@@ -1,7 +1,5 @@
 import { z } from "zod";
-import { describeMaterials } from "./building/blueprint.ts";
 import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
-import { chooseSite, planHouse } from "./building/plan.ts";
 import { STYLES } from "./building/styles.ts";
 import type { Stance } from "./persona.ts";
 
@@ -54,7 +52,7 @@ export const SKILL_USAGE: Readonly<Record<SkillName, string>> = {
   equip: `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`,
   sleep: `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`,
   hunt: `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`,
-  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>","style":"<${STYLE_IDS.join("|")}>"}  build a house right behind you, door facing the requester; "style" is optional (yours by default); every block must be carried first. Small house materials: ${[...STYLES.values()].map((style) => `${style.id} = ${describeMaterials(planHouse(style, "small", chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ")}`,
+  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house where you stand, door facing the requester; it chops, digs and crafts every missing block itself first (several minutes), so a house is this one step and nothing else. "size" small unless they ask for a big one; add "style":"<${STYLE_IDS.join("|")}>" only when they name one (yours otherwise)`,
 };
 
 /**

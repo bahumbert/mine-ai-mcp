@@ -2,7 +2,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { BotRuntime, BotSnapshot, ForegroundState, ForegroundTool, PlayerMessage } from "./runtime-client.ts";
+import type { BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage } from "./runtime-client.ts";
+
+/** A one-level recipe for the fake crafting planner: `makes` items per application. */
+export interface FakeRecipe {
+  readonly makes: number;
+  readonly needs: readonly ItemCount[];
+}
+
+/** Drops of blocks that do not drop themselves, for the fake `collect_block`. */
+const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone" };
 
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {
@@ -22,9 +31,15 @@ export class FakeRuntime implements BotRuntime {
   failureResults: Partial<Record<ForegroundTool, Readonly<Record<string, unknown>>>> = {};
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
+  /** The next call of that tool fails once with this error, after `effect` (what it got done before failing). */
+  failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void }>> = {};
+  /** Recipes known to the fake crafting planner; items without one are uncraftable. */
+  recipes: Readonly<Record<string, FakeRecipe>> = {};
+  /** Successful `collect_block` and `craft_item` calls change the snapshot's inventory. */
+  simulateInventory = false;
   readonly submitted: { readonly tool: ForegroundTool; readonly input: Readonly<Record<string, unknown>> }[] = [];
   readonly cancelled: string[] = [];
-  private readonly actions = new Map<string, { tool: ForegroundTool; remaining: number; cancelled: boolean }>();
+  private readonly actions = new Map<string, { tool: ForegroundTool; input: Readonly<Record<string, unknown>>; remaining: number; cancelled: boolean }>();
   private nextId = 1;
 
   get said(): string[] {
@@ -33,6 +48,16 @@ export class FakeRuntime implements BotRuntime {
 
   async status(): Promise<BotSnapshot> {
     return this.snapshot;
+  }
+
+  async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
+    if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
+    const leaves = new Map<string, number>();
+    for (const { item, count } of items) this.leaves(item, count, leaves);
+    const missing = [...leaves]
+      .map(([item, count]) => ({ item, count: count - this.carried(item) }))
+      .filter((entry) => entry.count > 0);
+    return { status: missing.length === 0 ? "ready" : "missing_materials", missing };
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {
@@ -49,7 +74,7 @@ export class FakeRuntime implements BotRuntime {
     }
     this.submitted.push({ tool, input });
     const actionId = `action-${this.nextId++}`;
-    this.actions.set(actionId, { tool, remaining: this.durations[tool] ?? 0, cancelled: false });
+    this.actions.set(actionId, { tool, input, remaining: this.durations[tool] ?? 0, cancelled: false });
     return this.step(actionId);
   }
 
@@ -67,6 +92,44 @@ export class FakeRuntime implements BotRuntime {
 
   async close(): Promise<void> {}
 
+  private carried(item: string): number {
+    return this.snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  }
+
+  private leaves(item: string, count: number, into: Map<string, number>): void {
+    const recipe = this.recipes[item];
+    if (recipe === undefined) {
+      into.set(item, (into.get(item) ?? 0) + count);
+      return;
+    }
+    const applications = Math.ceil(count / recipe.makes);
+    for (const need of recipe.needs) this.leaves(need.item, need.count * applications, into);
+  }
+
+  /** Adds (or with a negative delta removes) carried items. */
+  addItem(item: string, delta: number): void {
+    const total = this.carried(item) + delta;
+    const others = this.snapshot.inventory.filter((stack) => stack.name !== item);
+    this.snapshot = { ...this.snapshot, inventory: total > 0 ? [...others, { name: item, count: total }] : others };
+  }
+
+  /** What a successful action does to the inventory (leaves only: the fake crafts in one go). */
+  private applyEffects(tool: ForegroundTool, input: Readonly<Record<string, unknown>>): void {
+    if (!this.simulateInventory) return;
+    if (tool === "collect_block") {
+      const block = String(input.block_name);
+      this.addItem(FAKE_DROPS[block] ?? block, Number(input.count));
+    }
+    if (tool === "craft_item") {
+      for (const { item_name: item, count } of input.items as { item_name: string; count: number }[]) {
+        const leaves = new Map<string, number>();
+        this.leaves(item, count, leaves);
+        for (const [leaf, used] of leaves) this.addItem(leaf, -used);
+        this.addItem(item, count);
+      }
+    }
+  }
+
   private step(actionId: string): ForegroundState {
     const action = this.actions.get(actionId);
     if (action === undefined) return { state: "settled", actionId, status: "succeeded", error: null };
@@ -75,11 +138,18 @@ export class FakeRuntime implements BotRuntime {
       action.remaining -= 1;
       return { state: "pending", actionId };
     }
+    const once = this.failNext[action.tool];
+    if (once !== undefined) {
+      delete this.failNext[action.tool];
+      once.effect?.();
+      return { state: "settled", actionId, status: "failed", error: once.error };
+    }
     const failure = this.failures[action.tool];
     if (failure !== undefined) {
       const result = this.failureResults[action.tool];
       return { state: "settled", actionId, status: "failed", error: failure, ...(result !== undefined && { result }) };
     }
+    this.applyEffects(action.tool, action.input);
     return { state: "settled", actionId, status: "succeeded", error: null };
   }
 }

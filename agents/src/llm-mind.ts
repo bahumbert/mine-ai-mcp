@@ -147,7 +147,8 @@ For each message you hear, reply with only a JSON object {"say": "...", "route":
   "ignore" = not meant for you (players talking to each other or to someone else); "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals.
   "stop" = they want you to stop what you are doing.
-  "act" = a simple request you can start right away with one to four of your abilities.
+  "act" = a simple request you can start right away with one to four of your abilities (a house is one: build
+  gathers its own materials).
   "plan" = a bigger job needing several stages (gather, then craft, then deliver...).
 - "request": for act/plan, what is wanted in one standalone sentence with usernames, Minecraft ids and numbers
   (e.g. "give Steve 5 oak_log", "follow Steve"); otherwise "".
@@ -177,7 +178,8 @@ Rules:
 - Use 1 to ${MAX_ACTION_STEPS} steps, in order. "me" is the requester; "you" is ${persona.username}.
 - Use exact Minecraft ids (oak_log, cobblestone, cooked_beef). When the kind is not given, pick the sensible one from
   the situation (what you carry, what is usual).
-- To give or use something you do not carry, get it first (collect_block or craft_item).
+- To give or use something you do not carry, get it first (collect_block or craft_item). A house is the build step
+  alone: it gets its own materials.
 ${MINECRAFT_FACTS}
 - If it needs more than ${MAX_ACTION_STEPS} steps or real planning (several materials, crafting chains), escalate.
 - If no combination of these skills can do it, it is impossible.
@@ -195,8 +197,7 @@ Rules:
   small margin, and use what the inventory already holds. Tools and most items need a crafting_table: craft one
   first if you carry none (4 planks).
 ${MINECRAFT_FACTS}
-- A house needs every listed block in the inventory before the build step: plan the missing ones first (logs,
-  then planks, fences and doors crafted from them; stone for cobblestone).
+- A house is the build step alone, with nothing before it: it gathers and crafts its own materials.
 - Use exact Minecraft ids. If no plan with these skills can do it, it is impossible.
 Reply with only one JSON object: {"thought": "<one or two short sentences>", "steps": [...]} or
 {"impossible": "<short reason>"}.`;

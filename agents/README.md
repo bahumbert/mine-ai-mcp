@@ -23,11 +23,12 @@ style or a named one). A new skill = one catalog entry + one runner in `src/skil
 from the catalog.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
-roof type) fed to a parametric generator (`house.ts`). The plan puts the house right behind the bot, its door facing
-the player who asked, checks the bill of materials against the inventory (the build fails with the exact shortfall;
-the planner adds collect/craft steps first), then sends one `build_structure` call per layer, a clearing pass that
-re-digs the room (navigation scaffolding), and the door last. The site is not surveyed: whatever stands there is
-dug out.
+roof type) fed to a parametric generator (`house.ts`). The site is fixed where the bot stands when asked, its door
+facing the player who asked. Missing materials are gathered like a player would (`src/gathering.ts`): chop the logs,
+craft a crafting table to carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and
+doors (the runtime's `view_crafting_requirements` picks the recipes; each round restarts from the real inventory).
+Then the bot walks back to the site and sends one `build_structure` call per layer, a clearing pass that re-digs the
+room (navigation scaffolding), and the door last. The site is not surveyed: whatever stands there is dug out.
 
 ## Run
 
@@ -81,6 +82,8 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
 | `styles/*.json` | Style palettes (material role → block) and house options |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
+| `src/say.ts` | Dev CLI: make another bot host say a chat line (a scripted player for live tests) |
+| `src/gathering.ts` | Gather and craft a bill of materials like a player (build skill) |
 | `src/body.ts` | Owns the bot's single foreground slot: serialises actions, speech pre-empts movement |
 | `src/runtime-client.ts` | Typed MCP client for one bot |
 | `src/chat-model.ts` | OpenAI-compatible `/chat/completions` client |

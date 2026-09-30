@@ -57,9 +57,24 @@ export type ForegroundState =
     readonly unretrievedActionId: string | null;
   };
 
+export interface ItemCount {
+  readonly item: string;
+  readonly count: number;
+}
+
+/** The runtime's recursive crafting plan for a batch (`view_crafting_requirements`), reduced to what the brain uses. */
+export interface CraftingNeeds {
+  /** `unknown`: Minecraft has no such item. `uncraftable`: no recipe (gathered, not crafted). */
+  readonly status: "ready" | "missing_materials" | "uncraftable" | "planner_failed" | "unknown";
+  /** Leaf materials the bot lacks, including a crafting table's own when none is carried or in reach. */
+  readonly missing: readonly ItemCount[];
+}
+
 /** What a brain needs from one bot. Implemented over MCP ({@link McpBotRuntime}) and by fakes in tests. */
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
+  /** What crafting these items would take from the current inventory; crafts nothing. */
+  craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
@@ -78,6 +93,18 @@ const viewStatusSchema = z.object({
       inventory: z.object({ stacks: z.array(z.object({ name: z.string(), count: z.number() })) }),
       nearby: z.object({ players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })) }),
     }),
+  }),
+});
+
+const craftingRequirementsSchema = z.object({
+  result: z.object({
+    status: z.string(),
+    requirements: z.object({
+      plan: z.object({
+        status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
+        missingMaterials: z.array(z.object({ item: z.string(), count: z.number() })),
+      }).optional(),
+    }).optional(),
   }),
 });
 
@@ -138,6 +165,15 @@ export class McpBotRuntime implements BotRuntime {
       inventory: situation.inventory.stacks.map(({ name, count }) => ({ name, count })),
       players: situation.nearby.players,
     };
+  }
+
+  async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
+    const input = { items: items.map(({ item, count }) => ({ item_name: item, count })) };
+    const { result } = craftingRequirementsSchema.parse(await this.call("view_crafting_requirements", input, "Work out what crafting these would take."));
+    // Only an item Minecraft does not have fails without a plan.
+    const plan = result.requirements?.plan;
+    if (plan === undefined) return { status: "unknown", missing: [] };
+    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {

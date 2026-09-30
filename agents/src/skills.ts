@@ -4,6 +4,7 @@ import { describeStep, type Step } from "./actions.ts";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import type { Body } from "./body.ts";
+import { gatherMaterials } from "./gathering.ts";
 import type { BotRuntime, BotSnapshot, ForegroundTool, NearbyPlayer, Position } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -161,16 +162,22 @@ async function give(context: SkillContext, player: string, item: string, count: 
 }
 
 /**
- * Builds a house from a style's blueprint behind the bot, facing the requester: checks the bill of materials first
- * (nothing is gathered here: the planner adds collect/craft steps), then one `build_structure` call per batch.
+ * Builds a house from a style's blueprint where the bot stood when asked, facing the requester. Missing materials are
+ * gathered and crafted first (`gathering.ts`), then the bot walks back to that spot and sends one `build_structure`
+ * call per batch.
  */
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plan = planHouse(styleOrDefault(step.style ?? context.style), step.size, chooseSite(snapshot.position, toward));
   const what = `a ${step.size} ${plan.style.id} house`;
-  const missing = shortfall(plan.bill, snapshot.inventory);
-  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
+  if (shortfall(plan.bill, snapshot.inventory).length > 0) {
+    const gathered = await gatherMaterials(context, plan.bill, what, snapshot.position);
+    if (gathered.status === "stopped") return gathered;
+    if (gathered.status === "failed") return { status: "failed", detail: `could not get the materials for ${what} (it needs ${describeMaterials(plan.bill)}): ${gathered.detail}` };
+    const back = await once(context, "navigate", navigateInput(snapshot.position, GO_TO_RANGE), `Go back to where I was asked to build ${what}.`, "back at the site");
+    if (back.status !== "done") return back.status === "stopped" ? back : { status: "failed", detail: `gathered the materials but could not get back to the site: ${back.detail}` };
+  }
   for (const [index, batch] of plan.batches.entries()) {
     const blocks = batch.map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
     const part = `part ${index + 1}/${plan.batches.length}`;

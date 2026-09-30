@@ -28,12 +28,75 @@ test("a build step defaults to a small house in the persona's style, and only sh
   assert.equal(stepSchema.safeParse({ skill: "build", structure: "castle" }).success, false);
 });
 
-test("a house without its materials is refused with the exact shortfall, before any block is touched", async () => {
+/** Enough of Minecraft's recipes for a small medieval house. */
+const HOUSE_RECIPES = {
+  oak_planks: { makes: 4, needs: [{ item: "oak_log", count: 1 }] },
+  spruce_planks: { makes: 4, needs: [{ item: "spruce_log", count: 1 }] },
+  stick: { makes: 4, needs: [{ item: "oak_planks", count: 2 }] },
+  crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] },
+  wooden_pickaxe: { makes: 1, needs: [{ item: "oak_planks", count: 3 }, { item: "stick", count: 2 }] },
+  oak_fence: { makes: 3, needs: [{ item: "oak_planks", count: 4 }, { item: "stick", count: 2 }] },
+  oak_door: { makes: 3, needs: [{ item: "oak_planks", count: 6 }] },
+};
+
+function describeCall(call: { readonly tool: string; readonly input: Readonly<Record<string, unknown>> }): string {
+  if (call.tool === "collect_block") return `collect ${String(call.input.block_name)}`;
+  if (call.tool === "craft_item") {
+    const items = (call.input.items as { item_name: string }[]).map((item) => item.item_name).join("+");
+    return `craft ${items}${call.input.temporary_workstation === true ? " at table" : ""}`;
+  }
+  return call.tool;
+}
+
+test("a house without its materials gathers them like a player first, then is built where it was asked", async () => {
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 30 }, { name: "cobblestone", count: 64 }] };
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
+  assert.equal(result.status, "done");
+  const calls = runtime.submitted.map(describeCall);
+  const firstBuild = calls.indexOf("build_structure");
+  assert.deepEqual([...new Set(calls.slice(0, firstBuild))], [
+    "collect oak_log",
+    "collect spruce_log",
+    "craft crafting_table",
+    "craft wooden_pickaxe at table",
+    "collect stone",
+    "craft spruce_planks+oak_planks+oak_fence+oak_door at table",
+    "navigate",
+  ]);
+  const back = runtime.submitted[firstBuild - 1]!.input;
+  assert.deepEqual([back.x, back.y, back.z], [0, 64, 0], "back where it stood when asked");
+  assert.ok(runtime.submitted.filter((call) => call.tool === "collect_block").every((call) => Number(call.input.count) <= 32));
+});
+
+test("a pickaxe that breaks while digging is a setback, not a failure: another one is crafted and digging goes on", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...SMALL_MEDIEVAL.filter((stack) => stack.name !== "cobblestone"), { name: "oak_log", count: 30 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
+  runtime.failNext.collect_block = {
+    error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains. Broke 15 matching blocks; inventory gained 15/16 requested items.",
+    effect: () => {
+      runtime.addItem("cobblestone", 15);
+      runtime.addItem("wooden_pickaxe", -1);
+    },
+  };
+  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  const calls = runtime.submitted.map(describeCall);
+  assert.deepEqual(calls.slice(0, calls.indexOf("navigate")), ["collect stone", "craft wooden_pickaxe at table", "collect stone"]);
+});
+
+test("materials that cannot be found stop the build before any block is touched, saying what is missing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded spruce_log blocks.";
+  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^missing 49 spruce_planks, 6 oak_planks, 24 oak_log, 3 oak_fence, 1 oak_door for a small medieval house/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^could not get the materials for a small medieval house \(it needs 49 spruce_planks, .*\): \[NO_LOADED_MATCHING_TARGETS\]/u);
   assert.equal(builds(runtime).length, 0);
 });
 
