@@ -63,3 +63,23 @@ test("a batch that does not finish stops the build and says where", async () => 
   assert.match(result.detail ?? "", /^a small medieval house stopped at part 1\/\d+: 3 cells left: nothing_to_place_against$/);
   assert.equal(builds(runtime).length, 1);
 });
+
+test("a build the runtime stopped reports the audit it returned: what was left and why", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
+  runtime.failures.build_structure = "[BUILD_STOPPED] The build stopped: no progress in two passes.";
+  runtime.failureResults.build_structure = {
+    status: "failed",
+    error: "[BUILD_STOPPED] The build stopped: no progress in two passes.",
+    structure: {
+      placed: 7, dug: 2, wrong: 5, missing: [{ block: "cobblestone", count: 1 }],
+      left: [{ reason: "not_reached", count: 4, named: [] }, { reason: "refused", count: 1, named: [] }],
+    },
+  };
+  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.detail ?? "",
+    /stopped at part 1\/\d+: \[BUILD_STOPPED\] The build stopped: no progress in two passes\. \(placed 7, dug 2; left 4 not_reached, 1 refused; short of 1 cobblestone\)$/u,
+  );
+});

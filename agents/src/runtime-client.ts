@@ -41,7 +41,14 @@ export type ForegroundTool =
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
-  | { readonly state: "settled"; readonly actionId: string; readonly status: ActionStatus; readonly error: string | null }
+  | {
+    readonly state: "settled";
+    readonly actionId: string;
+    readonly status: ActionStatus;
+    readonly error: string | null;
+    /** The action's whole `result` (e.g. `build_structure`'s `structure` audit), when the runtime returned one. */
+    readonly result?: Readonly<Record<string, unknown>>;
+  }
   | {
     readonly state: "refused";
     readonly code: string;
@@ -90,7 +97,7 @@ const playerMessagePayloadSchema = z.object({
 });
 
 const actionOutputSchema = z.object({
-  result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
+  result: z.looseObject({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
 });
 
 const foregroundDataSchema = z.discriminatedUnion("state", [
@@ -181,10 +188,10 @@ function foregroundState(data: unknown): ForegroundState {
     case "pending":
       return { state: "pending", actionId: reply.actionId };
     case "settled":
-      return { state: "settled", actionId: reply.actionId, status: reply.output.result.status, error: reply.output.result.error ?? null };
+      return { state: "settled", actionId: reply.actionId, status: reply.output.result.status, error: reply.output.result.error ?? null, result: reply.output.result };
     case "storage_failed":
       // The action ran; only its durable record failed. Report what the body did.
-      return { state: "settled", actionId: reply.actionId, status: reply.output.result.status, error: reply.output.result.error ?? reply.error };
+      return { state: "settled", actionId: reply.actionId, status: reply.output.result.status, error: reply.output.result.error ?? reply.error, result: reply.output.result };
     case "refused":
       return {
         state: "refused",

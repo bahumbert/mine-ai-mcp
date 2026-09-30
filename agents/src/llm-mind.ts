@@ -18,6 +18,16 @@ const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
   rival: "You are a rival: proud and competitive; you take no orders from players and let them know it, without cruelty.",
 };
 
+/**
+ * Survival facts every benchmarked model got wrong (2026-09-30, .agent/knowledge/05-testing-and-ops.md): mining
+ * stone bare-handed, planning iron tools without a furnace skill, and family names instead of ids.
+ */
+const MINECRAFT_FACTS = `- Stone, cobblestone and every ore drop nothing without a pickaxe you carry: craft a wooden_pickaxe first
+  (it needs a crafting_table). Logs, dirt, sand and gravel need no tool.
+- Nothing can be smelted: ingots, iron, gold or diamond gear made from ore, cooked food, glass and charcoal are
+  impossible unless already carried.
+- Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood).`;
+
 /** The model behind each tier; they may all be the same model. */
 export interface TierModels {
   readonly chat: ChatModel;
@@ -168,6 +178,7 @@ Rules:
 - Use exact Minecraft ids (oak_log, cobblestone, cooked_beef). When the kind is not given, pick the sensible one from
   the situation (what you carry, what is usual).
 - To give or use something you do not carry, get it first (collect_block or craft_item).
+${MINECRAFT_FACTS}
 - If it needs more than ${MAX_ACTION_STEPS} steps or real planning (several materials, crafting chains), escalate.
 - If no combination of these skills can do it, it is impossible.
 Reply with only one JSON object: {"steps": [...]} or {"escalate": "<why>"} or {"impossible": "<short reason>"}.`;
@@ -182,7 +193,8 @@ Rules:
 - At most ${MAX_PLAN_STEPS} steps, in order. "me" is the requester; "you" is ${persona.username}.
 - Think about materials: gather raw blocks first, then craft, then deliver. Count what the recipes need, with a
   small margin, and use what the inventory already holds. Tools and most items need a crafting_table: craft one
-  first if you carry none (4 planks). Stone tools need cobblestone: collect stone. Smelting is not available yet.
+  first if you carry none (4 planks).
+${MINECRAFT_FACTS}
 - A house needs every listed block in the inventory before the build step: plan the missing ones first (logs,
   then planks, fences and doors crafted from them; stone for cobblestone).
 - Use exact Minecraft ids. If no plan with these skills can do it, it is impossible.

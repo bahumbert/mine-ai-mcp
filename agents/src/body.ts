@@ -15,6 +15,8 @@ export interface ActOutcome {
   readonly error: string | null;
   /** The body cancelled the action itself: to speak, or because `interruptWhen` asked to. */
   readonly preempted: boolean;
+  /** The action's whole result, when the runtime returned one. */
+  readonly result?: Readonly<Record<string, unknown>>;
 }
 
 export interface ActOptions {
@@ -81,7 +83,7 @@ export class Body {
       state = await this.runtime.wait(state.actionId, WAIT_SLICE_MS);
     }
     if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, preempted: false };
-    return { status: state.status, error: state.error, preempted };
+    return { status: state.status, error: state.error, preempted, ...(state.result !== undefined && { result: state.result }) };
   }
 
   /**

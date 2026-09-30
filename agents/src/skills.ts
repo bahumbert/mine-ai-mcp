@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { z } from "zod";
 import { describeStep, type Step } from "./actions.ts";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
@@ -175,10 +176,35 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const part = `part ${index + 1}/${plan.batches.length}`;
     const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
-    if (outcome.status !== "succeeded") return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}` };
+    if (outcome.status !== "succeeded") return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
   }
   const { door, facing } = plan.site;
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
+}
+
+/** The part of `build_structure`'s audit the skill reports (src/actions/build-structure/contract.ts). */
+const structureAuditSchema = z.object({
+  structure: z.object({
+    placed: z.number(),
+    dug: z.number(),
+    left: z.array(z.object({ reason: z.string(), count: z.number() })),
+    missing: z.array(z.object({ block: z.string(), count: z.number() })),
+  }),
+});
+
+/**
+ * Why cells were left, for the planner: `[BUILD_INCOMPLETE]` errors already list it, but `[BUILD_STOPPED]` and
+ * tool-loss errors do not.
+ */
+function auditSuffix(error: string | null, result: Readonly<Record<string, unknown>> | undefined): string {
+  if (error?.startsWith("[BUILD_INCOMPLETE]") === true) return "";
+  const parsed = structureAuditSchema.safeParse(result);
+  if (!parsed.success) return "";
+  const { placed, dug, left, missing } = parsed.data.structure;
+  const parts = [`placed ${placed}, dug ${dug}`];
+  if (left.length > 0) parts.push(`left ${left.map((group) => `${group.count} ${group.reason}`).join(", ")}`);
+  if (missing.length > 0) parts.push(`short of ${missing.map((entry) => `${entry.count} ${entry.block}`).join(", ")}`);
+  return ` (${parts.join("; ")})`;
 }
 
 function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {

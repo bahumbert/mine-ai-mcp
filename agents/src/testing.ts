@@ -18,6 +18,8 @@ export class FakeRuntime implements BotRuntime {
   durations: Partial<Record<ForegroundTool, number>> = {};
   /** Tools that settle as failed with this error. */
   failures: Partial<Record<ForegroundTool, string>> = {};
+  /** The action result a failing tool settles with (e.g. a `build_structure` audit). */
+  failureResults: Partial<Record<ForegroundTool, Readonly<Record<string, unknown>>>> = {};
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   readonly submitted: { readonly tool: ForegroundTool; readonly input: Readonly<Record<string, unknown>> }[] = [];
@@ -74,7 +76,10 @@ export class FakeRuntime implements BotRuntime {
       return { state: "pending", actionId };
     }
     const failure = this.failures[action.tool];
-    if (failure !== undefined) return { state: "settled", actionId, status: "failed", error: failure };
+    if (failure !== undefined) {
+      const result = this.failureResults[action.tool];
+      return { state: "settled", actionId, status: "failed", error: failure, ...(result !== undefined && { result }) };
+    }
     return { state: "settled", actionId, status: "succeeded", error: null };
   }
 }
