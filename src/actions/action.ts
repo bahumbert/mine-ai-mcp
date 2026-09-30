@@ -75,7 +75,10 @@ export interface ActionContext {
   readonly observeProgress?: ObserveRequest;
 }
 
-/** Whether an action observes, owns the foreground slot, or controls that slot from outside it. */
+/**
+ * Whether an action observes, owns the foreground slot, controls that slot from outside it,
+ * or acts without the body (public chat) and so runs beside whatever foreground action is running.
+ */
 export type ActionExecution =
   | { readonly kind: "information" }
   | {
@@ -83,7 +86,8 @@ export type ActionExecution =
       readonly prepare?: () => Promise<void> | void;
     }
   | { readonly kind: "resumable_task"; readonly prepare?: () => Promise<void> | void }
-  | { readonly kind: "control" };
+  | { readonly kind: "control" }
+  | { readonly kind: "concurrent" };
 
 /** One thing the bot can be asked to run, from MCP schema through to execution. */
 interface ActionContract<

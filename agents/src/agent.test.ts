@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Agent } from "./agent.ts";
-import { FakeRuntime, scriptedMind, testPersona, until } from "./testing.ts";
+import { INSTANT_TYPING } from "./body.ts";
+import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 
 function steveAt(x: number) {
@@ -10,7 +11,7 @@ function steveAt(x: number) {
 
 function agentFor(runtime: FakeRuntime, stance: "companion" | "rival" = "companion") {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona({ stance }), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined });
+  const agent = new Agent({ persona: testPersona({ stance }), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING });
   return { agent, ...tiers };
 }
 
@@ -44,7 +45,23 @@ test("a free-form request is acknowledged, mapped to skills by the action tier, 
   assert.equal(agent.activity, "idle");
   await until(() => runtime.said.length === 2);
   assert.deepEqual(runtime.said, ["Right behind you!", "Okay, I'll wait here."]);
-  assert.equal(runtime.cancelled.length, 1);
+  await until(() => runtime.cancelled.length === 1);
+});
+
+test("chatting while working is answered at once and the work goes on", async () => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 200;
+  const { agent, chat, action } = agentFor(runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 10 oak_log" }, { say: "Chopping away!", route: "talk", request: "" }, { say: "Done!" });
+  action.reply({ steps: [{ skill: "collect_block", block: "oak_log", count: 10 }] });
+  await agent.handle(say("Steve", "get me 10 logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Steve", "how is it going?"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(agent.activity, "collect 10 oak_log");
+  assert.deepEqual(runtime.cancelled, []);
+  await until(() => runtime.said.length === 3, 5_000);
+  assert.deepEqual(runtime.said, ["On it.", "Chopping away!", "Done!"]);
 });
 
 test("a finished task is reported in character", async () => {
@@ -95,10 +112,31 @@ test("a rival turns requests into words: the action tier is never asked", async 
   assert.equal(agent.activity, "idle");
 });
 
+test("a house the agent built becomes a known place, with its roof, for the next requests", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
+  const { agent, chat, action } = agentFor(runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
+  action.reply({ steps: [{ skill: "build" }] });
+  await agent.handle(say("Steve", "build me a house"));
+  await until(() => runtime.said.length === 2);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /- Places you know: none\./u);
+
+  chat.reply({ say: "Up I go.", route: "act", request: "go to the roof of the house" }, { say: "Nice view." });
+  action.reply({ steps: [{ skill: "go_to", x: -4, y: 70, z: 0 }] });
+  await agent.handle(say("Steve", "go to the roof"));
+  await until(() => runtime.said.length === 4);
+  const places = "- Places you know: the small medieval house you built for Steve (door -2 64 0 facing east; stand on its roof at -4 70 0).";
+  assert.ok((chat.requests[2]?.[1]?.content ?? "").includes(places), "the chat tier knows it");
+  assert.ok((action.requests[1]?.[1]?.content ?? "").includes(places), "the action tier knows it");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
+});
+
 test("other agents are not heard, and the chat tier may decide a message is not for us", async () => {
   const runtime = new FakeRuntime();
   const { agent, chat } = agentFor(runtime);
   await agent.handle(say("Vex", "Ayla come here"));
+  await agent.handle(say("Server", "Server stopping in 10 s"));
   assert.equal(chat.requests.length, 0);
   chat.reply({ say: "", route: "ignore", request: "" }, { say: "Hello Steve.", route: "talk", request: "" });
   await agent.handle(say("Alex", "anyone want to trade"));

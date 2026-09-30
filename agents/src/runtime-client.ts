@@ -36,7 +36,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
-  | "navigate" | "send_message" | "collect_block" | "drop_item"
+  | "navigate" | "collect_block" | "drop_item"
   | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure";
 
 export type ForegroundState =
@@ -75,6 +75,8 @@ export interface BotRuntime {
   status(): Promise<BotSnapshot>;
   /** What crafting these items would take from the current inventory; crafts nothing. */
   craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
+  /** One public chat line; runs beside the foreground action (chat does not take the body). */
+  say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
@@ -106,6 +108,10 @@ const craftingRequirementsSchema = z.object({
       }).optional(),
     }).optional(),
   }),
+});
+
+const sayResultSchema = z.object({
+  result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
 });
 
 const eventsSchema = z.object({
@@ -174,6 +180,11 @@ export class McpBotRuntime implements BotRuntime {
     const plan = result.requirements?.plan;
     if (plan === undefined) return { status: "unknown", missing: [] };
     return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
+  }
+
+  async say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
+    const { result } = sayResultSchema.parse(await this.call("send_message", { message }, "Speak in character."));
+    return { status: result.status, error: result.error ?? null };
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {

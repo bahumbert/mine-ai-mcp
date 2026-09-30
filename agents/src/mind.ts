@@ -14,6 +14,17 @@ export interface ChatLine {
 export const ROUTES = ["ignore", "talk", "stop", "act", "plan"] as const;
 export type Route = (typeof ROUTES)[number];
 
+/**
+ * A place the agent knows because it made it (a house it built): without it, "go to the roof" had no coordinates and
+ * the models invented some.
+ */
+export interface KnownPlace {
+  /** e.g. "the small medieval house you built for Tom". */
+  readonly name: string;
+  /** Coordinates worth going to, e.g. "door -1204 76 803 facing north; stand on its roof at -1206 82 803". */
+  readonly detail: string;
+}
+
 export interface ChatInput {
   readonly persona: Persona;
   readonly message: PlayerMessage;
@@ -22,6 +33,8 @@ export interface ChatInput {
   readonly snapshot: BotSnapshot;
   /** What the agent is doing now, e.g. `idle` or `follow StarOr1 at 3 blocks`. */
   readonly activity: string;
+  /** Places the agent knows, oldest first. */
+  readonly places: readonly KnownPlace[];
 }
 
 export interface ChatDecision {
@@ -39,6 +52,7 @@ export interface TaskInput {
   readonly requester: string;
   readonly snapshot: BotSnapshot;
   readonly activity: string;
+  readonly places: readonly KnownPlace[];
 }
 
 export type Resolution =

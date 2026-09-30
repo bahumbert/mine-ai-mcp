@@ -52,7 +52,7 @@ export const SKILL_USAGE: Readonly<Record<SkillName, string>> = {
   equip: `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`,
   sleep: `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`,
   hunt: `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`,
-  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house where you stand, door facing the requester; it chops, digs and crafts every missing block itself first (several minutes), so a house is this one step and nothing else. "size" small unless they ask for a big one; add "style":"<${STYLE_IDS.join("|")}>" only when they name one (yours otherwise)`,
+  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house where you stand, door facing the requester; only when a house is asked for, never for anything else (pile, pillar, tower, wall...: impossible for now). It chops, digs and crafts every missing block itself first (several minutes), so a house is this one step and nothing else. "size" small unless they ask for a big one; add "style":"<${STYLE_IDS.join("|")}>" only when the player names that style, never on your own (yours otherwise)`,
 };
 
 /**

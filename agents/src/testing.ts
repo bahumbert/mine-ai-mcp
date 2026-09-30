@@ -13,6 +13,16 @@ export interface FakeRecipe {
 /** Drops of blocks that do not drop themselves, for the fake `collect_block`. */
 const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone" };
 
+/** Exactly the blocks of a small medieval house: carrying them, the build skill gathers nothing. */
+export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
+  { name: "spruce_planks", count: 49 },
+  { name: "oak_planks", count: 36 },
+  { name: "oak_log", count: 24 },
+  { name: "cobblestone", count: 16 },
+  { name: "oak_fence", count: 3 },
+  { name: "oak_door", count: 1 },
+];
+
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {
   snapshot: BotSnapshot = {
@@ -37,7 +47,8 @@ export class FakeRuntime implements BotRuntime {
   recipes: Readonly<Record<string, FakeRecipe>> = {};
   /** Successful `collect_block` and `craft_item` calls change the snapshot's inventory. */
   simulateInventory = false;
-  readonly submitted: { readonly tool: ForegroundTool; readonly input: Readonly<Record<string, unknown>> }[] = [];
+  /** Every foreground call, plus chat lines as `send_message` (they do not take the body). */
+  readonly submitted: { readonly tool: ForegroundTool | "send_message"; readonly input: Readonly<Record<string, unknown>> }[] = [];
   readonly cancelled: string[] = [];
   private readonly actions = new Map<string, { tool: ForegroundTool; input: Readonly<Record<string, unknown>>; remaining: number; cancelled: boolean }>();
   private nextId = 1;
@@ -48,6 +59,11 @@ export class FakeRuntime implements BotRuntime {
 
   async status(): Promise<BotSnapshot> {
     return this.snapshot;
+  }
+
+  async say(message: string): Promise<{ readonly status: "succeeded"; readonly error: null }> {
+    this.submitted.push({ tool: "send_message", input: { message } });
+    return { status: "succeeded", error: null };
   }
 
   async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {

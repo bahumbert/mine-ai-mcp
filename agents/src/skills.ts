@@ -5,6 +5,7 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { gatherMaterials } from "./gathering.ts";
+import type { KnownPlace } from "./mind.ts";
 import type { BotRuntime, BotSnapshot, ForegroundTool, NearbyPlayer, Position } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -30,6 +31,8 @@ export interface SkillContext {
   readonly requester?: string;
   /** The persona's building style, used when a build step names none. */
   readonly style?: string;
+  /** Told about places worth remembering (a finished house), so later requests such as "go to the roof" can use them. */
+  readonly remember?: (place: KnownPlace) => void;
 }
 
 export type SkillResult =
@@ -120,7 +123,6 @@ async function follow(context: SkillContext, player: string, distance: number): 
     const target = step.target;
     const outcome = await body.act("navigate", navigateInput(target, distance), `Follow ${player}.`, {
       signal,
-      interruptible: true,
       interruptWhen: async () => {
         const now = findPlayer(await runtime.status(), player)?.position ?? null;
         return now !== null && distanceBetween(now, target) > REPLAN_DISTANCE;
@@ -170,7 +172,8 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const snapshot = await context.runtime.status();
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plan = planHouse(styleOrDefault(step.style ?? context.style), step.size, chooseSite(snapshot.position, toward));
-  const what = `a ${step.size} ${plan.style.id} house`;
+  const kind = `${step.size} ${plan.style.id} house`;
+  const what = `a ${kind}`;
   if (shortfall(plan.bill, snapshot.inventory).length > 0) {
     const gathered = await gatherMaterials(context, plan.bill, what, snapshot.position);
     if (gathered.status === "stopped") return gathered;
@@ -186,6 +189,11 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     if (outcome.status !== "succeeded") return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
   }
   const { door, facing } = plan.site;
+  const roof = plan.roofTop;
+  context.remember?.({
+    name: `the ${kind} you built${context.requester === undefined ? "" : ` for ${context.requester}`}`,
+    detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
+  });
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
 }
 

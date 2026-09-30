@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { allowedSkills, planSchema, SKILL_USAGE } from "./actions.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
-import { ROUTES, type ChatDecision, type ChatInput, type ChatLine, type Mind, type NarrateInput, type Resolution, type TaskInput } from "./mind.ts";
+import { ROUTES, type ChatDecision, type ChatInput, type ChatLine, type KnownPlace, type Mind, type NarrateInput, type Resolution, type TaskInput } from "./mind.ts";
 import type { Persona, Stance } from "./persona.ts";
 import type { BotSnapshot } from "./runtime-client.ts";
 
@@ -47,7 +47,7 @@ export class LlmMind implements Mind {
     const { message } = input;
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const request = [
-      describeSituation(input.snapshot, input.activity),
+      describeSituation(input.snapshot, input.activity, input.places),
       describeHistory(input.history),
       `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}`,
     ].join("\n\n");
@@ -136,7 +136,8 @@ export function chatSystemPrompt(persona: Persona): string {
   const skills = allowedSkills(persona.stance);
   const abilities = skills.length > 0
     ? `When players ask, you can: ${skills.map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these into bigger jobs.
-Anything else (other buildings than a small or medium house, trading, fighting players...) you cannot do yet: say so in character.`
+Anything else (any building but a small or medium house: towers, walls, piles...; trading, fighting players...) you
+cannot do yet: say so in character.`
     : `You take no orders from players: never use the "act" or "plan" routes; turn requests down in character.`;
   return `${personaPrompt(persona)}
 
@@ -178,6 +179,7 @@ Rules:
 - Use 1 to ${MAX_ACTION_STEPS} steps, in order. "me" is the requester; "you" is ${persona.username}.
 - Use exact Minecraft ids (oak_log, cobblestone, cooked_beef). When the kind is not given, pick the sensible one from
   the situation (what you carry, what is usual).
+- Take coordinates from the situation (your position, places you know) or the request; never invent them.
 - To give or use something you do not carry, get it first (collect_block or craft_item). A house is the build step
   alone: it gets its own materials.
 ${MINECRAFT_FACTS}
@@ -198,6 +200,7 @@ Rules:
   first if you carry none (4 planks).
 ${MINECRAFT_FACTS}
 - A house is the build step alone, with nothing before it: it gathers and crafts its own materials.
+- Take coordinates from the situation (your position, places you know) or the request; never invent them.
 - Use exact Minecraft ids. If no plan with these skills can do it, it is impossible.
 Reply with only one JSON object: {"thought": "<one or two short sentences>", "steps": [...]} or
 {"impossible": "<short reason>"}.`;
@@ -205,12 +208,12 @@ Reply with only one JSON object: {"thought": "<one or two short sentences>", "st
 
 function describeTask(input: TaskInput): string {
   return [
-    describeSituation(input.snapshot, input.activity),
+    describeSituation(input.snapshot, input.activity, input.places),
     `Request from ${input.requester}: ${JSON.stringify(input.request)}`,
   ].join("\n\n");
 }
 
-function describeSituation(snapshot: BotSnapshot, activity: string): string {
+function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[]): string {
   const { x, y, z } = snapshot.position;
   const inventory = snapshot.inventory.length === 0
     ? "empty"
@@ -224,6 +227,7 @@ function describeSituation(snapshot: BotSnapshot, activity: string): string {
 - Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}; health ${Math.round(snapshot.health)}/20; food ${snapshot.food}/20.
 - Inventory: ${inventory}.
 - Players online: ${players}.
+- Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.
 - Currently doing: ${activity}.`;
 }
 

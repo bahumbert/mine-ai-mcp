@@ -32,6 +32,8 @@ export interface HousePlan {
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
+  /** Where to stand on the roof, remembered with the house so "go to the roof" has real coordinates. */
+  readonly roofTop: Position;
 }
 
 /** Falls back to the default style when the name is unknown (a persona may name a style not shipped yet). */
@@ -44,5 +46,17 @@ export function styleOrDefault(name: string | undefined): Style {
 export function planHouse(style: Style, size: HouseSize, site: Site): HousePlan {
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
   const cells = placeBlueprint(blueprint, style.palette, site.door, site.facing);
-  return { style, size, site, cells, bill: billOfMaterials(cells), batches: buildBatches(cells) };
+  return { style, size, site, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
+}
+
+/** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof). */
+export function roofTop(cells: readonly WorldCell[]): Position {
+  const roof = cells.filter((cell) => cell.role === "roof");
+  const top = Math.max(...roof.map((cell) => cell.y));
+  const ridge = roof.filter((cell) => cell.y === top);
+  const middleX = ridge.reduce((sum, cell) => sum + cell.x, 0) / ridge.length;
+  const middleZ = ridge.reduce((sum, cell) => sum + cell.z, 0) / ridge.length;
+  const offset = (cell: WorldCell) => Math.hypot(cell.x - middleX, cell.z - middleZ);
+  const best = ridge.reduce((closest, cell) => (offset(cell) < offset(closest) ? cell : closest));
+  return { x: best.x, y: top + 1, z: best.z };
 }

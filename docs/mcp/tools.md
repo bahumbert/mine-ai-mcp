@@ -816,7 +816,9 @@ defined in [src/server/async-tools.ts](../../src/server/async-tools.ts).
 Use `send_message` to communicate with other players via in-game public
 chat. The argument is `message`, containing the text string to broadcast.
 Success proves the message was sent and the bot observed its own chat echo
-returned by the server. Defined in
+returned by the server. It does not use the body: it runs beside any foreground
+action without being refused or cancelling it, and is a direct call (no
+`submission_id` or `wait_timeout_ms`). Defined in
 [src/actions/send-message/contract.ts](../../src/actions/send-message/contract.ts).
 
 ## Diagnostic tools available only in debug mode

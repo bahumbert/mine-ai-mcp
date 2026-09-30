@@ -180,7 +180,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     tool(RAW_ACTION, RAW_ACTION_DESCRIPTION, rawActionInputSchema),
     tool(QUERY_BOT_DATA, QUERY_BOT_DATA_DESCRIPTION, queryBotDataInputSchema, { foreground: false }),
     tool(READ_RECENT_EVENTS, READ_RECENT_EVENTS_DESCRIPTION, readRecentEventsInputSchema, { foreground: false }),
-    tool(SEND_MESSAGE, SEND_MESSAGE_DESCRIPTION, sendMessageInputSchema),
+    tool(SEND_MESSAGE, SEND_MESSAGE_DESCRIPTION, sendMessageInputSchema, { foreground: false }),
     tool(SLEEP, SLEEP_DESCRIPTION, sleepInputSchema),
     tool(SMELT_ITEM, SMELT_ITEM_DESCRIPTION, smeltItemInputSchema),
     tool(USE_BUCKET, USE_BUCKET_DESCRIPTION, useBucketInputSchema),

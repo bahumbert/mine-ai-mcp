@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, toChatLine } from "./body.ts";
+import { Body, INSTANT_TYPING, toChatLine } from "./body.ts";
 import { FakeRuntime, until } from "./testing.ts";
 
 test("chat lines are single-line, never commands, and fit the 256-character limit", () => {
@@ -31,20 +31,41 @@ test("a refusal without a blocking action is reported, not retried", async () =>
 test("a survival reflex holding the body is waited out, then the action runs", async () => {
   const runtime = new FakeRuntime();
   runtime.refuseNext = { state: "refused", code: "ACTION_BUSY", error: "body owner: hostile_reflex", activeActionId: null, unretrievedActionId: null };
-  const outcome = await new Body(runtime, () => undefined).act("send_message", { message: "hi" }, "test");
+  const outcome = await new Body(runtime, () => undefined).act("eat_food", { food_name: "bread" }, "test");
   assert.equal(outcome.status, "succeeded");
-  assert.deepEqual(runtime.said, ["hi"]);
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["eat_food"]);
 });
 
-test("speech pre-empts interruptible movement, then is spoken", async () => {
+test("speech runs beside the work in progress: it neither cancels it nor waits for it", async () => {
   const runtime = new FakeRuntime();
-  runtime.durations.navigate = 1_000;
-  const body = new Body(runtime, () => undefined);
-  const walking = body.act("navigate", { x: 50, z: 0 }, "test", { interruptible: true });
+  runtime.durations.collect_block = 1_000;
+  const body = new Body(runtime, () => undefined, INSTANT_TYPING);
+  const controller = new AbortController();
+  let finished = false;
+  const collecting = body.act("collect_block", { block_name: "oak_log", count: 10 }, "test", { signal: controller.signal }).then((outcome) => {
+    finished = true;
+    return outcome;
+  });
   await until(() => runtime.submitted.length === 1);
-  await body.say("Hello!");
-  assert.deepEqual(await walking, { status: "cancelled", error: "cancelled by caller", preempted: true });
-  assert.deepEqual(runtime.said, ["Hello!"]);
+  await body.say("Still chopping, one sec!");
+  assert.deepEqual(runtime.said, ["Still chopping, one sec!"]);
+  assert.deepEqual(runtime.cancelled, []);
+  assert.equal(finished, false, "the collection is still running");
+  controller.abort();
+  await collecting;
+});
+
+test("a reply waits as long as typing it would take, thinking time included, and lines keep their order", async () => {
+  const runtime = new FakeRuntime();
+  const body = new Body(runtime, () => undefined, { msPerChar: 10, maxMs: 200 });
+  const started = Date.now();
+  const first = body.say("0123456789", started - 60);
+  const second = body.say("hi");
+  await Promise.all([first, second]);
+  assert.deepEqual(runtime.said, ["0123456789", "hi"]);
+  // The first line types 100 ms minus the 60 ms already spent thinking; "hi" was typed meanwhile.
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 35 && elapsed < 400, `took ${elapsed} ms`);
 });
 
 test("aborting the signal cancels a non-interruptible action", async () => {

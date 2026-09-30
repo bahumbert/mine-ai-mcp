@@ -41,7 +41,7 @@ const PUBLISHED: ReadonlyArray<
   ["raw_action", "task", false, true],
   ["query_bot_data", "information", true, null],
   ["read_recent_events", "information", true, false],
-  ["send_message", "task", false, false],
+  ["send_message", "concurrent", false, false],
   ["sleep", "task", false, null],
   ["smelt_item", "task", false, true],
   ["use_bucket", "task", false, true],

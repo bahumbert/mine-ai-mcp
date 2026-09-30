@@ -1,4 +1,3 @@
-import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot, BotEvents } from "mineflayer";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock } from "../markdown.js";
@@ -85,7 +84,7 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
     }
 
     // Mineflayer chat() has no acknowledgement. Without this observation
-    // window, a muted or suppressing server could hold the foreground lock forever.
+    // window, a muted or suppressing server could leave the call pending forever.
     timer = setTimeout(() => finish({ kind: "not_observed" }), MESSAGE_ECHO_TIMEOUT_MS);
     try {
       bot.chat(message);
@@ -103,13 +102,12 @@ export function formatSendMessageResult(result: SendMessageResult): string {
 
 export function createSendMessageAction(bot: Bot) {
   return defineAction({
-    checkpointSchema: executionCheckpointSchema,
     name: SEND_MESSAGE,
     description: SEND_MESSAGE_DESCRIPTION,
     inputSchema: sendMessageInputSchema,
     resultSchema: sendMessageResultSchema,
     formatResult: formatSendMessageResult,
-    execution: { kind: "task" },
+    execution: { kind: "concurrent" },
     annotations: sendMessageAnnotations,
     parse: parseSendMessageRequest,
     execute: (request, context) => sendMessage(bot, request, context),

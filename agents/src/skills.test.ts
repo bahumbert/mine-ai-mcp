@@ -3,16 +3,8 @@ import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { runStep, type SkillContext } from "./skills.ts";
-import { FakeRuntime } from "./testing.ts";
-
-const SMALL_MEDIEVAL = [
-  { name: "spruce_planks", count: 49 },
-  { name: "oak_planks", count: 36 },
-  { name: "oak_log", count: 24 },
-  { name: "cobblestone", count: 16 },
-  { name: "oak_fence", count: 3 },
-  { name: "oak_door", count: 1 },
-];
+import type { KnownPlace } from "./mind.ts";
+import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "./testing.ts";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, ...extra };
@@ -101,6 +93,7 @@ test("materials that cannot be found stop the build before any block is touched,
 });
 
 test("a house is built behind the bot in batches facing the requester, the door hung last", async () => {
+  const places: KnownPlace[] = [];
   const runtime = new FakeRuntime();
   runtime.snapshot = {
     ...runtime.snapshot,
@@ -108,8 +101,10 @@ test("a house is built behind the bot in batches facing the requester, the door 
     inventory: SMALL_MEDIEVAL,
     players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }],
   };
-  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { requester: "steve", style: "unknown-style" }));
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { requester: "steve", style: "unknown-style", remember: (place) => places.push(place) }));
   assert.deepEqual(result, { status: "done", detail: "built a small medieval house, door at -2 64 0 facing east" });
+  // The gable ridge runs across the door's axis, two blocks behind it; its centre is straight behind the door.
+  assert.deepEqual(places, [{ name: "the small medieval house you built for steve", detail: "door -2 64 0 facing east; stand on its roof at -4 70 0" }]);
   const calls = builds(runtime);
   assert.ok(calls.length > 2);
   assert.ok(calls.every((call) => call.remove_wrong_blocks && call.blocks.length <= 256));

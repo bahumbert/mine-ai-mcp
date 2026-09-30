@@ -22,41 +22,54 @@ export interface ActOutcome {
 export interface ActOptions {
   /** Aborting cancels the running action; the outcome is then `cancelled`. */
   readonly signal?: AbortSignal;
-  /** Movement that can be dropped and re-planned: pending speech cancels it so the agent can answer at once. */
-  readonly interruptible?: boolean;
   /** Checked between wait slices; true cancels the action as preempted (e.g. the followed player moved away). */
   readonly interruptWhen?: () => Promise<boolean>;
 }
 
+/** How fast the character types (owner, 2026-09-30: instant replies read as a machine). */
+export interface TypingPace {
+  readonly msPerChar: number;
+  /** A long line never waits longer than this. */
+  readonly maxMs: number;
+}
+
+/** About eight characters a second, a quick typist; thinking time already spent counts as typing. */
+export const HUMAN_TYPING: TypingPace = { msPerChar: 120, maxMs: 6_000 };
+export const INSTANT_TYPING: TypingPace = { msPerChar: 0, maxMs: 0 };
+
 /**
  * The single owner of a bot's foreground slot.
  *
- * The runtime runs one body-locking task at a time and refuses the next one (`ACTION_BUSY`), and `send_message` is
- * such a task, so the bot cannot talk while it walks. The body therefore serialises every foreground call, lets
- * speech pre-empt interruptible movement, and always retrieves each result so the runtime never answers
- * `RESULT_NOT_RETRIEVED`.
+ * The runtime runs one body-locking task at a time and refuses the next one (`ACTION_BUSY`): the body serialises
+ * every foreground call and always retrieves each result so the runtime never answers `RESULT_NOT_RETRIEVED`. Chat
+ * does not take the body (`send_message` runs beside the foreground action), so speaking never stops or waits for
+ * the work in progress; lines keep their order.
  */
 export class Body {
   private queue: Promise<unknown> = Promise.resolve();
-  private speechWaiting = 0;
+  private speech: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void) {}
+  constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void, private readonly typing: TypingPace = HUMAN_TYPING) {}
 
   act(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions = {}): Promise<ActOutcome> {
     return this.exclusive(() => this.run(tool, input, rationale, options));
   }
 
-  /** Says one chat line; empty text says nothing. Resolves once the runtime settled the message. */
-  async say(text: string): Promise<void> {
+  /**
+   * Says one chat line, after as long as typing it would take counted from `since` (when the message it answers was
+   * heard); empty text says nothing. Resolves once the runtime settled the message.
+   */
+  say(text: string, since = Date.now()): Promise<void> {
     const message = toChatLine(text);
-    if (message === "") return;
-    this.speechWaiting += 1;
-    try {
-      const outcome = await this.exclusive(() => this.run("send_message", { message }, "Speak in character.", {}));
+    if (message === "") return Promise.resolve();
+    const line = this.speech.then(async () => {
+      const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (Date.now() - since);
+      if (wait > 0) await sleep(wait);
+      const outcome = await this.runtime.say(message);
       if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
-    } finally {
-      this.speechWaiting -= 1;
-    }
+    });
+    this.speech = line.catch(() => undefined);
+    return line;
   }
 
   private exclusive<T>(task: () => Promise<T>): Promise<T> {
@@ -73,8 +86,7 @@ export class Body {
     while (state.state === "pending") {
       if (!cancelled) {
         const stop = options.signal?.aborted === true;
-        const yieldToSpeech = options.interruptible === true && this.speechWaiting > 0;
-        if (stop || yieldToSpeech || (options.interruptWhen !== undefined && await options.interruptWhen())) {
+        if (stop || (options.interruptWhen !== undefined && await options.interruptWhen())) {
           cancelled = true;
           preempted = !stop;
           await this.runtime.cancel(state.actionId, stop ? "Stopped by the agent." : "Re-planning.");

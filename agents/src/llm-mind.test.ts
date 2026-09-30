@@ -13,11 +13,12 @@ function chatInput(message: string, addressed = false): ChatInput {
     history: [],
     snapshot: new FakeRuntime().snapshot,
     activity: "idle",
+    places: [],
   };
 }
 
-function taskInput(request: string): TaskInput {
-  return { persona: testPersona(), request, requester: "Steve", snapshot: new FakeRuntime().snapshot, activity: "idle" };
+function taskInput(request: string, places: TaskInput["places"] = []): TaskInput {
+  return { persona: testPersona(), request, requester: "Steve", snapshot: new FakeRuntime().snapshot, activity: "idle", places };
 }
 
 test("the chat tier reads a fenced JSON reply as an answer plus a route", async () => {
@@ -71,4 +72,15 @@ test("the planner may not follow before other steps", async () => {
 test("the chat prompt offers abilities only to stances that take requests", () => {
   assert.match(chatSystemPrompt(testPersona()), /you can: follow player/u);
   assert.match(chatSystemPrompt(testPersona({ stance: "rival" })), /never use the "act" or "plan" routes/u);
+});
+
+test("the action and planner tiers see the places the agent knows, or none", async () => {
+  const { action, planner, mind } = scriptedMind();
+  const house = { name: "the small medieval house you built for Steve", detail: "door -2 64 0 facing east; stand on its roof at -4 70 0" };
+  action.reply({ steps: [{ skill: "go_to", x: -4, y: 70, z: 0 }] });
+  planner.reply({ impossible: "no skill piles blocks" });
+  await mind.resolve(taskInput("go to the roof", [house]), signal);
+  await mind.plan(taskInput("make a high pile"), signal);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /\n- Places you know: the small medieval house you built for Steve \(door -2 64 0 facing east; stand on its roof at -4 70 0\)\.\n/u);
+  assert.match(planner.requests[0]?.[1]?.content ?? "", /\n- Places you know: none\.\n/u);
 });

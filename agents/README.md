@@ -29,6 +29,9 @@ craft a crafting table to carry and a wooden pickaxe when stone is needed, dig t
 doors (the runtime's `view_crafting_requirements` picks the recipes; each round restarts from the real inventory).
 Then the bot walks back to the site and sends one `build_structure` call per layer, a clearing pass that re-digs the
 room (navigation scaffolding), and the door last. The site is not surveyed: whatever stands there is dug out.
+A finished house becomes a **known place** (door and facing, a standing spot on the roof ridge): the agent keeps the
+last 8 and every tier sees them in its situation ("Places you know: ..."), so "go to the roof" is a `go_to` with real
+coordinates. The build skill makes houses only; towers, piles, walls... are refused as impossible for now.
 
 ## Run
 

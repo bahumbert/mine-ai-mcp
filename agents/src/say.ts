@@ -13,9 +13,8 @@ if (url === undefined || message === undefined || message.trim() === "") {
 
 const runtime = await McpBotRuntime.connect(url, "mine-ai-say");
 try {
-  const state = await runtime.submit("send_message", { message }, "A scripted player line.", 10_000);
-  const settled = state.state === "pending" ? await runtime.wait(state.actionId, 10_000) : state;
-  console.log(settled.state === "settled" ? `${settled.status}${settled.error === null ? "" : `: ${settled.error}`}` : JSON.stringify(settled));
+  const outcome = await runtime.say(message);
+  console.log(`${outcome.status}${outcome.error === null ? "" : `: ${outcome.error}`}`);
 } finally {
   await runtime.close();
 }

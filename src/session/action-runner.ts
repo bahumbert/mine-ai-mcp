@@ -268,13 +268,16 @@ export class ActionRunner {
       return refusal(definition.name, outcomes.invalidArguments(cause));
     }
 
-    // A control action stops the body's owner and an information action only
-    // reads; neither needs the body, so neither waits for it. The first
-    // playthrough was refused eleven status reads while the reflex fought,
-    // exactly when the model most needed to see health and threats.
+    // A control action stops the body's owner, an information action only
+    // reads, and a concurrent action (public chat) acts without the body; none
+    // needs the body, so none waits for it. The first playthrough was refused
+    // eleven status reads while the reflex fought, exactly when the model most
+    // needed to see health and threats.
     if (
       definition.execute &&
-      (definition.execution.kind === "control" || definition.execution.kind === "information")
+      (definition.execution.kind === "control" ||
+        definition.execution.kind === "information" ||
+        definition.execution.kind === "concurrent")
     ) {
       const execute = definition.execute;
       return measured(

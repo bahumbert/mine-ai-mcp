@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { allowedSkills, allowedStep, describePlan, describeStep, type Step } from "./actions.ts";
-import { Body } from "./body.ts";
-import type { ChatLine, Mind, Resolution } from "./mind.ts";
+import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
+import type { ChatLine, KnownPlace, Mind, Resolution } from "./mind.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, PlayerMessage } from "./runtime-client.ts";
 import { runPlan, type SkillResult } from "./skills.ts";
@@ -10,6 +10,10 @@ import { runPlan, type SkillResult } from "./skills.ts";
 const DEFAULT_POLL_MS = 500;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
+/** The name the server console speaks under. */
+const SERVER_SPEAKER = "Server";
+/** Known places shown to the models; the oldest is forgotten first. */
+const KNOWN_PLACES = 8;
 
 export interface AgentOptions {
   readonly persona: Persona;
@@ -22,6 +26,8 @@ export interface AgentOptions {
   readonly otherAgents: readonly string[];
   readonly log: (line: string) => void;
   readonly pollMs?: number;
+  /** Chat typing pace; tests use instant typing. */
+  readonly typing?: TypingPace;
 }
 
 interface Task {
@@ -40,11 +46,12 @@ interface Task {
 export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
+  private readonly places: KnownPlace[] = [];
   private task: Task | null = null;
   private runSignal: AbortSignal = new AbortController().signal;
 
   constructor(private readonly options: AgentOptions) {
-    this.body = new Body(options.runtime, options.log);
+    this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
   }
 
   get activity(): string {
@@ -71,13 +78,14 @@ export class Agent {
 
   /** Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind a task. */
   async handle(message: PlayerMessage): Promise<void> {
+    const heardAt = Date.now();
     const { persona, mind, log } = this.options;
     this.remember(message.username, message.message);
     if (!this.listensTo(message.username)) return;
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: [...this.places] }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -92,7 +100,7 @@ export class Agent {
     if (route === "ignore") return;
     // Stop first so a new order or "stop" takes effect before the reply waits for the body.
     if (route !== "talk") this.stopTask();
-    this.speak(decision.say);
+    this.speak(decision.say, heardAt);
     if (route === "act" || route === "plan") this.startTask(route, decision.request, message.username);
   }
 
@@ -103,6 +111,8 @@ export class Agent {
   private listensTo(username: string): boolean {
     const { persona, otherAgents } = this.options;
     const speaker = username.toLowerCase();
+    // Console broadcasts (`/say`, shutdown countdowns) arrive as a player named "Server"; twice they started tasks.
+    if (username === SERVER_SPEAKER) return false;
     if (otherAgents.some((name) => name.toLowerCase() === speaker)) return false;
     return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
   }
@@ -121,7 +131,7 @@ export class Agent {
   private async carryOut(task: Task, route: "act" | "plan", requester: string): Promise<SkillResult> {
     const { persona, mind, runtime, log } = this.options;
     const signal = task.controller.signal;
-    const input = { persona, request: task.request, requester, snapshot: await runtime.status(), activity: "idle" };
+    const input = { persona, request: task.request, requester, snapshot: await runtime.status(), activity: "idle", places: [...this.places] };
     let resolution: Resolution = route === "act"
       ? await mind.resolve(input, signal)
       : { kind: "escalate", reason: "the chat tier asked for a plan" };
@@ -137,7 +147,13 @@ export class Agent {
     if (refused !== undefined) return { status: "failed", detail: `will not ${describeStep(refused)}` };
     task.steps = resolution.steps;
     log(`plan for "${task.request}": ${describePlan(task.steps)}`);
-    return runPlan(task.steps, { runtime, body: this.body, signal, requester, style: persona.style });
+    return runPlan(task.steps, { runtime, body: this.body, signal, requester, style: persona.style, remember: (place) => this.learnPlace(place) });
+  }
+
+  private learnPlace(place: KnownPlace): void {
+    this.options.log(`known place: ${place.name} (${place.detail})`);
+    this.places.push(place);
+    if (this.places.length > KNOWN_PLACES) this.places.splice(0, this.places.length - KNOWN_PLACES);
   }
 
   private async finishTask(task: Task, result: SkillResult): Promise<void> {
@@ -170,10 +186,11 @@ export class Agent {
     this.task = null;
   }
 
-  private speak(text: string): void {
+  /** `since`: when the message being answered was heard (thinking time counts as typing time). */
+  private speak(text: string, since = Date.now()): void {
     if (text.trim() === "") return;
     this.remember(this.options.persona.username, text);
-    this.body.say(text).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    this.body.say(text, since).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
   }
 
   private remember(speaker: string, text: string): void {

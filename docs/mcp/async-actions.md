@@ -1,8 +1,8 @@
 # Using asynchronous foreground actions
 
 Foreground MCP tools submit work and optionally wait for the first result. This is a breaking
-response change: acceptance is not a physical result. Information and control
-tools remain direct calls. The awaited library API `runtime.run` remains available
+response change: acceptance is not a physical result. Information, control, and
+concurrent (`send_message`) tools remain direct calls. The awaited library API `runtime.run` remains available
 for in-process callers and shares the same body owner.
 
 ## Submit, observe, and continue
