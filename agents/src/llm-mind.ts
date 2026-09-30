@@ -149,7 +149,8 @@ step by step into bigger jobs.
 For each message you hear, reply with only a JSON object {"say": "...", "route": "...", "request": "..."}:
 - "route":
   "ignore" = not meant for you: players talking to each other, or to someone else they name or describe (another
-  player, the server's operator or admin); "say" is "".
+  player, the server's operator or admin, any name that is not ${persona.username}, even one you do not know);
+  "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
   "stop" = they want you to stop what you are doing.
   "act" = you take on what they ask now, setting your current work aside (you resume it afterwards).
