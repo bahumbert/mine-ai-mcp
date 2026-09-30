@@ -69,9 +69,14 @@ export class LlmMind implements Mind {
   }
 
   async narrate(input: NarrateInput, signal: AbortSignal): Promise<string> {
+    const news = {
+      done: `Your task "${input.task}" is finished: ${input.detail}.`,
+      failed: `Your task "${input.task}" failed: ${input.detail}.`,
+      escalated: `Your task "${input.task}" is harder than it first looked (${input.detail}): you work out how before starting.`,
+    }[input.outcome];
     const request = [
       describeHistory(input.history),
-      `Your task "${input.task}" ${input.outcome === "done" ? "is finished" : "failed"}: ${input.detail}.`,
+      news,
       "Tell the players around you in one short line, in character.",
     ].join("\n\n");
     return ask(this.models.chat, narrateSystemPrompt(input.persona), request, signal, (json) => narrateReplySchema.parse(json).say);
@@ -132,11 +137,13 @@ For each message you hear, reply with only a JSON object {"say": "...", "route":
   "ignore" = not meant for you (players talking to each other or to someone else); "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals.
   "stop" = they want you to stop what you are doing.
-  "act" = a simple request you can do with one to four of your abilities.
+  "act" = a simple request you can start right away with one to four of your abilities.
   "plan" = a bigger job needing several stages (gather, then craft, then deliver...).
 - "request": for act/plan, what is wanted in one standalone sentence with usernames, Minecraft ids and numbers
   (e.g. "give Steve 5 oak_log", "follow Steve"); otherwise "".
-- "say": your chat line; "" to stay silent. For act/plan, a short acknowledgement: do not claim it is already done.
+- "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done:
+  act = you are starting now; plan = you agree but must first work out how; stop = you stop; talk = your answer.
+  When a request is too unclear to act on, use "talk" and ask what they mean.
 Players rarely use your name: a message is for you when they whisper, name you, or clearly continue a conversation
 with you. Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
 }

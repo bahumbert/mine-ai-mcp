@@ -59,14 +59,16 @@ test("a finished task is reported in character", async () => {
   assert.match(chat.requests[1]?.[1]?.content ?? "", /is finished: collected 4 dirt/u);
 });
 
-test("a bigger job escalates to the planner and runs its steps in order", async () => {
+test("a bigger job escalates to the planner, says it needs thinking, and runs the plan in order", async () => {
   const runtime = new FakeRuntime();
   const { agent, chat, action, planner } = agentFor(runtime);
-  chat.reply({ say: "Let me think.", route: "act", request: "make a crafting_table" }, { say: "Here's your table." });
+  chat.reply({ say: "On it.", route: "act", request: "make a crafting_table" }, { say: "Hmm, I need logs first, let me think." }, { say: "Here's your table." });
   action.reply({ escalate: "needs logs first" });
   planner.reply({ steps: [{ skill: "collect_block", block: "oak_log", count: 1 }, { skill: "craft_item", item: "crafting_table" }] });
   await agent.handle(say("Steve", "Ayla can you make a crafting table"));
-  await until(() => runtime.said.length === 2);
+  await until(() => runtime.said.length === 3);
+  assert.deepEqual(runtime.said, ["On it.", "Hmm, I need logs first, let me think.", "Here's your table."]);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /harder than it first looked \(needs logs first\)/u);
   assert.deepEqual(runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool), ["collect_block", "craft_item"]);
   assert.deepEqual(runtime.submitted.find((call) => call.tool === "craft_item")?.input, { items: [{ item_name: "crafting_table", count: 1 }] });
 });

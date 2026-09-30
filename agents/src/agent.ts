@@ -127,6 +127,8 @@ export class Agent {
       : { kind: "escalate", reason: "the chat tier asked for a plan" };
     if (resolution.kind === "escalate") {
       log(`planning "${task.request}" (${resolution.reason})`);
+      // The ack promised a quick job: say it needs thinking, while the planner works (not after it).
+      if (route === "act") void this.narrate(task, "escalated", resolution.reason);
       resolution = await mind.plan(input, signal);
     }
     if (signal.aborted) return { status: "stopped" };
@@ -141,16 +143,23 @@ export class Agent {
   private async finishTask(task: Task, result: SkillResult): Promise<void> {
     if (this.task === task) this.task = null;
     this.options.log(`task "${task.request}": ${result.status}${result.status === "stopped" ? "" : ` (${result.detail})`}`);
-    if (result.status === "stopped" || this.runSignal.aborted) return;
+    if (result.status === "stopped") return;
+    await this.narrate(task, result.status, result.detail);
+  }
+
+  /** Has the chat tier tell the players how a task is going; a progress line is dropped once the task is replaced. */
+  private async narrate(task: Task, outcome: "done" | "failed" | "escalated", detail: string): Promise<void> {
+    if (this.runSignal.aborted) return;
     try {
       const line = await this.options.mind.narrate({
         persona: this.options.persona,
         task: task.steps === null ? task.request : describePlan(task.steps),
-        outcome: result.status,
-        detail: result.detail,
+        outcome,
+        detail,
         history: this.history,
       }, this.runSignal);
-      this.speak(line);
+      const stale = outcome === "escalated" && this.task !== task;
+      if (!stale) this.speak(line);
     } catch (error) {
       this.options.log(`narration failed: ${String(error)}`);
     }

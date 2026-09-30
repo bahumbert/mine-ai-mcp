@@ -51,7 +51,8 @@ export type Resolution =
 export interface NarrateInput {
   readonly persona: Persona;
   readonly task: string;
-  readonly outcome: "done" | "failed";
+  /** `escalated`: the request turned out to need the planner, so the agent thinks before starting. */
+  readonly outcome: "done" | "failed" | "escalated";
   readonly detail: string;
   readonly history: readonly ChatLine[];
 }
@@ -64,6 +65,6 @@ export interface Mind {
   resolve(input: TaskInput, signal: AbortSignal): Promise<Resolution>;
   /** Planner tier: longer plans for requests the action tier could not map directly. Never escalates. */
   plan(input: TaskInput, signal: AbortSignal): Promise<Exclude<Resolution, { kind: "escalate" }>>;
-  /** Chat tier: one in-character line reporting how a task ended; empty means say nothing. */
+  /** Chat tier: one in-character line reporting how a task ended or that it needs thinking; empty means say nothing. */
   narrate(input: NarrateInput, signal: AbortSignal): Promise<string>;
 }

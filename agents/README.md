@@ -9,8 +9,10 @@ is ADR-008 in `.agent/vision/decisions.md`.
 
 1. **Chat tier** (fast model, in character): hears every chat line from players it listens to, answers right away,
    and routes it: `ignore` (not for me — no name needed), `talk`, `stop`, `act` (simple request) or `plan` (bigger
-   job), restating the request in one standalone sentence.
-2. **Action tier** (mid model): turns the request into 1-4 steps from the skill catalog, or escalates.
+   job), restating the request in one standalone sentence. The reply fits the route ("on it" vs "let me work out
+   how"; asks back when unclear).
+2. **Action tier** (mid model): turns the request into 1-4 steps from the skill catalog, or escalates; on escalation
+   the chat tier says it needs to think while the planner works.
 3. **Planner tier** (strongest model): up to 12 steps for bigger jobs (gather → craft → deliver).
 4. **Code**: validates every step (zod), enforces the stance (companion takes requests; neutral and rival only
    talk for now), runs the steps, and the chat tier narrates the outcome in character.
