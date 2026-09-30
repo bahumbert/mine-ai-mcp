@@ -4,7 +4,7 @@ import { changesSchema, policyLifetimeSchema } from "../../survival/policy/contr
 export const SET_SURVIVAL_POLICY = "set_survival_policy" as const;
 export const SET_SURVIVAL_POLICY_DESCRIPTION =
   "Change the connected bot's survival policy: the rules its automatic responses follow whenever the model is not driving the body. " +
-  "Groups: navigation (scaffold_blocks: preferred automatic building blocks; hostile_avoidance_multiplier: route caution, default 1; bucket_fall_save: emergency water rescue, default true; bucket_drops: planned water drops, default true), " +
+  "Groups: navigation (scaffold_blocks: preferred automatic building blocks; hostile_avoidance_multiplier: route caution, default 1; bucket_fall_save: emergency water rescue, default true; bucket_drops: planned water drops, default true; dig_straight_down: routes may dig the block beneath the bot, default true, false leaves only staircase descents), " +
   "combat (engagement, hiding, recovery, retreat, melee, bow, shield, terrain, health thresholds, tactical budgets) and " +
   "food (raw: when uncooked food may be eaten automatically). " +
   "set merges the named fields as overrides, each carrying the lifetime you give it, so an encounter tweak never disturbs a session setting; " +

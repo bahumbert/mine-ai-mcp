@@ -22,6 +22,8 @@ export interface BotSnapshot {
   readonly food: number;
   readonly inventory: readonly { readonly name: string; readonly count: number }[];
   readonly players: readonly NearbyPlayer[];
+  /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
+  readonly policy: { readonly revision: string; readonly digStraightDown: boolean } | null;
 }
 
 export interface PlayerMessage {
@@ -77,6 +79,11 @@ export interface BotRuntime {
   craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
   say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
+  /**
+   * Whether routes may dig the block under the bot (a survival-policy setting, merged with the others). The runtime
+   * resets every override on death and dimension change, so the brain checks it again from each snapshot.
+   */
+  setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
@@ -96,7 +103,13 @@ const viewStatusSchema = z.object({
       nearby: z.object({ players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })) }),
     }),
   }),
+  survivalPolicy: z.object({
+    revision: z.string(),
+    effective: z.object({ navigation: z.object({ dig_straight_down: z.boolean().default(true) }) }),
+  }).optional(),
 });
+
+const policyEditSchema = z.object({ result: z.object({ status: z.string() }) });
 
 const craftingRequirementsSchema = z.object({
   result: z.object({
@@ -168,14 +181,25 @@ export class McpBotRuntime implements BotRuntime {
   }
 
   async status(): Promise<BotSnapshot> {
-    const { situation } = viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding.")).result;
+    const data = viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding."));
+    const { situation } = data.result;
     return {
       position: situation.position,
       health: situation.vitals.health,
       food: situation.vitals.food,
       inventory: situation.inventory.stacks.map(({ name, count }) => ({ name, count })),
       players: situation.nearby.players,
+      policy: data.survivalPolicy === undefined
+        ? null
+        : { revision: data.survivalPolicy.revision, digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down },
     };
+  }
+
+  async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
+    const reason = allowed ? "I may dig straight down." : "I never dig straight down: I go down by staircase.";
+    const input = { operation: "set", expected_revision: revision, changes: { navigation: { dig_straight_down: allowed } }, lifetime: { kind: "session" }, reason };
+    const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
+    return result.status === "succeeded";
   }
 
   async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {

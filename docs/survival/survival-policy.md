@@ -46,6 +46,7 @@ can always see what it has changed and why.
 | `navigation.hostile_avoidance_multiplier` | `1` | Finite, nonnegative multiplier on the capped hostile proximity route cost. `2` doubles it, `0.5` halves it, and `0` removes proximity cost. |
 | `navigation.bucket_fall_save` | `true` | Save damaging falls using carried water on loaded safe full-block floors, then verify source removal and a refilled bucket. |
 | `navigation.bucket_drops` | `true` | Allow planned water-bucket descents up to 80 blocks. Independent of scaffolding and emergency fall rescue; unavailable in the Nether. |
+| `navigation.dig_straight_down` | `true` | Allow routes to dig the block beneath the bot and descend in its own column. `false` leaves every route only staircase descents (one block over per block down). Target breaks are unaffected; read by each route search. |
 
 The scaffold list is read from the live policy whenever a consumer chooses a
 block. The first usable carried name wins over stack size; unsafe entries are

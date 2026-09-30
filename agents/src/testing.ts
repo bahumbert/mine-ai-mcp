@@ -31,6 +31,7 @@ export class FakeRuntime implements BotRuntime {
     food: 20,
     inventory: [],
     players: [],
+    policy: null,
   };
   inbox: PlayerMessage[] = [];
   /** Wait slices each tool stays pending before it succeeds. */
@@ -64,6 +65,16 @@ export class FakeRuntime implements BotRuntime {
   async say(message: string): Promise<{ readonly status: "succeeded"; readonly error: null }> {
     this.submitted.push({ tool: "send_message", input: { message } });
     return { status: "succeeded", error: null };
+  }
+
+  /** Every `setDigStraightDown` call, in order. */
+  readonly digSettings: boolean[] = [];
+
+  async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
+    this.digSettings.push(allowed);
+    if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
+    this.snapshot = { ...this.snapshot, policy: { revision: `${revision}+`, digStraightDown: allowed } };
+    return true;
   }
 
   async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
@@ -181,6 +192,9 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     voice: "Plain.",
     aptitudes: {},
     listensTo: [],
+    authority: ["*"],
+    // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms.
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, restAfterStopSeconds: 0, digStraightDown: false },
     models: {},
     ...overrides,
   };

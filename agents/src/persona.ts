@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { SKILL_NAMES } from "./actions.ts";
 
 /** How an agent relates to players by default (ADR-005: later a per-relation value, one global stance for now). */
 export const STANCES = ["companion", "neutral", "rival"] as const;
@@ -30,6 +31,26 @@ export const personaSchema = z.strictObject({
   style: z.string().trim().min(1).max(40).optional(),
   /** Players this character takes orders and questions from; empty = everyone (mindcraft's `only_chat_with`). */
   listensTo: z.array(z.string().min(1).max(16)).default([]),
+  /**
+   * Whose orders come first, most important first (ADR-011); `*` = any other player. "Server" is the console
+   * operator. Told to the model, which decides; later derived from relationships (Phase 4).
+   */
+  authority: z.array(z.string().min(1).max(16)).min(1).default(["*"]),
+  /** The character's own long-term goal, worked on when nobody gives it an order; none = it waits for orders. */
+  goal: z.string().trim().min(1).max(600).optional(),
+  /** Skills this character's body can use at all; default: the whole catalog. */
+  skills: z.array(z.enum(SKILL_NAMES)).min(1).optional(),
+  /** Preferences as settings, not code paths (ADR-011). */
+  settings: z.strictObject({
+    /** Model calls per minute for its own goal; orders and chat are never held back. */
+    goalCallsPerMinute: z.number().int().min(1).max(120).default(6),
+    /** Steps one objective may take before the character gives it up. */
+    maxStepsPerObjective: z.number().int().min(1).max(500).default(40),
+    /** After a "stop", how long it rests before going back to its own goal. */
+    restAfterStopSeconds: z.number().int().min(0).max(3_600).default(60),
+    /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
+    digStraightDown: z.boolean().default(false),
+  }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
   models: z.strictObject({ chat: modelId.optional(), action: modelId.optional(), planner: modelId.optional() }).default({}),
 });

@@ -185,6 +185,11 @@ export const liveSituationSchema = z.strictObject({
           blockedBy: z.array(z.enum(MOBILITY_BLOCKERS)),
         })
         .describe("Automatic scaffold placement, which is what lets a route pillar up to a cell or bridge a gap."),
+      digStraightDown: z
+        .strictObject({ available: z.boolean(), blockedBy: z.array(z.enum(MOBILITY_BLOCKERS)) })
+        .describe(
+          "Whether a route may dig the block beneath the bot and descend straight down. When unavailable, routes still descend by digging a staircase.",
+        ),
     })
     .describe(
       "Which movements the carried inventory and the survival policy unlock right now, and what blocks the rest. " +

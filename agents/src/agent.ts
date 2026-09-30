@@ -1,10 +1,10 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { allowedSkills, allowedStep, describePlan, describeStep, type Step } from "./actions.ts";
+import { describeStep } from "./actions.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
-import type { ChatLine, KnownPlace, Mind, Resolution } from "./mind.ts";
+import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
 import type { Persona } from "./persona.ts";
-import type { BotRuntime, PlayerMessage } from "./runtime-client.ts";
-import { runPlan, type SkillResult } from "./skills.ts";
+import type { BotRuntime, BotSnapshot, PlayerMessage } from "./runtime-client.ts";
+import { runStep, type SkillResult } from "./skills.ts";
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
@@ -12,6 +12,12 @@ const DEFAULT_POLL_MS = 500;
 const HISTORY_LINES = 12;
 /** Known places shown to the models; the oldest is forgotten first. */
 const KNOWN_PLACES = 8;
+/** Steps kept per objective for the work tier. */
+const STEP_MEMORY = 20;
+/** Outcomes of its own objectives remembered for the goal tier. */
+const OWN_MEMORY = 5;
+/** Unusable model replies in a row before an objective is dropped. */
+const MAX_BAD_REPLIES = 2;
 
 export interface AgentOptions {
   readonly persona: Persona;
@@ -28,24 +34,32 @@ export interface AgentOptions {
   readonly typing?: TypingPace;
 }
 
-interface Task {
-  /** The request as restated by the chat tier. */
-  readonly request: string;
-  readonly controller: AbortController;
-  /** Set once the action or planner tier has turned the request into steps. */
-  steps: readonly Step[] | null;
+/** One objective on the stack and what was done for it. */
+interface Work {
+  readonly objective: Objective;
+  readonly steps: StepRecord[];
+  taken: number;
+  badReplies: number;
+  /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
+  step: AbortController | null;
 }
 
 /**
- * One character (ADR-008): every message it hears goes to the chat tier, which answers in character and routes it;
- * requests go to the action tier (and the planner when needed); code checks the stance and runs the skills.
- * At most one task at a time: a new request or "stop" replaces the current one.
+ * One character (ADR-008, ADR-011). Every message it hears goes to the chat tier, which answers in character and
+ * decides whether to take something on. What it takes on goes on top of a stack of objectives (an order sets aside
+ * what was below, which resumes afterwards); a work loop asks the model for one step at a time towards the top
+ * objective and runs it. With nothing on the stack, the character picks objectives towards its own goal, at most
+ * `settings.goalCallsPerMinute` model calls a minute. Code decides nothing else (Rule #0): it runs skills.
  */
 export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
-  private task: Task | null = null;
+  private readonly stack: Work[] = [];
+  private readonly lately: string[] = [];
+  private restUntil = 0;
+  private nextGoalCall = 0;
+  private wake: (() => void) | null = null;
   private runSignal: AbortSignal = new AbortController().signal;
 
   constructor(private readonly options: AgentOptions) {
@@ -53,15 +67,21 @@ export class Agent {
   }
 
   get activity(): string {
-    if (this.task === null) return "idle";
-    return this.task.steps === null ? `working out how to: ${this.task.request}` : describePlan(this.task.steps);
+    const top = this.stack.at(-1);
+    if (top === undefined) return "idle";
+    const whose = top.objective.requester === null ? "your own goal" : `for ${top.objective.requester}`;
+    const paused = this.stack.slice(0, -1).map((work) => JSON.stringify(work.objective.text));
+    return `${JSON.stringify(top.objective.text)} (${whose})${paused.length === 0 ? "" : `; set aside: ${paused.join(", ")}`}`;
   }
 
   async run(signal: AbortSignal): Promise<void> {
     this.runSignal = signal;
+    signal.addEventListener("abort", () => this.wake?.(), { once: true });
     // The runtime keeps chat from before this brain started; answering it now would be confusing.
     await this.options.runtime.readMessages();
+    await this.keepSettings(await this.options.runtime.status());
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
+    const working = this.workLoop(signal);
     try {
       while (!signal.aborted) {
         for (const message of await this.options.runtime.readMessages()) {
@@ -70,11 +90,12 @@ export class Agent {
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
     } finally {
-      this.stopTask();
+      this.stopAll();
+      await working;
     }
   }
 
-  /** Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind a task. */
+  /** Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind work. */
   async handle(message: PlayerMessage): Promise<void> {
     const heardAt = Date.now();
     const { persona, mind, log } = this.options;
@@ -88,18 +109,16 @@ export class Agent {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
     }
-    let route = decision.route;
-    if ((route === "act" || route === "plan") && allowedSkills(persona.stance).length === 0) {
-      log(`route ${route} refused by stance ${persona.stance}`);
-      route = "talk";
-    }
-    const request = route === "act" || route === "plan" ? ` ${JSON.stringify(decision.request)}` : "";
+    const { route } = decision;
+    const request = route === "act" ? ` ${JSON.stringify(decision.request)}` : "";
     log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}`);
     if (route === "ignore") return;
-    // Stop first so a new order or "stop" takes effect before the reply waits for the body.
-    if (route !== "talk") this.stopTask();
     this.speak(decision.say, heardAt);
-    if (route === "act" || route === "plan") this.startTask(route, decision.request, message.username);
+    if (route === "stop") {
+      this.stopAll();
+      this.restUntil = Date.now() + persona.settings.restAfterStopSeconds * 1_000;
+    }
+    if (route === "act") this.take({ text: decision.request, requester: message.username });
   }
 
   /**
@@ -113,37 +132,146 @@ export class Agent {
     return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
   }
 
-  private startTask(route: "act" | "plan", request: string, requester: string): void {
-    const task: Task = { request, controller: new AbortController(), steps: null };
-    this.task = task;
-    this.carryOut(task, route, requester).then(
-      (result) => this.finishTask(task, result),
-      (error: unknown) => this.finishTask(task, task.controller.signal.aborted
-        ? { status: "stopped" }
-        : { status: "failed", detail: error instanceof Error ? error.message : String(error) }),
-    );
+  /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
+  private take(objective: Objective): void {
+    const current = this.stack.at(-1);
+    current?.step?.abort();
+    this.stack.push({ objective, steps: [], taken: 0, badReplies: 0, step: null });
+    this.wake?.();
   }
 
-  private async carryOut(task: Task, route: "act" | "plan", requester: string): Promise<SkillResult> {
-    const { persona, mind, runtime, log } = this.options;
-    const signal = task.controller.signal;
-    const input = { persona, request: task.request, requester, snapshot: await runtime.status(), activity: "idle", places: [...this.places] };
-    let resolution: Resolution = route === "act"
-      ? await mind.resolve(input, signal)
-      : { kind: "escalate", reason: "the chat tier asked for a plan" };
-    if (resolution.kind === "escalate") {
-      log(`planning "${task.request}" (${resolution.reason})`);
-      // The ack promised a quick job: say it needs thinking, while the planner works (not after it).
-      if (route === "act") void this.narrate(task, "escalated", resolution.reason);
-      resolution = await mind.plan(input, signal);
+  /** The work loop: one model decision and one step at a time for the top objective; own goal when idle. */
+  private async workLoop(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const work = this.stack.at(-1);
+      try {
+        if (work !== undefined) await this.advance(work);
+        else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
+      } catch (error) {
+        if (signal.aborted) break;
+        this.options.log(`work loop error: ${String(error)}`);
+        await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
+      }
     }
-    if (signal.aborted) return { status: "stopped" };
-    if (resolution.kind !== "steps") return { status: "failed", detail: `cannot do that: ${resolution.reason}` };
-    const refused = resolution.steps.find((step) => !allowedStep(persona.stance, step));
-    if (refused !== undefined) return { status: "failed", detail: `will not ${describeStep(refused)}` };
-    task.steps = resolution.steps;
-    log(`plan for "${task.request}": ${describePlan(task.steps)}`);
-    return runPlan(task.steps, { runtime, body: this.body, signal, requester, style: persona.style, remember: (place) => this.learnPlace(place) });
+  }
+
+  /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */
+  private async pickOwnObjective(): Promise<boolean> {
+    const { persona, mind, runtime, log } = this.options;
+    if (persona.goal === undefined || Date.now() < this.restUntil) return false;
+    if (!(await this.waitForGoalBudget())) return true;
+    const text = await mind.chooseObjective({ persona, snapshot: await runtime.status(), places: [...this.places], lately: [...this.lately] }, this.runSignal);
+    // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
+    if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
+    log(`own objective: ${JSON.stringify(text)}`);
+    this.stack.push({ objective: { text, requester: null }, steps: [], taken: 0, badReplies: 0, step: null });
+    return true;
+  }
+
+  /** Takes one step towards `work`: one model call, then the chosen skill. */
+  private async advance(work: Work): Promise<void> {
+    const { persona, mind, runtime, log } = this.options;
+    if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
+    if (this.stack.at(-1) !== work) return;
+    const snapshot = await runtime.status();
+    await this.keepSettings(snapshot);
+    let decision: WorkDecision;
+    try {
+      const paused = this.stack.slice(0, -1).map((below) => below.objective);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: [...this.places], steps: [...work.steps], paused }, this.runSignal);
+      work.badReplies = 0;
+    } catch (error) {
+      if (this.runSignal.aborted) return;
+      work.badReplies += 1;
+      log(`work tier failed on ${JSON.stringify(work.objective.text)}: ${String(error)}`);
+      if (work.badReplies >= MAX_BAD_REPLIES) this.finish(work, "failed", "could not work out what to do next");
+      return;
+    }
+    // Set aside or stopped while it was thinking: it thinks again once the objective is back on top.
+    if (this.stack.at(-1) !== work) return;
+    if (decision.kind === "done") return this.finish(work, "done", decision.summary);
+    if (decision.kind === "give_up") return this.finish(work, "failed", decision.reason);
+    if (work.taken >= persona.settings.maxStepsPerObjective) return this.finish(work, "failed", `still not done after ${work.taken} steps`);
+    work.taken += 1;
+    const label = describeStep(decision.step);
+    log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
+    const controller = new AbortController();
+    work.step = controller;
+    let result: SkillResult;
+    try {
+      result = await runStep(decision.step, {
+        runtime,
+        body: this.body,
+        signal: AbortSignal.any([controller.signal, this.runSignal]),
+        requester: work.objective.requester ?? undefined,
+        style: persona.style,
+        remember: (place) => this.learnPlace(place),
+      });
+    } catch (error) {
+      result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      work.step = null;
+    }
+    const record: StepRecord = result.status === "stopped"
+      ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
+      : { step: label, outcome: result.status, detail: result.detail };
+    work.steps.push(record);
+    if (work.steps.length > STEP_MEMORY) work.steps.splice(0, work.steps.length - STEP_MEMORY);
+    log(`  -> ${record.outcome}: ${record.detail}`);
+  }
+
+  /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */
+  private finish(work: Work, outcome: "done" | "failed", detail: string): void {
+    const index = this.stack.indexOf(work);
+    if (index >= 0) this.stack.splice(index, 1);
+    const { objective } = work;
+    this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
+    if (objective.requester === null) {
+      this.lately.push(`${objective.text}: ${outcome} (${detail})`);
+      if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
+      return;
+    }
+    void this.narrate(objective.text, outcome, detail);
+  }
+
+  /**
+   * Paces own-goal thinking (ADR-011): waits until the next call is allowed. False when an order arrived meanwhile
+   * (orders and chat are never held back).
+   */
+  private async waitForGoalBudget(): Promise<boolean> {
+    const interval = 60_000 / this.options.persona.settings.goalCallsPerMinute;
+    while (Date.now() < this.nextGoalCall) {
+      if (this.runSignal.aborted || this.stack.some((work) => work.objective.requester !== null)) return false;
+      await this.idle(Math.min(this.nextGoalCall - Date.now(), this.options.pollMs ?? DEFAULT_POLL_MS));
+    }
+    if (this.stack.some((work) => work.objective.requester !== null)) return false;
+    this.nextGoalCall = Date.now() + interval;
+    return true;
+  }
+
+  /** Sleeps until `ms` pass, something is taken on, or the agent stops. */
+  private idle(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.wake = null;
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.wake = done;
+      if (this.runSignal.aborted) done();
+    });
+  }
+
+  /**
+   * Settings the runtime keeps (ADR-011: preferences are settings, not code paths). Checked from each snapshot because
+   * the runtime resets its survival policy on death and dimension change.
+   */
+  private async keepSettings(snapshot: BotSnapshot): Promise<void> {
+    const wanted = this.options.persona.settings.digStraightDown;
+    if (snapshot.policy === null || snapshot.policy.digStraightDown === wanted) return;
+    const applied = await this.options.runtime.setDigStraightDown(wanted, snapshot.policy.revision).catch(() => false);
+    this.options.log(`${wanted ? "may" : "never"} dig straight down: ${applied ? "set" : "not set yet"}`);
   }
 
   private learnPlace(place: KnownPlace): void {
@@ -152,35 +280,22 @@ export class Agent {
     if (this.places.length > KNOWN_PLACES) this.places.splice(0, this.places.length - KNOWN_PLACES);
   }
 
-  private async finishTask(task: Task, result: SkillResult): Promise<void> {
-    if (this.task === task) this.task = null;
-    this.options.log(`task "${task.request}": ${result.status}${result.status === "stopped" ? "" : ` (${result.detail})`}`);
-    // A replaced task may still finish its last step: its news is out of date, the new task speaks for itself.
-    if (result.status === "stopped" || task.controller.signal.aborted) return;
-    await this.narrate(task, result.status, result.detail);
-  }
-
-  /** Has the chat tier tell the players how a task is going; a progress line is dropped once the task is replaced. */
-  private async narrate(task: Task, outcome: "done" | "failed" | "escalated", detail: string): Promise<void> {
+  /** Has the chat tier tell the players how an order ended. */
+  private async narrate(objective: string, outcome: "done" | "failed", detail: string): Promise<void> {
     if (this.runSignal.aborted) return;
     try {
-      const line = await this.options.mind.narrate({
-        persona: this.options.persona,
-        task: task.steps === null ? task.request : describePlan(task.steps),
-        outcome,
-        detail,
-        history: this.history,
-      }, this.runSignal);
-      const stale = outcome === "escalated" && this.task !== task;
-      if (!stale) this.speak(line);
+      const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);
+      this.speak(line);
     } catch (error) {
       this.options.log(`narration failed: ${String(error)}`);
     }
   }
 
-  private stopTask(): void {
-    this.task?.controller.abort();
-    this.task = null;
+  /** "stop": everything on the stack ends, its own goal included. */
+  private stopAll(): void {
+    for (const work of this.stack) work.step?.abort();
+    this.stack.length = 0;
+    this.wake?.();
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */

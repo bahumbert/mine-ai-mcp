@@ -176,6 +176,9 @@ function observeMobility(bot: Bot): LiveSituation["mobility"] {
         : 0,
       blockedBy: scaffoldBlockers,
     },
+    digStraightDown: navigation.dig_straight_down
+      ? { available: true, blockedBy: [] }
+      : { available: false, blockedBy: ["policy_disabled"] },
   };
 }
 
@@ -372,6 +375,12 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
         ? `${mobility.scaffold.item} x${mobility.scaffold.blocks}`
         : `unavailable (${blockedBecause(mobility.scaffold.blockedBy)})`
     }`,
+    // Only the loss is news: the default costs this section nothing.
+    ...(mobility.digStraightDown.available
+      ? []
+      : [
+          `- No straight-down digging (${blockedBecause(mobility.digStraightDown.blockedBy)}); routes descend by staircase`,
+        ]),
     "",
     "### Clock",
     clock.phase === null

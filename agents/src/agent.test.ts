@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Agent } from "./agent.ts";
 import { INSTANT_TYPING } from "./body.ts";
+import type { Persona } from "./persona.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 
@@ -9,14 +11,25 @@ function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
 }
 
-function agentFor(runtime: FakeRuntime, stance: "companion" | "rival" = "companion") {
+/** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */
+function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}) {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona({ stance }), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
   return { agent, ...tiers };
 }
 
 function say(username: string, message: string) {
   return { username, channel: "chat" as const, message, addressed: false };
+}
+
+function bodyCalls(runtime: FakeRuntime): string[] {
+  return runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool);
 }
 
 test("follow planning holds when close, moves when far, and reports a lost player", () => {
@@ -26,115 +39,130 @@ test("follow planning holds when close, moves when far, and reports a lost playe
   assert.deepEqual(planFollowStep({ ...snapshot, players: [{ username: "Steve", position: null }] }, "Steve", 3), { kind: "lost" });
 });
 
-test("a free-form request is acknowledged, mapped to skills by the action tier, and stopped in plain words", async () => {
+test("a request becomes an objective worked out one step at a time, each step seeing what the last ones did", async (t) => {
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(20)] };
-  runtime.durations.navigate = 10_000;
-  const { agent, chat, action } = agentFor(runtime);
-  chat.reply({ say: "Right behind you!", route: "act", request: "follow Steve" });
-  action.reply({ steps: [{ skill: "follow_player", player: "Steve" }] });
-
-  await agent.handle(say("Steve", "hey, tag along with me"));
-  await until(() => runtime.submitted.some((call) => call.tool === "navigate"));
-  assert.equal(agent.activity, "follow Steve at 3 blocks");
-  assert.deepEqual(runtime.submitted.find((call) => call.tool === "navigate")?.input, { x: 20, y: 64, z: 0, range: 3 });
-  assert.match(action.requests[0]?.[1]?.content ?? "", /Request from Steve: "follow Steve"/u);
-
-  chat.reply({ say: "Okay, I'll wait here.", route: "stop", request: "" });
-  await agent.handle(say("Steve", "that's enough for now"));
-  assert.equal(agent.activity, "idle");
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "give Steve 2 dirt" }, { say: "Here you go!" });
+  action.reply(
+    { thought: "I carry no dirt.", step: { skill: "collect_block", block: "dirt", count: 2 } },
+    { step: { skill: "give_item", player: "Steve", item: "dirt", count: 2 } },
+    { done: "Steve has 2 dirt" },
+  );
+  await agent.handle(say("Steve", "could you give me a bit of dirt, 2 is enough"));
   await until(() => runtime.said.length === 2);
-  assert.deepEqual(runtime.said, ["Right behind you!", "Okay, I'll wait here."]);
-  await until(() => runtime.cancelled.length === 1);
+  assert.deepEqual(runtime.said, ["Sure.", "Here you go!"]);
+  assert.deepEqual(bodyCalls(runtime), ["collect_block", "navigate", "drop_item"]);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Objective \(asked by Steve\): "give Steve 2 dirt"\n\nSteps so far: none yet\./u);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 2 dirt -> done: collected 2 dirt/u);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /2\. give 2 dirt to Steve -> done: gave 2 dirt to Steve/u);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /\("give Steve 2 dirt"\) is done: Steve has 2 dirt/u);
+  assert.equal(agent.activity, "idle");
 });
 
-test("chatting while working is answered at once and the work goes on", async () => {
+test("a failed step is shown to the model, which may give up and say why in character", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "No birch around here, sorry!" });
+  action.reply({ step: { skill: "collect_block", block: "birch_log", count: 5 } }, { give_up: "there is no birch_log nearby" });
+  await agent.handle(say("Steve", "get me some birch"));
+  await until(() => runtime.said.length === 2);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[NO_LOADED_MATCHING_TARGETS\]/u);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /You stopped working on "collect 5 birch_log": there is no birch_log nearby/u);
+});
+
+test("chatting while working is answered at once and the work goes on", async (t) => {
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 200;
-  const { agent, chat, action } = agentFor(runtime);
+  const { agent, chat, action } = agentFor(t, runtime);
   chat.reply({ say: "On it.", route: "act", request: "collect 10 oak_log" }, { say: "Chopping away!", route: "talk", request: "" }, { say: "Done!" });
-  action.reply({ steps: [{ skill: "collect_block", block: "oak_log", count: 10 }] });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 10 } }, { done: "collected 10 oak_log" });
   await agent.handle(say("Steve", "get me 10 logs"));
   await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
   await agent.handle(say("Steve", "how is it going?"));
   await until(() => runtime.said.length === 2);
-  assert.equal(agent.activity, "collect 10 oak_log");
+  assert.equal(agent.activity, "\"collect 10 oak_log\" (for Steve)");
   assert.deepEqual(runtime.cancelled, []);
   await until(() => runtime.said.length === 3, 5_000);
   assert.deepEqual(runtime.said, ["On it.", "Chopping away!", "Done!"]);
 });
 
-test("a finished task is reported in character", async () => {
+test("an order sets the character's own goal aside; it resumes afterwards, knowing it was interrupted", async (t) => {
   const runtime = new FakeRuntime();
-  const { agent, chat, action } = agentFor(runtime);
-  chat.reply({ say: "Sure.", route: "act", request: "collect 4 dirt" }, { say: "Got your dirt!" });
-  action.reply({ steps: [{ skill: "collect_block", block: "dirt", count: 4 }] });
-  await agent.handle({ username: "Steve", channel: "whisper", message: "could u dig a bit of dirt, like 4", addressed: false });
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  planner.reply({ objective: "collect 16 oak_log for my base" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  assert.match(agent.activity, /"collect 16 oak_log for my base" \(your own goal\)/u);
+
+  chat.reply({ say: "Coming!", route: "act", request: "come to Steve" }, { say: "Here I am." });
+  action.reply({ step: { skill: "go_to_player", player: "Steve" } }, { done: "I am next to Steve" }, { done: "enough wood for now" });
+  await agent.handle(say("Steve", "come here please"));
   await until(() => runtime.said.length === 2);
-  assert.deepEqual(runtime.submitted.find((call) => call.tool === "collect_block")?.input, { block_name: "dirt", count: 4 });
-  assert.deepEqual(runtime.said, ["Sure.", "Got your dirt!"]);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /is finished: collected 4 dirt/u);
+  assert.equal(runtime.cancelled.length, 1, "the collection was set aside");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /Set aside until this one ends: "collect 16 oak_log for my base"/u);
+  await until(() => action.requests.length === 4);
+  const resumed = action.requests[3]?.[1]?.content ?? "";
+  assert.match(resumed, /Objective \(your own goal\): "collect 16 oak_log for my base"/u);
+  assert.match(resumed, /1\. collect 16 oak_log -> interrupted/u);
 });
 
-test("a bigger job escalates to the planner, says it needs thinking, and runs the plan in order", async () => {
+test("stop ends everything, its own goal included, and it rests before going back to that goal", async (t) => {
   const runtime = new FakeRuntime();
-  const { agent, chat, action, planner } = agentFor(runtime);
-  chat.reply({ say: "On it.", route: "act", request: "make a crafting_table" }, { say: "Hmm, I need logs first, let me think." }, { say: "Here's your table." });
-  action.reply({ escalate: "needs logs first" });
-  planner.reply({ steps: [{ skill: "collect_block", block: "oak_log", count: 1 }, { skill: "craft_item", item: "crafting_table" }] });
-  await agent.handle(say("Steve", "Ayla can you make a crafting table"));
-  await until(() => runtime.said.length === 3);
-  assert.deepEqual(runtime.said, ["On it.", "Hmm, I need logs first, let me think.", "Here's your table."]);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /harder than it first looked \(needs logs first\)/u);
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool), ["collect_block", "craft_item"]);
-  assert.deepEqual(runtime.submitted.find((call) => call.tool === "craft_item")?.input, { items: [{ item_name: "crafting_table", count: 1 }] });
-});
-
-test("an impossible request is explained, not attempted", async () => {
-  const runtime = new FakeRuntime();
-  const { agent, chat, action } = agentFor(runtime);
-  chat.reply({ say: "Hmm, let me see.", route: "act", request: "build Steve a castle" }, { say: "Castles are beyond me for now!" });
-  action.reply({ impossible: "no building skill" });
-  await agent.handle(say("Steve", "build me a castle"));
-  await until(() => runtime.said.length === 2);
-  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["send_message", "send_message"]);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /failed: cannot do that: no building skill/u);
-});
-
-test("a rival turns requests into words: the action tier is never asked", async () => {
-  const runtime = new FakeRuntime();
-  const { agent, chat, action } = agentFor(runtime, "rival");
-  chat.reply({ say: "Follow you? Dream on.", route: "act", request: "follow Steve" });
-  await agent.handle(say("Steve", "follow me"));
-  await until(() => runtime.said.length === 1);
-  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["send_message"]);
-  assert.equal(action.requests.length, 0);
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, restAfterStopSeconds: 60 } });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Okay, I'll take a break.", route: "stop", request: "" });
+  await agent.handle(say("Steve", "stop, take a break"));
+  await until(() => runtime.cancelled.length === 1);
   assert.equal(agent.activity, "idle");
+  await sleep(300);
+  assert.equal(planner.requests.length, 1, "no new own objective while resting");
 });
 
-test("a house the agent built becomes a known place, with its roof, for the next requests", async () => {
+test("a house the agent built becomes a known place, with its roof, for what comes next", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
-  const { agent, chat, action } = agentFor(runtime);
+  const { agent, chat, action } = agentFor(t, runtime);
   chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
-  action.reply({ steps: [{ skill: "build" }] });
+  action.reply({ step: { skill: "build" } }, { done: "built the house" });
   await agent.handle(say("Steve", "build me a house"));
   await until(() => runtime.said.length === 2);
   assert.match(action.requests[0]?.[1]?.content ?? "", /- Places you know: none\./u);
 
   chat.reply({ say: "Up I go.", route: "act", request: "go to the roof of the house" }, { say: "Nice view." });
-  action.reply({ steps: [{ skill: "go_to", x: -4, y: 70, z: 0 }] });
+  action.reply({ step: { skill: "go_to", x: -4, y: 70, z: 0 } }, { done: "on the roof" });
   await agent.handle(say("Steve", "go to the roof"));
   await until(() => runtime.said.length === 4);
   const places = "- Places you know: the small medieval house you built for Steve (door -2 64 0 facing east; stand on its roof at -4 70 0).";
   assert.ok((chat.requests[2]?.[1]?.content ?? "").includes(places), "the chat tier knows it");
-  assert.ok((action.requests[1]?.[1]?.content ?? "").includes(places), "the action tier knows it");
+  assert.ok((action.requests[2]?.[1]?.content ?? "").includes(places), "the work tier knows it");
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
 });
 
-test("other agents are not heard, and the chat tier may decide a message is not for us", async () => {
+test("never digging straight down is set at start, and again after the runtime reset its policy", async (t) => {
   const runtime = new FakeRuntime();
-  const { agent, chat } = agentFor(runtime);
+  runtime.snapshot = { ...runtime.snapshot, policy: { revision: "1", digStraightDown: true } };
+  const { agent, chat, action } = agentFor(t, runtime);
+  await until(() => runtime.digSettings.length === 1);
+  assert.deepEqual(runtime.digSettings, [false]);
+  // A death resets every override in the runtime.
+  runtime.snapshot = { ...runtime.snapshot, policy: { revision: "7", digStraightDown: true } };
+  chat.reply({ say: "Okay.", route: "act", request: "collect 1 dirt" }, { say: "Got it." });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 1 } }, { done: "collected 1 dirt" });
+  await agent.handle(say("Steve", "a bit of dirt please"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.digSettings, [false, false]);
+});
+
+test("other agents are not heard, and the chat tier may decide a message is not for us", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime);
   await agent.handle(say("Vex", "Ayla come here"));
   assert.equal(chat.requests.length, 0);
   chat.reply({ say: "", route: "ignore", request: "" }, { say: "Hello Steve.", route: "talk", request: "" });

@@ -74,6 +74,28 @@ decisions stay unchanged; deliberate combat approaches remain exempt. Each
 route search reads the current value; an edit does not force an existing route
 to replan. Use the usual lifetimes to make caution temporary.
 
+`navigation.dig_straight_down` (default `true`) lets a route dig the block
+beneath the bot's own feet and descend in its own column. Set it to `false` and
+every route the bot plans (`navigate`, `collect_block`, `build_structure`,
+automatic responses) descends only by digging a staircase, so the bot never
+opens a shaft it could fall through into a cave. It does not change which
+target blocks an action breaks. Setting only this field leaves every other
+override in place:
+
+```json
+{
+  "operation": "set",
+  "expected_revision": "<current survivalPolicy.revision>",
+  "changes": { "navigation": { "dig_straight_down": false } },
+  "lifetime": { "kind": "session" },
+  "reason": "Never dig straight down"
+}
+```
+
+Like every override it ends on death, dimension change or disconnect; read it
+back from `survivalPolicy.effective.navigation` in any reply or from
+`view_status` `mobility.digStraightDown`.
+
 `navigation.scaffold_blocks` is an ordered list of at most 16 registered block
 item names used by automatic navigation, footing, fire escape, blast barriers,
 and disposal-hole closure. The first carried name is preferred. The default is
@@ -116,7 +138,9 @@ The rendered section is deliberately two lines, because it renders on every
 status read: an available movement costs only its count, and the consequence
 is spelled out just where something is lost — `no_water_bucket`, or
 `water_evaporates_here` in the Nether, or `policy_disabled` when `bucket_drops`
-or `bucket_fall_save` is switched off in the survival policy. The structured
+or `bucket_fall_save` is switched off in the survival policy. A third line
+appears only when `dig_straight_down` is switched off, saying routes descend by
+staircase. The structured
 `mobility` field carries the full detail either way. These are the planner's
 standing limits, not a claim about the terrain: an available drop still needs
 a safe landing under it.

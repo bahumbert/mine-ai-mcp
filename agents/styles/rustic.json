@@ -1,0 +1,15 @@
+{
+  "id": "rustic",
+  "description": "Plain oak cottage for lands with only oak trees: cobblestone footing, oak walls and frame, oak roof.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "oak_planks",
+    "wall": "oak_planks",
+    "pillar": "oak_log",
+    "trim": "oak_log",
+    "roof": "oak_planks",
+    "window": "oak_fence",
+    "door": "oak_door"
+  },
+  "house": { "roof": "gable", "overhang": 1 }
+}

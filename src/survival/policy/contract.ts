@@ -60,6 +60,13 @@ export const navigationPolicySchema = z.strictObject({
     ),
   bucket_fall_save: z.boolean().describe("Automatically use carried water to save a damaging fall on a loaded safe full-block floor, then verify water recovery. Unavailable in the Nether."),
   bucket_drops: z.boolean().describe("Permit planned water-bucket drops up to 80 blocks onto loaded safe full-block floors; require a carried water bucket and verified recovery before continuing. Independent of scaffolding."),
+  dig_straight_down: z
+    .boolean()
+    .describe(
+      "Permit routes to dig the block beneath the bot's own feet and descend straight down. " +
+        "When false, every route (navigate, collect_block, build_structure and automatic responses) still descends by digging a staircase, one block forward per block down. " +
+        "Does not change which target blocks an action breaks. Read by each route search.",
+    ),
   hostile_avoidance_multiplier: z
     .number()
     .finite()
@@ -76,6 +83,7 @@ export const DEFAULT_NAVIGATION_POLICY: Readonly<NavigationPolicy> = Object.free
   hostile_avoidance_multiplier: 1,
   bucket_fall_save: true,
   bucket_drops: true,
+  dig_straight_down: true,
 });
 
 export const survivalPolicySchema = z.strictObject({

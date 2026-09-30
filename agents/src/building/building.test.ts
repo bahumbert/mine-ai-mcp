@@ -17,7 +17,7 @@ const key = (cell: { x: number; y: number; z: number }) => `${cell.x},${cell.y},
 
 test("every style is shipped with blocks that exist in 1.21.4 and are placed from an item of the same id", () => {
   const data = minecraftData("1.21.4");
-  assert.deepEqual([...STYLES.keys()].sort(), ["japanese", "medieval"]);
+  assert.deepEqual([...STYLES.keys()].sort(), ["japanese", "medieval", "rustic"]);
   for (const style of STYLES.values()) {
     for (const [role, block] of Object.entries(style.palette)) {
       assert.ok(data.blocksByName[block], `${style.id} ${role}: ${block} is not a block`);

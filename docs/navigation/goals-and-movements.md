@@ -79,7 +79,7 @@ Base policies configure feature toggles:
 - `allowParkour`: Enables two-block to four-block gap jumps.
 - `allowDiagonalAscend`: Enables diagonal step-ups.
 - `allowSprinting`: Enables sprint and sprint-jump edges.
-- `allowDownward`: Enables straight-down floor digging.
+- `allowDownward`: Enables straight-down floor digging. The Mineflayer policy reads it live from the survival policy's `navigation.dig_straight_down`.
 - `maximumDrop`: Maximum safe fall height, defaulting to 3 blocks.
 - `placementPenalty`: Extra cost added to each scaffold placement, defaulting to 8 ticks.
 - `heuristicWeight`: Tuning multiplier applied to goal heuristics, defaulting to 1.

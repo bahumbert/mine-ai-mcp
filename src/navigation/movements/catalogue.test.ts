@@ -535,6 +535,41 @@ test("A star chooses direct downward excavation for an aligned deep goal", () =>
   );
 });
 
+test("with direct downward excavation disabled, A star reaches the same deep goal by a staircase", () => {
+  const world = new MemoryWorld();
+  for (let x = -6; x <= 6; x += 1)
+    for (let z = -6; z <= 6; z += 1) {
+      for (let y = 55; y <= 63; y += 1) world.load({ x, y, z }, SOLID);
+      for (let y = 64; y <= 66; y += 1) world.load({ x, y, z }, AIR);
+    }
+  const goal = exactBlockGoal({ x: 0, y: 61, z: 0 }).resolve(observation(0, 64, 0));
+  assert.equal(goal.kind, "active");
+  if (goal.kind !== "active") return;
+  const search = new IncrementalSearch({
+    id: "no-direct-downward",
+    start: planningStart({ x: 0, y: 64, z: 0 }),
+    goal,
+    now: () => 0,
+    context: {
+      world,
+      policy: createMovementPolicy({ allowDownward: false }),
+      player: WELL_FED,
+      catalogue: createMovementCatalogue(),
+    },
+  });
+  const result = search.advance({ maximumExpansions: 20_000 });
+
+  assert.equal(result.kind, "complete");
+  if (result.kind !== "complete") return;
+  assert.deepEqual(result.plan.steps.at(-1)?.to, { x: 0, y: 61, z: 0 });
+  assert.equal(result.plan.steps.some((step) => step.kind === "downward"), false);
+  for (const step of result.plan.steps)
+    assert.ok(
+      step.to.y >= step.from.y || step.to.x !== step.from.x || step.to.z !== step.from.z,
+      `no step descends in its own column: ${step.kind} ${JSON.stringify(step.from)} -> ${JSON.stringify(step.to)}`,
+    );
+});
+
 test("a step up clears the takeoff headroom needed to jump", () => {
   const world = flat([{ x: 1, y: 63, z: 0 }, SOLID], [{ x: 0, y: 65, z: 0 }, SOLID], [{ x: 0, y: 66, z: 0 }, AIR]);
   const ascending = generateFrom(world, ORIGIN, {

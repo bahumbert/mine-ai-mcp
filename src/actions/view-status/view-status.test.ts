@@ -7,6 +7,7 @@ import { createViewStatusAction, formatViewStatusResult, observeLiveSituation } 
 import { botFixture, registry } from "../../test-support/bot.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { recordLastDeath } from "../../bot-data/index.js";
+import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 
 const idleActivity = () => ({ owner: "idle" as const, activeAction: null });
 
@@ -515,5 +516,28 @@ test("reports which movements the carried inventory unlocks, and what blocks the
   assert.match(
     report(unarmed),
     /- Scaffold placement \(pillar up, bridge gaps\): unavailable \(no admitted scaffold block carried\)/,
+  );
+});
+
+test("reports straight-down digging from the live policy, and renders only its loss", async (t) => {
+  const bot = liveBot();
+  const observe = () => observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
+  const policy = new SurvivalPolicyState(bot);
+  assert.deepEqual(observe().mobility.digStraightDown, { available: true, blockedBy: [] });
+  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation: observe() }), /straight-down/);
+
+  await policy.edit({
+    operation: "set",
+    expected_revision: policy.snapshot().revision,
+    changes: { navigation: { dig_straight_down: false } },
+    lifetime: { kind: "session" },
+    reason: "never dig a shaft",
+  });
+  const stairs = observe();
+  assert.deepEqual(stairs.mobility.digStraightDown, { available: false, blockedBy: ["policy_disabled"] });
+  assert.equal(viewStatusResultSchema.parse({ status: "succeeded", situation: stairs }).situation.mobility.digStraightDown.available, false);
+  assert.match(
+    formatViewStatusResult({ status: "succeeded", situation: stairs }),
+    /- No straight-down digging \(switched off in the survival policy\); routes descend by staircase/,
   );
 });

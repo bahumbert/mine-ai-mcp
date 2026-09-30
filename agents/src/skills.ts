@@ -22,6 +22,8 @@ const FOLLOW_MAX_FAILURES = 3;
 const COME_RANGE = 2;
 /** Arrival tolerance for `go_to` coordinates. */
 const GO_TO_RANGE = 1;
+/** `get_items` walks back to where it started when it ends farther than this. */
+const RETURN_RANGE = 3;
 
 export interface SkillContext {
   readonly runtime: BotRuntime;
@@ -29,7 +31,7 @@ export interface SkillContext {
   readonly signal: AbortSignal;
   /** Who asked: a house faces them. */
   readonly requester?: string;
-  /** The persona's building style, used when a build step names none. */
+  /** The persona's building style (always its own: the model cannot pick another). */
   readonly style?: string;
   /** Told about places worth remembering (a finished house), so later requests such as "go to the roof" can use them. */
   readonly remember?: (place: KnownPlace) => void;
@@ -42,30 +44,12 @@ export type SkillResult =
   | { readonly status: "stopped" };
 
 /**
- * Runs the steps in order and stops at the first one that does not finish. "stop" is not a skill; the agent aborts
- * the running plan.
- */
-export async function runPlan(steps: readonly Step[], context: SkillContext): Promise<SkillResult> {
-  const done: string[] = [];
-  for (const [index, step] of steps.entries()) {
-    const result = await runStep(step, context);
-    if (result.status === "stopped") return result;
-    if (result.status === "failed") {
-      if (steps.length === 1) return result;
-      const before = done.length === 0 ? "" : `; already did: ${done.join(", ")}`;
-      return { status: "failed", detail: `step ${index + 1}/${steps.length} (${describeStep(step)}) failed: ${result.detail}${before}` };
-    }
-    done.push(result.detail);
-  }
-  return { status: "done", detail: done.join("; ") };
-}
-
-/**
- * Brain-level skills: short programs over atomic actions. Following is done here with repeated `navigate` rather
- * than a new runtime action; if that proves too jerky it becomes a `follow_entity` action (backlog).
+ * Brain-level skills: short programs over atomic actions, one per step the model chooses (ADR-011). Following is done
+ * here with repeated `navigate` rather than a new runtime action; if that proves too jerky it becomes a
+ * `follow_entity` action (backlog).
  */
 export async function runStep(step: Step, context: SkillContext): Promise<SkillResult> {
-  const why = `A player asked me to ${describeStep(step)}.`;
+  const why = `I chose to ${describeStep(step)}.`;
   try {
     switch (step.skill) {
       case "follow_player": return await follow(context, step.player, step.distance);
@@ -77,6 +61,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "craft_item":
         return await once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+      case "get_items": return await getItems(context, step.items);
       case "eat": return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
       case "sleep": return await once(context, "sleep", {}, why, "slept");
@@ -164,9 +149,25 @@ async function give(context: SkillContext, player: string, item: string, count: 
 }
 
 /**
- * Builds a house from a style's blueprint where the bot stood when asked, facing the requester. Missing materials are
- * gathered and crafted first (`gathering.ts`), then the bot walks back to that spot and sends one `build_structure`
- * call per batch.
+ * Gets items like a player (`gathering.ts`), then comes back to where it started: fetching is a basic function; when
+ * and what to fetch is the model's choice (ADR-011).
+ */
+async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[]): Promise<SkillResult> {
+  const start = (await context.runtime.status()).position;
+  const gathered = await gatherMaterials(context, items, `getting ${describeMaterials(items)}`, start);
+  if (gathered.status !== "done") return gathered;
+  const here = (await context.runtime.status()).position;
+  if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
+    const back = await once(context, "navigate", navigateInput(start, GO_TO_RANGE), "Come back to where I started fetching.", "back");
+    if (back.status === "stopped") return back;
+    if (back.status === "failed") return { status: "failed", detail: `got ${describeMaterials(items)} but could not come back: ${back.detail}` };
+  }
+  return { status: "done", detail: `now carrying ${describeMaterials(items)} (${gathered.detail})` };
+}
+
+/**
+ * Builds a house from the persona's style where the bot stands, facing the requester, with carried blocks only (the
+ * model fetches them first with `get_items`); one `build_structure` call per batch.
  */
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
@@ -174,13 +175,8 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const plan = planHouse(styleOrDefault(context.style), step.size, chooseSite(snapshot.position, toward));
   const kind = `${step.size} ${plan.style.id} house`;
   const what = `a ${kind}`;
-  if (shortfall(plan.bill, snapshot.inventory).length > 0) {
-    const gathered = await gatherMaterials(context, plan.bill, what, snapshot.position);
-    if (gathered.status === "stopped") return gathered;
-    if (gathered.status === "failed") return { status: "failed", detail: `could not get the materials for ${what} (it needs ${describeMaterials(plan.bill)}): ${gathered.detail}` };
-    const back = await once(context, "navigate", navigateInput(snapshot.position, GO_TO_RANGE), `Go back to where I was asked to build ${what}.`, "back at the site");
-    if (back.status !== "done") return back.status === "stopped" ? back : { status: "failed", detail: `gathered the materials but could not get back to the site: ${back.detail}` };
-  }
+  const missing = shortfall(plan.bill, snapshot.inventory);
+  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
   for (const [index, batch] of plan.batches.entries()) {
     const blocks = batch.map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
     const part = `part ${index + 1}/${plan.batches.length}`;

@@ -465,8 +465,17 @@ export function createMineflayerMovementPolicy(
   // search, so one route places one block; a route that spends a whole stack
   // then replans onto the next carried stack. Chosen once, a bridge across a
   // lava sea ended on the last netherrack with sixteen cobblestone unused.
+  //
+  // The straight-down dig is the model's choice, like the bucket drop: a bot
+  // that digs its own shaft can fall into a cave it cannot climb out of, so
+  // the policy may leave it only the staircase. Read live for the same reason
+  // as the others: every route of this bot, whoever built its policy, obeys
+  // the setting as it stands when the planner asks.
   return Object.freeze({
     ...policy,
+    get allowDownward() {
+      return readNavigationPolicy(bot).dig_straight_down;
+    },
     get maximumBucketDrop() {
       return readNavigationPolicy(bot).bucket_drops && bucketAvailable(bot) ? MAXIMUM_BUCKET_DROP : 0;
     },
