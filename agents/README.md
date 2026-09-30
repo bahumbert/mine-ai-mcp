@@ -18,8 +18,8 @@ is ADR-008 in `.agent/vision/decisions.md`.
    talk for now), runs the steps, and the chat tier narrates the outcome in character.
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
-(intermediates automatic), eat, equip, sleep, hunt mobs for drops, build a house (small or medium, in the persona's
-style or a named one). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
+(intermediates automatic), eat, equip, sleep, hunt mobs for drops, build a house (small or medium, always in the
+persona's own style). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
@@ -31,7 +31,8 @@ Then the bot walks back to the site and sends one `build_structure` call per lay
 room (navigation scaffolding), and the door last. The site is not surveyed: whatever stands there is dug out.
 A finished house becomes a **known place** (door and facing, a standing spot on the roof ridge): the agent keeps the
 last 8 and every tier sees them in its situation ("Places you know: ..."), so "go to the roof" is a `go_to` with real
-coordinates. The build skill makes houses only; towers, piles, walls... are refused as impossible for now.
+coordinates. When no skill fits a request (a pillar, a tower...), the prompts let the character say it does not know
+how or ask what is meant; nothing in code lists what to refuse.
 
 ## Run
 
@@ -49,7 +50,7 @@ Then just talk: "hey Ayla, stick with me", "could you grab me some wood?", "make
 To try one skill on a live bot without any LLM:
 
 ```bash
-bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small","style":"japanese"}' [--requester Steve]
+bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small"}' --style japanese [--requester Steve]
 ```
 
 ## LLM configuration

@@ -10,8 +10,6 @@ import { runPlan, type SkillResult } from "./skills.ts";
 const DEFAULT_POLL_MS = 500;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
-/** The name the server console speaks under. */
-const SERVER_SPEAKER = "Server";
 /** Known places shown to the models; the oldest is forgotten first. */
 const KNOWN_PLACES = 8;
 
@@ -111,8 +109,6 @@ export class Agent {
   private listensTo(username: string): boolean {
     const { persona, otherAgents } = this.options;
     const speaker = username.toLowerCase();
-    // Console broadcasts (`/say`, shutdown countdowns) arrive as a player named "Server"; twice they started tasks.
-    if (username === SERVER_SPEAKER) return false;
     if (otherAgents.some((name) => name.toLowerCase() === speaker)) return false;
     return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
   }

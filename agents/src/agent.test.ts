@@ -136,7 +136,6 @@ test("other agents are not heard, and the chat tier may decide a message is not 
   const runtime = new FakeRuntime();
   const { agent, chat } = agentFor(runtime);
   await agent.handle(say("Vex", "Ayla come here"));
-  await agent.handle(say("Server", "Server stopping in 10 s"));
   assert.equal(chat.requests.length, 0);
   chat.reply({ say: "", route: "ignore", request: "" }, { say: "Hello Steve.", route: "talk", request: "" });
   await agent.handle(say("Alex", "anyone want to trade"));

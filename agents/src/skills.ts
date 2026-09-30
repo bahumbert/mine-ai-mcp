@@ -171,7 +171,7 @@ async function give(context: SkillContext, player: string, item: string, count: 
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
-  const plan = planHouse(styleOrDefault(step.style ?? context.style), step.size, chooseSite(snapshot.position, toward));
+  const plan = planHouse(styleOrDefault(context.style), step.size, chooseSite(snapshot.position, toward));
   const kind = `${step.size} ${plan.style.id} house`;
   const what = `a ${kind}`;
   if (shortfall(plan.bill, snapshot.inventory).length > 0) {

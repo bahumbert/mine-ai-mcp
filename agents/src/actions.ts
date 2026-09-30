@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
-import { STYLES } from "./building/styles.ts";
 import type { Stance } from "./persona.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
@@ -10,7 +9,6 @@ const coordinate = z.number().int().min(-30_000_000).max(30_000_000);
 /** The runtime's `collect_block` limit (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
 
-const STYLE_IDS = [...STYLES.keys()] as [string, ...string[]];
 const SIZES = Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]];
 
 /**
@@ -32,8 +30,6 @@ export const stepSchema = z.discriminatedUnion("skill", [
     skill: z.literal("build"),
     structure: z.literal("house").default("house"),
     size: z.enum(SIZES).default("small"),
-    /** Omitted = the persona's own style. */
-    style: z.enum(STYLE_IDS).optional(),
   }),
 ]);
 
@@ -52,7 +48,7 @@ export const SKILL_USAGE: Readonly<Record<SkillName, string>> = {
   equip: `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`,
   sleep: `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`,
   hunt: `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`,
-  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house where you stand, door facing the requester; only when a house is asked for, never for anything else (pile, pillar, tower, wall...: impossible for now). It chops, digs and crafts every missing block itself first (several minutes), so a house is this one step and nothing else. "size" small unless they ask for a big one; add "style":"<${STYLE_IDS.join("|")}>" only when the player names that style, never on your own (yours otherwise)`,
+  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your own style where you stand, door facing the requester; it chops, digs and crafts its missing blocks itself first (several minutes). "size" small unless they ask for a big one`,
 };
 
 /**
@@ -97,7 +93,7 @@ export function describeStep(step: Step): string {
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
-    case "build": return `build a ${step.size}${step.style === undefined ? "" : ` ${step.style}`} ${step.structure}`;
+    case "build": return `build a ${step.size} ${step.structure}`;
   }
 }
 

@@ -11,7 +11,7 @@ Runs one skill step from the catalog (src/actions.ts) on a live bot, without any
 blueprints in-game. --requester is the player the step is "for" (a house faces them); --style stands in for the
 persona's style. Ctrl+C cancels the running action.
 
-Example: bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small","style":"japanese"}' --requester Steve`;
+Example: bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small"}' --style japanese --requester Steve`;
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,

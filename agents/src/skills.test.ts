@@ -14,9 +14,9 @@ function builds(runtime: FakeRuntime) {
   return runtime.submitted.filter((call) => call.tool === "build_structure").map((call) => call.input as { blocks: { x: number; y: number; z: number; block_name: string }[]; remove_wrong_blocks: boolean });
 }
 
-test("a build step defaults to a small house in the persona's style, and only shipped styles are accepted", () => {
+test("a build step defaults to a small house; the style is always the persona's, never the model's", () => {
   assert.deepEqual(stepSchema.parse({ skill: "build" }), { skill: "build", structure: "house", size: "small" });
-  assert.equal(stepSchema.safeParse({ skill: "build", style: "gothic" }).success, false);
+  assert.equal(stepSchema.safeParse({ skill: "build", style: "japanese" }).success, false);
   assert.equal(stepSchema.safeParse({ skill: "build", structure: "castle" }).success, false);
 });
 
@@ -75,7 +75,7 @@ test("a pickaxe that breaks while digging is a setback, not a failure: another o
       runtime.addItem("wooden_pickaxe", -1);
     },
   };
-  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "done");
   const calls = runtime.submitted.map(describeCall);
   assert.deepEqual(calls.slice(0, calls.indexOf("navigate")), ["collect stone", "craft wooden_pickaxe at table", "collect stone"]);
@@ -86,7 +86,7 @@ test("materials that cannot be found stop the build before any block is touched,
   runtime.recipes = HOUSE_RECIPES;
   runtime.simulateInventory = true;
   runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded spruce_log blocks.";
-  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /^could not get the materials for a small medieval house \(it needs 49 spruce_planks, .*\): \[NO_LOADED_MATCHING_TARGETS\]/u);
   assert.equal(builds(runtime).length, 0);
@@ -116,7 +116,7 @@ test("a batch that does not finish stops the build and says where", async () => 
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
   runtime.failures.build_structure = "3 cells left: nothing_to_place_against";
-  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
   assert.match(result.detail ?? "", /^a small medieval house stopped at part 1\/\d+: 3 cells left: nothing_to_place_against$/);
   assert.equal(builds(runtime).length, 1);
@@ -134,7 +134,7 @@ test("a build the runtime stopped reports the audit it returned: what was left a
       left: [{ reason: "not_reached", count: 4, named: [] }, { reason: "refused", count: 1, named: [] }],
     },
   };
-  const result = await runStep({ skill: "build", structure: "house", size: "small", style: "medieval" }, contextFor(runtime));
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
   assert.match(
     result.detail ?? "",

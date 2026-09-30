@@ -136,8 +136,8 @@ export function chatSystemPrompt(persona: Persona): string {
   const skills = allowedSkills(persona.stance);
   const abilities = skills.length > 0
     ? `When players ask, you can: ${skills.map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these into bigger jobs.
-Anything else (any building but a small or medium house: towers, walls, piles...; trading, fighting players...) you
-cannot do yet: say so in character.`
+When none of these fits a request, or you do not understand it, say so in character (you do not know how, not yet,
+or ask what they mean): never pretend.`
     : `You take no orders from players: never use the "act" or "plan" routes; turn requests down in character.`;
   return `${personaPrompt(persona)}
 
