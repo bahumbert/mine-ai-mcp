@@ -6,7 +6,7 @@ import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { gatherMaterials } from "./gathering.ts";
 import type { KnownPlace } from "./mind.ts";
-import type { BotRuntime, BotSnapshot, ForegroundTool, NearbyPlayer, Position } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type NearbyPlayer, type Position } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -212,7 +212,7 @@ const structureAuditSchema = z.object({
  * tool-loss errors do not.
  */
 function auditSuffix(error: string | null, result: Readonly<Record<string, unknown>> | undefined): string {
-  if (error?.startsWith("[BUILD_INCOMPLETE]") === true) return "";
+  if (errorCode(error) === "BUILD_INCOMPLETE") return "";
   const parsed = structureAuditSchema.safeParse(result);
   if (!parsed.success) return "";
   const { placed, dug, left, missing } = parsed.data.structure;

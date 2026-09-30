@@ -155,7 +155,8 @@ export class Agent {
   private async finishTask(task: Task, result: SkillResult): Promise<void> {
     if (this.task === task) this.task = null;
     this.options.log(`task "${task.request}": ${result.status}${result.status === "stopped" ? "" : ` (${result.detail})`}`);
-    if (result.status === "stopped") return;
+    // A replaced task may still finish its last step: its news is out of date, the new task speaks for itself.
+    if (result.status === "stopped" || task.controller.signal.aborted) return;
     await this.narrate(task, result.status, result.detail);
   }
 

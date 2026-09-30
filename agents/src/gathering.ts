@@ -1,6 +1,6 @@
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
-import type { BotRuntime, ItemCount, Position } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type ItemCount, type Position } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -68,7 +68,7 @@ export async function gatherMaterials(context: GatherContext, bill: readonly Ite
       // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
       // without progress for any other reason ends the gathering.
       const after = shortfall(bill, (await context.runtime.status()).inventory);
-      if (units(after) >= units(missing) && !step.detail.startsWith("[HOSTILE_CONTACT]")) return step;
+      if (units(after) >= units(missing) && errorCode(step.detail) !== "HOSTILE_CONTACT") return step;
       actions.push(`setback (${step.detail})`);
       continue;
     }

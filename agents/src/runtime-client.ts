@@ -152,6 +152,11 @@ const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"
 /** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
+/** The runtime's outcome code: the bracketed prefix its errors start with, e.g. `HOSTILE_CONTACT`. */
+export function errorCode(error: string | null | undefined): string | null {
+  return /^\[([A-Z_]+)\]/u.exec(error ?? "")?.[1] ?? null;
+}
+
 /** {@link BotRuntime} over one mine-ai-mcp host's Streamable HTTP endpoint (ADR-002: one MCP connection per bot). */
 export class McpBotRuntime implements BotRuntime {
   private constructor(private readonly client: Client) {}
