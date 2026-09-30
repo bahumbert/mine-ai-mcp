@@ -1,0 +1,15 @@
+{
+  "id": "japanese",
+  "description": "Minka-like house: pale birch walls between dark oak posts, spruce floor, dark hip roof with deep eaves.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "spruce_planks",
+    "wall": "birch_planks",
+    "pillar": "dark_oak_log",
+    "trim": "dark_oak_planks",
+    "roof": "dark_oak_planks",
+    "window": "spruce_fence",
+    "door": "spruce_door"
+  },
+  "house": { "roof": "hip", "overhang": 1 }
+}

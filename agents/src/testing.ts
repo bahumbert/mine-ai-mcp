@@ -16,11 +16,13 @@ export class FakeRuntime implements BotRuntime {
   inbox: PlayerMessage[] = [];
   /** Wait slices each tool stays pending before it succeeds. */
   durations: Partial<Record<ForegroundTool, number>> = {};
+  /** Tools that settle as failed with this error. */
+  failures: Partial<Record<ForegroundTool, string>> = {};
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   readonly submitted: { readonly tool: ForegroundTool; readonly input: Readonly<Record<string, unknown>> }[] = [];
   readonly cancelled: string[] = [];
-  private readonly actions = new Map<string, { remaining: number; cancelled: boolean }>();
+  private readonly actions = new Map<string, { tool: ForegroundTool; remaining: number; cancelled: boolean }>();
   private nextId = 1;
 
   get said(): string[] {
@@ -45,7 +47,7 @@ export class FakeRuntime implements BotRuntime {
     }
     this.submitted.push({ tool, input });
     const actionId = `action-${this.nextId++}`;
-    this.actions.set(actionId, { remaining: this.durations[tool] ?? 0, cancelled: false });
+    this.actions.set(actionId, { tool, remaining: this.durations[tool] ?? 0, cancelled: false });
     return this.step(actionId);
   }
 
@@ -64,12 +66,15 @@ export class FakeRuntime implements BotRuntime {
   async close(): Promise<void> {}
 
   private step(actionId: string): ForegroundState {
-    const action = this.actions.get(actionId) ?? { remaining: 0, cancelled: false };
+    const action = this.actions.get(actionId);
+    if (action === undefined) return { state: "settled", actionId, status: "succeeded", error: null };
     if (action.cancelled) return { state: "settled", actionId, status: "cancelled", error: "cancelled by caller" };
     if (action.remaining > 0) {
       action.remaining -= 1;
       return { state: "pending", actionId };
     }
+    const failure = this.failures[action.tool];
+    if (failure !== undefined) return { state: "settled", actionId, status: "failed", error: failure };
     return { state: "settled", actionId, status: "succeeded", error: null };
   }
 }

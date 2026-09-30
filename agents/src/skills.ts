@@ -1,5 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { describeStep, type Step } from "./actions.ts";
+import { describeMaterials, shortfall } from "./building/blueprint.ts";
+import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import type { BotRuntime, BotSnapshot, ForegroundTool, NearbyPlayer, Position } from "./runtime-client.ts";
 
@@ -22,6 +24,10 @@ export interface SkillContext {
   readonly runtime: BotRuntime;
   readonly body: Body;
   readonly signal: AbortSignal;
+  /** Who asked: a house faces them. */
+  readonly requester?: string;
+  /** The persona's building style, used when a build step names none. */
+  readonly style?: string;
 }
 
 export type SkillResult =
@@ -71,6 +77,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "sleep": return await once(context, "sleep", {}, why, "slept");
       case "hunt":
         return await once(context, "collect_mob_drop", { mob_name: step.mob, drop_name: step.drop, count: step.count }, why, `got ${step.count} ${step.drop} from ${step.mob}`);
+      case "build": return await build(context, step);
     }
   } catch (error) {
     if (context.signal.aborted) return { status: "stopped" };
@@ -150,6 +157,28 @@ async function give(context: SkillContext, player: string, item: string, count: 
   const approach = await come(context, player);
   if (approach.status !== "done") return approach;
   return once(context, "drop_item", { items: [{ item_name: item, count }], to_player: player }, `${player} asked me for ${item}.`, `gave ${count} ${item} to ${player}`);
+}
+
+/**
+ * Builds a house from a style's blueprint behind the bot, facing the requester: checks the bill of materials first
+ * (nothing is gathered here: the planner adds collect/craft steps), then one `build_structure` call per batch.
+ */
+async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
+  const snapshot = await context.runtime.status();
+  const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
+  const plan = planHouse(styleOrDefault(step.style ?? context.style), step.size, chooseSite(snapshot.position, toward));
+  const what = `a ${step.size} ${plan.style.id} house`;
+  const missing = shortfall(plan.bill, snapshot.inventory);
+  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
+  for (const [index, batch] of plan.batches.entries()) {
+    const blocks = batch.map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
+    const part = `part ${index + 1}/${plan.batches.length}`;
+    const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });
+    if (context.signal.aborted) return { status: "stopped" };
+    if (outcome.status !== "succeeded") return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}` };
+  }
+  const { door, facing } = plan.site;
+  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
 }
 
 function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {

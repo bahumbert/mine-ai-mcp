@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { describeMaterials } from "./building/blueprint.ts";
+import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
+import { chooseSite, planHouse } from "./building/plan.ts";
+import { STYLES } from "./building/styles.ts";
 import type { Stance } from "./persona.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
@@ -7,6 +11,9 @@ const coordinate = z.number().int().min(-30_000_000).max(30_000_000);
 
 /** The runtime's `collect_block` limit (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
+
+const STYLE_IDS = [...STYLES.keys()] as [string, ...string[]];
+const SIZES = Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]];
 
 /**
  * The basic functions the LLM tiers compose (ADR-008). Each step is validated here and run in code by
@@ -23,6 +30,13 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({ skill: z.literal("equip"), item: minecraftId }),
   z.strictObject({ skill: z.literal("sleep") }),
   z.strictObject({ skill: z.literal("hunt"), mob: minecraftId, drop: minecraftId, count: z.number().int().min(1).max(16).default(1) }),
+  z.strictObject({
+    skill: z.literal("build"),
+    structure: z.literal("house").default("house"),
+    size: z.enum(SIZES).default("small"),
+    /** Omitted = the persona's own style. */
+    style: z.enum(STYLE_IDS).optional(),
+  }),
 ]);
 
 export type Step = z.infer<typeof stepSchema>;
@@ -40,6 +54,7 @@ export const SKILL_USAGE: Readonly<Record<SkillName, string>> = {
   equip: `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`,
   sleep: `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`,
   hunt: `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`,
+  build: `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>","style":"<${STYLE_IDS.join("|")}>"}  build a house right behind you, door facing the requester; "style" is optional (yours by default); every block must be carried first. Small house materials: ${[...STYLES.values()].map((style) => `${style.id} = ${describeMaterials(planHouse(style, "small", chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ")}`,
 };
 
 /**
@@ -84,6 +99,7 @@ export function describeStep(step: Step): string {
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
+    case "build": return `build a ${step.size}${step.style === undefined ? "" : ` ${step.style}`} ${step.structure}`;
   }
 }
 

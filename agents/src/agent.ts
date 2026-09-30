@@ -137,7 +137,7 @@ export class Agent {
     if (refused !== undefined) return { status: "failed", detail: `will not ${describeStep(refused)}` };
     task.steps = resolution.steps;
     log(`plan for "${task.request}": ${describePlan(task.steps)}`);
-    return runPlan(task.steps, { runtime, body: this.body, signal });
+    return runPlan(task.steps, { runtime, body: this.body, signal, requester, style: persona.style });
   }
 
   private async finishTask(task: Task, result: SkillResult): Promise<void> {

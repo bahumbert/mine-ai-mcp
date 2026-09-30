@@ -18,8 +18,16 @@ is ADR-008 in `.agent/vision/decisions.md`.
    talk for now), runs the steps, and the chat tier narrates the outcome in character.
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
-(intermediates automatic), eat, equip, sleep, hunt mobs for drops. A new skill = one catalog entry + one runner in
-`src/skills.ts`; the prompts are generated from the catalog.
+(intermediates automatic), eat, equip, sleep, hunt mobs for drops, build a house (small or medium, in the persona's
+style or a named one). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
+from the catalog.
+
+**Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
+roof type) fed to a parametric generator (`house.ts`). The plan puts the house right behind the bot, its door facing
+the player who asked, checks the bill of materials against the inventory (the build fails with the exact shortfall;
+the planner adds collect/craft steps first), then sends one `build_structure` call per layer, a clearing pass that
+re-digs the room (navigation scaffolding), and the door last. The site is not surveyed: whatever stands there is
+dug out.
 
 ## Run
 
@@ -32,7 +40,13 @@ bun run agents --agent agents/personas/ayla.json=http://127.0.0.1:25575/mcp   # 
 ```
 
 Then just talk: "hey Ayla, stick with me", "could you grab me some wood?", "make me a crafting table",
-"ok you can stop now", or whisper `/msg Ayla ...`.
+"build me a house here", "ok you can stop now", or whisper `/msg Ayla ...`.
+
+To try one skill on a live bot without any LLM:
+
+```bash
+bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small","style":"japanese"}' [--requester Steve]
+```
 
 ## LLM configuration
 
@@ -64,6 +78,9 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/mind.ts`, `llm-mind.ts` | The three tiers + narration, prompts, JSON repair round |
 | `src/actions.ts` | Skill catalog: step schemas, prompt lines, stance policy |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
+| `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
+| `styles/*.json` | Style palettes (material role → block) and house options |
+| `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
 | `src/body.ts` | Owns the bot's single foreground slot: serialises actions, speech pre-empts movement |
 | `src/runtime-client.ts` | Typed MCP client for one bot |
 | `src/chat-model.ts` | OpenAI-compatible `/chat/completions` client |

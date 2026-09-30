@@ -126,7 +126,7 @@ export function chatSystemPrompt(persona: Persona): string {
   const skills = allowedSkills(persona.stance);
   const abilities = skills.length > 0
     ? `When players ask, you can: ${skills.map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these into bigger jobs.
-Anything else (building, trading, fighting players...) you cannot do yet: say so in character.`
+Anything else (other buildings than a small or medium house, trading, fighting players...) you cannot do yet: say so in character.`
     : `You take no orders from players: never use the "act" or "plan" routes; turn requests down in character.`;
   return `${personaPrompt(persona)}
 
@@ -183,6 +183,8 @@ Rules:
 - Think about materials: gather raw blocks first, then craft, then deliver. Count what the recipes need, with a
   small margin, and use what the inventory already holds. Tools and most items need a crafting_table: craft one
   first if you carry none (4 planks). Stone tools need cobblestone: collect stone. Smelting is not available yet.
+- A house needs every listed block in the inventory before the build step: plan the missing ones first (logs,
+  then planks, fences and doors crafted from them; stone for cobblestone).
 - Use exact Minecraft ids. If no plan with these skills can do it, it is impossible.
 Reply with only one JSON object: {"thought": "<one or two short sentences>", "steps": [...]} or
 {"impossible": "<short reason>"}.`;

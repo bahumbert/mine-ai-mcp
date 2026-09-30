@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { STYLES } from "./building/styles.ts";
 import { loadPersona, personaSchema } from "./persona.ts";
 
-test("the sample personas are valid", async () => {
+test("the sample personas are valid and build in a shipped style", async () => {
   for (const name of ["ayla", "vex"]) {
     const persona = await loadPersona(fileURLToPath(new URL(`../personas/${name}.json`, import.meta.url)));
     assert.equal(persona.id, name);
+    assert.ok(persona.style !== undefined && STYLES.has(persona.style), `${name} style ${persona.style}`);
   }
 });
 

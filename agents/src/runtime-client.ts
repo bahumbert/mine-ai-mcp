@@ -37,7 +37,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "send_message" | "collect_block" | "drop_item"
-  | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop";
+  | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
