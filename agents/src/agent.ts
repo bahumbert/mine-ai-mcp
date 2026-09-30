@@ -4,7 +4,7 @@ import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage } from "./runtime-client.ts";
-import { runStep, type SkillResult } from "./skills.ts";
+import { runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
@@ -55,6 +55,7 @@ export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
+  private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
   private readonly stack: Work[] = [];
   private readonly lately: string[] = [];
   private restUntil = 0;
@@ -110,7 +111,7 @@ export class Agent {
       return;
     }
     const { route } = decision;
-    const request = route === "act" ? ` ${JSON.stringify(decision.request)}` : "";
+    const request = route === "act" || route === "later" ? ` ${JSON.stringify(decision.request)}` : "";
     log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}`);
     if (route === "ignore") return;
     this.speak(decision.say, heardAt);
@@ -119,6 +120,7 @@ export class Agent {
       this.restUntil = Date.now() + persona.settings.restAfterStopSeconds * 1_000;
     }
     if (route === "act") this.take({ text: decision.request, requester: message.username });
+    if (route === "later") this.queue({ text: decision.request, requester: message.username });
   }
 
   /**
@@ -137,6 +139,14 @@ export class Agent {
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.stack.push({ objective, steps: [], taken: 0, badReplies: 0, step: null });
+    this.wake?.();
+  }
+
+  /** Takes something on for when the current objective ends: it goes just below it on the stack. */
+  private queue(objective: Objective): void {
+    const work = { objective, steps: [], taken: 0, badReplies: 0, step: null };
+    if (this.stack.length === 0) this.stack.push(work);
+    else this.stack.splice(this.stack.length - 1, 0, work);
     this.wake?.();
   }
 
@@ -206,6 +216,7 @@ export class Agent {
         requester: work.objective.requester ?? undefined,
         style: persona.style,
         remember: (place) => this.learnPlace(place),
+        building: this.building,
       });
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -235,16 +246,17 @@ export class Agent {
   }
 
   /**
-   * Paces own-goal thinking (ADR-011): waits until the next call is allowed. False when an order arrived meanwhile
-   * (orders and chat are never held back).
+   * Paces own-goal thinking (ADR-011): waits until the next call is allowed. False when an order to do now arrived
+   * meanwhile (orders and chat are never held back; an order taken on for later waits its turn).
    */
   private async waitForGoalBudget(): Promise<boolean> {
     const interval = 60_000 / this.options.persona.settings.goalCallsPerMinute;
+    const orderOnTop = () => (this.stack.at(-1)?.objective.requester ?? null) !== null;
     while (Date.now() < this.nextGoalCall) {
-      if (this.runSignal.aborted || this.stack.some((work) => work.objective.requester !== null)) return false;
+      if (this.runSignal.aborted || orderOnTop()) return false;
       await this.idle(Math.min(this.nextGoalCall - Date.now(), this.options.pollMs ?? DEFAULT_POLL_MS));
     }
-    if (this.stack.some((work) => work.objective.requester !== null)) return false;
+    if (orderOnTop()) return false;
     this.nextGoalCall = Date.now() + interval;
     return true;
   }

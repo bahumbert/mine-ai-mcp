@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import { describeStep, type Step } from "./actions.ts";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
-import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
+import { chooseSite, planHouse, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { gatherMaterials } from "./gathering.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -35,6 +35,15 @@ export interface SkillContext {
   readonly style?: string;
   /** Told about places worth remembering (a finished house), so later requests such as "go to the roof" can use them. */
   readonly remember?: (place: KnownPlace) => void;
+  /** The house left unfinished by an earlier build step, which the next build of the same kind resumes. */
+  readonly building?: { unfinished: UnfinishedHouse | null };
+}
+
+export interface UnfinishedHouse {
+  readonly kind: string;
+  readonly site: Site;
+  /** The first part (batch) not yet built. */
+  readonly part: number;
 }
 
 export type SkillResult =
@@ -149,12 +158,14 @@ async function give(context: SkillContext, player: string, item: string, count: 
 }
 
 /**
- * Gets items like a player (`gathering.ts`), then comes back to where it started: fetching is a basic function; when
- * and what to fetch is the model's choice (ADR-011).
+ * Gets `count` more of each item like a player (`gathering.ts`), then comes back to where it started: fetching is a
+ * basic function; when and what to fetch is the model's choice (ADR-011).
  */
 async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[]): Promise<SkillResult> {
-  const start = (await context.runtime.status()).position;
-  const gathered = await gatherMaterials(context, items, `getting ${describeMaterials(items)}`, start);
+  const { position: start, inventory } = await context.runtime.status();
+  const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  const targets = items.map(({ item, count }) => ({ item, count: carried(item) + count }));
+  const gathered = await gatherMaterials(context, targets, `getting ${describeMaterials(items)}`, start);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
@@ -162,28 +173,44 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
     if (back.status === "stopped") return back;
     if (back.status === "failed") return { status: "failed", detail: `got ${describeMaterials(items)} but could not come back: ${back.detail}` };
   }
-  return { status: "done", detail: `now carrying ${describeMaterials(items)} (${gathered.detail})` };
+  return { status: "done", detail: `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})` };
 }
 
 /**
  * Builds a house from the persona's style where the bot stands, facing the requester, with carried blocks only (the
- * model fetches them first with `get_items`); one `build_structure` call per batch.
+ * model fetches them first with `get_items`); one `build_structure` call per batch. A house left unfinished (a cell
+ * refused, the step set aside) is resumed at the same site and part by the next build of the same kind.
  */
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
-  const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
-  const plan = planHouse(styleOrDefault(context.style), step.size, chooseSite(snapshot.position, toward));
-  const kind = `${step.size} ${plan.style.id} house`;
+  const style = styleOrDefault(context.style);
+  const kind = `${step.size} ${style.id} house`;
   const what = `a ${kind}`;
-  const missing = shortfall(plan.bill, snapshot.inventory);
-  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
-  for (const [index, batch] of plan.batches.entries()) {
-    const blocks = batch.map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
+  const resumed = context.building?.unfinished?.kind === kind ? context.building.unfinished : null;
+  const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
+  const plan = planHouse(style, step.size, resumed?.site ?? chooseSite(snapshot.position, toward));
+  if (resumed === null) {
+    const missing = shortfall(plan.bill, snapshot.inventory);
+    if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
+  }
+  const leaveUnfinished = (part: number) => {
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part };
+  };
+  for (let index = resumed?.part ?? 0; index < plan.batches.length; index += 1) {
+    const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
     const part = `part ${index + 1}/${plan.batches.length}`;
     const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });
-    if (context.signal.aborted) return { status: "stopped" };
-    if (outcome.status !== "succeeded") return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
+    if (context.signal.aborted) {
+      leaveUnfinished(index);
+      return { status: "stopped" };
+    }
+    if (outcome.status !== "succeeded") {
+      leaveUnfinished(index);
+      const again = context.building === undefined ? "" : "; building it again resumes it there";
+      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${again}` };
+    }
   }
+  if (context.building !== undefined) context.building.unfinished = null;
   const { door, facing } = plan.site;
   const roof = plan.roofTop;
   context.remember?.({

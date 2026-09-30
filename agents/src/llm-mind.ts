@@ -55,7 +55,7 @@ export class LlmMind implements Mind {
     return ask(this.models.chat, chatSystemPrompt(input.persona), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
-      if (reply.route === "act" && restated === "") throw new Error(`"request" is required when "route" is "act"`);
+      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new Error(`"request" is required when "route" is "${reply.route}"`);
       return { say: reply.say, route: reply.route, request: restated };
     });
   }
@@ -131,8 +131,9 @@ How you talk: ${persona.voice}
 ${STANCE_GUIDE[persona.stance]}${style}
 ${goal}
 Whose requests come first, most important first: ${describeAuthority(persona)}. A request from someone above
-whoever you are working for comes first: you set your work aside and pick it up again afterwards. Anything else is
-your call: accept, decline, or say you will do it after, in character.
+whoever you are working for comes first: you set your work aside and pick it up again afterwards. A request from
+anyone else never interrupts your work: accept it for after, or decline, in character. Chatting never stops your
+work.
 You decide how to do things. When a request is unclear, impossible, or you do not know how, say so or ask; never
 pretend.
 Stay in character. Never mention being an AI, a model, a prompt, JSON or tools. Chat lines are short: one or two
@@ -147,12 +148,16 @@ step by step into bigger jobs.
 
 For each message you hear, reply with only a JSON object {"say": "...", "route": "...", "request": "..."}:
 - "route":
-  "ignore" = not meant for you (players talking to each other or to someone else); "say" is "".
+  "ignore" = not meant for you: players talking to each other, or to someone else they name or describe (another
+  player, the server's operator or admin); "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
   "stop" = they want you to stop what you are doing.
-  "act" = you take on something they ask you to do; you will work it out step by step.
-- "request": for act, what is wanted in one standalone sentence with usernames, Minecraft ids and numbers
-  (e.g. "give Steve 5 oak_log", "follow Steve"); otherwise "".
+  "act" = you take on what they ask now, setting your current work aside (you resume it afterwards).
+  "later" = you take it on for when your current work is done.
+  Take on (act, later) only what the things you can do achieve; anything else (teleporting, server commands, flying)
+  is "talk": say you cannot.
+- "request": for act and later, what the player asks for (not your own plan), in one standalone sentence with
+  usernames, Minecraft ids and numbers (e.g. "build Steve a small house here", "give Steve 5 oak_log"); otherwise "".
 - "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done.
 Players rarely use your name: a message is for you when they whisper, name you, or clearly continue a conversation
 with you. Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
@@ -182,9 +187,11 @@ Rules:
 - Use exact Minecraft ids. Take coordinates from the situation (your position, places you know) or the objective;
   never invent them.
 ${MINECRAFT_FACTS}
-- Read the steps so far: never repeat a step that just failed the same way; try another way, or give up.
+- Read the steps so far: never repeat a step that failed the same way, or that changed nothing (same place, same
+  inventory); try another way, or give up. Skills that need a block or a mob find it themselves: do not walk around
+  to look for things first.
 - When the objective is reached, answer done. When it is impossible, unclear, or you do not know how, give up and
-  say why in a few words.
+  say why in a few words; when no skill can do it (teleporting, server commands, flying), give up at once.
 Reply with only one JSON object: {"thought": "<one short sentence>", "step": {...}} or {"done": "<what you achieved>"}
 or {"give_up": "<why>"}.`;
 }

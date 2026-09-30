@@ -9,9 +9,10 @@ export interface ChatLine {
 
 /**
  * Where the chat tier sends a message (ADR-008): `ignore` not meant for this agent; `talk` reply only; `stop` drop
- * what it is doing; `act` it takes on a request as a new objective (ADR-011).
+ * what it is doing; `act` it takes on a request now, setting its current work aside; `later` it takes it on for when
+ * its current work is done (ADR-011).
  */
-export const ROUTES = ["ignore", "talk", "stop", "act"] as const;
+export const ROUTES = ["ignore", "talk", "stop", "act", "later"] as const;
 export type Route = (typeof ROUTES)[number];
 
 /**
@@ -41,7 +42,7 @@ export interface ChatDecision {
   /** In-character reply spoken right away; empty means stay silent. */
   readonly say: string;
   readonly route: Route;
-  /** For `act`: the request restated so it stands alone, e.g. "give Steve 5 oak logs". */
+  /** For `act` and `later`: what the player asked, restated so it stands alone, e.g. "give Steve 5 oak logs". */
   readonly request: string;
 }
 

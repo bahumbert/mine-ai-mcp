@@ -12,10 +12,12 @@ safety checks, the models decide.
    building style, its own `goal`, and its `authority` order (e.g. `["Server", "Tom", "*"]`: whose requests come
    first). It decides how to do things and may say a request is unclear, impossible, or that it does not know how.
 2. **Chat tier** (fast model, in character): hears every chat line from players it listens to, answers right away,
-   and routes it: `ignore` (not for me — no name needed), `talk`, `stop`, or `act` (it takes the request on),
-   restating the request in one standalone sentence. Whether to accept is its call, guided by the init prompt.
-3. **Objective stack**: what it takes on goes on top; whatever was running is set aside (its step stops) and resumes
-   afterwards. `stop` clears the stack and it rests `settings.restAfterStopSeconds` before its own goal again.
+   and routes it: `ignore` (not for me — no name needed), `talk`, `stop`, `act` (it takes the request on now) or
+   `later` (it takes it on for when its current work ends), restating what the player asked in one standalone
+   sentence. Whether to accept, and when, is its call, guided by the init prompt.
+3. **Objective stack**: what it takes on now goes on top; whatever was running is set aside (its step stops) and
+   resumes afterwards; `later` goes just below the top. `stop` clears the stack and it rests
+   `settings.restAfterStopSeconds` before its own goal again.
 4. **Work tier** (action model): one step at a time towards the top objective. Each call sees the situation, the
    objective and who asked, what was set aside, and the last steps with their outcomes; it answers a step, `done`
    or `give_up` (why). Code runs the step and feeds the result back; the chat tier narrates how an order ended.
@@ -25,10 +27,10 @@ safety checks, the models decide.
    runtime's survival policy at start and again whenever a snapshot shows it reset (death, dimension change).
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
-(intermediates automatic), get items (fetch like a player, then come back), eat, equip, sleep, hunt mobs for drops,
-build a house (small or medium, always in the persona's own style, from carried blocks). A persona may limit them
-(`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated from the
-catalog.
+(intermediates automatic), get items (fetch that many more like a player, then come back), eat, equip, sleep, hunt
+mobs for drops, build a house (small or medium, always in the persona's own style, from carried blocks). A persona
+may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
+from the catalog.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
 roof type) fed to a parametric generator (`house.ts`). The house skill line in the prompt lists what the persona's
@@ -36,7 +38,8 @@ style needs; the model fetches it with `get_items` (`src/gathering.ts`: chop the
 carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and doors; the runtime's
 `view_crafting_requirements` picks the recipes; each round restarts from the real inventory; crafting happens back
 where it started), then builds where it stands, its door facing whoever asked: one `build_structure` call per layer,
-a clearing pass that re-digs the room (navigation scaffolding), and the door last. The site is not surveyed.
+a clearing pass that re-digs the room (navigation scaffolding), and the door last. The site is not surveyed. A house
+left unfinished (a refused cell, the step set aside) is resumed at the same site and part by the next build step.
 A finished house becomes a **known place** (door and facing, a standing spot on the roof ridge): the agent keeps the
 last 8 and every tier sees them in its situation ("Places you know: ..."), so "go to the roof" is a `go_to` with real
 coordinates. When no skill fits a request (a pillar, a tower...), the prompts let the character say it does not know

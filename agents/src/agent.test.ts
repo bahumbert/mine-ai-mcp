@@ -110,6 +110,24 @@ test("an order sets the character's own goal aside; it resumes afterwards, knowi
   assert.match(resumed, /1\. collect 16 oak_log -> interrupted/u);
 });
 
+test("a request taken on for later waits until the current objective ends", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  runtime.durations.collect_block = 300;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  planner.reply({ objective: "collect 16 oak_log for my base" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+
+  chat.reply({ say: "Right after these logs!", route: "later", request: "come to Steve" }, { say: "Here I am." });
+  action.reply({ done: "enough wood" }, { step: { skill: "go_to_player", player: "Steve" } }, { done: "I am next to Steve" });
+  await agent.handle(say("Steve", "come here when you can"));
+  assert.deepEqual(runtime.cancelled, [], "the collection goes on");
+  assert.match(agent.activity, /"collect 16 oak_log for my base" \(your own goal\); set aside: "come to Steve"/u);
+  await until(() => runtime.said.length === 2);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Steve\): "come to Steve"/u);
+});
+
 test("stop ends everything, its own goal included, and it rests before going back to that goal", async (t) => {
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 100_000;

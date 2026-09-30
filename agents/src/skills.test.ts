@@ -124,6 +124,32 @@ test("a batch that does not finish stops the build and says where", async () => 
   assert.equal(builds(runtime).length, 1);
 });
 
+test("building again resumes an unfinished house at the same site and part, without asking for the whole bill", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null };
+  runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong" };
+  const context = contextFor(runtime, { style: "medieval", building });
+  const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.match(first.status === "failed" ? first.detail : "", /stopped at part 1\/\d+: .*; building it again resumes it there$/u);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 20.5, y: 64, z: 0.5 }, inventory: [{ name: "oak_door", count: 1 }] };
+  const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.equal(second.status, "done");
+  const calls = builds(runtime);
+  assert.deepEqual(calls[1]!.blocks, calls[0]!.blocks, "the refused part is built again where it was");
+  assert.equal(building.unfinished, null);
+});
+
+test("get_items fetches that many more of each item", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 5 }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 3 }] }, contextFor(runtime));
+  assert.match(result.status === "done" ? result.detail : "", /^got 3 oak_log, now carrying 8 oak_log/u);
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.count]), [["collect_block", 3]]);
+});
+
 test("a build the runtime stopped reports the audit it returned: what was left and why", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };

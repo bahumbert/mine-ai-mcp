@@ -95,7 +95,8 @@ test("the init prompt carries the style, the own goal, whose requests come first
   assert.match(prompt, /Server \(the world's operator\), then Tom, then any other player/u);
   assert.match(prompt, /When a request is unclear, impossible, or you do not know how, say so or ask/u);
   assert.match(personaPrompt(testPersona()), /You have no goal of your own/u);
-  assert.match(chatSystemPrompt(testPersona({ stance: "rival" })), /"act" = you take on something/u);
+  assert.match(chatSystemPrompt(testPersona({ stance: "rival" })), /"act" = you take on what they ask now/u);
+  assert.match(chatSystemPrompt(testPersona()), /"later" = you take it on for when your current work is done/u);
 });
 
 test("the goal tier picks the next own objective, knowing how the last ones went", async () => {

@@ -57,10 +57,10 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3}  keep following that player; it never ends by itself, a new objective or "stop" ends it`;
     case "go_to_player": return `{"skill":"go_to_player","player":"<username>"}  walk up to that player once`;
     case "go_to": return `{"skill":"go_to","x":0,"y":64,"z":0}  walk to block coordinates`;
-    case "collect_block": return `{"skill":"collect_block","block":"<block id>","count":<1-${MAX_COLLECT}>}  mine the nearest such blocks; name the block, not the drop (stone drops cobblestone; oak_log, dirt, coal_ore...)`;
+    case "collect_block": return `{"skill":"collect_block","block":"<block id>","count":<1-${MAX_COLLECT}>}  find, walk to and mine the nearest such blocks by itself (no need to look for them first); name the block, not the drop (stone drops cobblestone; oak_log, dirt, coal_ore...)`;
     case "give_item": return `{"skill":"give_item","player":"<username>","item":"<item id>","count":<1-64>}  walk to the player and hand over items you carry`;
     case "craft_item": return `{"skill":"craft_item","item":"<item id>","count":<1-64>}  craft from your inventory; intermediate items (planks, sticks) are crafted automatically and a carried crafting_table is placed when needed; it never gathers missing materials`;
-    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed) and craft with a carried crafting table, then come back here; takes minutes`;
+    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed) and craft with a carried crafting table, then come back here; takes minutes`;
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
