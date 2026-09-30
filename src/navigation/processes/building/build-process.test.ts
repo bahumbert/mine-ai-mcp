@@ -234,6 +234,38 @@ test("a hidden wrong block is approached from a visible stance instead of perman
 });
 
 /**
+ * The live house of 30 September: the bot stood off the centre of its cell, the
+ * dig was visible from that centre but not from where it stood, so the route
+ * arrived without moving and the in-reach work saw nothing, twice, and stopped.
+ */
+test("the bot's own cell is judged from where it stands, not from the cell's centre", async () => {
+  const { bot, put, physics } = structureWorld({ feet: new Vec3(3, 64, 0) });
+  put(new Vec3(2, 64, 0), "oak_leaves");
+  bot.entity.position = new Vec3(3.1, 64, 0.5);
+  const fromCentreOnly = (_target: unknown, standing: { x: number }) => standing.x >= 3.4 || standing.x < 1;
+  const result = await build(bot, {
+    ...physics,
+    canSeeDig: fromCentreOnly,
+    route: async (request) => {
+      const goal = request.goal.resolve({ ...observation(3, 64, 0), position: { x: 3.1, y: 64, z: 0.5 } });
+      assert.equal(goal.kind, "active");
+      if (goal.kind === "active") {
+        assert.equal(
+          goal.isSatisfied({ feet: { x: 3, y: 64, z: 0 }, remainingScaffolds: 0, overlayId: "" }, goalTestWorld),
+          false,
+          "the start cell cannot see the dig from where the bot stands",
+        );
+      }
+      return physics.route(request);
+    },
+    cells: cells([[2, 64, 0]]),
+    removeWrongBlocks: true,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(result.dug, 1);
+});
+
+/**
  * The live portal of 3 September had cobblestone scaffolded up through its
  * interior, which a portal cannot be lit through. A cell asked to be air is
  * dug whether or not wrong blocks may be removed elsewhere, and it is never

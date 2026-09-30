@@ -364,16 +364,22 @@ class BuildTargeting {
       resolve: (observation) => {
         const spatial = approach.resolve(observation);
         if (spatial.kind === "invalid" || this.stateOf(target).kind !== "diggable") return spatial;
+        // The bot's own cell is judged from where it really stands, as the
+        // in-reach work will aim from there; the centre of that cell is not
+        // where an off-centre bot is. The live house of 30 September idled out
+        // on that disagreement: the route arrived at once, nothing was seen.
+        const here = observation.position;
         return {
           ...spatial,
           revision: `visible-dig:${spatial.revision}`,
           isSatisfied: (node, world) =>
             spatial.isSatisfied(node, world) &&
-            this.canWorkFrom(target, {
-              x: node.feet.x + 0.5,
-              y: node.feet.y,
-              z: node.feet.z + 0.5,
-            }),
+            this.canWorkFrom(
+              target,
+              node.feet.x === Math.floor(here.x) && node.feet.y === Math.floor(here.y) && node.feet.z === Math.floor(here.z)
+                ? here
+                : { x: node.feet.x + 0.5, y: node.feet.y, z: node.feet.z + 0.5 },
+            ),
         };
       },
     };
