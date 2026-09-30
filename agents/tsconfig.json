@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rootDir": "..",
+    "baseUrl": ".."
+  },
+  "include": ["**/*.ts"]
+}
