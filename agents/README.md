@@ -10,10 +10,13 @@ safety checks, the models decide.
 
 1. **Init prompt** (`personaPrompt`, from the persona file): identity, traits, voice, stance as a disposition, its
    building style, its own `goal`, and its `authority` order (e.g. `["Server", "Tom", "*"]`: whose requests come
-   first). It decides how to do things and may say a request is unclear, impossible, or that it does not know how.
+   first). Its own goal always gives way to any player's request; the authority order only ranks players against
+   whoever it is already working for. It decides how to do things and may say a request is unclear, impossible, or
+   that it does not know how.
 2. **Chat tier** (fast model, in character): hears every chat line from players it listens to, answers right away,
-   and routes it: `ignore` (not for me — no name needed), `talk`, `stop`, `act` (it takes the request on now) or
-   `later` (it takes it on for when its current work ends), restating what the player asked in one standalone
+   and routes it: `ignore` (clearly for someone else — a message naming nobody is for it), `talk`, `stop`, `act`
+   (it takes the request on now) or `later` (only when the player says it can wait, or while it works for someone
+   ranked above them), restating what the player asked in one standalone
    sentence. Whether to accept, and when, is its call, guided by the init prompt.
 3. **Objective stack**: what it takes on now goes on top; whatever was running is set aside (its step stops) and
    resumes afterwards; `later` goes just below the top. `stop` clears the stack and it rests
