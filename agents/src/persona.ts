@@ -46,6 +46,8 @@ export const personaSchema = z.strictObject({
     goalCallsPerMinute: z.number().int().min(1).max(120).default(6),
     /** Steps one objective may take before the character gives it up. */
     maxStepsPerObjective: z.number().int().min(1).max(500).default(40),
+    /** The same step ending the same way this many times in a row means it is going nowhere: it gives the objective up. */
+    maxSameStepInARow: z.number().int().min(2).max(50).default(3),
     /** After a "stop", how long it rests before going back to its own goal. */
     restAfterStopSeconds: z.number().int().min(0).max(3_600).default(60),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */

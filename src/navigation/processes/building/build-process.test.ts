@@ -199,6 +199,25 @@ test("a wrong block is reported by name when left, and dug first when asked", as
   assert.equal(replaced.placed, 1);
 });
 
+/**
+ * The live house of 30 September: its door was hung with whatever yaw the bot
+ * had, sideways in the wall, and its open panel lay across the doorway.
+ */
+test("an oriented block is placed looking its way, and the same block facing elsewhere is wrong", async () => {
+  const { bot, put, physics, looks } = structureWorld({ carried: { oak_door: 2 } });
+  const door: BuildCell = { position: { x: 2, y: 64, z: 0 }, blockName: "oak_door", facing: "south" };
+  const placed = await build(bot, { ...physics, cells: [door], removeWrongBlocks: false });
+  assert.equal(placed.status, "complete");
+  assert.deepEqual(looks, ["south"]);
+
+  put(new Vec3(2, 64, 0), "oak_door", { facing: "east" });
+  const left = await build(bot, { ...physics, cells: [door], removeWrongBlocks: false });
+  assert.deepEqual(left.cells[0]!.state, { kind: "blocked", holds: "oak_door facing east" });
+  const rehung = await build(bot, { ...physics, cells: [door], removeWrongBlocks: true });
+  assert.equal(rehung.status, "complete");
+  assert.deepEqual(looks, ["south", "south"]);
+});
+
 test("a hidden wrong block is approached from a visible stance instead of permanently refused", async () => {
   const { bot, put, physics, routes } = structureWorld({ feet: new Vec3(3, 64, 0) });
   put(new Vec3(2, 64, 0), "oak_leaves");

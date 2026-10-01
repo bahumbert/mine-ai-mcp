@@ -23,14 +23,21 @@ safety checks, the models decide.
    `settings.restAfterStopSeconds` before its own goal again.
 4. **Work tier** (action model): one step at a time towards the top objective. Each call sees the situation, the
    objective and who asked, what was set aside, and the last steps with their outcomes; it answers a step, `done`
-   or `give_up` (why). Code runs the step and feeds the result back; the chat tier narrates how an order ended.
+   or `give_up` (why). Code runs the step and feeds the result back; the chat tier narrates how an order ended. The
+   same step ending the same way `settings.maxSameStepInARow` times in a row (default 3) ends the objective as
+   failed, so a model that keeps retrying never spins until the step cap.
 5. **Goal tier** (planner model): with nothing to do, picks the next concrete objective towards its own goal, at most
    `settings.goalCallsPerMinute` model calls a minute for its own work (orders and chat are never held back).
 6. **Settings the runtime keeps**: `settings.digStraightDown` (default false: routes descend by staircase), set on the
    runtime's survival policy at start and again whenever a snapshot shows it reset (death, dimension change).
+7. **Memory** (`src/memory.ts`): known places, how its own last objectives ended and the unfinished house are saved
+   as runtime notes (`note_save`, context `brain memory: <kind> {json}`) in the world's bot data, and read back with
+   one `query_bot_data` when the brain starts, so a restart forgets nothing of these. The monitor lists them with
+   the other notes. Orders in progress are not resumed after a restart.
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
-(intermediates automatic), get items (fetch that many more like a player, then come back), eat, equip, sleep, hunt
+(intermediates automatic), get items (fetch that many more like a player, keeping everything it already carries, then
+come back), eat, equip, sleep, hunt
 mobs for drops, build a house (small or medium, always in the persona's own style, from carried blocks). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.

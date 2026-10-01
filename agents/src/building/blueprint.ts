@@ -50,6 +50,8 @@ export interface WorldCell {
   /** Block id, or `air` for a cell to dig clear. */
   readonly block: string;
   readonly role: Role;
+  /** For the door: the facing Minecraft must give it (`build_structure` places it looking that way). */
+  readonly facing?: Facing;
 }
 
 export interface Position {
@@ -74,9 +76,14 @@ export const FACING_VECTOR: Readonly<Record<Facing, readonly [number, number]>> 
   west: [-1, 0],
 };
 
+/** The facing straight back. */
+const OPPOSITE: Readonly<Record<Facing, Facing>> = { north: "south", south: "north", east: "west", west: "east" };
+
 /**
  * Turns a blueprint into world cells: the door cell lands on `door` and the front faces `facing`; each role takes
- * its block from the palette. The upper door half is never listed: the door item places it.
+ * its block from the palette. The upper door half is never listed: the door item places it. The door itself faces
+ * into the house, as a player hanging it from the doorstep would place it, so it swings along the doorway: hung
+ * sideways (the bot's own yaw), its open panel closed the way out and navigation walked into it.
  */
 export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Position, facing: Facing): WorldCell[] {
   const anchor = blueprint.cells.find((cell) => cell.role === "door");
@@ -90,6 +97,7 @@ export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Pos
       z: door.z + dz,
       block: cell.role === "air" ? "air" : palette[cell.role],
       role: cell.role,
+      ...(cell.role === "door" && { facing: OPPOSITE[facing] }),
     };
   });
 }
@@ -145,8 +153,8 @@ export function batchCells(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): 
 export function buildBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): WorldCell[][] {
   const doors = cells.filter((cell) => cell.role === "door");
   const doorway = doors.flatMap((door): WorldCell[] => [
-    { ...door, block: "air", role: "air" },
-    { ...door, y: door.y + 1, block: "air", role: "air" },
+    { x: door.x, y: door.y, z: door.z, block: "air", role: "air" },
+    { x: door.x, y: door.y + 1, z: door.z, block: "air", role: "air" },
   ]);
   const body = batchCells([...cells.filter((cell) => cell.role !== "door"), ...doorway], max);
   const air = cells.filter((cell) => cell.role === "air");

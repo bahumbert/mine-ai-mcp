@@ -54,6 +54,21 @@ test("the portal preset uses ten obsidian, four corner supports and six interior
       }),
     /both stone and dirt/,
   );
+  assert.deepEqual(
+    parseBuildStructureRequest({ blocks: [{ x: 1, y: 64, z: 1, block_name: "oak_door", facing: "south" }] }).cells,
+    [{ x: 1, y: 64, z: 1, blockName: "oak_door", facing: "south" }],
+  );
+  assert.throws(
+    () =>
+      parseBuildStructureRequest({
+        blocks: [
+          { x: 1, y: 64, z: 1, block_name: "oak_door", facing: "south" },
+          { x: 1, y: 64, z: 1, block_name: "oak_door", facing: "east" },
+        ],
+      }),
+    /both oak_door facing south and oak_door facing east/,
+  );
+  assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 1, y: 64, z: 1, block_name: "oak_door", facing: "up" }] }));
   assert.throws(() => parseBuildStructureRequest({}), /needs blocks/);
   assert.throws(() => parseBuildStructureRequest({
     portal_frame: { x: 5, y: 64, z: 0, corner_block: "obsidian" },

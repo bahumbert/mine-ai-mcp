@@ -66,6 +66,8 @@ export interface RouteContext {
 export interface RouteExecutionRequest {
   readonly context: RouteContext;
   readonly passages: OpenedPassages;
+  /** The route's policy lets it open doors and gates, including one the body stands in when a step starts. */
+  readonly allowDoors: boolean;
   readonly plan: RoutePlan;
   readonly stepStarted: (step: PlannedStep) => void;
   readonly phase: (step: PlannedStep, phase: MovementPhase) => void;
@@ -217,6 +219,19 @@ export class RouteExecutor {
       }
     }
     const token = { runId: this.request.context.runId, planId: this.request.plan.id, stepId: step.id, attempt: 1 };
+    const doorway = this.request.allowDoors ? this.request.passages.occupiedClosed(step.from) : null;
+    if (doorway) {
+      this.request.context.bot.clearOwnedControls();
+      const opening = this.request.passages.openingStep(doorway, step);
+      const opened = await this.#executeMutation(
+        stepIndex,
+        0,
+        opening,
+        { ...token, stepId: opening.id },
+        opening.operations[0],
+      );
+      if (opened) return opened;
+    }
     let mutationNeedsSettlement = false;
     let mutationControlsReleased = false;
     for (let operationIndex = 0; operationIndex < step.operations.length; operationIndex += 1) {

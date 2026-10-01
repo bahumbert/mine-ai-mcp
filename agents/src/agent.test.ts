@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { Agent } from "./agent.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { Persona } from "./persona.ts";
+import { memoryNote, recall } from "./memory.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 
@@ -70,6 +71,20 @@ test("a failed step is shown to the model, which may give up and say why in char
   await until(() => runtime.said.length === 2);
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[NO_LOADED_MATCHING_TARGETS\]/u);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /You stopped working on "collect 5 birch_log": there is no birch_log nearby/u);
+});
+
+test("the same step failing the same way several times in a row ends the objective instead of looping", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "I can't find any birch, sorry!" });
+  const collect = { step: { skill: "collect_block", block: "birch_log", count: 5 } };
+  action.reply(collect, collect, collect, collect);
+  await agent.handle(say("Steve", "get me some birch"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 3);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times in a row: \[NO_LOADED_MATCHING_TARGETS\]/u);
+  assert.equal(action.requests.length, 3);
 });
 
 test("chatting while working is answered at once and the work goes on", async (t) => {
@@ -161,6 +176,29 @@ test("a house the agent built becomes a known place, with its roof, for what com
   assert.ok((chat.requests[2]?.[1]?.content ?? "").includes(places), "the chat tier knows it");
   assert.ok((action.requests[2]?.[1]?.content ?? "").includes(places), "the work tier knows it");
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
+  assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");
+});
+
+test("memories an earlier run saved as notes come back: places, its own last objectives, an unfinished house", async (t) => {
+  const runtime = new FakeRuntime();
+  const house = { kind: "small medieval house", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" as const }, part: 2 };
+  runtime.notes = [
+    memoryNote({ kind: "place", place: { name: "the old hut", detail: "door 1 64 1 facing south" } }),
+    memoryNote({ kind: "place", place: { name: "the small medieval house you built for Steve", detail: "door -2 64 0 facing east" } }),
+    memoryNote({ kind: "own_objective", outcome: "collect 16 oak_log: done (collected 16 oak_log)" }),
+    memoryNote({ kind: "unfinished_house", house }),
+    memoryNote({ kind: "unfinished_house", house: null }),
+    memoryNote({ kind: "unfinished_house", house }),
+  ];
+  const { planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const prompt = planner.requests[0]?.[1]?.content ?? "";
+  assert.match(prompt, /the old hut \(door 1 64 1 facing south\); the small medieval house you built for Steve/u);
+  assert.match(prompt, /collect 16 oak_log: done/u);
+  assert.equal(runtime.queries.length, 1);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5 }).unfinished, house);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5 }).places.map((place) => place.name), ["the small medieval house you built for Steve"]);
 });
 
 test("never digging straight down is set at start, and again after the runtime reset its policy", async (t) => {

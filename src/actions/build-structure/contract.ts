@@ -2,6 +2,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
+import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
 
 export const BUILD_STRUCTURE = "build_structure" as const;
 export const BUILD_STRUCTURE_DESCRIPTION =
@@ -19,6 +20,12 @@ export const structureCellSchema = z.strictObject({
   block_name: registryNameSchema.describe(
     "Block registry name carried as an item, such as cobblestone; air asks for the cell to be dug clear.",
   ),
+  facing: z
+    .enum(HORIZONTAL_FACINGS)
+    .optional()
+    .describe(
+      "For a block Minecraft orients by the player's facing (a door, stairs): the facing it must have. The bot faces that way while placing it, and the same block facing elsewhere counts as wrong.",
+    ),
 });
 
 export const portalFrameRequestSchema = z.strictObject({
@@ -52,6 +59,7 @@ export interface StructureCell {
   readonly y: number;
   readonly z: number;
   readonly blockName: string;
+  readonly facing?: HorizontalFacing;
 }
 
 export interface BuildStructureRequest {
@@ -87,7 +95,13 @@ export function portalFrameCells(frame: z.output<typeof portalFrameRequestSchema
 export function parseBuildStructureRequest(input: unknown): BuildStructureRequest {
   const value = buildStructureInputSchema.parse(input ?? {});
   const cells: StructureCell[] = [
-    ...(value.blocks ?? []).map((cell) => ({ x: cell.x, y: cell.y, z: cell.z, blockName: cell.block_name })),
+    ...(value.blocks ?? []).map((cell) => ({
+      x: cell.x,
+      y: cell.y,
+      z: cell.z,
+      blockName: cell.block_name,
+      ...(cell.facing !== undefined && { facing: cell.facing }),
+    })),
     ...(value.portal_frame ? portalFrameCells(value.portal_frame) : []),
   ];
   if (cells.length === 0) throw new Error("A structure needs blocks or a portal_frame.");
@@ -98,8 +112,9 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
   for (const cell of cells) {
     const key = `${cell.x},${cell.y},${cell.z}`;
     const existing = byCell.get(key);
-    if (existing && existing.blockName !== cell.blockName) {
-      throw new Error(`Cell ${key} is asked to be both ${existing.blockName} and ${cell.blockName}.`);
+    if (existing && (existing.blockName !== cell.blockName || existing.facing !== cell.facing)) {
+      const describe = (asked: StructureCell) => `${asked.blockName}${asked.facing ? ` facing ${asked.facing}` : ""}`;
+      throw new Error(`Cell ${key} is asked to be both ${describe(existing)} and ${describe(cell)}.`);
     }
     byCell.set(key, cell);
   }

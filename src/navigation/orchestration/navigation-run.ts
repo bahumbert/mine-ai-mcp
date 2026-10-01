@@ -823,6 +823,7 @@ export class NavigationRun {
     const executor = new RouteExecutor({
       context: this.context,
       passages: this.#passages,
+      allowDoors: this.#policy.allowDoors,
       plan,
       stepStarted: (step) => this.#onStepStarted(plan, step),
       phase: (step, phase) => this.#onStepPhase(goal, plan, step, phase),

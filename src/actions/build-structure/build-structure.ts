@@ -73,7 +73,11 @@ function productionPhysics(
 }
 
 function toBuildCell(cell: StructureCell): BuildCell {
-  return { position: { x: cell.x, y: cell.y, z: cell.z }, blockName: cell.blockName };
+  return {
+    position: { x: cell.x, y: cell.y, z: cell.z },
+    blockName: cell.blockName,
+    ...(cell.facing !== undefined && { facing: cell.facing }),
+  };
 }
 
 // ── Result settlement ─────────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { describeStep } from "./actions.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
+import { memoryNote, recall, recallQuery, type Memory } from "./memory.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage } from "./runtime-client.ts";
 import { runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
@@ -56,6 +57,8 @@ export class Agent {
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
+  /** The unfinished house as last saved to memory, to save it again only when it changed. */
+  private savedUnfinished = "null";
   private readonly stack: Work[] = [];
   private readonly lately: string[] = [];
   private restUntil = 0;
@@ -80,6 +83,7 @@ export class Agent {
     signal.addEventListener("abort", () => this.wake?.(), { once: true });
     // The runtime keeps chat from before this brain started; answering it now would be confusing.
     await this.options.runtime.readMessages();
+    await this.recallMemory();
     await this.keepSettings(await this.options.runtime.status());
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
     const working = this.workLoop(signal);
@@ -229,6 +233,17 @@ export class Agent {
     work.steps.push(record);
     if (work.steps.length > STEP_MEMORY) work.steps.splice(0, work.steps.length - STEP_MEMORY);
     log(`  -> ${record.outcome}: ${record.detail}`);
+    const unfinished = JSON.stringify(this.building.unfinished);
+    if (unfinished !== this.savedUnfinished) {
+      this.savedUnfinished = unfinished;
+      this.memorize({ kind: "unfinished_house", house: this.building.unfinished });
+    }
+    // A model that keeps choosing a step that ends the same way is stuck; the loop must not spin until the step cap.
+    const same = persona.settings.maxSameStepInARow;
+    const last = work.steps.slice(-same);
+    if (record.outcome !== "interrupted" && last.length === same && last.every((step) => step.step === record.step && step.outcome === record.outcome && step.detail === record.detail)) {
+      this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
+    }
   }
 
   /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */
@@ -238,8 +253,10 @@ export class Agent {
     const { objective } = work;
     this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
     if (objective.requester === null) {
-      this.lately.push(`${objective.text}: ${outcome} (${detail})`);
+      const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
+      this.lately.push(outcomeLine);
       if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
+      this.memorize({ kind: "own_objective", outcome: outcomeLine });
       return;
     }
     void this.narrate(objective.text, outcome, detail);
@@ -290,6 +307,33 @@ export class Agent {
     this.options.log(`known place: ${place.name} (${place.detail})`);
     this.places.push(place);
     if (this.places.length > KNOWN_PLACES) this.places.splice(0, this.places.length - KNOWN_PLACES);
+    this.memorize({ kind: "place", place });
+  }
+
+  /** What it knew before this brain started: the memories saved as notes in this world's bot data. */
+  private async recallMemory(): Promise<void> {
+    const limits = { places: KNOWN_PLACES, lately: OWN_MEMORY };
+    try {
+      const rows = await this.options.runtime.queryBotData(recallQuery(this.options.persona.username, limits));
+      const recalled = recall(rows.map((row) => String(row[1] ?? "")), limits);
+      this.places.push(...recalled.places);
+      this.lately.push(...recalled.lately);
+      this.building.unfinished = recalled.unfinished;
+      this.savedUnfinished = JSON.stringify(recalled.unfinished);
+      const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
+      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.lately.length} own objective(s)${house}`);
+    } catch (error) {
+      this.options.log(`could not recall its memory: ${String(error)}`);
+    }
+  }
+
+  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). */
+  private memorize(memory: Memory): void {
+    this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
+      .then((outcome) => {
+        if (outcome.status !== "succeeded") this.options.log(`could not save a memory (${outcome.status}): ${outcome.error ?? ""}`);
+      })
+      .catch((error: unknown) => this.options.log(`could not save a memory: ${String(error)}`));
   }
 
   /** Has the chat tier tell the players how an order ended. */

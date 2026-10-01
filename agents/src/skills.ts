@@ -165,7 +165,9 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
   const { position: start, inventory } = await context.runtime.status();
   const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const targets = items.map(({ item, count }) => ({ item, count: carried(item) + count }));
-  const gathered = await gatherMaterials(context, targets, `getting ${describeMaterials(items)}`, start);
+  // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
+  const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
+  const gathered = await gatherMaterials(context, targets, `getting ${describeMaterials(items)}`, start, keep);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
@@ -197,7 +199,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part };
   };
   for (let index = resumed?.part ?? 0; index < plan.batches.length; index += 1) {
-    const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block }) => ({ x, y, z, block_name: block }));
+    const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block, facing }) => ({ x, y, z, block_name: block, ...(facing !== undefined && { facing }) }));
     const part = `part ${index + 1}/${plan.batches.length}`;
     const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });
     if (context.signal.aborted) {

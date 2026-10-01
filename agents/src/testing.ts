@@ -93,6 +93,17 @@ export class FakeRuntime implements BotRuntime {
     return messages;
   }
 
+  /** Notes saved with `note_save`, oldest first; a test may seed them to stand for an earlier run. */
+  notes: { readonly note: string; readonly context: string }[] = [];
+  /** Every SQL statement asked of `queryBotData`. */
+  readonly queries: string[] = [];
+
+  /** Answers any query with every saved note as `[note_id, context]`, newest first (the SQL is not run). */
+  async queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]> {
+    this.queries.push(sql);
+    return this.notes.map((note, index) => [index + 1, note.context]).reverse();
+  }
+
   async submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>): Promise<ForegroundState> {
     if (this.refuseNext !== null) {
       const refusal = this.refuseNext;
@@ -100,6 +111,7 @@ export class FakeRuntime implements BotRuntime {
       return refusal;
     }
     this.submitted.push({ tool, input });
+    if (tool === "note_save") this.notes.push({ note: String(input.note), context: String(input.context) });
     const actionId = `action-${this.nextId++}`;
     this.actions.set(actionId, { tool, input, remaining: this.durations[tool] ?? 0, cancelled: false });
     return this.step(actionId);
@@ -194,7 +206,7 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, restAfterStopSeconds: 0, digStraightDown: false },
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, restAfterStopSeconds: 0, digStraightDown: false },
     models: {},
     ...overrides,
   };

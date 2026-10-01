@@ -51,6 +51,7 @@ import {
   type NavigationResult,
 } from "../../index.js";
 import type { Position3 } from "../../world/world.js";
+import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
 
 /**
  * How far a cell may be from the feet to be worked without moving, measured
@@ -95,6 +96,26 @@ const NEIGHBOURS = [
 export interface BuildCell {
   readonly position: BlockPosition;
   readonly blockName: string;
+  /**
+   * The facing an oriented block must have. Minecraft gives a door or stairs the
+   * placing player's facing, so the bot looks that way while placing it; the
+   * same block facing elsewhere is a wrong block. A door hung sideways in a
+   * wall swings its open panel across the doorway, and navigation, which
+   * passes an open door from any side, walked into it for good.
+   */
+  readonly facing?: HorizontalFacing;
+}
+
+/** Whether `block` is what `cell` asks for: its block, facing the asked way when a facing is asked. */
+export function holdsCell(block: WorldBlock, cell: BuildCell): boolean {
+  if (block.name !== cell.blockName) return false;
+  return cell.facing === undefined || (block.getProperties() as Readonly<Record<string, unknown>>).facing === cell.facing;
+}
+
+/** A block for the audit: its name, and its facing when the cell asks for one. */
+function described(block: WorldBlock, cell: BuildCell): string {
+  const facing = (block.getProperties() as Readonly<Record<string, unknown>>).facing;
+  return cell.facing !== undefined && typeof facing === "string" ? `${block.name} facing ${facing}` : block.name;
 }
 
 /** What one cell of the structure is, as of the last look at the world. */
@@ -276,7 +297,7 @@ class BuildTargeting {
     for (const cell of this.request.cells) {
       if (cell.blockName === "air") continue;
       const block = bot.blockAt(asVec3(cell.position));
-      if (block?.name === cell.blockName) this.protectedCells.add(keyOf(cell.position));
+      if (block !== null && holdsCell(block, cell)) this.protectedCells.add(keyOf(cell.position));
     }
     for (const cell of this.request.cells) {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
@@ -289,15 +310,15 @@ class BuildTargeting {
     const position = asVec3(cell.position);
     const block = this.bot.blockAt(position);
     if (block === null) return { kind: "unloaded" };
-    if (block.name === cell.blockName || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
+    if (holdsCell(block, cell) || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
     const refused = this.#refused.get(keyOf(cell.position));
     if (refused !== undefined) return { kind: "refused", reason: refused };
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
     if (!isReplaceableForPlacement(block)) {
       return this.request.removeWrongBlocks
-        ? { kind: "diggable", holds: block.name }
-        : { kind: "blocked", holds: block.name };
+        ? { kind: "diggable", holds: described(block, cell) }
+        : { kind: "blocked", holds: described(block, cell) };
     }
     if (position.equals(feet) || position.equals(head)) return { kind: "occupied" };
     const placement = findPlacementSupport(this.bot, position);
@@ -454,7 +475,8 @@ async function workInReach(
         support: state.support,
         face: state.face,
         expectedCells: [target.position],
-        matches: (block) => block.name === target.blockName,
+        matches: (block) => holdsCell(block, target),
+        ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
         signal,
       });
       if (placed.kind === "placed") targeting.placed += 1;

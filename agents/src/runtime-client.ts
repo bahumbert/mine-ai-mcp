@@ -39,7 +39,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
-  | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure";
+  | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -86,6 +86,8 @@ export interface BotRuntime {
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
+  /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
+  queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]>;
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
   wait(actionId: string, timeoutMs: number): Promise<ForegroundState>;
   cancel(actionId: string, reason: string): Promise<void>;
@@ -125,6 +127,14 @@ const craftingRequirementsSchema = z.object({
 
 const sayResultSchema = z.object({
   result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
+});
+
+const queryResultSchema = z.object({
+  result: z.object({
+    status: z.string(),
+    error: z.string().optional(),
+    query: z.object({ rows: z.array(z.array(z.union([z.string(), z.number(), z.null()]))) }).optional(),
+  }),
 });
 
 const eventsSchema = z.object({
@@ -214,6 +224,12 @@ export class McpBotRuntime implements BotRuntime {
   async say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
     const { result } = sayResultSchema.parse(await this.call("send_message", { message }, "Speak in character."));
     return { status: result.status, error: result.error ?? null };
+  }
+
+  async queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]> {
+    const { result } = queryResultSchema.parse(await this.call("query_bot_data", { sql }, "Remember what I knew."));
+    if (result.query === undefined) throw new Error(`[QUERY_FAILED] ${result.error ?? result.status}`);
+    return result.query.rows;
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {

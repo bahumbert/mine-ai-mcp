@@ -36,9 +36,10 @@ const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 const walkStep = (id: string, fromX: number, toX: number) =>
   movementStep("walk", { x: fromX, y: 63, z: 0 }, { x: toX, y: 63, z: 0 }, { id, expectedTicks: 4 });
 
-function routeExecutor(request: Omit<RouteExecutionRequest, "passages" | "effectConfirmed">): RouteExecutor {
+function routeExecutor(request: Omit<RouteExecutionRequest, "passages" | "effectConfirmed" | "allowDoors">): RouteExecutor {
   return new RouteExecutor({
     ...request,
+    allowDoors: true,
     passages: new OpenedPassages(request.context.world, request.context.bot.observe().dimension),
     effectConfirmed: () => undefined,
   });
@@ -244,6 +245,7 @@ test("a replanned step enters its owned open doorway before restoration", async 
       signal: new AbortController().signal,
     },
     passages,
+    allowDoors: true,
     plan: routePlan([step], { id: "replanned" }),
     stepStarted: () => undefined,
     phase: () => undefined,
@@ -252,6 +254,75 @@ test("a replanned step enters its owned open doorway before restoration", async 
   }).execute();
   assert.equal(result.kind, "exhausted");
   assert.equal(bot.observe().position.x, 1.5);
+});
+
+/** Walks one step out of a closed two-block door the body stands in; the fake bot toggles the door when activated. */
+async function leaveClosedDoorway(allowDoors: boolean) {
+  const world = flatWorld();
+  const ledger = new ExpectedMutationLedger();
+  const lower = { x: 0, y: 63, z: 0 };
+  const upper = { x: 0, y: 64, z: 0 };
+  const setDoor = (open: boolean) => {
+    for (const position of [lower, upper]) {
+      const before = world.blockAt(position.x, position.y, position.z);
+      world.load(position, {
+        stateId: open ? 3 : 2,
+        traits: { activationGroup: "oak_door", openable: true, open, upperHalf: position === upper },
+      });
+      ledger.classify(
+        { position, before, after: world.blockAt(position.x, position.y, position.z), worldRevision: world.revision },
+        new Set(),
+        Date.now(),
+      );
+    }
+  };
+  setDoor(false);
+  const doorOpen = () => {
+    const block = world.blockAt(lower.x, lower.y, lower.z);
+    return block.kind === "loaded" && block.traits.open;
+  };
+  const order: string[] = [];
+  const bot = new FakeNavigationBot();
+  bot.startEffect = (operation) => {
+    const open = !doorOpen();
+    order.push(`${operation.kind} ${open ? "open" : "close"}`);
+    return {
+      issued: true,
+      completion: Promise.resolve().then(() => {
+        setDoor(open);
+        return { kind: "accepted" } as const;
+      }),
+      cancel: () => undefined,
+    };
+  };
+  const walk = bot.prepareMovement.bind(bot);
+  bot.prepareMovement = async (step, ...rest) => {
+    order.push("move");
+    return walk(step, ...rest);
+  };
+  const passages = new OpenedPassages(world, "overworld");
+  const result = await new RouteExecutor({
+    context: { runId: "doorway", world, bot, ledger, signal: new AbortController().signal },
+    passages,
+    allowDoors,
+    plan: routePlan([walkStep("out-of-doorway", 0, 1)]),
+    stepStarted: () => undefined,
+    phase: () => undefined,
+    effectConfirmed: () => undefined,
+    stepCompleted: () => "continue",
+  }).execute();
+  return { result, order, open: doorOpen(), pending: passages.pending(bot.observe()) };
+}
+
+test("a step out of a closed doorway the body stands in opens it first and closes it behind; never without doors allowed", async () => {
+  const allowed = await leaveClosedDoorway(true);
+  assert.equal(allowed.result.kind, "exhausted");
+  assert.deepEqual(allowed.order, ["activate open", "move", "activate close"]);
+  assert.equal(allowed.open, false);
+  assert.deepEqual(allowed.pending, []);
+  const refused = await leaveClosedDoorway(false);
+  assert.deepEqual(refused.order, ["move"]);
+  assert.deepEqual(refused.pending, []);
 });
 
 test("route cancellation waits for an active physical effect to settle", async () => {

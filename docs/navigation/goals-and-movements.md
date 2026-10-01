@@ -73,7 +73,9 @@ Base policies configure feature toggles:
 
 - `allowDigging`: Permits breaking blocks to clear paths.
 - `allowPlacing`: Permits placing scaffold blocks for bridges and pillars.
-- `allowDoors`: Permits opening wooden doors and fence gates.
+- `allowDoors`: Permits opening wooden doors and fence gates, including a closed one the body already stands in
+  when a step starts: search plans only the cells a movement enters, so the executor opens that doorway before
+  walking out through its closed plane and closes it again once the body has cleared it.
 - `allowSwimming`: Permits traversing water blocks.
 - `allowClimbing`: Permits using ladders and vines.
 - `allowParkour`: Enables two-block to four-block gap jumps.

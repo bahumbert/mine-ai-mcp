@@ -348,7 +348,11 @@ axis, which expands to 10 obsidian, four cobblestone corner supports, and six in
 cells that must be air. The supports remain in place and do not prevent activation.
 Use explicit `blocks` for custom designs, including different corner materials.
 A cell whose block is `air` is dug clear rather than placed, whatever
-`remove_wrong_blocks` says. The action is
+`remove_wrong_blocks` says. A cell may add `facing` (`north`, `south`, `east`,
+`west`) for a block Minecraft orients by the player's facing, such as a door:
+the bot looks that way while placing it, and the same block facing elsewhere
+counts as a wrong block. A house door should face along its doorway, or its
+open panel lies across the way through. The action is
 a thin contract over the navigation library's build process, which is
 Baritone's builder loop: it places and digs what is in reach from where the
 bot stands, lowest first, and otherwise routes under one goal of every

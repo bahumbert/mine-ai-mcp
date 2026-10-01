@@ -26,9 +26,15 @@ export type StructurePhysics = Pick<BuildRequest, "movements" | "route" | "break
 
 /** A stone floor at y 63 under air, a bot standing at `feet`, and the log of what the physics did. */
 export function structureWorld(options: StructureWorldOptions = {}) {
-  const blocks = new Map<string, { name: string; boundingBox: "block" | "empty"; position: Vec3 }>();
-  const put = (position: Vec3, name: string) =>
-    blocks.set(key(position), { name, boundingBox: name === "air" ? "empty" : "block", position });
+  type FakeBlock = { name: string; boundingBox: "block" | "empty"; position: Vec3; getProperties: () => Record<string, unknown> };
+  const blocks = new Map<string, FakeBlock>();
+  const put = (position: Vec3, name: string, properties: Record<string, unknown> = {}) =>
+    blocks.set(key(position), {
+      name,
+      boundingBox: name === "air" ? "empty" : "block",
+      position,
+      getProperties: () => properties,
+    });
   for (let x = -6; x <= 40; x += 1) for (let z = -6; z <= 6; z += 1) put(new Vec3(x, 63, z), "stone");
   const carried = new Map(Object.entries(options.carried ?? { cobblestone: 64, obsidian: 14 }));
   const position = (options.feet ?? new Vec3(0, 64, 0)).offset(0.5, 0, 0.5);
@@ -41,10 +47,12 @@ export function structureWorld(options: StructureWorldOptions = {}) {
     },
     blockAt: (at: Vec3) => {
       if (options.loadedRadius !== undefined && at.distanceTo(bot.entity.position) > options.loadedRadius) return null;
-      return blocks.get(key(at)) ?? { name: "air", boundingBox: "empty" as const, position: at };
+      return blocks.get(key(at)) ?? { name: "air", boundingBox: "empty" as const, position: at, getProperties: () => ({}) };
     },
   } as unknown as Bot;
   const placements: string[] = [];
+  /** The direction the bot looked for each placement that asked for one. */
+  const looks: string[] = [];
   const routes: string[] = [];
   const protectedSets: ReadonlySet<number>[] = [];
   const physics: StructurePhysics = {
@@ -75,10 +83,14 @@ export function structureWorld(options: StructureWorldOptions = {}) {
     place: async (placement) => {
       const cell = placement.expectedCells[0];
       placements.push(key(cell));
-      put(new Vec3(cell.x, cell.y, cell.z), placement.item.name);
+      // Minecraft gives an oriented block the placing player's horizontal facing.
+      const look = placement.lookDirection;
+      const facing = look === undefined ? undefined : look.x > 0 ? "east" : look.x < 0 ? "west" : look.z > 0 ? "south" : "north";
+      if (facing !== undefined) looks.push(facing);
+      put(new Vec3(cell.x, cell.y, cell.z), placement.item.name, facing === undefined ? {} : { facing });
       carried.set(placement.item.name, (carried.get(placement.item.name) ?? 0) - 1);
       return { kind: "placed", block: blocks.get(key(cell)) as never };
     },
   };
-  return { bot, blocks, put, physics, placements, routes, protectedSets };
+  return { bot, blocks, put, physics, placements, looks, routes, protectedSets };
 }

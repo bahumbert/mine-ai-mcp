@@ -11,7 +11,7 @@ function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): Sk
 }
 
 function builds(runtime: FakeRuntime) {
-  return runtime.submitted.filter((call) => call.tool === "build_structure").map((call) => call.input as { blocks: { x: number; y: number; z: number; block_name: string }[]; remove_wrong_blocks: boolean });
+  return runtime.submitted.filter((call) => call.tool === "build_structure").map((call) => call.input as { blocks: { x: number; y: number; z: number; block_name: string; facing?: string }[]; remove_wrong_blocks: boolean });
 }
 
 test("a build step defaults to a small house; the style is always the persona's, never the model's", () => {
@@ -72,7 +72,8 @@ test("a pickaxe that breaks while digging is a setback, not a failure: another o
   };
   const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
   assert.equal(result.status, "done");
-  assert.deepEqual(runtime.submitted.map(describeCall), ["collect stone", "craft wooden_pickaxe at table", "collect stone"]);
+  // The logs the new pickaxe used up are chopped again: get_items keeps what it carried.
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect stone", "craft wooden_pickaxe at table", "collect oak_log", "collect stone"]);
 });
 
 test("items that cannot be found end get_items, saying why", async () => {
@@ -110,7 +111,8 @@ test("a house is built behind the bot in batches facing the requester, the door 
   const calls = builds(runtime);
   assert.ok(calls.length > 2);
   assert.ok(calls.every((call) => call.remove_wrong_blocks && call.blocks.length <= 256));
-  assert.deepEqual(calls.at(-1)!.blocks, [{ x: -2, y: 64, z: 0, block_name: "oak_door" }]);
+  // Hung from the doorstep, facing into the house, so it swings along the doorway.
+  assert.deepEqual(calls.at(-1)!.blocks, [{ x: -2, y: 64, z: 0, block_name: "oak_door", facing: "west" }]);
   assert.ok(calls.slice(0, -1).flatMap((call) => call.blocks).every((cell) => cell.x <= -1), "the house stands behind the bot, away from Steve");
 });
 
@@ -148,6 +150,19 @@ test("get_items fetches that many more of each item", async () => {
   const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 3 }] }, contextFor(runtime));
   assert.match(result.status === "done" ? result.detail : "", /^got 3 oak_log, now carrying 8 oak_log/u);
   assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.count]), [["collect_block", 3]]);
+});
+
+test("get_items keeps what it carried: planks that crafting the new items used up are made again", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 20 }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_fence", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  const count = (item: string) => runtime.snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  assert.ok(count("oak_fence") >= 3);
+  assert.ok(count("oak_planks") >= 20, `still carries the 20 planks (${count("oak_planks")})`);
+  assert.ok(runtime.submitted.some((call) => call.tool === "collect_block" && call.input.block_name === "oak_log"), "chopped logs to make the planks again");
 });
 
 test("a build the runtime stopped reports the audit it returned: what was left and why", async () => {

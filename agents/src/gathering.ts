@@ -4,8 +4,9 @@ import { errorCode, type BotRuntime, type ItemCount, type Position } from "./run
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
-/** Gather/craft rounds before giving up; a house takes about five (logs, table, pickaxe, stone, crafting). */
-const MAX_ROUNDS = 10;
+/** Gather/craft rounds before giving up; a house takes about five (logs, table, pickaxe, stone, crafting), and
+ * replacing what crafting used up of the kept items (fences eat planks, planks eat logs) a few more. */
+const MAX_ROUNDS = 14;
 /** Farther than this from home, the bot walks back before setting its crafting table down. */
 const HOME_RANGE = 3;
 
@@ -43,13 +44,24 @@ const PICKAXE = { item: "wooden_pickaxe", count: 1 } as const;
  * picked up again). The runtime's crafting planner picks the recipes; each round starts again from the real
  * inventory, so a recipe that used another wood than planned only costs another round. Crafting with the table
  * happens back at `home` (the build site: open ground), never at the bottom of the shaft the stone came from.
+ *
+ * `keep`: what the character carried before and still wants afterwards. A craft that uses some of it up (the fences
+ * asked for eat the planks it carried for the walls) adds it back to what is gathered, so fetching a few items never
+ * leaves it short of the others. Only crafting counts: food eaten or a tool worn out on the way is not replaced.
  */
-export async function gatherMaterials(context: GatherContext, bill: readonly ItemCount[], purpose: string, home: Position): Promise<GatherResult> {
+export async function gatherMaterials(
+  context: GatherContext,
+  bill: readonly ItemCount[],
+  purpose: string,
+  home: Position,
+  keep: readonly ItemCount[] = [],
+): Promise<GatherResult> {
   const recipes = new Map<string, boolean>();
   const actions: string[] = [];
+  let wanted = [...bill];
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     const inventory = (await context.runtime.status()).inventory;
-    const missing = shortfall(bill, inventory);
+    const missing = shortfall(wanted, inventory);
     if (missing.length === 0) return { status: "done", detail: actions.length === 0 ? "had everything" : actions.join(", ") };
     const plan = await planRound(context.runtime, missing, inventory, recipes);
     if (typeof plan === "string") return { status: "failed", detail: plan };
@@ -57,27 +69,51 @@ export async function gatherMaterials(context: GatherContext, bill: readonly Ite
     const ungated = [...plan.collect].filter(([block]) => !PICKAXE_BLOCK.test(block));
     const gated = [...plan.collect].filter(([block]) => PICKAXE_BLOCK.test(block));
     let step: GatherResult;
+    let crafted = false;
     if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
     else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false);
     else if (plan.pickaxeFirst) step = await craftAtHome(context, [PICKAXE], purpose, home);
     else if (gated.length > 0) step = await collectAll(context, gated, purpose);
-    else step = await craftAtHome(context, plan.craft, purpose, home);
+    else {
+      step = await craftAtHome(context, plan.craft, purpose, home);
+      crafted = true;
+    }
     if (step.status === "stopped") return step;
+    if (crafted || plan.tableFirst || plan.pickaxeFirst) wanted = keepWhatCraftingUsed(wanted, keep, inventory, (await context.runtime.status()).inventory);
     if (step.status === "failed") {
       // A setback that still got something (a pickaxe that broke after 15 of 16 stones) or a fight that interrupted
       // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
       // without progress for any other reason ends the gathering.
-      const after = shortfall(bill, (await context.runtime.status()).inventory);
+      const after = shortfall(wanted, (await context.runtime.status()).inventory);
       if (units(after) >= units(missing) && errorCode(step.detail) !== "HOSTILE_CONTACT") return step;
       actions.push(`setback (${step.detail})`);
       continue;
     }
     actions.push(step.detail);
   }
-  const left = shortfall(bill, (await context.runtime.status()).inventory);
+  const left = shortfall(wanted, (await context.runtime.status()).inventory);
   return left.length === 0
     ? { status: "done", detail: actions.join(", ") }
     : { status: "failed", detail: `still missing ${describeMaterials(left)} after ${MAX_ROUNDS} rounds of gathering` };
+}
+
+type Stacks = readonly { readonly name: string; readonly count: number }[];
+
+function carried(inventory: Stacks, item: string): number {
+  return inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+}
+
+/** `wanted`, raised back to the kept count of every kept item a craft between `before` and `after` used up. */
+function keepWhatCraftingUsed(wanted: readonly ItemCount[], keep: readonly ItemCount[], before: Stacks, after: Stacks): ItemCount[] {
+  const next = [...wanted];
+  for (const { item, count } of keep) {
+    const now = carried(after, item);
+    if (now >= carried(before, item) || now >= count) continue;
+    const index = next.findIndex((entry) => entry.item === item);
+    if (index < 0) next.push({ item, count });
+    else if (next[index]!.count < count) next[index] = { item, count };
+  }
+  return next;
 }
 
 function units(items: readonly ItemCount[]): number {
