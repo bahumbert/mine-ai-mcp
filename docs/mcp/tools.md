@@ -239,6 +239,27 @@ no automatic expiry. For older notes or different filters, query `main.notes` wi
 `query_bot_data`. Defined in
 [src/actions/note-read/contract.ts](../../src/actions/note-read/contract.ts).
 
+### `protect_region`
+
+Protect a box of blocks in the current dimension from this bot's own digging and
+scaffolding: every route refuses to break or place a block inside it, `collect_block`
+never takes a block inside it (the refusal reason names the region), and walking
+through and opening doors stay allowed. Give `corner_a` and `corner_b`, or `center`
+and `radius` (0-31); each side is at most 64 blocks and at most 64 regions exist.
+`owner` is whose build it is (a player's name; omitted, the bot's own).
+`build_structure` still works inside regions its own bot owns and refuses a request
+with cells in anyone else's (`[BUILD_PROTECTED_REGION]`). The same box for the same
+owner returns the existing region with `created: false`. Errors: `[REGION_TOO_LARGE]`,
+`[REGION_LIMIT_REACHED]`. Regions persist in `main.protected_regions`. Runs beside the
+foreground action. Defined in
+[src/actions/protect-region/contract.ts](../../src/actions/protect-region/contract.ts).
+
+### `unprotect_region`
+
+Remove one protected region by `region_id`, so routes may dig and place there again.
+Error: `[REGION_NOT_FOUND]`. Runs beside the foreground action. Defined in
+[src/actions/unprotect-region/contract.ts](../../src/actions/unprotect-region/contract.ts).
+
 ## Tools that move the bot across terrain
 
 ### `navigate`

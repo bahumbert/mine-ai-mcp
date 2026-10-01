@@ -18,6 +18,23 @@ CREATE TABLE IF NOT EXISTS notes (
 
 CREATE INDEX IF NOT EXISTS notes_bot_id_note_id ON notes (bot_id, note_id DESC);
 
+CREATE TABLE IF NOT EXISTS protected_regions (
+  region_id INTEGER PRIMARY KEY,
+  dimension TEXT NOT NULL,
+  min_x INTEGER NOT NULL,
+  min_y INTEGER NOT NULL,
+  min_z INTEGER NOT NULL,
+  max_x INTEGER NOT NULL,
+  max_y INTEGER NOT NULL,
+  max_z INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  label TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_by_bot_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (min_x <= max_x AND min_y <= max_y AND min_z <= max_z)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS stronghold_throws (
   throw_id TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL,
@@ -321,6 +338,20 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'notes', 'y', 'Bot feet position Y when the note was saved.'),
   ('main', 'notes', 'z', 'Bot feet position Z when the note was saved.'),
   ('main', 'notes', 'world_age_ticks', 'Latest server-reported world age in game ticks; null before the first time update. Persists across server restarts, excludes stopped-world time, and advances while the world ticks without this bot. Not personal playtime.'),
+  ('main', 'protected_regions', NULL, 'Boxes of blocks this bot never digs or scaffolds in (its builds, areas it was asked to respect); written by protect_region, removed by unprotect_region.'),
+  ('main', 'protected_regions', 'region_id', 'Unique region identifier, the id unprotect_region takes.'),
+  ('main', 'protected_regions', 'dimension', 'Dimension the box lies in.'),
+  ('main', 'protected_regions', 'min_x', 'Smallest block X inside the box (inclusive).'),
+  ('main', 'protected_regions', 'min_y', 'Smallest block Y inside the box (inclusive).'),
+  ('main', 'protected_regions', 'min_z', 'Smallest block Z inside the box (inclusive).'),
+  ('main', 'protected_regions', 'max_x', 'Largest block X inside the box (inclusive).'),
+  ('main', 'protected_regions', 'max_y', 'Largest block Y inside the box (inclusive).'),
+  ('main', 'protected_regions', 'max_z', 'Largest block Z inside the box (inclusive).'),
+  ('main', 'protected_regions', 'owner', 'Whose build it is: the bot''s own username or a player''s name; build_structure still works in regions its own bot owns.'),
+  ('main', 'protected_regions', 'label', 'Short name of what is protected, e.g. small medieval house.'),
+  ('main', 'protected_regions', 'reason', 'Why the region was protected, in the caller''s words.'),
+  ('main', 'protected_regions', 'created_by_bot_id', 'Bot whose runtime stored the region.'),
+  ('main', 'protected_regions', 'created_at', 'UTC timestamp when the region was stored.'),
   ('main', 'stronghold_throws', NULL, 'Durable Eye of Ender measurements, scoped to a named search, bot and dimension in this world. Reused after cancellation or restart.'),
   ('main', 'stronghold_throws', 'throw_id', 'Unique throw attempt identifier, written before using an eye.'),
   ('main', 'stronghold_throws', 'bot_id', 'Bot that attempted this throw.'),

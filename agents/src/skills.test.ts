@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { runStep, type SkillContext } from "./skills.ts";
+import { houseBox, runStep, type SkillContext } from "./skills.ts";
+import type { ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "./testing.ts";
 
@@ -222,4 +223,60 @@ test("a build the runtime stopped reports the audit it returned: what was left a
     result.detail ?? "",
     /stopped at part 1\/\d+: \[BUILD_STOPPED\] The build stopped: no progress in two passes\. \(placed 7, dug 2; left 4 not_reached, 1 refused; short of 1 cobblestone\)$/u,
   );
+});
+
+test("a house protects its box before the first block, one ring wider and one layer deeper, and only once when built again", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const areas: ProtectedArea[] = [];
+  const context = contextFor(runtime, { style: "medieval", areas });
+  assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, context)).status, "done");
+  assert.equal(runtime.submitted[0]?.tool, "protect_region", "protected before any block is touched");
+  const cellsBuilt = builds(runtime).flatMap((call) => call.blocks);
+  const box = runtime.areas[0]!;
+  assert.deepEqual(box.min, {
+    x: Math.min(...cellsBuilt.map((cell) => cell.x)) - 1,
+    y: Math.min(...cellsBuilt.map((cell) => cell.y)) - 1,
+    z: Math.min(...cellsBuilt.map((cell) => cell.z)) - 1,
+  });
+  assert.deepEqual(box.max, {
+    x: Math.max(...cellsBuilt.map((cell) => cell.x)) + 1,
+    y: Math.max(...cellsBuilt.map((cell) => cell.y)),
+    z: Math.max(...cellsBuilt.map((cell) => cell.z)) + 1,
+  });
+  assert.equal(box.label, "small medieval house");
+  assert.deepEqual(areas, [box]);
+
+  // The same site again (a resume, or a rebuild after a restart): the same box, nothing new stored.
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.equal(runtime.areas.length, 1);
+  assert.equal(areas.length, 1);
+});
+
+test("houseBox spans the cells plus a ring around them and the layer below, not above", () => {
+  assert.deepEqual(houseBox([{ x: 0, y: 64, z: 0 }, { x: 4, y: 70, z: 2 }]), { min: { x: -1, y: 63, z: -1 }, max: { x: 5, y: 70, z: 3 } });
+});
+
+test("protect_area keeps a radius around a seen player, owned by that player, and release_area gives it back", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 10.4, y: 64, z: -3.6 } }] };
+  const areas: ProtectedArea[] = [];
+  const context = contextFor(runtime, { areas });
+  const kept = await runStep(stepSchema.parse({ skill: "protect_area", player: "tom", radius: 5, label: "Tom's place" }), context);
+  assert.deepEqual(kept, { status: "done", detail: "protected area #1 'Tom's place' (11 blocks across around 10 64 -4): I will not dig or place blocks there" });
+  assert.deepEqual(areas, [{ regionId: 1, label: "Tom's place", owner: "tom", min: { x: 5, y: 59, z: -9 }, max: { x: 15, y: 69, z: 1 } }]);
+
+  assert.deepEqual(await runStep({ skill: "release_area", area: 1 }, context), { status: "done", detail: "released area #1: I may dig and place blocks there again" });
+  assert.deepEqual(areas, []);
+  assert.equal((await runStep({ skill: "release_area", area: 1 }, context)).status, "failed");
+});
+
+test("protect_area needs a player in sight or coordinates", async () => {
+  const runtime = new FakeRuntime();
+  const context = contextFor(runtime);
+  assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", player: "Tom", label: "x" }), context), { status: "failed", detail: "cannot see Tom to protect the area around them" });
+  assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", label: "x" }), context), { status: "failed", detail: "protect_area needs a player or x, y and z" });
+  assert.equal((await runStep(stepSchema.parse({ skill: "protect_area", x: 1, y: 64, z: 1, radius: 2, label: "spot" }), context)).status, "done");
+  assert.equal(runtime.areas[0]?.owner, "self", "coordinates alone protect the character's own area");
+  assert.equal(stepSchema.safeParse({ skill: "protect_area", player: "Tom", radius: 32, label: "x" }).success, false);
 });

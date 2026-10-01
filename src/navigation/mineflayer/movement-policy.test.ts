@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture, type FakeBot, type FakeStack } from "../../test-support/bot.js";
 import { flatWorld } from "../../test-support/navigation.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 
 /** Air around the origin: no liquid beside any cell these tests break. */
 const world = flatWorld();
@@ -250,4 +251,30 @@ test("scaffold admission follows other mobs moving into and out of a placement c
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "allowed");
   mob.position.x = 1.1;
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "prohibited");
+});
+
+test("a protected region refuses route digging and scaffolding in it, but not walking, other dimensions or its owner's build", () => {
+  const bot = botFixture({ username: "Ayla" });
+  let regions: readonly ProtectedRegion[] = [];
+  setProtectedRegionsProvider(bot, () => regions);
+  const policy = createMovements(bot);
+  const stone = observed(bot, "stone");
+  const inside = { x: 1, y: 64, z: 1 };
+  assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "nothing protected yet");
+
+  // Read live: a region added after the policy was made applies to its next check.
+  regions = [{ regionId: 1, dimension: "overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 66, z: 2 }, owner: "Ayla", label: "small medieval house" }];
+  const refusal = { kind: "prohibited", reason: "inside protected region #1 'small medieval house' (owner Ayla)" };
+  assert.deepEqual(policy.evaluateBreak(stone, inside, world).decision, refusal);
+  assert.deepEqual(policy.confirmBreak(stone, { x: 2, y: 66, z: 2 }, world), refusal);
+  assert.equal(policy.evaluateBreak(stone, { x: 3, y: 64, z: 1 }, world).decision.kind, "penalized", "just outside");
+  assert.deepEqual(policy.decidePlace(1, 65, 1, world), refusal);
+  assert.equal(policy.decideStep(1, 65, 1, world).kind, "allowed", "walking through stays allowed");
+
+  const ownBuild = createMovements(bot, { ignoreRegionsOwnedBy: "ayla" });
+  assert.equal(ownBuild.evaluateBreak(stone, inside, world).decision.kind, "penalized");
+  assert.equal(ownBuild.decidePlace(1, 65, 1, world).kind, "allowed");
+
+  bot.game.dimension = "the_nether";
+  assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "an overworld region stays in the overworld");
 });

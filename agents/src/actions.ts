@@ -12,6 +12,8 @@ const coordinate = z.number().int().min(-30_000_000).max(30_000_000);
 const MAX_COLLECT = 32;
 /** Kinds of items one `get_items` step fetches: a house needs six. */
 const MAX_GET_ITEMS = 8;
+/** The runtime's limit for a centre and radius (src/actions/protect-region/contract.ts `MAX_REGION_RADIUS`). */
+const MAX_AREA_RADIUS = 31;
 
 const SIZES = Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]];
 
@@ -35,6 +37,16 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({ skill: z.literal("sleep") }),
   z.strictObject({ skill: z.literal("hunt"), mob: minecraftId, drop: minecraftId, count: z.number().int().min(1).max(16).default(1) }),
   z.strictObject({
+    skill: z.literal("protect_area"),
+    player: playerName.optional(),
+    x: coordinate.optional(),
+    y: z.number().int().min(-64).max(320).optional(),
+    z: coordinate.optional(),
+    radius: z.number().int().min(1).max(MAX_AREA_RADIUS).default(8),
+    label: z.string().trim().min(1).max(80),
+  }),
+  z.strictObject({ skill: z.literal("release_area"), area: z.number().int().positive() }),
+  z.strictObject({
     skill: z.literal("build"),
     structure: z.literal("house").default("house"),
     size: z.enum(SIZES).default("small"),
@@ -45,7 +57,7 @@ export type Step = z.infer<typeof stepSchema>;
 export type SkillName = Step["skill"];
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "collect_block", "give_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "build",
+  "follow_player", "go_to_player", "go_to", "collect_block", "give_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "build",
 ] as const satisfies readonly SkillName[];
 
 /**
@@ -65,6 +77,8 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
     case "hunt": return `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`;
+    case "protect_area": return `{"skill":"protect_area","player":"<username>","radius":8,"label":"<short name>"}  never dig or place blocks within radius (1-${MAX_AREA_RADIUS}) of where that player stands, or give "x","y","z" instead of "player"; e.g. around a build someone asked you to respect; you can still walk there`;
+    case "release_area": return `{"skill":"release_area","area":<area number>}  stop protecting one of your protected areas, so you may dig and place blocks there again`;
     case "build": {
       const bills = SIZES.map((size) => `${size} = ${describeMaterials(planHouse(style, size, chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ");
       return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; every block must be carried first (${bills})`;
@@ -86,6 +100,8 @@ export function describeStep(step: Step): string {
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
+    case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;
+    case "release_area": return `release area #${step.area}`;
     case "build": return `build a ${step.size} ${step.structure}`;
   }
 }

@@ -132,6 +132,8 @@ import {
 import { VIEW_STATUS, VIEW_STATUS_DESCRIPTION, viewStatusInputSchema } from "./view-status/contract.js";
 
 import { NOTE_READ, NOTE_READ_DESCRIPTION, noteReadInputSchema } from "./note-read/contract.js";
+import { PROTECT_REGION, PROTECT_REGION_DESCRIPTION, protectRegionInputSchema } from "./protect-region/contract.js";
+import { UNPROTECT_REGION, UNPROTECT_REGION_DESCRIPTION, unprotectRegionInputSchema } from "./unprotect-region/contract.js";
 import { NOTE_SAVE, NOTE_SAVE_DESCRIPTION, noteSaveInputSchema } from "./note-save/contract.js";
 
 /** One published tool, as tool discovery describes it before MCP adds its metadata. */
@@ -173,6 +175,8 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     tool(NAVIGATE, NAVIGATE_DESCRIPTION, navigateInputSchema),
     tool(NOTE_SAVE, NOTE_SAVE_DESCRIPTION, noteSaveInputSchema),
     tool(NOTE_READ, NOTE_READ_DESCRIPTION, noteReadInputSchema, { foreground: false }),
+    tool(PROTECT_REGION, PROTECT_REGION_DESCRIPTION, protectRegionInputSchema, { foreground: false }),
+    tool(UNPROTECT_REGION, UNPROTECT_REGION_DESCRIPTION, unprotectRegionInputSchema, { foreground: false }),
     tool(PLACE_BLOCK, PLACE_BLOCK_DESCRIPTION, placeBlockInputSchema),
     tool(PREPARE_DRAGON_PERCH, PREPARE_DRAGON_PERCH_DESCRIPTION, prepareDragonPerchInputSchema),
     tool(SHOOT_DRAGON, SHOOT_DRAGON_DESCRIPTION, shootDragonInputSchema),

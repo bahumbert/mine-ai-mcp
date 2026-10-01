@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture } from "../test-support/bot.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import { createActions, type ActionCatalogOptions } from "./index.js";
 import { describeActionTools } from "./describe.js";
 
@@ -35,6 +36,8 @@ const PUBLISHED: ReadonlyArray<
   ["navigate", "resumable_task", false, true],
   ["note_save", "task", false, false],
   ["note_read", "information", true, false],
+  ["protect_region", "concurrent", false, false],
+  ["unprotect_region", "concurrent", false, false],
   ["place_block", "task", false, true],
   ["prepare_dragon_perch", "resumable_task", false, true],
   ["pick_up_items", "resumable_task", false, false],
@@ -59,10 +62,12 @@ const DEBUG_ONLY = [
 
 function published(t: { after(fn: () => void): void }, options: ActionCatalogOptions = {}) {
   // Every factory only stores what it is given; nothing here is exercised.
+  const botData = temporaryBotData({ closeAfter: t });
   return createActions(
     {
       bot: botFixture(),
-      botData: temporaryBotData({ closeAfter: t }),
+      botData,
+      protectedRegions: new ProtectedRegionStore(botData),
       budgets: {} as never,
       frontier: {} as never,
       navigation: {} as never,

@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { structureWorld } from "../../test-support/structure-world.js";
 import { parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
 import { formatBuildStructureResult, buildStructure } from "./build-structure.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 
 function cells(list: [number, number, number][], blockName = "cobblestone"): StructureCell[] {
   return list.map(([x, y, z]) => ({ x, y, z, blockName }));
@@ -147,4 +148,22 @@ test("a block Minecraft does not have is refused before anything moves", async (
   assert.deepEqual(placements, []);
   assert.equal(result.structure, null);
   assert.doesNotMatch(formatBuildStructureResult(result), /Every cell/);
+});
+
+test("a structure is refused before any block is touched when a cell lies in a region someone else owns, and built in its own", async () => {
+  const { bot, physics } = structureWorld();
+  Object.assign(bot, { username: "Ayla" });
+  const region = (owner: string) => ({ regionId: 4, dimension: "overworld", min: { x: 3, y: 64, z: 0 }, max: { x: 5, y: 66, z: 2 }, owner, label: "Tom's place" });
+  setProtectedRegionsProvider(bot, () => [region("Tom")]);
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
+  const refused = await buildStructure(bot, request, {}, physics);
+  assert.deepEqual(refused, {
+    status: "failed",
+    error: "[BUILD_PROTECTED_REGION] 2 cells lie inside protected region #4 'Tom's place' (owner Tom), which this bot does not own; unprotect it or build elsewhere.",
+    structure: null,
+  });
+  assert.equal(bot.blockAt(new Vec3(2, 64, 0))?.name, "air", "nothing was placed");
+
+  setProtectedRegionsProvider(bot, () => [region("ayla")]);
+  assert.equal((await buildStructure(bot, request, {}, physics)).status, "succeeded");
 });

@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -49,7 +49,7 @@ export class FakeRuntime implements BotRuntime {
   /** Successful `collect_block` and `craft_item` calls change the snapshot's inventory. */
   simulateInventory = false;
   /** Every foreground call, plus chat lines as `send_message` (they do not take the body). */
-  readonly submitted: { readonly tool: ForegroundTool | "send_message"; readonly input: Readonly<Record<string, unknown>> }[] = [];
+  readonly submitted: { readonly tool: ForegroundTool | "send_message" | "protect_region" | "unprotect_region"; readonly input: Readonly<Record<string, unknown>> }[] = [];
   readonly cancelled: string[] = [];
   private readonly actions = new Map<string, { tool: ForegroundTool; input: Readonly<Record<string, unknown>>; remaining: number; cancelled: boolean }>();
   private nextId = 1;
@@ -85,6 +85,33 @@ export class FakeRuntime implements BotRuntime {
       .map(([item, count]) => ({ item, count: count - this.carried(item) }))
       .filter((entry) => entry.count > 0);
     return { status: missing.length === 0 ? "ready" : "missing_materials", missing };
+  }
+
+  /** Protected areas, oldest first; a test may seed them to stand for an earlier run. Own areas are owned by "self". */
+  areas: ProtectedArea[] = [];
+  private nextRegionId = 1;
+
+  async protectRegion(request: AreaRequest): Promise<AreaOutcome> {
+    this.submitted.push({ tool: "protect_region", input: { ...request } });
+    const owner = request.owner ?? "self";
+    const same = (a: Position, b: Position) => a.x === b.x && a.y === b.y && a.z === b.z;
+    const existing = this.areas.find((area) => area.owner === owner && same(area.min, request.min) && same(area.max, request.max));
+    if (existing !== undefined) return { status: "succeeded", area: existing };
+    const area = { regionId: this.nextRegionId++, label: request.label, owner, min: request.min, max: request.max };
+    this.areas.push(area);
+    return { status: "succeeded", area };
+  }
+
+  async unprotectRegion(regionId: number): Promise<{ readonly status: "succeeded" } | { readonly status: "failed"; readonly error: string }> {
+    this.submitted.push({ tool: "unprotect_region", input: { region_id: regionId } });
+    const index = this.areas.findIndex((area) => area.regionId === regionId);
+    if (index === -1) return { status: "failed", error: `[REGION_NOT_FOUND] There is no protected region #${regionId}.` };
+    this.areas.splice(index, 1);
+    return { status: "succeeded" };
+  }
+
+  async protectedRegions(): Promise<readonly ProtectedArea[]> {
+    return [...this.areas];
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {

@@ -8,6 +8,7 @@ import { createMovementPolicy } from "../../movements/policy.js";
 import { evaluateMineTarget, lavaClosuresOf } from "./target-safety.js";
 import { createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../mineflayer/world.js";
+import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 
 test("lava preparation counts permitted building material, not reserved inventory", () => {
   const bot = botFixture({ items: [{ type: 1, name: "oak_log", count: 64 }] });
@@ -103,4 +104,28 @@ test("a drop column that ends on a solid block or in water needs no floor", () =
   // Items float in water, so a pool between the target and the lava catches the drop.
   stop = "water";
   assert.deepEqual(lavaClosuresOf(bot, { x: 0, y: 64, z: 0 }), []);
+});
+
+test("a block inside a protected region is never a mining target, and the refusal names the region", () => {
+  const bot = botFixture();
+  const blocks = blockClass(bot);
+  bot.blockAt = (position) => {
+    const block = blocks.fromStateId(bot.registry.blocksByName[position.equals(new Vec3(1, 64, 0)) ? "dirt" : "air"]!.defaultState, 0);
+    block.position = position;
+    return block;
+  };
+  const world = {
+    blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!),
+    revision: 0, subscribe: () => () => {},
+  };
+  const target = bot.blockAt(new Vec3(1, 64, 0))!;
+  const policy = createMineflayerMovementPolicy(bot);
+  setProtectedRegionsProvider(bot, () => []);
+  assert.equal(evaluateMineTarget(bot, policy, target, world, 0).kind, "mineable");
+  setProtectedRegionsProvider(bot, () => [
+    { regionId: 3, dimension: "overworld", min: { x: 0, y: 63, z: -1 }, max: { x: 2, y: 65, z: 1 }, owner: "Tom", label: "Tom's place" },
+  ]);
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
+    kind: "prohibited", reason: "inside protected region #3 'Tom's place' (owner Tom)",
+  });
 });

@@ -9,6 +9,28 @@ export interface Position {
   readonly z: number;
 }
 
+/** A box this bot never digs or scaffolds in (ADR-012), as the runtime reports it. */
+export interface ProtectedArea {
+  readonly regionId: number;
+  readonly label: string;
+  readonly owner: string;
+  readonly min: Position;
+  readonly max: Position;
+}
+
+export interface AreaRequest {
+  readonly min: Position;
+  readonly max: Position;
+  /** Omitted: the bot's own. */
+  readonly owner?: string;
+  readonly label: string;
+  readonly reason: string;
+}
+
+export type AreaOutcome =
+  | { readonly status: "succeeded"; readonly area: ProtectedArea }
+  | { readonly status: "failed"; readonly error: string };
+
 export interface NearbyPlayer {
   readonly username: string;
   /** Null when the player is online but not loaded around the bot. */
@@ -91,6 +113,12 @@ export interface BotRuntime {
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
   wait(actionId: string, timeoutMs: number): Promise<ForegroundState>;
   cancel(actionId: string, reason: string): Promise<void>;
+  /** Protects a box (`protect_region`, ADR-012); runs beside the foreground action. */
+  protectRegion(request: AreaRequest): Promise<AreaOutcome>;
+  /** Removes one protected box (`unprotect_region`). */
+  unprotectRegion(regionId: number): Promise<{ readonly status: "succeeded" } | { readonly status: "failed"; readonly error: string }>;
+  /** Every protected box in this bot's data, oldest first. */
+  protectedRegions(): Promise<readonly ProtectedArea[]>;
   close(): Promise<void>;
 }
 
@@ -123,6 +151,11 @@ const craftingRequirementsSchema = z.object({
       }).optional(),
     }).optional(),
   }),
+});
+
+const areaSchema = z.object({ regionId: z.number(), label: z.string(), owner: z.string(), min: positionSchema, max: positionSchema });
+const regionResultSchema = z.object({
+  result: z.object({ status: z.string(), error: z.string().optional(), region: areaSchema.nullable().optional() }),
 });
 
 const sayResultSchema = z.object({
@@ -230,6 +263,38 @@ export class McpBotRuntime implements BotRuntime {
     const { result } = queryResultSchema.parse(await this.call("query_bot_data", { sql }, "Remember what I knew."));
     if (result.query === undefined) throw new Error(`[QUERY_FAILED] ${result.error ?? result.status}`);
     return result.query.rows;
+  }
+
+  async protectRegion(request: AreaRequest): Promise<AreaOutcome> {
+    const input = {
+      corner_a: request.min,
+      corner_b: request.max,
+      label: request.label,
+      reason: request.reason,
+      ...(request.owner !== undefined && { owner: request.owner }),
+    };
+    const { result } = regionResultSchema.parse(await this.call("protect_region", input, request.reason));
+    if (result.status !== "succeeded" || !result.region) return { status: "failed", error: result.error ?? result.status };
+    const { regionId, label, owner, min, max } = result.region;
+    return { status: "succeeded", area: { regionId, label, owner, min, max } };
+  }
+
+  async unprotectRegion(regionId: number): Promise<{ readonly status: "succeeded" } | { readonly status: "failed"; readonly error: string }> {
+    const { result } = regionResultSchema.parse(await this.call("unprotect_region", { region_id: regionId }, "Release a protected area."));
+    return result.status === "succeeded" ? { status: "succeeded" } : { status: "failed", error: result.error ?? result.status };
+  }
+
+  async protectedRegions(): Promise<readonly ProtectedArea[]> {
+    const rows = await this.queryBotData(
+      "SELECT region_id, label, owner, min_x, min_y, min_z, max_x, max_y, max_z FROM protected_regions ORDER BY region_id",
+    );
+    return rows.map((row) => ({
+      regionId: Number(row[0]),
+      label: String(row[1]),
+      owner: String(row[2]),
+      min: { x: Number(row[3]), y: Number(row[4]), z: Number(row[5]) },
+      max: { x: Number(row[6]), y: Number(row[7]), z: Number(row[8]) },
+    }));
   }
 
   async readMessages(): Promise<readonly PlayerMessage[]> {

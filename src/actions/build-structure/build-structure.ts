@@ -27,6 +27,7 @@ import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibili
 import { placeBlock } from "../../world/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 import {
   buildStructureAnnotations,
   buildStructureOutcomes,
@@ -56,6 +57,8 @@ function productionPhysics(
     movements: (protectedCells) =>
       createMovements(bot, {
         protectedCells,
+        // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
+        ignoreRegionsOwnedBy: bot.username,
         protectedScaffoldNames: [...new Set(request.cells.map((cell) => cell.blockName))].filter(
           (name) => name !== "air",
         ),
@@ -200,6 +203,19 @@ export async function buildStructure(
         structure: null,
       };
     }
+  }
+  // Someone else's protected build is not this bot's to change, whoever asked (ADR-012).
+  const regions = readProtectedRegions(bot);
+  const foreign = request.cells.flatMap((cell) => {
+    const region = protectedRegionAt(regions, dimension, cell.x, cell.y, cell.z, bot.username);
+    return region === null ? [] : [region];
+  });
+  if (foreign[0] !== undefined) {
+    return {
+      status: "failed",
+      error: buildStructureOutcomes.protectedRegion(foreign.length, describeProtectedRegion(foreign[0])),
+      structure: null,
+    };
   }
   const toolLoss = request.removeWrongBlocks ? observeToolTierLoss(bot) : null;
   let result: BuildResult;

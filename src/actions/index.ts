@@ -10,6 +10,7 @@ import { createSetSurvivalPolicyAction } from "./set-survival-policy/index.js";
  */
 import type { Bot } from "mineflayer";
 import { snapshotBotStatus, updateBotStatus, type SqlBotData } from "../bot-data/index.js";
+import type { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import type { NavigationRuntime } from "../navigation/index.js";
 import type { SessionFrontier } from "../runtime/frontier.js";
 import type { ForegroundCancellation } from "../session/action-runner.js";
@@ -35,6 +36,8 @@ import { createLocateStrongholdAction, type StrongholdEyeFlights } from "./locat
 import { createNavigateAction } from "./navigate/index.js";
 import { createNoteReadAction } from "./note-read/index.js";
 import { createNoteSaveAction } from "./note-save/index.js";
+import { createProtectRegionAction } from "./protect-region/index.js";
+import { createUnprotectRegionAction } from "./unprotect-region/index.js";
 import { createPlaceBlockAction } from "./place-block/index.js";
 import { createPrepareDragonPerchAction } from "./prepare-dragon-perch/index.js";
 import { createPickUpItemsAction } from "./pick-up-items/index.js";
@@ -64,6 +67,8 @@ export interface ActionDependencies {
   readonly combat: CombatController;
   readonly cancelForegroundAction: (reason: string) => ForegroundCancellation;
   readonly observeStatusActivity: ObserveStatusActivity;
+  /** The bot's protected regions (ADR-012); routes read them through the provider, these tools write them. */
+  readonly protectedRegions: ProtectedRegionStore;
 }
 
 export interface ActionCatalogOptions {
@@ -81,6 +86,7 @@ export function createActions(
     combat,
     cancelForegroundAction,
     observeStatusActivity,
+    protectedRegions,
   }: ActionDependencies,
   options: ActionCatalogOptions = {},
 ) {
@@ -109,6 +115,8 @@ export function createActions(
     createNavigateAction(bot, navigation),
     createNoteSaveAction(bot, botData),
     createNoteReadAction(botData, bot.username),
+    createProtectRegionAction(bot, protectedRegions),
+    createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation),
     createPrepareDragonPerchAction(bot, combat),
     createPickUpItemsAction(bot, navigation, botData, discarded),
@@ -153,6 +161,8 @@ export * from "./markdown.js";
 export * from "./navigate/index.js";
 export * from "./note-read/index.js";
 export * from "./note-save/index.js";
+export * from "./protect-region/index.js";
+export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";
 export * from "./prepare-dragon-perch/index.js";
 export * from "./pick-up-items/index.js";

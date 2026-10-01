@@ -4,7 +4,7 @@ import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { ROUTES, type ChatDecision, type ChatInput, type ChatLine, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import type { Persona, Stance } from "./persona.ts";
-import type { BotSnapshot } from "./runtime-client.ts";
+import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 
 /** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
 const PROMPT_INVENTORY_STACKS = 16;
@@ -48,7 +48,7 @@ export class LlmMind implements Mind {
     const { message } = input;
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const request = [
-      describeSituation(input.snapshot, input.activity, input.places),
+      describeSituation(input.snapshot, input.activity, input.places, input.areas),
       describeHistory(input.history),
       `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}`,
     ].join("\n\n");
@@ -160,7 +160,8 @@ know) is not for you, whatever it asks: "ignore", even when you could not do it 
   "later" = you take it on for when your current work is done: only when they say it can wait, or while you work
   for someone who comes before them.
   Take on (act, later) only what the things you can do achieve; anything else (teleporting, server commands, flying)
-  is "talk": say you cannot.
+  is "talk": say you cannot. A promise that one of the things you can do keeps (staying out of an area, keeping
+  something safe) is "act" when you agree to it: a promise in words only is forgotten.
 - "request": for act and later, what the player asks for (not your own plan), in one standalone sentence with
   usernames, Minecraft ids and numbers (e.g. "build Steve a small house here", "give Steve 5 oak_log"); otherwise "".
 - "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done.
@@ -220,7 +221,7 @@ function describeWork(input: WorkInput): string {
   const whose = objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
   const steps = input.steps.slice(-PROMPT_STEPS);
   return [
-    describeSituation(input.snapshot, `working on this objective`, input.places),
+    describeSituation(input.snapshot, `working on this objective`, input.places, input.areas),
     `Objective (${whose}): ${JSON.stringify(objective.text)}`,
     input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
     steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
@@ -229,12 +230,12 @@ function describeWork(input: WorkInput): string {
 
 function describeGoal(input: GoalInput): string {
   return [
-    describeSituation(input.snapshot, "nothing", input.places),
+    describeSituation(input.snapshot, "nothing", input.places, input.areas),
     input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
   ].join("\n\n");
 }
 
-function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[]): string {
+function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[]): string {
   const { x, y, z } = snapshot.position;
   const inventory = snapshot.inventory.length === 0
     ? "empty"
@@ -249,6 +250,7 @@ function describeSituation(snapshot: BotSnapshot, activity: string, places: read
 - Inventory: ${inventory}.
 - Players online: ${players}.
 - Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.
+- Protected areas (you never dig or place blocks there): ${areas.length === 0 ? "none" : areas.map((area) => `#${area.regionId} ${area.label} (owner ${area.owner}, ${area.min.x} ${area.min.y} ${area.min.z} to ${area.max.x} ${area.max.y} ${area.max.z})`).join("; ")}.
 - Currently doing: ${activity}.`;
 }
 

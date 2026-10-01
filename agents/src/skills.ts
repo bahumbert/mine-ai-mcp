@@ -6,7 +6,7 @@ import { chooseSite, planHouse, styleOrDefault, type Site } from "./building/pla
 import type { Body } from "./body.ts";
 import { gatherMaterials } from "./gathering.ts";
 import type { KnownPlace } from "./mind.ts";
-import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type NearbyPlayer, type Position } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -37,6 +37,8 @@ export interface SkillContext {
   readonly remember?: (place: KnownPlace) => void;
   /** The house left unfinished by an earlier build step, which the next build of the same kind resumes. */
   readonly building?: { unfinished: UnfinishedHouse | null };
+  /** The protected areas the agent knows (ADR-012), updated in place when a skill protects or releases one. */
+  readonly areas?: ProtectedArea[];
 }
 
 export interface UnfinishedHouse {
@@ -76,6 +78,8 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "sleep": return await once(context, "sleep", {}, why, "slept");
       case "hunt":
         return await once(context, "collect_mob_drop", { mob_name: step.mob, drop_name: step.drop, count: step.count }, why, `got ${step.count} ${step.drop} from ${step.mob}`);
+      case "protect_area": return await protectArea(context, step);
+      case "release_area": return await releaseArea(context, step.area);
       case "build": return await build(context, step);
     }
   } catch (error) {
@@ -195,6 +199,15 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const missing = shortfall(plan.bill, snapshot.inventory);
     if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (it needs ${describeMaterials(plan.bill)})` };
   }
+  // Protected before the first block and again on every resume (the runtime keeps one region per box): its own
+  // gathering and goals must not dig into the house (ADR-012). The build itself still works inside it.
+  const protection = await context.runtime.protectRegion({
+    ...houseBox(plan.batches.flat()),
+    label: kind,
+    reason: `Keep my own digging out of the ${kind} I am building.`,
+  });
+  if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
+  noteArea(context, protection.area);
   const leaveUnfinished = (part: number) => {
     if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part };
   };
@@ -247,6 +260,64 @@ function auditSuffix(error: string | null, result: Readonly<Record<string, unkno
   if (left.length > 0) parts.push(`left ${left.map((group) => `${group.count} ${group.reason}`).join(", ")}`);
   if (missing.length > 0) parts.push(`short of ${missing.map((entry) => `${entry.count} ${entry.block}`).join(", ")}`);
   return ` (${parts.join("; ")})`;
+}
+
+/** Keeps the character's own digging and scaffolding out of an area (ADR-012); its own choice, e.g. when asked. */
+async function protectArea(context: SkillContext, step: Extract<Step, { skill: "protect_area" }>): Promise<SkillResult> {
+  let centre: Position;
+  if (step.player !== undefined) {
+    const seen = findPlayer(await context.runtime.status(), step.player)?.position ?? null;
+    if (seen === null) return { status: "failed", detail: `cannot see ${step.player} to protect the area around them` };
+    centre = seen;
+  } else if (step.x !== undefined && step.y !== undefined && step.z !== undefined) {
+    centre = { x: step.x, y: step.y, z: step.z };
+  } else {
+    return { status: "failed", detail: "protect_area needs a player or x, y and z" };
+  }
+  const c = { x: Math.floor(centre.x), y: Math.floor(centre.y), z: Math.floor(centre.z) };
+  const r = step.radius;
+  const outcome = await context.runtime.protectRegion({
+    min: { x: c.x - r, y: c.y - r, z: c.z - r },
+    max: { x: c.x + r, y: c.y + r, z: c.z + r },
+    label: step.label,
+    reason: `I chose to protect ${step.label}.`,
+    ...(step.player !== undefined && { owner: step.player }),
+  });
+  if (outcome.status === "failed") return { status: "failed", detail: outcome.error };
+  noteArea(context, outcome.area);
+  return {
+    status: "done",
+    detail: `protected area #${outcome.area.regionId} '${outcome.area.label}' (${2 * r + 1} blocks across around ${c.x} ${c.y} ${c.z}): I will not dig or place blocks there`,
+  };
+}
+
+async function releaseArea(context: SkillContext, regionId: number): Promise<SkillResult> {
+  const outcome = await context.runtime.unprotectRegion(regionId);
+  if (outcome.status === "failed") return { status: "failed", detail: outcome.error };
+  const index = context.areas?.findIndex((area) => area.regionId === regionId) ?? -1;
+  if (index !== -1) context.areas?.splice(index, 1);
+  return { status: "done", detail: `released area #${regionId}: I may dig and place blocks there again` };
+}
+
+/**
+ * A house's protected box: its cells, a one-block ring around them and the layer under them, so gathering beside it
+ * cannot undermine a wall or take the doorstep (live 2026-10-01: dirt dug under Tom's doorway).
+ */
+export function houseBox(cells: readonly Position[]): { readonly min: Position; readonly max: Position } {
+  const xs = cells.map((cell) => cell.x);
+  const ys = cells.map((cell) => cell.y);
+  const zs = cells.map((cell) => cell.z);
+  return {
+    min: { x: Math.min(...xs) - 1, y: Math.min(...ys) - 1, z: Math.min(...zs) - 1 },
+    max: { x: Math.max(...xs) + 1, y: Math.max(...ys), z: Math.max(...zs) + 1 },
+  };
+}
+
+function noteArea(context: SkillContext, area: ProtectedArea): void {
+  if (context.areas === undefined) return;
+  const index = context.areas.findIndex((known) => known.regionId === area.regionId);
+  if (index === -1) context.areas.push(area);
+  else context.areas[index] = area;
 }
 
 function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {

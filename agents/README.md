@@ -39,7 +39,9 @@ safety checks, the models decide.
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
 (intermediates automatic), get items (fetch that many more like a player, keeping everything it already carries, then
 come back), eat, equip, sleep, hunt
-mobs for drops, build a house (small or medium, always in the persona's own style, from carried blocks). A persona
+mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
+respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
+blocks). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
@@ -51,6 +53,9 @@ carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fe
 where it started), then builds where it stands, its door facing whoever asked: one `build_structure` call per layer,
 a clearing pass that re-digs the room (navigation scaffolding), and the door last. The site is not surveyed. A house
 left unfinished (a refused cell, the step set aside) is resumed at the same site and part by the next build step.
+Before its first block the house protects its own box (cells + a one-block ring + the layer below, ADR-012), so the
+character's own gathering and goals never dig into it; the build itself still works inside. Protected areas are read
+at start (`protected_regions`) and every tier sees them ("Protected areas ...").
 A finished house becomes a **known place** (door and facing, a standing spot on the roof ridge): the agent keeps the
 last 8 and every tier sees them in its situation ("Places you know: ..."), so "go to the roof" is a `go_to` with real
 coordinates. When no skill fits a request (a pillar, a tower...), the prompts let the character say it does not know

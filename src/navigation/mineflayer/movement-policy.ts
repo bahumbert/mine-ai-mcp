@@ -1,5 +1,6 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
+import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
  * and what each costs, answered with Mineflayer's own knowledge of blocks,
@@ -91,6 +92,11 @@ export interface MineflayerMovementPolicyOptions {
   readonly breakPenalty?: number;
   /** Cells a route may never dig, as packed keys: the blocks of a structure being built. */
   readonly protectedCells?: ReadonlySet<number>;
+  /**
+   * The owner whose protected regions this caller may dig and scaffold in: a build working on its own house (ADR-012).
+   * Every other region refuses both.
+   */
+  readonly ignoreRegionsOwnedBy?: string;
 }
 
 /** Whether the cell holds water or lava, and whether as a source; null when it holds neither or is not loaded. */
@@ -408,6 +414,15 @@ export function createMineflayerMovementPolicy(
       !options.isRequestedBreak(observation, position)) ||
     (options.protectedCells?.has(packKey(position.x, position.y, position.z)) ?? false);
 
+  // Read at each check rather than when the policy is made, like the navigation policy: a region protected while a
+  // long action runs applies to its next search.
+  const regionRefusal = (x: number, y: number, z: number): PolicyDecision | null => {
+    const regions = readProtectedRegions(bot);
+    if (regions.length === 0) return null;
+    const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy);
+    return region === null ? null : { kind: "prohibited", reason: `inside ${describeProtectedRegion(region)}` };
+  };
+
   // Whether a route may stand in or on a cell: damaging, lava, or a block to
   // avoid. Search asks this of every arrival, so it is the observation's
   // bits and one table read.
@@ -428,6 +443,8 @@ export function createMineflayerMovementPolicy(
     confirmBreak: (observation, position, world) => {
       if (observation.kind === "unloaded") return unloaded.decision;
       if (refusedAtCell(observation, position)) return prohibited.decision;
+      const inRegion = regionRefusal(position.x, position.y, position.z);
+      if (inRegion !== null) return inRegion;
       return opensIntoLiquid(world, position.x, position.y, position.z) ? OPENS_INTO_LIQUID : ALLOWED_STEP;
     },
     evaluateBreak: (observation, position, world) => {
@@ -438,6 +455,8 @@ export function createMineflayerMovementPolicy(
       // given: a requested break is judged by cell, and a protected cell
       // refuses before the tool is questioned.
       if (refusedAtCell(observation, position)) return prohibited;
+      const inRegion = regionRefusal(position.x, position.y, position.z);
+      if (inRegion !== null) return { decision: inRegion, tool: verdict.tool };
       if (verdict === unharvestable) return verdict;
       // Last, and with the tool it would have used: a caller that owns the
       // target break needs to know this refusal is the flood rule rather than
@@ -448,6 +467,8 @@ export function createMineflayerMovementPolicy(
       return verdict;
     },
     decidePlace: (x, y, z) => {
+      const inRegion = regionRefusal(x, y, z);
+      if (inRegion !== null) return inRegion;
       // The route moves our own body before placing; other bodies are live obstacles.
       const reason = occupiedCell(bot, { x, y, z }, bot.entity.id);
       return reason ? { kind: "prohibited", reason } : ALLOWED_STEP;

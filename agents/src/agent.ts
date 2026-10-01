@@ -4,7 +4,7 @@ import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
 import { memoryNote, recall, recallQuery, type Memory } from "./memory.ts";
 import type { Persona } from "./persona.ts";
-import type { BotRuntime, BotSnapshot, PlayerMessage } from "./runtime-client.ts";
+import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 import { runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 
 /** How often the agent checks for new chat. */
@@ -56,6 +56,8 @@ export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
+  /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
+  private readonly areas: ProtectedArea[] = [];
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
   /** The unfinished house as last saved to memory, to save it again only when it changed. */
   private savedUnfinished = "null";
@@ -84,6 +86,7 @@ export class Agent {
     // The runtime keeps chat from before this brain started; answering it now would be confusing.
     await this.options.runtime.readMessages();
     await this.recallMemory();
+    await this.recallAreas();
     await this.keepSettings(await this.options.runtime.status());
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
     const working = this.workLoop(signal);
@@ -109,7 +112,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: [...this.places] }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: [...this.places], areas: [...this.areas] }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -182,7 +185,7 @@ export class Agent {
     const { persona, mind, runtime, log } = this.options;
     if (persona.goal === undefined || Date.now() < this.restUntil) return false;
     if (!(await this.waitForGoalBudget())) return true;
-    const text = await mind.chooseObjective({ persona, snapshot: await runtime.status(), places: [...this.places], lately: [...this.lately] }, this.runSignal);
+    const text = await mind.chooseObjective({ persona, snapshot: await runtime.status(), places: [...this.places], areas: [...this.areas], lately: [...this.lately] }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}`);
@@ -200,7 +203,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: [...this.places], steps: [...work.steps], paused }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: [...this.places], areas: [...this.areas], steps: [...work.steps], paused }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;
@@ -229,6 +232,7 @@ export class Agent {
         style: persona.style,
         remember: (place) => this.learnPlace(place),
         building: this.building,
+        areas: this.areas,
       });
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -316,6 +320,16 @@ export class Agent {
     this.places.push(place);
     if (this.places.length > KNOWN_PLACES) this.places.splice(0, this.places.length - KNOWN_PLACES);
     this.memorize({ kind: "place", place });
+  }
+
+  /** The areas protected in this world's bot data, so the models know them from the first prompt. */
+  private async recallAreas(): Promise<void> {
+    try {
+      this.areas.push(...await this.options.runtime.protectedRegions());
+      this.options.log(`knows ${this.areas.length} protected area(s)`);
+    } catch (error) {
+      this.options.log(`could not read its protected areas: ${String(error)}`);
+    }
   }
 
   /** What it knew before this brain started: the memories saved as notes in this world's bot data. */

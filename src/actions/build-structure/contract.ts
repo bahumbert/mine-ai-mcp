@@ -6,7 +6,7 @@ import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js
 
 export const BUILD_STRUCTURE = "build_structure" as const;
 export const BUILD_STRUCTURE_DESCRIPTION =
-  "Build a structure given as cells, each an absolute x, y, z and a carried block name, or air for a cell to dig clear, or as a nether portal frame using 10 obsidian and 4 cobblestone corner supports at an interior corner with its interior kept clear. Places every cell it can reach from where the bot stands, walks within reach of the rest lowest first, never builds itself in, and reports what was placed, dug, and short, and why each cell still wrong was left: holding another block, nothing to place against, its block not carried, would seal the bot in, or refused. Required tool-tier loss stops with partial progress by default; on_tool_loss=continue keeps the same build running. Sending the same structure again resumes or audits it.";
+  "Build a structure given as cells, each an absolute x, y, z and a carried block name, or air for a cell to dig clear, or as a nether portal frame using 10 obsidian and 4 cobblestone corner supports at an interior corner with its interior kept clear. Places every cell it can reach from where the bot stands, walks within reach of the rest lowest first, never builds itself in, and reports what was placed, dug, and short, and why each cell still wrong was left: holding another block, nothing to place against, its block not carried, would seal the bot in, or refused. Required tool-tier loss stops with partial progress by default; on_tool_loss=continue keeps the same build running. Sending the same structure again resumes or audits it. Works inside protected regions this bot owns; a request with a cell in anyone else's protected region is refused before any block is touched.";
 
 /** How many cells one build may describe; a portal preset is twenty and a small shelter under a hundred. */
 export const MAX_STRUCTURE_CELLS = 256;
@@ -196,4 +196,6 @@ export const buildStructureOutcomes = {
     (missing ? `; short of ${missing}` : "") +
     ".",
   stopped: (reason: string) => `[BUILD_STOPPED] The build stopped: ${reason}.`,
+  protectedRegion: (cells: number, region: string) =>
+    `[BUILD_PROTECTED_REGION] ${cells} cell${cells === 1 ? " lies" : "s lie"} inside ${region}, which this bot does not own; unprotect it or build elsewhere.`,
 } as const;

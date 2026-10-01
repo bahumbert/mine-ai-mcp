@@ -14,6 +14,7 @@ function chatInput(message: string, addressed = false): ChatInput {
     snapshot: new FakeRuntime().snapshot,
     activity: "idle",
     places: [],
+    areas: [],
   };
 }
 
@@ -23,6 +24,7 @@ function workInput(text: string, overrides: Partial<WorkInput> = {}): WorkInput 
     objective: { text, requester: "Steve" },
     snapshot: new FakeRuntime().snapshot,
     places: [],
+    areas: [],
     steps: [],
     paused: [],
     ...overrides,
@@ -78,11 +80,13 @@ test("the work tier sees the objective, who asked, what was set aside, places an
   action.reply({ step: { skill: "go_to", x: -4, y: 70, z: 0 } });
   await mind.next(workInput("go to the roof", {
     places: [house],
+    areas: [{ regionId: 2, label: "small medieval house", owner: "Ayla", min: { x: -6, y: 63, z: -3 }, max: { x: 0, y: 70, z: 3 } }],
     paused: [{ text: "gather wood for my base", requester: null }],
     steps: [{ step: "go to Steve", outcome: "done", detail: "reached Steve" }],
   }), signal);
   const request = action.requests[0]?.[1]?.content ?? "";
   assert.match(request, /\n- Places you know: the small medieval house you built for Steve \(door -2 64 0 facing east; stand on its roof at -4 70 0\)\.\n/u);
+  assert.match(request, /\n- Protected areas \(you never dig or place blocks there\): #2 small medieval house \(owner Ayla, -6 63 -3 to 0 70 3\)\.\n/u);
   assert.match(request, /Objective \(asked by Steve\): "go to the roof"/u);
   assert.match(request, /Set aside until this one ends: "gather wood for my base"/u);
   assert.match(request, /1\. go to Steve -> done: reached Steve/u);
@@ -97,6 +101,8 @@ test("the init prompt carries the style, the own goal, whose requests come first
   assert.match(personaPrompt(testPersona()), /You have no goal of your own/u);
   assert.match(chatSystemPrompt(testPersona({ stance: "rival" })), /"act" = you take on what they ask now/u);
   assert.match(chatSystemPrompt(testPersona()), /"later" = you take it on for when your current work is done/u);
+  // Live 2026-10-01: "please never dig around here" got "I'll keep this spot safe" as talk, and nothing kept it.
+  assert.match(chatSystemPrompt(testPersona()), /A promise that one of the things you can do keeps [\s\S]*? is "act"/u);
 });
 
 test("the goal tier picks the next own objective, knowing how the last ones went", async () => {
@@ -106,6 +112,7 @@ test("the goal tier picks the next own objective, knowing how the last ones went
     persona: testPersona({ goal: "build yourself a base" }),
     snapshot: new FakeRuntime().snapshot,
     places: [],
+    areas: [],
     lately: ["craft a crafting_table: done (crafted it)"],
   }, signal);
   assert.equal(objective, "Collect 16 oak_log for my base.");

@@ -1,6 +1,6 @@
 import type { Step } from "./actions.ts";
 import type { Persona } from "./persona.ts";
-import type { BotSnapshot, PlayerMessage } from "./runtime-client.ts";
+import type { BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 
 export interface ChatLine {
   readonly speaker: string;
@@ -36,6 +36,8 @@ export interface ChatInput {
   readonly activity: string;
   /** Places the agent knows, oldest first. */
   readonly places: readonly KnownPlace[];
+  /** Areas it never digs or places blocks in (ADR-012), oldest first. */
+  readonly areas: readonly ProtectedArea[];
 }
 
 export interface ChatDecision {
@@ -64,6 +66,8 @@ export interface WorkInput {
   readonly objective: Objective;
   readonly snapshot: BotSnapshot;
   readonly places: readonly KnownPlace[];
+  /** Areas it never digs or places blocks in (ADR-012), oldest first. */
+  readonly areas: readonly ProtectedArea[];
   /** Steps taken for this objective, oldest first (the last few). */
   readonly steps: readonly StepRecord[];
   /** Objectives set aside for this one, to resume afterwards. */
@@ -81,6 +85,8 @@ export interface GoalInput {
   readonly persona: Persona;
   readonly snapshot: BotSnapshot;
   readonly places: readonly KnownPlace[];
+  /** Areas it never digs or places blocks in (ADR-012), oldest first. */
+  readonly areas: readonly ProtectedArea[];
   /** How its last own objectives ended, oldest first. */
   readonly lately: readonly string[];
 }

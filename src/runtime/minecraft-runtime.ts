@@ -1,3 +1,5 @@
+import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
+import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
 import { randomUUID } from "node:crypto";
@@ -299,6 +301,9 @@ export async function createMinecraftRuntime(
 ): Promise<MinecraftRuntime> {
   await using resources = new AsyncDisposableStack();
   const botData = resources.use(SqlBotData.create(options.botData));
+  // One list per bot: routes read it through the provider, the region tools write it (ADR-012).
+  const protectedRegions = new ProtectedRegionStore(botData);
+  setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
   const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), position: () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
@@ -433,6 +438,7 @@ export async function createMinecraftRuntime(
       budgets: reflexes.budgets,
       bot,
       botData,
+      protectedRegions,
       frontier,
       navigation,
       strongholdEyeFlights,
