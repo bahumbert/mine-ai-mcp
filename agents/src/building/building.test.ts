@@ -110,10 +110,12 @@ test("batches go one layer at a time bottom up within the runtime limit, then cl
   assert.ok(body.every((batch) => batch.every((cell) => cell.y === batch[0]!.y)), "one layer per batch");
   assert.deepEqual(body.map((batch) => batch[0]!.y), [...new Set(plan.cells.map((cell) => cell.y))].sort((a, b) => a - b));
   const last = batches.at(-1)!;
-  assert.deepEqual(last.map((cell) => cell.block), ["oak_door"]);
+  assert.deepEqual(last.map((cell) => cell.role), ["foundation", "door"], "the door is hung with the block it stands on");
+  const door = last[1]!;
+  assert.deepEqual(key(last[0]!), key({ ...door, y: door.y - 1 }));
   const structure = body.flat();
   assert.equal(structure.length + 1, plan.cells.length + 2);
-  const doorway = [key(last[0]!), key({ ...last[0]!, y: last[0]!.y + 1 })];
+  const doorway = [key(door), key({ ...door, y: door.y + 1 })];
   for (const cell of doorway) assert.ok(structure.some((entry) => entry.block === "air" && key(entry) === cell));
   const clearing = batches.at(-2)!;
   assert.ok(clearing.every((cell) => cell.block === "air"));

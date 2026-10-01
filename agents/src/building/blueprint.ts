@@ -147,8 +147,9 @@ export function batchCells(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): 
  * The `build_structure` calls for a placed blueprint: everything but the door, one layer at a time, with the doorway
  * dug clear so the bot can walk in and out while it works; then every air cell of the blueprint again, because reaching
  * the roof the bot pillars up on scaffold blocks and leaves them in the room it had already cleared (the first live house
- * kept four dirt blocks inside); then the door alone, last. The doorway is not cleared again: a finished house's door
- * stands there, which navigation will not break.
+ * kept four dirt blocks inside); then the door alone, last, with the block it stands on: Minecraft drops a door that
+ * has nothing under it, and a doorstep dug out after the first layer (live 2026-10-01) left it refused for good. The
+ * doorway is not cleared again: a finished house's door stands there, which navigation will not break.
  */
 export function buildBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): WorldCell[][] {
   const doors = cells.filter((cell) => cell.role === "door");
@@ -156,9 +157,10 @@ export function buildBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS)
     { x: door.x, y: door.y, z: door.z, block: "air", role: "air" },
     { x: door.x, y: door.y + 1, z: door.z, block: "air", role: "air" },
   ]);
+  const supports = cells.filter((cell) => doors.some((door) => cell.x === door.x && cell.y === door.y - 1 && cell.z === door.z));
   const body = batchCells([...cells.filter((cell) => cell.role !== "door"), ...doorway], max);
   const air = cells.filter((cell) => cell.role === "air");
   const clearing: WorldCell[][] = [];
   for (let start = 0; start < air.length; start += max) clearing.push(air.slice(start, start + max));
-  return [...body, ...clearing, ...(doors.length === 0 ? [] : [doors])];
+  return [...body, ...clearing, ...(doors.length === 0 ? [] : [[...supports, ...doors]])];
 }

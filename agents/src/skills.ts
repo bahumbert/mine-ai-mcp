@@ -181,7 +181,7 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
 /**
  * Builds a house from the persona's style where the bot stands, facing the requester, with carried blocks only (the
  * model fetches them first with `get_items`); one `build_structure` call per batch. A house left unfinished (a cell
- * refused, the step set aside) is resumed at the same site and part by the next build of the same kind.
+ * refused, the step set aside) is finished at the same site by the next build of the same kind.
  */
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
@@ -198,7 +198,9 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const leaveUnfinished = (part: number) => {
     if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part };
   };
-  for (let index = resumed?.part ?? 0; index < plan.batches.length; index += 1) {
+  // A resumed house is checked again from its first part: `build_structure` skips the cells already right, and anything
+  // dug out since (the doorstep under the door, by the gathering next to it: live 2026-10-01) is put back.
+  for (let index = 0; index < plan.batches.length; index += 1) {
     const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block, facing }) => ({ x, y, z, block_name: block, ...(facing !== undefined && { facing }) }));
     const part = `part ${index + 1}/${plan.batches.length}`;
     const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });

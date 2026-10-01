@@ -112,7 +112,8 @@ test("a house is built behind the bot in batches facing the requester, the door 
   assert.ok(calls.length > 2);
   assert.ok(calls.every((call) => call.remove_wrong_blocks && call.blocks.length <= 256));
   // Hung from the doorstep, facing into the house, so it swings along the doorway.
-  assert.deepEqual(calls.at(-1)!.blocks, [{ x: -2, y: 64, z: 0, block_name: "oak_door", facing: "west" }]);
+  assert.deepEqual(calls.at(-1)!.blocks.at(-1), { x: -2, y: 64, z: 0, block_name: "oak_door", facing: "west" });
+  assert.deepEqual(calls.at(-1)!.blocks.at(0), { x: -2, y: 63, z: 0, block_name: "cobblestone" }, "with the block it stands on");
   assert.ok(calls.slice(0, -1).flatMap((call) => call.blocks).every((cell) => cell.x <= -1), "the house stands behind the bot, away from Steve");
 });
 
@@ -140,6 +141,24 @@ test("building again resumes an unfinished house at the same site and part, with
   const calls = builds(runtime);
   assert.deepEqual(calls[1]!.blocks, calls[0]!.blocks, "the refused part is built again where it was");
   assert.equal(building.unfinished, null);
+});
+
+test("an unfinished house is checked again from its first part, so what was dug out since is put back", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null };
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && builds(runtime).length === 2) runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong" };
+    return submit(tool, input, ...rest);
+  };
+  const context = contextFor(runtime, { style: "medieval", building });
+  const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.match(first.status === "failed" ? first.detail : "", /stopped at part 3\/\d+/u);
+  const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.equal(second.status, "done");
+  const calls = builds(runtime);
+  assert.deepEqual(calls[3]!.blocks, calls[0]!.blocks, "the second build starts again at part 1");
 });
 
 test("get_items fetches that many more of each item", async () => {
