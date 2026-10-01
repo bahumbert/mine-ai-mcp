@@ -11,5 +11,6 @@
     "window": "oak_fence",
     "door": "oak_door"
   },
+  "variants": { "roof": { "stairs": "spruce_stairs", "slab": "spruce_slab" } },
   "house": { "roof": "gable", "overhang": 1 }
 }

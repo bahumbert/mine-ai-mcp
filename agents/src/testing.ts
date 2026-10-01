@@ -15,10 +15,11 @@ const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone" };
 
 /** Exactly the blocks of a small medieval house: carrying them, the build skill gathers nothing. */
 export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
-  { name: "spruce_planks", count: 49 },
+  { name: "spruce_stairs", count: 42 },
   { name: "oak_planks", count: 36 },
   { name: "oak_log", count: 24 },
   { name: "cobblestone", count: 16 },
+  { name: "spruce_slab", count: 7 },
   { name: "oak_fence", count: 3 },
   { name: "oak_door", count: 1 },
 ];

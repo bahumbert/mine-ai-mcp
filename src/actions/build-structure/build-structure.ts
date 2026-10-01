@@ -80,6 +80,8 @@ function toBuildCell(cell: StructureCell): BuildCell {
     position: { x: cell.x, y: cell.y, z: cell.z },
     blockName: cell.blockName,
     ...(cell.facing !== undefined && { facing: cell.facing }),
+    ...(cell.half !== undefined && { half: cell.half }),
+    ...(cell.axis !== undefined && { axis: cell.axis }),
   };
 }
 

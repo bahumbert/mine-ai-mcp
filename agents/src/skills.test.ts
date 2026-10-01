@@ -25,6 +25,8 @@ test("a build step defaults to a small house; the style is always the persona's,
 const HOUSE_RECIPES = {
   oak_planks: { makes: 4, needs: [{ item: "oak_log", count: 1 }] },
   spruce_planks: { makes: 4, needs: [{ item: "spruce_log", count: 1 }] },
+  spruce_stairs: { makes: 4, needs: [{ item: "spruce_planks", count: 6 }] },
+  spruce_slab: { makes: 6, needs: [{ item: "spruce_planks", count: 3 }] },
   stick: { makes: 4, needs: [{ item: "oak_planks", count: 2 }] },
   crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] },
   wooden_pickaxe: { makes: 1, needs: [{ item: "oak_planks", count: 3 }, { item: "stick", count: 2 }] },
@@ -54,7 +56,7 @@ test("get_items fetches items like a player: logs, a table to carry, a wooden pi
     "craft crafting_table",
     "craft wooden_pickaxe at table",
     "collect stone",
-    "craft spruce_planks+oak_planks+oak_fence+oak_door at table",
+    "craft spruce_stairs+oak_planks+spruce_slab+oak_fence+oak_door at table",
   ]);
   assert.ok(runtime.submitted.filter((call) => call.tool === "collect_block").every((call) => Number(call.input.count) <= 32));
 });
@@ -92,7 +94,7 @@ test("a house without its blocks is refused with the exact shortfall, before any
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 30 }, { name: "cobblestone", count: 64 }] };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^missing 49 spruce_planks, 6 oak_planks, 24 oak_log, 3 oak_fence, 1 oak_door for a small medieval house/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^missing 42 spruce_stairs, 6 oak_planks, 24 oak_log, 7 spruce_slab, 3 oak_fence, 1 oak_door for a small medieval house/u);
   assert.equal(runtime.submitted.length, 0);
 });
 
@@ -279,4 +281,15 @@ test("protect_area needs a player in sight or coordinates", async () => {
   assert.equal((await runStep(stepSchema.parse({ skill: "protect_area", x: 1, y: 64, z: 1, radius: 2, label: "spot" }), context)).status, "done");
   assert.equal(runtime.areas[0]?.owner, "self", "coordinates alone protect the character's own area");
   assert.equal(stepSchema.safeParse({ skill: "protect_area", player: "Tom", radius: 32, label: "x" }).success, false);
+});
+
+test("a house's blocks carry their states to build_structure: stairs facing and half, beams along their wall", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }))).status, "done");
+  const blocks = builds(runtime).flatMap((call) => call.blocks) as { block_name: string; facing?: string; half?: string; axis?: string }[];
+  assert.ok(blocks.some((cell) => cell.block_name === "spruce_stairs" && cell.facing !== undefined && cell.half === "bottom"));
+  assert.ok(blocks.some((cell) => cell.block_name === "spruce_slab" && cell.half === "bottom"));
+  assert.ok(blocks.some((cell) => cell.block_name === "oak_log" && (cell.axis === "x" || cell.axis === "z")));
+  assert.ok(blocks.some((cell) => cell.block_name === "oak_log" && cell.axis === "y"));
 });

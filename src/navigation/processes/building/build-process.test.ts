@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
-import { build, enclosesBot, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
+import { build, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -328,4 +328,45 @@ test("a route that cannot reach a cell refuses that cell and carries on with the
   assert.equal(placements.length, 1, "the other cell was still built");
   assert.ok(kinds(result).includes("refused"));
   assert.ok(kinds(result).includes("correct"));
+});
+
+test("a cell asking for block states holds only a block in those states: facing, half (or a slab's type) and axis", () => {
+  const block = (name: string, properties: Record<string, unknown>) =>
+    ({ name, getProperties: () => properties }) as unknown as Parameters<typeof holdsCell>[0];
+  const at = { x: 0, y: 64, z: 0 };
+  const stairs: BuildCell = { position: at, blockName: "spruce_stairs", facing: "north", half: "bottom" };
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "north", half: "bottom", shape: "outer_left" }), stairs), true, "shape is not asked");
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "north", half: "top" }), stairs), false);
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "east", half: "bottom" }), stairs), false);
+  const slab: BuildCell = { position: at, blockName: "spruce_slab", half: "top" };
+  assert.equal(holdsCell(block("spruce_slab", { type: "top" }), slab), true);
+  assert.equal(holdsCell(block("spruce_slab", { type: "bottom" }), slab), false);
+  assert.equal(holdsCell(block("spruce_slab", { type: "double" }), slab), false);
+  const beam: BuildCell = { position: at, blockName: "oak_log", axis: "x" };
+  assert.equal(holdsCell(block("oak_log", { axis: "x" }), beam), true);
+  assert.equal(holdsCell(block("oak_log", { axis: "y" }), beam), false);
+  assert.equal(holdsCell(block("oak_log", { axis: "y" }), { position: at, blockName: "oak_log" }), true, "no state asked, any state");
+});
+
+test("a cell asking a state waits for a support that gives it: a beam beside its pillar, a top slab under or beside a block, never on the floor", async () => {
+  const { bot, put, physics } = structureWorld({ carried: { oak_log: 4, spruce_slab: 4, spruce_stairs: 4 } });
+  // Side neighbours for the top halves: nothing above them, only the floor below.
+  put(new Vec3(6, 64, 3), "stone");
+  put(new Vec3(6, 64, 6), "stone");
+  const structure: BuildCell[] = [
+    { position: { x: 3, y: 64, z: 0 }, blockName: "oak_log", axis: "x" },
+    { position: { x: 2, y: 64, z: 0 }, blockName: "oak_log", axis: "y" },
+    { position: { x: 5, y: 64, z: 3 }, blockName: "spruce_slab", half: "top" },
+    { position: { x: 5, y: 64, z: 6 }, blockName: "spruce_stairs", facing: "north", half: "top" },
+    { position: { x: 5, y: 65, z: 9 }, blockName: "spruce_slab", half: "bottom" },
+  ];
+  put(new Vec3(5, 64, 9), "stone");
+  const result = await build(bot, { ...physics, cells: structure, removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  const states = (x: number, y: number, z = 0) => bot.blockAt(new Vec3(x, y, z))!.getProperties();
+  assert.deepEqual(states(2, 64), { axis: "y" });
+  assert.deepEqual(states(3, 64), { axis: "x" }, "placed against the pillar, not the floor");
+  assert.deepEqual(states(5, 64, 3), { type: "top" });
+  assert.deepEqual(states(5, 64, 6), { facing: "north", half: "top" });
+  assert.deepEqual(states(5, 65, 9), { type: "bottom" });
 });

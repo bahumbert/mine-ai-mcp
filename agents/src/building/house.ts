@@ -1,4 +1,17 @@
-import { blueprintSchema, type Blueprint, type Role } from "./blueprint.ts";
+import { blueprintSchema, type Blueprint, type Role, type Shape } from "./blueprint.ts";
+
+type Facing = "north" | "south" | "east" | "west";
+/** What a cell asks besides its role (ADR-013), in the blueprint frame. */
+interface States {
+  readonly shape?: Shape;
+  readonly facing?: Facing;
+  readonly half?: "top" | "bottom";
+  readonly axis?: "x" | "y" | "z";
+}
+/** A roof step: bottom stairs whose high side faces up the slope. */
+const stairs = (facing: Facing): States => ({ shape: "stairs", facing, half: "bottom" });
+/** The row on top of the roof. */
+const RIDGE: States = { shape: "slab", half: "bottom" };
 
 export const ROOFS = ["gable", "hip"] as const;
 export type Roof = (typeof ROOFS)[number];
@@ -24,9 +37,10 @@ export type HouseSize = keyof typeof HOUSE_SIZES;
 
 /**
  * A one-room house: floor on the ground layer (foundation ring + floor), walls with corner pillars, a trim row,
- * windows at row 2, one door centred in the front wall, the room and doorstep dug clear, and a stepped full-block roof
- * (no stairs until blueprints carry block states). Every roof block rests on or beside one placed before it, so the
- * builder never needs scaffolding cells of its own.
+ * windows at row 2, one door centred in the front wall, the room and doorstep dug clear, and a roof of stairs facing up
+ * their slope with a slab ridge (a style without stairs builds them as full blocks). Pillars stand, trim beams lie along
+ * their wall (ADR-013). Every roof block rests on or beside one placed before it, so the builder never needs
+ * scaffolding cells of its own.
  */
 export function house(options: HouseOptions): Blueprint {
   const { width, depth, wallHeight, roof, overhang } = options;
@@ -35,8 +49,8 @@ export function house(options: HouseOptions): Blueprint {
   if (wallHeight < 3) throw new Error(`house wall height must be at least 3, not ${wallHeight}`);
   if (!Number.isInteger(overhang) || overhang < 0 || overhang > 2) throw new Error(`house overhang must be 0-2, not ${overhang}`);
 
-  const cells = new Map<string, { x: number; y: number; z: number; role: Role }>();
-  const set = (x: number, y: number, z: number, role: Role) => cells.set(`${x},${y},${z}`, { x, y, z, role });
+  const cells = new Map<string, { x: number; y: number; z: number; role: Role } & States>();
+  const set = (x: number, y: number, z: number, role: Role, states: States = {}) => cells.set(`${x},${y},${z}`, { x, y, z, role, ...states });
   /** Adds a hidden support block, but never over a wall, pillar or trim. */
   const support = (x: number, y: number, z: number) => {
     const existing = cells.get(`${x},${y},${z}`);
@@ -66,11 +80,11 @@ export function house(options: HouseOptions): Blueprint {
       set(x, 0, z, edge(x, z) ? "foundation" : "floor");
       for (let y = 1; y <= wallHeight; y += 1) {
         if (!edge(x, z)) set(x, y, z, "air");
-        else if (corner(x, z)) set(x, y, z, "pillar");
+        else if (corner(x, z)) set(x, y, z, "pillar", { axis: "y" });
         else if (x === doorX && z === z0 && y <= 2) {
           // The door item places its own upper half: that cell is not listed.
           if (y === 1) set(x, y, z, "door");
-        } else if (y === wallHeight) set(x, y, z, "trim");
+        } else if (y === wallHeight) set(x, y, z, "trim", { axis: z === z0 || z === z1 ? "x" : "z" });
         else if (y === 2 && windows.has(`${x},${z}`)) set(x, y, z, "window");
         else set(x, y, z, "wall");
       }
@@ -83,14 +97,19 @@ export function house(options: HouseOptions): Blueprint {
     // Slopes across the shorter side; the triangular gable ends are wall, and hold up each roof row from its end.
     const acrossX = width <= depth;
     const [s0, s1, l0, l1] = acrossX ? [x0, x1, z0, z1] : [z0, z1, x0, x1];
-    const at = (s: number, y: number, l: number, role: Role) => (acrossX ? set(s, y, l, role) : set(l, y, s, role));
+    const at = (s: number, y: number, l: number, role: Role, states: States = {}) => (acrossX ? set(s, y, l, role, states) : set(l, y, s, role, states));
+    // Up the slope, toward the ridge: +s on the low side, -s on the high side.
+    const [upFromLow, upFromHigh]: [Facing, Facing] = acrossX ? ["east", "west"] : ["south", "north"];
     for (let k = 0; s0 - overhang + k <= s1 + overhang - k; k += 1) {
       const low = s0 - overhang + k;
       const high = s1 + overhang - k;
       const y = wallHeight + k;
       for (let l = l0 - overhang; l <= l1 + overhang; l += 1) {
-        at(low, y, l, "roof");
-        at(high, y, l, "roof");
+        if (low === high) at(low, y, l, "roof", RIDGE);
+        else {
+          at(low, y, l, "roof", stairs(upFromLow));
+          at(high, y, l, "roof", stairs(upFromHigh));
+        }
       }
       if (k > 0) {
         for (let s = low + 1; s < high; s += 1) {
@@ -108,8 +127,13 @@ export function house(options: HouseOptions): Blueprint {
       for (let x = xl; x <= xh; x += 1) {
         for (let z = zl; z <= zh; z += 1) {
           const ring = Math.min(x - xl, xh - x, z - zl, zh - z);
-          if (ring === 0) set(x, y, z, "roof");
-          else if (ring === 1) support(x, y, z);
+          if (ring !== 0) {
+            if (ring === 1) support(x, y, z);
+            continue;
+          }
+          // The top ring, a line or one cell, is the ridge; any other ring slopes inward.
+          if (xl === xh || zl === zh) set(x, y, z, "roof", RIDGE);
+          else set(x, y, z, "roof", stairs(x === xl ? "east" : x === xh ? "west" : z === zl ? "south" : "north"));
         }
       }
     }

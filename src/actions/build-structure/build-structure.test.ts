@@ -167,3 +167,21 @@ test("a structure is refused before any block is touched when a cell lies in a r
   setProtectedRegionsProvider(bot, () => [region("ayla")]);
   assert.equal((await buildStructure(bot, request, {}, physics)).status, "succeeded");
 });
+
+test("cells may ask a half and an axis, and one cell asked two ways is refused", () => {
+  assert.deepEqual(
+    parseBuildStructureRequest({ blocks: [
+      { x: 1, y: 64, z: 1, block_name: "spruce_stairs", facing: "north", half: "top" },
+      { x: 2, y: 64, z: 1, block_name: "oak_log", axis: "x" },
+    ] }).cells,
+    [
+      { x: 1, y: 64, z: 1, blockName: "spruce_stairs", facing: "north", half: "top" },
+      { x: 2, y: 64, z: 1, blockName: "oak_log", axis: "x" },
+    ],
+  );
+  assert.throws(() => parseBuildStructureRequest({ blocks: [
+    { x: 1, y: 64, z: 1, block_name: "spruce_slab", half: "top" },
+    { x: 1, y: 64, z: 1, block_name: "spruce_slab", half: "bottom" },
+  ] }), /both spruce_slab top and spruce_slab bottom/);
+  assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 1, y: 64, z: 1, block_name: "oak_log", axis: "w" }] }));
+});

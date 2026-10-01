@@ -45,7 +45,7 @@ export function styleOrDefault(name: string | undefined): Style {
 
 export function planHouse(style: Style, size: HouseSize, site: Site): HousePlan {
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-  const cells = placeBlueprint(blueprint, style.palette, site.door, site.facing);
+  const cells = placeBlueprint(blueprint, style.palette, site.door, site.facing, style.variants);
   return { style, size, site, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
 }
 

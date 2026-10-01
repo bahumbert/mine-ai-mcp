@@ -46,7 +46,9 @@ may limit them (`skills`). A new skill = one catalog entry + one runner in `src/
 from the catalog.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
-roof type) fed to a parametric generator (`house.ts`). The house skill line in the prompt lists what the persona's
+roof type, plus `variants`: the stairs and slab of a role) fed to a parametric generator (`house.ts`): stair roofs
+facing up their slope with a slab ridge, pillars standing and trim beams along the walls (block states, ADR-013; a
+style without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
 style needs; the model fetches it with `get_items` (`src/gathering.ts`: chop the logs, craft a crafting table to
 carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and doors; the runtime's
 `view_crafting_requirements` picks the recipes; each round restarts from the real inventory; crafting happens back

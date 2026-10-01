@@ -3,6 +3,7 @@ import { z } from "zod";
 import { type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
 import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
+import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
 
 export const BUILD_STRUCTURE = "build_structure" as const;
 export const BUILD_STRUCTURE_DESCRIPTION =
@@ -25,6 +26,18 @@ export const structureCellSchema = z.strictObject({
     .optional()
     .describe(
       "For a block Minecraft orients by the player's facing (a door, stairs): the facing it must have. The bot faces that way while placing it, and the same block facing elsewhere counts as wrong.",
+    ),
+  half: z
+    .enum(BLOCK_HALVES)
+    .optional()
+    .describe(
+      "For stairs, slabs and trapdoors: the upper or lower half it must take (a slab's type). The bot clicks above or below the middle of a side face, or places against the block above or below, as a player would; the other half counts as wrong.",
+    ),
+  axis: z
+    .enum(BLOCK_AXES)
+    .optional()
+    .describe(
+      "For logs and other blocks with an axis: the axis it must lie along. The bot places it against a neighbour on that axis (a horizontal beam needs one beside it); another axis counts as wrong.",
     ),
 });
 
@@ -60,6 +73,15 @@ export interface StructureCell {
   readonly z: number;
   readonly blockName: string;
   readonly facing?: HorizontalFacing;
+  readonly half?: BlockHalf;
+  readonly axis?: BlockAxis;
+}
+
+/** How a cell reads in messages: its block and every state it asks for. */
+export function describeStructureCell(cell: Pick<StructureCell, "blockName" | "facing" | "half" | "axis">): string {
+  return [cell.blockName, cell.facing && `facing ${cell.facing}`, cell.half, cell.axis && `along ${cell.axis}`]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export interface BuildStructureRequest {
@@ -101,6 +123,8 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
       z: cell.z,
       blockName: cell.block_name,
       ...(cell.facing !== undefined && { facing: cell.facing }),
+      ...(cell.half !== undefined && { half: cell.half }),
+      ...(cell.axis !== undefined && { axis: cell.axis }),
     })),
     ...(value.portal_frame ? portalFrameCells(value.portal_frame) : []),
   ];
@@ -112,9 +136,8 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
   for (const cell of cells) {
     const key = `${cell.x},${cell.y},${cell.z}`;
     const existing = byCell.get(key);
-    if (existing && (existing.blockName !== cell.blockName || existing.facing !== cell.facing)) {
-      const describe = (asked: StructureCell) => `${asked.blockName}${asked.facing ? ` facing ${asked.facing}` : ""}`;
-      throw new Error(`Cell ${key} is asked to be both ${describe(existing)} and ${describe(cell)}.`);
+    if (existing && describeStructureCell(existing) !== describeStructureCell(cell)) {
+      throw new Error(`Cell ${key} is asked to be both ${describeStructureCell(existing)} and ${describeStructureCell(cell)}.`);
     }
     byCell.set(key, cell);
   }

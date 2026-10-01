@@ -87,7 +87,19 @@ export function structureWorld(options: StructureWorldOptions = {}) {
       const look = placement.lookDirection;
       const facing = look === undefined ? undefined : look.x > 0 ? "east" : look.x < 0 ? "west" : look.z > 0 ? "south" : "north";
       if (facing !== undefined) looks.push(facing);
-      put(new Vec3(cell.x, cell.y, cell.z), placement.item.name, facing === undefined ? {} : { facing });
+      // Vanilla's other placement states (ADR-013): a log lies along the clicked face's axis; stairs and slabs take
+      // the top half against the underside of the block above, or a side face clicked above its middle.
+      const name = placement.item.name;
+      const face = placement.face;
+      const axis = face.x !== 0 ? "x" : face.y !== 0 ? "y" : "z";
+      const half = face.y < 0 || (face.y === 0 && placement.half === "top") ? "top" : "bottom";
+      const states = {
+        ...(facing !== undefined && { facing }),
+        ...(name.endsWith("_log") && { axis }),
+        ...(name.endsWith("_stairs") && { half }),
+        ...(name.endsWith("_slab") && { type: half }),
+      };
+      put(new Vec3(cell.x, cell.y, cell.z), name, states);
       carried.set(placement.item.name, (carried.get(placement.item.name) ?? 0) - 1);
       return { kind: "placed", block: blocks.get(key(cell)) as never };
     },

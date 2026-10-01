@@ -8,6 +8,15 @@ export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "
 export type Role = (typeof ROLES)[number];
 export type BlockRole = Exclude<Role, "air">;
 
+/** Shapes a cell may take from its role's material: stairs or a slab of the same wood or stone. */
+export const SHAPES = ["stairs", "slab"] as const;
+export type Shape = (typeof SHAPES)[number];
+
+/** Per role, the blocks a style uses for each shape; a role without one builds the shape as its full block. */
+export type Variants = Readonly<Partial<Record<BlockRole, Readonly<Partial<Record<Shape, string>>>>>>;
+
+const FACINGS = ["north", "south", "east", "west"] as const;
+
 /** The runtime's `build_structure` limit (src/actions/build-structure/contract.ts `MAX_STRUCTURE_CELLS`). */
 export const MAX_BATCH_CELLS = 256;
 
@@ -15,13 +24,24 @@ const index = z.number().int().nonnegative();
 
 /**
  * A structure in its own frame: x to the right, y up (0 = the ground layer the floor replaces), and the front, where
- * the single door is, facing -z. Block states (stairs, log axis, door hinge) are not modelled yet: the runtime's
- * `build_structure` compares block names only.
+ * the single door is, facing -z. Cells may ask block states (ADR-013): a shape with its facing and half, or a log's
+ * axis; `build_structure` places and audits them (door hinge is left to Minecraft).
  */
 export const blueprintSchema = z.strictObject({
   name: z.string().min(1),
   size: z.strictObject({ x: index.min(1), y: index.min(1), z: index.min(1) }),
-  cells: z.array(z.strictObject({ x: index, y: index, z: index, role: z.enum(ROLES) })).min(1),
+  cells: z.array(z.strictObject({
+    x: index,
+    y: index,
+    z: index,
+    role: z.enum(ROLES),
+    /** Built from the role's stairs or slab variant when the style has one (ADR-013). */
+    shape: z.enum(SHAPES).optional(),
+    /** In the blueprint frame, where the front (the door side) is north. */
+    facing: z.enum(FACINGS).optional(),
+    half: z.enum(["top", "bottom"]).optional(),
+    axis: z.enum(["x", "y", "z"]).optional(),
+  })).min(1),
 }).superRefine((blueprint, context) => {
   const seen = new Set<string>();
   let doors = 0;
@@ -50,8 +70,12 @@ export interface WorldCell {
   /** Block id, or `air` for a cell to dig clear. */
   readonly block: string;
   readonly role: Role;
-  /** For the door: the facing Minecraft must give it (`build_structure` places it looking that way). */
+  /** For the door and stairs: the facing Minecraft must give it (`build_structure` places it looking that way). */
   readonly facing?: Facing;
+  /** For stairs and slabs: the half (ADR-013). */
+  readonly half?: "top" | "bottom";
+  /** For logs: the axis they lie along (ADR-013). */
+  readonly axis?: "x" | "y" | "z";
 }
 
 export interface Position {
@@ -84,20 +108,33 @@ const OPPOSITE: Readonly<Record<Facing, Facing>> = { north: "south", south: "nor
  * its block from the palette. The upper door half is never listed: the door item places it. The door itself faces
  * into the house, as a player hanging it from the doorstep would place it, so it swings along the doorway: hung
  * sideways (the bot's own yaw), its open panel closed the way out and navigation walked into it.
+ * A shaped cell takes its role's stairs or slab from `variants`, its facing and axis turned with the site; without a
+ * variant it is the role's full block and asks no stair or slab state.
  */
-export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Position, facing: Facing): WorldCell[] {
+export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Position, facing: Facing, variants: Variants = {}): WorldCell[] {
   const anchor = blueprint.cells.find((cell) => cell.role === "door");
   if (anchor === undefined) throw new Error(`${blueprint.name} has no door`);
   const rotate = ROTATE[facing];
-  return blueprint.cells.map((cell) => {
+  // A direction in the blueprint frame, turned like the offsets; an axis across x and z swaps on a quarter turn.
+  const turn = (local: Facing): Facing => {
+    const [x, z] = rotate(...FACING_VECTOR[local]);
+    return x > 0 ? "east" : x < 0 ? "west" : z > 0 ? "south" : "north";
+  };
+  const quarter = facing === "east" || facing === "west";
+  return blueprint.cells.map((cell): WorldCell => {
     const [dx, dz] = rotate(cell.x - anchor.x, cell.z - anchor.z);
+    const position = { x: door.x + dx, y: door.y + cell.y - anchor.y, z: door.z + dz };
+    if (cell.role === "air") return { ...position, block: "air", role: "air" };
+    if (cell.role === "door") return { ...position, block: palette.door, role: "door", facing: OPPOSITE[facing] };
+    const shaped = cell.shape === undefined ? undefined : variants[cell.role]?.[cell.shape];
+    const axis = cell.axis === undefined || cell.axis === "y" || !quarter ? cell.axis : cell.axis === "x" ? "z" : "x";
     return {
-      x: door.x + dx,
-      y: door.y + cell.y - anchor.y,
-      z: door.z + dz,
-      block: cell.role === "air" ? "air" : palette[cell.role],
+      ...position,
+      block: shaped ?? palette[cell.role],
       role: cell.role,
-      ...(cell.role === "door" && { facing: OPPOSITE[facing] }),
+      ...(shaped !== undefined && cell.facing !== undefined && { facing: turn(cell.facing) }),
+      ...(shaped !== undefined && cell.half !== undefined && { half: cell.half }),
+      ...(axis !== undefined && { axis }),
     };
   });
 }

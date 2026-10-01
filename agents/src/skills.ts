@@ -214,7 +214,12 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   // A resumed house is checked again from its first part: `build_structure` skips the cells already right, and anything
   // dug out since (the doorstep under the door, by the gathering next to it: live 2026-10-01) is put back.
   for (let index = 0; index < plan.batches.length; index += 1) {
-    const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block, facing }) => ({ x, y, z, block_name: block, ...(facing !== undefined && { facing }) }));
+    const blocks = (plan.batches[index] ?? []).map(({ x, y, z, block, facing, half, axis }) => ({
+      x, y, z, block_name: block,
+      ...(facing !== undefined && { facing }),
+      ...(half !== undefined && { half }),
+      ...(axis !== undefined && { axis }),
+    }));
     const part = `part ${index + 1}/${plan.batches.length}`;
     const outcome = await context.body.act("build_structure", { blocks, remove_wrong_blocks: true }, `Build ${what}, ${part}.`, { signal: context.signal });
     if (context.signal.aborted) {

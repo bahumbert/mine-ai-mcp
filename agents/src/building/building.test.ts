@@ -23,16 +23,24 @@ test("every style is shipped with blocks that exist in 1.21.4 and are placed fro
       assert.ok(data.blocksByName[block], `${style.id} ${role}: ${block} is not a block`);
       assert.ok(data.itemsByName[block], `${style.id} ${role}: ${block} has no item`);
     }
+    for (const [role, shapes] of Object.entries(style.variants ?? {})) {
+      for (const [shape, block] of Object.entries(shapes)) {
+        assert.ok(data.blocksByName[block]?.name.endsWith(shape === "stairs" ? "_stairs" : "_slab"), `${style.id} ${role} ${shape}: ${block}`);
+        assert.ok(data.itemsByName[block], `${style.id} ${role} ${shape}: ${block} has no item`);
+      }
+    }
+    assert.ok(style.variants?.roof?.stairs && style.variants.roof.slab, `${style.id} has a stair roof`);
   }
 });
 
 test("a small medieval house has the expected bill of materials", () => {
   const plan = planHouse(STYLES.get("medieval")!, "small", chooseSite({ x: 0, y: 64, z: 0 }, null));
   assert.deepEqual(plan.bill, [
-    { item: "spruce_planks", count: 49 },
+    { item: "spruce_stairs", count: 42 },
     { item: "oak_planks", count: 36 },
     { item: "oak_log", count: 24 },
     { item: "cobblestone", count: 16 },
+    { item: "spruce_slab", count: 7 },
     { item: "oak_fence", count: 3 },
     { item: "oak_door", count: 1 },
   ]);
@@ -136,4 +144,79 @@ test("the shortfall counts what the inventory lacks, across stacks", () => {
   const bill = [{ item: "oak_planks", count: 70 }, { item: "cobblestone", count: 16 }, { item: "oak_door", count: 1 }];
   const inventory = [{ name: "oak_planks", count: 64 }, { name: "oak_planks", count: 3 }, { name: "cobblestone", count: 20 }];
   assert.deepEqual(shortfall(bill, inventory), [{ item: "oak_planks", count: 3 }, { item: "oak_door", count: 1 }]);
+});
+
+test("a shaped cell turns with the site: stairs keep facing up their slope and a beam keeps lying along its wall", () => {
+  const blueprint: Blueprint = {
+    name: "test",
+    size: { x: 3, y: 2, z: 2 },
+    cells: [
+      { x: 1, y: 0, z: 0, role: "door" },
+      { x: 0, y: 1, z: 1, role: "roof", shape: "stairs", facing: "north", half: "bottom" },
+      { x: 1, y: 1, z: 1, role: "trim", axis: "x" },
+      { x: 2, y: 1, z: 1, role: "roof", shape: "slab", half: "bottom" },
+    ],
+  };
+  const variants = { roof: { stairs: "spruce_stairs", slab: "spruce_slab" } };
+  const turned = { north: ["north", "x"], south: ["south", "x"], east: ["east", "z"], west: ["west", "z"] } as const;
+  for (const facing of FACINGS) {
+    const cells = placeBlueprint(blueprint, STYLES.get("medieval")!.palette, { x: 0, y: 64, z: 0 }, facing, variants);
+    const stairs = cells.find((cell) => cell.block === "spruce_stairs")!;
+    const beam = cells.find((cell) => cell.role === "trim")!;
+    const slab = cells.find((cell) => cell.block === "spruce_slab")!;
+    assert.equal(stairs.facing, turned[facing][0], `stairs, door facing ${facing}`);
+    assert.equal(stairs.half, "bottom");
+    assert.equal(beam.axis, turned[facing][1], `beam, door facing ${facing}`);
+    assert.equal(slab.half, "bottom");
+    assert.equal(slab.facing, undefined);
+  }
+});
+
+test("a shaped cell whose role has no variant in the style is the role's full block, with no stair or slab state", () => {
+  const blueprint: Blueprint = {
+    name: "test",
+    size: { x: 2, y: 2, z: 2 },
+    cells: [
+      { x: 0, y: 0, z: 0, role: "door" },
+      { x: 1, y: 1, z: 1, role: "roof", shape: "stairs", facing: "north", half: "bottom" },
+    ],
+  };
+  const roof = placeBlueprint(blueprint, STYLES.get("medieval")!.palette, { x: 0, y: 64, z: 0 }, "north").find((cell) => cell.role === "roof")!;
+  assert.deepEqual(roof, { x: 1, y: 65, z: 1, block: "spruce_planks", role: "roof" });
+});
+
+test("roofs are stairs facing up their slope with a slab ridge; beams lie along their wall and pillars stand", () => {
+  for (const [name, blueprint] of blueprints()) {
+    const cells = blueprint.cells;
+    const at = new Map(cells.map((cell) => [key(cell), cell]));
+    const roofs = cells.filter((cell) => cell.role === "roof" && cell.shape !== undefined);
+    assert.ok(roofs.length > 0, `${name} has a shaped roof`);
+    for (const cell of roofs) {
+      if (cell.shape === "slab") {
+        assert.equal(cell.half, "bottom", `${name} ridge ${key(cell)}`);
+        continue;
+      }
+      assert.equal(cell.half, "bottom", `${name} ${key(cell)}`);
+      // Up the slope: the cell one step that way, one block higher, is roof too (or the ridge above the top row).
+      const step = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }[cell.facing!];
+      const above = at.get(key({ x: cell.x + step[0], y: cell.y + 1, z: cell.z + step[1] }));
+      const across = at.get(key({ x: cell.x + step[0], y: cell.y, z: cell.z + step[1] }));
+      assert.ok(above?.role === "roof" || across?.role === "roof" || across?.role === "air" || across?.role === "wall", `${name} ${key(cell)} faces ${cell.facing}, up its slope`);
+    }
+    for (const cell of cells.filter((c) => c.role === "trim")) {
+      const along = at.get(key({ x: cell.x + 1, y: cell.y, z: cell.z }))?.role === "trim" || at.get(key({ x: cell.x - 1, y: cell.y, z: cell.z }))?.role === "trim"
+        || at.get(key({ x: cell.x + 1, y: cell.y, z: cell.z }))?.role === "pillar" || at.get(key({ x: cell.x - 1, y: cell.y, z: cell.z }))?.role === "pillar";
+      assert.equal(cell.axis, along ? "x" : "z", `${name} trim ${key(cell)}`);
+    }
+    assert.ok(cells.filter((cell) => cell.role === "pillar").every((cell) => cell.axis === "y"), `${name} pillars stand`);
+  }
+});
+
+test("a gable roof's slopes face each other and a one-cell ridge row is a slab", () => {
+  const blueprint = house({ width: 5, depth: 5, wallHeight: 3, roof: "gable", overhang: 1 });
+  const top = Math.max(...blueprint.cells.filter((cell) => cell.role === "roof").map((cell) => cell.y));
+  const ridge = blueprint.cells.filter((cell) => cell.role === "roof" && cell.y === top);
+  assert.ok(ridge.length > 0 && ridge.every((cell) => cell.shape === "slab"), "the top row is slab");
+  const facings = new Set(blueprint.cells.filter((cell) => cell.shape === "stairs").map((cell) => cell.facing));
+  assert.deepEqual([...facings].sort(), ["east", "west"], "5x5 slopes across x");
 });

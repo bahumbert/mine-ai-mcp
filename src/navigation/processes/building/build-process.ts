@@ -52,6 +52,7 @@ import {
 } from "../../index.js";
 import type { Position3 } from "../../world/world.js";
 import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
+import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
 
 /**
  * How far a cell may be from the feet to be worked without moving, measured
@@ -104,18 +105,49 @@ export interface BuildCell {
    * passes an open door from any side, walked into it for good.
    */
   readonly facing?: HorizontalFacing;
+  /** The upper or lower half of stairs, a slab (its `type`) or a trapdoor, set by where the side face is clicked. */
+  readonly half?: BlockHalf;
+  /** The axis of a log or pillar, set by the face it is placed against. */
+  readonly axis?: BlockAxis;
 }
 
-/** Whether `block` is what `cell` asks for: its block, facing the asked way when a facing is asked. */
+/**
+ * Whether placing against this face (pointing from the support into the cell) can give the cell its asked states
+ * (ADR-013): an axis comes from the face's own axis; a top half never rests on the block below, a bottom half never
+ * hangs from the block above, and a side face takes either half from where it is clicked.
+ */
+export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: BuildCell): boolean {
+  if (cell.axis !== undefined && (cell.axis === "x" ? face.x : cell.axis === "y" ? face.y : face.z) === 0) return false;
+  if (cell.half === "top" && face.y > 0) return false;
+  if (cell.half === "bottom" && face.y < 0) return false;
+  return true;
+}
+
+/** The states a block has, in the cell's terms: a slab's `type` is its half. */
+function statesOf(block: WorldBlock): { readonly facing: unknown; readonly half: unknown; readonly axis: unknown } {
+  const properties = block.getProperties() as Readonly<Record<string, unknown>>;
+  return { facing: properties.facing, half: properties.half ?? properties.type, axis: properties.axis };
+}
+
+/** Whether `block` is what `cell` asks for: its block, in every state the cell asks (ADR-013), any other state free. */
 export function holdsCell(block: WorldBlock, cell: BuildCell): boolean {
   if (block.name !== cell.blockName) return false;
-  return cell.facing === undefined || (block.getProperties() as Readonly<Record<string, unknown>>).facing === cell.facing;
+  if (cell.facing === undefined && cell.half === undefined && cell.axis === undefined) return true;
+  const states = statesOf(block);
+  return (cell.facing === undefined || states.facing === cell.facing) &&
+    (cell.half === undefined || states.half === cell.half) &&
+    (cell.axis === undefined || states.axis === cell.axis);
 }
 
-/** A block for the audit: its name, and its facing when the cell asks for one. */
+/** A block for the audit: its name, and the states the cell asks about, as they are. */
 function described(block: WorldBlock, cell: BuildCell): string {
-  const facing = (block.getProperties() as Readonly<Record<string, unknown>>).facing;
-  return cell.facing !== undefined && typeof facing === "string" ? `${block.name} facing ${facing}` : block.name;
+  const states = statesOf(block);
+  const shown = [
+    cell.facing !== undefined && typeof states.facing === "string" ? `facing ${states.facing}` : null,
+    cell.half !== undefined && typeof states.half === "string" ? states.half : null,
+    cell.axis !== undefined && typeof states.axis === "string" ? `along ${states.axis}` : null,
+  ].filter((part): part is string => part !== null);
+  return [block.name, ...shown].join(" ");
 }
 
 /** What one cell of the structure is, as of the last look at the world. */
@@ -321,7 +353,7 @@ class BuildTargeting {
         : { kind: "blocked", holds: described(block, cell) };
     }
     if (position.equals(feet) || position.equals(head)) return { kind: "occupied" };
-    const placement = findPlacementSupport(this.bot, position);
+    const placement = findPlacementSupport(this.bot, position, undefined, (face) => faceFits(face, cell));
     if (!placement) return { kind: "unsupported" };
     if ((carried.get(cell.blockName) ?? 0) === 0) return { kind: "not_carried" };
     const after = new Set(this.protectedCells);
@@ -477,6 +509,7 @@ async function workInReach(
         expectedCells: [target.position],
         matches: (block) => holdsCell(block, target),
         ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
+        ...(target.half !== undefined && { half: target.half }),
         signal,
       });
       if (placed.kind === "placed") targeting.placed += 1;
