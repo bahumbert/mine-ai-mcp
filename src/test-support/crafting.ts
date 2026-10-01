@@ -44,7 +44,15 @@ const RECIPES = [
   recipe("stone_axe", 1, { cobblestone: 3, stick: 2 }, true),
 ];
 
-export function craftingBot(carried: Readonly<Record<string, number>>, tableAvailable = false) {
+export { recipe as craftingRecipe };
+
+/** `recipes`: extra recipes offered before the fixture's own, as Mineflayer lists other wood families first. */
+export function craftingBot(
+  carried: Readonly<Record<string, number>>,
+  tableAvailable = false,
+  recipes: readonly Recipe[] = [],
+) {
+  const known = [...recipes, ...RECIPES];
   const counts = new Map(
     Object.entries(carried).map(([name, count]) => {
       const item = craftingRegistry.itemsByName[name];
@@ -79,7 +87,7 @@ export function craftingBot(carried: Readonly<Record<string, number>>, tableAvai
     waitForTicks: async () => undefined,
     findBlock: () => (tableAvailable ? { name: "crafting_table" } : null),
     recipesAll: (itemType: number, _metadata: number | null, craftingTable: boolean | object | null) =>
-      RECIPES.filter(
+      known.filter(
         (candidate) => candidate.result.id === itemType && (!candidate.requiresTable || Boolean(craftingTable)),
       ),
     craft: async (selected: Recipe, applications: number) => {

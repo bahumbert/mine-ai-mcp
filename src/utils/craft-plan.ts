@@ -97,9 +97,22 @@ function recipeInputs(recipe: MineflayerRecipe): readonly { id: number; count: n
   return recipe.delta.filter((item) => item.count < 0);
 }
 
-function missingScore(state: PlanningState): readonly [number, number, number] {
-  const missingUnits = [...state.missing.values()].reduce((total, count) => total + count, 0);
-  return [missingUnits, state.missing.size, state.applications.length];
+/**
+ * Lower is better: units missing, then units missing of materials the plan does
+ * not already take from the inventory, then kinds missing, then crafts. The
+ * second term breaks the tie between wood families: two oak logs short of a
+ * table and a pickaxe were reported as one missing pale_oak_log, the first
+ * planks recipe in registry order, and a gatherer then looked for pale oak in
+ * an oak forest. A material it already carries is the one it can find again.
+ */
+function missingScore(state: PlanningState): readonly [number, number, number, number] {
+  let missingUnits = 0;
+  let unfamiliarUnits = 0;
+  for (const [itemId, count] of state.missing) {
+    missingUnits += count;
+    if (!state.carried.has(itemId)) unfamiliarUnits += count;
+  }
+  return [missingUnits, unfamiliarUnits, state.missing.size, state.applications.length];
 }
 
 function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidate | null): boolean {
