@@ -68,18 +68,18 @@ export async function gatherMaterials(
 
     const ungated = [...plan.collect].filter(([block]) => !PICKAXE_BLOCK.test(block));
     const gated = [...plan.collect].filter(([block]) => PICKAXE_BLOCK.test(block));
+    // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home is not
+    // fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
+    const spent: Spent = (before, after) => {
+      wanted = keepWhatCraftingUsed(wanted, keep, before, after);
+    };
     let step: GatherResult;
-    let crafted = false;
     if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
-    else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false);
-    else if (plan.pickaxeFirst) step = await craftAtHome(context, [PICKAXE], purpose, home);
+    else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
+    else if (plan.pickaxeFirst) step = await craftAtHome(context, [PICKAXE], purpose, home, spent);
     else if (gated.length > 0) step = await collectAll(context, gated, purpose);
-    else {
-      step = await craftAtHome(context, plan.craft, purpose, home);
-      crafted = true;
-    }
+    else step = await craftAtHome(context, plan.craft, purpose, home, spent);
     if (step.status === "stopped") return step;
-    if (crafted || plan.tableFirst || plan.pickaxeFirst) wanted = keepWhatCraftingUsed(wanted, keep, inventory, (await context.runtime.status()).inventory);
     if (step.status === "failed") {
       // A setback that still got something (a pickaxe that broke after 15 of 16 stones) or a fight that interrupted
       // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
@@ -172,20 +172,25 @@ async function collectAll(context: GatherContext, targets: readonly (readonly [s
 }
 
 /** Crafts with the carried table set down near `home`, walking back there first when needed. */
-async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, home: Position): Promise<GatherResult> {
+async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, home: Position, spent: Spent): Promise<GatherResult> {
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - home.x, here.y - home.y, here.z - home.z) > HOME_RANGE) {
     const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 };
     const back = await act(context, "navigate", target, `Go back to the site to craft for ${purpose}.`);
     if (back !== null) return back;
   }
-  return craft(context, items, purpose, true);
+  return craft(context, items, purpose, true, spent);
 }
 
+/** Told the inventory just before and just after one craft. */
+type Spent = (before: Stacks, after: Stacks) => void;
+
 /** `withTable`: set the carried crafting table down for this batch and pick it up again. */
-async function craft(context: GatherContext, items: readonly ItemCount[], purpose: string, withTable: boolean): Promise<GatherResult> {
+async function craft(context: GatherContext, items: readonly ItemCount[], purpose: string, withTable: boolean, spent: Spent): Promise<GatherResult> {
   const input = { items: items.map(({ item, count }) => ({ item_name: item, count })), ...(withTable && { temporary_workstation: true }) };
+  const before = (await context.runtime.status()).inventory;
   const step = await act(context, "craft_item", input, `Craft ${describeMaterials(items)} for ${purpose}.`);
+  if (step?.status !== "stopped") spent(before, (await context.runtime.status()).inventory);
   return step ?? { status: "done", detail: `crafted ${describeMaterials(items)}` };
 }
 

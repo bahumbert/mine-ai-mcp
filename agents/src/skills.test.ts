@@ -165,6 +165,26 @@ test("get_items keeps what it carried: planks that crafting the new items used u
   assert.ok(runtime.submitted.some((call) => call.tool === "collect_block" && call.input.block_name === "oak_log"), "chopped logs to make the planks again");
 });
 
+test("get_items does not fetch back the scaffold blocks spent walking home to craft", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 10 }, { name: "crafting_table", count: 1 }] };
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    // The logs are far away; the way back home pillars and bridges with carried dirt.
+    if (tool === "collect_block") runtime.snapshot = { ...runtime.snapshot, position: { x: 30, y: 64, z: 0 } };
+    if (tool === "navigate") {
+      runtime.addItem("dirt", -3);
+      runtime.snapshot = { ...runtime.snapshot, position: { x: 0, y: 64, z: 0 } };
+    }
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_planks", count: 8 }] }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect oak_log", "navigate", "craft oak_planks at table"]);
+});
+
 test("a build the runtime stopped reports the audit it returned: what was left and why", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
