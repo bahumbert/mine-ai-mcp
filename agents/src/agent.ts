@@ -124,7 +124,15 @@ export class Agent {
       this.restUntil = Date.now() + persona.settings.restAfterStopSeconds * 1_000;
     }
     if (route === "act") this.take({ text: decision.request, requester: message.username });
-    if (route === "later") this.queue({ text: decision.request, requester: message.username });
+    if (route === "later") {
+      // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
+      // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
+      // only waits behind work done for someone.
+      const top = this.stack.at(-1);
+      const objective = { text: decision.request, requester: message.username };
+      if (top === undefined || top.objective.requester === null) this.take(objective);
+      else this.queue(objective);
+    }
   }
 
   /**

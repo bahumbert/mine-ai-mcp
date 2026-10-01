@@ -125,22 +125,41 @@ test("an order sets the character's own goal aside; it resumes afterwards, knowi
   assert.match(resumed, /1\. collect 16 oak_log -> interrupted/u);
 });
 
-test("a request taken on for later waits until the current objective ends", async (t) => {
+test("a request taken on for later waits until the work for another player ends", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3), { username: "Bob", position: { x: 5, y: 64, z: 0 } }] };
+  runtime.durations.collect_block = 300;
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log for Steve" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "get me 16 logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+
+  chat.reply({ say: "Right after Steve's logs!", route: "later", request: "come to Bob" }, { say: "Done, Steve!" }, { say: "Here I am, Bob." });
+  action.reply({ done: "collected 16 oak_log" }, { step: { skill: "go_to_player", player: "Bob" } }, { done: "I am next to Bob" });
+  await agent.handle(say("Bob", "come here when you can"));
+  assert.deepEqual(runtime.cancelled, [], "the collection goes on");
+  assert.match(agent.activity, /"collect 16 oak_log for Steve" \(for Steve\); set aside: "come to Bob"/u);
+  await until(() => action.requests.length >= 3, 5_000);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Bob\): "come to Bob"/u);
+});
+
+test("a player's request never waits behind the character's own goal, even when the model said later", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
-  runtime.durations.collect_block = 300;
+  runtime.durations.collect_block = 100_000;
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
   planner.reply({ objective: "collect 16 oak_log for my base" });
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
   await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
 
-  chat.reply({ say: "Right after these logs!", route: "later", request: "come to Steve" }, { say: "Here I am." });
-  action.reply({ done: "enough wood" }, { step: { skill: "go_to_player", player: "Steve" } }, { done: "I am next to Steve" });
-  await agent.handle(say("Steve", "come here when you can"));
-  assert.deepEqual(runtime.cancelled, [], "the collection goes on");
-  assert.match(agent.activity, /"collect 16 oak_log for my base" \(your own goal\); set aside: "come to Steve"/u);
-  await until(() => runtime.said.length === 2);
-  assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Steve\): "come to Steve"/u);
+  chat.reply({ say: "Right after these logs!", route: "later", request: "come to Steve" });
+  action.reply({ step: { skill: "go_to_player", player: "Steve" } });
+  await agent.handle(say("Steve", "come here please"));
+  await until(() => runtime.cancelled.length === 1 && action.requests.length >= 2);
+  const next = action.requests[1]?.[1]?.content ?? "";
+  assert.match(next, /Objective \(asked by Steve\): "come to Steve"/u);
+  assert.match(next, /Set aside until this one ends: "collect 16 oak_log for my base"/u);
 });
 
 test("stop ends everything, its own goal included, and it rests before going back to that goal", async (t) => {

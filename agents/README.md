@@ -19,7 +19,8 @@ safety checks, the models decide.
    ranked above them), restating what the player asked in one standalone
    sentence. Whether to accept, and when, is its call, guided by the init prompt.
 3. **Objective stack**: what it takes on now goes on top; whatever was running is set aside (its step stops) and
-   resumes afterwards; `later` goes just below the top. `stop` clears the stack and it rests
+   resumes afterwards; `later` goes just below the top, but only behind work done for someone: over its own goal a
+   player's request always goes on top (owner rule; the model answered `later` anyway once). `stop` clears the stack and it rests
    `settings.restAfterStopSeconds` before its own goal again.
 4. **Work tier** (action model): one step at a time towards the top objective. Each call sees the situation, the
    objective and who asked, what was set aside, and the last steps with their outcomes; it answers a step, `done`
