@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chatSystemPrompt, personaPrompt } from "./llm-mind.ts";
+import type { ModelCall } from "./brain-log.ts";
+import { chatSystemPrompt, LlmMind, personaPrompt } from "./llm-mind.ts";
 import type { ChatInput, WorkInput } from "./mind.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
@@ -124,4 +125,36 @@ test("the house skill line lists what the character's own style needs", async ()
   action.reply({ done: "nothing to do" });
   await mind.next(workInput("anything", { persona: testPersona({ style: "medieval" }) }), signal);
   assert.match(action.requests[0]?.[0]?.content ?? "", /build a house in your medieval style .*small = 42 spruce_stairs, 36 oak_planks, 24 oak_log, 16 cobblestone, 7 spruce_slab, 3 glass_pane, 1 oak_door/u);
+});
+
+test("\"later\" is offered only while working for someone else; said anyway, the reply is repaired to act", async () => {
+  assert.doesNotMatch(chatSystemPrompt(testPersona(), false), /"later"/u);
+  const { chat, mind } = scriptedMind();
+  chat.reply(
+    { say: "Just a sec to finish this house first.", route: "later", request: "build Steve a small house" },
+    { say: "On it!", route: "act", request: "build Steve a small house" },
+  );
+  const decision = await mind.chat({ ...chatInput("build me a house"), canWait: false }, signal);
+  assert.deepEqual(decision, { say: "On it!", route: "act", request: "build Steve a small house" });
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"later" is not a route now/u);
+});
+
+test("every model call is reported with its tier, prompt, raw replies and decision, a repaired one included", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.chat.reply("not json", { say: "Hi!", route: "talk", request: "" });
+  await mind.chat(chatInput("hello"), signal);
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  assert.equal(call?.tier, "chat");
+  assert.equal(call?.model, "chat");
+  assert.deepEqual(call?.replies, ["not json", "{\"say\":\"Hi!\",\"route\":\"talk\",\"request\":\"\"}"]);
+  assert.equal(call?.turns.length, 4, "system, request, the bad reply and the repair request");
+  assert.deepEqual(call?.result, { say: "Hi!", route: "talk", request: "" });
+
+  models.planner.reply("nope", "still nope");
+  await assert.rejects(mind.chooseObjective({ persona: testPersona(), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [] }, signal));
+  assert.equal(calls[1]?.tier, "goal");
+  assert.match(calls[1]?.error ?? "", /^\[LLM_BAD_REPLY\]/u);
 });

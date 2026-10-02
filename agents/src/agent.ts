@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { describeStep } from "./actions.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
+import type { BrainEvent } from "./brain-log.ts";
 import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
 import { memoryNote, recall, recallQuery, type Memory } from "./memory.ts";
 import type { Persona } from "./persona.ts";
@@ -33,6 +34,8 @@ export interface AgentOptions {
   readonly pollMs?: number;
   /** Chat typing pace; tests use instant typing. */
   readonly typing?: TypingPace;
+  /** Told what the character takes on, does and reports (the brain log, read by the monitor). */
+  readonly journal?: (event: BrainEvent) => void;
 }
 
 /** One objective on the stack and what was done for it. */
@@ -130,7 +133,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas] }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -172,6 +175,7 @@ export class Agent {
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.stack.push(newWork(objective));
+    this.journalObjective("taken", objective);
     this.wake?.();
   }
 
@@ -180,6 +184,7 @@ export class Agent {
     const work = newWork(objective);
     if (this.stack.length === 0) this.stack.push(work);
     else this.stack.splice(this.stack.length - 1, 0, work);
+    this.journalObjective("queued", objective);
     this.wake?.();
   }
 
@@ -208,6 +213,7 @@ export class Agent {
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}`);
     this.stack.push(newWork({ text, requester: null }));
+    this.journalObjective("own", { text, requester: null });
     return true;
   }
 
@@ -240,6 +246,8 @@ export class Agent {
     log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
     const controller = new AbortController();
     work.step = controller;
+    this.journalState(label);
+    const started = Date.now();
     let result: SkillResult;
     try {
       result = await runStep(decision.step, {
@@ -247,6 +255,7 @@ export class Agent {
         body: this.body,
         signal: AbortSignal.any([controller.signal, this.runSignal]),
         requester: work.objective.requester ?? undefined,
+        self: persona.username,
         style: persona.style,
         remember: (place) => this.learnPlace(place),
         building: this.building,
@@ -263,6 +272,8 @@ export class Agent {
       ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
       : { step: label, outcome: result.status, detail: result.detail };
     work.steps.push(record);
+    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms: Date.now() - started });
+    this.journalState(null);
     if (work.steps.length > STEP_MEMORY) work.steps.splice(0, work.steps.length - STEP_MEMORY);
     log(`  -> ${record.outcome}: ${record.detail}`);
     const unfinished = JSON.stringify(this.building.unfinished);
@@ -284,6 +295,8 @@ export class Agent {
     if (index >= 0) this.stack.splice(index, 1);
     const { objective } = work;
     this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
+    this.options.journal?.({ kind: "objective", event: "finished", text: objective.text, requester: objective.requester, outcome, detail });
+    this.journalState(null);
     if (objective.requester === null) {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lately.push(outcomeLine);
@@ -386,7 +399,9 @@ export class Agent {
     if (fact === work.lastFact) return;
     work.lastFact = fact;
     this.options.log(`  now: ${fact}`);
-    if (Date.now() - work.spokenAt < this.options.persona.settings.narrateEverySeconds * 1_000) return;
+    const asked = Date.now() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
+    this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
+    if (!asked) return;
     work.spokenAt = Date.now();
     void this.narrate(work.objective.text, "progress", fact);
   }
@@ -402,10 +417,21 @@ export class Agent {
     }
   }
 
+  private journalObjective(event: "taken" | "queued" | "own", objective: Objective): void {
+    this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester });
+    this.journalState(null);
+  }
+
+  /** The stack as it is now (top last) and the step running, for the monitor. */
+  private journalState(step: string | null): void {
+    this.options.journal?.({ kind: "state", stack: this.stack.map(({ objective }) => ({ text: objective.text, requester: objective.requester })), step });
+  }
+
   /** "stop": everything on the stack ends, its own goal included. */
   private stopAll(): void {
     for (const work of this.stack) work.step?.abort();
     this.stack.length = 0;
+    this.journalState(null);
     this.wake?.();
   }
 

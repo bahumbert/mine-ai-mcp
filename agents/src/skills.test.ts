@@ -583,11 +583,17 @@ test("level_area around a player uses their level; it refuses a zone it cannot m
 test("level_area never levels over a protected area, her own houses included", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
-  runtime.areas = [{ regionId: 4, label: "small medieval house", owner: "self", min: { x: 3, y: 60, z: 3 }, max: { x: 9, y: 72, z: 9 } }];
+  runtime.areas = [
+    { regionId: 4, label: "small medieval house", owner: "Ayla", min: { x: 3, y: 60, z: 3 }, max: { x: 9, y: 72, z: 9 } },
+    { regionId: 5, label: "Steve's garden", owner: "Steve", min: { x: -3, y: 60, z: -3 }, max: { x: 0, y: 72, z: 0 } },
+  ];
   runtime.world.set("1,64,1", "dirt");
-  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 5, z2: 5, y: 64 }), contextFor(runtime));
-  assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /overlaps a protected area \(#4 'small medieval house'\)/u);
+  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 5, z2: 5, y: 64 }), contextFor(runtime, { self: "Ayla" }));
+  // What each area is, so the model does not just release them (live 2026-10-02).
+  assert.deepEqual(result, {
+    status: "failed",
+    detail: "6x6 at y 64 overlaps protected areas #4 'small medieval house' (yours: leveling would dig it up), #5 'Steve's garden' (owned by Steve): choose another zone clear of them, or ask whoever asked you",
+  });
   assert.deepEqual(builds(runtime), []);
 });
 

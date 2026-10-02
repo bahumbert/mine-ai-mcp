@@ -3,6 +3,7 @@ import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent } from "./agent.ts";
 import { INSTANT_TYPING } from "./body.ts";
+import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
@@ -144,7 +145,7 @@ test("a request taken on for later waits until the work for another player ends"
   assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Bob\): "come to Bob"/u);
 });
 
-test("a player's request never waits behind the character's own goal, even when the model said later", async (t) => {
+test("a player's request never waits behind the character's own goal: a \"later\" reply is sent back to be corrected", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
   runtime.durations.collect_block = 100_000;
@@ -153,13 +154,14 @@ test("a player's request never waits behind the character's own goal, even when 
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
   await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
 
-  chat.reply({ say: "Right after these logs!", route: "later", request: "come to Steve" });
+  chat.reply({ say: "Right after these logs!", route: "later", request: "come to Steve" }, { say: "Coming!", route: "act", request: "come to Steve" });
   action.reply({ step: { skill: "go_to_player", player: "Steve" } });
   await agent.handle(say("Steve", "come here please"));
   await until(() => runtime.cancelled.length === 1 && action.requests.length >= 2);
   const next = action.requests[1]?.[1]?.content ?? "";
   assert.match(next, /Objective \(asked by Steve\): "come to Steve"/u);
   assert.match(next, /Set aside until this one ends: "collect 16 oak_log for my base"/u);
+  assert.equal(runtime.said[0], "Coming!");
 });
 
 test("stop ends everything, its own goal included, and it rests before going back to that goal", async (t) => {
@@ -274,4 +276,39 @@ test("no progress line is asked for within the budget after the reply that took 
   await agent.handle(say("Steve", "get me 2 dirt"));
   await until(() => runtime.said.length === 2);
   assert.deepEqual(runtime.said, ["Sure.", "Done!"], "within 30 s of the reply that took the order, nothing more is said");
+});
+
+test("on its own goal, the chat tier is not offered \"later\"; working for someone, it is", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "gather logs" });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Hi!", route: "talk", request: "" });
+  await agent.handle(say("Steve", "hi"));
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /"later" =/u);
+});
+
+test("the journal gets what it takes on, its stack, each step with its input and thought, and how it ended", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const tiers = scriptedMind();
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  tiers.chat.reply({ say: "Sure.", route: "act", request: "collect 2 dirt" }, { say: "Done!" });
+  tiers.action.reply({ thought: "Dirt is right here.", step: { skill: "collect_block", block: "dirt", count: 2 } }, { done: "2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  assert.deepEqual(events.filter((event) => event.kind === "objective").map((event) => [event.event, event.text, event.requester]), [["taken", "collect 2 dirt", "Steve"], ["finished", "collect 2 dirt", "Steve"]]);
+  const step = events.find((event) => event.kind === "step");
+  assert.deepEqual(step && { ...step, ms: 0 }, { kind: "step", objective: "collect 2 dirt", requester: "Steve", step: "collect 2 dirt", input: { skill: "collect_block", block: "dirt", count: 2 }, thought: "Dirt is right here.", outcome: "done", detail: "collected 2 dirt", ms: 0 });
+  const states = events.filter((event) => event.kind === "state");
+  assert.ok(states.some((state) => state.step === "collect 2 dirt" && state.stack.length === 1));
+  assert.deepEqual(states.at(-1), { kind: "state", stack: [], step: null });
 });

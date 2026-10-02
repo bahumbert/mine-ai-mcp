@@ -42,6 +42,8 @@ export interface SkillContext {
   readonly building?: { unfinished: UnfinishedHouse | null };
   /** The protected areas the agent knows (ADR-012), updated in place when a skill protects or releases one. */
   readonly areas?: ProtectedArea[];
+  /** The character's own username: areas it owns are its own builds. */
+  readonly self?: string;
   /** Told what it starts doing now and why, at a skill's phase changes (see {@link GatherContext.progress}). */
   readonly progress?: (fact: string) => void;
 }
@@ -348,7 +350,10 @@ async function levelZone(context: SkillContext, zone: Zone, level: number, what:
     area.regionId !== ownRegion && !area.label.startsWith(LEVELING_LABEL) &&
     area.min.x <= max.x && area.max.x >= min.x && area.min.y <= max.y && area.max.y >= min.y && area.min.z <= max.z && area.max.z >= min.z);
   if (overlapping.length > 0) {
-    return { status: "failed", detail: `${what} overlaps a protected area (${overlapping.map((area) => `#${area.regionId} '${area.label}'`).join(", ")}): choose another zone, or release it first` };
+    // What each area is, so the model weighs it (live 2026-10-02: told only "release it first", she released Tom's area
+    // and then her own house to level around Tom, and began digging the house).
+    const whose = (area: ProtectedArea) => area.owner === context.self ? "yours: leveling would dig it up" : `owned by ${area.owner}`;
+    return { status: "failed", detail: `${what} overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => `#${area.regionId} '${area.label}' (${whose(area)})`).join(", ")}: choose another zone clear of ${overlapping.length === 1 ? "it" : "them"}, or ask whoever asked you` };
   }
   // Her own region while she works, with a margin: fill is dug a safe distance away, never at the zone's edge or
   // under it (owner, 2026-10-02: she dug right below the zone she was leveling). A house site gets it too.

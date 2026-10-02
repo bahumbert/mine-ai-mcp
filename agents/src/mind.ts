@@ -38,6 +38,8 @@ export interface ChatInput {
   readonly places: readonly KnownPlace[];
   /** Areas it never digs or places blocks in (ADR-012), oldest first. */
   readonly areas: readonly ProtectedArea[];
+  /** Whether a request may wait ("later"): only while it works for someone else. Default true. */
+  readonly canWait?: boolean;
 }
 
 export interface ChatDecision {

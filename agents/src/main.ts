@@ -1,5 +1,7 @@
 import { parseArgs } from "node:util";
+import { dirname, join } from "node:path";
 import { Agent } from "./agent.ts";
+import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
@@ -62,6 +64,20 @@ function createModel(persona: Persona, tier: Tier, override: string | undefined)
   });
 }
 
+/**
+ * The brain log of the bot an MCP url plays, next to its bot-data file (the host's `/health` says where), so the
+ * monitor finds it beside the database it already reads; null when the host does not say (no log, the agent runs).
+ */
+async function openBrainLog(url: string): Promise<BrainLog | null> {
+  try {
+    const health = await (await fetch(new URL("/health", url))).json() as { minecraft?: { botData?: { file?: unknown } } };
+    const file = health.minecraft?.botData?.file;
+    return typeof file === "string" ? new BrainLog(join(dirname(file), BRAIN_LOG_FILE)) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
@@ -79,14 +95,17 @@ async function main(): Promise<void> {
   const specs = readSpecs(values.agent);
   const personas = await Promise.all(specs.map((spec) => loadPersona(spec.personaPath)));
   const usernames = personas.map((persona) => persona.username);
-  const minds = personas.map((persona) => {
+  const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
+  const minds = personas.map((persona, index) => {
     const models = {
       chat: createModel(persona, "chat", values["chat-model"]),
       action: createModel(persona, "action", values["action-model"]),
       planner: createModel(persona, "planner", values["planner-model"]),
     };
     console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
-    return new LlmMind(models);
+    const brainLog = brainLogs[index];
+    console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
+    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }));
   });
   const runtimes = await Promise.all(specs.map((spec, index) => McpBotRuntime.connect(spec.url, `agent-${personas[index]!.id}`)));
 
@@ -102,6 +121,7 @@ async function main(): Promise<void> {
       mind: minds[index]!,
       otherAgents: usernames.filter((name) => name !== persona.username),
       log,
+      ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
     });
     return agent.run(shutdown.signal).catch((error: unknown) => log(`stopped on error: ${String(error)}`));
   });
