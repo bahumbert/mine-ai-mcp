@@ -47,7 +47,7 @@ function fakeBot(placed: Record<string, Placed>, feet = new Vec3(0.5, 64, 0.5)) 
 }
 
 test("a view needs at least one of find, box, or cells, dedupes names, and defaults the limit", () => {
-  assert.throws(() => parseViewBlocksRequest({}), /needs find, box, or cells/);
+  assert.throws(() => parseViewBlocksRequest({}), /needs find, box, cells, or kinds/);
   const parsed = parseViewBlocksRequest({ find: { block_names: ["Obsidian", "minecraft:obsidian", "lava"] } });
   assert.deepEqual(parsed.find, { blockNames: ["obsidian", "lava"], limit: 12 });
   assert.equal(parsed.box, null);
@@ -87,6 +87,22 @@ test("a name Minecraft has no block for fails the view rather than finding nothi
   const result = viewBlocks(fakeBot({}), { find: { blockNames: ["unobtainium"], limit: 12 }, box: null, cells: [] });
   assert.equal(result.status, "failed");
   assert.match((result as { error: string }).error, /no block named unobtainium/);
+});
+
+test("kinds give each named block's game data, harvest tools cheapest tier first, without reading the world", () => {
+  const request = parseViewBlocksRequest({ kinds: ["stone", "iron_ore", "dirt", "minecraft:stone"] });
+  assert.deepEqual(request.kinds, ["stone", "iron_ore", "dirt"]);
+  const result = viewBlocks(fakeBot({}), request);
+  assert.equal(result.status, "succeeded");
+  const kinds = result.blocks.kinds!;
+  assert.deepEqual(kinds.dirt, { tool: "shovel", solid: true, harvest: null });
+  assert.equal(kinds.stone!.tool, "pickaxe");
+  assert.equal(kinds.stone!.harvest![0], "wooden_pickaxe");
+  assert.equal(kinds.iron_ore!.harvest![0], "stone_pickaxe");
+  assert.ok(!kinds.iron_ore!.harvest!.includes("wooden_pickaxe"));
+  assert.match(formatViewBlocksResult(result), /- dirt: solid, mined fast with a shovel, drops by hand/);
+  const unknown = viewBlocks(fakeBot({}), parseViewBlocksRequest({ kinds: ["unobtainium"] }));
+  assert.equal(unknown.status, "failed");
 });
 
 test("a box is drawn top layer first as one grid per layer with a legend", () => {

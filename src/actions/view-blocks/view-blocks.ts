@@ -22,6 +22,7 @@ import {
   viewBlocksResultSchema,
   viewBlocksAnnotations,
   viewBlocksOutcomes,
+  type BlockKind,
   type FoundBlock,
   type ObservedBlock,
   type ViewBlocksRequest,
@@ -83,6 +84,23 @@ function find(
   return { found };
 }
 
+/** The tool class a block is mined with, from its game-data material (`mineable/shovel`...); null when none helps. */
+export function toolClassOf(bot: Pick<Bot, "registry">, name: string): "pickaxe" | "shovel" | "axe" | "hoe" | null {
+  const material = bot.registry.blocksByName[name]?.material ?? "";
+  const tool = /mineable\/(pickaxe|shovel|axe|hoe)/u.exec(material)?.[1];
+  return (tool as "pickaxe" | "shovel" | "axe" | "hoe" | undefined) ?? null;
+}
+
+/** A block name's game data; null when Minecraft has no such block. */
+export function kindOf(bot: Pick<Bot, "registry">, name: string): BlockKind | null {
+  const block = bot.registry.blocksByName[name];
+  if (block === undefined) return null;
+  // Item ids follow the game's tier order (wooden, stone, golden, iron, diamond, netherite): the lowest is the cheapest.
+  const ids = Object.keys(block.harvestTools ?? {}).map(Number).sort((a, b) => a - b);
+  const harvest = ids.map((id) => bot.registry.items[id]?.name).filter((item): item is string => item !== undefined);
+  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", harvest: harvest.length > 0 ? harvest : null };
+}
+
 function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNullable<ViewBlocksReport["box"]> {
   const layers: NonNullable<ViewBlocksReport["box"]>["layers"] = [];
   for (let y = request.y + request.halfHeight; y >= request.y - request.halfHeight; y -= 1) {
@@ -101,6 +119,12 @@ function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNulla
     halfWidth: request.halfWidth,
     halfHeight: request.halfHeight,
     layers,
+    kinds: Object.fromEntries(
+      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => [
+        name,
+        kindOf(bot, name) ?? { tool: null, solid: false, harvest: null },
+      ]),
+    ),
   };
 }
 
@@ -114,6 +138,15 @@ export function viewBlocks(bot: Bot, request: ViewBlocksRequest): ViewBlocksResu
     box: request.box ? box(bot, request.box) : null,
     cells: request.cells.map((cell) => observe(bot, new Vec3(cell.x, cell.y, cell.z))),
   };
+  if (request.kinds !== undefined && request.kinds.length > 0) {
+    const kinds: Record<string, BlockKind> = {};
+    for (const name of request.kinds) {
+      const kind = kindOf(bot, name);
+      if (kind === null) return { status: "failed", error: viewBlocksOutcomes.unknownBlock(name), blocks: report };
+      kinds[name] = kind;
+    }
+    report.kinds = kinds;
+  }
   if (request.find) {
     const result = find(bot, feet, request.find);
     if ("unknown" in result) {
@@ -192,6 +225,13 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     lines.push("", "### Cells");
     for (const cell of blocks.cells)
       lines.push(`- ${cell.x}, ${cell.y}, ${cell.z}: ${cell.name} (${shapeWords(cell)})`);
+  }
+  if (blocks.kinds !== undefined) {
+    lines.push("", "### Kinds");
+    for (const [name, kind] of Object.entries(blocks.kinds)) {
+      const harvest = kind.harvest === null ? "drops by hand" : `drops only with ${kind.harvest.join(" or ")}`;
+      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}`);
+    }
   }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");

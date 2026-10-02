@@ -66,6 +66,24 @@ test("missing carried workstation refuses before placement or crafting", async (
   assert.deepEqual(f.calls, []);
 });
 
+test("a full inventory refuses before placement: the workstation could not be picked back up", async () => {
+  const f = fixture();
+  (f.bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async () => {
+      throw new Error("must not execute");
+    },
+    f.failure,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_NO_ROOM/);
+  assert.deepEqual(f.calls, []);
+});
+
 test("unconfirmed placement cannot start crafting and recovers an observed placed block", async () => {
   const f = fixture();
   f.operations.place = async () => ({ kind: "failed", position: f.position, error: "slot update missing" });

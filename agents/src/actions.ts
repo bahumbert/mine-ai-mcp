@@ -27,6 +27,7 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({ skill: z.literal("go_to"), x: coordinate, y: z.number().int().min(-64).max(320), z: coordinate }),
   z.strictObject({ skill: z.literal("collect_block"), block: minecraftId, count: z.number().int().min(1).max(MAX_COLLECT).default(1) }),
   z.strictObject({ skill: z.literal("give_item"), player: playerName, item: minecraftId, count: z.number().int().min(1).max(64).default(1) }),
+  z.strictObject({ skill: z.literal("drop_item"), item: minecraftId, count: z.number().int().min(1).max(2304).optional() }),
   z.strictObject({ skill: z.literal("craft_item"), item: minecraftId, count: z.number().int().min(1).max(64).default(1) }),
   z.strictObject({
     skill: z.literal("get_items"),
@@ -47,9 +48,24 @@ export const stepSchema = z.discriminatedUnion("skill", [
   }),
   z.strictObject({ skill: z.literal("release_area"), area: z.number().int().positive() }),
   z.strictObject({
+    skill: z.literal("level_area"),
+    x1: coordinate.optional(),
+    z1: coordinate.optional(),
+    x2: coordinate.optional(),
+    z2: coordinate.optional(),
+    around: playerName.optional(),
+    radius: z.number().int().min(2).max(16).default(5),
+    markers: minecraftId.optional(),
+    y: z.number().int().min(-64).max(320).optional(),
+    fill: minecraftId.optional(),
+  }),
+  z.strictObject({
     skill: z.literal("build"),
     structure: z.literal("house").default("house"),
     size: z.enum(SIZES).default("small"),
+    x: coordinate.optional(),
+    y: z.number().int().min(-64).max(320).optional(),
+    z: coordinate.optional(),
   }),
 ]);
 
@@ -57,7 +73,7 @@ export type Step = z.infer<typeof stepSchema>;
 export type SkillName = Step["skill"];
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "collect_block", "give_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "build",
+  "follow_player", "go_to_player", "go_to", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build",
 ] as const satisfies readonly SkillName[];
 
 /**
@@ -71,17 +87,19 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "go_to": return `{"skill":"go_to","x":0,"y":64,"z":0}  walk to block coordinates`;
     case "collect_block": return `{"skill":"collect_block","block":"<block id>","count":<1-${MAX_COLLECT}>}  find, walk to and mine the nearest such blocks by itself (no need to look for them first); name the block, not the drop (stone drops cobblestone; oak_log, dirt, coal_ore...)`;
     case "give_item": return `{"skill":"give_item","player":"<username>","item":"<item id>","count":<1-64>}  walk to the player and hand over items you carry`;
+    case "drop_item": return `{"skill":"drop_item","item":"<item id>","count":<n>}  drop items you carry on the ground where you stand (no "count": all of them), e.g. to make room: crafting and gathering stop when all 36 inventory slots are taken, and a slot is freed only when a whole stack goes, so drop all of something you do not need; what you drop is lost`;
     case "craft_item": return `{"skill":"craft_item","item":"<item id>","count":<1-64>}  craft from your inventory; intermediate items (planks, sticks) are crafted automatically and a carried crafting_table is placed when needed; it never gathers missing materials`;
     case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; takes minutes`;
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
     case "hunt": return `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`;
+    case "level_area": return `{"skill":"level_area","markers":"<block id>"}  flatten (level, terraform) the zone between the nearest 2-4 blocks of that kind a player placed as markers: it finds the markers itself (do not look for them first) and keeps them, digs everything above their level and fills holes below, with the right tool for each block; add "y":<walking level> for another height. Or {"skill":"level_area","around":"<username>","radius":<2-16>} for a square around a player at their level, or "x1","z1","x2","z2" corners with "y" (they keep no block: when a player placed markers, use "markers" so they stay, even after walking up to them); at most 32 by 32; holes, water and drops get a one-block floor of dirt (or cobblestone), or of the block in "fill":"<block id>" when one is asked for; takes minutes`;
     case "protect_area": return `{"skill":"protect_area","player":"<username>","radius":8,"label":"<short name>"}  never dig or place blocks within radius (1-${MAX_AREA_RADIUS}) of where that player stands, or give "x","y","z" instead of "player"; e.g. around a build someone asked you to respect; you can still walk there`;
     case "release_area": return `{"skill":"release_area","area":<area number>}  stop protecting one of your protected areas, so you may dig and place blocks there again`;
     case "build": {
       const bills = SIZES.map((size) => `${size} = ${describeMaterials(planHouse(style, size, chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ");
-      return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; every block must be carried first (${bills})`;
+      return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes); every block must be carried first (${bills})`;
     }
   }
 }
@@ -94,14 +112,16 @@ export function describeStep(step: Step): string {
     case "go_to": return `go to ${step.x} ${step.y} ${step.z}`;
     case "collect_block": return `collect ${step.count} ${step.block}`;
     case "give_item": return `give ${step.count} ${step.item} to ${step.player}`;
+    case "drop_item": return `drop ${step.count ?? "all"} ${step.item}`;
     case "craft_item": return `craft ${step.count} ${step.item}`;
     case "get_items": return `get ${describeMaterials(step.items)}`;
     case "eat": return `eat ${step.food}`;
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
+    case "level_area": return `level ${step.markers !== undefined ? `the zone between the ${step.markers} markers` : step.around !== undefined ? `${step.radius} blocks around ${step.around}` : `${step.x1} ${step.z1} to ${step.x2} ${step.z2}`}${step.y === undefined ? "" : ` at y ${step.y}`}${step.fill === undefined ? "" : `, filled with ${step.fill}`}`;
     case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;
     case "release_area": return `release area #${step.area}`;
-    case "build": return `build a ${step.size} ${step.structure}`;
+    case "build": return `build a ${step.size} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}`;
   }
 }

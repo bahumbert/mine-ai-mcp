@@ -6,7 +6,7 @@ import { flatWorld } from "../../../test-support/navigation.js";
 import { blockClass } from "../../mineflayer/world.js";
 import { createMovementPolicy } from "../../movements/policy.js";
 import { evaluateMineTarget, lavaClosuresOf } from "./target-safety.js";
-import { createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
+import { BREAK_UNDER_WATER, createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../mineflayer/world.js";
 import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 
@@ -58,8 +58,9 @@ test("missing isolation material rejects a dry water barrier but retains a swimm
   assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "mineable", routeMayBreak: false });
   Reflect.set(bot.entity, "isInWater", false);
   submergedTarget = true;
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "mineable", routeMayBreak: false },
-    "a shore approach to an already submerged target remains available");
+  // Owner, 2026-10-02: never mine under water, whatever the occasion; a submerged block is reached from the land below.
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "prohibited", reason: BREAK_UNDER_WATER },
+    "a submerged target is never mined, not even from the shore");
 });
 
 test("lava below an open drop column needs a floor under the target", () => {

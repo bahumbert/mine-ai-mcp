@@ -340,6 +340,13 @@ const OPENS_INTO_LIQUID: PolicyDecision = {
   cause: "opens_into_liquid",
   reason: BREAK_OPENS_INTO_LIQUID,
 };
+/**
+ * Never mine under water, whatever the occasion (owner, 2026-10-02): a submerged block is reached by diving, and a dive
+ * that closes its own surface ends in the breath reflex pulling the bot out, again and again (live: dirt for a house
+ * site taken from a pond bottom). Gathering and routes take what is on land instead.
+ */
+export const BREAK_UNDER_WATER = "the block is under water: the bot never mines under water";
+const UNDER_WATER: PolicyDecision = { kind: "prohibited", reason: BREAK_UNDER_WATER };
 const AVOIDED_BITS = TRAIT_DAMAGING | TRAIT_LAVA;
 
 export function createMineflayerMovementPolicy(
@@ -445,6 +452,7 @@ export function createMineflayerMovementPolicy(
       if (refusedAtCell(observation, position)) return prohibited.decision;
       const inRegion = regionRefusal(position.x, position.y, position.z);
       if (inRegion !== null) return inRegion;
+      if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return UNDER_WATER;
       return opensIntoLiquid(world, position.x, position.y, position.z) ? OPENS_INTO_LIQUID : ALLOWED_STEP;
     },
     evaluateBreak: (observation, position, world) => {
@@ -458,6 +466,7 @@ export function createMineflayerMovementPolicy(
       const inRegion = regionRefusal(position.x, position.y, position.z);
       if (inRegion !== null) return { decision: inRegion, tool: verdict.tool };
       if (verdict === unharvestable) return verdict;
+      if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return { decision: UNDER_WATER, tool: verdict.tool };
       // Last, and with the tool it would have used: a caller that owns the
       // target break needs to know this refusal is the flood rule rather than
       // an unbreakable block, and it needs the pickaxe the break will take.

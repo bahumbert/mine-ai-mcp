@@ -11,6 +11,8 @@ export const BUILD_STRUCTURE_DESCRIPTION =
 
 /** How many cells one build may describe; a portal preset is twenty and a small shelter under a hundred. */
 export const MAX_STRUCTURE_CELLS = 256;
+/** Cells one call may keep intact besides its own: the earlier parts of a structure built in several calls. */
+export const MAX_KEEP_CELLS = 2048;
 
 const coordinate = (axis: string) => z.number().int().safe().describe(`Absolute ${axis} coordinate.`);
 
@@ -65,6 +67,11 @@ export const buildStructureInputSchema = z.strictObject({
     .describe("Dig a cell holding the wrong block before placing. Off, such cells are reported as wrong."),
   on_tool_loss: z.enum(["stop", "continue"]).default("stop")
     .describe("Stop with a partial structure when the best required digging tool tier drops, or continue with the remaining tool."),
+  keep: z
+    .array(z.strictObject({ x: coordinate("X"), y: coordinate("Y"), z: coordinate("Z") }))
+    .max(MAX_KEEP_CELLS)
+    .optional()
+    .describe("Cells routes must not dig while this call works: what earlier calls of the same structure already built. The structure's own correct cells are always kept."),
 });
 
 export interface StructureCell {
@@ -88,6 +95,8 @@ export interface BuildStructureRequest {
   readonly cells: readonly StructureCell[];
   readonly removeWrongBlocks: boolean;
   readonly onToolLoss?: "stop" | "continue";
+  /** Cells routes must not dig: earlier parts of the structure. */
+  readonly keep?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
 /**
@@ -141,7 +150,12 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
     }
     byCell.set(key, cell);
   }
-  return { cells: [...byCell.values()], removeWrongBlocks: value.remove_wrong_blocks, onToolLoss: value.on_tool_loss };
+  return {
+    cells: [...byCell.values()],
+    removeWrongBlocks: value.remove_wrong_blocks,
+    onToolLoss: value.on_tool_loss,
+    ...(value.keep !== undefined && value.keep.length > 0 && { keep: value.keep }),
+  };
 }
 
 /** Why a wrong cell was left, in the words of what was observed there. */

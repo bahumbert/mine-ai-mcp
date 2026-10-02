@@ -5,7 +5,7 @@ import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } 
 import { memoryNote, recall, recallQuery, type Memory } from "./memory.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
-import { runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
+import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
@@ -56,6 +56,17 @@ export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
+
+  /**
+   * The places shown to the models: the known ones, and the unfinished house with where to stand to resume it (live
+   * 2026-10-02: asked to "go back and finish the house you started", she began a new one where she stood).
+   */
+  private knownPlaces(): KnownPlace[] {
+    const house = this.building.unfinished;
+    if (house === null) return [...this.places];
+    const { x, y, z } = house.site.door;
+    return [...this.places, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
+  }
   /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
   private readonly areas: ProtectedArea[] = [];
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
@@ -112,7 +123,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: [...this.places], areas: [...this.areas] }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas] }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -185,7 +196,7 @@ export class Agent {
     const { persona, mind, runtime, log } = this.options;
     if (persona.goal === undefined || Date.now() < this.restUntil) return false;
     if (!(await this.waitForGoalBudget())) return true;
-    const text = await mind.chooseObjective({ persona, snapshot: await runtime.status(), places: [...this.places], areas: [...this.areas], lately: [...this.lately] }, this.runSignal);
+    const text = await mind.chooseObjective({ persona, snapshot: await runtime.status(), places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately] }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}`);
@@ -203,7 +214,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: [...this.places], areas: [...this.areas], steps: [...work.steps], paused }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;

@@ -5,6 +5,7 @@ import { structureWorld } from "../../test-support/structure-world.js";
 import { parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
 import { formatBuildStructureResult, buildStructure } from "./build-structure.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
+import { packKey } from "../../navigation/index.js";
 
 function cells(list: [number, number, number][], blockName = "cobblestone"): StructureCell[] {
   return list.map(([x, y, z]) => ({ x, y, z, blockName }));
@@ -184,4 +185,21 @@ test("cells may ask a half and an axis, and one cell asked two ways is refused",
     { x: 1, y: 64, z: 1, block_name: "spruce_slab", half: "bottom" },
   ] }), /both spruce_slab top and spruce_slab bottom/);
   assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 1, y: 64, z: 1, block_name: "oak_log", axis: "w" }] }));
+});
+
+test("cells kept from earlier parts are never dug by the routes of this one", async () => {
+  const { bot, physics, protectedSets } = structureWorld();
+  const request = parseBuildStructureRequest({
+    blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }],
+    keep: [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }],
+  });
+  assert.deepEqual(request.keep, [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }]);
+  const result = await buildStructure(bot, request, {}, physics);
+  assert.equal(result.status, "succeeded");
+  assert.ok(protectedSets.length > 0);
+  for (const cells of protectedSets) {
+    assert.ok(cells.has(packKey(5, 64, 0)) && cells.has(packKey(5, 65, 0)), "every route keeps the earlier parts");
+  }
+  assert.equal(parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: [] }).keep, undefined);
+  assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: Array.from({ length: 2049 }, (_, x) => ({ x, y: 64, z: 0 })) }));
 });

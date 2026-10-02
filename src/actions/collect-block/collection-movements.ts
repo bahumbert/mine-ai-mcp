@@ -10,6 +10,8 @@ export interface CollectionMovementOptions {
   readonly scaffolding: boolean;
   readonly exactTarget: Vec3 | null;
   readonly matchingStateIds: ReadonlySet<number>;
+  /** The owner whose protected regions this collection may dig in (a workstation it just set down there). */
+  readonly ignoreRegionsOwnedBy?: string;
 }
 
 /** Apply Collect's action-specific constraints to the production movement policy. */

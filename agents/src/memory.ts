@@ -40,6 +40,7 @@ const memorySchema = z.discriminatedUnion("kind", [
       kind: z.string().min(1),
       site: z.object({ door: position, facing: z.enum(["north", "south", "east", "west"]) }),
       part: z.number().int().min(0),
+      prepared: z.boolean().optional(),
     }).nullable(),
   }),
 ]);

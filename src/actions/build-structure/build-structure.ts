@@ -11,7 +11,7 @@ import { buildCheckpointSchema } from "../checkpoint-schemas.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { createMovements, type NavigationRuntime } from "../../navigation/index.js";
+import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { DIG_REACH } from "../../navigation/movements/excavation.js";
 import {
@@ -219,11 +219,15 @@ export async function buildStructure(
       structure: null,
     };
   }
+  const kept = new Set((request.keep ?? []).map((cell) => packKey(cell.x, cell.y, cell.z)));
   const toolLoss = request.removeWrongBlocks ? observeToolTierLoss(bot) : null;
   let result: BuildResult;
   try {
     result = await build(bot, {
       ...physics,
+      // Its own correct cells, and what earlier calls of the same structure built (`keep`): a route to the roof must
+      // not dig through the walls (live 2026-10-01: 11 cells of a finished house dug out).
+      movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : new Set([...protectedCells, ...kept])),
       route: (options) => physics.route({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
       breakInPlace: (options) => physics.breakInPlace({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
       place: async (placement) => {

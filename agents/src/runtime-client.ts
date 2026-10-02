@@ -110,6 +110,30 @@ export interface SmeltingKnowledge {
   readonly fuels: Readonly<Record<string, number>>;
 }
 
+/** The tool class a block is mined with (game data), null when no tool helps. */
+export type ToolClass = "pickaxe" | "shovel" | "axe" | "hoe";
+
+/**
+ * Game data for one block name: the tool class it is mined with, whether it is solid ground, and the tools without
+ * which it drops nothing (cheapest tier first; null when a bare hand will do).
+ */
+export interface BlockKind {
+  readonly tool: ToolClass | null;
+  readonly solid: boolean;
+  readonly harvest: readonly string[] | null;
+}
+
+/** The blocks of a box as read by the runtime: name by position, and what each name is. */
+export interface BlockArea {
+  /** Block name at `x,y,z` (keys from {@link areaKey}). */
+  readonly blocks: ReadonlyMap<string, string>;
+  readonly kinds: Readonly<Record<string, BlockKind>>;
+}
+
+export function areaKey(x: number, y: number, z: number): string {
+  return `${x},${y},${z}`;
+}
+
 /** What a brain needs from one bot. Implemented over MCP ({@link McpBotRuntime}) and by fakes in tests. */
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
@@ -117,6 +141,12 @@ export interface BotRuntime {
   craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
   /** The furnace recipes making these items, from the game data the runtime ships (`view_smelting_recipes`). */
   smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge>;
+  /** Every block of the box between two corners (inclusive), read in slices through `view_blocks`. */
+  blocksIn(min: Position, max: Position): Promise<BlockArea>;
+  /** The nearest loaded blocks of that name, nearest first (`view_blocks` find). */
+  findBlocks(name: string, limit: number): Promise<readonly Position[]>;
+  /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
+  blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
   say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
   /**
@@ -180,6 +210,29 @@ const smeltingRecipesSchema = z.object({
     }).optional(),
   }),
 });
+
+const blockKindSchema = z.object({
+  tool: z.enum(["pickaxe", "shovel", "axe", "hoe"]).nullable(),
+  solid: z.boolean(),
+  harvest: z.array(z.string()).nullable().default(null),
+});
+
+const viewBoxSchema = z.object({
+  result: z.object({
+    blocks: z.object({
+      box: z.object({
+        layers: z.array(z.object({ y: z.number(), rows: z.array(z.object({ z: z.number(), blocks: z.array(z.string()) })) })),
+        kinds: z.record(z.string(), blockKindSchema).default({}),
+      }).nullable(),
+      find: z.array(z.object({ listed: z.array(positionSchema) })).nullable(),
+      kinds: z.record(z.string(), blockKindSchema).optional(),
+    }).optional(),
+  }),
+});
+
+/** `view_blocks` box limits (src/actions/view-blocks/contract.ts): 9 wide, 7 high per read. */
+const BOX_HALF_WIDTH = 4;
+const BOX_HALF_HEIGHT = 3;
 
 const areaSchema = z.object({ regionId: z.number(), label: z.string(), owner: z.string(), min: positionSchema, max: positionSchema });
 const regionResultSchema = z.object({
@@ -291,6 +344,39 @@ export class McpBotRuntime implements BotRuntime {
       recipes: Object.fromEntries((smelting?.items ?? []).map(({ item, recipes }) => [item, recipes])),
       fuels: Object.fromEntries((smelting?.fuels ?? []).map(({ item, itemsSmelted }) => [item, itemsSmelted])),
     };
+  }
+
+  async blocksIn(min: Position, max: Position): Promise<BlockArea> {
+    const blocks = new Map<string, string>();
+    const kinds: Record<string, BlockKind> = {};
+    const [W, H] = [BOX_HALF_WIDTH * 2 + 1, BOX_HALF_HEIGHT * 2 + 1];
+    for (let x = min.x; x <= max.x; x += W) for (let z = min.z; z <= max.z; z += W) for (let y = min.y; y <= max.y; y += H) {
+      const box = { x: x + BOX_HALF_WIDTH, y: y + BOX_HALF_HEIGHT, z: z + BOX_HALF_WIDTH, half_width: BOX_HALF_WIDTH, half_height: BOX_HALF_HEIGHT };
+      const read = viewBoxSchema.parse(await this.call("view_blocks", { box }, "Look at the ground I am to work.")).result.blocks?.box;
+      if (read === null || read === undefined) continue;
+      Object.assign(kinds, read.kinds);
+      for (const layer of read.layers) for (const row of layer.rows) row.blocks.forEach((name, index) => {
+        const cell = { x: box.x - BOX_HALF_WIDTH + index, y: layer.y, z: row.z };
+        if (cell.x <= max.x && cell.y >= min.y && cell.y <= max.y && cell.z >= min.z && cell.z <= max.z) blocks.set(areaKey(cell.x, cell.y, cell.z), name);
+      });
+    }
+    return { blocks, kinds };
+  }
+
+  async findBlocks(name: string, limit: number): Promise<readonly Position[]> {
+    const read = viewBoxSchema.parse(await this.call("view_blocks", { find: { block_names: [name], limit } }, `Find ${name}.`)).result.blocks;
+    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z }) => ({ x, y, z }));
+  }
+
+  async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {
+    const kinds: Record<string, BlockKind> = {};
+    // One read per name: an unknown name fails the whole read, and it should only leave itself out.
+    for (const name of new Set(names)) {
+      const read = viewBoxSchema.parse(await this.call("view_blocks", { kinds: [name] }, `Recall what ${name} is.`)).result.blocks;
+      const kind = read?.kinds?.[name];
+      if (kind !== undefined) kinds[name] = kind;
+    }
+    return kinds;
   }
 
   async say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {

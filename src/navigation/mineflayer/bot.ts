@@ -101,6 +101,11 @@ export interface MineflayerBotSurface {
   waitForTicks(ticks: number): Promise<void>;
   lookAt(position: Position3, force?: boolean): Promise<void>;
   equip(item: { readonly type: number }, destination: "hand"): Promise<void>;
+  /**
+   * Puts a held tool (an item that wears out) away before a dig no tool speeds up: a pickaxe on dirt digs at hand
+   * speed and still loses durability. Optional so fakes need no change.
+   */
+  putAwayHeldTool?(): Promise<void>;
   /** Registry name of an item type, for failures about an item no longer carried. Optional so fakes need no change. */
   itemName?(type: number): string | null;
   blockAt(position: Position3): unknown;
@@ -172,6 +177,15 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     lookAt: (position, force) => bot.lookAt(new Vec3(position.x, position.y, position.z), force),
     look: (yaw, pitch, force) => bot.look(yaw, pitch, force),
     equip: (value, destination) => bot.equip(item(value), destination),
+    putAwayHeldTool: async () => {
+      const wears = (type: number) => (bot.registry.items[type]?.maxDurability ?? 0) > 0;
+      const held = bot.heldItem;
+      if (!held || !wears(held.type)) return;
+      // Something that does not wear out in hand, else an empty hand.
+      const plain = bot.inventory.items().find((candidate) => !wears(candidate.type));
+      if (plain) await bot.equip(plain, "hand");
+      else await bot.unequip("hand");
+    },
     blockAt: (position) => bot.blockAt(new Vec3(position.x, position.y, position.z)),
     dig: (target, forceLook) => bot.dig(block(target), forceLook ?? false),
     visibleDigAim: (position) => {
@@ -706,6 +720,9 @@ export class MineflayerBot implements NavigationBot {
                 observation: `The route planned to break with ${this.bot.itemName?.(operation.toolType) ?? `item type ${operation.toolType}`}, which is not in the inventory.`,
               } as const;
             await this.bot.equip(item, "hand");
+          } else {
+            // No tool helps: dig by hand rather than wear out whatever tool the last dig left in it.
+            await this.bot.putAwayHeldTool?.().catch(() => {});
           }
           signal.throwIfAborted();
           this.selectedTool()?.(operation.toolType);

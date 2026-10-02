@@ -2,13 +2,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockKind, ToolClass } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
   readonly makes: number;
   readonly needs: readonly ItemCount[];
 }
+
+/** Blocks the fake world reports as not solid ground. */
+const FAKE_NOT_SOLID = new Set(["air", "water", "lava", "short_grass", "dandelion"]);
 
 /** Drops of blocks that do not drop themselves, for the fake `collect_block`. */
 const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone" };
@@ -98,6 +101,46 @@ export class FakeRuntime implements BotRuntime {
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
     const recipes = Object.fromEntries(items.map((item) => [item, this.smelting[item] === undefined ? [] : [{ output: item, count: 1, inputs: this.smelting[item]! }]]));
     return { status: "known", recipes, fuels: this.fuels };
+  }
+
+  /** The world's blocks for `blocksIn`/`findBlocks`, by `x,y,z`; unlisted cells are dirt up to `groundTop`, air above. */
+  world = new Map<string, string>();
+  /** The top of the fake world's flat ground: under the bot's feet by default, so a house site there is level. */
+  groundTop = 63;
+  /** Tool classes the fake reports per block name (others: none). */
+  toolClasses: Readonly<Record<string, ToolClass>> = { dirt: "shovel", grass_block: "shovel", sand: "shovel", gravel: "shovel", stone: "pickaxe", cobblestone: "pickaxe", oak_log: "axe" };
+
+  async blocksIn(min: Position, max: Position): Promise<BlockArea> {
+    const blocks = new Map<string, string>();
+    for (let x = min.x; x <= max.x; x += 1) for (let y = min.y; y <= max.y; y += 1) for (let z = min.z; z <= max.z; z += 1) {
+      blocks.set(`${x},${y},${z}`, this.world.get(`${x},${y},${z}`) ?? (y <= this.groundTop ? "dirt" : "air"));
+    }
+    const kinds = Object.fromEntries([...new Set(blocks.values())].map((name): [string, BlockKind] => [name, this.kindOf(name)]));
+    return { blocks, kinds };
+  }
+
+  /** Tools without which a block drops nothing, cheapest first, per block name (others: drops by hand). */
+  harvestTools: Readonly<Record<string, readonly string[]>> = {
+    stone: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe"],
+    cobblestone: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe"],
+    coal_ore: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe"],
+    iron_ore: ["stone_pickaxe", "iron_pickaxe"],
+  };
+
+  async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {
+    return Object.fromEntries(names.map((name) => [name, this.kindOf(name)]));
+  }
+
+  private kindOf(name: string): BlockKind {
+    return { tool: this.toolClasses[name] ?? null, solid: !FAKE_NOT_SOLID.has(name), harvest: this.harvestTools[name] ?? null };
+  }
+
+  async findBlocks(name: string, limit: number): Promise<readonly Position[]> {
+    const at = this.snapshot.position;
+    return [...this.world].filter(([, block]) => block === name)
+      .map(([key]) => { const [x, y, z] = key.split(",").map(Number) as [number, number, number]; return { x, y, z }; })
+      .sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y, a.z - at.z) - Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z))
+      .slice(0, limit);
   }
 
   /** Protected areas, oldest first; a test may seed them to stand for an earlier run. Own areas are owned by "self". */

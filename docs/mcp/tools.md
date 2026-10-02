@@ -164,7 +164,9 @@ eight block kinds and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
 reported whatever the `limit`, which defaults to twelve per name. `box` reads every cell
 of a small box around a point, drawn as one grid per layer with a legend, up to
-nine across and seven high. `cells` reads exact cells. Every block is reported
+nine across and seven high, with `kinds`: for each block name in the box, the tool class it is mined with
+(its game-data `mineable/<tool>` material: pickaxe, shovel, axe, hoe, or none) and whether it is solid. `cells`
+reads exact cells. Every block is reported
 with its name and whether it is solid, open, or liquid, and a liquid's source or
 flowing level. Success proves the report came from the live loaded world; a
 name Minecraft has no block for fails the read. Defined in
@@ -396,7 +398,11 @@ would (ADR-013): an axis from the face it places against (a horizontal beam
 waits for a neighbour on its axis), a half from placing against the block above
 or below, or from clicking a side face above or below its middle. A block in
 another state counts as wrong, and the audit names its state. Stair corner
-shapes, door hinges and double slabs are left to Minecraft. The action is
+shapes, door hinges and double slabs are left to Minecraft. `keep` lists up to
+2048 more cells routes may not dig while the call works: what earlier calls of
+the same structure built (a house built part by part passes its finished parts,
+so a route to the roof never digs through a wall). The call's own correct cells
+are always kept. The action is
 a thin contract over the navigation library's build process, which is
 Baritone's builder loop: it places and digs what is in reach from where the
 bot stands, lowest first, and otherwise routes under one goal of every

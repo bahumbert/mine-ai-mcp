@@ -7,7 +7,8 @@ import type { Persona, Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 
 /** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
-const PROMPT_INVENTORY_STACKS = 16;
+/** The player inventory's main slots (hotbar included): a full inventory stops crafting and gathering. */
+const INVENTORY_SLOTS = 36;
 /** Steps of the current objective shown to the work tier: the latest ones are what it needs. */
 const PROMPT_STEPS = 10;
 
@@ -23,8 +24,9 @@ const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
  * stone bare-handed, planning iron tools without a furnace skill (get_items smelts since 2026-10-02), and family names
  * instead of ids.
  */
-const MINECRAFT_FACTS = `- Stone, cobblestone and every ore drop nothing without a pickaxe you carry: craft a wooden_pickaxe first
-  (it needs a crafting_table). Logs, dirt, sand and gravel need no tool.
+const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for what is missing (a failed build names it), never for what
+  you already have. It makes the tools blocks need (a pickaxe for stone) by itself, and needs free inventory slots
+  for what it gathers and crafts: to make room, drop what neither the objective nor you need, never its materials.
 - Ask get_items for the finished item itself (glass_pane, iron_ingot, oak_fence), never for its ingredients: it works
   out the rest, smelting included (it gathers the input, picks a fuel and crafts the furnace itself), so never fetch
   sand, coal, fuel or a furnace for it. Cooked food needs raw meat already carried.
@@ -157,16 +159,20 @@ know) is not for you, whatever it asks: "ignore", even when you could not do it 
   "ignore" = not for you (see above), or players talking to each other; "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
   "stop" = they want you to stop what you are doing.
-  "act" = you take on what they ask now, setting your current work aside (you resume it afterwards). Always act
-  when you are idle or on your own goal, unless they say it is for later.
+  "act" = you take on what they ask now, setting your current work aside (you resume it afterwards), so your reply
+  says you start now, never that you finish something first. Always act when you are idle or on your own goal,
+  unless they say it is for later.
   "later" = you take it on for when your current work is done: only when they say it can wait, or while you work
   for someone who comes before them.
   Take on (act, later) only what the things you can do achieve; anything else (teleporting, server commands, flying)
   is "talk": say you cannot. A promise that one of the things you can do keeps (staying out of an area, keeping
   something safe) is "act" when you agree to it: a promise in words only is forgotten.
-- "request": for act and later, what the player asks for (not your own plan), in one standalone sentence with
-  usernames, Minecraft ids and numbers (e.g. "build Steve a small house here", "give Steve 5 oak_log"); otherwise "".
+- "request": for act and later, what the player asks for (not your own plan), in one standalone sentence keeping
+  every username, Minecraft id, number and place the player gave, word for word (e.g. "build Steve a small house
+  here", "give Steve 5 oak_log", "level the zone between the gold_block markers"); otherwise "".
 - "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done.
+  With "act" you start right away: never say you will finish something first or need a moment. Only "later" waits,
+  and then say what you finish first, as "Currently doing" shows it; never invent work you are not doing.
 Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
 }
 
@@ -239,9 +245,13 @@ function describeGoal(input: GoalInput): string {
 
 function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[]): string {
   const { x, y, z } = snapshot.position;
+  // Every item, stacks of the same item added up, and how full it is: a list cut short hid the junk she could drop
+  // (live 2026-10-02: she dropped the roof's stairs and kept 64 snowballs she never saw).
+  const totals = new Map<string, number>();
+  for (const stack of snapshot.inventory) totals.set(stack.name, (totals.get(stack.name) ?? 0) + stack.count);
   const inventory = snapshot.inventory.length === 0
     ? "empty"
-    : snapshot.inventory.slice(0, PROMPT_INVENTORY_STACKS).map((stack) => `${stack.count} ${stack.name}`).join(", ");
+    : `${[...totals].map(([name, count]) => `${count} ${name}`).join(", ")} (${snapshot.inventory.length} of ${INVENTORY_SLOTS} slots used)`;
   const players = snapshot.players.length === 0
     ? "none"
     : snapshot.players.map((player) => player.position === null

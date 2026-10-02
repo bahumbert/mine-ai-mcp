@@ -18,9 +18,6 @@ const DEFAULT_FUEL = "oak_planks";
 /** Items that are the drop of a different block: collect_block names the block to break. */
 const MINED_FROM: Readonly<Record<string, string>> = { cobblestone: "stone", cobbled_deepslate: "deepslate" };
 
-/** Blocks that drop nothing unless broken with a pickaxe. */
-const PICKAXE_BLOCK = /^(stone|deepslate|cobblestone|cobbled_deepslate|andesite|diorite|granite|sandstone|.+_ore)$/u;
-
 export interface GatherContext {
   readonly runtime: BotRuntime;
   readonly body: Body;
@@ -48,13 +45,13 @@ interface SmeltJob {
 interface Round {
   readonly collect: ReadonlyMap<string, number>;
   readonly tableFirst: boolean;
-  readonly pickaxeFirst: boolean;
+  /** The harvest tool to craft before some block to collect drops anything (a wooden pickaxe for stone). */
+  readonly toolFirst: string | null;
   readonly craft: readonly ItemCount[];
   readonly smelt: readonly SmeltJob[];
 }
 
 const TABLE = { item: "crafting_table", count: 1 } as const;
-const PICKAXE = { item: "wooden_pickaxe", count: 1 } as const;
 const FURNACE = "furnace";
 
 /** How an item is obtained, learnt once per gathering from the runtime's game data. */
@@ -63,11 +60,14 @@ interface Knowledge {
   readonly smelted: Map<string, readonly SmeltingRecipe[]>;
   /** Items one of each fuel smelts (filled by the first furnace lookup). */
   fuels: Readonly<Record<string, number>>;
+  /** Per block, the tools without which it drops nothing, cheapest first (game data); null when a hand will do. */
+  readonly harvest: Map<string, readonly string[] | null>;
 }
 
 /**
  * Gets every item of `bill` into the inventory the way a player would: chop and dig the raw materials, craft a
- * crafting table to carry and a wooden pickaxe when stone is needed, smelt in a carried furnace what only a furnace
+ * crafting table to carry and the cheapest tool a block needs to drop anything (game data: a wooden pickaxe for
+ * stone, a stone one for iron ore, made from the stone it digs first), smelt in a carried furnace what only a furnace
  * makes (glass from sand: input, fuel and the furnace itself are gathered or crafted first), then craft the rest
  * (the table and furnace are set down and picked up again). The runtime's crafting planner and its furnace recipes
  * (game data) pick the recipes; each round starts again from the real inventory, so a recipe that used another wood
@@ -87,7 +87,7 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const knowledge: Knowledge = { craftable: new Map(), smelted: new Map(), fuels: {} };
+  const knowledge: Knowledge = { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map() };
   const actions: string[] = [];
   let wanted = [...bill];
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
@@ -97,8 +97,8 @@ export async function gatherMaterials(
     const plan = await planRound(context.runtime, missing, inventory, knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
-    const ungated = [...plan.collect].filter(([block]) => !PICKAXE_BLOCK.test(block));
-    const gated = [...plan.collect].filter(([block]) => PICKAXE_BLOCK.test(block));
+    const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
+    const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
     // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
     // is not fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
     const spent: Spent = (before, after) => {
@@ -107,7 +107,7 @@ export async function gatherMaterials(
     let step: GatherResult;
     if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
     else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
-    else if (plan.pickaxeFirst) step = await craftAtHome(context, [PICKAXE], purpose, home, spent);
+    else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, home, spent);
     else if (gated.length > 0) step = await collectAll(context, gated, purpose);
     else {
       const ready = await readyCrafts(context.runtime, plan.craft);
@@ -254,10 +254,13 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
     const problem = await need(entry.item, entry.count);
     if (problem !== null) return problem;
   }
-  // Furnace jobs and crafts each bring needs of their own (sand and fuel, a furnace, the leaves of the crafts), which
-  // may be furnace jobs again (stone for smooth stone): settle them until nothing new comes up.
+  // Furnace jobs, crafts and harvest tools each bring needs of their own (sand and fuel, a furnace, the leaves of the
+  // crafts, a pickaxe for their stone), which may be furnace jobs again (stone for smooth stone): settle them until
+  // nothing new comes up.
   let craftedSeen = "";
-  for (let pass = 0; pass < 8 && (pass === 0 || jobs.size < smelts.size || craftedSeen !== signature(crafted)); pass += 1) {
+  let toolsSeen = "";
+  let tools: string[] = [];
+  for (let pass = 0; pass < 8; pass += 1) {
     for (const [output, count] of smelts) {
       if (jobs.has(output)) continue;
       const input = chooseInput(knowledge.smelted.get(output)!, inventory);
@@ -270,13 +273,16 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
         if (problem !== null) return problem;
       }
     }
+    tools = await missingTools(runtime, [...collect.keys(), ...leaves.keys()], inventory, knowledge);
+    if (pass > 0 && jobs.size >= smelts.size && craftedSeen === signature(crafted) && toolsSeen === tools.join(",")) break;
     craftedSeen = signature(crafted);
+    toolsSeen = tools.join(",");
     const batch = [...crafted].map(([item, count]) => ({ item, count }));
-    if (batch.length === 0) continue;
+    if (batch.length === 0 && tools.length === 0) continue;
     leaves = new Map();
-    const needs = await runtime.craftingNeeds(withTools(batch, collect, inventory));
+    const needs = await runtime.craftingNeeds(withTools(batch, tools, inventory));
     if (needs.status === "uncraftable" || needs.status === "planner_failed" || needs.status === "unknown") {
-      return `cannot work out how to craft ${describeMaterials(batch)}`;
+      return `cannot work out how to craft ${describeMaterials([...batch, ...tools.map((item) => ({ item, count: 1 }))])}`;
     }
     for (const leaf of needs.missing) {
       // A leaf a furnace makes (glass for panes) is a furnace job; the others are gathered.
@@ -288,13 +294,12 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
     }
   }
   for (const [block, count] of leaves) collect.set(block, (collect.get(block) ?? 0) + count);
-  const carries = (predicate: (name: string) => boolean) => inventory.some((stack) => predicate(stack.name));
-  const pickaxeFirst = !carries((name) => name.endsWith("_pickaxe")) && [...collect.keys()].some((block) => PICKAXE_BLOCK.test(block));
-  const tableFirst = (pickaxeFirst || crafted.size > 0) && !carries((name) => name === TABLE.item);
+  const toolFirst = await chooseTool(runtime, tools);
+  const tableFirst = (toolFirst !== null || crafted.size > 0) && carried(inventory, TABLE.item) === 0;
   return {
     collect,
     tableFirst,
-    pickaxeFirst,
+    toolFirst,
     craft: [...crafted].map(([item, count]) => ({ item, count })),
     smelt: [...jobs.values()],
   };
@@ -304,12 +309,38 @@ function signature(counts: ReadonlyMap<string, number>): string {
   return [...counts].map(([item, count]) => `${item}:${count}`).join(",");
 }
 
-/** `batch`, with the crafting table and wooden pickaxe it still has to make first, so their leaves are counted too. */
-function withTools(batch: readonly ItemCount[], collect: ReadonlyMap<string, number>, inventory: Stacks): ItemCount[] {
-  const carries = (predicate: (name: string) => boolean) => inventory.some((stack) => predicate(stack.name));
-  const pickaxe = !carries((name) => name.endsWith("_pickaxe")) && ([...collect.keys()].some((block) => PICKAXE_BLOCK.test(block)) || batch.some(({ item }) => item === FURNACE));
-  const table = !carries((name) => name === TABLE.item);
-  return [...(table ? [TABLE] : []), ...(pickaxe ? [PICKAXE] : []), ...batch];
+/** The cheapest tool `block` drops anything with, when it carries none of them; null when it can be collected now. */
+function toolMissing(block: string, inventory: Stacks, knowledge: Knowledge): string | null {
+  const harvest = knowledge.harvest.get(block) ?? null;
+  if (harvest === null || harvest.some((tool) => carried(inventory, tool) > 0)) return null;
+  return harvest[0] ?? null;
+}
+
+/** The harvest tools still to make for `blocks`, learning each block's harvest tools from game data once. */
+async function missingTools(runtime: BotRuntime, blocks: readonly string[], inventory: Stacks, knowledge: Knowledge): Promise<string[]> {
+  const unknown = [...new Set(blocks)].filter((block) => !knowledge.harvest.has(block));
+  if (unknown.length > 0) {
+    const kinds = await runtime.blockKinds(unknown);
+    // Not a block (an item gathered some other way): nothing to dig it with.
+    for (const block of unknown) knowledge.harvest.set(block, kinds[block]?.harvest ?? null);
+  }
+  const tools = blocks.map((block) => toolMissing(block, inventory, knowledge)).filter((tool): tool is string => tool !== null);
+  return [...new Set(tools)];
+}
+
+/**
+ * The tool to craft first: one it can craft right now (the wooden pickaxe before the stone one that needs its
+ * cobblestone), else the first; null when none is missing.
+ */
+async function chooseTool(runtime: BotRuntime, tools: readonly string[]): Promise<string | null> {
+  for (const tool of tools) if ((await runtime.craftingNeeds([{ item: tool, count: 1 }])).status === "ready") return tool;
+  return tools[0] ?? null;
+}
+
+/** `batch`, with the crafting table and harvest tools it still has to make first, so their leaves are counted too. */
+function withTools(batch: readonly ItemCount[], tools: readonly string[], inventory: Stacks): ItemCount[] {
+  const table = carried(inventory, TABLE.item) === 0;
+  return [...(table ? [TABLE] : []), ...tools.map((item) => ({ item, count: 1 })), ...batch];
 }
 
 async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string): Promise<GatherResult> {
@@ -335,19 +366,50 @@ async function goHome(context: GatherContext, home: Position, purpose: string, w
 
 /** Crafts with the carried table set down near `home`, walking back there first when needed. */
 async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, home: Position, spent: Spent): Promise<GatherResult> {
+  // A table close by is used where it stands, as a player would (owner, 2026-10-02: "check first if one is close").
+  if ((await walkToStation(context, "crafting_table")) !== null) return craft(context, items, purpose, false, spent);
   const back = await goHome(context, home, purpose, "craft");
   if (back !== null) return back;
+  // Back at the site, a table close to it counts too (live 2026-10-02: one 6 blocks from the site went unused
+  // because she looked from where the logs were).
+  if ((await walkToStation(context, "crafting_table")) !== null) return craft(context, items, purpose, false, spent);
   return craft(context, items, purpose, true, spent);
 }
 
-/** Smelts (at most one furnace load) in the carried furnace set down near `home`, walking back there first when needed. */
+/**
+ * Smelts (at most one furnace load) in a furnace close by, else in the carried furnace set down near `home`, walking
+ * back there first when needed.
+ */
 async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: string, home: Position): Promise<GatherResult> {
+  const count = Math.min(job.count, MAX_SMELT);
+  const load = { item_name: job.input, count, fuel_item_name: job.fuel };
+  const rationale = `Smelt ${count} ${job.input} into ${job.output} for ${purpose}.`;
+  const done: GatherResult = { status: "done", detail: `smelted ${count} ${job.output} from ${job.input} with ${job.fuel}` };
+  const furnace = await walkToStation(context, "furnace");
+  // A furnace still holding someone's items refuses the load: then her own, as if there were none.
+  if (furnace !== null && (await act(context, "smelt_item", { ...load, ...furnace }, rationale)) === null) return done;
+  if (context.signal.aborted) return { status: "stopped" };
   const back = await goHome(context, home, purpose, "smelt");
   if (back !== null) return back;
-  const count = Math.min(job.count, MAX_SMELT);
-  const input = { item_name: job.input, count, fuel_item_name: job.fuel, temporary_workstation: true };
-  const step = await act(context, "smelt_item", input, `Smelt ${count} ${job.input} into ${job.output} for ${purpose}.`);
-  return step ?? { status: "done", detail: `smelted ${count} ${job.output} from ${job.input} with ${job.fuel}` };
+  const atHome = furnace === null ? await walkToStation(context, "furnace") : null;
+  if (atHome !== null && (await act(context, "smelt_item", { ...load, ...atHome }, rationale)) === null) return done;
+  if (context.signal.aborted) return { status: "stopped" };
+  return (await act(context, "smelt_item", { ...load, temporary_workstation: true }, rationale)) ?? done;
+}
+
+/** Within this many blocks, a placed crafting table or furnace is walked to and used instead of setting one down. */
+const STATION_RANGE = 16;
+
+/**
+ * Walks up to the nearest placed `block` when one is within {@link STATION_RANGE}; where it stands, or null when none
+ * is that close or the way there fails (then a carried one is set down as before).
+ */
+export async function walkToStation(context: GatherContext, block: "crafting_table" | "furnace"): Promise<Position | null> {
+  const here = (await context.runtime.status()).position;
+  const station = (await context.runtime.findBlocks(block, 1))[0];
+  if (station === undefined || Math.hypot(station.x - here.x, station.y - here.y, station.z - here.z) > STATION_RANGE) return null;
+  const outcome = await context.body.act("navigate", { ...station, range: 2 }, `Walk to the ${block.replaceAll("_", " ")} close by to use it.`, { signal: context.signal });
+  return outcome.status === "succeeded" ? station : null;
 }
 
 /** Told the inventory just before and just after one craft or smelt. */

@@ -17,12 +17,27 @@ export interface Site {
  * there is dug out.
  */
 export function chooseSite(bot: Position, toward: Position | null): Site {
-  const dx = toward === null ? 0 : toward.x - bot.x;
-  const dz = toward === null ? -1 : toward.z - bot.z;
-  const facing: Facing = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? "east" : "west") : (dz > 0 ? "south" : "north");
+  const facing = facingToward(bot, toward);
   const [fx, fz] = FACING_VECTOR[facing];
   const feet = { x: Math.floor(bot.x), y: Math.floor(bot.y), z: Math.floor(bot.z) };
   return { door: { x: feet.x - fx * DOOR_DISTANCE, y: feet.y, z: feet.z - fz * DOOR_DISTANCE }, facing };
+}
+
+/** A house whose door is at `door` (its lower cell, feet height), facing the player it is for (or north without one). */
+export function siteAt(door: Position, toward: Position | null): Site {
+  return { door: { x: Math.floor(door.x), y: Math.floor(door.y), z: Math.floor(door.z) }, facing: facingToward(door, toward) };
+}
+
+/** Where the builder starts for `site`: in front of the door, clear of every cell, as {@link chooseSite} places it. */
+export function builderStand(site: Site): Position {
+  const [fx, fz] = FACING_VECTOR[site.facing];
+  return { x: site.door.x + fx * DOOR_DISTANCE, y: site.door.y, z: site.door.z + fz * DOOR_DISTANCE };
+}
+
+function facingToward(from: Position, toward: Position | null): Facing {
+  const dx = toward === null ? 0 : toward.x - from.x;
+  const dz = toward === null ? -1 : toward.z - from.z;
+  return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? "east" : "west") : (dz > 0 ? "south" : "north");
 }
 
 export interface HousePlan {

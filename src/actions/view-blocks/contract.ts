@@ -8,6 +8,7 @@ export const VIEW_BLOCKS = "view_blocks" as const;
 export const VIEW_BLOCKS_DESCRIPTION =
   "View blocks without moving. find lists, for each named block kind, the nearest ones across every loaded chunk with their distance and what is above and below. " +
   "box reads every cell of a small box around a point as one grid per layer. cells reads exact cells. " +
+  "kinds gives named blocks' game data: the tool class that mines them fast and the tools without which they drop nothing. " +
   "Each reports the block name and whether it is solid, open, or liquid, and a liquid's source or flowing level. " +
   "Use it to locate obsidian, water, lava, ore, or chests before acting, and to see what is under and around the bot or a target.";
 
@@ -31,6 +32,8 @@ export const MAX_BOX_HALF_WIDTH = 4;
 export const MAX_BOX_HALF_HEIGHT = 3;
 /** Exact cells are the bot's own choice; thirty-two is a whole small structure. */
 export const MAX_CELLS = 32;
+/** Block names one kinds read may name: a whole bill of materials. */
+export const MAX_KIND_NAMES = 32;
 
 const coordinate = (axis: string) => z.number().int().safe().describe(`Absolute ${axis} coordinate.`);
 
@@ -77,6 +80,12 @@ export const viewBlocksInputSchema = z.strictObject({
   find: findRequestSchema.optional().describe("The nearest blocks of these kinds, anywhere loaded."),
   box: boxRequestSchema.optional().describe("Every cell of a box around a point, drawn layer by layer."),
   cells: z.array(cellRequestSchema).min(1).max(MAX_CELLS).optional().describe("Exact cells to read."),
+  kinds: z
+    .array(registryNameSchema)
+    .min(1)
+    .max(MAX_KIND_NAMES)
+    .optional()
+    .describe("Block names to describe from game data (tool class, solidity, harvest tools); reads no world cell."),
 });
 
 export type ViewBlocksInput = z.input<typeof viewBlocksInputSchema>;
@@ -91,11 +100,12 @@ export interface ViewBlocksRequest {
     readonly halfHeight: number;
   } | null;
   readonly cells: readonly { readonly x: number; readonly y: number; readonly z: number }[];
+  readonly kinds?: readonly string[];
 }
 
 export function parseViewBlocksRequest(raw: unknown): ViewBlocksRequest {
   const value = viewBlocksInputSchema.parse(raw ?? {});
-  if (!value.find && !value.box && !value.cells) throw new Error("A view needs find, box, or cells.");
+  if (!value.find && !value.box && !value.cells && !value.kinds) throw new Error("A view needs find, box, cells, or kinds.");
   return {
     find: value.find ? { blockNames: [...new Set(value.find.block_names)], limit: value.find.limit } : null,
     box: value.box
@@ -108,6 +118,7 @@ export function parseViewBlocksRequest(raw: unknown): ViewBlocksRequest {
         }
       : null,
     cells: value.cells ?? [],
+    kinds: [...new Set(value.kinds ?? [])],
   };
 }
 
@@ -129,6 +140,17 @@ export const foundBlockSchema = observedBlockSchema.extend({
   distance: z.number().nonnegative(),
   above: z.string(),
   below: z.string(),
+});
+
+/**
+ * Game data for one block name: the tool class it is mined with (its `mineable/<tool>` material, null when none
+ * helps), whether it is solid (a full collision box, unlike air, water, grass or flowers), and the tools without which
+ * it drops nothing (`harvest`, cheapest tier first; null when a bare hand will do).
+ */
+export const blockKindSchema = z.strictObject({
+  tool: z.enum(["pickaxe", "shovel", "axe", "hoe"]).nullable(),
+  solid: z.boolean(),
+  harvest: z.array(z.string()).nullable(),
 });
 
 export const viewBlocksReportSchema = z.strictObject({
@@ -159,13 +181,18 @@ export const viewBlocksReportSchema = z.strictObject({
           rows: z.array(z.strictObject({ z: z.number().int(), blocks: z.array(z.string()) })),
         }),
       ),
+      /** Game data for each block name in the box. */
+      kinds: z.record(z.string(), blockKindSchema),
     })
     .nullable(),
   cells: z.array(observedBlockSchema),
+  /** Game data for each name asked for in `kinds`; absent when none was asked for. */
+  kinds: z.record(z.string(), blockKindSchema).optional(),
 });
 
 export type ObservedBlock = z.output<typeof observedBlockSchema>;
 export type FoundBlock = z.output<typeof foundBlockSchema>;
+export type BlockKind = z.output<typeof blockKindSchema>;
 export type ViewBlocksReport = z.output<typeof viewBlocksReportSchema>;
 
 export const viewBlocksResultSchema = actionResultSchema({ blocks: viewBlocksReportSchema });

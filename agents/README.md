@@ -54,7 +54,12 @@ carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fe
 furnace what only a furnace makes: glass for the panes, with the sand, the fuel and the furnace gathered or crafted
 first; the runtime's `view_crafting_requirements` and `view_smelting_recipes` pick the recipes from game data; each
 round restarts from the real inventory; crafting and smelting happen back where it started), then builds where it stands, its door facing whoever asked: one `build_structure` call per layer,
-a clearing pass that re-digs the room (navigation scaffolding), and the door last. The site is not surveyed. A house
+a clearing pass that re-digs the room (navigation scaffolding), and the door last. Before the first block it
+levels its site (`src/building/terrain.ts`: holes under the floor filled from the bottom up, everything above it dug
+from the top down, water displaced first, with the right tool for every block it digs: stone tools when it can spare
+the cobblestone, else wood); every later part keeps what the earlier parts built (`build_structure` `keep`), and a
+final pass checks every part again. The `level_area` skill uses the same engine on request: between the players'
+marker blocks, around a player, or between corners, at most 32 by 32. The site is not surveyed. A house
 left unfinished (a refused cell, the step set aside) is resumed at the same site and part by the next build step.
 Before its first block the house protects its own box (cells + a one-block ring + the layer below, ADR-012), so the
 character's own gathering and goals never dig into it; the build itself still works inside. Protected areas are read

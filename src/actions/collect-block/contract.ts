@@ -139,6 +139,12 @@ export interface CollectBlockRequest {
   scaffolding: boolean;
   allowFullInventory: boolean;
   onToolLoss: "stop" | "continue";
+  /**
+   * Internal, never from the tool input: the bot's own protected regions do not refuse this collection. Only for
+   * picking a temporary workstation back up, set down a moment ago inside a region of its own (live 2026-10-02: a
+   * crafting table left in a zone she was leveling).
+   */
+  ignoreOwnRegions?: boolean;
 }
 
 export function parseCollectBlockRequest(input: unknown): CollectBlockRequest {

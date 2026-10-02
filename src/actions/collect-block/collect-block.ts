@@ -92,6 +92,7 @@ function collectionMovements(bot: Bot, request: CollectBlockRequest, target: Col
     matchingStateIds: target.blockStateIds,
     exactTarget: request.exactTarget,
     scaffolding: request.scaffolding,
+    ...(request.ignoreOwnRegions === true && { ignoreRegionsOwnedBy: bot.username }),
   });
 }
 

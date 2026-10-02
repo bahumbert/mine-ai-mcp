@@ -54,7 +54,8 @@ export function workstationOperations(bot: Bot, navigation: NavigationRuntime): 
       return collectBlock(
         bot,
         navigation,
-        parseCollectBlockRequest({ block_name: name, ...position, scaffold: false }),
+        // It set the workstation down itself a moment ago, possibly inside a region of its own: pick it up regardless.
+        { ...parseCollectBlockRequest({ block_name: name, ...position, scaffold: false }), ignoreOwnRegions: true },
         context,
       );
     },
@@ -73,6 +74,11 @@ export async function useTemporaryWorkstation<Evidence extends object>(
   context.signal?.throwIfAborted();
   if (carriedCount(bot, name) < 1) {
     return failure(`[WORKSTATION_NOT_CARRIED] No ${name} is carried for temporary use.`);
+  }
+  // Picking it back up needs a free slot: the slot it leaves may fill with what it makes (live 2026-10-02: a full
+  // inventory left a furnace inside the house being built, a cell the build may not dig).
+  if (bot.inventory.emptySlotCount?.() === 0) {
+    return failure(`[WORKSTATION_NO_ROOM] ${name}: no free inventory slot to pick it back up afterwards; make room first.`);
   }
   const placement = await operations.place(name, context.signal);
   if (placement.kind === "no_item" || placement.kind === "no_cell") {
