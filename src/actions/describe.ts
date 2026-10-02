@@ -125,6 +125,11 @@ import {
   viewCraftingRequirementsInputSchema,
 } from "./view-crafting-requirements/contract.js";
 import {
+  VIEW_SMELTING_RECIPES,
+  VIEW_SMELTING_RECIPES_DESCRIPTION,
+  viewSmeltingRecipesInputSchema,
+} from "./view-smelting-recipes/contract.js";
+import {
   VIEW_FRONTIER,
   VIEW_FRONTIER_DESCRIPTION,
   viewFrontierInputSchema,
@@ -195,6 +200,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
       viewCraftingRequirementsInputSchema,
       { foreground: false },
     ),
+    tool(VIEW_SMELTING_RECIPES, VIEW_SMELTING_RECIPES_DESCRIPTION, viewSmeltingRecipesInputSchema, { foreground: false }),
     tool(VIEW_FRONTIER, VIEW_FRONTIER_DESCRIPTION, viewFrontierInputSchema, { foreground: false }),
     tool(VIEW_BLOCKS, VIEW_BLOCKS_DESCRIPTION, viewBlocksInputSchema, { foreground: false }),
     tool(VIEW_STATUS, VIEW_STATUS_DESCRIPTION, viewStatusInputSchema, { foreground: false }),

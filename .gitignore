@@ -22,3 +22,6 @@ private/
 # Editor and OS files
 .DS_Store
 Thumbs.db
+
+# Claude Code machine-local settings
+.claude/settings.local.json

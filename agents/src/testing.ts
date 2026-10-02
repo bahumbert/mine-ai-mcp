@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -20,7 +20,7 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
   { name: "oak_log", count: 24 },
   { name: "cobblestone", count: 16 },
   { name: "spruce_slab", count: 7 },
-  { name: "oak_fence", count: 3 },
+  { name: "glass_pane", count: 3 },
   { name: "oak_door", count: 1 },
 ];
 
@@ -47,7 +47,13 @@ export class FakeRuntime implements BotRuntime {
   failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void }>> = {};
   /** Recipes known to the fake crafting planner; items without one are uncraftable. */
   recipes: Readonly<Record<string, FakeRecipe>> = {};
-  /** Successful `collect_block` and `craft_item` calls change the snapshot's inventory. */
+  /** Items whose recipes the fake planner cannot plan (Minecraft: coal, iron ingots, made back from their blocks). */
+  unplannable: readonly string[] = [];
+  /** Furnace recipes known to the fake: output → inputs (any one of them); others are not smeltable. */
+  smelting: Readonly<Record<string, readonly string[]>> = {};
+  /** Items one of each fuel smelts, as the runtime reports them. */
+  fuels: Readonly<Record<string, number>> = { coal: 8, charcoal: 8, oak_planks: 1.5, spruce_planks: 1.5, oak_log: 1.5, spruce_log: 1.5, stick: 0.5 };
+  /** Successful `collect_block`, `craft_item` and `smelt_item` calls change the snapshot's inventory. */
   simulateInventory = false;
   /** Every foreground call, plus chat lines as `send_message` (they do not take the body). */
   readonly submitted: { readonly tool: ForegroundTool | "send_message" | "protect_region" | "unprotect_region"; readonly input: Readonly<Record<string, unknown>> }[] = [];
@@ -79,6 +85,7 @@ export class FakeRuntime implements BotRuntime {
   }
 
   async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
+    if (items.some(({ item }) => this.unplannable.includes(item))) return { status: "planner_failed", missing: [] };
     if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
     const leaves = new Map<string, number>();
     for (const { item, count } of items) this.leaves(item, count, leaves);
@@ -86,6 +93,11 @@ export class FakeRuntime implements BotRuntime {
       .map(([item, count]) => ({ item, count: count - this.carried(item) }))
       .filter((entry) => entry.count > 0);
     return { status: missing.length === 0 ? "ready" : "missing_materials", missing };
+  }
+
+  async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
+    const recipes = Object.fromEntries(items.map((item) => [item, this.smelting[item] === undefined ? [] : [{ output: item, count: 1, inputs: this.smelting[item]! }]]));
+    return { status: "known", recipes, fuels: this.fuels };
   }
 
   /** Protected areas, oldest first; a test may seed them to stand for an earlier run. Own areas are owned by "self". */
@@ -186,6 +198,16 @@ export class FakeRuntime implements BotRuntime {
     if (tool === "collect_block") {
       const block = String(input.block_name);
       this.addItem(FAKE_DROPS[block] ?? block, Number(input.count));
+    }
+    if (tool === "smelt_item") {
+      const count = Number(input.count);
+      const fuel = String(input.fuel_item_name);
+      const input_ = String(input.item_name);
+      const output = Object.entries(this.smelting).find(([, inputs]) => inputs.includes(input_))?.[0];
+      if (output === undefined) throw new Error(`the fake cannot smelt ${input_}`);
+      this.addItem(input_, -count);
+      this.addItem(fuel, -Math.ceil(count / (this.fuels[fuel] ?? 1)));
+      this.addItem(output, count);
     }
     if (tool === "craft_item") {
       for (const { item_name: item, count } of input.items as { item_name: string; count: number }[]) {

@@ -123,5 +123,5 @@ test("the house skill line lists what the character's own style needs", async ()
   const { action, mind } = scriptedMind();
   action.reply({ done: "nothing to do" });
   await mind.next(workInput("anything", { persona: testPersona({ style: "medieval" }) }), signal);
-  assert.match(action.requests[0]?.[0]?.content ?? "", /build a house in your medieval style .*small = 42 spruce_stairs, 36 oak_planks, 24 oak_log, 16 cobblestone, 7 spruce_slab, 3 oak_fence, 1 oak_door/u);
+  assert.match(action.requests[0]?.[0]?.content ?? "", /build a house in your medieval style .*small = 42 spruce_stairs, 36 oak_planks, 24 oak_log, 16 cobblestone, 7 spruce_slab, 3 glass_pane, 1 oak_door/u);
 });

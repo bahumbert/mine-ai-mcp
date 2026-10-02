@@ -61,7 +61,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
-  | "craft_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save";
+  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -94,11 +94,29 @@ export interface CraftingNeeds {
   readonly missing: readonly ItemCount[];
 }
 
+/** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
+export interface SmeltingRecipe {
+  readonly output: string;
+  readonly count: number;
+  readonly inputs: readonly string[];
+}
+
+/** Furnace knowledge for some items: the recipes making each (none: not smeltable) and how far each fuel goes. */
+export interface SmeltingKnowledge {
+  /** `unknown`: Minecraft has no such item (or no smelting data ships for this version). */
+  readonly status: "known" | "unknown";
+  readonly recipes: Readonly<Record<string, readonly SmeltingRecipe[]>>;
+  /** Items one of each fuel smelts. */
+  readonly fuels: Readonly<Record<string, number>>;
+}
+
 /** What a brain needs from one bot. Implemented over MCP ({@link McpBotRuntime}) and by fakes in tests. */
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
   /** What crafting these items would take from the current inventory; crafts nothing. */
   craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
+  /** The furnace recipes making these items, from the game data the runtime ships (`view_smelting_recipes`). */
+  smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
   say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
   /**
@@ -149,6 +167,16 @@ const craftingRequirementsSchema = z.object({
         status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
         missingMaterials: z.array(z.object({ item: z.string(), count: z.number() })),
       }).optional(),
+    }).optional(),
+  }),
+});
+
+const smeltingRecipesSchema = z.object({
+  result: z.object({
+    status: z.string(),
+    smelting: z.object({
+      items: z.array(z.object({ item: z.string(), recipes: z.array(z.object({ output: z.string(), count: z.number(), inputs: z.array(z.string()) })) })),
+      fuels: z.array(z.object({ item: z.string(), itemsSmelted: z.number() })),
     }).optional(),
   }),
 });
@@ -252,6 +280,17 @@ export class McpBotRuntime implements BotRuntime {
     const plan = result.requirements?.plan;
     if (plan === undefined) return { status: "unknown", missing: [] };
     return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
+  }
+
+  async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
+    const { result } = smeltingRecipesSchema.parse(await this.call("view_smelting_recipes", { items: [...items] }, "Work out what a furnace can make."));
+    const smelting = result.smelting;
+    const known = result.status === "succeeded" && smelting !== undefined;
+    return {
+      status: known ? "known" : "unknown",
+      recipes: Object.fromEntries((smelting?.items ?? []).map(({ item, recipes }) => [item, recipes])),
+      fuels: Object.fromEntries((smelting?.fuels ?? []).map(({ item, itemsSmelted }) => [item, itemsSmelted])),
+    };
   }
 
   async say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {

@@ -50,9 +50,10 @@ roof type, plus `variants`: the stairs and slab of a role) fed to a parametric g
 facing up their slope with a slab ridge, pillars standing and trim beams along the walls (block states, ADR-013; a
 style without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
 style needs; the model fetches it with `get_items` (`src/gathering.ts`: chop the logs, craft a crafting table to
-carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and doors; the runtime's
-`view_crafting_requirements` picks the recipes; each round restarts from the real inventory; crafting happens back
-where it started), then builds where it stands, its door facing whoever asked: one `build_structure` call per layer,
+carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and doors, smelt in a carried
+furnace what only a furnace makes: glass for the panes, with the sand, the fuel and the furnace gathered or crafted
+first; the runtime's `view_crafting_requirements` and `view_smelting_recipes` pick the recipes from game data; each
+round restarts from the real inventory; crafting and smelting happen back where it started), then builds where it stands, its door facing whoever asked: one `build_structure` call per layer,
 a clearing pass that re-digs the room (navigation scaffolding), and the door last. The site is not surveyed. A house
 left unfinished (a refused cell, the step set aside) is resumed at the same site and part by the next build step.
 Before its first block the house protects its own box (cells + a one-block ring + the layer below, ADR-012), so the

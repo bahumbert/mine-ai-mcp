@@ -20,12 +20,14 @@ const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
 
 /**
  * Survival facts every benchmarked model got wrong (2026-09-30, .agent/knowledge/05-testing-and-ops.md): mining
- * stone bare-handed, planning iron tools without a furnace skill, and family names instead of ids.
+ * stone bare-handed, planning iron tools without a furnace skill (get_items smelts since 2026-10-02), and family names
+ * instead of ids.
  */
 const MINECRAFT_FACTS = `- Stone, cobblestone and every ore drop nothing without a pickaxe you carry: craft a wooden_pickaxe first
   (it needs a crafting_table). Logs, dirt, sand and gravel need no tool.
-- Nothing can be smelted: ingots, iron, gold or diamond gear made from ore, cooked food, glass and charcoal are
-  impossible unless already carried.
+- Ask get_items for the finished item itself (glass_pane, iron_ingot, oak_fence), never for its ingredients: it works
+  out the rest, smelting included (it gathers the input, picks a fuel and crafts the furnace itself), so never fetch
+  sand, coal, fuel or a furnace for it. Cooked food needs raw meat already carried.
 - Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood).`;
 
 /** The model behind each tier; they may all be the same model. `action` picks work steps, `planner` own objectives. */

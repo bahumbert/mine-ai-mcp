@@ -44,19 +44,22 @@ function describeCall(call: { readonly tool: string; readonly input: Readonly<Re
 }
 
 test("get_items fetches items like a player: logs, a table to carry, a wooden pickaxe for stone, then the crafts", async () => {
-  const runtime = new FakeRuntime();
-  runtime.recipes = HOUSE_RECIPES;
-  runtime.simulateInventory = true;
+  const runtime = smeltRuntime();
   const items = SMALL_MEDIEVAL.map(({ name, count }) => ({ item: name, count }));
   const result = await runStep({ skill: "get_items", items }, contextFor(runtime));
   assert.equal(result.status, "done");
+  // Glass panes for the windows: sand with the rest, the furnace crafted with the house blocks, glass smelted with
+  // planks, then the panes and the planks the fuel used up.
   assert.deepEqual([...new Set(runtime.submitted.map(describeCall))], [
     "collect oak_log",
+    "collect sand",
     "collect spruce_log",
     "craft crafting_table",
     "craft wooden_pickaxe at table",
     "collect stone",
-    "craft spruce_stairs+oak_planks+spruce_slab+oak_fence+oak_door at table",
+    "craft spruce_stairs+oak_planks+spruce_slab+oak_door+furnace at table",
+    "smelt_item",
+    "craft oak_planks+glass_pane at table",
   ]);
   assert.ok(runtime.submitted.filter((call) => call.tool === "collect_block").every((call) => Number(call.input.count) <= 32));
 });
@@ -89,12 +92,89 @@ test("items that cannot be found end get_items, saying why", async () => {
   assert.match(result.status === "failed" ? result.detail : "", /^\[NO_LOADED_MATCHING_TARGETS\]/u);
 });
 
+/** House recipes plus what glass windows take: a furnace, and panes from glass. */
+const GLASS_RECIPES = {
+  ...HOUSE_RECIPES,
+  furnace: { makes: 1, needs: [{ item: "cobblestone", count: 8 }] },
+  glass_pane: { makes: 16, needs: [{ item: "glass", count: 6 }] },
+};
+
+function smeltRuntime(inventory: { name: string; count: number }[] = []): FakeRuntime {
+  const runtime = new FakeRuntime();
+  runtime.recipes = GLASS_RECIPES;
+  runtime.smelting = { glass: ["sand", "red_sand"], iron_ingot: ["deepslate_iron_ore", "iron_ore", "raw_iron"], coal: ["coal_ore", "deepslate_coal_ore"], cooked_beef: ["beef"] };
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory };
+  return runtime;
+}
+
+function smeltCalls(runtime: FakeRuntime) {
+  return runtime.submitted.filter((call) => call.tool === "smelt_item").map((call) => call.input);
+}
+
+test("get_items smelts what only a furnace makes: sand, logs and stone gathered, a furnace and fuel crafted, glass smelted, panes crafted", async () => {
+  const runtime = smeltRuntime();
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass_pane", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  const calls = runtime.submitted.map((call) => call.tool === "smelt_item" ? `smelt ${String(call.input.item_name)}` : describeCall(call));
+  assert.ok(calls.indexOf("collect sand") >= 0, calls.join(" | "));
+  assert.ok(calls.indexOf("craft wooden_pickaxe at table") < calls.indexOf("collect stone"), calls.join(" | "));
+  assert.ok(calls.findIndex((call) => call.startsWith("craft") && call.includes("furnace")) < calls.indexOf("smelt sand"), calls.join(" | "));
+  assert.ok(calls.indexOf("smelt sand") < calls.findIndex((call) => call.includes("glass_pane")), calls.join(" | "));
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 6, fuel_item_name: "oak_planks", temporary_workstation: true }]);
+  assert.ok(runtime.snapshot.inventory.some((stack) => stack.name === "glass_pane" && stack.count >= 3));
+});
+
+test("carried coal burns before planks, and carried red sand is smelted before any sand is dug", async () => {
+  const runtime = smeltRuntime([{ name: "red_sand", count: 8 }, { name: "coal", count: 2 }, { name: "oak_planks", count: 20 }, { name: "furnace", count: 1 }]);
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 8 }] }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["smelt_item"]);
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "red_sand", count: 8, fuel_item_name: "coal", temporary_workstation: true }]);
+});
+
+test("planks asked for and burnt as fuel are made again", async () => {
+  const runtime = smeltRuntime([{ name: "sand", count: 3 }, { name: "oak_planks", count: 2 }, { name: "furnace", count: 1 }, { name: "crafting_table", count: 1 }]);
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 3 }, { item: "oak_planks", count: 2 }] }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  const carried = (item: string) => runtime.snapshot.inventory.find((stack) => stack.name === item)?.count ?? 0;
+  assert.equal(carried("glass"), 3);
+  assert.ok(carried("oak_planks") >= 4, `planks: ${carried("oak_planks")}`);
+});
+
+test("iron ingots come from the carried raw iron; coal is mined, never smelted from its ore", async () => {
+  const runtime = smeltRuntime([{ name: "raw_iron", count: 3 }, { name: "coal", count: 1 }, { name: "furnace", count: 1 }]);
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, contextFor(runtime))).status, "done");
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "raw_iron", count: 3, fuel_item_name: "coal", temporary_workstation: true }]);
+
+  const miner = smeltRuntime([{ name: "wooden_pickaxe", count: 1 }]);
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "coal", count: 2 }] }, contextFor(miner))).status, "done");
+  assert.deepEqual(miner.submitted.map(describeCall), ["collect coal"]);
+});
+
+test("an item whose only recipe cannot be planned (coal from a coal block) is mined or smelted instead", async () => {
+  const miner = smeltRuntime([{ name: "wooden_pickaxe", count: 1 }, { name: "raw_iron", count: 2 }, { name: "furnace", count: 1 }]);
+  miner.unplannable = ["coal", "iron_ingot"];
+  const result = await runStep({ skill: "get_items", items: [{ item: "coal", count: 1 }, { item: "iron_ingot", count: 2 }] }, contextFor(miner));
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  assert.deepEqual(miner.submitted.map((call) => call.tool === "smelt_item" ? `smelt ${String(call.input.item_name)} with ${String(call.input.fuel_item_name)}` : describeCall(call)), ["collect coal", "smelt raw_iron with coal"]);
+});
+
+test("a furnace item whose input cannot be gathered ends get_items with the runtime's reason", async () => {
+  const runtime = smeltRuntime([{ name: "coal", count: 1 }, { name: "furnace", count: 1 }]);
+  runtime.failures.collect_block = "[UNKNOWN_BLOCK] Minecraft has no block named beef.";
+  const result = await runStep({ skill: "get_items", items: [{ item: "cooked_beef", count: 1 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /beef/u);
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect beef"]);
+});
+
 test("a house without its blocks is refused with the exact shortfall, before any block is touched", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 30 }, { name: "cobblestone", count: 64 }] };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^missing 42 spruce_stairs, 6 oak_planks, 24 oak_log, 7 spruce_slab, 3 oak_fence, 1 oak_door for a small medieval house/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^missing 42 spruce_stairs, 6 oak_planks, 24 oak_log, 7 spruce_slab, 3 glass_pane, 1 oak_door for a small medieval house/u);
   assert.equal(runtime.submitted.length, 0);
 });
 

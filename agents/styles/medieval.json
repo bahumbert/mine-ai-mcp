@@ -8,7 +8,7 @@
     "pillar": "oak_log",
     "trim": "oak_log",
     "roof": "spruce_planks",
-    "window": "oak_fence",
+    "window": "glass_pane",
     "door": "oak_door"
   },
   "variants": { "roof": { "stairs": "spruce_stairs", "slab": "spruce_slab" } },

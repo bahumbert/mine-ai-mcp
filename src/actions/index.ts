@@ -53,6 +53,7 @@ import { createUseBucketAction } from "./use-bucket/index.js";
 import { createUseContainerAction } from "./use-container/index.js";
 import { createViewBlocksAction } from "./view-blocks/index.js";
 import { createViewCraftingRequirementsAction } from "./view-crafting-requirements/index.js";
+import { createViewSmeltingRecipesAction } from "./view-smelting-recipes/index.js";
 import { createViewFrontierAction } from "./view-frontier/index.js";
 import { createViewStatusAction, type ObserveStatusActivity } from "./view-status/index.js";
 
@@ -130,6 +131,7 @@ export function createActions(
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
     createViewCraftingRequirementsAction(bot),
+    createViewSmeltingRecipesAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
     createViewStatusAction(bot, botData, observeStatusActivity),
   ];
@@ -178,5 +180,6 @@ export * from "./use-bucket/index.js";
 export * from "./use-container/index.js";
 export * from "./view-blocks/index.js";
 export * from "./view-crafting-requirements/index.js";
+export * from "./view-smelting-recipes/index.js";
 export * from "./view-frontier/index.js";
 export * from "./view-status/index.js";

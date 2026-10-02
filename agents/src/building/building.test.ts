@@ -41,7 +41,7 @@ test("a small medieval house has the expected bill of materials", () => {
     { item: "oak_log", count: 24 },
     { item: "cobblestone", count: 16 },
     { item: "spruce_slab", count: 7 },
-    { item: "oak_fence", count: 3 },
+    { item: "glass_pane", count: 3 },
     { item: "oak_door", count: 1 },
   ]);
 });

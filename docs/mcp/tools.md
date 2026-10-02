@@ -214,6 +214,22 @@ checked whether a crafting table is needed, without modifying inventory. Defined
 in
 [src/actions/view-crafting-requirements/contract.ts](../../src/actions/view-crafting-requirements/contract.ts).
 
+### `view_smelting_recipes`
+
+Use `view_smelting_recipes` to learn what a furnace makes before smelting with
+`smelt_item`. The argument is `items`, 1 to 16 item names looked up as furnace
+outputs. Success reports, per item, the recipes that make it (any one of their
+`inputs` cooks into `count` of the item, in `cookingTicks`; none when no furnace
+makes it) and every furnace fuel with how many items one of it smelts. Recipes
+come from the game's own data: `src/world/data/smelting/<version>.json`,
+generated from the vanilla server jar by `src/world/smelting-extract.ts` (tags
+resolved); a server newer than every shipped file uses the nearest older one
+(`dataVersion` says which). Fuel values are the game's hard-coded burn times.
+`[UNKNOWN_SMELT_ITEMS]` names items Minecraft does not have;
+`[SMELTING_DATA_UNAVAILABLE]` means no data ships for this version or any older
+one. Reads nothing in the world. Defined in
+[src/actions/view-smelting-recipes/contract.ts](../../src/actions/view-smelting-recipes/contract.ts).
+
 ## Notes
 
 ### `note_save`

@@ -51,6 +51,7 @@ const PUBLISHED: ReadonlyArray<
   ["use_container", "task", false, true],
   ["view_blocks", "information", true, null],
   ["view_crafting_requirements", "information", true, false],
+  ["view_smelting_recipes", "information", true, false],
   ["view_frontier", "information", true, null],
   ["view_status", "information", true, null],
 ];
