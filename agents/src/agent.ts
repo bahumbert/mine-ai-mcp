@@ -43,6 +43,13 @@ interface Work {
   badReplies: number;
   /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
   step: AbortController | null;
+  /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
+  lastFact: string;
+  spokenAt: number;
+}
+
+function newWork(objective: Objective): Work {
+  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now() };
 }
 
 /**
@@ -164,13 +171,13 @@ export class Agent {
   private take(objective: Objective): void {
     const current = this.stack.at(-1);
     current?.step?.abort();
-    this.stack.push({ objective, steps: [], taken: 0, badReplies: 0, step: null });
+    this.stack.push(newWork(objective));
     this.wake?.();
   }
 
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
   private queue(objective: Objective): void {
-    const work = { objective, steps: [], taken: 0, badReplies: 0, step: null };
+    const work = newWork(objective);
     if (this.stack.length === 0) this.stack.push(work);
     else this.stack.splice(this.stack.length - 1, 0, work);
     this.wake?.();
@@ -200,7 +207,7 @@ export class Agent {
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}`);
-    this.stack.push({ objective: { text, requester: null }, steps: [], taken: 0, badReplies: 0, step: null });
+    this.stack.push(newWork({ text, requester: null }));
     return true;
   }
 
@@ -244,6 +251,8 @@ export class Agent {
         remember: (place) => this.learnPlace(place),
         building: this.building,
         areas: this.areas,
+        // Only an order is narrated (owner, 2026-10-02); its own goals show in the monitor.
+        ...(work.objective.requester !== null && { progress: (fact: string) => this.progress(work, fact) }),
       });
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -369,8 +378,21 @@ export class Agent {
       .catch((error: unknown) => this.options.log(`could not save a memory: ${String(error)}`));
   }
 
-  /** Has the chat tier tell the players how an order ended. */
-  private async narrate(objective: string, outcome: "done" | "failed", detail: string): Promise<void> {
+  /**
+   * A skill started something new for an order: the chat tier may say it, at most once per
+   * `settings.narrateEverySeconds` (counted from the reply that took the order on) and never twice for the same thing.
+   */
+  private progress(work: Work, fact: string): void {
+    if (fact === work.lastFact) return;
+    work.lastFact = fact;
+    this.options.log(`  now: ${fact}`);
+    if (Date.now() - work.spokenAt < this.options.persona.settings.narrateEverySeconds * 1_000) return;
+    work.spokenAt = Date.now();
+    void this.narrate(work.objective.text, "progress", fact);
+  }
+
+  /** Has the chat tier tell the players about an order: how it ended, or what it does now. */
+  private async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string): Promise<void> {
     if (this.runSignal.aborted) return;
     try {
       const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);

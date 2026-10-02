@@ -50,6 +50,8 @@ export const personaSchema = z.strictObject({
     maxSameStepInARow: z.number().int().min(2).max(50).default(3),
     /** After a "stop", how long it rests before going back to its own goal. */
     restAfterStopSeconds: z.number().int().min(0).max(3_600).default(60),
+    /** Working on an order, at most one line about what it does now every this many seconds (0: at each change). */
+    narrateEverySeconds: z.number().int().min(0).max(3_600).default(30),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
   }).prefault({}),

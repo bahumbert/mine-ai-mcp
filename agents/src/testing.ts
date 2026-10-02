@@ -298,8 +298,8 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     aptitudes: {},
     listensTo: [],
     authority: ["*"],
-    // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, restAfterStopSeconds: 0, digStraightDown: false },
+    // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, digStraightDown: false },
     models: {},
     ...overrides,
   };

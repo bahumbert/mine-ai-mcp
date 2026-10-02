@@ -247,3 +247,31 @@ test("other agents are not heard, and the chat tier may decide a message is not 
   assert.deepEqual(runtime.said, ["Hello Steve."]);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /Alex: "anyone want to trade"/u);
 });
+
+test("under an order, what it starts doing and why is given to the chat tier, which says it; its own goals stay silent", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "gather dirt", settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
+  chat.reply({ say: "Sure.", route: "act", request: "get 2 dirt" }, { say: "Digging a bit of dirt for you." }, { say: "Got it!" });
+  action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => runtime.said.length === 3);
+  assert.deepEqual(runtime.said, ["Sure.", "Digging a bit of dirt for you.", "Got it!"]);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /working on what you were asked \("get 2 dirt"\)\. Now you start gathering 2 dirt for getting 2 dirt\./u);
+
+  // Its own goal: the same work, no line.
+  planner.reply({ objective: "get 2 dirt" });
+  action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 4 dirt" });
+  await until(() => action.requests.length === 4);
+  await sleep(50);
+  assert.equal(chat.requests.length, 3, "no narration for its own goal");
+});
+
+test("no progress line is asked for within the budget after the reply that took the order on", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, narrateEverySeconds: 30 } });
+  chat.reply({ say: "Sure.", route: "act", request: "get 2 dirt" }, { say: "Done!" });
+  action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.said, ["Sure.", "Done!"], "within 30 s of the reply that took the order, nothing more is said");
+});

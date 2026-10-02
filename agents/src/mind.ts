@@ -94,7 +94,8 @@ export interface GoalInput {
 export interface NarrateInput {
   readonly persona: Persona;
   readonly objective: string;
-  readonly outcome: "done" | "failed";
+  /** How the order ended, or "progress": what it starts doing now (`detail`), the order still under way. */
+  readonly outcome: "done" | "failed" | "progress";
   readonly detail: string;
   readonly history: readonly ChatLine[];
 }
@@ -107,6 +108,6 @@ export interface Mind {
   next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision>;
   /** Goal tier (planner model): the next concrete objective towards the character's own goal. */
   chooseObjective(input: GoalInput, signal: AbortSignal): Promise<string>;
-  /** Chat tier: one in-character line reporting how an order ended; empty means say nothing. */
+  /** Chat tier: one in-character line about an order (how it ended, or what it does now); empty means say nothing. */
   narrate(input: NarrateInput, signal: AbortSignal): Promise<string>;
 }

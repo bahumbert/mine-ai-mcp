@@ -22,6 +22,11 @@ export interface GatherContext {
   readonly runtime: BotRuntime;
   readonly body: Body;
   readonly signal: AbortSignal;
+  /**
+   * Told what it starts doing now and what for, at each phase change (gathering, crafting, smelting), so the character
+   * can say it (owner, 2026-10-02: under an order, she says what she does and why).
+   */
+  readonly progress?: (fact: string) => void;
 }
 
 export type GatherResult =
@@ -346,6 +351,7 @@ function withTools(batch: readonly ItemCount[], tools: readonly string[], invent
 async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string): Promise<GatherResult> {
   const done: string[] = [];
   for (const [block, total] of targets) {
+    context.progress?.(`gathering ${total} ${block} for ${purpose}`);
     for (let left = total; left > 0; left -= MAX_COLLECT) {
       const count = Math.min(left, MAX_COLLECT);
       const step = await act(context, "collect_block", { block_name: block, count }, `Gather ${count} ${block} for ${purpose}.`);
@@ -385,6 +391,7 @@ async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: strin
   const load = { item_name: job.input, count, fuel_item_name: job.fuel };
   const rationale = `Smelt ${count} ${job.input} into ${job.output} for ${purpose}.`;
   const done: GatherResult = { status: "done", detail: `smelted ${count} ${job.output} from ${job.input} with ${job.fuel}` };
+  context.progress?.(`smelting ${count} ${job.input} into ${job.output} for ${purpose}`);
   const furnace = await walkToStation(context, "furnace");
   // A furnace still holding someone's items refuses the load: then her own, as if there were none.
   if (furnace !== null && (await act(context, "smelt_item", { ...load, ...furnace }, rationale)) === null) return done;
@@ -419,6 +426,7 @@ type Spent = (before: Stacks, after: Stacks) => void;
 async function craft(context: GatherContext, items: readonly ItemCount[], purpose: string, withTable: boolean, spent: Spent): Promise<GatherResult> {
   const input = { items: items.map(({ item, count }) => ({ item_name: item, count })), ...(withTable && { temporary_workstation: true }) };
   const before = (await context.runtime.status()).inventory;
+  context.progress?.(`crafting ${describeMaterials(items)} for ${purpose}`);
   const step = await act(context, "craft_item", input, `Craft ${describeMaterials(items)} for ${purpose}.`);
   if (step?.status !== "stopped") spent(before, (await context.runtime.status()).inventory);
   return step ?? { status: "done", detail: `crafted ${describeMaterials(items)}` };

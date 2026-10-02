@@ -42,6 +42,8 @@ export interface SkillContext {
   readonly building?: { unfinished: UnfinishedHouse | null };
   /** The protected areas the agent knows (ADR-012), updated in place when a skill protects or releases one. */
   readonly areas?: ProtectedArea[];
+  /** Told what it starts doing now and why, at a skill's phase changes (see {@link GatherContext.progress}). */
+  readonly progress?: (fact: string) => void;
 }
 
 export interface UnfinishedHouse {
@@ -180,13 +182,14 @@ async function give(context: SkillContext, player: string, item: string, count: 
  * Gets `count` more of each item like a player (`gathering.ts`), then comes back to where it started: fetching is a
  * basic function; when and what to fetch is the model's choice (ADR-011).
  */
-async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[]): Promise<SkillResult> {
+async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], purpose = `getting ${describeMaterials(items)}`): Promise<SkillResult> {
   const { position: start, inventory } = await context.runtime.status();
   const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const targets = items.map(({ item, count }) => ({ item, count: carried(item) + count }));
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
-  const gathered = await gatherMaterials(context, targets, `getting ${describeMaterials(items)}`, start, keep);
+  // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
+  const gathered = await gatherMaterials(context, targets, purpose, start, keep);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
@@ -224,6 +227,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   }
   if (at !== null) {
     const stand = builderStand(plan.site);
+    context.progress?.(`walking to the site of ${what} at ${at.x} ${at.y} ${at.z}`);
     const there = await context.body.act("navigate", navigateInput(stand, 1), `Walk to the site of ${what}.`, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}` };
@@ -282,6 +286,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     if (blocks.length === 0) continue;
     const auditing = index >= plan.batches.length;
     const part = auditing ? `final check ${index - plan.batches.length + 1}/${plan.batches.length}` : `part ${index + 1}/${plan.batches.length}`;
+    context.progress?.(auditing ? `checking every block of ${what} is right` : `building ${what}, ${part}`);
     // What earlier parts built stays: a route to this part may not dig through it (live 2026-10-01: 11 cells dug).
     const keep = auditing ? [] : builtBefore(plan.batches, index, lastPart);
     const input = { blocks, remove_wrong_blocks: true, ...(keep.length > 0 && { keep }) };
@@ -390,7 +395,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const firstFill = plan.phases.fillFirst[0]?.[0]?.block;
   if (firstFill !== undefined && spare(firstFill) < first) needs.push({ item: firstFill, count: first - Math.max(0, spare(firstFill)) });
   if (needs.length > 0) {
-    const got = await getItems(context, needs);
+    const got = await getItems(context, needs, `the tools${firstFill === undefined ? "" : " and fill"} to level ${what}`);
     if (got.status !== "done") return got;
   }
   // Cells it may not touch (someone's crafting table, a block under water) are left and leveled around, as a player
@@ -412,7 +417,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
         toolsLost += 1;
         const replace = toolsMissing((await context.runtime.status()).inventory);
         if (replace.length > 0) {
-          const got = await getItems(context, replace);
+          const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
           if (got.status !== "done") return got;
         }
         done -= 1;
@@ -428,6 +433,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     }
     return null;
   };
+  context.progress?.(`leveling ${what}: ${plan.dug > 0 ? "digging what stands above it" : "filling it"}`);
   const dug = await run([...plan.phases.fillFirst, ...plan.phases.dig]);
   if (dug !== null) return dug;
   // The holes, with what the dig brought; only the rest is fetched.
@@ -436,9 +442,10 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     const has = spareIn((await context.runtime.status()).inventory);
     const fill = fillFor(holes, has);
     if (has(fill) < holes) {
-      const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }]);
+      const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
       if (got.status !== "done") return got;
     }
+    context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
     const filled = await run(plan.phases.fillAfter.map((batch) => batch.map((cell) => ({ ...cell, block: fill }))));
     if (filled !== null) return filled;
   }

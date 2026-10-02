@@ -87,12 +87,13 @@ export class LlmMind implements Mind {
   async narrate(input: NarrateInput, signal: AbortSignal): Promise<string> {
     const news = input.outcome === "done"
       ? `What you were asked ("${input.objective}") is done: ${input.detail}.`
-      : `You stopped working on "${input.objective}": ${input.detail}.`;
-    const request = [
-      describeHistory(input.history),
-      news,
-      "Tell the players around you in one short line, in character.",
-    ].join("\n\n");
+      : input.outcome === "failed"
+        ? `You stopped working on "${input.objective}": ${input.detail}.`
+        : `You are working on what you were asked ("${input.objective}"). Now you start ${input.detail}.`;
+    const tell = input.outcome === "progress"
+      ? "If it helps the players around you follow what you do and why, tell them in one short line, in character; if it adds nothing to what was already said, reply with an empty say."
+      : "Tell the players around you in one short line, in character.";
+    const request = [describeHistory(input.history), news, tell].join("\n\n");
     return ask(this.models.chat, narrateSystemPrompt(input.persona), request, signal, (json) => narrateReplySchema.parse(json).say);
   }
 }

@@ -400,8 +400,13 @@ test("a house levels its site first, keeps what earlier parts built, and checks 
   // A bump of grass on the site, and a hole where the house lays its own floor.
   runtime.world.set("-4,64,0", "grass_block");
   runtime.world.set("-5,63,1", "air");
-  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { requester: "steve", style: "medieval" }));
+  const facts: string[] = [];
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { requester: "steve", style: "medieval", progress: (fact) => facts.push(fact) }));
   assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  // What it starts doing and why, at each phase change, for the character to say.
+  assert.equal(facts[0], "leveling the site of a small medieval house: digging what stands above it");
+  assert.match(facts[1] ?? "", /^building a small medieval house, part 1\/\d+$/u);
+  assert.ok(facts.includes("checking every block of a small medieval house is right"));
   const calls = builds(runtime) as { blocks: { x: number; y: number; z: number; block_name: string }[]; keep?: { x: number; y: number; z: number }[] }[];
   // The bump is dug before any block of the house; the hole is left to the floor that goes there.
   assert.deepEqual(calls[0]!.blocks, [{ x: -4, y: 64, z: 0, block_name: "air" }]);
