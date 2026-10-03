@@ -1,0 +1,27 @@
+template: ../../templates/flat-single-action.yaml
+name: seeds-from-grass
+tags: [acceptance]
+description: >-
+  Wheat seeds are gathered the way a player gets them: breaking short grass, which drops a seed one time in eight
+  (the 1.21.4 loot table). Most breaks drop nothing, so the run must keep breaking instead of waiting for a drop
+  that never comes or stopping after requested + 4 breaks: four seeds from a field of grass.
+
+geometry:
+  - fill: { block: grass_block, from: [-12, -61, -12], to: [12, -61, 12] }
+  - fill: { block: short_grass, from: [-10, -60, -10], to: [10, -60, 10] }
+  - fill: { block: air, from: [0, -60, 0], to: [0, -60, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+
+params:
+  action: collect_block
+  input: { block_name: short_grass, count: 4 }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: hasItem, who: Actor, item: wheat_seeds, count: 4 }

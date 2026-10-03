@@ -87,12 +87,59 @@ test("the harvest tool comes from game data and climbs the tiers: a wooden picka
   runtime.recipes = { ...HOUSE_RECIPES, stone_pickaxe: { makes: 1, needs: [{ item: "cobblestone", count: 3 }, { item: "stick", count: 2 }] } };
   runtime.simulateInventory = true;
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
-  const result = await runStep({ skill: "get_items", items: [{ item: "iron_ore", count: 2 }] }, contextFor(runtime));
+  // Iron ore drops raw iron (game data): without silk touch, the ore block itself is never gathered.
+  const result = await runStep({ skill: "get_items", items: [{ item: "raw_iron", count: 2 }] }, contextFor(runtime));
   assert.equal(result.status, "done", result.status === "done" ? "" : JSON.stringify(result));
   const calls = runtime.submitted.map(describeCall);
   assert.deepEqual(calls.filter((call) => call.startsWith("craft")), ["craft wooden_pickaxe at table", "craft stone_pickaxe at table"]);
   assert.ok(calls.indexOf("collect stone") > calls.indexOf("craft wooden_pickaxe at table"), calls.join(" | "));
   assert.ok(calls.indexOf("collect iron_ore") > calls.indexOf("craft stone_pickaxe at table"), calls.join(" | "));
+});
+
+test("get_items gathers an item from the block that drops it, from game data: wheat seeds from grass", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  const result = await runStep({ skill: "get_items", items: [{ item: "wheat_seeds", count: 8 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.block_name, call.input.count]), [["collect_block", "short_grass", 8]]);
+});
+
+test("among equally likely sources, the nearest loaded one is broken", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.world.set("2,64,0", "fern");
+  runtime.world.set("30,64,0", "short_grass");
+  await runStep({ skill: "get_items", items: [{ item: "wheat_seeds", count: 2 }] }, contextFor(runtime));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.block_name), ["fern"]);
+});
+
+test("the iron for a bucket is mined as iron ore (raw iron is its drop), then smelted and crafted", async () => {
+  const runtime = smeltRuntime([{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "stone_pickaxe", count: 1 }, { name: "furnace", count: 1 }, { name: "coal", count: 4 }]);
+  runtime.recipes = { ...GLASS_RECIPES, bucket: { makes: 1, needs: [{ item: "iron_ingot", count: 3 }] } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const calls = runtime.submitted.map(describeCall);
+  assert.ok(calls.includes("collect iron_ore"), calls.join(" | "));
+  assert.ok(!calls.includes("collect raw_iron"), calls.join(" | "));
+});
+
+test("an item that only grows as a crop is not gathered from someone's farm: get_items says to farm it", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { ...runtime.dropSources, wheat: [{ block: "wheat", chance: 1, planted: true }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "wheat", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /wheat grows as a crop: farm it/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("an item no block drops, and nothing crafts or smelts, ends get_items saying so", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /no block drops water_bucket, and it is not crafted or smelted/u);
+  assert.deepEqual(runtime.submitted, []);
 });
 
 test("items that cannot be found end get_items, saying why", async () => {

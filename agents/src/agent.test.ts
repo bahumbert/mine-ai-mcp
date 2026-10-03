@@ -200,6 +200,15 @@ test("a house the agent built becomes a known place, with its roof, for what com
   assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");
 });
 
+test("her farms are places she knows, as they were at their last tend", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.notes = [memoryNote({ kind: "farm", farm: { crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "2026-10-02T20:00:00.000Z", tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0 } } })];
+  const { planner } = agentFor(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  assert.match(planner.requests[0]?.[1]?.content ?? "", /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty when you last tended it, [^)]* ago; farming it again harvests what is ripe and replants it\)/u);
+});
+
 test("memories an earlier run saved as notes come back: places, its own last objectives, an unfinished house", async (t) => {
   const runtime = new FakeRuntime();
   const house = { kind: "small medieval house", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" as const }, part: 2 };
@@ -218,8 +227,8 @@ test("memories an earlier run saved as notes come back: places, its own last obj
   assert.match(prompt, /the old hut \(door 1 64 1 facing south\); the small medieval house you built for Steve/u);
   assert.match(prompt, /collect 16 oak_log: done/u);
   assert.equal(runtime.queries.length, 1);
-  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5 }).unfinished, house);
-  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5 }).places.map((place) => place.name), ["the small medieval house you built for Steve"]);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4 }).unfinished, house);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4 }).places.map((place) => place.name), ["the small medieval house you built for Steve"]);
 });
 
 test("never digging straight down is set at start, and again after the runtime reset its policy", async (t) => {

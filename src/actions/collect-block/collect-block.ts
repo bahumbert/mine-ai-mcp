@@ -25,16 +25,19 @@ import { evaluateMineTarget, type MineTargetDecision } from "../../navigation/pr
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
+import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
+import { watchForStall } from "../stall-watch.js";
 import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains } from "./collection-facts.js";
 import { createCollectionMovements } from "./collection-movements.js";
 import {
   cellLabel,
+  COLLECT_STALL_MS,
   decimal,
   HIGHLIGHT_COLOURS,
   MAX_EXTRA_BREAKS,
@@ -61,6 +64,8 @@ const sumValues = (record: Record<string, number>): number => Object.values(reco
 interface CollectionTarget {
   readonly itemNames: ReadonlySet<string>;
   readonly blockStateIds: ReadonlySet<number>;
+  /** How often one break yields a collectable item (`collectionChance`). */
+  readonly chance: number;
 }
 
 function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTarget {
@@ -76,7 +81,31 @@ function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTar
     const block = bot.registry.blocksByName[name]!;
     for (let stateId = block.minStateId; stateId <= block.maxStateId; stateId += 1) blockStateIds.add(stateId);
   }
-  return { itemNames, blockStateIds };
+  return { itemNames, blockStateIds, chance: collectionChance(bot, names, itemNames) };
+}
+
+/**
+ * How often one break yields a collectable item, at best among the matching blocks: grass gives wheat seeds one time
+ * in eight (its loot table, `src/world/block-drops.ts`). A block without shipped drops counts as a sure drop, which is
+ * what the break budget assumed before.
+ */
+export function collectionChance(bot: Bot, blockNames: readonly string[], collectable: ReadonlySet<string>): number {
+  const version = bot.version;
+  let best = 0;
+  for (const name of blockNames) {
+    if (blockDropsData(version)?.blocks[name] === undefined) return 1;
+    for (const drop of ordinaryDrops(name, version)) if (collectable.has(drop.item)) best = Math.max(best, drop.chance);
+  }
+  return best > 0 ? best : 1;
+}
+
+/**
+ * Breaks a run may make: a sure drop gets the requested count plus the allowance for lost ones; an uncertain one twice
+ * the breaks expected at its chance, so bad luck rarely cuts the run short (the expected count alone fell short about
+ * one run in three for 4 seeds from grass).
+ */
+export function breakBudget(requested: number, chance: number): number {
+  return (chance >= 1 ? requested : Math.ceil((2 * requested) / chance)) + MAX_EXTRA_BREAKS;
 }
 
 function collectionMovements(bot: Bot, request: CollectBlockRequest, target: CollectionTarget) {
@@ -231,6 +260,15 @@ function beginCollectBlock(
       if (capacityReason !== null) capacity.abort(new Error(capacityReason));
     };
     bot.on("physicsTick", checkCapacity);
+    // Whatever inner loop keeps the run alive, no break and no gain for this
+    // long means it is going nowhere: settle with what it got.
+    const stall = watchForStall({
+      work: () => `${broken.length}:${gained()}`,
+      position: () => bot.entity.position,
+      stallMs: COLLECT_STALL_MS,
+      describe: ({ seconds, walked }) =>
+        outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(start))),
+    });
     // Target highlights are live state, retained until replaced or this attempt ends.
     const highlights = new AbortController();
     // The viewer reads this lazily: no polling viewer means no display work.
@@ -265,8 +303,8 @@ function beginCollectBlock(
         movements,
         castSearchRadius: LOADED_SEARCH_RADIUS,
         explore: exactCell === null,
-        maximumBreaks: Math.max(0, request.requested + MAX_EXTRA_BREAKS - broken.length),
-        signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal]),
+        maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance) - broken.length),
+        signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
         ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
         onTargets: (targets) => {
           pursued = targets;
@@ -274,15 +312,21 @@ function beginCollectBlock(
         onBroken: (position) => broken.push(position),
       });
 
+      const stopped = capacityReason ?? stall.reason();
       return settle(
         bot, request, inventoryBefore, collectable, start,
-        capacityReason === null ? { ...result, broken } : { status: "stopped", broken, reason: capacityReason },
+        stopped === null ? { ...result, broken } : { status: "stopped", broken, reason: stopped },
       );
     } catch (error) {
       context.signal?.throwIfAborted();
-      if (capacityReason === null || error !== capacity.signal.reason) throw error;
-      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: capacityReason });
+      const stopped =
+        capacityReason !== null && error === capacity.signal.reason ? capacityReason
+        : error === stall.signal.reason ? stall.reason()
+        : null;
+      if (stopped === null) throw error;
+      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: stopped });
     } finally {
+      stall.close();
       highlights.abort();
       bot.off("physicsTick", checkCapacity);
     }

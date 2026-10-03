@@ -20,6 +20,7 @@ const PUBLISHED: ReadonlyArray<
   ["attack_dragon_perch", "resumable_task", false, true],
   ["shoot_dragon", "resumable_task", false, true],
   ["build_structure", "task", false, true],
+  ["tend_crops", "task", false, true],
   ["cancel_foreground_action", "control", false, true],
   ["collect_block", "resumable_task", false, true],
   ["craft_item", "task", false, true],
@@ -52,6 +53,7 @@ const PUBLISHED: ReadonlyArray<
   ["view_blocks", "information", true, null],
   ["view_crafting_requirements", "information", true, false],
   ["view_smelting_recipes", "information", true, false],
+  ["view_block_drops", "information", true, false],
   ["view_frontier", "information", true, null],
   ["view_status", "information", true, null],
 ];

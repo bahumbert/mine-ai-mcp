@@ -15,6 +15,7 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "Without x/y/z it mines the closest matching blocks it can reach, wherever they are, including blocks the bot placed itself; " +
   "reposition with navigate first if you want blocks from a particular area. " +
   "The best carried tool for each block is equipped automatically, so equip is not needed first. " +
+  "A run that breaks and picks up nothing for 180 s stops with what it got and says how far it walked meanwhile. " +
   "By default a required tool-tier loss stops with partial progress; on_tool_loss=continue keeps mining with the remaining tool. " +
   "The response lists every cell broken and its distance from where the run started. " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
@@ -32,6 +33,13 @@ export const NON_MINEABLE_FLUIDS = new Set(["water", "lava", "bubble_column"]);
  * allowance covers a hazardous seam without licensing an unbounded dig.
  */
 export const MAX_EXTRA_BREAKS = 4;
+/**
+ * How long a run may go without breaking a matching block or gaining an item
+ * before it settles with what it got. A walk to the next stand of trees fits
+ * well inside it; the circling it ends (observed live 2026-10-02) lasted 15 to
+ * 27 minutes.
+ */
+export const COLLECT_STALL_MS = 180_000;
 
 export const HIGHLIGHT_COLOURS = {
   candidate: "#ffaa0d",
@@ -76,6 +84,8 @@ export const outcomes = {
   inventoryFull: (totalSlots: number, itemNames: readonly string[]) =>
     `[INVENTORY_FULL] All ${totalSlots} inventory slots are occupied with no room in a stack of ${describeItems(itemNames)}; allow_full_inventory=false.`,
   incomplete: "[COLLECTION_INCOMPLETE] Collection stopped before the requested inventory gain was observed.",
+  stalled: (seconds: number, walked: number, fromStart: number) =>
+    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
   progress: (reason: string, gained: number, requested: number, blocksBroken: number) =>
     `${reason} Broke ${blocksBroken} matching block${blocksBroken === 1 ? "" : "s"}; inventory gained ${gained}/${requested} requested items.`,
 } as const;

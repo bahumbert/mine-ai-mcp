@@ -15,9 +15,6 @@ const HOME_RANGE = 3;
 /** Fuel made when none is carried: planks of the wood it carries, else these. */
 const DEFAULT_FUEL = "oak_planks";
 
-/** Items that are the drop of a different block: collect_block names the block to break. */
-const MINED_FROM: Readonly<Record<string, string>> = { cobblestone: "stone", cobbled_deepslate: "deepslate" };
-
 export interface GatherContext {
   readonly runtime: BotRuntime;
   readonly body: Body;
@@ -67,6 +64,10 @@ interface Knowledge {
   fuels: Readonly<Record<string, number>>;
   /** Per block, the tools without which it drops nothing, cheapest first (game data); null when a hand will do. */
   readonly harvest: Map<string, readonly string[] | null>;
+  /** Per gathered item, the block collect_block breaks for it (game data: cobblestone from stone); null when none drops it. */
+  readonly source: Map<string, string | null>;
+  /** Items that only come from crops someone grows (wheat): a farm, not gathering, gets them. */
+  readonly cropOnly: Set<string>;
 }
 
 /**
@@ -92,7 +93,7 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const knowledge: Knowledge = { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map() };
+  const knowledge: Knowledge = { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), cropOnly: new Set() };
   const actions: string[] = [];
   let wanted = [...bill];
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
@@ -185,6 +186,43 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
   return recipes.length > 0 ? "smelt" : "gather";
 }
 
+function notDropped(item: string, knowledge: Knowledge): string {
+  // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
+  if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
+  return `no block drops ${item}, and it is not crafted or smelted`;
+}
+
+/**
+ * The block to break for `item`, from the game's loot tables (`view_block_drops`): a wild block before a crop someone
+ * planted (grass, not a farm's wheat, for seeds), the likeliest drop first, and among equally likely ones the nearest
+ * loaded (fern beside her rather than grass far off); null when no block drops it.
+ */
+async function sourceBlock(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string | null> {
+  const known = knowledge.source.get(item);
+  if (known !== undefined) return known;
+  const sources = (await runtime.blockSources([item]))[item] ?? [];
+  const wild = sources.filter((source) => !source.planted);
+  if (wild.length === 0 && sources.length > 0) {
+    knowledge.cropOnly.add(item);
+    knowledge.source.set(item, null);
+    return null;
+  }
+  const pool = wild;
+  const tied = pool.filter((source) => source.chance === pool[0]?.chance).map((source) => source.block);
+  let block = tied[0] ?? null;
+  if (tied.length > 1) {
+    const at = (await runtime.status()).position;
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const candidate of tied) {
+      const found = (await runtime.findBlocks(candidate, 1))[0];
+      const distance = found === undefined ? Number.POSITIVE_INFINITY : Math.hypot(found.x - at.x, found.y - at.y, found.z - at.z);
+      if (distance < nearest) [nearest, block] = [distance, candidate];
+    }
+  }
+  knowledge.source.set(item, block);
+  return block;
+}
+
 /** An ore block: it drops its own item (raw iron, coal…), it is smelted whole only when silk-touched. */
 function isOre(item: string): boolean {
   return item.endsWith("_ore");
@@ -243,16 +281,18 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   const crafted = new Map<string, number>();
   const smelts = new Map<string, number>();
   const jobs = new Map<string, SmeltJob>();
-  const gathered = (item: string, count: number) => {
-    const block = MINED_FROM[item] ?? item;
+  const gathered = async (item: string, count: number): Promise<string | null> => {
+    const block = await sourceBlock(runtime, item, knowledge);
+    if (block === null) return notDropped(item, knowledge);
     collect.set(block, (collect.get(block) ?? 0) + count);
+    return null;
   };
   const need = async (item: string, count: number): Promise<string | null> => {
     const how = await howToGet(runtime, item, knowledge);
     if (how === null) return `${item} is not a Minecraft item`;
     const into = how === "craft" ? crafted : how === "smelt" ? smelts : null;
-    if (into === null) gathered(item, count);
-    else into.set(item, (into.get(item) ?? 0) + count);
+    if (into === null) return gathered(item, count);
+    into.set(item, (into.get(item) ?? 0) + count);
     return null;
   };
   for (const entry of missing) {
@@ -293,7 +333,8 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
       // A leaf a furnace makes (glass for panes) is a furnace job; the others are gathered.
       if ((await howToGet(runtime, leaf.item, knowledge)) === "smelt") smelts.set(leaf.item, Math.max(smelts.get(leaf.item) ?? 0, leaf.count));
       else {
-        const block = MINED_FROM[leaf.item] ?? leaf.item;
+        const block = await sourceBlock(runtime, leaf.item, knowledge);
+        if (block === null) return notDropped(leaf.item, knowledge);
         leaves.set(block, (leaves.get(block) ?? 0) + leaf.count);
       }
     }

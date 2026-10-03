@@ -4,7 +4,7 @@ import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { ROUTES, type ChatDecision, type ChatInput, type ChatLine, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
-import type { Persona, Stance } from "./persona.ts";
+import type { Aptitude, Persona, Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 
 /** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
@@ -31,7 +31,8 @@ const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for wha
 - Ask get_items for the finished item itself (glass_pane, iron_ingot, oak_fence), never for its ingredients: it works
   out the rest, smelting included (it gathers the input, picks a fuel and crafts the furnace itself), so never fetch
   sand, coal, fuel or a furnace for it. Cooked food needs raw meat already carried.
-- Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood).`;
+- Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood).
+- Crops ripen over time near water (wheat in about half an hour), so a farm is planted now and harvested later; bread is crafted from 3 wheat.`;
 
 /** The model behind each tier; they may all be the same model. `action` picks work steps, `planner` own objectives. */
 export interface TierModels {
@@ -144,16 +145,32 @@ function describeAuthority(persona: Persona): string {
   return persona.authority.map((name) => name === "*" ? "any other player" : name === "Server" ? "Server (the world's operator)" : name).join(", then ");
 }
 
+/** Each aptitude as the activity it is about (ADR-005: an inclination the models weigh, never a switch). */
+const APTITUDE_ACTIVITY: Readonly<Record<Aptitude, string>> = {
+  builder: "building", farmer: "farming", miner: "mining", warrior: "fighting", explorer: "exploring", trader: "trading",
+};
+
+/** `farming (very), exploring (fairly)`, strongest first; an aptitude of 0 is left out. */
+function describeAptitudes(persona: Persona): string {
+  return Object.entries(persona.aptitudes)
+    .filter((entry): entry is [Aptitude, number] => entry[1] !== undefined && entry[1] > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([aptitude, weight]) => `${APTITUDE_ACTIVITY[aptitude]} (${weight >= 0.7 ? "very" : weight >= 0.4 ? "fairly" : "a little"})`)
+    .join(", ");
+}
+
 /**
  * The init prompt (ADR-011): who the character is, its style, its own goal, whose requests come first, and its
  * freedom to decide. Shared by every tier (same prefix helps provider prompt caching).
  */
 export function personaPrompt(persona: Persona): string {
   const traits = persona.traits.length > 0 ? `\nTraits: ${persona.traits.join(", ")}.` : "";
+  const liked = describeAptitudes(persona);
+  const aptitudes = liked === "" ? "" : `\nWhat you are good at and like doing: ${liked}.`;
   const style = persona.style === undefined ? "" : `\nYou build in the ${styleOrDefault(persona.style).id} style: ${styleOrDefault(persona.style).description}`;
   const goal = persona.goal === undefined ? "You have no goal of your own: you wait for requests." : `Your own goal, when nobody needs you: ${persona.goal}`;
   return `You are ${persona.displayName}, a character living in a Minecraft world, playing as ${persona.username}.
-${persona.description}${traits}
+${persona.description}${traits}${aptitudes}
 How you talk: ${persona.voice}
 ${STANCE_GUIDE[persona.stance]}${style}
 ${goal}
@@ -230,7 +247,8 @@ ${MINECRAFT_FACTS}
 - Read the steps so far: never repeat a step that failed the same way, or that changed nothing (same place, same
   inventory); try another way, or give up. Skills that need a block or a mob find it themselves: do not walk around
   to look for things first.
-- When the objective is reached, answer done. When it is impossible, unclear, or you do not know how, give up and
+- When the objective is reached, answer done only when the steps so far did every part of it: making something for
+  someone is not giving it to them (a give step must have succeeded); never claim what no step did. When it is impossible, unclear, or you do not know how, give up and
   say why in a few words; when no skill can do it (teleporting, server commands, flying), give up at once.
 Reply with only one JSON object: {"thought": "<one short sentence>", "step": {...}} or {"done": "<what you achieved>"}
 or {"give_up": "<why>"}.`;

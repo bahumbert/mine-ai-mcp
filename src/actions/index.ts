@@ -21,6 +21,7 @@ import { createActivatePortalAction } from "./activate-portal/index.js";
 import { createAttackDragonPerchAction } from "./attack-dragon-perch/index.js";
 import { createBarterAction } from "./barter/index.js";
 import { createBuildStructureAction } from "./build-structure/index.js";
+import { createTendCropsAction } from "./tend-crops/index.js";
 import { createCancelForegroundAction } from "./cancel-foreground-action/index.js";
 import { createCollectBlockAction } from "./collect-block/index.js";
 import { createCraftItemAction } from "./craft-item/index.js";
@@ -54,6 +55,7 @@ import { createUseContainerAction } from "./use-container/index.js";
 import { createViewBlocksAction } from "./view-blocks/index.js";
 import { createViewCraftingRequirementsAction } from "./view-crafting-requirements/index.js";
 import { createViewSmeltingRecipesAction } from "./view-smelting-recipes/index.js";
+import { createViewBlockDropsAction } from "./view-block-drops/index.js";
 import { createViewFrontierAction } from "./view-frontier/index.js";
 import { createViewStatusAction, type ObserveStatusActivity } from "./view-status/index.js";
 
@@ -100,6 +102,7 @@ export function createActions(
     createAttackDragonPerchAction(bot, combat),
     createShootDragonAction(bot, combat),
     createBuildStructureAction(bot, navigation),
+    createTendCropsAction(bot, navigation),
     createCancelForegroundAction(cancelForegroundAction),
     createCollectBlockAction(bot, navigation, discarded),
     createCraftItemAction(bot, navigation),
@@ -132,6 +135,7 @@ export function createActions(
     createViewBlocksAction(bot),
     createViewCraftingRequirementsAction(bot),
     createViewSmeltingRecipesAction(bot),
+    createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
     createViewStatusAction(bot, botData, observeStatusActivity),
   ];
@@ -181,5 +185,7 @@ export * from "./use-container/index.js";
 export * from "./view-blocks/index.js";
 export * from "./view-crafting-requirements/index.js";
 export * from "./view-smelting-recipes/index.js";
+export * from "./view-block-drops/index.js";
+export * from "./tend-crops/index.js";
 export * from "./view-frontier/index.js";
 export * from "./view-status/index.js";

@@ -8,10 +8,24 @@ import type { UnfinishedHouse } from "./skills.ts";
  * memory belongs to that world and bot, and the monitor shows it with the other notes. The note is a sentence for
  * people; the context carries the same memory as data, after a fixed prefix the brain reads back with one query.
  */
+/** A farm the character made, as it was when she last tended it. */
+export interface KnownFarm {
+  /** The item planted on it (wheat_seeds, carrot...). */
+  readonly crop: string;
+  readonly size: number;
+  /** The middle cell at soil level, where the water is. */
+  readonly centre: { readonly x: number; readonly y: number; readonly z: number };
+  readonly madeAt: string;
+  readonly tendedAt: string;
+  /** Cells at the last tend: crops growing, ripe crops left, farmland left empty. */
+  readonly state: { readonly planted: number; readonly ripe: number; readonly empty: number };
+}
+
 export type Memory =
   | { readonly kind: "place"; readonly place: KnownPlace }
   | { readonly kind: "own_objective"; readonly outcome: string }
-  | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null };
+  | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null }
+  | { readonly kind: "farm"; readonly farm: KnownFarm };
 
 export interface Recalled {
   /** Oldest first, one per name (the latest wins). */
@@ -19,16 +33,19 @@ export interface Recalled {
   /** Oldest first. */
   readonly lately: readonly string[];
   readonly unfinished: UnfinishedHouse | null;
+  /** Oldest first, one per farm (by its centre; the latest note wins). */
+  readonly farms: readonly KnownFarm[];
 }
 
 /** How many of each kind are read back; the agent keeps no more than this in its prompts anyway. */
 export interface RecallLimits {
   readonly places: number;
   readonly lately: number;
+  readonly farms: number;
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm"] as const;
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const memorySchema = z.discriminatedUnion("kind", [
@@ -42,6 +59,17 @@ const memorySchema = z.discriminatedUnion("kind", [
       part: z.number().int().min(0),
       prepared: z.boolean().optional(),
     }).nullable(),
+  }),
+  z.object({
+    kind: z.literal("farm"),
+    farm: z.object({
+      crop: z.string().min(1),
+      size: z.number().int().positive(),
+      centre: position,
+      madeAt: z.string(),
+      tendedAt: z.string(),
+      state: z.object({ planted: z.number().int().min(0), ripe: z.number().int().min(0), empty: z.number().int().min(0) }),
+    }),
   }),
 ]);
 
@@ -60,6 +88,10 @@ function describe(memory: Memory): string {
         ? "I have no unfinished house any more."
         : `I left a ${house.kind} unfinished at part ${house.part + 1}, door ${house.site.door.x} ${house.site.door.y} ${house.site.door.z} facing ${house.site.facing}.`;
     }
+    case "farm": {
+      const { farm } = memory;
+      return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
+    }
   }
 }
 
@@ -73,7 +105,8 @@ export function recallQuery(username: string, limits: RecallLimits): string {
     return `SELECT * FROM (SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
       `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC LIMIT ${limit})`;
   };
-  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1)].join(" UNION ALL ")} ORDER BY note_id DESC`;
+  // A farm is noted at every tend: read enough notes to find the latest of each of the farms kept.
+  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8)].join(" UNION ALL ")} ORDER BY note_id DESC`;
 }
 
 /** Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. */
@@ -81,14 +114,19 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
   const places = new Map<string, KnownPlace>();
   const lately: string[] = [];
   let unfinished: UnfinishedHouse | null | undefined;
+  const farms = new Map<string, KnownFarm>();
   for (const context of contexts) {
     const memory = parse(context);
     if (memory === null) continue;
     if (memory.kind === "place" && !places.has(memory.place.name) && places.size < limits.places) places.set(memory.place.name, memory.place);
     if (memory.kind === "own_objective" && lately.length < limits.lately) lately.push(memory.outcome);
     if (memory.kind === "unfinished_house" && unfinished === undefined) unfinished = memory.house;
+    if (memory.kind === "farm") {
+      const key = `${memory.farm.centre.x},${memory.farm.centre.y},${memory.farm.centre.z}`;
+      if (!farms.has(key) && farms.size < limits.farms) farms.set(key, memory.farm);
+    }
   }
-  return { places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null };
+  return { places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse() };
 }
 
 function parse(context: string): Memory | null {

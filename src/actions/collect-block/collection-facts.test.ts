@@ -8,7 +8,8 @@ function factsBot(
   items: Array<{ name: string; count: number; type: number }> = [],
   heldItem: { enchants: Array<{ name: string; lvl: number }> } | null = null,
 ) {
-  return botFixture({ items }, { heldItem });
+  // The version selects the shipped loot tables (src/world/block-drops.ts); the fixture's registry is 1.21.4.
+  return Object.assign(botFixture({ items }, { heldItem }), { version: "1.21.4" });
 }
 
 test("matches only Collect's supported resource families", () => {
@@ -19,12 +20,21 @@ test("matches only Collect's supported resource families", () => {
   assert.equal(blockMatchesSelector("deepslate", "stone"), false);
 });
 
-test("chooses the equipped tool's Minecraft loot and keeps the ordinary-break upstream override", () => {
+test("chooses the equipped tool's drop: cobblestone, or stone with silk touch; seeds from grass, string from cobweb", () => {
   assert.equal(expectedDropName(factsBot(), "stone"), "cobblestone");
   assert.equal(expectedDropName(factsBot(), "clay"), "clay_ball");
   assert.equal(expectedDropName(factsBot([], { enchants: [{ name: "silk_touch", lvl: 1 }] }), "stone"), "stone");
   assert.equal(expectedDropName(factsBot(), "short_grass"), "wheat_seeds");
   assert.equal(expectedDropName(factsBot(), "cobweb"), "string");
+});
+
+test("reads the version's own loot tables: the likeliest ordinary drop, grass under its 1.21 names", () => {
+  assert.equal(expectedDropName(factsBot(), "gravel"), "gravel");
+  assert.equal(expectedDropName(factsBot(), "oak_leaves"), "oak_sapling");
+  assert.equal(expectedDropName(factsBot(), "large_fern"), "wheat_seeds");
+  assert.equal(expectedDropName(factsBot(), "pitcher_crop"), "pitcher_pod");
+  assert.equal(expectedDropName(factsBot([], { enchants: [{ name: "silk_touch", lvl: 1 }] }), "iron_ore"), "iron_ore");
+  assert.equal(expectedDropName(factsBot(), "iron_ore"), "raw_iron");
 });
 
 test("adds only Collect's before-and-after interpretation to Mineflayer inventory facts", () => {

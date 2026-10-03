@@ -40,6 +40,7 @@ import {
   BUILD_STRUCTURE_DESCRIPTION,
   buildStructureInputSchema,
 } from "./build-structure/contract.js";
+import { TEND_CROPS, TEND_CROPS_DESCRIPTION, tendCropsInputSchema } from "./tend-crops/contract.js";
 import {
   CANCEL_FOREGROUND_ACTION,
 } from "./cancel-foreground-action/contract.js";
@@ -130,6 +131,11 @@ import {
   viewSmeltingRecipesInputSchema,
 } from "./view-smelting-recipes/contract.js";
 import {
+  VIEW_BLOCK_DROPS,
+  VIEW_BLOCK_DROPS_DESCRIPTION,
+  viewBlockDropsInputSchema,
+} from "./view-block-drops/contract.js";
+import {
   VIEW_FRONTIER,
   VIEW_FRONTIER_DESCRIPTION,
   viewFrontierInputSchema,
@@ -165,6 +171,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     ),
     tool("wait_for_action", WAIT_FOR_ACTION_DESCRIPTION, waitForActionInputSchema, { foreground: false }),
     tool(BUILD_STRUCTURE, BUILD_STRUCTURE_DESCRIPTION, buildStructureInputSchema),
+    tool(TEND_CROPS, TEND_CROPS_DESCRIPTION, tendCropsInputSchema),
     tool(COLLECT_BLOCK, COLLECT_BLOCK_DESCRIPTION, collectBlockInputSchema),
     tool(CRAFT_ITEM, CRAFT_ITEM_DESCRIPTION, craftItemInputSchema),
     tool(SET_SURVIVAL_POLICY, SET_SURVIVAL_POLICY_DESCRIPTION, setSurvivalPolicyInputSchema, { foreground: false }),
@@ -201,6 +208,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
       { foreground: false },
     ),
     tool(VIEW_SMELTING_RECIPES, VIEW_SMELTING_RECIPES_DESCRIPTION, viewSmeltingRecipesInputSchema, { foreground: false }),
+    tool(VIEW_BLOCK_DROPS, VIEW_BLOCK_DROPS_DESCRIPTION, viewBlockDropsInputSchema, { foreground: false }),
     tool(VIEW_FRONTIER, VIEW_FRONTIER_DESCRIPTION, viewFrontierInputSchema, { foreground: false }),
     tool(VIEW_BLOCKS, VIEW_BLOCKS_DESCRIPTION, viewBlocksInputSchema, { foreground: false }),
     tool(VIEW_STATUS, VIEW_STATUS_DESCRIPTION, viewStatusInputSchema, { foreground: false }),

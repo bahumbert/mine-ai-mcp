@@ -8,7 +8,8 @@ safety checks, the models decide.
 
 ## How it thinks
 
-1. **Init prompt** (`personaPrompt`, from the persona file): identity, traits, voice, stance as a disposition, its
+1. **Init prompt** (`personaPrompt`, from the persona file): identity, traits, what it is good at and likes doing (its
+   `aptitudes`, as "farming (very), exploring (fairly)": an inclination, never a switch), voice, stance as a disposition, its
    building style, its own `goal`, and its `authority` order (e.g. `["Server", "Tom", "*"]`: whose requests come
    first). Its own goal always gives way to any player's request; the authority order only ranks players against
    whoever it is already working for. It decides how to do things and may say a request is unclear, impossible, or
@@ -41,7 +42,7 @@ Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, c
 come back), eat, equip, sleep, hunt
 mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
 respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
-blocks). A persona
+blocks), make a crop farm or tend one it made (below). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
@@ -68,6 +69,16 @@ A finished house becomes a **known place** (door and facing, a standing spot on 
 last 8 and every tier sees them in its situation ("Places you know: ..."), so "go to the roof" is a `go_to` with real
 coordinates. When no skill fits a request (a pillar, a tower...), the prompts let the character say it does not know
 how or ask what is meant; nothing in code lists what to refuse.
+
+**Farming** (`src/farming/`, ADR-014): `farm` makes a square plot (3-9 a side, 9 by default) right behind the character,
+away from whoever asked (or around given coordinates): protected (`farm <crop>`), leveled with the house's site
+engine (the middle cell left alone), water poured in the middle from a bucket it fills at the nearest water (or one it
+carries; water already there is kept), then the runtime's `tend_crops` tills and plants it. Missing a hoe, the crop
+item or a bucket, the step fails naming the `get_items` step to take. Near one of its farms (8 blocks from the
+middle) `farm` tends it instead: ripe crops harvested (ripeness from the game's loot tables) and replanted with their
+own seed, the asked crop planted on empty farmland when carried. Each farm is remembered (`brain memory: farm`) as it
+was at its last tend and every tier sees it as a known place ("your wheat_seeds farm …, tended 14 min ago"); when to
+come back is the model's choice.
 
 ## Run
 

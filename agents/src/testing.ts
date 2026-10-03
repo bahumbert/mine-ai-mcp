@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockKind, ToolClass } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, BlockKind, ToolClass } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -14,7 +14,7 @@ export interface FakeRecipe {
 const FAKE_NOT_SOLID = new Set(["air", "water", "lava", "short_grass", "dandelion"]);
 
 /** Drops of blocks that do not drop themselves, for the fake `collect_block`. */
-const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone" };
+const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone", short_grass: "wheat_seeds", fern: "wheat_seeds", iron_ore: "raw_iron" };
 
 /** Exactly the blocks of a small medieval house: carrying them, the build skill gathers nothing. */
 export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
@@ -54,6 +54,17 @@ export class FakeRuntime implements BotRuntime {
   unplannable: readonly string[] = [];
   /** Furnace recipes known to the fake: output → inputs (any one of them); others are not smeltable. */
   smelting: Readonly<Record<string, readonly string[]>> = {};
+  /**
+   * Blocks each item drops from (the runtime's loot tables, in its order); an item not listed drops from the block of
+   * its own name, unless it is in `notDropped`.
+   */
+  dropSources: Readonly<Record<string, readonly DropSource[]>> = {
+    cobblestone: [{ block: "stone", chance: 1, planted: false }],
+    wheat_seeds: [{ block: "short_grass", chance: 0.125, planted: false }, { block: "fern", chance: 0.125, planted: false }, { block: "wheat", chance: 1, planted: true }],
+    raw_iron: [{ block: "iron_ore", chance: 1, planted: false }],
+  };
+  /** Items no block drops (`dropSources` answers none). */
+  notDropped: ReadonlySet<string> = new Set(["water_bucket", "bucket", "iron_ingot", "glass", "glass_pane"]);
   /** Items one of each fuel smelts, as the runtime reports them. */
   fuels: Readonly<Record<string, number>> = { coal: 8, charcoal: 8, oak_planks: 1.5, spruce_planks: 1.5, oak_log: 1.5, spruce_log: 1.5, stick: 0.5 };
   /** Successful `collect_block`, `craft_item` and `smelt_item` calls change the snapshot's inventory. */
@@ -101,6 +112,10 @@ export class FakeRuntime implements BotRuntime {
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
     const recipes = Object.fromEntries(items.map((item) => [item, this.smelting[item] === undefined ? [] : [{ output: item, count: 1, inputs: this.smelting[item]! }]]));
     return { status: "known", recipes, fuels: this.fuels };
+  }
+
+  async blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>> {
+    return Object.fromEntries(items.map((item) => [item, this.dropSources[item] ?? (this.notDropped.has(item) ? [] : [{ block: item, chance: 1, planted: false }])]));
   }
 
   /** The world's blocks for `blocksIn`/`findBlocks`, by `x,y,z`; unlisted cells are dirt up to `groundTop`, air above. */
@@ -235,12 +250,34 @@ export class FakeRuntime implements BotRuntime {
     this.snapshot = { ...this.snapshot, inventory: total > 0 ? [...others, { name: item, count: total }] : others };
   }
 
+  /** A `tend_crops` result for the plot: every cell but the middle planted (src/actions/tend-crops/contract.ts). */
+  /** Replaces the `tend_crops` result the fake settles with, when a test needs a particular plot. */
+  tendAfter: Readonly<Record<string, unknown>> | null = null;
+
+  private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter } };
+    const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
+    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 } } };
+  }
+
   /** What a successful action does to the inventory (leaves only: the fake crafts in one go). */
   private applyEffects(tool: ForegroundTool, input: Readonly<Record<string, unknown>>): void {
     if (!this.simulateInventory) return;
     if (tool === "collect_block") {
       const block = String(input.block_name);
-      this.addItem(FAKE_DROPS[block] ?? block, Number(input.count));
+      // An exact cell is one block, dug out of the world.
+      if (input.x !== undefined) this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "air");
+      this.addItem(FAKE_DROPS[block] ?? block, Number(input.count ?? 1));
+    }
+    if (tool === "use_bucket") {
+      const [from, to] = input.action === "fill" ? ["bucket", "water_bucket"] : ["water_bucket", "bucket"];
+      this.addItem(from, -1);
+      this.addItem(to, 1);
+      if (input.action === "pour") this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "water");
+    }
+    if (tool === "tend_crops" && input.plant !== undefined) {
+      const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
+      this.addItem(String(input.plant), -Math.min(cells, this.carried(String(input.plant))));
     }
     if (tool === "smelt_item") {
       const count = Number(input.count);
@@ -282,7 +319,8 @@ export class FakeRuntime implements BotRuntime {
       return { state: "settled", actionId, status: "failed", error: failure, ...(result !== undefined && { result }) };
     }
     this.applyEffects(action.tool, action.input);
-    return { state: "settled", actionId, status: "succeeded", error: null };
+    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : undefined;
+    return { state: "settled", actionId, status: "succeeded", error: null, ...(result !== undefined && { result }) };
   }
 }
 

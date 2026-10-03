@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { collectBlockInputSchema, formatCollectBlockResult, parseCollectBlockRequest } from "./index.js";
+import { collectBlockInputSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
 import type { Bot } from "mineflayer";
-import { inventoryStop, pursuedInventoryStop, settle } from "./collect-block.js";
+import { breakBudget, collectionChance, inventoryStop, pursuedInventoryStop, settle } from "./collect-block.js";
+import { botFixture } from "../../test-support/bot.js";
 
 test("capacity admission allows a clearing break with free space or a compatible partial stack", () => {
   let empty = 4;
@@ -69,6 +70,34 @@ test("sixteen obsidian cannot conceal a casting bucket absent from the final inv
     }).status,
     "succeeded",
   );
+});
+
+/** Observed live on 2026-10-02: 27 minutes, 881 blocks walked, 7 of 32 stone, settled only by a server kick. */
+test("a stalled collection settles with what it got and how far it walked meanwhile", () => {
+  const bot = { inventory: { items: () => [{ name: "cobblestone", count: 30 }] } } as unknown as Bot;
+  const request = parseCollectBlockRequest({ block_name: "stone", count: 32 });
+  const result = settle(bot, request, { cobblestone: 23 }, new Set(["cobblestone", "stone"]), new Vec3(0, 0, 0), {
+    status: "stopped",
+    broken: [new Vec3(1, 60, 1)],
+    reason: outcomes.stalled(180, 881, 8),
+  });
+  assert.equal(result.status, "partial");
+  assert.match(
+    result.error ?? "",
+    /^\[COLLECTION_STALLED\] Nothing was broken or picked up for 180 s \(walked 881 blocks meanwhile, now 8 blocks from the start\)\. Broke 1 matching block; inventory gained 7\/32/u,
+  );
+});
+
+test("the break budget follows how often a break yields the item: grass gives seeds one time in eight", () => {
+  const bot = Object.assign(botFixture(), { version: "1.21.4" });
+  assert.equal(collectionChance(bot, ["short_grass"], new Set(["short_grass", "wheat_seeds"])), 0.125);
+  // Twice the breaks expected at that chance, so bad luck rarely cuts the run short.
+  assert.equal(breakBudget(16, collectionChance(bot, ["short_grass"], new Set(["short_grass", "wheat_seeds"]))), 260);
+  // A sure drop keeps today's budget exactly.
+  assert.equal(collectionChance(bot, ["stone"], new Set(["stone", "cobblestone"])), 1);
+  assert.equal(breakBudget(16, 1), 20);
+  // Of several matching blocks the likeliest counts, and a block without shipped drops counts as sure.
+  assert.equal(collectionChance(bot, ["short_grass", "not_a_block"], new Set(["wheat_seeds"])), 1);
 });
 
 test("collect_block presents collection evidence as Markdown", () => {

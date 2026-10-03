@@ -34,7 +34,8 @@ export function builderStand(site: Site): Position {
   return { x: site.door.x + fx * DOOR_DISTANCE, y: site.door.y, z: site.door.z + fz * DOOR_DISTANCE };
 }
 
-function facingToward(from: Position, toward: Position | null): Facing {
+/** The side `toward` lies on, seen from `from` (north when nobody is given). */
+export function facingToward(from: Position, toward: Position | null): Facing {
   const dx = toward === null ? 0 : toward.x - from.x;
   const dz = toward === null ? -1 : toward.z - from.z;
   return Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? "east" : "west") : (dz > 0 ? "south" : "north");

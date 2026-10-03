@@ -1,0 +1,50 @@
+template: ../../templates/flat-single-action.yaml
+name: tend-crops-harvest-replant
+tags: [acceptance]
+description: >-
+  Coming back to a farm: a 5 x 5 farmland plot around a water source, eight cells of ripe wheat (age 7) and the rest
+  young wheat (age 3). The actor carries a hoe and no seeds. tend_crops harvests only the ripe wheat, picks up its
+  drops (one wheat each and seeds), and replants those eight cells from the seeds it just picked up, from the loot
+  tables' "unripe wheat drops its seed". The young wheat is left growing, and every farmland cell is still farmland
+  afterwards: walking the farm tramples nothing.
+
+geometry:
+  - fill: { block: grass_block, from: [-4, -61, -6], to: [10, -61, 6] }
+  - fill: { block: "farmland[moisture=7]", from: [2, -61, -2], to: [6, -61, 2] }
+  - fill: { block: water, from: [4, -61, 0], to: [4, -61, 0] }
+  - fill: { block: "wheat[age=3]", from: [2, -60, -2], to: [6, -60, 2] }
+  - fill: { block: air, from: [4, -60, 0], to: [4, -60, 0] }
+  - fill: { block: "wheat[age=7]", from: [2, -60, -2], to: [2, -60, -2] }
+  - fill: { block: "wheat[age=7]", from: [3, -60, -2], to: [3, -60, -2] }
+  - fill: { block: "wheat[age=7]", from: [5, -60, -2], to: [5, -60, -2] }
+  - fill: { block: "wheat[age=7]", from: [6, -60, -2], to: [6, -60, -2] }
+  - fill: { block: "wheat[age=7]", from: [2, -60, 2], to: [2, -60, 2] }
+  - fill: { block: "wheat[age=7]", from: [3, -60, 2], to: [3, -60, 2] }
+  - fill: { block: "wheat[age=7]", from: [5, -60, 2], to: [5, -60, 2] }
+  - fill: { block: "wheat[age=7]", from: [6, -60, 2], to: [6, -60, 2] }
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: wooden_hoe, count: 1 }
+
+params:
+  action: tend_crops
+  input: { x1: 2, z1: -2, x2: 6, z2: 2, y: -61 }
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: hasItem, who: Actor, item: wheat, count: 8 }
+    - kind: blocksAt
+      block: farmland
+      positions: [[2, -61, -2], [2, -61, -1], [2, -61, 0], [2, -61, 1], [2, -61, 2], [3, -61, -2], [3, -61, -1], [3, -61, 0], [3, -61, 1], [3, -61, 2], [4, -61, -2], [4, -61, -1], [4, -61, 1], [4, -61, 2], [5, -61, -2], [5, -61, -1], [5, -61, 0], [5, -61, 1], [5, -61, 2], [6, -61, -2], [6, -61, -1], [6, -61, 0], [6, -61, 1], [6, -61, 2]]
+    - kind: blocksAt
+      block: "wheat[age=0]"
+      positions: [[2, -60, -2], [3, -60, -2], [5, -60, -2], [6, -60, -2], [2, -60, 2], [3, -60, 2], [5, -60, 2], [6, -60, 2]]
+    - kind: blocksAt
+      block: "wheat[age=3]"
+      positions: [[4, -60, -2], [4, -60, 2], [2, -60, -1], [2, -60, 0], [2, -60, 1], [6, -60, -1], [6, -60, 0], [6, -60, 1]]

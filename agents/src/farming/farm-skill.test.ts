@@ -1,0 +1,132 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { stepSchema } from "../actions.ts";
+import { Body } from "../body.ts";
+import type { KnownFarm } from "../memory.ts";
+import { runStep, type SkillContext } from "../skills.ts";
+import { FakeRuntime } from "../testing.ts";
+
+function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
+  return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, self: "Ayla", ...extra };
+}
+
+/** A runtime standing on flat ground (dirt up to y 63, feet at 64) carrying what a farm needs. */
+function farmRuntime(inventory: { name: string; count: number }[]): FakeRuntime {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory };
+  return runtime;
+}
+
+/** Foreground actions only (protecting an area is not one). */
+const calls = (runtime: FakeRuntime) => runtime.submitted.filter((call) => !["send_message", "protect_region", "unprotect_region"].includes(call.tool)).map((call) => call.tool === "use_bucket" ? `use_bucket ${String(call.input.action)}` : call.tool);
+
+test("a farm step plants the item asked for, nine by nine unless told; coordinates come all together", () => {
+  assert.deepEqual(stepSchema.parse({ skill: "farm", crop: "wheat_seeds" }), { skill: "farm", crop: "wheat_seeds", size: 9 });
+  assert.equal(stepSchema.safeParse({ skill: "farm", crop: "wheat_seeds", size: 4 }).success, false);
+  assert.equal(stepSchema.safeParse({ skill: "farm", crop: "wheat_seeds", x: 3 }).success, false);
+});
+
+test("a new farm needs a hoe, the crop and a bucket: what is missing is named as the get_items step to take", async () => {
+  const runtime = farmRuntime([{ name: "wheat_seeds", count: 5 }]);
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 9 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /needs 1 wooden_hoe, 1 bucket .*get_items/u);
+  assert.deepEqual(calls(runtime), []);
+});
+
+test("a new farm is protected, leveled, watered from a filled bucket, tilled and planted, then remembered", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "bucket", count: 1 }]);
+  const remembered: KnownFarm[] = [];
+  const facts: string[] = [];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, {
+    rememberFarm: (farm) => remembered.push(farm),
+    progress: (fact) => facts.push(fact),
+  }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  // Behind her (nobody asked: south), soil at y 63, the middle cell at 0 63 4.
+  assert.deepEqual(runtime.areas.map((area) => [area.label, area.min, area.max]), [["farm wheat_seeds", { x: -3, y: 62, z: 1 }, { x: 3, y: 65, z: 7 }]]);
+  // The ground is already flat (leveling sets its zone aside and finds nothing to do), then the water hole.
+  assert.ok(runtime.submitted.some((call) => call.tool === "protect_region" && String(call.input.label).startsWith("leveling ")));
+  assert.deepEqual(calls(runtime), ["build_structure", "use_bucket fill", "use_bucket pour", "tend_crops"]);
+  // The hole is dug as an air cell of build_structure, which works inside her own farm region (live 2026-10-03:
+  // collect_block refused it there).
+  assert.deepEqual(runtime.submitted.find((call) => call.tool === "build_structure")!.input.blocks, [{ x: 0, y: 63, z: 4, block_name: "air" }]);
+  const tend = runtime.submitted.find((call) => call.tool === "tend_crops")!.input;
+  assert.deepEqual(tend, { x1: -2, z1: 2, x2: 2, z2: 6, y: 63, plant: "wheat_seeds" });
+  const pour = runtime.submitted.find((call) => call.tool === "use_bucket" && call.input.action === "pour")!.input;
+  assert.deepEqual([pour.x, pour.y, pour.z], [0, 63, 4]);
+  assert.equal(remembered.length, 1);
+  assert.deepEqual([remembered[0]!.crop, remembered[0]!.size, remembered[0]!.centre], ["wheat_seeds", 5, { x: 0, y: 63, z: 4 }]);
+  assert.match(result.status === "done" ? result.detail : "", /made a 5x5 wheat_seeds farm around 0 63 4/u);
+  assert.ok(facts.some((fact) => /fetching water/u.test(fact)), facts.join(" | "));
+});
+
+test("with a water bucket already carried, or water already in the middle, there is no trip to fill a bucket", async () => {
+  const carrying = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  assert.equal((await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(carrying))).status, "done");
+  assert.deepEqual(calls(carrying), ["build_structure", "use_bucket pour", "tend_crops"]);
+
+  const watered = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }]);
+  watered.world.set("0,63,4", "water");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(watered));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(watered), ["tend_crops"]);
+});
+
+test("a farm's ground is filled with dirt, never cobblestone: soil must be tillable", async () => {
+  // Live 2026-10-03: carrying more cobblestone than dirt, the leveling filled 10 hollows of the plot with it and
+  // tend_crops skipped them "not tillable (cobblestone)".
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }, { name: "cobblestone", count: 64 }, { name: "dirt", count: 30 }]);
+  runtime.groundTop = 62;
+  runtime.world.set("0,63,4", "dirt");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const fills = runtime.submitted
+    .filter((call) => call.tool === "build_structure")
+    .flatMap((call) => (call.input.blocks as { block_name: string }[]).map((cell) => cell.block_name))
+    .filter((block) => block !== "air");
+  assert.ok(fills.length > 0, "the hollow plot was filled");
+  assert.deepEqual([...new Set(fills)], ["dirt"]);
+});
+
+test("a new farm that cannot be finished releases its protection, so trying again elsewhere is not refused", async () => {
+  // Live 2026-10-03: a worn-out shovel stopped the leveling; the plot stayed protected, and every new try from a
+  // step aside overlapped it ("overlaps protected area #20 'farm wheat_seeds'").
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  runtime.failures.use_bucket = "[BUCKET_FAILED] The water did not land.";
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.ok(!runtime.areas.some((area) => area.label === "farm wheat_seeds"), JSON.stringify(runtime.areas));
+});
+
+test("farming near a farm she knows tends it: ripe crops harvested and replanted, nothing leveled or poured", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }]);
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 80, ripe: 0, empty: 0 } }];
+  const remembered: KnownFarm[] = [];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 9 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+  // No seeds carried: the harvested cells are replanted with their own seed, nothing else is planted.
+  assert.deepEqual(runtime.submitted[0]!.input, { x1: 0, z1: 2, x2: 8, z2: 10, y: 63 });
+  assert.deepEqual([remembered[0]!.centre, remembered[0]!.madeAt], [{ x: 4, y: 63, z: 6 }, "t0"]);
+  assert.match(result.status === "done" ? result.detail : "", /tended your wheat_seeds farm around 4 63 6/u);
+});
+
+test("farmland left empty for want of seeds says so, naming the get_items step", async () => {
+  // Live 2026-10-03: 4 of 24 cells stayed empty (20 seeds), the result only said "4 farmland empty", and the model
+  // tended the farm three more times until the repeat guard failed the order.
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }]);
+  runtime.tendAfter = { crops: { "wheat age 0": 20 }, emptyFarmland: 4, dryFarmland: 0, water: 1 };
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 5, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 20, ripe: 0, empty: 4 } }];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms }));
+  assert.equal(result.status, "done");
+  assert.match(result.status === "done" ? result.detail : "", /4 farmland empty because you carry no wheat_seeds: get_items wheat_seeds 4, then farm again to plant them/u);
+});
+
+test("a farm she knows, asked for another crop: the crop asked is planted on empty farmland when carried", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "carrot", count: 6 }]);
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 70, ripe: 0, empty: 10 } }];
+  await runStep({ skill: "farm", crop: "carrot", size: 9 }, contextFor(runtime, { farms }));
+  assert.equal(runtime.submitted[0]!.input.plant, "carrot");
+});

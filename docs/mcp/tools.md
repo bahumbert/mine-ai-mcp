@@ -232,6 +232,26 @@ resolved); a server newer than every shipped file uses the nearest older one
 one. Reads nothing in the world. Defined in
 [src/actions/view-smelting-recipes/contract.ts](../../src/actions/view-smelting-recipes/contract.ts).
 
+### `view_block_drops`
+
+Use `view_block_drops` to learn where an item comes from before gathering it,
+or what a block drops. The arguments are `items` and `blocks`, up to 16 names
+each, at least one name in all. Success reports, per item, the blocks an
+ordinary break by hand gathers it from, each with `chance` (how often one break
+yields it, at no fortune) and `planted` (the block is a crop the item grows
+into, such as wheat for wheat seeds, listed after the wild sources); and per
+block, every drop in loot order with the `tool` it needs (`silk_touch`,
+`shears`, `shears or silk_touch`, or an item) and the block `state` it needs
+(a crop's ripe `age`). Drops come from the game's own loot tables:
+`src/world/data/block-drops/<version>.json`, generated from the vanilla server
+jar by `src/world/block-drops-extract.ts`; a server newer than every shipped
+file uses the nearest older one (`dataVersion` says which). `collect_block`
+reads the same data for the item a break yields and how many breaks a request
+may take. `[UNKNOWN_DROP_NAMES]` names what Minecraft does not have;
+`[DROP_DATA_UNAVAILABLE]` means no data ships for this version or any older
+one. Reads nothing in the world. Defined in
+[src/actions/view-block-drops/contract.ts](../../src/actions/view-block-drops/contract.ts).
+
 ## Notes
 
 ### `note_save`
@@ -727,6 +747,29 @@ see from where it stands. To obtain obsidian, ask `collect_block` for it while
 carrying a water bucket — casting is part of mining, not of the bucket.
 Defined in
 [src/actions/use-bucket/contract.ts](../../src/actions/use-bucket/contract.ts).
+
+### `tend_crops`
+
+Use `tend_crops` to farm a rectangle of soil the way a player does. The
+arguments are two corners `x1`, `z1`, `x2`, `z2` (at most 16 x 16 cells) and
+`y`, the soil level (the dirt or farmland; crops grow at `y + 1`); `plant` is
+the item to plant on empty farmland; `harvest` and `till` default to true.
+The bot first walks the plot breaking ripe crops (ripe in the state the game's
+loot tables drop the crop in: wheat at age 7, beetroots at age 3) and grass or
+flowers standing on the soil, picks up what they dropped, then tills each soil
+cell with the best carried hoe (right-click on the top face, confirmed by the
+cell changing; coarse dirt takes two) and plants it with `plant`, or, without
+`plant`, a cell harvested in this call with that crop's own seed (its unripe
+drop) when carried. Unripe crops are left growing. Water, leveling and fences
+are the caller's: a cell that is not soil is reported, not changed. Its routes
+never dig farmland or crops and place no scaffold. Success means no cell was
+left for a reason other than growing crops or water; the result counts what was
+harvested, cleared, tilled and planted, the items gained, the cells skipped by
+reason, and the plot afterwards (crops by block and age, empty farmland,
+farmland not hydrated, water). `[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
+refuse before any work; `[TEND_STALLED]` ends a run where no cell changed for
+180 s. Defined in
+[src/actions/tend-crops/contract.ts](../../src/actions/tend-crops/contract.ts).
 
 ## Tools that craft and smelt items
 

@@ -61,7 +61,8 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
-  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save";
+  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save"
+  | "tend_crops" | "use_bucket";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -99,6 +100,15 @@ export interface SmeltingRecipe {
   readonly output: string;
   readonly count: number;
   readonly inputs: readonly string[];
+}
+
+/** One block an item drops from by an ordinary break (`view_block_drops`). */
+export interface DropSource {
+  readonly block: string;
+  /** How often one break yields it. */
+  readonly chance: number;
+  /** A crop the item grows into (wheat for wheat seeds): breaking it takes from a farm. */
+  readonly planted: boolean;
 }
 
 /** Furnace knowledge for some items: the recipes making each (none: not smeltable) and how far each fuel goes. */
@@ -141,6 +151,11 @@ export interface BotRuntime {
   craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
   /** The furnace recipes making these items, from the game data the runtime ships (`view_smelting_recipes`). */
   smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge>;
+  /**
+   * The blocks each item drops from by an ordinary break, wild blocks before planted crops, the likeliest first
+   * (`view_block_drops`, the game's loot tables); none for an item no block drops.
+   */
+  blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>>;
   /** Every block of the box between two corners (inclusive), read in slices through `view_blocks`. */
   blocksIn(min: Position, max: Position): Promise<BlockArea>;
   /** The nearest loaded blocks of that name, nearest first (`view_blocks` find). */
@@ -207,6 +222,14 @@ const smeltingRecipesSchema = z.object({
     smelting: z.object({
       items: z.array(z.object({ item: z.string(), recipes: z.array(z.object({ output: z.string(), count: z.number(), inputs: z.array(z.string()) })) })),
       fuels: z.array(z.object({ item: z.string(), itemsSmelted: z.number() })),
+    }).optional(),
+  }),
+});
+
+const blockDropsSchema = z.object({
+  result: z.object({
+    drops: z.object({
+      items: z.array(z.object({ item: z.string(), sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean() })) })),
     }).optional(),
   }),
 });
@@ -344,6 +367,11 @@ export class McpBotRuntime implements BotRuntime {
       recipes: Object.fromEntries((smelting?.items ?? []).map(({ item, recipes }) => [item, recipes])),
       fuels: Object.fromEntries((smelting?.fuels ?? []).map(({ item, itemsSmelted }) => [item, itemsSmelted])),
     };
+  }
+
+  async blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>> {
+    const { result } = blockDropsSchema.parse(await this.call("view_block_drops", { items: [...items] }, "Work out which blocks drop what I need."));
+    return Object.fromEntries((result.drops?.items ?? []).map(({ item, sources }) => [item, sources]));
   }
 
   async blocksIn(min: Position, max: Position): Promise<BlockArea> {

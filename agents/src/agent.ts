@@ -3,7 +3,7 @@ import { describeStep } from "./actions.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { ChatLine, KnownPlace, Mind, Objective, StepRecord, WorkDecision } from "./mind.ts";
-import { memoryNote, recall, recallQuery, type Memory } from "./memory.ts";
+import { memoryNote, recall, recallQuery, type KnownFarm, type Memory } from "./memory.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
@@ -18,6 +18,8 @@ const KNOWN_PLACES = 8;
 const STEP_MEMORY = 20;
 /** Outcomes of its own objectives remembered for the goal tier. */
 const OWN_MEMORY = 5;
+/** Farms it remembers and every tier sees. */
+const KNOWN_FARMS = 4;
 /** Unusable model replies in a row before an objective is dropped. */
 const MAX_BAD_REPLIES = 2;
 
@@ -66,16 +68,24 @@ export class Agent {
   private readonly body: Body;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
+  /** Its farms, oldest first, each as it was at its last tend. */
+  private readonly farms: KnownFarm[] = [];
 
   /**
    * The places shown to the models: the known ones, and the unfinished house with where to stand to resume it (live
    * 2026-10-02: asked to "go back and finish the house you started", she began a new one where she stood).
    */
   private knownPlaces(): KnownPlace[] {
+    // Her farms, as they were at their last tend: the models only know what the situation says (when to come back is
+    // their choice).
+    const farms = this.farms.map((farm): KnownPlace => ({
+      name: `your ${farm.crop} farm`,
+      detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when you last tended it, ${minutesAgo(farm.tendedAt)}; farming it again harvests what is ripe and replants it`,
+    }));
     const house = this.building.unfinished;
-    if (house === null) return [...this.places];
+    if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;
-    return [...this.places, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
+    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
   }
   /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
   private readonly areas: ProtectedArea[] = [];
@@ -258,6 +268,8 @@ export class Agent {
         self: persona.username,
         style: persona.style,
         remember: (place) => this.learnPlace(place),
+        farms: this.farms,
+        rememberFarm: (farm) => this.learnFarm(farm),
         building: this.building,
         areas: this.areas,
         // Only an order is narrated (owner, 2026-10-02); its own goals show in the monitor.
@@ -355,6 +367,15 @@ export class Agent {
     this.memorize({ kind: "place", place });
   }
 
+  private learnFarm(farm: KnownFarm): void {
+    this.options.log(`farm: ${farm.crop} ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z} (${farm.state.planted} planted)`);
+    const index = this.farms.findIndex((known) => known.centre.x === farm.centre.x && known.centre.y === farm.centre.y && known.centre.z === farm.centre.z);
+    if (index >= 0) this.farms.splice(index, 1);
+    this.farms.push(farm);
+    if (this.farms.length > KNOWN_FARMS) this.farms.splice(0, this.farms.length - KNOWN_FARMS);
+    this.memorize({ kind: "farm", farm });
+  }
+
   /** The areas protected in this world's bot data, so the models know them from the first prompt. */
   private async recallAreas(): Promise<void> {
     try {
@@ -367,16 +388,17 @@ export class Agent {
 
   /** What it knew before this brain started: the memories saved as notes in this world's bot data. */
   private async recallMemory(): Promise<void> {
-    const limits = { places: KNOWN_PLACES, lately: OWN_MEMORY };
+    const limits = { places: KNOWN_PLACES, lately: OWN_MEMORY, farms: KNOWN_FARMS };
     try {
       const rows = await this.options.runtime.queryBotData(recallQuery(this.options.persona.username, limits));
       const recalled = recall(rows.map((row) => String(row[1] ?? "")), limits);
       this.places.push(...recalled.places);
       this.lately.push(...recalled.lately);
+      this.farms.push(...recalled.farms);
       this.building.unfinished = recalled.unfinished;
       this.savedUnfinished = JSON.stringify(recalled.unfinished);
       const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
-      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.lately.length} own objective(s)${house}`);
+      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}`);
     } catch (error) {
       this.options.log(`could not recall its memory: ${String(error)}`);
     }
@@ -446,4 +468,11 @@ export class Agent {
     this.history.push({ speaker, text });
     if (this.history.length > HISTORY_LINES) this.history.splice(0, this.history.length - HISTORY_LINES);
   }
+}
+
+/** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
+function minutesAgo(iso: string): string {
+  const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+  if (!Number.isFinite(minutes)) return "some time ago";
+  return minutes < 1 ? "just now" : minutes < 120 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
 }

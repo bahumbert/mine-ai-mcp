@@ -7,6 +7,8 @@ import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { gatherMaterials, walkToStation } from "./gathering.ts";
 import type { KnownPlace } from "./mind.ts";
+import type { KnownFarm } from "./memory.ts";
+import { farm } from "./farming/farm-skill.ts";
 import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -46,6 +48,10 @@ export interface SkillContext {
   readonly self?: string;
   /** Told what it starts doing now and why, at a skill's phase changes (see {@link GatherContext.progress}). */
   readonly progress?: (fact: string) => void;
+  /** The farms it made, as at their last tend; farming near one tends it. */
+  readonly farms?: readonly KnownFarm[];
+  /** Told about a farm made or tended, to remember it. */
+  readonly rememberFarm?: (farm: KnownFarm) => void;
 }
 
 export interface UnfinishedHouse {
@@ -100,6 +106,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "protect_area": return await protectArea(context, step);
       case "release_area": return await releaseArea(context, step.area);
       case "build": return await build(context, step);
+      case "farm": return await farm(context, step);
     }
   } catch (error) {
     if (context.signal.aborted) return { status: "stopped" };
@@ -342,7 +349,7 @@ const TOOL_COBBLESTONE: Readonly<Record<string, number>> = { pickaxe: 3, axe: 3,
  * the liquid above the level, digs from the top down, then fills the holes from the bottom up with what the dig
  * brought, fetching only what is still short (`terrain.ts`).
  */
-async function levelZone(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string } = {}, reserved: readonly { readonly item: string; readonly count: number }[] = [], ownRegion?: number): Promise<SkillResult> {
+export async function levelZone(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string } = {}, reserved: readonly { readonly item: string; readonly count: number }[] = [], ownRegion?: number): Promise<SkillResult> {
   const { min, max } = levelBox(zone, level);
   // Leveling digs inside her own regions too (it runs as a build): never over an area she protects, her other houses
   // included, except the house being prepared (live 2026-10-02: a zone "between the oak_log markers" reached her house).
@@ -564,7 +571,7 @@ async function protectArea(context: SkillContext, step: Extract<Step, { skill: "
   };
 }
 
-async function releaseArea(context: SkillContext, regionId: number): Promise<SkillResult> {
+export async function releaseArea(context: SkillContext, regionId: number): Promise<SkillResult> {
   const outcome = await context.runtime.unprotectRegion(regionId);
   if (outcome.status === "failed") return { status: "failed", detail: outcome.error };
   const index = context.areas?.findIndex((area) => area.regionId === regionId) ?? -1;
@@ -586,19 +593,19 @@ export function houseBox(cells: readonly Position[]): { readonly min: Position; 
   };
 }
 
-function noteArea(context: SkillContext, area: ProtectedArea): void {
+export function noteArea(context: SkillContext, area: ProtectedArea): void {
   if (context.areas === undefined) return;
   const index = context.areas.findIndex((known) => known.regionId === area.regionId);
   if (index === -1) context.areas.push(area);
   else context.areas[index] = area;
 }
 
-function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {
+export function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {
   const wanted = username.toLowerCase();
   return snapshot.players.find((entry) => entry.username.toLowerCase() === wanted);
 }
 
-function navigateInput(target: Position, range: number): Record<string, unknown> {
+export function navigateInput(target: Position, range: number): Record<string, unknown> {
   return { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z), range };
 }
 

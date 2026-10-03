@@ -8,6 +8,7 @@ export type Stance = (typeof STANCES)[number];
 
 /** Specialisations are aptitudes (ADR-005): weights that bias choices, never switches that remove abilities. */
 export const APTITUDES = ["builder", "farmer", "miner", "warrior", "explorer", "trader"] as const;
+export type Aptitude = (typeof APTITUDES)[number];
 
 /** The LLM tiers of a mind (ADR-008). */
 export const TIERS = ["chat", "action", "planner"] as const;

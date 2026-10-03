@@ -93,6 +93,22 @@ test("the work tier sees the objective, who asked, what was set aside, places an
   assert.match(request, /1\. go to Steve -> done: reached Steve/u);
 });
 
+test("aptitudes reach the init prompt as what the character is good at and likes doing, never as a rule", () => {
+  const prompt = personaPrompt(testPersona({ aptitudes: { farmer: 0.8, explorer: 0.5, builder: 0.2, miner: 0 } }));
+  assert.match(prompt, /What you are good at and like doing: farming \(very\), exploring \(fairly\), building \(a little\)\./u);
+  assert.doesNotMatch(prompt, /mining/u);
+  assert.doesNotMatch(personaPrompt(testPersona({ aptitudes: {} })), /good at and like doing/u);
+});
+
+test("the work tier knows crops ripen over time near water and bread is made from wheat", async () => {
+  const { mind, action } = scriptedMind();
+  action.reply({ done: "ok" });
+  await mind.next({ persona: testPersona(), objective: { text: "make bread", requester: "Tom" }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] }, new AbortController().signal);
+  assert.match(action.requests[0]?.[0]?.content ?? "", /Crops ripen over time near water[^\n]*bread is crafted from 3 wheat/u);
+  // Live 2026-10-03: "give Tom 1 bread" ended "done (gave Tom 1 bread)" right after crafting it; no give step ran.
+  assert.match(action.requests[0]?.[0]?.content ?? "", /answer done only when the steps so far did every part of it/u);
+});
+
 test("the init prompt carries the style, the own goal, whose requests come first, and the freedom to decide", () => {
   const prompt = personaPrompt(testPersona({ style: "medieval", goal: "build yourself a base", authority: ["Server", "Tom", "*"] }));
   assert.match(prompt, /You build in the medieval style/u);

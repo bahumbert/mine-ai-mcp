@@ -69,6 +69,11 @@ interface PlannedCandidate {
   readonly item: PlannedItem;
 }
 
+/** A requirement no recipe path can make without needing one of these items, already being planned above it. */
+interface PlanCycle {
+  readonly cycle: ReadonlySet<number>;
+}
+
 interface PlannedTarget {
   readonly target: CraftTarget;
   readonly root?: PlannedItem;
@@ -125,7 +130,12 @@ function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidat
   return false;
 }
 
-/** Plan one requirement against a simulated inventory and retain its selected recipe tree. */
+/**
+ * Plan one requirement against a simulated inventory and retain its selected recipe tree. A recipe path that needs an
+ * item already being planned above it is a loop and is skipped; when every recipe of an ingredient loops back to that
+ * ingredient itself (iron ingots only craft out of nuggets and blocks made of ingots), it is a missing material, as an
+ * item without any recipe is. A requested item itself never is (coal only crafts out of coal: it is not craftable).
+ */
 function planNeededItem(
   bot: Bot,
   initial: PlanningState,
@@ -133,7 +143,10 @@ function planNeededItem(
   count: number,
   ancestors: ReadonlySet<number>,
   useInventory: boolean,
-): PlannedCandidate | null {
+): PlannedCandidate | PlanCycle {
+  // Needing an item already being planned above is a loop, carried or not: carried wheat spent on a hay block to
+  // craft wheat back is a round trip (live 2026-10-03).
+  if (ancestors.has(itemId)) return { cycle: new Set([itemId]) };
   const state = copyState(initial);
   const sources: ItemSource[] = [];
   let remaining = count;
@@ -157,18 +170,19 @@ function planNeededItem(
   }
 
   if (remaining === 0) return { state, item: { id: itemId, count, sources } };
-  if (ancestors.has(itemId)) return null;
 
-  const recipes = bot.recipesAll(itemId, null, true);
-  if (recipes.length === 0) {
+  const missingLeaf = (): PlannedCandidate => {
     addCount(state.required, itemId, remaining);
     addCount(state.missing, itemId, remaining);
     sources.push({ kind: "missing", count: remaining });
     return { state, item: { id: itemId, count, sources } };
-  }
+  };
+  const recipes = bot.recipesAll(itemId, null, true);
+  if (recipes.length === 0) return missingLeaf();
 
   const nextAncestors = new Set(ancestors).add(itemId);
   let best: PlannedCandidate | null = null;
+  const loopsTo = new Set<number>();
 
   for (const recipe of recipes) {
     const applications = Math.ceil(remaining / recipe.result.count);
@@ -185,7 +199,8 @@ function planNeededItem(
         nextAncestors,
         true,
       );
-      if (!planned) {
+      if ("cycle" in planned) {
+        for (const id of planned.cycle) loopsTo.add(id);
         cyclic = true;
         break;
       }
@@ -208,7 +223,10 @@ function planNeededItem(
     if (isBetterCandidate(candidate, best)) best = candidate;
   }
 
-  return best;
+  if (best !== null) return best;
+  loopsTo.delete(itemId);
+  if (loopsTo.size === 0 && ancestors.size > 0) return missingLeaf();
+  return { cycle: loopsTo.size > 0 ? loopsTo : new Set([itemId]) };
 }
 
 function materials(bot: Bot, counts: ReadonlyMap<number, number>): CraftMaterial[] {
@@ -301,7 +319,7 @@ export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarge
     }
 
     const planned = planNeededItem(bot, state, target.id, target.count, new Set(), false);
-    if (!planned) {
+    if ("cycle" in planned) {
       plannerFailures.push(target.name);
       plannedTargets.push({ target });
       continue;

@@ -3,6 +3,7 @@
  * `smelting-extract.ts`, see `data/smelting/`) and the fuels a furnace burns.
  */
 import recipes_1_21_4 from "./data/smelting/1.21.4.json" with { type: "json" };
+import { nearestShipped } from "./shipped-data.js";
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
 export interface SmeltingRecipe {
@@ -21,26 +22,12 @@ interface SmeltingData {
 /** Shipped data files, by version. Add a file with `smelting-extract.ts`, then list it here. */
 const SHIPPED: readonly SmeltingData[] = [recipes_1_21_4];
 
-function versionParts(version: string): number[] {
-  return version.split(".").map((part) => Number.parseInt(part, 10) || 0);
-}
-
-function compareVersions(a: string, b: string): number {
-  const [left, right] = [versionParts(a), versionParts(b)];
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return 0;
-}
-
 /**
  * The smelting recipes for `version`: its own file, else the nearest older shipped one (recipes rarely change between
  * patch versions), else null when every shipped file is newer.
  */
 export function smeltingData(version: string, shipped: readonly SmeltingData[] = SHIPPED): SmeltingData | null {
-  const older = shipped.filter((data) => compareVersions(data.version, version) <= 0);
-  return older.sort((a, b) => compareVersions(b.version, a.version))[0] ?? null;
+  return nearestShipped(version, shipped);
 }
 
 /** The recipes that make `item` in `version` (empty when none, or no data for that version). */

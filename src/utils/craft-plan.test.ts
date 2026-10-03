@@ -54,6 +54,48 @@ test("a shortfall names the wood already carried, not the first wood in registry
   assert.deepEqual(preparation.plan.missingMaterials, [{ item: "oak_log", count: 1 }]);
 });
 
+/**
+ * Live 3 October: `get_items bucket` found the bucket "not craftable". Iron ingots only craft back out of iron nuggets
+ * and iron blocks, both made from ingots, so every recipe of the ingot loops to itself and the whole bucket failed.
+ * Such an ingredient is a missing material (a furnace makes it), as an item without any recipe is.
+ */
+/** Minecraft's iron and coal recipes: ingots and coal only craft back out of what is made of them. */
+const LOOPING_RECIPES = [
+  craftingRecipe("bucket", 1, { iron_ingot: 3 }, true),
+  craftingRecipe("iron_pickaxe", 1, { iron_ingot: 3, stick: 2 }, true),
+  craftingRecipe("iron_ingot", 1, { iron_nugget: 9 }, true),
+  craftingRecipe("iron_nugget", 9, { iron_ingot: 1 }),
+  craftingRecipe("iron_block", 1, { iron_ingot: 9 }, true),
+  craftingRecipe("iron_ingot", 9, { iron_block: 1 }),
+  craftingRecipe("coal_block", 1, { coal: 9 }, true),
+  craftingRecipe("coal", 9, { coal_block: 1 }),
+];
+
+test("an ingredient whose every recipe loops back to itself is a missing material, not a failed plan", () => {
+  const { bot } = craftingBot({ stick: 2 }, true, LOOPING_RECIPES);
+  const bucket = planCraftingFromInventory(bot, [{ ...registry.itemsByName.bucket, count: 1 }]);
+  assert.equal(bucket.kind, "missing_materials");
+  assert.deepEqual(bucket.plan.missingMaterials, [{ item: "iron_ingot", count: 3 }]);
+  const pickaxe = planCraftingFromInventory(bot, [{ ...registry.itemsByName.iron_pickaxe, count: 1 }]);
+  assert.equal(pickaxe.kind, "missing_materials");
+  assert.deepEqual(pickaxe.plan.missingMaterials, [{ item: "iron_ingot", count: 3 }]);
+});
+
+test("carrying the requested item never turns it into a round trip through what it is made of", () => {
+  // Live 2026-10-03: carrying wheat, `get_items wheat` planned wheat -> hay_block -> wheat and failed for inventory room.
+  const { bot } = craftingBot({ wheat: 9 }, true, [
+    craftingRecipe("hay_block", 1, { wheat: 9 }, true),
+    craftingRecipe("wheat", 9, { hay_block: 1 }),
+  ]);
+  assert.equal(planCraftingFromInventory(bot, [{ ...registry.itemsByName.wheat, count: 4 }]).kind, "planner_failed");
+});
+
+test("a requested item that only crafts back out of itself still cannot be planned", () => {
+  // Coal only crafts out of a coal block, made of coal: a player mines it (the gatherer relies on this, live 2 October).
+  const { bot } = craftingBot({}, true, LOOPING_RECIPES);
+  assert.equal(planCraftingFromInventory(bot, [{ ...registry.itemsByName.coal, count: 1 }]).kind, "planner_failed");
+});
+
 test("distinguishes an item with no crafting recipe", () => {
   const { bot } = craftingBot({});
 
