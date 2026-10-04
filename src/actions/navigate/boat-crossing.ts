@@ -255,7 +255,10 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     await sleep(50);
   }
 
-  if (stoppedBy === "") {
+  // Stopped over water that is not deep (live 2026-10-04: shallows one or two deep, with stone islets): no bank is
+  // needed, she gets off and the route wades on.
+  const deepUnder = () => isDeepOpenWater((wx, wy, wz) => isWater(bot, wx, wy, wz), Math.floor(position.x), surfaceLevel, Math.floor(position.z));
+  if (stoppedBy === "" && deepUnder()) {
     // A bank a swimmer cannot climb (live 2026-10-04: two blocks above the water) is not where she gets off: the boat
     // goes along the shore to where it is low enough, then up to it, its bow against the bank.
     // None along it: straight on, with a step cut into the bank from the boat, as a player does.
@@ -276,7 +279,7 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
         await sleep(50);
       }
       const cut = await cutStep(bot, position, heading, surfaceLevel);
-      if (cut !== "") stoppedBy = cut;
+      if (cut !== "" && deepUnder()) stoppedBy = cut;
     }
   }
   bot._client.removeListener("vehicle_move", onCorrection);

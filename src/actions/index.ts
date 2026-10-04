@@ -35,6 +35,7 @@ import { createExploreFrontierAction } from "./explore-frontier/index.js";
 import { createCollectMobDropAction } from "./hunt-mob/index.js";
 import { createLocateStrongholdAction, type StrongholdEyeFlights } from "./locate-stronghold/index.js";
 import { createNavigateAction } from "./navigate/index.js";
+import { createNoteDeleteAction } from "./note-delete/index.js";
 import { createNoteReadAction } from "./note-read/index.js";
 import { createNoteSaveAction } from "./note-save/index.js";
 import { createProtectRegionAction } from "./protect-region/index.js";
@@ -119,6 +120,7 @@ export function createActions(
     createNavigateAction(bot, navigation),
     createNoteSaveAction(bot, botData),
     createNoteReadAction(botData, bot.username),
+    createNoteDeleteAction(botData, bot.username),
     createProtectRegionAction(bot, protectedRegions),
     createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation),
@@ -167,6 +169,7 @@ export * from "./markdown.js";
 export * from "./navigate/index.js";
 export * from "./note-read/index.js";
 export * from "./note-save/index.js";
+export * from "./note-delete/index.js";
 export * from "./protect-region/index.js";
 export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";

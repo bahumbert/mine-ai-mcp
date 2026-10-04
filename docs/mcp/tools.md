@@ -281,6 +281,14 @@ no automatic expiry. For older notes or different filters, query `main.notes` wi
 `query_bot_data`. Defined in
 [src/actions/note-read/contract.ts](../../src/actions/note-read/contract.ts).
 
+### `note_delete`
+
+Delete this bot's own notes by id (`note_ids`, 1 to 500 positive integers, from
+`note_read` or `main.notes`). Another bot's notes are never deleted: ids that are not
+this bot's, or no longer exist, come back in `notDeleted`, the rest in `deleted`.
+Deleting cannot be undone and uses the foreground task slot. Defined in
+[src/actions/note-delete/contract.ts](../../src/actions/note-delete/contract.ts).
+
 ### `protect_region`
 
 Protect a box of blocks in the current dimension from this bot's own digging and
