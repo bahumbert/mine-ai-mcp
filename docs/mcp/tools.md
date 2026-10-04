@@ -316,6 +316,16 @@ harvest capability stops at Pathfinder's safe cancellation point and returns
 `partial` with `[TOOL_TIER_LOST]`. Reissue the same request to continue with the
 remaining tool; `navigate` has no continuation flag.
 
+Routes never set off across deep open water (water at least three deep, nine or more blocks across both ways: the
+sea, wide lakes; rivers and coasts are swum), for every action that moves the bot; a bot already out on it swims
+back. When a `navigate` route stops short and the straight way on crosses deep open water, it fails with
+`[NAVIGATION_DEEP_WATER]` naming where the water starts, or, with a boat carried, walks to the water's edge at the
+water's level, puts the boat in, rides it straight across, gets off at the far shore, takes the boat back and goes on
+(`boatBlocks` in the evidence; `[NAVIGATION_BOAT_FAILED]` when the crossing could not be made). With a boat carried and
+24 or more blocks of deep open water on the straight way, the boat is taken at once instead of a way round. At the far
+shore the boat goes along to a bank at most one block above the water, or a step is cut into the bank from the boat.
+Kelp, seagrass and waterlogged blocks count as water.
+
 Active portal cells are not navigation destinations. Use `enter_nether_portal`
 or `enter_end_portal` with the active portal block's explicit `x`, `y`, `z`.
 Both actions wait for the server to position the bot in the destination.

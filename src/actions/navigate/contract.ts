@@ -105,6 +105,12 @@ export const navigationEvidenceSchema = z.strictObject({
   missingDigTools: z
     .array(z.enum(["shovel", "pickaxe", "axe"]))
     .describe("Tool types absent from inventory when reporting navigation; empty when digging is disabled."),
+  boatBlocks: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Blocks of deep open water crossed by boat on the way; absent when none."),
 });
 
 export const navigateResultSchema = actionResultSchema({
@@ -132,4 +138,7 @@ export const navigateOutcomes = {
     `[NAVIGATION_INCOMPLETE] Pathfinder completed but its final node remained ${remaining.toFixed(2)} blocks from a ${range}-block target range.`,
   executionFailed: (cause: unknown) =>
     `[NAVIGATION_FAILED] Pathfinder threw: ${cause instanceof Error ? cause.message : String(cause)}`,
+  deepWater: (target: { x: number; z: number }, start: { x: number; z: number }, length: number) =>
+    `[NAVIGATION_DEEP_WATER] The way to ${target.x}, ${target.z} crosses deep open water from about ${start.x}, ${start.z} (${length}+ blocks of it seen); no boat is carried: carry a boat to cross by boat, or choose a way over land.`,
+  boatCrossingFailed: (detail: string) => `[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: ${detail}.`,
 } as const;

@@ -3,7 +3,8 @@ import { createMovements } from "../runtime.js";
 import { BREAK_OPENS_INTO_LIQUID } from "../movements/policy.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
-import { TERRAIN_BREAK_PENALTY } from "./movement-policy.js";
+import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY } from "./movement-policy.js";
+import { Vec3 } from "vec3";
 import { blockClass, observeMineflayerBlock } from "./world.js";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
@@ -277,4 +278,22 @@ test("a protected region refuses route digging and scaffolding in it, but not wa
 
   bot.game.dimension = "the_nether";
   assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "an overworld region stays in the overworld");
+});
+
+test("routes never set off across deep open water, but a bot already out on it swims back", () => {
+  const bot = botFixture();
+  const water = loadedBlock(bot.registry.blocksByName.water.defaultState);
+  const observation = { ...water, traits: { ...water.traits, empty: true, liquid: "water" as const, liquidSource: true } };
+  const air = loadedBlock(bot.registry.blocksByName.air.defaultState);
+  // An ocean from x 10 to 60, z -30 to 30, down to y 50; land elsewhere.
+  const inOcean = (x: number, y: number, z: number) => x >= 10 && x <= 60 && z >= -30 && z <= 30 && y >= 50 && y <= 62;
+  const oceanWorld = { blockAt: (x: number, y: number, z: number) => (inOcean(x, y, z) ? observation : air), subscribe: () => () => {}, revision: 0 };
+  const policy = createMovements(bot);
+
+  bot.entity.position = new Vec3(0.5, 64, 0.5);
+  assert.deepEqual(policy.decideStep(30, 62, 0, oceanWorld), { kind: "prohibited", reason: DEEP_WATER_REASON });
+  assert.equal(policy.decideStep(0, 64, 0, oceanWorld).kind, "allowed", "land stays open");
+
+  bot.entity.position = new Vec3(30.5, 62.2, 0.5);
+  assert.equal(policy.decideStep(25, 62, 0, oceanWorld).kind, "allowed", "out at sea, the way back is open");
 });

@@ -21,6 +21,12 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
+
+/** Deep-water crossings one request makes by boat: there and on to the far side, then once more at most. */
+const MAX_CROSSINGS = 2;
+/** Deep open water in a row on the straight way that a bot with a boat crosses by boat before trying a way round. */
+const BOAT_FIRST_LENGTH = 24;
 import {
   navigateOutcomes,
   parseNavigateRequest,
@@ -216,6 +222,7 @@ function beginNavigate(
   dependencies: NavigateDependencies,
   lifetime: AbortSignal,
   observe: ObserveRequest = () => {},
+  crossings = 0,
 ) {
   const toolLoss = request.dig ? observeToolTierLoss(bot) : null;
   lifetime.addEventListener("abort", () => toolLoss?.close(), { once: true });
@@ -317,6 +324,53 @@ function beginNavigate(
       },
     };
 
+    // A route never sets off across deep open water (movement policy). Stopped short with deep water on the straight
+    // way on, it says so, or crosses by boat with one carried and goes on from the far side (spec 2026-10-04).
+    const overWater = async (stopped: NavigateResult): Promise<NavigateResult> => {
+      if (crossings >= MAX_CROSSINGS || context.signal?.aborted) return stopped;
+      const here = bot.entity.position.clone();
+      const water = deepWaterOnTheWay(bot, here, request);
+      if (water === null) return stopped;
+      if (!carriesBoat(bot)) {
+        return { ...stopped, status: "failed", error: navigateOutcomes.deepWater(request, water.start, water.length) };
+      }
+      // To the water's edge, at the water's level: from a cliff the water is out of reach for a boat.
+      const spot = launchSpot(bot, water.start);
+      if (spot === null) return { ...stopped, status: "failed", error: navigateOutcomes.boatCrossingFailed("no shore at the water's level near where the deep water starts") };
+      if (bot.entity.position.distanceTo(spot.offset(0.5, 0, 0.5)) > 1.5) {
+        const shore = { ...request, x: spot.x, y: spot.y, z: spot.z, range: 0 };
+        const atShore = await beginNavigate(bot, shore, dependencies, lifetime, () => {}, MAX_CROSSINGS)(context);
+        if (atShore.status !== "succeeded") return { ...stopped, status: "failed", error: navigateOutcomes.boatCrossingFailed(`could not reach the water's edge at ${spot.x} ${spot.y} ${spot.z}: ${atShore.status === "failed" ? atShore.error : atShore.status}`) };
+      }
+      // Already out on the water (off the boat by the far bank, live 2026-10-04): ashore there was the way, no boat
+      // goes back in; the route goes on from the land.
+      if (water.shore === null) return beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
+      const from = bot.entity.position;
+      const length = Math.hypot(request.x - from.x, request.z - from.z);
+      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal);
+      if (context.signal?.aborted) return stopped;
+      if (crossed.status !== "crossed") {
+        // Where the ride left her, not where the route had stopped before it.
+        const navigation = { ...stopped.navigation, end: position(bot.entity.position), boatBlocks: crossed.blocks };
+        return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
+      }
+      const onward = await beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
+      const boatBlocks = crossed.blocks + (onward.navigation.boatBlocks ?? 0);
+      return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks } };
+    };
+    // With a boat carried, a long stretch of deep open water on the straight way is crossed by boat at once, as a
+    // player does, rather than walked round (live 2026-10-04: two and a half minutes round a bay 380 blocks across).
+    if (crossings === 0 && carriesBoat(bot)) {
+      const ahead = deepWaterOnTheWay(bot, bot.entity.position, request);
+      if (ahead !== null && ahead.shore !== null && ahead.length >= BOAT_FIRST_LENGTH) {
+        return overWater({
+          status: "failed",
+          error: navigateOutcomes.deepWater(request, ahead.start, ahead.length),
+          navigation: navigationEvidence(bot, evidenceRequest(), start, startDimension, elapsedMs, scaffoldInventoryBefore, bucketBefore),
+        });
+      }
+    }
+
     try {
       route = await dependencies.navigate({
         movements: dependencies.createMovements(bot, { scaffolding: request.scaffold, allowDigging: request.dig }),
@@ -370,22 +424,22 @@ function beginNavigate(
       };
     }
     if (route.status === "stopped") {
-      return { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
+      return overWater({ status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence });
     }
     if (destination === null) {
-      return {
+      return overWater({
         status: "failed",
         error:
           "[NAVIGATION_SURFACE_UNOBSERVED] The destination surface was not observed; horizontal proximity is not arrival.",
         navigation: evidence,
-      };
+      });
     }
     if (evidence.remainingDistance !== null && evidence.remainingDistance > request.range) {
-      return {
+      return overWater({
         status: "failed",
         error: navigateOutcomes.incomplete(evidence.remainingDistance, request.range),
         navigation: evidence,
-      };
+      });
     }
     return { status: "succeeded", navigation: evidence };
   };

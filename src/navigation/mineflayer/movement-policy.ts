@@ -19,6 +19,7 @@ import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
+import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
 import {
   packKey,
   type BlockObservation,
@@ -97,7 +98,15 @@ export interface MineflayerMovementPolicyOptions {
    * Every other region refuses both.
    */
   readonly ignoreRegionsOwnedBy?: string;
+  /** Lets routes swim deep open water (`deep-water.ts`); off by default: it is crossed by boat (`navigate`). */
+  readonly allowDeepWater?: boolean;
 }
+
+/**
+ * A route never sets off across deep open water (owner, 2026-10-02 and 2026-10-04: never cross deep ocean without a
+ * boat; `navigate` crosses it by boat). The bot already out on it may swim anywhere, so the way back is never closed.
+ */
+export const DEEP_WATER_REASON = "deep open water: crossed by boat, never swum";
 
 /** Whether the cell holds water or lava, and whether as a source; null when it holds neither or is not loaded. */
 function liquidAt(world: WorldView, x: number, y: number, z: number): "source" | "flowing" | null {
@@ -334,6 +343,7 @@ export const MAXIMUM_BUCKET_DROP = 80;
 
 /** The step decisions, shared: search asks about every cell it could stand in, and the answer names no cell. */
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };
+const DEEP_WATER_STEP: PolicyDecision = { kind: "prohibited", reason: DEEP_WATER_REASON };
 const AVOIDED_STEP: PolicyDecision = { kind: "prohibited", reason: "movement policy avoids this block" };
 const OPENS_INTO_LIQUID: PolicyDecision = {
   kind: "prohibited",
@@ -437,6 +447,24 @@ export function createMineflayerMovementPolicy(
     (observation.bits & AVOIDED_BITS) !== 0 ||
     (observation.kind === "loaded" && avoidedStates[observation.stateId] === 1);
 
+  const allowDeepWater = options.allowDeepWater ?? false;
+  const waterIn = (world: WorldView): WaterAt => (x, y, z) => {
+    const block = world.blockAt(x, y, z);
+    return block.kind === "loaded" && (block.traits.liquid === "water" || block.traits.waterlogged);
+  };
+  // Whether the bot itself is out on deep water, read once per cell it stands in (search asks of every step).
+  let seaCell = "";
+  let seaAnswer = false;
+  const atSea = (world: WorldView): boolean => {
+    const feet = bot.entity.position.floored();
+    const key = `${feet.x},${feet.y},${feet.z}`;
+    if (key !== seaCell) {
+      seaCell = key;
+      seaAnswer = isDeepOpenWater(waterIn(world), feet.x, feet.y, feet.z) || isDeepOpenWater(waterIn(world), feet.x, feet.y - 1, feet.z);
+    }
+    return seaAnswer;
+  };
+
   const policy = createMovementPolicy({
     allowDigging: options.allowDigging ?? true,
     allowPlacing: scaffolding,
@@ -488,6 +516,7 @@ export function createMineflayerMovementPolicy(
         const observation = world.blockAt(x, y + dy, z);
         if (avoids(observation)) return AVOIDED_STEP;
       }
+      if (!allowDeepWater && isDeepOpenWater(waterIn(world), x, y, z) && !atSea(world)) return DEEP_WATER_STEP;
       return ALLOWED_STEP;
     },
   });

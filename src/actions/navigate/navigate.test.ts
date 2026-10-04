@@ -526,3 +526,28 @@ test("a target on a ledge within range is a place the bot can be", async () => {
 
   assert.equal(output.result.status, "succeeded");
 });
+
+test("a route stopped at the shore of deep open water, with no boat carried, says the way crosses it", async () => {
+  const { bot } = botFixture();
+  // Sea from x 10 to 40 (water y 50 to 63, its surface at 63); stone up to 63 elsewhere.
+  bot.blockAt = ((cell: Vec3) => {
+    if (cell.x >= 10 && cell.x <= 40 && cell.y >= 50 && cell.y <= 63) return { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+    return cell.y < 64
+      ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
+      : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+  }) as unknown as Bot["blockAt"];
+  const action = createNavigateAction(
+    bot,
+    fakeNavigation,
+    dependencies(async () => {
+      bot.entity.position.set(9.5, 64, 0.5);
+      return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+    }),
+  );
+  const output = await new ActionRunner().run(action, { x: 60, y: 64, z: 0 });
+  assert.equal(output.result.status, "failed");
+  assert.match(
+    "error" in output.result ? String(output.result.error) : "",
+    /^\[NAVIGATION_DEEP_WATER\] The way to 60, 0 crosses deep open water from about 10, 0 \(31\+ blocks of it seen\); no boat is carried/u,
+  );
+});
