@@ -150,6 +150,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
       { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: null },
       { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: null },
     ],
+    foods: [],
   });
   // Players, the bot's own entity, and dropped items are in no mob category, and
   // the loaded-mob summary reaches entities the bounded threat list cannot: the
@@ -166,6 +167,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "cow",
         age: "adult",
         kind: "animal",
+        hostile: false,
         count: 2,
         nearest: { entityId: 4, distance: 1.6, position: { x: -8, y: 99, z: 18 } },
       },
@@ -173,6 +175,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "zombie",
         age: "adult",
         kind: "hostile",
+        hostile: true,
         count: 1,
         nearest: { entityId: 1, distance: 5, position: { x: -4.5, y: 99, z: 18.68 } },
       },
@@ -180,6 +183,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "bat",
         age: "not_applicable",
         kind: "ambient",
+        hostile: false,
         count: 1,
         nearest: { entityId: 6, distance: 6, position: { x: -9.5, y: 105, z: 18.68 } },
       },
@@ -187,6 +191,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "villager",
         age: "adult",
         kind: "passive",
+        hostile: false,
         count: 1,
         nearest: { entityId: 7, distance: 6, position: { x: -15.5, y: 99, z: 18.68 } },
       },
@@ -194,6 +199,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "cod",
         age: "not_applicable",
         kind: "water_creature",
+        hostile: false,
         count: 1,
         nearest: { entityId: 8, distance: 10, position: { x: -9.5, y: 99, z: 8.68 } },
       },
@@ -201,6 +207,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "rabbit",
         age: "adult",
         kind: "animal",
+        hostile: false,
         count: 1,
         nearest: { entityId: 9, distance: 39.5, position: { x: 30, y: 99, z: 18.68 } },
       },
@@ -208,6 +215,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
         name: "slime",
         age: "not_applicable",
         kind: "mob",
+        hostile: true,
         count: 1,
         nearest: { entityId: 10, distance: 60, position: { x: -9.5, y: 99, z: 78.68 } },
       },
@@ -540,4 +548,20 @@ test("reports straight-down digging from the live policy, and renders only its l
     formatViewStatusResult({ status: "succeeded", situation: stairs }),
     /- No straight-down digging \(switched off in the survival policy\); routes descend by staircase/,
   );
+});
+
+/**
+ * What a carried food restores is game data a model otherwise guesses at: a brain choosing between farming and
+ * hunting, or counting a day's worth of food, reads it here, one line per food kind, most filling first.
+ */
+test("lists each carried food once with its hunger points and saturation from game data", (t) => {
+  const bot = liveBot();
+  bot.inventory.items = () => [stack(9, "bread", 3), stack(10, "cobblestone", 64), stack(11, "cooked_beef", 2), stack(12, "bread", 1)] as never;
+  const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
+  assert.deepEqual(situation.inventory.foods, [
+    { name: "cooked_beef", count: 2, points: 8, saturation: 12.8 },
+    { name: "bread", count: 4, points: 5, saturation: 6 },
+  ]);
+  const markdown = formatViewStatusResult({ status: "succeeded", situation });
+  assert.match(markdown, /- Food carried: cooked_beef x2 \(8 hunger points, 12.8 saturation each\); bread x4 \(5 hunger points, 6 saturation each\)/);
 });

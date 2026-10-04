@@ -11,6 +11,7 @@
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { tagsOf } from "../../world/block-tags.js";
 import { findLoadedBlockPositions, isLiquid } from "../../world/index.js";
 import { defineAction } from "../action.js";
 import { blockMatchesSelector } from "../collect-block/collection-facts.js";
@@ -18,11 +19,13 @@ import {
   parseViewBlocksRequest,
   VIEW_BLOCKS,
   VIEW_BLOCKS_DESCRIPTION,
+  FIND_COUNT_CAP,
   viewBlocksInputSchema,
   viewBlocksResultSchema,
   viewBlocksAnnotations,
   viewBlocksOutcomes,
   type BlockKind,
+  type NamedBlockKind,
   type FoundBlock,
   type ObservedBlock,
   type ViewBlocksRequest,
@@ -70,16 +73,16 @@ function find(
   for (const name of request.blockNames) {
     const stateIds = selectedStateIds(bot, name);
     if (stateIds.size === 0) return { unknown: name };
-    // The scan is nearest first and cheap: it reads packed state IDs, so the
-    // count of everything loaded costs no more than the few that are listed.
-    const positions = findLoadedBlockPositions(bot, { center: feet, stateIds, limit: Number.POSITIVE_INFINITY });
+    // The scan is nearest first and stops once the cap's worth of nearer hits
+    // is held; one past the cap tells "more" from "exactly the cap".
+    const positions = findLoadedBlockPositions(bot, { center: feet, stateIds, limit: FIND_COUNT_CAP + 1 });
     const listed: FoundBlock[] = positions.slice(0, request.limit).map((position) => ({
       ...observe(bot, position),
       distance: Math.round(position.distanceTo(feet) * 10) / 10,
       above: nameAt(bot, position.offset(0, 1, 0)),
       below: nameAt(bot, position.offset(0, -1, 0)),
     }));
-    found.push({ name, found: positions.length, listed });
+    found.push({ name, found: Math.min(positions.length, FIND_COUNT_CAP), more: positions.length > FIND_COUNT_CAP, listed });
   }
   return { found };
 }
@@ -139,11 +142,11 @@ export function viewBlocks(bot: Bot, request: ViewBlocksRequest): ViewBlocksResu
     cells: request.cells.map((cell) => observe(bot, new Vec3(cell.x, cell.y, cell.z))),
   };
   if (request.kinds !== undefined && request.kinds.length > 0) {
-    const kinds: Record<string, BlockKind> = {};
+    const kinds: Record<string, NamedBlockKind> = {};
     for (const name of request.kinds) {
       const kind = kindOf(bot, name);
       if (kind === null) return { status: "failed", error: viewBlocksOutcomes.unknownBlock(name), blocks: report };
-      kinds[name] = kind;
+      kinds[name] = { ...kind, tags: [...tagsOf(name, bot.version)] };
     }
     report.kinds = kinds;
   }
@@ -211,7 +214,7 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     `Bot feet at ${blocks.feet.x}, ${blocks.feet.y}, ${blocks.feet.z} in \`${blocks.dimension}\`; ${blocks.loadedChunks} chunks loaded.`,
   ];
   for (const entry of blocks.find ?? []) {
-    const heading = `### ${entry.name}: ${entry.found} loaded`;
+    const heading = `### ${entry.name}: ${entry.found}${entry.more ? "+" : ""} loaded`;
     lines.push("", entry.found > entry.listed.length ? `${heading}, nearest ${entry.listed.length} listed` : heading);
     for (const hit of entry.listed) {
       lines.push(
@@ -230,7 +233,8 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     lines.push("", "### Kinds");
     for (const [name, kind] of Object.entries(blocks.kinds)) {
       const harvest = kind.harvest === null ? "drops by hand" : `drops only with ${kind.harvest.join(" or ")}`;
-      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}`);
+      const tags = kind.tags.length === 0 ? "" : `; tags: ${kind.tags.join(", ")}`;
+      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}${tags}`);
     }
   }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);

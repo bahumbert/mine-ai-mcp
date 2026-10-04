@@ -50,6 +50,8 @@ import {
   type Navigate,
   type NavigationResult,
 } from "../../index.js";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { navigationFeet } from "../../world/block-geometry.js";
 import type { Position3 } from "../../world/world.js";
 import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
 import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
@@ -203,8 +205,13 @@ export interface BuildResult {
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
 const isSolid = (block: WorldBlock | null): boolean => block?.boundingBox === "block";
 
+/**
+ * The cell the bot's feet are in, as navigation counts it: standing on a floor lower than a full block (farmland,
+ * soul sand, mud), the floored position is the floor block itself (live 2026-10-03: on farmland at y 75.94, a water
+ * cell beside her read as sealing her in).
+ */
 function feetOf(bot: Bot): Vec3 {
-  return bot.entity.position.floored();
+  return asVec3(navigationFeet(bot.entity.position, bot.entity.onGround === true));
 }
 
 function withinReach(bot: Bot, position: BlockPosition): boolean {
@@ -529,6 +536,9 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
   let idlePasses = 0;
 
   for (;;) {
+    // Each pass gives the event loop a turn: a pass whose route and work resolve at once (nothing to walk, nothing in
+    // reach) otherwise runs on promises alone and starves every timer, the runtime's heartbeat included.
+    await nextTurn();
     request.signal?.throwIfAborted();
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
     targeting.passes += 1;
@@ -540,9 +550,15 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
     // would either be refused or wall the bot into a pit, so step out first;
     // likewise when every remaining placement would seal the bot in.
     if (targeting.standingInStructure() || targeting.onlyEnclosing()) {
+      const before = feetOf(bot);
       const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal });
       if (exit.status === "stopped") {
         return targeting.result("stopped", `could not step out of the structure: ${exit.reason}`);
+      }
+      // An exit that left the bot where it was changes nothing the next pass would see.
+      idlePasses = feetOf(bot).equals(before) ? idlePasses + 1 : 0;
+      if (idlePasses >= IDLE_PASSES) {
+        return targeting.result("stopped", "could not step out of the structure: the way out leaves it where it stands");
       }
       continue;
     }

@@ -139,6 +139,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
       scaffolding: false,
       allowFullInventory: true,
       onToolLoss: "stop",
+      maxDistance: null,
     },
   );
   assert.deepEqual(parseCollectBlockRequest({ block_name: "oak_log", x: 8, y: 64, z: -3 }), {
@@ -148,6 +149,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
     scaffolding: true,
     allowFullInventory: false,
     onToolLoss: "stop",
+    maxDistance: null,
   });
   assert.throws(() => parseCollectBlockRequest({ block_name: "minecraft:" }), /must identify a block/);
   assert.throws(
@@ -170,4 +172,24 @@ test("exact collection accepts one or omitted count and rejects larger counts at
       message: "Exact coordinates select one block. Omit count or set it to 1. To collect multiple blocks, omit x, y, and z.",
     }]);
   }
+});
+
+/**
+ * Live 2026-10-03: with no bound, a fetch for a scarce wood walked 491, 907 and 806 blocks (an ocean twice), the loaded
+ * nearest moving on as it walked. Under max_distance the run ends with the nearest farther one named instead.
+ */
+test("max_distance bounds the run and its stop names the nearest block beyond the range", () => {
+  const request = parseCollectBlockRequest({ block_name: "dark_oak_log", count: 3, max_distance: 64 });
+  assert.equal(request.maxDistance, 64);
+  assert.throws(() => parseCollectBlockRequest({ block_name: "oak_log", max_distance: 0 }));
+  assert.throws(() => parseCollectBlockRequest({ block_name: "oak_log", max_distance: 5000 }));
+  assert.equal(
+    outcomes.noTargetInRange("dark_oak_log", 64, { position: { x: -150, y: 70, z: -260 }, distance: 712 }),
+    "[NO_TARGET_IN_RANGE] No dark_oak_log block left within 64 blocks of where the run started; the nearest loaded one is at -150,70,-260, 712 blocks from the start.",
+  );
+  // Nothing loaded at all, in range or beyond.
+  const bot = Object.assign(botFixture(), { version: "1.21.4", world: { getColumns: () => [] } }) as unknown as Bot;
+  const result = settle(bot, request, {}, new Set(["dark_oak_log"]), new Vec3(0, 64, 0), { status: "no_targets", broken: [], reason: null });
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[NO_TARGET_IN_RANGE\] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either\./u);
 });

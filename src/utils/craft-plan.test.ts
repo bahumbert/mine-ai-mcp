@@ -54,6 +54,28 @@ test("a shortfall names the wood already carried, not the first wood in registry
   assert.deepEqual(preparation.plan.missingMaterials, [{ item: "oak_log", count: 1 }]);
 });
 
+/** Two woods' planks, sticks and table: which wood a shortfall names is the planner's choice. */
+const TWO_WOODS = [
+  craftingRecipe("pale_oak_planks", 4, { pale_oak_log: 1 }),
+  craftingRecipe("birch_planks", 4, { birch_log: 1 }),
+  craftingRecipe("stick", 4, { pale_oak_planks: 2 }),
+  craftingRecipe("stick", 4, { birch_planks: 2 }),
+  craftingRecipe("crafting_table", 1, { pale_oak_planks: 4 }),
+  craftingRecipe("crafting_table", 1, { birch_planks: 4 }),
+];
+
+test("carrying no wood, a shortfall names the preferred wood (the one growing nearby), not the first in registry order", () => {
+  // Live 3 October: carrying nothing, Vex's stone pickaxe needed "3 pale_oak_log" and he walked 900 blocks for them,
+  // across an ocean, with oak and birch all around.
+  const { bot } = craftingBot({}, true, TWO_WOODS);
+  const table = [{ ...registry.itemsByName.crafting_table, count: 1 }];
+  assert.deepEqual(planCraftingFromInventory(bot, table).plan.missingMaterials, [{ item: "pale_oak_log", count: 1 }]);
+  assert.deepEqual(planCraftingFromInventory(bot, table, { prefer: ["birch_log", "oak_log"] }).plan.missingMaterials, [{ item: "birch_log", count: 1 }]);
+  // What is carried still comes first.
+  const carrying = craftingBot({ pale_oak_log: 1 }, true, TWO_WOODS).bot;
+  assert.equal(planCraftingFromInventory(carrying, table, { prefer: ["birch_log"] }).kind, "ready");
+});
+
 /**
  * Live 3 October: `get_items bucket` found the bucket "not craftable". Iron ingots only craft back out of iron nuggets
  * and iron blocks, both made from ingots, so every recipe of the ingot loops to itself and the whole bucket failed.

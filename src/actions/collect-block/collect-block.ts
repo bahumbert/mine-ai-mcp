@@ -26,6 +26,7 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
 import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
+import { findLoadedBlockPositions } from "../../world/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
@@ -293,7 +294,9 @@ function beginCollectBlock(
         // a lava source. The process makes pools targets only when it has nothing
         // to mine and water in the bucket.
         cast: blockMatchesSelector("obsidian", request.selector) ? useItemAt : null,
-        matches: (block: MinecraftBlock) => blockMatchesSelector(block.name, request.selector),
+        // Under max_distance a block beyond the range is no target (one with no position is a palette entry).
+        matches: (block: MinecraftBlock) =>
+          blockMatchesSelector(block.name, request.selector) && (block.position == null || withinRange(request, start, block.position)),
         canMine,
         matchingStateIds: target.blockStateIds,
         ...(exactCell !== null && { exactTarget: exactCell }),
@@ -302,7 +305,8 @@ function beginCollectBlock(
         observedInventoryGain: gained,
         movements,
         castSearchRadius: LOADED_SEARCH_RADIUS,
-        explore: exactCell === null,
+        // Exploring for a block is what walks a run across the map: never under max_distance.
+        explore: exactCell === null && request.maxDistance === null,
         maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance) - broken.length),
         signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
         ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
@@ -350,12 +354,26 @@ function targetHighlights(targets: readonly MineTarget[]): HighlightFrame {
 
 // ── Result settlement ─────────────────────────────────────────────────────────────────────
 
+/** Whether a cell is within the request's `max_distance` of where the run started, horizontally; always when unbounded. */
+function withinRange(request: CollectBlockRequest, start: Vec3, position: { readonly x: number; readonly z: number }): boolean {
+  return request.maxDistance === null || Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z) <= request.maxDistance;
+}
+
+/** The nearest loaded matching block beyond the range, and its horizontal distance from the start. */
+function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3) {
+  const positions = findLoadedBlockPositions(bot, { center: start, stateIds: collectionTarget(bot, request).blockStateIds, limit: 256 });
+  const beyond = positions.find((position) => !withinRange(request, start, position));
+  if (beyond === undefined) return null;
+  return { position: { x: beyond.x, y: beyond.y, z: beyond.z }, distance: Math.round(Math.hypot(beyond.x + 0.5 - start.x, beyond.z + 0.5 - start.z)) };
+}
+
 /** Why the mine process stopped, in the words of the request that asked for it. */
-function stopReason(request: CollectBlockRequest, result: MineResult, gained: number): string | null {
+function stopReason(bot: Bot, request: CollectBlockRequest, start: Vec3, result: MineResult, gained: number): string | null {
   switch (result.status) {
     case "satisfied":
       return null;
     case "no_targets":
+      if (request.maxDistance !== null) return outcomes.noTargetInRange(request.selector, request.maxDistance, nearestBeyondRange(bot, request, start));
       return outcomes.noLoadedTargets(request.selector);
     case "unreachable":
       return outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
@@ -401,7 +419,7 @@ export function settle(
     error: outcomes.progress(
       missingBucket
         ? `[CASTING_BUCKET_MISSING] Carried buckets decreased from ${bucketsBefore} to ${bucketsAfter}; the missing bucket was not recovered.`
-        : (stopReason(request, result, gained) ?? outcomes.incomplete),
+        : (stopReason(bot, request, start, result, gained) ?? outcomes.incomplete),
       gained,
       request.requested,
       brokenAt.length,

@@ -52,7 +52,7 @@ export async function viewCraftingRequirements(
     };
   }
 
-  const preparation = planCraftingFromInventory(bot, targets);
+  const preparation = planCraftingFromInventory(bot, targets, { prefer: request.prefer });
   if (preparation.kind === "planner_failed") {
     return {
       status: "failed",

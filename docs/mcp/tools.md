@@ -119,12 +119,13 @@ affected.
 Use `view_status` to obtain an instantaneous snapshot of the bot's live
 state before planning or after physical execution. It accepts no tool-specific
 arguments. Success proves the bot sampled its vitals, world time, exact
-position, compass heading, carried items, best tool/armour tiers, and nearby entities, while refreshing
+position, compass heading, carried items (each carried food with the hunger points and saturation one
+restores, from game data), best tool/armour tiers, and nearby entities, while refreshing
 the `bot_status`, `bot_inventory`, and `bot_tools` tables in SQLite. Nearby entities are the
 players online, the hostiles the combat policy counts within sixteen blocks, every
 loaded dropped item nearest first (up to sixteen), and a summary of every loaded mob
-species with its count and the nearest one's entity ID, distance and position, at any
-distance. Defined in
+species with its count, whether it is in the game's hostile category (the one `collect_mob_drop` refuses without
+a shield), and the nearest one's entity ID, distance and position, at any distance. Defined in
 [src/actions/view-status/contract.ts](../../src/actions/view-status/contract.ts).
 
 The `mobility` section answers what the carried inventory unlocks, which the
@@ -162,11 +163,14 @@ dragon or crystals have been killed.
 Use `view_blocks` to read blocks without moving. `find` names up to
 eight block kinds and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
-reported whatever the `limit`, which defaults to twelve per name. `box` reads every cell
+reported whatever the `limit`, which defaults to twelve per name, up to a thousand (`more` says there are
+more: counting every stone loaded once stalled the runtime). `box` reads every cell
 of a small box around a point, drawn as one grid per layer with a legend, up to
 nine across and seven high, with `kinds`: for each block name in the box, the tool class it is mined with
 (its game-data `mineable/<tool>` material: pickaxe, shovel, axe, hoe, or none) and whether it is solid. `cells`
-reads exact cells. Every block is reported
+reads exact cells. `kinds` describes named blocks from game data alone: tool class, solidity, the tools without
+which they drop nothing, and the game's block tags they belong to (`logs`, `crops`, `mineable/axe`...), extracted
+from the server jar per version (`src/world/data/block-tags/`). Every block is reported
 with its name and whether it is solid, open, or liquid, and a liquid's source or
 flowing level. Success proves the report came from the live loaded world; a
 name Minecraft has no block for fails the read. Defined in
@@ -475,7 +479,10 @@ best required harvest tier drops. `continue` lets the same request use its
 remaining tool; losing the last usable tool still reports the physical stop.
 Without coordinates it mines the closest matching blocks it can reach, wherever
 they are, including blocks the bot placed itself; navigate to the area first
-when a particular deposit matters. The best carried tool for each block is
+when a particular deposit matters. `max_distance` keeps the whole run within that
+many blocks (horizontally) of where it started: no farther target, no exploring;
+with none left in range it stops `[NO_TARGET_IN_RANGE]`, naming the nearest
+loaded one beyond the range and its distance. The best carried tool for each block is
 equipped automatically. The response lists every cell broken with its distance
 from where the run started, so the model can see which deposit was mined.
 

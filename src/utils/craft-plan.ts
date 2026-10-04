@@ -44,6 +44,14 @@ export type CraftPreparation =
   | { readonly kind: "uncraftable"; readonly plan: CraftPlanEvidence; readonly items: readonly string[] }
   | { readonly kind: "planner_failed"; readonly plan: CraftPlanEvidence; readonly items: readonly string[] };
 
+export interface CraftPlanOptions {
+  /**
+   * Materials to choose, in this order, where recipes accept several and none is carried: the logs that grow nearby
+   * rather than the first wood in registry order. Unknown names are ignored.
+   */
+  readonly prefer?: readonly string[];
+}
+
 interface PlanningState {
   readonly available: Map<number, number>;
   readonly craftedSurplus: Map<number, number>;
@@ -51,6 +59,8 @@ interface PlanningState {
   readonly carried: Map<number, number>;
   readonly missing: Map<number, number>;
   readonly applications: CraftApplication[];
+  /** Item id -> rank among the caller's preferred materials (0 first); shared, never copied. */
+  readonly prefer: ReadonlyMap<number, number>;
 }
 
 type ItemSource =
@@ -87,6 +97,7 @@ function copyState(state: PlanningState): PlanningState {
     carried: new Map(state.carried),
     missing: new Map(state.missing),
     applications: [...state.applications],
+    prefer: state.prefer,
   };
 }
 
@@ -108,16 +119,20 @@ function recipeInputs(recipe: MineflayerRecipe): readonly { id: number; count: n
  * second term breaks the tie between wood families: two oak logs short of a
  * table and a pickaxe were reported as one missing pale_oak_log, the first
  * planks recipe in registry order, and a gatherer then looked for pale oak in
- * an oak forest. A material it already carries is the one it can find again.
+ * an oak forest. A material it already carries is the one it can find again. Carrying none of them, the caller's
+ * preferred materials come next, in its order (live 3 October: carrying nothing, a stone pickaxe was still "3
+ * pale_oak_log", and the gatherer walked 900 blocks for them past oak and birch).
  */
-function missingScore(state: PlanningState): readonly [number, number, number, number] {
+function missingScore(state: PlanningState): readonly [number, number, number, number, number] {
   let missingUnits = 0;
   let unfamiliarUnits = 0;
+  let unpreferred = 0;
   for (const [itemId, count] of state.missing) {
     missingUnits += count;
     if (!state.carried.has(itemId)) unfamiliarUnits += count;
+    unpreferred += count * (state.prefer.get(itemId) ?? state.prefer.size);
   }
-  return [missingUnits, unfamiliarUnits, state.missing.size, state.applications.length];
+  return [missingUnits, unfamiliarUnits, unpreferred, state.missing.size, state.applications.length];
 }
 
 function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidate | null): boolean {
@@ -296,10 +311,16 @@ function evidence(
  * Earlier targets reserve their requested output while intermediate surplus
  * remains available to later targets.
  */
-export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarget[]): CraftPreparation {
+export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarget[], options: CraftPlanOptions = {}): CraftPreparation {
   const available = new Map<number, number>();
   for (const item of bot.inventory.items()) addCount(available, item.type, item.count);
+  const prefer = new Map<number, number>();
+  for (const name of options.prefer ?? []) {
+    const id = bot.registry.itemsByName[name]?.id;
+    if (id !== undefined && !prefer.has(id)) prefer.set(id, prefer.size);
+  }
   let state: PlanningState = {
+    prefer,
     available,
     craftedSurplus: new Map(),
     required: new Map(),

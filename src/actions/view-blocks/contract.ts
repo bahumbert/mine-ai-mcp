@@ -8,7 +8,7 @@ export const VIEW_BLOCKS = "view_blocks" as const;
 export const VIEW_BLOCKS_DESCRIPTION =
   "View blocks without moving. find lists, for each named block kind, the nearest ones across every loaded chunk with their distance and what is above and below. " +
   "box reads every cell of a small box around a point as one grid per layer. cells reads exact cells. " +
-  "kinds gives named blocks' game data: the tool class that mines them fast and the tools without which they drop nothing. " +
+  "kinds gives named blocks' game data: the tool class that mines them fast, the tools without which they drop nothing, and the game's block tags they belong to (logs, crops...). " +
   "Each reports the block name and whether it is solid, open, or liquid, and a liquid's source or flowing level. " +
   "Use it to locate obsidian, water, lava, ore, or chests before acting, and to see what is under and around the bot or a target.";
 
@@ -22,6 +22,14 @@ export const VIEW_BLOCKS_DESCRIPTION =
  */
 export const DEFAULT_FIND_LIMIT = 12;
 export const MAX_FIND_LIMIT = 64;
+/**
+ * The most matches a find counts per name; past it the count reads "at least".
+ * Counting every stone of the loaded world kept millions of positions and
+ * sorted them on the event loop: live 2026-10-03 the runtime stalled past its
+ * 5 s heartbeat and was stopped. The scan is nearest first, so a capped count
+ * stops early for common blocks and still covers every loaded chunk for rare ones.
+ */
+export const FIND_COUNT_CAP = 1000;
 /** How many kinds one find may name; more than a handful is a query, not a look. */
 export const MAX_FIND_NAMES = 8;
 /**
@@ -51,7 +59,7 @@ export const findRequestSchema = z.strictObject({
     .min(1)
     .max(MAX_FIND_LIMIT)
     .default(DEFAULT_FIND_LIMIT)
-    .describe("How many of the nearest hits to list per name; the count found is always reported."),
+    .describe("How many of the nearest hits to list per name; the count found is always reported, up to 1000."),
 });
 
 export const boxRequestSchema = z.strictObject({
@@ -85,7 +93,7 @@ export const viewBlocksInputSchema = z.strictObject({
     .min(1)
     .max(MAX_KIND_NAMES)
     .optional()
-    .describe("Block names to describe from game data (tool class, solidity, harvest tools); reads no world cell."),
+    .describe("Block names to describe from game data (tool class, solidity, harvest tools, block tags); reads no world cell."),
 });
 
 export type ViewBlocksInput = z.input<typeof viewBlocksInputSchema>;
@@ -153,6 +161,14 @@ export const blockKindSchema = z.strictObject({
   harvest: z.array(z.string()).nullable(),
 });
 
+/**
+ * A named block's game data, as a `kinds` read reports it: its {@link blockKindSchema} and the game's block tags it
+ * belongs to (`logs`, `mineable/axe`, `crops`; from the server jar's data, sorted; empty when none ships for the version).
+ */
+export const namedBlockKindSchema = blockKindSchema.extend({
+  tags: z.array(z.string()),
+});
+
 export const viewBlocksReportSchema = z.strictObject({
   dimension: z.string(),
   feet: z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() }),
@@ -163,8 +179,10 @@ export const viewBlocksReportSchema = z.strictObject({
     .array(
       z.strictObject({
         name: z.string(),
-        /** Matching blocks loaded, before the limit. */
+        /** Matching blocks loaded, before the limit, counted up to {@link FIND_COUNT_CAP}. */
         found: z.number().int().nonnegative(),
+        /** More than `found` are loaded: the count stopped at its cap. */
+        more: z.boolean(),
         listed: z.array(foundBlockSchema),
       }),
     )
@@ -187,12 +205,13 @@ export const viewBlocksReportSchema = z.strictObject({
     .nullable(),
   cells: z.array(observedBlockSchema),
   /** Game data for each name asked for in `kinds`; absent when none was asked for. */
-  kinds: z.record(z.string(), blockKindSchema).optional(),
+  kinds: z.record(z.string(), namedBlockKindSchema).optional(),
 });
 
 export type ObservedBlock = z.output<typeof observedBlockSchema>;
 export type FoundBlock = z.output<typeof foundBlockSchema>;
 export type BlockKind = z.output<typeof blockKindSchema>;
+export type NamedBlockKind = z.output<typeof namedBlockKindSchema>;
 export type ViewBlocksReport = z.output<typeof viewBlocksReportSchema>;
 
 export const viewBlocksResultSchema = actionResultSchema({ blocks: viewBlocksReportSchema });

@@ -10,9 +10,10 @@ export const VIEW_STATUS_DESCRIPTION =
   "View the bot's live situation in one read: health, hunger, and saturation; the world clock with day or night, " +
   "the ticks until that changes, and whether the bot is asleep or it is raining; exact position, dimension, footing, " +
   "and compass heading; every carried stack with its slot, the free slot count, the held item, and worn equipment; " +
+  "each carried food with the hunger points and saturation one restores; " +
   "remaining item durability, best carried tool and armour tiers, bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
   "which movements the inventory unlocks: no carried water bucket caps every route at a three-block fall and disarms the emergency fall save, and pillaring and bridging need a carried scaffold block; " +
-  "the players and hostile mobs nearby; every loaded dropped item, nearest first; and every loaded mob species and observed age group with its count and the " +
+  "the players and hostile mobs nearby; every loaded dropped item, nearest first; and every loaded mob species and observed age group with its count, whether it is hostile, and the " +
   "nearest one's position, at any distance, so a cow sixty blocks off is listed. " +
   "The End fight section lists loaded crystal IDs and observed cage status, dragon phase name and health, the estimated perched head or tentative landing head position, and dragon breath clouds. " +
   "Use it to check state before and after actions, to wait for night, to pick a species to hunt, " +
@@ -74,6 +75,9 @@ export const DRAGON_PHASE_NAMES = [
 export const nearbyMobSchema = z.strictObject({
   name: z.string().min(1),
   kind: z.enum(MOB_KINDS),
+  hostile: z
+    .boolean()
+    .describe("The species is in the game's hostile mob category, the one collect_mob_drop refuses without a shield."),
   age: z.enum(MOB_AGES),
   count: z.number().int().positive().describe("Loaded mob count for this species and observed age group."),
   nearest: z.strictObject({
@@ -238,6 +242,15 @@ export const liveSituationSchema = z.strictObject({
     usedSlots: z.number().int().nonnegative(),
     freeSlots: z.number().int().nonnegative(),
     stacks: z.array(inventoryStackSchema),
+    /** Every carried food kind with what one restores (game data), most filling first. */
+    foods: z.array(
+      z.strictObject({
+        name: z.string(),
+        count: z.number().int().positive(),
+        points: z.number().nonnegative().describe("Hunger points one restores."),
+        saturation: z.number().nonnegative().describe("Saturation one restores."),
+      }),
+    ),
   }),
   tools: toolSnapshotSchema,
   nearby: z.strictObject({

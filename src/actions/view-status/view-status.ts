@@ -6,6 +6,7 @@ import {
   readLastDeath,
   snapshotBotStatus,
   updateBotStatus,
+  type InventoryStack,
   type SqlBotData,
 } from "../../bot-data/index.js";
 import {
@@ -14,7 +15,7 @@ import {
   preferredScaffoldItem,
 } from "../../navigation/mineflayer/movement-policy.js";
 import { waterLandingSupply } from "../../navigation/mineflayer/water-landing.js";
-import { HOSTILE_OBSERVATION_RANGE, observeHostileContact } from "../../survival/perception/combat/threats.js";
+import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies, observeHostileContact } from "../../survival/perception/combat/threats.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import type { Position3 } from "../../utils/index.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
@@ -106,6 +107,7 @@ export function observeLiveSituation(
       usedSlots: carried.length,
       freeSlots: CARRIED_SLOT_COUNT - carried.length,
       stacks: [...snapshot.inventory],
+      foods: carriedFoods(bot, carried),
     },
     tools: snapshot.tools!,
     nearby: observeNearby(bot),
@@ -212,6 +214,18 @@ function headingDegrees(yaw: number): number {
   return round((((-yaw * 180) / Math.PI) % 360) + 360, 1) % 360;
 }
 
+/** Each carried food kind once, with what one restores from game data, most filling first. */
+function carriedFoods(bot: Bot, carried: readonly InventoryStack[]): LiveSituation["inventory"]["foods"] {
+  const counts = new Map<string, number>();
+  for (const stack of carried) if (bot.registry.foodsByName[stack.name]) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
+  return [...counts]
+    .map(([name, count]) => {
+      const food = bot.registry.foodsByName[name]!;
+      return { name, count, points: food.foodPoints, saturation: food.saturation };
+    })
+    .sort((left, right) => right.points - left.points || right.saturation - left.saturation || left.name.localeCompare(right.name));
+}
+
 function observeNearby(bot: Bot): LiveNearby {
   const origin = bot.entity?.position ?? { x: 0, y: 0, z: 0 };
   return {
@@ -270,7 +284,7 @@ function observeMobs(bot: Bot, origin: Position3): LiveNearby["mobs"] {
     const group = `${registered.name}:${age}`;
     const seen = groups.get(group);
     if (!seen) {
-      groups.set(group, { name: registered.name, kind, age, count: 1, nearest });
+      groups.set(group, { name: registered.name, kind, hostile: isHostileSpecies(bot, registered.name), age, count: 1, nearest });
       continue;
     }
     seen.count += 1;
@@ -410,6 +424,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
           ],
     ),
     "- Durability is unavailable or not applicable for stacks without a durability entry.",
+    `- Food carried: ${inventory.foods.length > 0 ? inventory.foods.map((food) => `${food.name} x${food.count} (${food.points} hunger points, ${food.saturation} saturation each)`).join("; ") : "none"}`,
     "",
     "### Best tools and armour",
     ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.tier}${entry.item ? ` (${entry.item}, slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : ""}`),
@@ -436,7 +451,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     `- Loaded mobs (every loaded chunk, any distance):${nearby.mobs.length > 0 ? "" : " none"}`,
     ...nearby.mobs.map(
       (mob) =>
-        `  - ${mob.name} (${mob.kind}${mob.age === "not_applicable" ? "" : `, ${mob.age === "unknown" ? "age unknown" : mob.age}`}) x${mob.count}, nearest #${mob.nearest.entityId} ${mob.nearest.distance} at ${at(mob.nearest.position)}`,
+        `  - ${mob.name} (${mob.kind}${mob.hostile && mob.kind !== "hostile" ? ", hostile" : ""}${mob.age === "not_applicable" ? "" : `, ${mob.age === "unknown" ? "age unknown" : mob.age}`}) x${mob.count}, nearest #${mob.nearest.entityId} ${mob.nearest.distance} at ${at(mob.nearest.position)}`,
     ),
     `- Dropped items (every loaded chunk, nearest ${DROPPED_ITEM_LIMIT}): ${
       nearby.droppedItems.length > 0

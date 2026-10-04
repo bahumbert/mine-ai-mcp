@@ -67,11 +67,13 @@ test("find lists the nearest matches across what is loaded, with what is above a
     {
       name: "obsidian",
       found: 2,
+      more: false,
       listed: [{ x: 3, y: 64, z: 0, name: "obsidian", shape: "solid", distance: 3, above: "lava", below: "stone" }],
     },
     {
       name: "lava",
       found: 1,
+      more: false,
       listed: [
         { x: 3, y: 65, z: 0, name: "lava", shape: "liquid", level: 0, distance: 3.2, above: "air", below: "obsidian" },
       ],
@@ -83,6 +85,19 @@ test("find lists the nearest matches across what is loaded, with what is above a
   assert.match(markdown, /### lava: 1 loaded\n- lava at 3, 65, 0, 3.2 blocks away \(source\)/);
 });
 
+test("a find counts at most a thousand per name, the nearest, and says there are more", () => {
+  // Live 2026-10-03: counting every stone loaded kept millions of positions and stalled the runtime past its heartbeat.
+  const blocks: Record<string, { name: string }> = {};
+  // Four full layers of the one loaded chunk: 1024 stone under the bot.
+  for (let y = 60; y <= 63; y += 1) for (let x = 0; x < 16; x += 1) for (let z = 0; z < 16; z += 1) blocks[key(x, y, z)] = { name: "stone" };
+  const result = viewBlocks(fakeBot(blocks), { find: { blockNames: ["stone"], limit: 2 }, box: null, cells: [] });
+  assert.equal(result.status, "succeeded");
+  const [stone] = result.blocks.find!;
+  assert.deepEqual([stone!.found, stone!.more, stone!.listed.length], [1000, true, 2]);
+  assert.deepEqual([stone!.listed[0]!.x, stone!.listed[0]!.y, stone!.listed[0]!.z], [0, 63, 0]);
+  assert.match(formatViewBlocksResult(result), /### stone: 1000\+ loaded, nearest 2 listed/);
+});
+
 test("a name Minecraft has no block for fails the view rather than finding nothing", () => {
   const result = viewBlocks(fakeBot({}), { find: { blockNames: ["unobtainium"], limit: 12 }, box: null, cells: [] });
   assert.equal(result.status, "failed");
@@ -92,17 +107,28 @@ test("a name Minecraft has no block for fails the view rather than finding nothi
 test("kinds give each named block's game data, harvest tools cheapest tier first, without reading the world", () => {
   const request = parseViewBlocksRequest({ kinds: ["stone", "iron_ore", "dirt", "minecraft:stone"] });
   assert.deepEqual(request.kinds, ["stone", "iron_ore", "dirt"]);
-  const result = viewBlocks(fakeBot({}), request);
+  const result = viewBlocks(Object.assign(fakeBot({}), { version: "1.21.4" }), request);
   assert.equal(result.status, "succeeded");
   const kinds = result.blocks.kinds!;
-  assert.deepEqual(kinds.dirt, { tool: "shovel", solid: true, harvest: null });
+  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, harvest: null, tags: undefined });
+  assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
+  assert.ok(kinds.stone!.tags.includes("mineable/pickaxe"));
   assert.equal(kinds.stone!.tool, "pickaxe");
   assert.equal(kinds.stone!.harvest![0], "wooden_pickaxe");
   assert.equal(kinds.iron_ore!.harvest![0], "stone_pickaxe");
   assert.ok(!kinds.iron_ore!.harvest!.includes("wooden_pickaxe"));
-  assert.match(formatViewBlocksResult(result), /- dirt: solid, mined fast with a shovel, drops by hand/);
+  assert.match(formatViewBlocksResult(result), /- dirt: solid, mined fast with a shovel, drops by hand; tags: [^\n]*mineable\/shovel/);
   const unknown = viewBlocks(fakeBot({}), parseViewBlocksRequest({ kinds: ["unobtainium"] }));
   assert.equal(unknown.status, "failed");
+});
+
+test("kinds name the game's block tags, so every wood's log is a log and a pumpkin, mined with an axe too, is not", () => {
+  const bot = Object.assign(fakeBot({}), { version: "1.21.4" });
+  const kinds = viewBlocks(bot, parseViewBlocksRequest({ kinds: ["spruce_log", "crimson_stem", "pumpkin"] })).blocks.kinds!;
+  assert.ok(kinds.spruce_log!.tags.includes("logs"));
+  assert.ok(kinds.crimson_stem!.tags.includes("logs"));
+  assert.equal(kinds.pumpkin!.tool, "axe");
+  assert.ok(!kinds.pumpkin!.tags.includes("logs"));
 });
 
 test("a box is drawn top layer first as one grid per layer with a legend", () => {

@@ -370,3 +370,40 @@ test("a cell asking a state waits for a support that gives it: a beam beside its
   assert.deepEqual(states(5, 64, 6), { facing: "north", half: "top" });
   assert.deepEqual(states(5, 65, 9), { type: "bottom" });
 });
+
+/**
+ * Live 2026-10-03: Ayla stood on her farm's farmland (y 75.94) and leveling filled its water cell beside her. The
+ * floored position put her feet in the farmland block itself, every pass read the cell as sealing her in, and the
+ * step-out route, already satisfied, returned at once: the loop spun on promises without ever yielding, and the
+ * runtime was stopped as unresponsive after 5 s. Twice.
+ */
+test("standing on farmland, the feet are the cell above it: filling the water cell beside it seals nothing", async () => {
+  const { bot, put, physics } = structureWorld({ feet: new Vec3(1, 64, 0), carried: { dirt: 4 } });
+  for (let x = 0; x <= 2; x += 1) for (let z = -1; z <= 1; z += 1) put(new Vec3(x, 64, z), "farmland");
+  put(new Vec3(0, 64, 0), "water", { level: 0 });
+  Object.assign(bot.entity, { position: new Vec3(1.5, 64.9375, 0.5), onGround: true });
+  const result = await build(bot, { ...physics, cells: cells([[0, 64, 0]], "dirt"), removeWrongBlocks: true });
+  assert.equal(result.status, "complete");
+  assert.equal(result.placed, 1);
+});
+
+test("a step out of the structure that does not move the bot ends the run instead of spinning", async () => {
+  const feet = new Vec3(1, 64, 1);
+  const { bot, physics } = structureWorld({ feet });
+  let exits = 0;
+  // A route that reports arrival without moving, as one does whose goal is already met.
+  const stuck = {
+    ...physics,
+    route: async (request: Parameters<typeof physics.route>[0]) => {
+      if (request.onArrival === undefined) {
+        exits += 1;
+        return { status: "completed" as const, elapsedMs: 0 };
+      }
+      return physics.route(request);
+    },
+  };
+  const result = await build(bot, { ...stuck, cells: cells(hollowBox()), removeWrongBlocks: false });
+  assert.equal(result.status, "stopped");
+  assert.match(result.reason ?? "", /could not step out of the structure/u);
+  assert.ok(exits <= 3, `asked to step out ${exits} times`);
+});
