@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encodeQuery, unknownStatesAsStone } from "./neoforge-client.js";
+import { clickWithoutPrediction, encodeQuery, unknownStatesAsStone } from "./neoforge-client.js";
+
+test("a container click goes without the client's slot prediction, every other packet as it is", () => {
+  const sent: [string, object][] = [];
+  const client = { write: (name: string, params: object) => void sent.push([name, params]) };
+  clickWithoutPrediction(client);
+
+  client.write("window_click", { windowId: 0, stateId: 7, slot: 38, mouseButton: 1, mode: 4, changedSlots: [{ location: 38, item: { itemCount: 1, itemId: 10_937 } }], cursorItem: { itemCount: 1, itemId: 5 } });
+  client.write("chat_message", { message: "hi" });
+
+  assert.deepEqual(sent, [
+    ["window_click", { windowId: 0, stateId: 7, slot: 38, mouseButton: 1, mode: 4, changedSlots: [], cursorItem: { itemCount: 0 } }],
+    ["chat_message", { message: "hi" }],
+  ]);
+});
 
 test("the channel query lists each non-empty protocol with its channels' id, version, flow and optional flag", () => {
   const query = encodeQuery({

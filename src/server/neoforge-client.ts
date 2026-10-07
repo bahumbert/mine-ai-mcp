@@ -71,6 +71,20 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
   });
   unknownStatesAsStone(bot.registry as unknown as BlockRegistry);
   tolerateUnparsed(client);
+  clickWithoutPrediction(client);
+}
+
+/**
+ * A container click carries the client's prediction of the slots it changed, as whole item stacks. An item with modded
+ * data components is only half read by the vanilla protocol data, and written back it no longer decodes on the server
+ * (live 2026-10-07, kicked twice: "Failed to decode packet 'serverbound/minecraft:container_click'", the second time
+ * while dropping such an item). Sent without the prediction (no changed slots, an empty cursor), the click is still
+ * done by the server, which then sends every slot it changed, and the cursor, as they really are.
+ */
+export function clickWithoutPrediction(client: Pick<ProtocolClient, "write">): void {
+  const write = client.write.bind(client);
+  client.write = (name, params) =>
+    write(name, name === "window_click" ? { ...params, changedSlots: [], cursorItem: { itemCount: 0 } } : params);
 }
 
 /** Encodes NeoForge's channel query: protocols, then per protocol its channels (id, version, flow?, optional). */
