@@ -809,6 +809,12 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   assert.match("detail" in ore ? ore.detail : "", /^iron_ore lies underground nearly everywhere, and walking the surface does not find it: get_items raw_iron digs for it/u);
   assert.equal(runtime.submitted.length, before);
 
+  // What is made is not found (live 2026-10-07: Ayla explored for a crafting_table).
+  runtime.recipes = { ...runtime.recipes, crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] } };
+  const table = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "crafting_table" }), contextFor(runtime));
+  assert.deepEqual(table, { status: "failed", detail: "crafting_table is crafted, not found: get_items crafting_table makes it" });
+  assert.equal(runtime.submitted.length, before);
+
   // Live 2026-10-07: Ayla explored "for spruce_log" some forty times while she knew of spruce 169 blocks away; the
   // result names the known one and the step that fetches it.
   const near = new FakeRuntime();
