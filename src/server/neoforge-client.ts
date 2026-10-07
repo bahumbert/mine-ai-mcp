@@ -6,6 +6,7 @@
  * data cannot read, and maps block states the vanilla data does not know (modded blocks) to stone.
  */
 import { readFileSync } from "node:fs";
+import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { z } from "zod";
 
@@ -70,8 +71,33 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
     if (client.state === "configuration" && client.listenerCount("ping") === 1) client.write("pong", { id: packet.id });
   });
   unknownStatesAsStone(bot.registry as unknown as BlockRegistry);
-  tolerateUnparsed(client);
+  tolerateUnparsed(client, packetId(bot.version, "window_items"), (windowId) => mirrorInventoryInto(bot, windowId));
   clickWithoutPrediction(client);
+}
+
+/** The play-state id of a clientbound packet in `version`'s protocol data; null when it has none. */
+export function packetId(version: string, name: string): number | null {
+  type Mapper = { readonly type?: readonly [string, { readonly mappings?: Record<string, string> }] };
+  type Protocol = { readonly play?: { readonly toClient?: { readonly types?: { readonly packet?: readonly [string, readonly Mapper[]] } } } };
+  const protocol = (minecraftData(version) as unknown as { readonly protocol?: Protocol } | undefined)?.protocol;
+  const mappings = protocol?.play?.toClient?.types?.packet?.[1]?.[0]?.type?.[1]?.mappings ?? {};
+  const hex = Object.entries(mappings).find(([, value]) => value === name)?.[0];
+  return hex === undefined ? null : Number.parseInt(hex, 16);
+}
+
+/**
+ * After an unreadable window-contents packet was replaced by an empty one, the window's player-inventory part is
+ * filled from the player inventory, which item-by-item updates keep (crafting at a table picks its ingredients there).
+ */
+function mirrorInventoryInto(bot: Bot, windowId: number): void {
+  bot.once("windowOpen", (window) => {
+    if (window.id !== windowId) return;
+    for (let slot = window.inventoryStart; slot < window.inventoryEnd; slot += 1) {
+      const item = bot.inventory.slots[slot - window.inventoryStart + bot.inventory.inventoryStart];
+      // A copy: a window renumbers the item it holds, and the inventory's own must keep its slot.
+      if (item != null) window.updateSlot(slot, Object.assign(Object.create(Object.getPrototypeOf(item) as object) as typeof item, item));
+    }
+  });
 }
 
 /**
@@ -121,9 +147,11 @@ export function unknownStatesAsStone(registry: BlockRegistry): void {
 /**
  * A play packet the vanilla protocol data cannot read (modded recipes, modded item or entity data) is skipped,
  * logged once per packet id (then every 100th), instead of closing the connection (live 2026-10-05: 0x77
- * declare_recipes with farmersdelight:cutting recipes).
+ * declare_recipes with farmersdelight:cutting recipes). A window's contents (`windowItemsId`) holding a modded item
+ * become an empty contents packet for that window instead (live 2026-10-07: skipped, a crafting table never "opened"
+ * and every boat craft timed out): the window opens, and `unreadableWindow` fills what it can.
  */
-function tolerateUnparsed(client: ProtocolClient): void {
+export function tolerateUnparsed(client: Pick<ProtocolClient, "on" | "deserializer">, windowItemsId: number | null, unreadableWindow: (windowId: number) => void): void {
   const seen = new Map<number, number>();
   client.on("state", (state: string) => {
     if (state !== "play") return;
@@ -138,6 +166,14 @@ function tolerateUnparsed(client: ProtocolClient): void {
         seen.set(id, count);
         if (count === 1 || count % 100 === 0) {
           console.error(`[neoforge] skipped play packet 0x${id.toString(16)} (${count}x): ${String(error).slice(0, 160)}`);
+        }
+        if (id === windowItemsId && buffer.length > 2) {
+          // Window ids stay below 128, one byte whether the id is a byte or a varint; the state id follows.
+          const windowId = buffer[1]!;
+          const [stateId] = readVarint(buffer, 2);
+          unreadableWindow(windowId);
+          const params = { windowId, stateId, items: [] };
+          return { data: { name: "window_items", params }, metadata: { size: buffer.length }, buffer, fullBuffer: buffer };
         }
         return { data: { name: "neoforge_unparsed", params: { id } }, metadata: { size: buffer.length }, buffer, fullBuffer: buffer };
       }

@@ -30,6 +30,16 @@ test("items list the blocks an ordinary break gathers them from; blocks list eve
   assert.match(text, /wheat \(planted crop\)/u);
 });
 
+test("items also list the mobs that drop them, hostile ones marked", async () => {
+  // Live 2026-10-04: with block loot tables only, a bed's wool was planned from string, never from sheep.
+  const result = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["white_wool", "beef", "string"] }), {});
+  const mobs = (item: string) => result.drops.items.find((entry) => entry.item === item)!.mobs;
+  assert.deepEqual(mobs("white_wool"), [{ mob: "sheep", chance: 1, hostile: false }]);
+  assert.ok(mobs("beef").some((source) => source.mob === "cow" && !source.hostile));
+  assert.ok(mobs("string").some((source) => source.mob === "spider" && source.hostile));
+  assert.match(formatViewBlockDropsResult(result), /white_wool: from white_wool; hunted from sheep/u);
+});
+
 test("at least one item or block is asked; unknown names and versions without data are reported", async () => {
   assert.throws(() => parseViewBlockDropsRequest({}), /items or blocks/u);
   const unknown = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["moon_rock"], blocks: ["stone", "moon_block"] }), {});

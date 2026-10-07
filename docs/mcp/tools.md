@@ -243,13 +243,18 @@ or what a block drops. The arguments are `items` and `blocks`, up to 16 names
 each, at least one name in all. Success reports, per item, the blocks an
 ordinary break by hand gathers it from, each with `chance` (how often one break
 yields it, at no fortune) and `planted` (the block is a crop the item grows
-into, such as wheat for wheat seeds, listed after the wild sources); and per
+into, such as wheat for wheat seeds, listed after the wild sources), and the
+`mobs` that drop it when killed, each with `chance` and `hostile` (the game's
+hostile category: a fight, not a hunt), from the entity loot tables
+(`src/world/data/mob-drops/<version>.json`, `src/world/mob-drops-extract.ts`;
+conditions on the kill, such as a player kill or a fire, are left out); and per
 block, every drop in loot order with the `tool` it needs (`silk_touch`,
 `shears`, `shears or silk_touch`, or an item) and the block `state` it needs
 (a crop's ripe `age`). Drops come from the game's own loot tables:
 `src/world/data/block-drops/<version>.json`, generated from the vanilla server
 jar by `src/world/block-drops-extract.ts`; a server newer than every shipped
-file uses the nearest older one (`dataVersion` says which). `collect_block`
+file uses the nearest older one, an older patch of the same minor version the
+nearest newer one (`dataVersion` says which). `collect_block`
 reads the same data for the item a break yields and how many breaks a request
 may take. `[UNKNOWN_DROP_NAMES]` names what Minecraft does not have;
 `[DROP_DATA_UNAVAILABLE]` means no data ships for this version or any older

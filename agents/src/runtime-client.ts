@@ -72,7 +72,7 @@ export interface BotSnapshot {
   readonly mobs: readonly NearbyMob[];
   readonly players: readonly NearbyPlayer[];
   /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
-  readonly policy: { readonly revision: string; readonly digStraightDown: boolean } | null;
+  readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[] } | null;
 }
 
 export interface PlayerMessage {
@@ -136,6 +136,14 @@ export interface DropSource {
   readonly chance: number;
   /** A crop the item grows into (wheat for wheat seeds): breaking it takes from a farm. */
   readonly planted: boolean;
+}
+
+/** One mob an item drops from when killed (`view_block_drops`). */
+export interface MobSource {
+  readonly mob: string;
+  readonly chance: number;
+  /** The game counts the species as hostile: a fight, not a hunt. */
+  readonly hostile: boolean;
 }
 
 /** Furnace knowledge for some items: the recipes making each (none: not smeltable) and how far each fuel goes. */
@@ -232,6 +240,8 @@ export interface BotRuntime {
    * (`view_block_drops`, the game's loot tables); none for an item no block drops.
    */
   blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>>;
+  /** The mobs each item drops from when killed, likeliest first, hostile ones marked (`view_block_drops`). */
+  mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>>;
   /** Every block of the box between two corners (inclusive), read in slices through `view_blocks`. */
   blocksIn(min: Position, max: Position): Promise<BlockArea>;
   /** The nearest loaded blocks of that name (or the runtime's `logs` selector: any wood), nearest first (`view_blocks` find). */
@@ -266,6 +276,8 @@ export interface BotRuntime {
    * resets every override on death and dimension change, so the brain checks it again from each snapshot.
    */
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
+  /** The blocks routes may place as scaffolding (runtime survival policy `navigation.scaffold_blocks`). */
+  setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
@@ -301,7 +313,7 @@ const viewStatusSchema = z.object({
   }),
   survivalPolicy: z.object({
     revision: z.string(),
-    effective: z.object({ navigation: z.object({ dig_straight_down: z.boolean().default(true) }) }),
+    effective: z.object({ navigation: z.object({ dig_straight_down: z.boolean().default(true), scaffold_blocks: z.array(z.string()).default([]) }) }),
   }).optional(),
 });
 
@@ -332,7 +344,11 @@ const smeltingRecipesSchema = z.object({
 const blockDropsSchema = z.object({
   result: z.object({
     drops: z.object({
-      items: z.array(z.object({ item: z.string(), sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean() })) })),
+      items: z.array(z.object({
+        item: z.string(),
+        sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean() })),
+        mobs: z.array(z.object({ mob: z.string(), chance: z.number(), hostile: z.boolean() })).default([]),
+      })),
     }).optional(),
   }),
 });
@@ -456,8 +472,19 @@ export class McpBotRuntime implements BotRuntime {
       players: situation.nearby.players,
       policy: data.survivalPolicy === undefined
         ? null
-        : { revision: data.survivalPolicy.revision, digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down },
+        : {
+          revision: data.survivalPolicy.revision,
+          digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down,
+          scaffoldBlocks: data.survivalPolicy.effective.navigation.scaffold_blocks,
+        },
     };
+  }
+
+  async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
+    const reason = "What I am fetching is for my work, not for scaffolding on the way.";
+    const input = { operation: "set", expected_revision: revision, changes: { navigation: { scaffold_blocks: [...blocks] } }, lifetime: { kind: "session" }, reason };
+    const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
+    return result.status === "succeeded";
   }
 
   async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
@@ -490,6 +517,11 @@ export class McpBotRuntime implements BotRuntime {
   async blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>> {
     const { result } = blockDropsSchema.parse(await this.call("view_block_drops", { items: [...items] }, "Work out which blocks drop what I need."));
     return Object.fromEntries((result.drops?.items ?? []).map(({ item, sources }) => [item, sources]));
+  }
+
+  async mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>> {
+    const { result } = blockDropsSchema.parse(await this.call("view_block_drops", { items: [...items] }, "Work out which animals drop what I need."));
+    return Object.fromEntries((result.drops?.items ?? []).map(({ item, mobs }) => [item, mobs]));
   }
 
   async blocksIn(min: Position, max: Position): Promise<BlockArea> {

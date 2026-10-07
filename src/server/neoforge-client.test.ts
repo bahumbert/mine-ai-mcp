@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clickWithoutPrediction, encodeQuery, unknownStatesAsStone } from "./neoforge-client.js";
+import { clickWithoutPrediction, encodeQuery, packetId, tolerateUnparsed, unknownStatesAsStone } from "./neoforge-client.js";
+
+test("an unreadable window's contents open the window empty; another unreadable packet is skipped", () => {
+  // Live 2026-10-07: the contents of a crafting table's window held a modded item, and every boat craft timed out.
+  assert.equal(packetId("1.21.1", "window_items"), 0x13);
+  let onState: ((state: string) => void) | null = null;
+  const deserializer = { parsePacketBuffer: (_buffer: Buffer): unknown => { throw new Error("array size is abnormally large"); } };
+  const client = { deserializer, on: (event: string, listener: (state: string) => void) => { if (event === "state") onState = listener; } };
+  const windows: number[] = [];
+  tolerateUnparsed(client as never, 0x13, (windowId) => windows.push(windowId));
+  (onState as unknown as (state: string) => void)("play");
+
+  const contents = deserializer.parsePacketBuffer(Buffer.from([0x13, 3, 0x2a, 0xff])) as { data: unknown };
+  assert.deepEqual(contents.data, { name: "window_items", params: { windowId: 3, stateId: 42, items: [] } });
+  assert.deepEqual(windows, [3]);
+  const other = deserializer.parsePacketBuffer(Buffer.from([0x77, 1, 2])) as { data: unknown };
+  assert.deepEqual(other.data, { name: "neoforge_unparsed", params: { id: 0x77 } });
+});
 
 test("a container click goes without the client's slot prediction, every other packet as it is", () => {
   const sent: [string, object][] = [];

@@ -81,8 +81,13 @@ export async function useTemporaryWorkstation<Evidence extends object>(
     return failure(`[WORKSTATION_NO_ROOM] ${name}: no free inventory slot to pick it back up afterwards; make room first.`);
   }
   const placement = await operations.place(name, context.signal);
-  if (placement.kind === "no_item" || placement.kind === "no_cell") {
-    return failure(`[WORKSTATION_PLACEMENT_FAILED] ${name}: ${placement.kind}.`);
+  if (placement.kind === "no_item") {
+    return failure(`[WORKSTATION_PLACEMENT_FAILED] ${name}: no_item.`);
+  }
+  if (placement.kind === "no_cell") {
+    return failure(
+      `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_cell (no dry, clear cell with something solid to set it on within reach: in water, a tunnel or a crowded spot); move to open dry ground first.`,
+    );
   }
   // A placement may report unsettled inventory even though the block appeared.
   // That cell is still ours to recover, but no crafting/cooking may begin.

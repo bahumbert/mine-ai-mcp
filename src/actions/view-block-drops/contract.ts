@@ -5,7 +5,7 @@ import { registryNameSchema } from "../registry-name.js";
 
 export const VIEW_BLOCK_DROPS = "view_block_drops" as const;
 export const VIEW_BLOCK_DROPS_DESCRIPTION =
-  "List which blocks an ordinary break by hand gathers each requested item from (with how often one break yields it, wild blocks before crops someone planted), and everything each requested block drops (with the tool or block state a drop needs, such as shears, silk touch, or a crop's ripe age). Drops come from the game's own loot tables for this version; reads nothing in the world and changes nothing.";
+  "List which blocks an ordinary break by hand gathers each requested item from (with how often one break yields it, wild blocks before crops someone planted) and which mobs drop it when killed (hostile ones marked), and everything each requested block drops (with the tool or block state a drop needs, such as shears, silk touch, or a crop's ripe age). Drops come from the game's own loot tables for this version; reads nothing in the world and changes nothing.";
 
 /** How many names one call looks up, per list. */
 export const MAX_DROP_NAMES = 16;
@@ -48,11 +48,18 @@ const sourceSchema = z.strictObject({
   planted: z.boolean(),
 });
 
+const mobSourceSchema = z.strictObject({
+  mob: z.string(),
+  chance: z.number().positive().max(1),
+  /** The game counts the species as hostile (a fight, not a hunt). */
+  hostile: z.boolean(),
+});
+
 export const blockDropsEvidenceSchema = z.strictObject({
   version: z.string(),
   /** The shipped data version used, which may be an older one than the server's; null when none fits. */
   dataVersion: z.string().nullable(),
-  items: z.array(z.strictObject({ item: z.string(), sources: z.array(sourceSchema) })),
+  items: z.array(z.strictObject({ item: z.string(), sources: z.array(sourceSchema), mobs: z.array(mobSourceSchema) })),
   blocks: z.array(z.strictObject({ block: z.string(), drops: z.array(dropSchema) })),
 });
 

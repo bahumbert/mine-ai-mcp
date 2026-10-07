@@ -44,6 +44,21 @@ function describeCall(call: { readonly tool: string; readonly input: Readonly<Re
   return call.tool;
 }
 
+test("a carried crafting table with no dry cell around is set down on the nearest land she has seen", async () => {
+  // Live 2026-10-07: at the water's edge, "crafting_table: no_cell", and the boat she needed was never crafted.
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.walkOnNavigate = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 4 }, { name: "crafting_table", count: 1 }] };
+  runtime.water = { "0,0": 1, "2,0": 0 };
+  runtime.failNext.craft_item = { error: "[WORKSTATION_PLACEMENT_FAILED] crafting_table: no_cell (no dry, clear cell with something solid to set it on within reach: in water, a tunnel or a crowded spot); move to open dry ground first." };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  // Then back to where the step started, as every get_items does.
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x]).filter(([tool]) => tool !== "collect_block"), [["craft_item", undefined], ["navigate", 40], ["craft_item", undefined], ["navigate", 0]]);
+});
+
 test("get_items fetches items like a player: logs, a table to carry, a wooden pickaxe for stone, then the crafts", async () => {
   const runtime = smeltRuntime();
   const items = SMALL_MEDIEVAL.map(({ name, count }) => ({ item: name, count }));
@@ -134,13 +149,55 @@ test("an item that only grows as a crop is not gathered from someone's farm: get
   assert.deepEqual(runtime.submitted, []);
 });
 
+test("what get_items fetches is not scaffolding meanwhile; the scaffold list is put back after", async () => {
+  // Live 2026-10-04: walking out of a cave, Tom's routes used 16 of the 36 cobblestone fetched for his house.
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, policy: { revision: "r1", digStraightDown: false, scaffoldBlocks: ["dirt", "cobblestone"] } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 4 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.scaffoldSettings, [["cobblestone"], ["dirt", "cobblestone"]]);
+});
+
+test("drop_item drops several items in one step, and the single-item form still reads", async () => {
+  // Live 2026-10-04: a full inventory took Tom 20 steps of dropping one item each.
+  const runtime = new FakeRuntime();
+  const step = stepSchema.parse({ skill: "drop_item", items: [{ item: "snowball" }, { item: "granite", count: 10 }] });
+  const result = await runStep(step, contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "snowball" }, { item_name: "granite", count: 10 }]]);
+  assert.equal(stepSchema.safeParse({ skill: "drop_item", item: "dirt" }).success, true);
+  assert.equal(stepSchema.safeParse({ skill: "drop_item" }).success, false);
+});
+
 test("an item no block drops, and nothing crafts or smelts, ends get_items saying so", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
   const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /no block drops water_bucket, and it is not crafted or smelted/u);
+  assert.match(result.status === "failed" ? result.detail : "", /no block or mob drops water_bucket, and it is not crafted or smelted/u);
   assert.deepEqual(runtime.submitted, []);
+});
+
+test("get_items hunts what an animal gives instead of crafting it the long way: wool from sheep, not from string", async () => {
+  // Live 2026-10-04: a first bed planned "12 string"; Tom walked 200-300 blocks three ways and never hunted sheep.
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.recipes = { white_wool: { makes: 1, needs: [{ item: "string", count: 4 }] }, arrow: { makes: 4, needs: [{ item: "flint", count: 1 }] } };
+  runtime.mobDrops = {
+    white_wool: [{ mob: "sheep", chance: 1, hostile: false }],
+    beef: [{ mob: "cow", chance: 1, hostile: false }],
+    arrow: [{ mob: "skeleton", chance: 1, hostile: true }],
+  };
+  const wool = await runStep({ skill: "get_items", items: [{ item: "white_wool", count: 3 }, { item: "beef", count: 2 }] }, contextFor(runtime));
+  assert.equal(wool.status, "done", JSON.stringify(wool));
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.mob_name, call.input.drop_name, call.input.count]), [
+    ["collect_mob_drop", "sheep", "white_wool", 3],
+    ["collect_mob_drop", "cow", "beef", 2],
+  ]);
+  // A fight is no source when a craft will do: arrows are crafted, not taken from skeletons.
+  await runStep({ skill: "get_items", items: [{ item: "arrow", count: 4 }] }, contextFor(runtime));
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_mob_drop" && call.input.mob_name === "skeleton").length, 0);
 });
 
 test("items that cannot be found end get_items, saying why", async () => {
@@ -767,6 +824,19 @@ test("a walk that stopped is not \"done\" because the block is in sight farther 
   runtime.failures.navigate = "[NAVIGATION_STOPPED] Pathfinder stopped: planning_stalled.";
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "dark_oak_log" }), contextFor(runtime));
   assert.match(result.status === "failed" ? result.detail : "", /^exploring east stopped \(\[NAVIGATION_STOPPED\] Pathfinder stopped: planning_stalled\.\): now 0 blocks/u);
+});
+
+test("a recorded place found empty is not offered again: explore no longer sends her back to it", async () => {
+  // Live 2026-10-07: spruce "seen" 6 blocks from Ayla, none loaded; explore kept sending her back for 15 minutes.
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No spruce_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.seen = { spruce_log: { dimension: "overworld", x: 6, z: -6 } };
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
+  const near = await runStep({ skill: "collect_block", block: "spruce_log", count: 3 }, contextFor(runtime));
+  assert.match(near.status === "failed" ? near.detail : "", /^no spruce_log within 64 blocks, and you know of none farther away/u);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 200.5, y: 64, z: 0.5 } };
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "spruce_log" }), contextFor(runtime));
+  assert.doesNotMatch(result.status === "failed" ? result.detail : "", /already know/u);
 });
 
 test("explore names only blocks she may take: a log in a wall of her protected house is not one she knows of", async () => {

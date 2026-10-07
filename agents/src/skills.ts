@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
 import type { Activity } from "./activities.ts";
-import { COMPASS_HEADINGS, describeStep, type Step } from "./actions.ts";
+import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./actions.ts";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
@@ -103,7 +103,10 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       }
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "drop_item": {
-        const dropped = await once(context, "drop_item", { items: [{ item_name: step.item, ...(step.count !== undefined && { count: step.count }) }], allow_equipped: true }, why, `dropped ${step.count ?? "all the"} ${step.item}`);
+        const entries = dropEntries(step);
+        const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
+        const what = entries.map((entry) => `${entry.count ?? "all the"} ${entry.item}`).join(", ");
+        const dropped = await once(context, "drop_item", { items, allow_equipped: true }, why, `dropped ${what}`);
         // How much room it made is what a drop is for (live 2026-10-02: 30 of 36 panes dropped freed no slot).
         const stacks = (await context.runtime.status()).inventory.length;
         const room = `${Math.max(0, INVENTORY_SLOTS - stacks)} of ${INVENTORY_SLOTS} inventory slots free`;

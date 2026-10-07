@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { blockDropsData, sourcesOf } from "../../world/block-drops.js";
+import { mobSourcesOf } from "../../world/mob-drops.js";
 import { defineAction, type ActionContext } from "../action.js";
 import {
   parseViewBlockDropsRequest,
@@ -30,7 +31,11 @@ export async function viewBlockDrops(
     dataVersion: data?.version ?? null,
     items: request.items
       .filter((item) => !unknown.includes(item))
-      .map((item) => ({ item, sources: data === null ? [] : sourcesOf(item, data.version).map((source) => ({ ...source })) })),
+      .map((item) => ({
+        item,
+        sources: data === null ? [] : sourcesOf(item, data.version).map((source) => ({ ...source })),
+        mobs: mobSourcesOf(item, bot.version).map((source) => ({ ...source, hostile: bot.registry.entitiesByName[source.mob]?.type === "hostile" })),
+      })),
     blocks: request.blocks
       .filter((block) => !unknown.includes(block))
       .map((block) => ({ block, drops: (data?.blocks[block] ?? []).map((drop) => ({ ...drop, ...(drop.state && { state: { ...drop.state } }) })) })),
@@ -47,10 +52,11 @@ function describeChance(chance: number): string {
 export function formatViewBlockDropsResult(result: ViewBlockDropsResult): string {
   const { drops } = result;
   const lines = result.status === "succeeded" ? [] : [`**Observed stop:** ${result.error}`];
-  for (const { item, sources } of drops.items) {
+  for (const { item, sources, mobs } of drops.items) {
+    const hunted = mobs.length === 0 ? "" : `; hunted from ${mobs.map((source) => `${source.mob}${source.hostile ? " (hostile)" : ""}${describeChance(source.chance)}`).join(", ")}`;
     lines.push(sources.length === 0
-      ? `- ${item}: no block drops it by an ordinary break`
-      : `- ${item}: from ${sources.map((source) => `${source.block}${source.planted ? " (planted crop)" : ""}${describeChance(source.chance)}`).join(", ")}`);
+      ? `- ${item}: no block drops it by an ordinary break${hunted}`
+      : `- ${item}: from ${sources.map((source) => `${source.block}${source.planted ? " (planted crop)" : ""}${describeChance(source.chance)}`).join(", ")}${hunted}`);
   }
   for (const { block, drops: list } of drops.blocks) {
     lines.push(list.length === 0

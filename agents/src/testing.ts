@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
@@ -101,6 +101,16 @@ export class FakeRuntime implements BotRuntime {
     return true;
   }
 
+  /** Every `setScaffoldBlocks` call, in order. */
+  readonly scaffoldSettings: (readonly string[])[] = [];
+
+  async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
+    this.scaffoldSettings.push(blocks);
+    if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
+    this.snapshot = { ...this.snapshot, policy: { ...this.snapshot.policy, revision: `${revision}+`, scaffoldBlocks: blocks } };
+    return true;
+  }
+
   /** The `prefer` lists `craftingNeeds` was given, in order (the fake planner does not use them). */
   readonly preferences: (readonly string[])[] = [];
 
@@ -123,6 +133,13 @@ export class FakeRuntime implements BotRuntime {
 
   async blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>> {
     return Object.fromEntries(items.map((item) => [item, this.dropSources[item] ?? (this.notDropped.has(item) ? [] : [{ block: item, chance: 1, planted: false }])]));
+  }
+
+  /** Mobs each item drops from when killed (the runtime's entity loot tables); none unless listed. */
+  mobDrops: Readonly<Record<string, readonly MobSource[]>> = {};
+
+  async mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>> {
+    return Object.fromEntries(items.map((item) => [item, this.mobDrops[item] ?? []]));
   }
 
   /** The world's blocks for `blocksIn`/`findBlocks`, by `x,y,z`; unlisted cells are dirt up to `groundTop`, air above. */
@@ -329,6 +346,7 @@ export class FakeRuntime implements BotRuntime {
       if (input.x !== undefined) this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "air");
       this.addItem(FAKE_DROPS[block] ?? block, Number(input.count ?? 1));
     }
+    if (tool === "collect_mob_drop") this.addItem(String(input.drop_name), Number(input.count ?? 1));
     if (tool === "use_bucket") {
       const [from, to] = input.action === "fill" ? ["bucket", "water_bucket"] : ["water_bucket", "bucket"];
       this.addItem(from, -1);

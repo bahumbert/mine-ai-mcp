@@ -1,6 +1,6 @@
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
-import { errorCode, type BotRuntime, type ItemCount, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -52,6 +52,8 @@ interface SmeltJob {
 /** One round's work: what to collect (block → drops wanted), which tools are still to craft, what to craft or smelt. */
 interface Round {
   readonly collect: ReadonlyMap<string, number>;
+  /** What to hunt: item → the mob that drops it and how many. */
+  readonly hunt: ReadonlyMap<string, { readonly mob: string; readonly count: number }>;
   readonly tableFirst: boolean;
   /** The harvest tool to craft before some block to collect drops anything (a wooden pickaxe for stone). */
   readonly toolFirst: string | null;
@@ -72,6 +74,8 @@ interface Knowledge {
   readonly harvest: Map<string, readonly string[] | null>;
   /** Per gathered item, the block collect_block breaks for it (game data: cobblestone from stone); null when none drops it. */
   readonly source: Map<string, string | null>;
+  /** Per item, the mob hunted for it (game data: white wool from sheep), passive ones first; null when none drops it. */
+  readonly mob: Map<string, MobSource | null>;
   /** Items that only come from crops someone grows (wheat): a farm, not gathering, gets them. */
   readonly cropOnly: Set<string>;
   /** The woods growing nearby, nearest first, looked up once: recipes that take any wood are planned with them. */
@@ -93,6 +97,8 @@ interface Knowledge {
  * leaves it short of the others. Not a smelt: carried raw iron is there to be smelted and coal to be burnt (fuel
  * burnt from the asked-for items themselves is made again like any shortfall). Food eaten or a tool worn out on the
  * way is not replaced.
+ *
+ * What it fetches is not scaffolding meanwhile (see {@link withMaterialsKept}).
  */
 export async function gatherMaterials(
   context: GatherContext,
@@ -101,7 +107,39 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
+  const items = [...bill, ...keep].map((entry) => entry.item);
+  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, keep));
+}
+
+/**
+ * Materials being fetched are not scaffolding (live 2026-10-04: walking out of a cave, Tom's routes used 16 of the 36
+ * cobblestone fetched for his house, and the build was short again): while `run` runs, those of `items` on the
+ * runtime's scaffold list are taken off it, and the list is put back after (owner, 2026-10-07).
+ */
+async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly string[], run: () => Promise<T>): Promise<T> {
+  const policy = (await runtime.status()).policy;
+  const scaffold = policy?.scaffoldBlocks ?? [];
+  const kept = scaffold.filter((block) => items.includes(block));
+  if (policy === null || kept.length === 0) return run();
+  if (!(await runtime.setScaffoldBlocks(scaffold.filter((block) => !kept.includes(block)), policy.revision).catch(() => false))) return run();
+  try {
+    return await run();
+  } finally {
+    // A death wipes policies (the list is back to its defaults then): putting the old one back is harmless.
+    const now = (await runtime.status().catch(() => null))?.policy;
+    if (now != null) await runtime.setScaffoldBlocks(scaffold, now.revision).catch(() => false);
+  }
+}
+
+async function gatherRounds(
+  context: GatherContext,
+  bill: readonly ItemCount[],
+  purpose: string,
+  home: Position,
+  keep: readonly ItemCount[],
+): Promise<GatherResult> {
   const knowledge = newKnowledge();
+  const site: Site = { home };
   // Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
   // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
   // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone).
@@ -131,14 +169,15 @@ export async function gatherMaterials(
     };
     let step: GatherResult;
     if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
+    else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose);
     else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
-    else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, home, spent);
+    else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
     else if (gated.length > 0) step = await collectAll(context, gated, purpose);
     else {
       const ready = await readyCrafts(context.runtime, plan.craft);
       const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
-      if (ready.length > 0) step = await craftAtHome(context, ready, purpose, home, spent);
-      else if (job !== undefined) step = await smeltAtHome(context, job, purpose, home);
+      if (ready.length > 0) step = await craftAtHome(context, ready, purpose, site, spent);
+      else if (job !== undefined) step = await smeltAtHome(context, job, purpose, site);
       else return { status: "failed", detail: `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt` };
     }
     if (step.status === "stopped") return step;
@@ -196,13 +235,14 @@ function units(items: readonly ItemCount[]): number {
 }
 
 function newKnowledge(): Knowledge {
-  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), cropOnly: new Set(), woods: null };
+  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null };
 }
 
-/** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, or broken from `block`. */
+/** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, broken from `block`, or hunted. */
 export type ObtainedBy =
   | { readonly way: "craft" | "smelt" | "farm" | "none" }
-  | { readonly way: "gather"; readonly block: string };
+  | { readonly way: "gather"; readonly block: string }
+  | { readonly way: "hunt"; readonly mob: string };
 
 /** How `get_items` would get `item` (the runtime's game data: recipes, furnace recipes, loot tables). */
 export async function obtainedBy(runtime: BotRuntime, item: string): Promise<ObtainedBy> {
@@ -210,8 +250,8 @@ export async function obtainedBy(runtime: BotRuntime, item: string): Promise<Obt
   const how = await howToGet(runtime, item, knowledge);
   if (how === null) return { way: "none" };
   if (how !== "gather") return { way: how };
-  const block = await sourceBlock(runtime, item, knowledge);
-  if (block !== null) return { way: "gather", block };
+  const from = await gatherFrom(runtime, item, knowledge);
+  if (from !== null) return "mob" in from ? { way: "hunt", mob: from.mob } : { way: "gather", block: from.block };
   return { way: knowledge.cropOnly.has(item) ? "farm" : "none" };
 }
 
@@ -239,7 +279,9 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
     craftable = needs.status === "ready" || needs.status === "missing_materials";
     knowledge.craftable.set(item, craftable);
   }
-  if (craftable) return "craft";
+  // What an animal gives for sure is taken from it, as a player would, not crafted the long way (live 2026-10-04: a
+  // bed's wool planned from string, 4 string a wool; a fight or a rare drop is no such source: arrows are crafted).
+  if (craftable) return (await huntedFrom(runtime, item, knowledge))?.hostile === false ? "gather" : "craft";
   let recipes = knowledge.smelted.get(item);
   if (recipes === undefined) {
     const smelting = await runtime.smeltingRecipes([item]);
@@ -254,7 +296,36 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
 function notDropped(item: string, knowledge: Knowledge): string {
   // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
   if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
-  return `no block drops ${item}, and it is not crafted or smelted`;
+  return `no block or mob drops ${item}, and it is not crafted or smelted`;
+}
+
+/** A drop this likely, or more, makes a mob a source to hunt (cod drop bone meal 5% of the time: no source). */
+const HUNT_CHANCE = 0.5;
+
+/** The mob to hunt for `item` (game data), a passive one before a hostile one, the likeliest first; null when none. */
+async function huntedFrom(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<MobSource | null> {
+  const known = knowledge.mob.get(item);
+  if (known !== undefined) return known;
+  const sources = ((await runtime.mobSources([item]).catch(() => ({})))[item] ?? []).filter((source) => source.chance >= HUNT_CHANCE);
+  const mob = sources.find((source) => !source.hostile) ?? sources[0] ?? null;
+  knowledge.mob.set(item, mob);
+  return mob;
+}
+
+/**
+ * Where `item` is gathered: the block to break for it, else the mob to hunt; a block that only drops itself (a wool block
+ * someone placed) comes after a mob that drops it. Null when neither.
+ */
+async function gatherFrom(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<{ readonly block: string } | { readonly mob: string } | null> {
+  const block = await sourceBlock(runtime, item, knowledge);
+  const mob = await huntedFrom(runtime, item, knowledge);
+  if (block !== null && (block !== item || mob === null)) return { block };
+  if (mob !== null) {
+    // Not a crop after all: an animal gives it.
+    knowledge.cropOnly.delete(item);
+    return { mob: mob.mob };
+  }
+  return null;
 }
 
 /**
@@ -341,15 +412,18 @@ async function readyCrafts(runtime: BotRuntime, items: readonly ItemCount[]): Pr
 /** What the next rounds need, or why it cannot be done. */
 async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inventory: Stacks, knowledge: Knowledge): Promise<Round | string> {
   const collect = new Map<string, number>();
+  const hunt = new Map<string, { mob: string; count: number }>();
   /** The gathered leaves of the crafts, worked out again on each pass as the crafts grow. */
   let leaves = new Map<string, number>();
+  let huntedLeaves = new Map<string, { mob: string; count: number }>();
   const crafted = new Map<string, number>();
   const smelts = new Map<string, number>();
   const jobs = new Map<string, SmeltJob>();
   const gathered = async (item: string, count: number): Promise<string | null> => {
-    const block = await sourceBlock(runtime, item, knowledge);
-    if (block === null) return notDropped(item, knowledge);
-    collect.set(block, (collect.get(block) ?? 0) + count);
+    const from = await gatherFrom(runtime, item, knowledge);
+    if (from === null) return notDropped(item, knowledge);
+    if ("mob" in from) hunt.set(item, { mob: from.mob, count: (hunt.get(item)?.count ?? 0) + count });
+    else collect.set(from.block, (collect.get(from.block) ?? 0) + count);
     return null;
   };
   const need = async (item: string, count: number): Promise<string | null> => {
@@ -391,6 +465,7 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
     const batch = [...crafted].map(([item, count]) => ({ item, count }));
     if (batch.length === 0 && tools.length === 0) continue;
     leaves = new Map();
+    huntedLeaves = new Map();
     const needs = await runtime.craftingNeeds(withTools(batch, tools, inventory), await nearbyWoods(runtime, knowledge));
     if (needs.status === "uncraftable" || needs.status === "planner_failed" || needs.status === "unknown") {
       return `cannot work out how to craft ${describeMaterials([...batch, ...tools.map((item) => ({ item, count: 1 }))])}`;
@@ -399,17 +474,20 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
       // A leaf a furnace makes (glass for panes) is a furnace job; the others are gathered.
       if ((await howToGet(runtime, leaf.item, knowledge)) === "smelt") smelts.set(leaf.item, Math.max(smelts.get(leaf.item) ?? 0, leaf.count));
       else {
-        const block = await sourceBlock(runtime, leaf.item, knowledge);
-        if (block === null) return notDropped(leaf.item, knowledge);
-        leaves.set(block, (leaves.get(block) ?? 0) + leaf.count);
+        const from = await gatherFrom(runtime, leaf.item, knowledge);
+        if (from === null) return notDropped(leaf.item, knowledge);
+        if ("mob" in from) huntedLeaves.set(leaf.item, { mob: from.mob, count: (huntedLeaves.get(leaf.item)?.count ?? 0) + leaf.count });
+        else leaves.set(from.block, (leaves.get(from.block) ?? 0) + leaf.count);
       }
     }
   }
   for (const [block, count] of leaves) collect.set(block, (collect.get(block) ?? 0) + count);
+  for (const [item, { mob, count }] of huntedLeaves) hunt.set(item, { mob, count: (hunt.get(item)?.count ?? 0) + count });
   const toolFirst = await chooseTool(runtime, tools);
   const tableFirst = (toolFirst !== null || crafted.size > 0) && carried(inventory, TABLE.item) === 0;
   return {
     collect,
+    hunt,
     tableFirst,
     toolFirst,
     craft: [...crafted].map(([item, count]) => ({ item, count })),
@@ -495,13 +573,31 @@ function noneUsableNear(detail: string): boolean {
  * around them.
  */
 export async function knownPlaces(runtime: BotRuntime, block: string, from: Position): Promise<readonly SeenBlock[]> {
-  const tried = triedPlaces.get(runtime) ?? new Set<string>();
-  triedPlaces.set(runtime, tried);
+  const tried = triedSet(runtime);
   const areas = await runtime.protectedRegions().catch(() => []);
   const guarded = (x: number, z: number) => areas.some((area) => area.min.x <= x + 8 && area.max.x >= x - 8 && area.min.z <= z + 8 && area.max.z >= z - 8);
   // Read once (live 2026-10-04: one query per place, through thousands of chunks, held Ayla still for minutes).
   return (await runtime.seenPlaces(block, from, FETCH_RANGE, FAR_CANDIDATES).catch(() => []))
     .filter((place) => !tried.has(`${place.x},${place.z}`) && !guarded(place.x, place.z));
+}
+
+function triedSet(runtime: BotRuntime): Set<string> {
+  const tried = triedPlaces.get(runtime) ?? new Set<string>();
+  triedPlaces.set(runtime, tried);
+  return tried;
+}
+
+/**
+ * A near search that found none has looked at every place within its range: the record's places there are stale
+ * (cut since, or never what the record says) and are not offered again this run (live 2026-10-07: spruce "seen" 6
+ * blocks from Ayla, none loaded; `explore` kept sending her back to it, `get_items` found none, for 15 minutes).
+ */
+async function forgetEmptyNear(runtime: BotRuntime, block: string, here: Position): Promise<void> {
+  const tried = triedSet(runtime);
+  for (const place of await runtime.seenPlaces(block, here, 0, FAR_CANDIDATES).catch(() => [])) {
+    if (Math.hypot(place.x - here.x, place.z - here.z) > FETCH_RANGE) break;
+    tried.add(`${place.x},${place.z}`);
+  }
 }
 
 /**
@@ -522,9 +618,11 @@ export function groundHeight(error: string | null | undefined, feetY: number): n
  * explore.
  */
 async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult): Promise<GatherResult | null> {
-  const tried = triedPlaces.get(context.runtime) ?? new Set<string>();
-  triedPlaces.set(context.runtime, tried);
-  const places = await knownPlaces(context.runtime, block, (await context.runtime.status()).position);
+  const tried = triedSet(context.runtime);
+  const start = (await context.runtime.status()).position;
+  const code = failed.status === "failed" ? errorCode(failed.detail) : null;
+  if (code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS") await forgetEmptyNear(context.runtime, block, start);
+  const places = await knownPlaces(context.runtime, block, start);
   if (places.length === 0) {
     const why = failed.status === "failed" ? ` (${failed.detail})` : "";
     return { status: "failed", detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
@@ -564,7 +662,10 @@ export async function notNear(context: Pick<GatherContext, "runtime">, block: st
   const code = errorCode(detail);
   if (code !== "NO_TARGET_IN_RANGE" && code !== "NO_LOADED_MATCHING_TARGETS") return detail;
   const here = (await context.runtime.status()).position;
-  const seen = await context.runtime.seenAt(block, here, FETCH_RANGE).catch(() => null);
+  await forgetEmptyNear(context.runtime, block, here);
+  // A place she may still take from in this world, else one seen in another dimension.
+  const elsewhere = await context.runtime.seenAt(block, here, FETCH_RANGE).catch(() => null);
+  const seen = (await knownPlaces(context.runtime, block, here))[0] ?? (elsewhere?.dimension === "overworld" ? null : elsewhere);
   const near = `no ${block} within ${FETCH_RANGE} blocks`;
   if (seen === null) return `${near}, and you know of none farther away: explore for it (toward land you have not seen), use another material, or say so (${detail})`;
   if (seen.dimension !== "overworld") return `${near}; you saw some in ${seen.dimension.replaceAll("_", " ")} around ${seen.x} ${seen.z} (${detail})`;
@@ -592,23 +693,49 @@ async function goHome(context: GatherContext, home: Position, purpose: string, w
   return act(context, "navigate", target, `Go back to the site to ${work} for ${purpose}.`);
 }
 
-/** Crafts with the carried table set down near `home`, walking back there first when needed. */
-async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, home: Position, spent: Spent): Promise<GatherResult> {
+/** Where crafting and smelting happen: `home` at first, the dry ground she moved to when no workstation fit there. */
+interface Site {
+  home: Position;
+}
+
+/** Crafts with the carried table set down near the site's home, walking back there first when needed. */
+async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, site: Site, spent: Spent): Promise<GatherResult> {
   // A table close by is used where it stands, as a player would (owner, 2026-10-02: "check first if one is close").
   if ((await walkToStation(context, "crafting_table")) !== null) return craft(context, items, purpose, false, spent);
-  const back = await goHome(context, home, purpose, "craft");
+  const back = await goHome(context, site.home, purpose, "craft");
   if (back !== null) return back;
   // Back at the site, a table close to it counts too (live 2026-10-02: one 6 blocks from the site went unused
   // because she looked from where the logs were).
   if ((await walkToStation(context, "crafting_table")) !== null) return craft(context, items, purpose, false, spent);
-  return craft(context, items, purpose, true, spent);
+  return withRoomForStation(context, site, () => craft(context, items, purpose, true, spent));
+}
+
+/**
+ * A carried workstation needs a dry, clear cell with something solid under it within reach; in water, or in a crowded
+ * tunnel, none is free (live 2026-10-02, and 2026-10-07 at the water's edge: "crafting_table: no_cell", and the boat
+ * she needed was never crafted). A player steps onto dry ground first: she walks to the nearest land she has seen and
+ * sets it down there, once; that ground is home for the rest of the gathering.
+ */
+async function withRoomForStation(context: GatherContext, site: Site, run: () => Promise<GatherResult>): Promise<GatherResult> {
+  const first = await run();
+  if (first.status !== "failed" || !/\[WORKSTATION_PLACEMENT_FAILED\] \S+: no_cell/u.test(first.detail)) return first;
+  const here = (await context.runtime.status()).position;
+  const land = await context.runtime.nearestLand(here).catch(() => null);
+  if (land === null) return first;
+  const why = "Step onto dry, open ground to set the workstation down.";
+  let moved = await act(context, "navigate", { x: land.x, z: land.z, range: 4 }, why);
+  const ground = moved?.status === "failed" ? groundHeight(moved.detail, here.y) : undefined;
+  if (ground !== undefined) moved = await act(context, "navigate", { x: land.x, y: ground, z: land.z, range: 4 }, why);
+  if (moved !== null) return first;
+  site.home = (await context.runtime.status()).position;
+  return run();
 }
 
 /**
  * Smelts (at most one furnace load) in a furnace close by, else in the carried furnace set down near `home`, walking
  * back there first when needed.
  */
-async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: string, home: Position): Promise<GatherResult> {
+async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: string, site: Site): Promise<GatherResult> {
   const count = Math.min(job.count, MAX_SMELT);
   const load = { item_name: job.input, count, fuel_item_name: job.fuel };
   const rationale = `Smelt ${count} ${job.input} into ${job.output} for ${purpose}.`;
@@ -618,12 +745,12 @@ async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: strin
   // A furnace still holding someone's items refuses the load: then her own, as if there were none.
   if (furnace !== null && (await act(context, "smelt_item", { ...load, ...furnace }, rationale)) === null) return done;
   if (context.signal.aborted) return { status: "stopped" };
-  const back = await goHome(context, home, purpose, "smelt");
+  const back = await goHome(context, site.home, purpose, "smelt");
   if (back !== null) return back;
   const atHome = furnace === null ? await walkToStation(context, "furnace") : null;
   if (atHome !== null && (await act(context, "smelt_item", { ...load, ...atHome }, rationale)) === null) return done;
   if (context.signal.aborted) return { status: "stopped" };
-  return (await act(context, "smelt_item", { ...load, temporary_workstation: true }, rationale)) ?? done;
+  return withRoomForStation(context, site, async () => (await act(context, "smelt_item", { ...load, temporary_workstation: true }, rationale)) ?? done);
 }
 
 /** Within this many blocks, a placed crafting table or furnace is walked to and used instead of setting one down. */
@@ -657,8 +784,20 @@ async function craft(context: GatherContext, items: readonly ItemCount[], purpos
   return step ?? { status: "done", detail: `crafted ${describeMaterials(items)}` };
 }
 
+/** Hunts each item from its mob (`collect_mob_drop`: it finds, fights and picks up), one after the other. */
+async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { readonly mob: string; readonly count: number }>, purpose: string): Promise<GatherResult> {
+  const done: string[] = [];
+  for (const [item, { mob, count }] of hunts) {
+    context.progress?.(`hunting ${mob} for ${count} ${item}, for ${purpose}`);
+    const step = await act(context, "collect_mob_drop", { mob_name: mob, drop_name: item, count }, `Hunt ${mob} for ${count} ${item}, for ${purpose}.`);
+    if (step !== null) return step;
+    done.push(`got ${count} ${item} from ${mob}`);
+  }
+  return { status: "done", detail: done.join(", ") };
+}
+
 /** Runs one action; null when it succeeded. */
-async function act(context: GatherContext, tool: "collect_block" | "craft_item" | "smelt_item" | "navigate", input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
+async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate", input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
   const outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return null;

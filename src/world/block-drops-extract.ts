@@ -89,6 +89,12 @@ function itemDrops(entries: readonly Entry[], outer: Requirement): BlockDrop[] {
   });
 }
 
+/** The drops of one loot table file (its JSON text), every pool in loot order. */
+export function tableDrops(json: string): BlockDrop[] {
+  const pools = (JSON.parse(json) as { pools?: readonly Pool[] }).pools ?? [];
+  return pools.flatMap((pool) => itemDrops(pool.entries, requirementOf(pool.conditions, { chance: 1 })));
+}
+
 /** Every block's drops, by block id, sorted by id. */
 export function extractBlockDrops(jar: Uint8Array): Record<string, BlockDrop[]> {
   const entries = readZipEntries(jar);
@@ -96,8 +102,7 @@ export function extractBlockDrops(jar: Uint8Array): Record<string, BlockDrop[]> 
   for (const name of [...entries.keys()].sort()) {
     const block = BLOCK_TABLES.exec(name)?.[1];
     if (block === undefined) continue;
-    const pools = (JSON.parse(entries.get(name)!()) as { pools?: readonly Pool[] }).pools ?? [];
-    blocks[block] = pools.flatMap((pool) => itemDrops(pool.entries, requirementOf(pool.conditions, { chance: 1 })));
+    blocks[block] = tableDrops(entries.get(name)!());
   }
   return blocks;
 }

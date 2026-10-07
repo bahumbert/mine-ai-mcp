@@ -499,7 +499,7 @@ export class Agent {
         const how = await obtainedBy(this.options.runtime, item);
         activity = how.way === "gather"
           ? gatheringActivity(how.block, { tags: await this.tagsOf([how.block]), hostile: new Set(), foods: this.foods })
-          : how.way === "craft" || how.way === "smelt" ? "crafting" : how.way === "farm" ? "farming" : null;
+          : how.way === "craft" || how.way === "smelt" ? "crafting" : how.way === "farm" ? "farming" : how.way === "hunt" ? "hunting" : null;
         this.itemActivities.set(item, activity);
       }
       if (activity !== null) missing.push({ item, count, activity });
