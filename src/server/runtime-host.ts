@@ -21,6 +21,15 @@ import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 
+/**
+ * A kick reason is a text component, an object since 1.20.3: logged whole (live 2026-10-07 on a real server, the
+ * only trace of a kick was "[object Object]").
+ */
+export function kickReason(reason: unknown): string {
+  if (typeof reason === "string") return reason;
+  return JSON.stringify(reason, (_key, value: unknown) => (typeof value === "bigint" ? String(value) : value));
+}
+
 interface ConnectedBot extends Disposable {
   readonly bot: Bot;
   readonly identity: MinecraftBotDataIdentity;
@@ -87,7 +96,7 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
     const kicked = (reason: unknown) =>
       finish({
         kind: "failed",
-        error: new Error(`Minecraft kicked ${configuration.username}: ${String(reason)}`),
+        error: new Error(`Minecraft kicked ${configuration.username}: ${kickReason(reason)}`),
       });
     const timer = setTimeout(
       () =>
@@ -160,7 +169,7 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
     runtime ? runtime.disconnect(failure.message) : connectionEnded(failure);
   bot.on("error", failedConnection);
   const kicked = (reason: unknown) =>
-    failedConnection(new Error(`Minecraft kicked ${configuration.username}: ${String(reason)}`));
+    failedConnection(new Error(`Minecraft kicked ${configuration.username}: ${kickReason(reason)}`));
   bot.on("kicked", kicked);
   resources.defer(() => {
     bot.off("error", failedConnection);
