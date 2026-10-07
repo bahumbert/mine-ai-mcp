@@ -14,6 +14,7 @@ test("defaults to persistent personal bot data, and to no unrestricted JavaScrip
     scope: "bot",
   });
   assert.equal(options.debugExecuteJavaScript, false);
+  assert.equal(options.neoforgeComponents, null);
   // Debug execution is reachable only through its own explicit flag.
   assert.equal(parseHostOptions(["--debug-execute-javascript"]).debugExecuteJavaScript, true);
 });

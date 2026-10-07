@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import { attachSessionFrontier } from "./frontier.js";
+import { attachSessionFrontier, RESCAN_AFTER_MS } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
   return SqlBotData.create({
@@ -297,6 +297,30 @@ test("does not scan an enriched chunk again when it reloads", async (t) => {
     { material: "oak_log" },
     { material: "prismarine" },
   ]);
+});
+
+test("a chunk loaded again after the rescan time is scanned again: its materials are what it holds now", async (t) => {
+  // Live 2026-10-04: materials kept from the first sight sent bots to logs long cut.
+  const { events, bot, column, data } = fixture();
+  const frontier = attachSessionFrontier(bot, data);
+  const recorded: unknown[] = [];
+  frontier.onRecorded((chunk) => recorded.push(chunk));
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+  const before = frontier.status().observedChunks;
+  recorded.length = 0;
+  data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
+  column.sections[0]!.data.palette!.push(7);
+  (bot.registry.blocksByStateId as Record<number, { name: string }>)[7] = { name: "birch_log" };
+  events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
+  await frontier.idle();
+
+  assert.ok(data.read("SELECT material FROM frontier_chunk_materials WHERE chunk_key = 'overworld|-2|4'").some((row) => row.material === "birch_log"));
+  assert.equal(frontier.status().observedChunks, before, "a rescan is no new chunk");
+  assert.deepEqual(recorded, []);
 });
 
 test("coalesces repeated chunk loads before scanning", async (t) => {

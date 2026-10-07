@@ -124,6 +124,23 @@ test("farmland left empty for want of seeds says so, naming the get_items step",
   assert.match(result.status === "done" ? result.detail : "", /4 farmland empty because you carry no wheat_seeds: get_items wheat_seeds 4, then farm again to plant them/u);
 });
 
+test("cells a tend left as they were are counted by reason, not left as a list she never sees", async () => {
+  // Live 2026-10-03: told "11 cells could not be farmed; see skipped", she guessed she needed a hoe, fetched one,
+  // dropped the two she carried and fetched them again.
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 2 }, { name: "wheat_seeds", count: 20 }]);
+  runtime.tendSkipped = { "not tillable (cobblestone)": [{ x: 1, z: 1 }, { x: 2, z: 1 }], "unreachable: no path": [{ x: 3, z: 3 }] };
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 5, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 20, ripe: 0, empty: 0 } }];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms }));
+  assert.equal(result.status, "done");
+  const detail = result.status === "done" ? result.detail : "";
+  assert.match(detail, /partly: .*; 3 cells left as they were: 2 not tillable \(cobblestone\), 1 unreachable: no path$/u);
+  assert.doesNotMatch(detail, /see skipped/u);
+  // Live 2026-10-03, minutes later: the same tend settled failed (no cell changed) and said "see skipped" again.
+  runtime.tendSkippedStatus = "failed";
+  const failed = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms }));
+  assert.match(failed.status === "failed" ? failed.detail : "", /stopped: .*; 3 cells left as they were: 2 not tillable \(cobblestone\), 1 unreachable: no path$/u);
+});
+
 test("a farm she knows, asked for another crop: the crop asked is planted on empty farmland when carried", async () => {
   const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "carrot", count: 6 }]);
   const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 70, ripe: 0, empty: 10 } }];

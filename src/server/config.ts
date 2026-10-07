@@ -25,6 +25,8 @@ export interface HostOptions {
   readonly version: string;
   readonly connectTimeoutMs: number;
   readonly debugExecuteJavaScript: boolean;
+  /** Channel list of a NeoForge server (`--neoforge-components <file>`); null joins as a vanilla client. */
+  readonly neoforgeComponents: string | null;
   readonly botData: {
     readonly storage: BotDataStorage;
     readonly scope: BotDataScopeKind;
@@ -47,6 +49,7 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
       version: { type: "string", default: "1.21.4" },
       "connect-timeout-ms": { type: "string", default: "45000" },
       "debug-execute-javascript": { type: "boolean", default: false },
+      "neoforge-components": { type: "string" },
       "data-root": { type: "string", default: DEFAULT_DATA_ROOT },
       "bot-data-persistence": { type: "string", default: "persistent" },
       "bot-data-scope": { type: "string", default: "bot" },
@@ -74,6 +77,8 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
     version: values.version,
     connectTimeoutMs: positiveInteger("--connect-timeout-ms", values["connect-timeout-ms"]),
     debugExecuteJavaScript: values["debug-execute-javascript"],
+    neoforgeComponents:
+      values["neoforge-components"] === undefined ? null : path.resolve(values["neoforge-components"]),
     botData: {
       storage:
         botDataPersistence === "temporary"

@@ -165,3 +165,22 @@ test("reserves one shared inventory before declaring a batch ready", () => {
   assert.equal(preparation.kind, "missing_materials");
   assert.deepEqual(preparation.plan.missingMaterials, [{ item: "oak_log", count: 1 }]);
 });
+
+test("a first white bed is planned from wool and planks, never by dyeing a bed of another colour", () => {
+  // Live 2026-10-04: the plan for Tom's first bed was "3 black_wool, 1 lily_of_the_valley" (a black bed dyed white).
+  // The game's recipes: a white bed from white wool, or any bed dyed white; a black bed from black wool.
+  const beds = [
+    craftingRecipe("white_bed", 1, { black_bed: 1, white_dye: 1 }),
+    craftingRecipe("black_bed", 1, { black_wool: 3, oak_planks: 3 }, true),
+    craftingRecipe("white_dye", 1, { lily_of_the_valley: 1 }),
+    craftingRecipe("white_bed", 1, { white_wool: 3, oak_planks: 3 }, true),
+    // Wool from string too: counted as 12 missing string, it made the dyed bed look cheaper (4 missing).
+    craftingRecipe("white_wool", 1, { string: 4 }),
+  ];
+  const { bot } = craftingBot({ oak_planks: 3 }, true, beds);
+  const preparation = planCraftingFromInventory(bot, [{ ...registry.itemsByName.white_bed, count: 1 }]);
+  assert.equal(preparation.kind, "missing_materials");
+  const missing = preparation.plan.missingMaterials.map((material) => material.item);
+  assert.ok(!missing.some((item) => /black|lily|dye/u.test(item)), missing.join(", "));
+  assert.ok(missing.some((item) => item === "white_wool" || item === "string"), missing.join(", "));
+});

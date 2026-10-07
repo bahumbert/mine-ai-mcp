@@ -8,8 +8,9 @@ safety checks, the models decide.
 
 ## How it thinks
 
-1. **Init prompt** (`personaPrompt`, from the persona file): identity, traits, what it is good at and likes doing (its
-   `aptitudes`, as "farming (very), exploring (fairly)": an inclination, never a switch), voice, stance as a disposition, its
+1. **Init prompt** (`personaPrompt`, from the persona file): identity, traits, its `preferences` (ADR-015: one
+   activity it loves, one it likes, one it dislikes, one it hates, as "You love farming and like building; you dislike
+   fighting monsters and hate mining…": a feeling, never a switch), voice, stance as a disposition, its
    building style, its own `goal`, and its `authority` order (e.g. `["Server", "Tom", "*"]`: whose requests come
    first). Its own goal always gives way to any player's request; the authority order only ranks players against
    whoever it is already working for. It decides how to do things and may say a request is unclear, impossible, or
@@ -29,10 +30,19 @@ safety checks, the models decide.
    same step ending the same way `settings.maxSameStepInARow` times in a row (default 3) ends the objective as
    failed, so a model that keeps retrying never spins until the step cap.
 5. **Goal tier** (planner model): with nothing to do, picks the next concrete objective towards its own goal, at most
-   `settings.goalCallsPerMinute` model calls a minute for its own work (orders and chat are never held back).
+   `settings.goalCallsPerMinute` model calls a minute for its own work (orders and chat are never held back). It
+   also sees **things that could use doing** (`src/opportunities.ts`: a tool nearly worn out, little food carried, a
+   farm left a while, an unfinished house, no house of its own and what one still needs, no bed; at most 6, each
+   tagged with its kind of work) and **how it spent the last hour** by activity; it weighs them with its tastes and
+   may ignore them all.
 6. **Settings the runtime keeps**: `settings.digStraightDown` (default false: routes descend by staircase), set on the
    runtime's survival policy at start and again whenever a snapshot shows it reset (death, dimension change).
-7. **Memory** (`src/memory.ts`): known places, how its own last objectives ended and the unfinished house are saved
+7. **Time per activity** (`src/activities.ts`, `src/time-spent.ts`): every finished step has a kind of work
+   (building, farming, mining, woodcutting, digging, foraging, hunting, mob combat, exploring, crafting, cooking…),
+   from its skill and game data: what `collect_block` breaks by the game's block tags (`logs`, `mineable/pickaxe`,
+   `mineable/shovel`, from `view_blocks` kinds), a hunt by the mob's hostile category, making a food is cooking; a
+   `get_items` step is what its body spent most time on. Its minutes are counted (and remembered, `activity_time`).
+8. **Memory** (`src/memory.ts`): known places, how its own last objectives ended and the unfinished house are saved
    as runtime notes (`note_save`, context `brain memory: <kind> {json}`) in the world's bot data, and read back with
    one `query_bot_data` when the brain starts, so a restart forgets nothing of these. The monitor lists them with
    the other notes. Orders in progress are not resumed after a restart.

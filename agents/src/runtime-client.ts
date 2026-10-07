@@ -37,12 +37,39 @@ export interface NearbyPlayer {
   readonly position: Position | null;
 }
 
+/** A carried stack; `durability` only for items that wear out (tools, armour), as the runtime reports it. */
+export interface CarriedStack {
+  readonly name: string;
+  readonly count: number;
+  readonly durability?: { readonly remaining: number; readonly maximum: number } | null;
+}
+
+/** A carried food kind and what one restores (game data). */
+export interface CarriedFood {
+  readonly name: string;
+  readonly count: number;
+  readonly points: number;
+  readonly saturation: number;
+}
+
+/** A loaded mob species: whether the game files it as hostile, how many are loaded, how far the nearest is. */
+export interface NearbyMob {
+  readonly name: string;
+  readonly hostile: boolean;
+  readonly count: number;
+  readonly distance: number;
+}
+
 /** The slice of `view_status` the brain reasons about. */
 export interface BotSnapshot {
   readonly position: Position;
   readonly health: number;
   readonly food: number;
-  readonly inventory: readonly { readonly name: string; readonly count: number }[];
+  readonly inventory: readonly CarriedStack[];
+  /** Carried foods, most filling first; empty when it carries none. */
+  readonly foods: readonly CarriedFood[];
+  /** Loaded mob species, nearest first. */
+  readonly mobs: readonly NearbyMob[];
   readonly players: readonly NearbyPlayer[];
   /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
   readonly policy: { readonly revision: string; readonly digStraightDown: boolean } | null;
@@ -61,7 +88,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
-  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save"
+  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
   | "tend_crops" | "use_bucket";
 
 export type ForegroundState =
@@ -131,6 +158,20 @@ export interface BlockKind {
   readonly tool: ToolClass | null;
   readonly solid: boolean;
   readonly harvest: readonly string[] | null;
+  /** The game's block tags it belongs to (`logs`, `crops`...); only a `blockKinds` lookup reports them. */
+  readonly tags?: readonly string[];
+}
+
+/** Where a block was seen: the middle of an explored chunk holding it, at the height asked from. */
+export interface SeenBlock {
+  readonly dimension: string;
+  readonly x: number;
+  readonly z: number;
+}
+
+/** A block found by name or selector: where, and which block it is. */
+export interface FoundBlock extends Position {
+  readonly name: string;
 }
 
 /** The blocks of a box as read by the runtime: name by position, and what each name is. */
@@ -145,10 +186,45 @@ export function areaKey(x: number, y: number, z: number): string {
 }
 
 /** What a brain needs from one bot. Implemented over MCP ({@link McpBotRuntime}) and by fakes in tests. */
+/** How much of the ground along a line is water, from the chunks of it the bot explored. */
+export interface WaterShare {
+  readonly chunks: number;
+  readonly share: number;
+}
+
+/**
+ * The chunk columns (x, z) a straight line from `from` to `to` crosses, `from`'s own excluded, in order: sampled every
+ * 4 blocks, so no chunk the line goes through is skipped.
+ */
+export function chunksAlong(from: { readonly x: number; readonly z: number }, to: { readonly x: number; readonly z: number }): readonly (readonly [number, number])[] {
+  const chunkOf = (x: number, z: number) => [Math.floor(x / 16), Math.floor(z / 16)] as const;
+  const [startX, startZ] = chunkOf(from.x, from.z);
+  const length = Math.hypot(to.x - from.x, to.z - from.z);
+  const chunks: (readonly [number, number])[] = [];
+  const seen = new Set<string>([`${startX},${startZ}`]);
+  for (let walked = 4; walked < length + 4; walked += 4) {
+    const t = Math.min(1, walked / Math.max(length, 1e-9));
+    const chunk = chunkOf(from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t);
+    if (seen.has(`${chunk[0]},${chunk[1]}`)) continue;
+    seen.add(`${chunk[0]},${chunk[1]}`);
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+/** How far from `from` the first of these chunks (in order along a line) that is not `known` is; null when all are. */
+export function firstUnseen(from: { readonly x: number; readonly z: number }, chunks: readonly (readonly [number, number])[], known: ReadonlySet<string>): number | null {
+  const unseen = chunks.find(([x, z]) => !known.has(`${x},${z}`));
+  return unseen === undefined ? null : Math.round(Math.hypot(unseen[0] * 16 + 8 - from.x, unseen[1] * 16 + 8 - from.z));
+}
+
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
-  /** What crafting these items would take from the current inventory; crafts nothing. */
-  craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds>;
+  /**
+   * What crafting these items would take from the current inventory; crafts nothing. `prefer`: materials to plan with,
+   * in order, where recipes accept several and none is carried (the woods growing nearby).
+   */
+  craftingNeeds(items: readonly ItemCount[], prefer?: readonly string[]): Promise<CraftingNeeds>;
   /** The furnace recipes making these items, from the game data the runtime ships (`view_smelting_recipes`). */
   smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge>;
   /**
@@ -158,8 +234,29 @@ export interface BotRuntime {
   blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>>;
   /** Every block of the box between two corners (inclusive), read in slices through `view_blocks`. */
   blocksIn(min: Position, max: Position): Promise<BlockArea>;
-  /** The nearest loaded blocks of that name, nearest first (`view_blocks` find). */
-  findBlocks(name: string, limit: number): Promise<readonly Position[]>;
+  /** The nearest loaded blocks of that name (or the runtime's `logs` selector: any wood), nearest first (`view_blocks` find). */
+  findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]>;
+  /**
+   * The explored chunk nearest to `from`, farther than `beyond` blocks, where this block was seen (the bot data's
+   * frontier map records the materials of every chunk it loaded), with its dimension; null when none. Closer chunks
+   * are left out: the caller has just searched them, so a record there is stale (live 2026-10-03: logs cut long ago
+   * sent Vex to "7 blocks south-west" again and again).
+   */
+  seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null>;
+  /** The overworld places (chunk middles) it saw `block` in, farther than `beyond`, nearest first, at most `limit`. */
+  seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]>;
+  /**
+   * The explored chunks (overworld) a straight line from `from` to `to` crosses, and their mean surface water share
+   * (0..1, the bot data's frontier map); null when it crosses none it has explored.
+   */
+  waterAlong(from: Position, to: Position): Promise<WaterShare | null>;
+  /** The middle of the nearest explored chunk (overworld) whose surface is mostly land; null when it knows none. */
+  nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null>;
+  /**
+   * How far along the straight line from `from` toward `to` the first chunk it has never seen is (blocks, to that
+   * chunk's middle); null when every chunk on the line is explored.
+   */
+  unseenAlong(from: Position, to: Position): Promise<number | null>;
   /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
   blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
@@ -192,8 +289,14 @@ const viewStatusSchema = z.object({
     situation: z.object({
       position: positionSchema,
       vitals: z.object({ health: z.number(), food: z.number() }),
-      inventory: z.object({ stacks: z.array(z.object({ name: z.string(), count: z.number() })) }),
-      nearby: z.object({ players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })) }),
+      inventory: z.object({
+        stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null) })),
+        foods: z.array(z.object({ name: z.string(), count: z.number(), points: z.number(), saturation: z.number() })).default([]),
+      }),
+      nearby: z.object({
+        players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })),
+        mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number() }) })).default([]),
+      }),
     }),
   }),
   survivalPolicy: z.object({
@@ -238,6 +341,7 @@ const blockKindSchema = z.object({
   tool: z.enum(["pickaxe", "shovel", "axe", "hoe"]).nullable(),
   solid: z.boolean(),
   harvest: z.array(z.string()).nullable().default(null),
+  tags: z.array(z.string()).optional(),
 });
 
 const viewBoxSchema = z.object({
@@ -247,7 +351,7 @@ const viewBoxSchema = z.object({
         layers: z.array(z.object({ y: z.number(), rows: z.array(z.object({ z: z.number(), blocks: z.array(z.string()) })) })),
         kinds: z.record(z.string(), blockKindSchema).default({}),
       }).nullable(),
-      find: z.array(z.object({ listed: z.array(positionSchema) })).nullable(),
+      find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string() })) })).nullable(),
       kinds: z.record(z.string(), blockKindSchema).optional(),
     }).optional(),
   }),
@@ -312,6 +416,18 @@ const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"
 /** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
+/** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
+function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number } }[]): NearbyMob[] {
+  const species = new Map<string, NearbyMob>();
+  for (const group of groups) {
+    const seen = species.get(group.name);
+    species.set(group.name, seen === undefined
+      ? { name: group.name, hostile: group.hostile, count: group.count, distance: group.nearest.distance }
+      : { ...seen, count: seen.count + group.count, distance: Math.min(seen.distance, group.nearest.distance) });
+  }
+  return [...species.values()].sort((a, b) => a.distance - b.distance);
+}
+
 /** The runtime's outcome code: the bracketed prefix its errors start with, e.g. `HOSTILE_CONTACT`. */
 export function errorCode(error: string | null | undefined): string | null {
   return /^\[([A-Z_]+)\]/u.exec(error ?? "")?.[1] ?? null;
@@ -334,7 +450,9 @@ export class McpBotRuntime implements BotRuntime {
       position: situation.position,
       health: situation.vitals.health,
       food: situation.vitals.food,
-      inventory: situation.inventory.stacks.map(({ name, count }) => ({ name, count })),
+      inventory: situation.inventory.stacks.map(({ name, count, durability }) => ({ name, count, durability })),
+      foods: situation.inventory.foods,
+      mobs: mobSpecies(situation.nearby.mobs),
       players: situation.nearby.players,
       policy: data.survivalPolicy === undefined
         ? null
@@ -349,8 +467,8 @@ export class McpBotRuntime implements BotRuntime {
     return result.status === "succeeded";
   }
 
-  async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
-    const input = { items: items.map(({ item, count }) => ({ item_name: item, count })) };
+  async craftingNeeds(items: readonly ItemCount[], prefer: readonly string[] = []): Promise<CraftingNeeds> {
+    const input = { items: items.map(({ item, count }) => ({ item_name: item, count })), ...(prefer.length > 0 && { prefer: [...prefer] }) };
     const { result } = craftingRequirementsSchema.parse(await this.call("view_crafting_requirements", input, "Work out what crafting these would take."));
     // Only an item Minecraft does not have fails without a plan.
     const plan = result.requirements?.plan;
@@ -391,9 +509,66 @@ export class McpBotRuntime implements BotRuntime {
     return { blocks, kinds };
   }
 
-  async findBlocks(name: string, limit: number): Promise<readonly Position[]> {
+  async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const read = viewBoxSchema.parse(await this.call("view_blocks", { find: { block_names: [name], limit } }, `Find ${name}.`)).result.blocks;
-    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z }) => ({ x, y, z }));
+    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z, name: found }) => ({ x, y, z, name: found }));
+  }
+
+  async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {
+    // `block` is a Minecraft id (letters, digits, underscore: the step schemas check it), safe inside the literal.
+    if (!/^[a-z0-9_]+$/u.test(block)) return null;
+    const [x, z, far] = [Math.floor(from.x), Math.floor(from.z), Math.floor(beyond)];
+    const squared = `((c.chunk_x * 16 + 8 - (${x})) * (c.chunk_x * 16 + 8 - (${x})) + (c.chunk_z * 16 + 8 - (${z})) * (c.chunk_z * 16 + 8 - (${z})))`;
+    // Another dimension is never "close": its coordinates do not compare with these.
+    const rows = await this.queryBotData(
+      "SELECT c.dimension, c.chunk_x * 16 + 8, c.chunk_z * 16 + 8 FROM frontier_chunk_materials m JOIN frontier_chunks c ON c.chunk_key = m.chunk_key " +
+      `WHERE m.material = '${block}' AND (c.dimension <> 'overworld' OR ${squared} > ${far * far}) ` +
+      `ORDER BY (c.dimension <> 'overworld'), ${squared} LIMIT 1`,
+    );
+    const row = rows[0];
+    return row === undefined ? null : { dimension: String(row[0]), x: Number(row[1]), z: Number(row[2]) };
+  }
+
+  async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
+    if (!/^[a-z0-9_]+$/u.test(block)) return [];
+    const [x, z, far, count] = [Math.floor(from.x), Math.floor(from.z), Math.floor(beyond), Math.max(1, Math.floor(limit))];
+    const squared = `((c.chunk_x * 16 + 8 - (${x})) * (c.chunk_x * 16 + 8 - (${x})) + (c.chunk_z * 16 + 8 - (${z})) * (c.chunk_z * 16 + 8 - (${z})))`;
+    const rows = await this.queryBotData(
+      "SELECT c.chunk_x * 16 + 8, c.chunk_z * 16 + 8 FROM frontier_chunk_materials m JOIN frontier_chunks c ON c.chunk_key = m.chunk_key " +
+      `WHERE m.material = '${block}' AND c.dimension = 'overworld' AND ${squared} > ${far * far} ORDER BY ${squared} LIMIT ${count}`,
+    );
+    return rows.map((row) => ({ dimension: "overworld", x: Number(row[0]), z: Number(row[1]) }));
+  }
+
+  async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
+    const chunks = chunksAlong(from, to);
+    if (chunks.length === 0) return null;
+    const rows = await this.queryBotData(
+      "SELECT COUNT(*), AVG(surface_water_fraction) FROM frontier_chunks WHERE dimension = 'overworld' AND (" +
+      chunks.map(([x, z]) => `(chunk_x = ${x} AND chunk_z = ${z})`).join(" OR ") + ")",
+    );
+    const [count, share] = rows[0] ?? [0, null];
+    return Number(count) === 0 || share === null ? null : { chunks: Number(count), share: Number(share) };
+  }
+
+  async unseenAlong(from: Position, to: Position): Promise<number | null> {
+    const chunks = chunksAlong(from, to);
+    if (chunks.length === 0) return null;
+    const rows = await this.queryBotData(
+      "SELECT chunk_x, chunk_z FROM frontier_chunks WHERE dimension = 'overworld' AND (" +
+      chunks.map(([x, z]) => `(chunk_x = ${x} AND chunk_z = ${z})`).join(" OR ") + ")",
+    );
+    return firstUnseen(from, chunks, new Set(rows.map((row) => `${Number(row[0])},${Number(row[1])}`)));
+  }
+
+  async nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null> {
+    const [x, z] = [Math.floor(from.x), Math.floor(from.z)];
+    const rows = await this.queryBotData(
+      "SELECT chunk_x * 16 + 8, chunk_z * 16 + 8 FROM frontier_chunks WHERE dimension = 'overworld' AND surface_water_fraction < 0.5 " +
+      `ORDER BY ((chunk_x * 16 + 8 - (${x})) * (chunk_x * 16 + 8 - (${x})) + (chunk_z * 16 + 8 - (${z})) * (chunk_z * 16 + 8 - (${z}))) LIMIT 1`,
+    );
+    const row = rows[0];
+    return row === undefined ? null : { x: Number(row[0]), z: Number(row[1]) };
   }
 
   async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {

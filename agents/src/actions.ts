@@ -20,14 +20,28 @@ const MAX_AREA_RADIUS = 31;
 
 const SIZES = Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]];
 
+/** The eight compass words the models use (and results say), as headings in degrees clockwise from north. */
+export const COMPASS_HEADINGS = {
+  north: 0, "north-east": 45, east: 90, "south-east": 135, south: 180, "south-west": 225, west: 270, "north-west": 315,
+} as const;
+const COMPASS_WORDS = Object.keys(COMPASS_HEADINGS) as [keyof typeof COMPASS_HEADINGS, ...(keyof typeof COMPASS_HEADINGS)[]];
+/** The runtime's `explore_frontier` limit (src/actions/explore-frontier/contract.ts `MAX_EXPLORE_CHUNKS`). */
+const MAX_EXPLORE_CHUNKS = 8;
+
 /**
  * The basic functions the models compose (ADR-008, ADR-011): one is chosen at a time, validated here and run in code
  * by `skills.ts`, so whatever anyone writes, the worst outcome is a sequence of these.
  */
 export const stepSchema = z.discriminatedUnion("skill", [
-  z.strictObject({ skill: z.literal("follow_player"), player: playerName, distance: z.number().int().min(1).max(8).default(3) }),
+  z.strictObject({ skill: z.literal("follow_player"), player: playerName, distance: z.number().int().min(1).max(8).default(3), minutes: z.number().int().min(1).max(15).optional() }),
   z.strictObject({ skill: z.literal("go_to_player"), player: playerName }),
   z.strictObject({ skill: z.literal("go_to"), x: coordinate, y: z.number().int().min(-64).max(320), z: coordinate }),
+  z.strictObject({
+    skill: z.literal("explore"),
+    toward: z.enum(COMPASS_WORDS),
+    chunks: z.number().int().min(1).max(MAX_EXPLORE_CHUNKS).default(4),
+    for: minecraftId.optional(),
+  }),
   z.strictObject({ skill: z.literal("collect_block"), block: minecraftId, count: z.number().int().min(1).max(MAX_COLLECT).default(1) }),
   z.strictObject({ skill: z.literal("give_item"), player: playerName, item: minecraftId, count: z.number().int().min(1).max(64).default(1) }),
   z.strictObject({ skill: z.literal("drop_item"), item: minecraftId, count: z.number().int().min(1).max(2304).optional() }),
@@ -84,7 +98,7 @@ export type Step = z.infer<typeof stepSchema>;
 export type SkillName = Step["skill"];
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "farm",
+  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "farm",
 ] as const satisfies readonly SkillName[];
 
 /**
@@ -93,14 +107,15 @@ export const SKILL_NAMES = [
  */
 export function skillUsage(skill: SkillName, style: Style): string {
   switch (skill) {
-    case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3}  keep following that player; it never ends by itself, a new objective or "stop" ends it`;
+    case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3,"minutes":5}  follow that player: asked by them, leave "minutes" out and it lasts until they stop talking to you for 10 minutes (or say stop); on your own, "minutes" (1-15) says how long`;
     case "go_to_player": return `{"skill":"go_to_player","player":"<username>"}  walk up to that player once`;
     case "go_to": return `{"skill":"go_to","x":0,"y":64,"z":0}  walk to block coordinates`;
-    case "collect_block": return `{"skill":"collect_block","block":"<block id>","count":<1-${MAX_COLLECT}>}  find, walk to and mine the nearest such blocks by itself (no need to look for them first); name the block, not the drop (stone drops cobblestone; oak_log, dirt, coal_ore...)`;
+    case "explore": return `{"skill":"explore","toward":"<${COMPASS_WORDS.join("|")}>","chunks":<1-${MAX_EXPLORE_CHUNKS}>,"for":"<block id>"}  walk that way past the edge of the land you know (a chunk is 16 blocks; 4 chunks take about a minute), to find what is not near ("for": it then says where the nearest one is, or that none was seen); it does not set off toward water you have seen there; you stay where it ends, so fetch or build there, or go back`;
+    case "collect_block": return `{"skill":"collect_block","block":"<block id>","count":<1-${MAX_COLLECT}>}  find, walk to and mine the nearest such blocks within 64 blocks by itself (no need to look for them first; farther, it says where you last saw some); name the block, not the drop (stone drops cobblestone; oak_log, dirt, coal_ore...)`;
     case "give_item": return `{"skill":"give_item","player":"<username>","item":"<item id>","count":<1-64>}  walk to the player and hand over items you carry`;
     case "drop_item": return `{"skill":"drop_item","item":"<item id>","count":<n>}  drop items you carry on the ground where you stand (no "count": all of them), e.g. to make room: crafting and gathering stop when all 36 inventory slots are taken, and a slot is freed only when a whole stack goes, so drop all of something you do not need; what you drop is lost`;
     case "craft_item": return `{"skill":"craft_item","item":"<item id>","count":<1-64>}  craft from your inventory; intermediate items (planks, sticks) are crafted automatically and a carried crafting_table is placed when needed; it never gathers missing materials`;
-    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; takes minutes`;
+    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; it fetches within 64 blocks only: when something is not near, it says where you last saw some (or that you never did), and going there is a go_to step of its own, worth it or not; takes minutes`;
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
@@ -122,6 +137,7 @@ export function describeStep(step: Step): string {
     case "follow_player": return `follow ${step.player} at ${step.distance} blocks`;
     case "go_to_player": return `go to ${step.player}`;
     case "go_to": return `go to ${step.x} ${step.y} ${step.z}`;
+    case "explore": return `explore ${step.chunks} chunks ${step.toward}${step.for === undefined ? "" : ` for ${step.for}`}`;
     case "collect_block": return `collect ${step.count} ${step.block}`;
     case "give_item": return `give ${step.count} ${step.item} to ${step.player}`;
     case "drop_item": return `drop ${step.count ?? "all"} ${step.item}`;

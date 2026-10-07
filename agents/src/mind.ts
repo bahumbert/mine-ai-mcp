@@ -1,10 +1,17 @@
 import type { Step } from "./actions.ts";
+import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
+import type { ActivityTotal } from "./time-spent.ts";
 
 export interface ChatLine {
   readonly speaker: string;
   readonly text: string;
+  /**
+   * Whom the line spoke to, as this character read it when it heard it (its chat tier's `spoken_to`), or whom it
+   * answered with its own line; absent when it never read it (another agent's line).
+   */
+  readonly to?: readonly string[];
 }
 
 /**
@@ -24,6 +31,8 @@ export interface KnownPlace {
   readonly name: string;
   /** Coordinates worth going to, e.g. "door -1204 76 803 facing north; stand on its roof at -1206 82 803". */
   readonly detail: string;
+  /** A house it built for itself: its own home. */
+  readonly own?: boolean;
 }
 
 export interface ChatInput {
@@ -48,6 +57,13 @@ export interface ChatDecision {
   readonly route: Route;
   /** For `act` and `later`: what the player asked, restated so it stands alone, e.g. "give Steve 5 oak logs". */
   readonly request: string;
+  /**
+   * The kind of work asked, in the chat tier's own judgment (one of the activities, or "none"); only asked of a
+   * character with preferences, so it weighs how it feels before it answers (ADR-015). Empty when not asked.
+   */
+  readonly work?: string;
+  /** Who the line speaks to, as the chat tier read it: names, "everyone" or "unclear" (spec 2026-10-03 fetch-range-and-addressee). */
+  readonly to?: readonly string[];
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */
@@ -83,6 +99,12 @@ export type WorkDecision =
   /** Impossible, unclear, or it does not know how: the character says why. */
   | { readonly kind: "give_up"; readonly reason: string };
 
+/** The same sentence once case, punctuation and spacing are set aside. */
+export function sameWords(a: string, b: string): boolean {
+  const words = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/gu, " ").trim();
+  return words(a) === words(b);
+}
+
 export interface GoalInput {
   readonly persona: Persona;
   readonly snapshot: BotSnapshot;
@@ -91,6 +113,12 @@ export interface GoalInput {
   readonly areas: readonly ProtectedArea[];
   /** How its last own objectives ended, oldest first. */
   readonly lately: readonly string[];
+  /** Its last own objective, when it failed, and why: chosen again word for word, it is sent back once. */
+  readonly lastFailed?: { readonly objective: string; readonly reason: string } | null;
+  /** Things that could use doing, the most pressing first (the tasks a character looks for). */
+  readonly opportunities: readonly Opportunity[];
+  /** Minutes per activity over the last hour, most first. */
+  readonly time: readonly ActivityTotal[];
 }
 
 export interface NarrateInput {

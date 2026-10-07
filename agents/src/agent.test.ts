@@ -70,7 +70,7 @@ test("a failed step is shown to the model, which may give up and say why in char
   action.reply({ step: { skill: "collect_block", block: "birch_log", count: 5 } }, { give_up: "there is no birch_log nearby" });
   await agent.handle(say("Steve", "get me some birch"));
   await until(() => runtime.said.length === 2);
-  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[NO_LOADED_MATCHING_TARGETS\]/u);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: no birch_log within 64 blocks, and you know of none farther away: .*\[NO_LOADED_MATCHING_TARGETS\]/u);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /You stopped working on "collect 5 birch_log": there is no birch_log nearby/u);
 });
 
@@ -84,7 +84,7 @@ test("the same step failing the same way several times in a row ends the objecti
   await agent.handle(say("Steve", "get me some birch"));
   await until(() => runtime.said.length === 2);
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 3);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times in a row: \[NO_LOADED_MATCHING_TARGETS\]/u);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times in a row: no birch_log within 64 blocks/u);
   assert.equal(action.requests.length, 3);
 });
 
@@ -143,6 +143,33 @@ test("a request taken on for later waits until the work for another player ends"
   assert.match(agent.activity, /"collect 16 oak_log for Steve" \(for Steve\); set aside: "come to Bob"/u);
   await until(() => action.requests.length >= 3, 5_000);
   assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Bob\): "come to Bob"/u);
+});
+
+test("whom she read a line as spoken to stays with it in the chat history, and her answer as spoken to the speaker", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply({ spoken_to: ["Opus"], say: "", route: "ignore", request: "" }, { spoken_to: ["Ayla"], say: "Hello Steve!", route: "talk", request: "" }, { say: "Hi.", route: "talk", request: "" });
+  await agent.handle(say("Steve", "Opus, teleport me"));
+  await agent.handle(say("Steve", "hi Ayla"));
+  await agent.handle(say("Steve", "how are you"));
+  assert.match(chat.requests[2]?.[1]?.content ?? "", /Steve to Opus: "Opus, teleport me"\nSteve to [^:]+: "hi Ayla"\n[^\n]+ to Steve: "Hello Steve!"/u);
+});
+
+test("a request she is already working on is not taken or queued again", async (t) => {
+  // Live 2026-10-04: "thanks, no rush" while she fetched for Opus's house came back as "later" with the same request.
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  runtime.durations.collect_block = 300;
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log for Steve" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "get me 16 logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "No rush, Steve!", route: "later", request: "Collect 16 oak_log for Steve." }, { say: "Sure!", route: "act", request: "collect 16 oak_log for Steve" });
+  await agent.handle(say("Steve", "thanks, no rush"));
+  await agent.handle(say("Steve", "you got it?"));
+  assert.deepEqual(runtime.cancelled, [], "the collection goes on");
+  assert.doesNotMatch(agent.activity, /set aside/u);
 });
 
 test("a player's request never waits behind the character's own goal: a \"later\" reply is sent back to be corrected", async (t) => {
@@ -226,9 +253,10 @@ test("memories an earlier run saved as notes come back: places, its own last obj
   const prompt = planner.requests[0]?.[1]?.content ?? "";
   assert.match(prompt, /the old hut \(door 1 64 1 facing south\); the small medieval house you built for Steve/u);
   assert.match(prompt, /collect 16 oak_log: done/u);
-  assert.equal(runtime.queries.length, 1);
-  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4 }).unfinished, house);
-  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4 }).places.map((place) => place.name), ["the small medieval house you built for Steve"]);
+  // The memories, then its activity notes, to forget those older than its last hour of play.
+  assert.equal(runtime.queries.length, 2);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4, times: 10 }).unfinished, house);
+  assert.deepEqual(recall(runtime.notes.map((note) => note.context).reverse(), { places: 1, lately: 5, farms: 4, times: 10 }).places.map((place) => place.name), ["the small medieval house you built for Steve"]);
 });
 
 test("never digging straight down is set at start, and again after the runtime reset its policy", async (t) => {
@@ -316,8 +344,41 @@ test("the journal gets what it takes on, its stack, each step with its input and
   await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
   assert.deepEqual(events.filter((event) => event.kind === "objective").map((event) => [event.event, event.text, event.requester]), [["taken", "collect 2 dirt", "Steve"], ["finished", "collect 2 dirt", "Steve"]]);
   const step = events.find((event) => event.kind === "step");
-  assert.deepEqual(step && { ...step, ms: 0 }, { kind: "step", objective: "collect 2 dirt", requester: "Steve", step: "collect 2 dirt", input: { skill: "collect_block", block: "dirt", count: 2 }, thought: "Dirt is right here.", outcome: "done", detail: "collected 2 dirt", ms: 0 });
+  assert.deepEqual(step && { ...step, ms: 0, times: step.kind === "step" ? step.times?.map((time) => time.activity) : undefined }, { kind: "step", objective: "collect 2 dirt", requester: "Steve", step: "collect 2 dirt", input: { skill: "collect_block", block: "dirt", count: 2 }, thought: "Dirt is right here.", outcome: "done", detail: "collected 2 dirt", ms: 0, activity: "digging", times: ["digging"] });
   const states = events.filter((event) => event.kind === "state");
   assert.ok(states.some((state) => state.step === "collect 2 dirt" && state.stack.length === 1));
   assert.deepEqual(states.at(-1), { kind: "state", stack: [], step: null });
+});
+
+test("the goal tier sees what could use doing and how the last hour went, time recalled from an earlier run", async (t) => {
+  const runtime = new FakeRuntime();
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  runtime.notes = [
+    memoryNote({ kind: "activity_time", time: { activity: "mining", ended: minutesAgo(90), minutes: 30 } }),
+    memoryNote({ kind: "activity_time", time: { activity: "farming", ended: minutesAgo(20), minutes: 12 } }),
+    memoryNote({ kind: "activity_time", time: { activity: "building", ended: minutesAgo(5), minutes: 4 } }),
+  ];
+  runtime.snapshot = { ...runtime.snapshot, food: 15, inventory: [{ name: "oak_log", count: 4 }, { name: "stone_pickaxe", count: 1, durability: { remaining: 5, maximum: 131 } }] };
+  runtime.recipes = { spruce_stairs: { makes: 4, needs: [{ item: "spruce_planks", count: 6 }] } };
+  const { planner } = agentFor(t, runtime, { goal: "live well", style: "medieval", preferences: { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const [system, request] = [planner.requests[0]?.[0]?.content ?? "", planner.requests[0]?.[1]?.content ?? ""];
+  assert.match(system, /You love farming and like building; you dislike fighting monsters and hate mining\./u);
+  // The last hour of play, not of the clock: mining that ended 90 min ago is still in it (spec 2026-10-04).
+  assert.match(request, /How you spent the last hour: mining 30 min, farming 12 min, building 4 min\./u);
+  assert.match(request, /Things that could use doing, by the kind of work they are: \n- \(crafting\) your stone_pickaxe has 5 uses left\n- \(farming, hunting, cooking\) you carry no food; your hunger is 15\/20\n- \(building\) you have no house of your own yet\n/u);
+  // Each missing material is tagged with the work get_items would do for it: logs are cut, crafted items crafted.
+  assert.match(request, /- \(cutting wood\) a house of your own needs 20 more oak_log/u);
+  assert.match(request, /- \(crafting\) a house of your own needs [^\n]*spruce_stairs/u);
+});
+
+test("each finished step counts towards its activity, for the next goal call", async (t) => {
+  const runtime = new FakeRuntime();
+  const { planner, action } = agentFor(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "get some stone" }, { objective: "rest a while" });
+  action.reply({ step: { skill: "collect_block", block: "stone", count: 2 } }, { done: "got stone" });
+  await until(() => planner.requests.length === 2);
+  assert.match(planner.requests[1]?.[1]?.content ?? "", /How you spent the last hour: mining under a minute\./u);
+  assert.match(planner.requests[0]?.[1]?.content ?? "", /How you spent the last hour: nothing yet\./u);
 });

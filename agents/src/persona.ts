@@ -1,14 +1,30 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { SKILL_NAMES } from "./actions.ts";
+import { ACTIVITIES, NEUTRAL_ACTIVITIES } from "./activities.ts";
 
 /** How an agent relates to players by default (ADR-005: later a per-relation value, one global stance for now). */
 export const STANCES = ["companion", "neutral", "rival"] as const;
 export type Stance = (typeof STANCES)[number];
 
-/** Specialisations are aptitudes (ADR-005): weights that bias choices, never switches that remove abilities. */
-export const APTITUDES = ["builder", "farmer", "miner", "warrior", "explorer", "trader"] as const;
-export type Aptitude = (typeof APTITUDES)[number];
+/** How a character feels about activities, strongest liking first (ADR-015). */
+export const FEELINGS = ["loves", "likes", "dislikes", "hates"] as const;
+export type Feeling = (typeof FEELINGS)[number];
+
+/**
+ * A specialisation is what a character prefers and avoids (ADR-015, refining ADR-005): one activity it loves, one it
+ * likes, one it dislikes and one it hates, all different; every other activity is neutral. The fixed shape keeps every
+ * character contrasted. They act only through the prompts, never as a switch: a character still does what it hates.
+ */
+export const preferencesSchema = z.strictObject({
+  loves: z.enum(ACTIVITIES),
+  likes: z.enum(ACTIVITIES),
+  dislikes: z.enum(ACTIVITIES),
+  hates: z.enum(ACTIVITIES),
+}).refine((preferences) => new Set(FEELINGS.map((feeling) => preferences[feeling])).size === FEELINGS.length, "loves, likes, dislikes and hates name four different activities")
+  .refine((preferences) => FEELINGS.every((feeling) => !NEUTRAL_ACTIVITIES.has(preferences[feeling])), "travelling is nobody's love or hate: name another activity");
+
+export type Preferences = z.infer<typeof preferencesSchema>;
 
 /** The LLM tiers of a mind (ADR-008). */
 export const TIERS = ["chat", "action", "planner"] as const;
@@ -28,7 +44,8 @@ export const personaSchema = z.strictObject({
   description: z.string().trim().min(1).max(1_000),
   traits: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
   voice: z.string().trim().min(1).max(400),
-  aptitudes: z.partialRecord(z.enum(APTITUDES), z.number().min(0).max(1)).default({}),
+  /** What it prefers and avoids doing; none: it feels the same about everything. */
+  preferences: preferencesSchema.optional(),
   style: z.string().trim().min(1).max(40).optional(),
   /** Players this character takes orders and questions from; empty = everyone (mindcraft's `only_chat_with`). */
   listensTo: z.array(z.string().min(1).max(16)).default([]),

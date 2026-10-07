@@ -27,7 +27,9 @@ LLM environment (Bun also reads a .env file in the working directory):
   MINE_AI_LLM_TIMEOUT_MS        per request, default 30000`;
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
-const TIER_TEMPERATURE: Readonly<Record<Tier, number>> = { chat: 0.7, action: 0.2, planner: 0.3 };
+// Chat routes as well as it speaks: at 0.7 the same line was read as for another player one time and as an order the
+// next (addressee bench, 2026-10-04: the "Opus" lines 10/18 at 0.7, 14/18 at 0.4).
+const TIER_TEMPERATURE: Readonly<Record<Tier, number>> = { chat: 0.4, action: 0.2, planner: 0.3 };
 
 interface AgentSpec {
   readonly personaPath: string;

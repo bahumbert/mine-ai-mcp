@@ -161,7 +161,7 @@ function nearestBoat(bot: Bot, around: Vec3, within: number): Entity | null {
  * Puts the carried boat in the water toward `heading` (a unit vector), rides straight across, gets off a block short
  * of the far shore and takes the boat back. The bot stands at the shore, facing the water.
  */
-export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal): Promise<CrossingResult> {
+export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING): Promise<CrossingResult> {
   const item = bot.inventory.items().find((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
   if (item === undefined) return { status: "failed", blocks: 0, detail: "no boat is carried" };
   await bot.equip(item, "hand");
@@ -213,6 +213,7 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   // Straight across, at the water's surface the boat floats on, until the shore is close ahead.
   const yaw = (Math.atan2(-heading.x, heading.z) * 180) / Math.PI;
   const position = { x: boat.position.x, y: boat.position.y, z: boat.position.z };
+  const launch = { x: position.x, z: position.z };
   const move = (step: { readonly x: number; readonly z: number }, facing: number) => {
     position.x += step.x;
     position.z += step.z;
@@ -239,7 +240,13 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   };
   let ridden = 0;
   let stoppedBy = "";
-  while (ridden < MAX_CROSSING) {
+  while (true) {
+    // No land by then past where it was going: never out on open sea with no end (live 2026-10-04: Vex, exploring
+    // 64 blocks, rode 518 blocks of ocean and was stranded at its far side).
+    if (ridden >= Math.min(maxBlocks, MAX_CROSSING)) {
+      stoppedBy = `no land within ${Math.round(ridden)} blocks that way`;
+      break;
+    }
     if (signal?.aborted) {
       stoppedBy = "stopped";
       break;
@@ -281,6 +288,18 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
       const cut = await cutStep(bot, position, heading, surfaceLevel);
       if (cut !== "" && deepUnder()) stoppedBy = cut;
     }
+  }
+  // Not ashore and out on deep water: back the way it came, to where the boat went in, rather than stranded there.
+  if (stoppedBy !== "" && stoppedBy !== "stopped" && deepUnder()) {
+    const back = { x: -heading.x, z: -heading.z };
+    const backYaw = (Math.atan2(-back.x, back.z) * 180) / Math.PI;
+    corrected = false;
+    for (let left = Math.hypot(launch.x - position.x, launch.z - position.z); left > 1 && !corrected && !signal?.aborted; left -= BOAT_STEP) {
+      move({ x: back.x * BOAT_STEP, z: back.z * BOAT_STEP }, backYaw);
+      ridden += BOAT_STEP;
+      await sleep(50);
+    }
+    stoppedBy += "; rode back to where the boat went in";
   }
   bot._client.removeListener("vehicle_move", onCorrection);
   const { x, y, z } = position;

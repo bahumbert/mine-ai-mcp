@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { ACTIVITIES } from "./activities.ts";
 import type { KnownPlace } from "./mind.ts";
+import type { ActivityTime } from "./time-spent.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 
 /**
@@ -25,7 +27,9 @@ export type Memory =
   | { readonly kind: "place"; readonly place: KnownPlace }
   | { readonly kind: "own_objective"; readonly outcome: string }
   | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null }
-  | { readonly kind: "farm"; readonly farm: KnownFarm };
+  | { readonly kind: "farm"; readonly farm: KnownFarm }
+  /** One finished step's activity and time (spec 2026-10-03-specialisations-preferences): the time per activity. */
+  | { readonly kind: "activity_time"; readonly time: ActivityTime };
 
 export interface Recalled {
   /** Oldest first, one per name (the latest wins). */
@@ -35,6 +39,8 @@ export interface Recalled {
   readonly unfinished: UnfinishedHouse | null;
   /** Oldest first, one per farm (by its centre; the latest note wins). */
   readonly farms: readonly KnownFarm[];
+  /** Oldest first. */
+  readonly times: readonly ActivityTime[];
 }
 
 /** How many of each kind are read back; the agent keeps no more than this in its prompts anyway. */
@@ -42,14 +48,16 @@ export interface RecallLimits {
   readonly places: number;
   readonly lately: number;
   readonly farms: number;
+  /** Activity records read back: enough to cover the last hour. */
+  readonly times: number;
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house", "farm"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time"] as const;
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const memorySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string() }) }),
+  z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional() }) }),
   z.object({ kind: z.literal("own_objective"), outcome: z.string().min(1) }),
   z.object({
     kind: z.literal("unfinished_house"),
@@ -70,6 +78,10 @@ const memorySchema = z.discriminatedUnion("kind", [
       tendedAt: z.string(),
       state: z.object({ planted: z.number().int().min(0), ripe: z.number().int().min(0), empty: z.number().int().min(0) }),
     }),
+  }),
+  z.object({
+    kind: z.literal("activity_time"),
+    time: z.object({ activity: z.enum(ACTIVITIES), ended: z.string(), minutes: z.number().min(0) }),
   }),
 ]);
 
@@ -92,6 +104,7 @@ function describe(memory: Memory): string {
       const { farm } = memory;
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
     }
+    case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity} (until ${memory.time.ended}).`;
   }
 }
 
@@ -106,7 +119,7 @@ export function recallQuery(username: string, limits: RecallLimits): string {
       `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC LIMIT ${limit})`;
   };
   // A farm is noted at every tend: read enough notes to find the latest of each of the farms kept.
-  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8)].join(" UNION ALL ")} ORDER BY note_id DESC`;
+  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times)].join(" UNION ALL ")} ORDER BY note_id DESC`;
 }
 
 /** Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. */
@@ -115,6 +128,7 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
   const lately: string[] = [];
   let unfinished: UnfinishedHouse | null | undefined;
   const farms = new Map<string, KnownFarm>();
+  const times: ActivityTime[] = [];
   for (const context of contexts) {
     const memory = parse(context);
     if (memory === null) continue;
@@ -125,8 +139,9 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
       const key = `${memory.farm.centre.x},${memory.farm.centre.y},${memory.farm.centre.z}`;
       if (!farms.has(key) && farms.size < limits.farms) farms.set(key, memory.farm);
     }
+    if (memory.kind === "activity_time" && times.length < limits.times) times.push(memory.time);
   }
-  return { places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse() };
+  return { places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse() };
 }
 
 function parse(context: string): Memory | null {
@@ -138,4 +153,28 @@ function parse(context: string): Memory | null {
   } catch {
     return null;
   }
+}
+
+/** This bot's activity-time notes, newest first, as `note_id` and `context` (for {@link staleActivityNotes}). */
+export function activityNotesQuery(username: string): string {
+  const prefix = `${PREFIX}: activity_time `;
+  return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
+    `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC`;
+}
+
+/**
+ * The ids of activity-time notes older than the last `minutes` of play (spec 2026-10-04-activity-time-travel-
+ * terraforming: the hour rotates), from rows of `note_id` and `context`, newest first. The note that crosses the hour
+ * is kept.
+ */
+export function staleActivityNotes(rows: readonly (readonly unknown[])[], minutes: number): number[] {
+  const stale: number[] = [];
+  let played = 0;
+  for (const [id, context] of rows) {
+    const memory = parse(String(context ?? ""));
+    if (memory?.kind !== "activity_time" || typeof id !== "number") continue;
+    if (played >= minutes) stale.push(id);
+    else played += memory.time.minutes;
+  }
+  return stale;
 }

@@ -79,3 +79,16 @@ test("aborting the signal cancels a non-interruptible action", async () => {
   assert.equal(outcome.status, "cancelled");
   assert.equal(outcome.preempted, false);
 });
+
+test("every foreground action is reported once it ends, with how long it ran, failed ones too", async () => {
+  const runtime = new FakeRuntime();
+  runtime.durations = { collect_block: 1 };
+  runtime.failures = { craft_item: "[CRAFT_FAILED] no table" };
+  const body = new Body(runtime, () => undefined);
+  const seen: [string, unknown, number][] = [];
+  body.onAction = (tool, input, ms) => seen.push([tool, input, ms]);
+  await body.act("collect_block", { block_name: "stone", count: 1 }, "test");
+  await body.act("craft_item", { items: [] }, "test");
+  assert.deepEqual(seen.map(([tool, input]) => [tool, input]), [["collect_block", { block_name: "stone", count: 1 }], ["craft_item", { items: [] }]]);
+  assert.ok(seen.every(([, , ms]) => ms >= 0));
+});

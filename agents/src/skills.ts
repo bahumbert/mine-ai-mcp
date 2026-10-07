@@ -1,18 +1,27 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { describeStep, type Step } from "./actions.ts";
+import type { Activity } from "./activities.ts";
+import { COMPASS_HEADINGS, describeStep, type Step } from "./actions.ts";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { gatherMaterials, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, notNear, walkToStation } from "./gathering.ts";
+import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
-import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
+/**
+ * A follow asked for by a player ends after this long without a word from them; on her own goal it lasts the minutes
+ * the step says, {@link FOLLOW_OWN_MINUTES} by default (spec 2026-10-04-activity-time-travel-terraforming: live, Vex
+ * followed Tester, who never asked, until an order came).
+ */
+const FOLLOW_QUIET_MS = 10 * 60_000;
+const FOLLOW_OWN_MINUTES = 5;
 /** Extra blocks tolerated beyond the follow distance before moving, so the bot does not twitch at every step. */
 const FOLLOW_SLACK = 1.5;
 /** A followed player this far from the current navigation target triggers a re-plan. */
@@ -48,6 +57,10 @@ export interface SkillContext {
   readonly self?: string;
   /** Told what it starts doing now and why, at a skill's phase changes (see {@link GatherContext.progress}). */
   readonly progress?: (fact: string) => void;
+  /** Told that the step's work is another activity from now on (the house's site preparation is terraforming). */
+  readonly phase?: (activity: Activity) => void;
+  /** When the player who asked for this step last said anything (epoch ms); unset for her own goals. */
+  readonly heardFrom?: () => number;
   /** The farms it made, as at their last tend; farming near one tends it. */
   readonly farms?: readonly KnownFarm[];
   /** Told about a farm made or tended, to remember it. */
@@ -78,12 +91,16 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
   const why = `I chose to ${describeStep(step)}.`;
   try {
     switch (step.skill) {
-      case "follow_player": return await follow(context, step.player, step.distance);
+      case "follow_player": return await follow(context, step.player, step.distance, step.minutes);
       case "go_to_player": return await come(context, step.player);
       case "go_to":
         return await once(context, "navigate", { x: step.x, y: step.y, z: step.z, range: GO_TO_RANGE }, why, `reached ${step.x} ${step.y} ${step.z}`);
-      case "collect_block":
-        return await once(context, "collect_block", { block_name: step.block, count: step.count }, why, `collected ${step.count} ${step.block}`);
+      case "explore": return await explore(context, step, why);
+      case "collect_block": {
+        // Within the fetch range, like get_items: a trip is a go_to of its own (spec 2026-10-03 fetch-range).
+        const collected = await once(context, "collect_block", { block_name: step.block, count: step.count, max_distance: FETCH_RANGE }, why, `collected ${step.count} ${step.block}`);
+        return collected.status === "failed" ? { status: "failed", detail: await notNear(context, step.block, collected.detail) } : collected;
+      }
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "drop_item": {
         const dropped = await once(context, "drop_item", { items: [{ item_name: step.item, ...(step.count !== undefined && { count: step.count }) }], allow_equipped: true }, why, `dropped ${step.count ?? "all the"} ${step.item}`);
@@ -127,11 +144,21 @@ export function planFollowStep(snapshot: BotSnapshot, player: string, distance: 
   return { kind: "move", target };
 }
 
-async function follow(context: SkillContext, player: string, distance: number): Promise<SkillResult> {
-  const { runtime, body, signal } = context;
+async function follow(context: SkillContext, player: string, distance: number, minutes?: number): Promise<SkillResult> {
+  const { runtime, body, signal, heardFrom } = context;
+  const started = Date.now();
+  const until = started + (minutes ?? FOLLOW_OWN_MINUTES) * 60_000;
   let unseen = 0;
   let failures = 0;
   while (!signal.aborted) {
+    // Asked for by a player: it lasts while they keep talking (any line restarts the count). On her own goal: its minutes.
+    if (heardFrom !== undefined && minutes === undefined) {
+      if (Date.now() - heardFrom() >= FOLLOW_QUIET_MS) {
+        return { status: "done", detail: `followed ${player}; they said nothing for ${FOLLOW_QUIET_MS / 60_000} minutes, so I went back to my own things` };
+      }
+    } else if (Date.now() >= until) {
+      return { status: "done", detail: `followed ${player} for ${Math.round((Date.now() - started) / 60_000)} minutes` };
+    }
     const step = planFollowStep(await runtime.status(), player, distance);
     if (step.kind === "lost") {
       unseen += 1;
@@ -229,6 +256,18 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)));
   if (resumed === null) {
+    // A new site clear of every protected area before anything is protected or dug, and if not, where the nearest
+    // clear one is (live 2026-10-03: told only "choose another zone clear of it", she stepped one block at a time,
+    // and each refused start left its site protected for good: 16 house boxes, most of them never built).
+    const areas = await context.runtime.protectedRegions();
+    const blocked = overlapsOf(areas, siteBox(plan));
+    if (blocked.length > 0) {
+      const clear = nearestClearSite(areas, style, step.size, plan.site, toward);
+      const where = clear === null
+        ? `no site clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or build somewhere else`
+        : `the nearest site clear of them has its door ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
+      return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) ${describeOverlaps(context, blocked)}; ${where}` };
+    }
     const missing = shortfall(plan.bill, snapshot.inventory);
     // Only what is missing, named as the step that fetches it: get_items adds to what she carries, so asking for the
     // whole bill fetched it twice and filled her inventory (live 2026-10-02).
@@ -257,20 +296,26 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
   if (resumed === null || resumed.prepared === false) {
     const box = houseBox(plan.batches.flat());
+    // Clearing and levelling the site is reshaping ground, not building (spec 2026-10-04-activity-time-travel-terraforming).
+    context.phase?.("terraforming");
     const prepared = await levelZone(context, { minX: box.min.x, maxX: box.max.x, minZ: box.min.z, maxZ: box.max.z }, plan.site.door.y, `the site of ${what}`, {
       // Blocks do not fall: a house needs its ring level and the water above its floor gone, not a pond filled under
       // it (live 2026-10-02: 258 cobblestone mined for a site over a pond). Its own floor goes in even over water.
       below: 1,
       placedLater: new Set(plan.batches.flat().filter((cell) => cell.block !== "air").map((cell) => `${cell.x},${cell.y},${cell.z}`)),
-    }, plan.bill, protection.area.regionId);
+    }, plan.bill, [protection.area.regionId, ...earlierProtections(context, kind, plan.site.door, protection.area.regionId)]);
+    // Nothing of the house stands yet: its site is not kept protected (a resume protects it again).
     if (prepared.status === "stopped" || context.signal.aborted) {
       leaveUnfinished(0, false);
+      await releaseArea(context, protection.area.regionId);
       return { status: "stopped" };
     }
     if (prepared.status === "failed") {
       leaveUnfinished(0, false);
+      await releaseArea(context, protection.area.regionId);
       return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}` };
     }
+    context.phase?.("building");
   }
   // A resumed house is checked again from its first part: `build_structure` skips the cells already right, and anything
   // dug out since (the doorstep under the door, by the gathering next to it: live 2026-10-01) is put back. The second
@@ -316,6 +361,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   context.remember?.({
     name: `the ${kind} you built${context.requester === undefined ? "" : ` for ${context.requester}`}`,
     detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
+    ...(context.requester === undefined && { own: true }),
   });
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
 }
@@ -349,18 +395,13 @@ const TOOL_COBBLESTONE: Readonly<Record<string, number>> = { pickaxe: 3, axe: 3,
  * the liquid above the level, digs from the top down, then fills the holes from the bottom up with what the dig
  * brought, fetching only what is still short (`terrain.ts`).
  */
-export async function levelZone(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string } = {}, reserved: readonly { readonly item: string; readonly count: number }[] = [], ownRegion?: number): Promise<SkillResult> {
+export async function levelZone(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string } = {}, reserved: readonly { readonly item: string; readonly count: number }[] = [], ownRegions: readonly number[] = []): Promise<SkillResult> {
   const { min, max } = levelBox(zone, level);
   // Leveling digs inside her own regions too (it runs as a build): never over an area she protects, her other houses
   // included, except the house being prepared (live 2026-10-02: a zone "between the oak_log markers" reached her house).
-  const overlapping = (await context.runtime.protectedRegions()).filter((area) =>
-    area.regionId !== ownRegion && !area.label.startsWith(LEVELING_LABEL) &&
-    area.min.x <= max.x && area.max.x >= min.x && area.min.y <= max.y && area.max.y >= min.y && area.min.z <= max.z && area.max.z >= min.z);
+  const overlapping = overlapsOf(await context.runtime.protectedRegions(), { min, max }, ownRegions);
   if (overlapping.length > 0) {
-    // What each area is, so the model weighs it (live 2026-10-02: told only "release it first", she released Tom's area
-    // and then her own house to level around Tom, and began digging the house).
-    const whose = (area: ProtectedArea) => area.owner === context.self ? "yours: leveling would dig it up" : `owned by ${area.owner}`;
-    return { status: "failed", detail: `${what} overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => `#${area.regionId} '${area.label}' (${whose(area)})`).join(", ")}: choose another zone clear of ${overlapping.length === 1 ? "it" : "them"}, or ask whoever asked you` };
+    return { status: "failed", detail: `${what} ${describeOverlaps(context, overlapping)}: choose another zone clear of ${overlapping.length === 1 ? "it" : "them"}, or ask whoever asked you` };
   }
   // Her own region while she works, with a margin: fill is dug a safe distance away, never at the zone's edge or
   // under it (owner, 2026-10-02: she dug right below the zone she was leveling). A house site gets it too.
@@ -524,7 +565,7 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
     for (const at of found) keep.add(`${at.x},${at.y},${at.z}`);
     level ??= Math.min(...found.map((at) => at.y));
   } else if (step.around !== undefined) {
-    const seen = findPlayer(snapshot, step.around)?.position ?? null;
+    const seen = whereIs(snapshot, step.around, context.self);
     if (seen === null) return { status: "failed", detail: `cannot see ${step.around} to level the ground around them` };
     const [x, z] = [Math.floor(seen.x), Math.floor(seen.z)];
     zone = { minX: x - step.radius, maxX: x + step.radius, minZ: z - step.radius, maxZ: z + step.radius };
@@ -546,7 +587,7 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
 async function protectArea(context: SkillContext, step: Extract<Step, { skill: "protect_area" }>): Promise<SkillResult> {
   let centre: Position;
   if (step.player !== undefined) {
-    const seen = findPlayer(await context.runtime.status(), step.player)?.position ?? null;
+    const seen = whereIs(await context.runtime.status(), step.player, context.self);
     if (seen === null) return { status: "failed", detail: `cannot see ${step.player} to protect the area around them` };
     centre = seen;
   } else if (step.x !== undefined && step.y !== undefined && step.z !== undefined) {
@@ -593,6 +634,237 @@ export function houseBox(cells: readonly Position[]): { readonly min: Position; 
   };
 }
 
+/** One leg of an exploring walk: within loaded ground, so `navigate` sees the surface (and the water) it goes to. */
+const EXPLORE_LEG = 32;
+/** Above this share of water in the explored ground of the next leg, the walk does not go on. */
+const MOSTLY_WATER = 0.5;
+/** How far ahead unseen land is looked for, along each way. */
+const EXPLORE_REACH = 512;
+/**
+ * How far around her she sees, in blocks: chunks within it are already in her map from where she stands (the server's
+ * view distance, 10 chunks, less a margin), so the walk to new land stops this short of it.
+ */
+const SIGHT = 128;
+/** The longest walk one explore step makes. */
+const EXPLORE_MAX_WALK = 384;
+
+/**
+ * Walks one compass way, `chunks` x 16 blocks from where she stands, in legs of {@link EXPLORE_LEG} blocks (`navigate`
+ * to the ground there, which moves a target on water to the nearest shore or refuses it), then says where she ended,
+ * what water she crossed and, asked `for` a block, where the nearest one is; it stops early once that block is within
+ * fetching range (spec 2026-10-03 explore-skill). It does not set off over ground she knows to be mostly water.
+ * Live 2026-10-04: the runtime's `explore_frontier` walked to the edge of all she had ever explored that way first,
+ * 400 blocks north over water for "3 chunks".
+ */
+async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
+  const setOut = await context.runtime.status();
+  const start = setOut.position;
+  // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
+  // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
+  const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+  const radians = (COMPASS_HEADINGS[step.toward] * Math.PI) / 180;
+  const [dx, dz] = [Math.sin(radians), -Math.cos(radians)];
+  // Land she has seen is not explored again (owner, 2026-10-04: "exploring already known areas has no point"; her
+  // houses and protected areas are such land): the walk goes on to where unseen land comes into sight, then `chunks`
+  // chunks beyond it.
+  const unseen = await context.runtime.unseenAlong(start, { x: start.x + dx * EXPLORE_REACH, z: start.z + dz * EXPLORE_REACH, y: start.y }).catch(() => null);
+  if (unseen === null) {
+    return { status: "failed", detail: `${step.toward} is land you have seen as far as ${EXPLORE_REACH} blocks: explore another way (${await unseenWays(context, start)})` };
+  }
+  // A way already sailed from near here without finding land is not sailed again (live 2026-10-04: Vex rode 450
+  // blocks of sea out and back nine times, from the same base, north, north-west, north-east and north again).
+  const sailed = openSeaWays(context.runtime).find((sea) => sea.toward === step.toward && Math.hypot(sea.from.x - start.x, sea.from.z - start.z) <= OPEN_SEA_NEAR);
+  if (sailed !== undefined) {
+    return { status: "failed", detail: `${step.toward} from here is open sea: you sailed it and found no land within ${sailed.blocks} blocks: explore another way (${await unseenWays(context, start)})` };
+  }
+  const known = Math.max(0, unseen - SIGHT);
+  const total = Math.min(EXPLORE_MAX_WALK, known + step.chunks * 16);
+  context.progress?.(`exploring ${step.toward}${step.for === undefined ? "" : ` for ${step.for}`}`);
+  let here = start;
+  let stop: string | null = null;
+  let found: FoundBlock | undefined;
+  for (let walked = 0; walked < total;) {
+    let leg = Math.min(EXPLORE_LEG, total - walked);
+    let target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
+    const water = await context.runtime.waterAlong(here, target).catch(() => null);
+    if (water !== null && water.share > MOSTLY_WATER && boat) {
+      leg = total - walked;
+      target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
+    } else if (water !== null && water.share > MOSTLY_WATER) {
+      const ahead = `${step.toward} is water as far as you have seen (${Math.round(water.share * 100)}% of the next ${water.chunks} chunk${water.chunks === 1 ? "" : "s"})`;
+      if (walked > 0) {
+        stop = ahead;
+        break;
+      }
+      // Already out at sea, every way may be water: the way back to land is what helps (live 2026-10-04: Vex, 104
+      // blocks out over water, was refused all eight ways, fifteen steps in a row). Her own chunk: a line ending where
+      // she stands counts it (the start of a line never does).
+      const atSea = await context.runtime.waterAlong({ x: start.x - 16, y: start.y, z: start.z }, start).catch(() => null);
+      if (atSea !== null && atSea.share > MOSTLY_WATER) {
+        const land = await context.runtime.nearestLand(start).catch(() => null);
+        const back = land === null ? "you know of no land near" : `the nearest land you have seen is ${describeWay(start, land)}, around ${land.x} ${Math.floor(start.y)} ${land.z}: go_to there first`;
+        return { status: "failed", detail: `you are out on the water, and ${ahead}; ${back}` };
+      }
+      return { status: "failed", detail: `${ahead}: explore another way, or say so` };
+    }
+    let outcome = await context.body.act("navigate", { x: target.x, z: target.z, range: 4 }, why, { signal: context.signal });
+    // Caves under the ground make the column ambiguous: the walk is over the ground, the highest height it lists
+    // (live 2026-10-04: "[NAVIGATION_HEIGHT_REQUIRED] … observed standable feet heights: 70, -19, -47").
+    const surface = /observed standable feet heights: (-?\d+)/u.exec(outcome.error ?? "")?.[1];
+    if (outcome.status !== "succeeded" && !context.signal.aborted && surface !== undefined) {
+      outcome = await context.body.act("navigate", { x: target.x, y: Number(surface), z: target.z, range: 4 }, why, { signal: context.signal });
+    }
+    if (context.signal.aborted) return { status: "stopped" };
+    const before = here;
+    here = (await context.runtime.status()).position;
+    if (outcome.status !== "succeeded") {
+      stop = outcome.error ?? `navigate ${outcome.status}`;
+      break;
+    }
+    walked += leg;
+    if (Math.hypot(here.x - before.x, here.z - before.z) < 4) {
+      stop = "the way ahead did not take her any farther";
+      break;
+    }
+    if (step.for !== undefined) {
+      const nearest = await nearestFree(context, step.for);
+      if (nearest !== undefined && Math.hypot(nearest.x - here.x, nearest.z - here.z) <= FETCH_RANGE) {
+        found = nearest;
+        break;
+      }
+    }
+  }
+  const crossed = await context.runtime.waterAlong(start, here).catch(() => null);
+  const parts = [
+    `now ${describeWay(start, here)} from where you started, at ${Math.floor(here.x)} ${Math.floor(here.y)} ${Math.floor(here.z)}`,
+    ...(crossed === null || crossed.share === 0 ? [] : [`${Math.round(crossed.share * 100)}% of the ground crossed was water`]),
+  ];
+  if (step.for !== undefined) {
+    found ??= await nearestFree(context, step.for);
+    parts.push(found === undefined ? `no ${step.for} seen on the way` : `the nearest ${step.for} is ${describeWay(here, found)}, at ${found.x} ${found.y} ${found.z}`);
+  }
+  parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
+  const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
+  if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, blocks: Number(noLand[1]) });
+  if (stop === null || found !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
+  return { status: "failed", detail: `exploring ${step.toward} stopped (${stop}): ${parts.join("; ")}` };
+}
+
+/** How near where a way was sailed without land it counts as the same way. */
+const OPEN_SEA_NEAR = 256;
+/** Ways sailed without finding land, by bot, this run. */
+const openSeas = new WeakMap<object, { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[]>();
+
+function openSeaWays(runtime: object): { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[] {
+  const ways = openSeas.get(runtime) ?? [];
+  openSeas.set(runtime, ways);
+  return ways;
+}
+
+/** "north 180 blocks, east 40 blocks; seen as far as 512 blocks: south, west": how far unseen land is each way. */
+async function unseenWays(context: SkillContext, from: Position): Promise<string> {
+  const near: string[] = [];
+  const none: string[] = [];
+  const ways = await Promise.all(Object.entries(COMPASS_HEADINGS).map(async ([way, degrees]) => {
+    const radians = (degrees * Math.PI) / 180;
+    const to = { x: from.x + Math.sin(radians) * EXPLORE_REACH, y: from.y, z: from.z - Math.cos(radians) * EXPLORE_REACH };
+    return [way, await context.runtime.unseenAlong(from, to).catch(() => null)] as const;
+  }));
+  for (const [way, distance] of [...ways].sort((a, b) => (a[1] ?? Infinity) - (b[1] ?? Infinity))) {
+    if (distance === null) none.push(way);
+    else near.push(`${way} ${distance} blocks`);
+  }
+  return [near.join(", "), none.length === 0 ? "" : `seen as far as ${EXPLORE_REACH} blocks: ${none.join(", ")}`].filter((part) => part !== "").join("; ");
+}
+
+/** How many of the nearest blocks of a name are looked through for one outside every protected area. */
+const FREE_SCAN = 64;
+
+/**
+ * The nearest block of this name outside every protected area: one she may take (live 2026-10-04: "the nearest
+ * oak_log is 22 blocks" was a wall of her own house; all 48 logs near were, and she walked to them for 40 steps).
+ */
+async function nearestFree(context: SkillContext, name: string): Promise<FoundBlock | undefined> {
+  const areas = context.areas ?? [];
+  const inside = (block: FoundBlock) => areas.some((area) =>
+    block.x >= area.min.x && block.x <= area.max.x && block.y >= area.min.y && block.y <= area.max.y && block.z >= area.min.z && block.z <= area.max.z);
+  return (await context.runtime.findBlocks(name, FREE_SCAN)).find((block) => !inside(block));
+}
+
+/** How far around a refused house site the nearest clear one is looked for. */
+const SITE_SEARCH = 32;
+
+/** Protected areas a box overlaps, her leveling margins and `except` (the region of the work itself) left out. */
+function overlapsOf(areas: readonly ProtectedArea[], { min, max }: { readonly min: Position; readonly max: Position }, except: readonly number[] = []): ProtectedArea[] {
+  return areas.filter((area) =>
+    !except.includes(area.regionId) && !area.label.startsWith(LEVELING_LABEL) &&
+    area.min.x <= max.x && area.max.x >= min.x && area.min.y <= max.y && area.max.y >= min.y && area.min.z <= max.z && area.max.z >= min.z);
+}
+
+/**
+ * "overlaps protected area #4 'small medieval house' (yours: leveling would dig it up)": what each area is, so the
+ * model weighs it (live 2026-10-02: told only "release it first", she released Tom's area and then her own house to
+ * level around Tom, and began digging the house).
+ */
+function describeOverlaps(context: SkillContext, overlapping: readonly ProtectedArea[]): string {
+  const whose = (area: ProtectedArea) => area.owner === context.self ? "yours: leveling would dig it up" : `owned by ${area.owner}`;
+  return `overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => `#${area.regionId} '${area.label}' (${whose(area)})`).join(", ")}`;
+}
+
+/**
+ * Her own earlier protections of this same house: a region of hers, with its label, around its door (live 2026-10-04:
+ * resuming her unfinished house, its site was refused for overlapping #12, the same house protected before with a
+ * slightly different box).
+ */
+function earlierProtections(context: SkillContext, label: string, door: Position, current: number, areas: readonly ProtectedArea[] = context.areas ?? []): number[] {
+  return areas.filter((area) =>
+    area.regionId !== current && area.owner === context.self && area.label === label &&
+    door.x >= area.min.x - 1 && door.x <= area.max.x + 1 && door.z >= area.min.z - 1 && door.z <= area.max.z + 1,
+  ).map((area) => area.regionId);
+}
+
+/** Everything a new house touches: its protected box and the box its site leveling digs and fills. */
+function siteBox(plan: ReturnType<typeof planHouse>): { readonly min: Position; readonly max: Position } {
+  const house = houseBox(plan.batches.flat());
+  const level = levelBox({ minX: house.min.x, maxX: house.max.x, minZ: house.min.z, maxZ: house.max.z }, plan.site.door.y);
+  return {
+    min: { x: house.min.x, y: Math.min(house.min.y, level.min.y), z: house.min.z },
+    max: { x: house.max.x, y: Math.max(house.max.y, level.max.y), z: house.max.z },
+  };
+}
+
+/**
+ * The door of the nearest house site, at the same height, whose house and leveling overlap no protected area, as
+ * `build` at those coordinates would plan it (facing whoever it is for); null when none lies within
+ * {@link SITE_SEARCH} blocks. Geometry only: the ground there is leveled by the build as usual.
+ */
+function nearestClearSite(areas: readonly ProtectedArea[], style: ReturnType<typeof styleOrDefault>, size: HouseSize, refused: Site, toward: Position | null): Position | null {
+  // One plan per facing, then moved: the box of a door elsewhere is the same box shifted.
+  const boxes = new Map<string, { readonly min: Position; readonly max: Position }>();
+  const boxFor = (door: Position) => {
+    const facing = siteAt(door, toward).facing;
+    let box = boxes.get(facing);
+    if (box === undefined) {
+      box = siteBox(planHouse(style, size, { door: refused.door, facing }));
+      boxes.set(facing, box);
+    }
+    const [dx, dz] = [door.x - refused.door.x, door.z - refused.door.z];
+    return { min: { x: box.min.x + dx, y: box.min.y, z: box.min.z + dz }, max: { x: box.max.x + dx, y: box.max.y, z: box.max.z + dz } };
+  };
+  for (let ring = 1; ring <= SITE_SEARCH; ring += 1) {
+    const doors: Position[] = [];
+    for (let dx = -ring; dx <= ring; dx += 1) {
+      for (let dz = -ring; dz <= ring; dz += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) === ring) doors.push({ x: refused.door.x + dx, y: refused.door.y, z: refused.door.z + dz });
+      }
+    }
+    doors.sort((a, b) => Math.hypot(a.x - refused.door.x, a.z - refused.door.z) - Math.hypot(b.x - refused.door.x, b.z - refused.door.z));
+    const clear = doors.find((door) => overlapsOf(areas, boxFor(door)).length === 0);
+    if (clear !== undefined) return clear;
+  }
+  return null;
+}
+
 export function noteArea(context: SkillContext, area: ProtectedArea): void {
   if (context.areas === undefined) return;
   const index = context.areas.findIndex((known) => known.regionId === area.regionId);
@@ -603,6 +875,15 @@ export function noteArea(context: SkillContext, area: ProtectedArea): void {
 export function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlayer | undefined {
   const wanted = username.toLowerCase();
   return snapshot.players.find((entry) => entry.username.toLowerCase() === wanted);
+}
+
+/**
+ * Where a player named in a step stands; her own name is where she stands (live 2026-10-03: "level 4 blocks around
+ * Ayla" failed five times with "cannot see Ayla", the players list holding only the others).
+ */
+function whereIs(snapshot: BotSnapshot, username: string, self: string | undefined): Position | null {
+  if (self !== undefined && username.toLowerCase() === self.toLowerCase()) return snapshot.position;
+  return findPlayer(snapshot, username)?.position ?? null;
 }
 
 export function navigateInput(target: Position, range: number): Record<string, unknown> {

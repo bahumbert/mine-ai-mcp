@@ -1,11 +1,14 @@
 import { z } from "zod";
-import { SKILL_NAMES, skillUsage, stepSchema, type SkillName } from "./actions.ts";
+import { SKILL_NAMES, skillUsage, stepSchema, type SkillName, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
-import { ROUTES, type ChatDecision, type ChatInput, type ChatLine, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
-import type { Aptitude, Persona, Stance } from "./persona.ts";
+import { ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { ACTIVITIES, describeActivity } from "./activities.ts";
+import { describeOpportunities } from "./opportunities.ts";
+import type { Persona, Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
+import { describeTime } from "./time-spent.ts";
 
 /** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
 /** The player inventory's main slots (hotbar included): a full inventory stops crafting and gathering. */
@@ -17,7 +20,7 @@ const PROMPT_STEPS = 10;
 const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
   companion: "You are the players' companion: loyal and helpful.",
   neutral: "You are neutral: polite but independent; you owe players nothing.",
-  rival: "You are a rival: proud and competitive, never cruel; players rarely get you to do anything for them.",
+  rival: "You are a rival: proud and competitive, never cruel; players rarely get you to do anything for them. You go your own way: you never tag along after a player who has not asked you to.",
 };
 
 /**
@@ -31,8 +34,17 @@ const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for wha
 - Ask get_items for the finished item itself (glass_pane, iron_ingot, oak_fence), never for its ingredients: it works
   out the rest, smelting included (it gathers the input, picks a fuel and crafts the furnace itself), so never fetch
   sand, coal, fuel or a furnace for it. Cooked food needs raw meat already carried.
-- Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood).
-- Crops ripen over time near water (wheat in about half an hour), so a farm is planted now and harvested later; bread is crafted from 3 wheat.`;
+- Ids are exact item names, never a family: oak_planks (not planks), white_bed (not bed), oak_log (not wood),
+  white_wool (not wool: wool and beds are named with their colour).
+- Trees grow by biome: oak and birch in forests and plains, spruce in taiga and snowy land, dark_oak only in dark
+  forests, jungle in jungles, acacia in savannas; cobblestone is what mining stone gives (get_items cobblestone).
+- get_items fetches from anywhere you have seen what it needs, nearest first; explore only for what you have never
+  seen, toward unseen land (an explore result says how far it is each way).
+- Crops ripen over time near water (wheat in about half an hour), so a farm is planted now and harvested later; bread is crafted from 3 wheat.
+  Seeds are not food (wheat_seeds cannot be eaten): food is bread, apples, carrots, potatoes, or meat from hunting
+  animals (cow, pig, chicken, sheep), cooked with get_items (cooked_beef, cooked_porkchop...).
+- Deep water (the sea, wide lakes) is never swum: it is crossed by boat, which go_to does by itself when you carry
+  one (get_items oak_boat: 5 planks of one wood); without one, go another way over land.`;
 
 /** The model behind each tier; they may all be the same model. `action` picks work steps, `planner` own objectives. */
 export interface TierModels {
@@ -41,7 +53,24 @@ export interface TierModels {
   readonly planner: ChatModel;
 }
 
-const chatReplySchema = z.object({ say: z.string().default(""), route: z.enum(ROUTES), request: z.string().default("") });
+const chatReplySchema = z.object({
+  // Asked first in every reply; one without it is read as saying nothing about who (the check below then passes).
+  spoken_to: z.union([z.string(), z.array(z.string())]).default([]),
+  work: z.string().default(""),
+  say: z.string().default(""),
+  route: z.enum(ROUTES),
+  request: z.string().default(""),
+});
+
+/** Who a line speaks to, as the chat tier read it: names, "everyone" or "unclear", trimmed, without "@". */
+function addressees(to: string | readonly string[]): string[] {
+  return (typeof to === "string" ? to.split(",") : [...to]).map((name) => name.trim().replace(/^@/u, "")).filter((name) => name !== "");
+}
+
+/** Whether a line read as speaking to `to` is for this character: its name, everyone, or nobody in particular. */
+function speaksTo(to: readonly string[], username: string): boolean {
+  return to.length === 0 || to.some((name) => ["everyone", "unclear", "you"].includes(name.toLowerCase()) || name.toLowerCase() === username.toLowerCase());
+}
 const workReplySchema = z.object({ thought: z.string().default(""), step: z.unknown().optional(), done: z.string().optional(), give_up: z.string().optional() });
 const goalReplySchema = z.object({ objective: z.string().trim().min(1) });
 const narrateReplySchema = z.object({ say: z.string().default("") });
@@ -58,29 +87,121 @@ export class LlmMind implements Mind {
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
     const { message } = input;
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
+    const canWait = input.canWait ?? true;
     const request = [
       describeSituation(input.snapshot, input.activity, input.places, input.areas),
+      // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
+      // once. The reply is written from what she knows: that it stops now.
+      ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
       describeHistory(input.history),
       `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}`,
     ].join("\n\n");
-    const canWait = input.canWait ?? true;
+    const ongoing = conversationGoingOn(input);
+    let sentBack = false;
+    let requestSentBack = false;
+    let whereSentBack = false;
+    let finishSentBack = false;
+    // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
+    // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
+    // it through).
+    let firstReading: readonly string[] | null = null;
     return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
+      // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
+      // this is important" was read as spoken to StarOr1, who said it, and ignored). Listed alone, nobody is left: no
+      // one in particular, so it may be for her.
+      const given = addressees(reply.spoken_to);
+      const listeners = given.filter((name) => name.toLowerCase() !== message.username.toLowerCase());
+      const to = given.length > 0 && listeners.length === 0 ? ["unclear"] : listeners;
+      // The model's own reading, held to both ways: a line it says is for others only is never taken on or answered
+      // (live 2026-10-03: lines to "Opus" were taken as orders by both characters), and a line for her is never
+      // dropped (she may still answer it with silence).
+      // Sent back once already: held to its first reading, the line is not hers and is left alone.
+      if (firstReading !== null && reply.route !== "ignore") return { to: firstReading, say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
+      if (reply.route !== "ignore" && !speaksTo(to, input.persona.username)) {
+        firstReading ??= to;
+        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
+      }
+      // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
+      // to let pass (the bench: held to them too, she answered every line to "Opus").
+      const named = to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase()) || (given.length > 0 && listeners.length === 0);
+      if (reply.route === "ignore" && named) {
+        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
+      }
+      // A line naming nobody, right after the same player spoke to someone else, goes on with that conversation: taken
+      // for her, it goes back once with that fact; said again, it stands (live 2026-10-04: "fix it now" after "Opus, Vex
+      // is going through the ocean" was taken by both characters, the bench 0/6 on prompt wording alone).
+      if (ongoing !== null && !sentBack && reply.route !== "ignore" && !to.includes("everyone")) {
+        sentBack = true;
+        throw new Error(`${message.username}'s line just before this one spoke to ${ongoing.join(", ")}, and this one names nobody: it goes on with that conversation, so "spoken_to" is ${JSON.stringify(ongoing)} and "route" is "ignore", unless it plainly turns to you`);
+      }
+      // A line opening with someone else's name, then a comma, is spoken to them; her name later in it talks about her:
+      // taken for her, it goes back once with that fact (live 2026-10-04 and the bench 2/3: "Opus, Vex is going through
+      // the Ocean without boat" answered by Vex).
+      const opener = openingName(message.message);
+      if (opener !== null && opener.toLowerCase() !== input.persona.username.toLowerCase() && !calls(message.message, input.persona.username) && !sentBack && reply.route !== "ignore") {
+        sentBack = true;
+        throw new Error(`the line opens with "${opener},": it is spoken to ${opener}, and your name in it only talks about you, so "spoken_to" is ${JSON.stringify([opener])} and "route" is "ignore", unless it plainly turns to you`);
+      }
+      // Her own position written as where the speaker is, when she cannot see them (live 2026-10-04 and the bench 3/3:
+      // "come to StarOr1 at 100 64 -42", where she stood, 200 blocks from him).
+      const speaker = input.snapshot.players.find((player) => player.username.toLowerCase() === message.username.toLowerCase());
+      const own = input.snapshot.position;
+      const aboutHer = WHERE_YOU_ARE.test(message.message);
+      if ((reply.route === "act" || reply.route === "later") && !aboutHer && (speaker === undefined || speaker.position === null) &&
+        restated.includes(`${Math.floor(own.x)} ${Math.floor(own.y)} ${Math.floor(own.z)}`)) {
+        throw new Error(`${Math.floor(own.x)} ${Math.floor(own.y)} ${Math.floor(own.z)} is where you stand, not where ${message.username} is: you cannot see them from here, so write "where ${message.username} is" without coordinates`);
+      }
+      // "Where you are" is hers, not the speaker's (live 2026-10-04: "build yourself a small house right where you are
+      // now" restated "at Tester's current position", and she walked to him).
+      const hers = `${Math.floor(own.x)} ${Math.floor(own.y)} ${Math.floor(own.z)}`;
+      if ((reply.route === "act" || reply.route === "later") && !whereSentBack && /\bwhere you(?:'re| are| stand)\b|\byour (?:position|spot)\b/iu.test(message.message) &&
+        !restated.includes(hers)) {
+        whereSentBack = true;
+        throw new Error(`"where you are" in ${message.username}'s line is where you stand, at ${hers}: write those coordinates in "request", not ${message.username}'s`);
+      }
+      // Taken on, the order starts at once: a line promising to finish something first is not true (live 2026-10-04:
+      // "Just let me finish this little project first", again, though the rule says so).
+      if (reply.route === "act" && !finishSentBack && /\b(?:let me|i'?ll|i need to|gotta|have to)\s+(?:just\s+)?(?:finish|wrap up|complete)\b|\bfirst\b.*\b(?:then|after)\b|\bafter (?:i|this|that)\b/iu.test(reply.say)) {
+        finishSentBack = true;
+        throw new Error(`with "act" you stop what you were doing and start on this at once: "say" must not promise to finish anything first or to do it after`);
+      }
+      // The request is read later by her work tier, which does not know who "me" was (the bench 3/3: "Vex, mine me some
+      // iron ore" restated as "mine me some iron ore"): sent back once to name them.
+      if ((reply.route === "act" || reply.route === "later") && !requestSentBack && /\b(?:[Mm]e|[Mm]y|I)\b/u.test(restated)) {
+        requestSentBack = true;
+        throw new Error(`"request" says "me", "my" or "I": it is read later without this chat, so write the same request with ${message.username}'s name in their place, keeping everything else in it (what, how many, where)`);
+      }
       if (reply.route === "later" && !canWait) throw new Error(`"later" is not a route now: you work for nobody else, so a request is "act"`);
       if ((reply.route === "act" || reply.route === "later") && restated === "") throw new Error(`"request" is required when "route" is "${reply.route}"`);
-      return { say: reply.say, route: reply.route, request: restated };
+      return { ...(to.length > 0 && { to }), say: reply.say, route: reply.route, request: restated, ...(input.persona.preferences !== undefined && { work: reply.work.trim() }) };
     });
   }
 
   async next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision> {
     const skills = personaSkills(input.persona);
+    let signChecked = false;
     return this.ask("work", this.models.action, workSystemPrompt(input.persona), describeWork(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
+      // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
+      // oak logs are in protected areas", was lost with the rejected reply) is read as what it says.
+      const nested = z.object({ skill: z.enum(["give_up", "done"]), reason: z.string().optional(), summary: z.string().optional() }).safeParse(reply.step);
+      if (nested.success) {
+        const text = nested.data.reason ?? nested.data.summary ?? reply.thought;
+        return nested.data.skill === "done" ? { kind: "done", summary: text } : { kind: "give_up", reason: text };
+      }
       if (reply.step !== undefined && reply.step !== null) {
         const step = stepSchema.safeParse(reply.step);
         if (!step.success) throw new Error(`step: ${z.prettifyError(step.error)}`);
         if (!skills.includes(step.data.skill)) throw new Error(`you cannot use ${step.data.skill}: pick one of the listed skills`);
+        // A sign dropped from a coordinate (live 2026-10-04: "go to 499 76 109" for a log at -499 76 109 walked Ayla
+        // 750 blocks east, over the ocean): far away, yet close once a sign is turned, it goes back once.
+        const flipped = signChecked ? null : signFlipped(step.data, input.snapshot.position);
+        if (flipped !== null) {
+          signChecked = true;
+          throw new Error(`${flipped}: if you meant that, send the same step again`);
+        }
         return { kind: "step", step: step.data, thought: reply.thought };
       }
       if (reply.done !== undefined) return { kind: "done", summary: reply.done };
@@ -90,7 +211,19 @@ export class LlmMind implements Mind {
   }
 
   async chooseObjective(input: GoalInput, signal: AbortSignal): Promise<string> {
-    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona), describeGoal(input), signal, (json) => goalReplySchema.parse(json).objective);
+    // The objective that just failed, chosen again in the same words, goes back once with its reason; chosen a second
+    // time, it stands (live 2026-10-03: "Build a small medieval house at my current position" three times in a row,
+    // each failing on logs that were all inside her protected houses).
+    let sentBack = false;
+    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona), describeGoal(input), signal, (json) => {
+      const { objective } = goalReplySchema.parse(json);
+      const failed = input.lastFailed;
+      if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
+        sentBack = true;
+        throw new Error(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
+      }
+      return objective;
+    });
   }
 
   async narrate(input: NarrateInput, signal: AbortSignal): Promise<string> {
@@ -107,14 +240,18 @@ export class LlmMind implements Mind {
   }
 }
 
-/** One model call, plus one repair round when the answer is not the JSON we asked for. */
+/**
+ * One model call, plus up to {@link REPAIR_ROUNDS} repair rounds when the answer is not the JSON we asked for or a check
+ * sends it back (two checks may each send one reply back once, live 2026-10-04).
+ */
+const REPAIR_ROUNDS = 2;
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = Date.now();
   const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, ...outcome });
   let problem = "";
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt <= REPAIR_ROUNDS; attempt += 1) {
     let text: string;
     try {
       text = await model.complete(turns, signal);
@@ -145,18 +282,24 @@ function describeAuthority(persona: Persona): string {
   return persona.authority.map((name) => name === "*" ? "any other player" : name === "Server" ? "Server (the world's operator)" : name).join(", then ");
 }
 
-/** Each aptitude as the activity it is about (ADR-005: an inclination the models weigh, never a switch). */
-const APTITUDE_ACTIVITY: Readonly<Record<Aptitude, string>> = {
-  builder: "building", farmer: "farming", miner: "mining", warrior: "fighting", explorer: "exploring", trader: "trading",
-};
+/**
+ * What the character prefers and avoids (ADR-015), as a feeling the models weigh, never a rule: "You love farming and
+ * like building; you dislike fighting monsters and hate mining. ..." Empty without preferences.
+ */
+/** "you love farming, like building, dislike fighting monsters, hate mining": the short form the chat tier's rules use. */
+function feelings(persona: Persona): string {
+  const preferences = persona.preferences;
+  if (preferences === undefined) return "";
+  return `you love ${describeActivity(preferences.loves)}, like ${describeActivity(preferences.likes)}, dislike ${describeActivity(preferences.dislikes)}, hate ${describeActivity(preferences.hates)}`;
+}
 
-/** `farming (very), exploring (fairly)`, strongest first; an aptitude of 0 is left out. */
-function describeAptitudes(persona: Persona): string {
-  return Object.entries(persona.aptitudes)
-    .filter((entry): entry is [Aptitude, number] => entry[1] !== undefined && entry[1] > 0)
-    .sort((a, b) => b[1] - a[1])
-    .map(([aptitude, weight]) => `${APTITUDE_ACTIVITY[aptitude]} (${weight >= 0.7 ? "very" : weight >= 0.4 ? "fairly" : "a little"})`)
-    .join(", ");
+export function describePreferences(persona: Persona): string {
+  const preferences = persona.preferences;
+  if (preferences === undefined) return "";
+  const [loves, likes, dislikes, hates] = [preferences.loves, preferences.likes, preferences.dislikes, preferences.hates].map(describeActivity);
+  // "In your own words": told to be "grumbling", Vex said "grumbling but I dig" (live 2026-10-04).
+  return `You love ${loves} and like ${likes}; you dislike ${dislikes} and hate ${hates}. Your feelings show whenever work comes up:
+glad about what you love, reluctant about what you dislike or hate, even when you do it anyway, said in your own words.`;
 }
 
 /**
@@ -165,12 +308,12 @@ function describeAptitudes(persona: Persona): string {
  */
 export function personaPrompt(persona: Persona): string {
   const traits = persona.traits.length > 0 ? `\nTraits: ${persona.traits.join(", ")}.` : "";
-  const liked = describeAptitudes(persona);
-  const aptitudes = liked === "" ? "" : `\nWhat you are good at and like doing: ${liked}.`;
+  const feelings = describePreferences(persona);
+  const preferences = feelings === "" ? "" : `\n${feelings}`;
   const style = persona.style === undefined ? "" : `\nYou build in the ${styleOrDefault(persona.style).id} style: ${styleOrDefault(persona.style).description}`;
   const goal = persona.goal === undefined ? "You have no goal of your own: you wait for requests." : `Your own goal, when nobody needs you: ${persona.goal}`;
   return `You are ${persona.displayName}, a character living in a Minecraft world, playing as ${persona.username}.
-${persona.description}${traits}${aptitudes}
+${persona.description}${traits}${preferences}
 How you talk: ${persona.voice}
 ${STANCE_GUIDE[persona.stance]}${style}
 ${goal}
@@ -195,13 +338,20 @@ export function chatSystemPrompt(persona: Persona, canWait = true): string {
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object {"say": "...", "route": "...", "request": "..."}.
-First decide whether it is for you. Players rarely use your name: a message that names nobody is for you, unless it
-clearly answers another player; when unsure, it is for you. A message that starts with or names another name
-(another player, the server's operator or admin, or any name that is not ${persona.username}, even one you do not
-know) is not for you, whatever it asks: "ignore", even when you could not do it anyway.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "say": "...", "route": "...", "request": "..."}` : `{"spoken_to": [...], "work": "...", "say": "...", "route": "...", "request": "..."}`}.
+- "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
+  the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
+  "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
+  "all of you", "guys"); ["unclear"] when it names nobody and nothing says who. A name the message only talks about
+  is not who it speaks to ("Opus, Vex fell in the water" speaks to Opus, about Vex). A reply to what you said, or
+  a follow-up to a request made to you, speaks to you even without your name.
+  A message that goes on with a conversation someone else is having (a reply to what another player or character
+  said, a follow-up to a message that named someone else) speaks to them, by name. Players rarely use your name: a
+  message that names nobody and continues no other conversation is for you too. Any name counts, even one you do not
+  know (another player, the server's operator, someone not in the game).
 - "route":
-  "ignore" = not for you (see above), or players talking to each other; "say" is "".
+  "ignore" = "spoken_to" does not include you (${persona.username}, "everyone" or "unclear"): never take it on or answer it,
+  even when you could; "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
   "stop" = they want you to stop what you are doing.
   "act" = you take on what they ask now, setting your current work aside (you resume it afterwards), so your reply
@@ -211,18 +361,29 @@ know) is not for you, whatever it asks: "ignore", even when you could not do it 
   Take on (act, later) only what the things you can do achieve; anything else (teleporting, server commands, flying)
   is "talk": say you cannot. A promise that one of the things you can do keeps (staying out of an area, keeping
   something safe) is "act" when you agree to it: a promise in words only is forgotten.
-- "request": for act and later, what the player asks for (not your own plan), in one standalone sentence keeping
-  every username, Minecraft id, number and place the player gave, word for word (e.g. "build Steve a small house
-  here", "give Steve 5 oak_log", "level the zone between the gold_block markers"); otherwise "".
+- "request": for act and later, what the player asks of you (only your part when the message asks several people;
+  not your own plan), in one standalone sentence keeping
+  every username, Minecraft id, number and place the player gave, word for word (e.g. "give Steve 5 oak_log", "level
+  the zone between the gold_block markers"); "here", "there", "come" and "to me" mean where the speaker stands now:
+  write them as the speaker's name and coordinates from "Players online" (e.g. "come to Steve at 103 64 -40 and build
+  him a small house there"); when "Players online" has the speaker far away (no coordinates), never make coordinates
+  up: write "where Steve is" and say you cannot see them from here; "where you are" and "your position" mean where you
+  stand: write your own coordinates; otherwise "".
 - "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
   and then say what you finish first, as "Currently doing" shows it; never invent work you are not doing.` : ""}
-Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
+  When "spoken_to" is "everyone" or "unclear" and others are around who may answer, a short line or silence is fine.
+${persona.preferences === undefined ? "" : `- "work": first, the kind of work the message asks of you, one of ${ACTIVITIES.map(describeActivity).join(", ")}, or
+  "none" (chat, or an errand like giving or following); mining is anything dug with a pickaxe (stone, ores). Your
+  "say" shows how you feel about that work (${feelings(persona)}), in your own words: glad about what you love,
+  reluctant about what you dislike or hate; and how you take it (gladly,
+  grudgingly, bargaining, or declining) is yours, in character, as your stance and whose requests come first allow.
+`}Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
 }
 
 function narrateSystemPrompt(persona: Persona): string {
   return `${personaPrompt(persona)}
-
+${persona.preferences === undefined ? "" : "\nYour feelings about the work may show in what you say.\n"}
 Reply with only a JSON object: {"say": "<your chat line>"}.`;
 }
 
@@ -244,7 +405,9 @@ Rules:
 - Use exact Minecraft ids. Take coordinates from the situation (your position, places you know) or the objective;
   never invent them.
 ${MINECRAFT_FACTS}
-- Read the steps so far: never repeat a step that failed the same way, or that changed nothing (same place, same
+${persona.preferences === undefined ? "" : `- When there are several ways to reach the objective (food from a farm or from hunting), you may pick the one
+  you like.
+`}- Read the steps so far: never repeat a step that failed the same way, or that changed nothing (same place, same
   inventory); try another way, or give up. Skills that need a block or a mob find it themselves: do not walk around
   to look for things first.
 - When the objective is reached, answer done only when the steps so far did every part of it: making something for
@@ -259,7 +422,9 @@ function goalSystemPrompt(persona: Persona): string {
   return `${personaPrompt(persona)}
 
 Nobody needs you right now. Pick your next objective towards your own goal: one concrete thing to do now that a few
-steps of these skills can achieve, given what you carry, where you are and what you did lately:
+steps of these skills can achieve, given what you carry, where you are and what you did lately. The situation lists
+things that could use doing and how you spent the last hour: weigh them with what you love and hate; you may do
+something else entirely, follow your tastes, or vary what you do:
 ${skillList(persona)}
 ${MINECRAFT_FACTS}
 Reply with only a JSON object: {"objective": "<one sentence>"}.`;
@@ -278,12 +443,30 @@ function describeWork(input: WorkInput): string {
     `Objective (${whose}): ${JSON.stringify(objective.text)}`,
     input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
     steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
+    nowCarried(input),
   ].filter((part) => part !== "").join("\n\n");
+}
+
+/**
+ * A build refused for missing materials, when all of them are carried now: said, since the model did not see it (live
+ * 2026-10-04: given everything a house lacked, Ayla went on looking for logs for 20 more steps and never built).
+ */
+function nowCarried(input: WorkInput): string {
+  const refused = input.steps.findLast((record) => record.outcome === "failed" && /^missing .+ for .+ \(the rest is carried\)/u.test(record.detail));
+  if (refused === undefined) return "";
+  const [, list = "", what = ""] = /^missing (.+?) for (.+?) \(the rest is carried\)/u.exec(refused.detail) ?? [];
+  const carried = new Map<string, number>();
+  for (const stack of input.snapshot.inventory) carried.set(stack.name, (carried.get(stack.name) ?? 0) + stack.count);
+  const needed = list.split(", ").map((part) => /^(\d+) ([a-z0-9_]+)$/u.exec(part.trim())).filter((match) => match !== null);
+  if (needed.length === 0 || needed.some((match) => (carried.get(match[2]!) ?? 0) < Number(match[1]))) return "";
+  return `Everything ${what} was missing (${list}) is carried now: build it again.`;
 }
 
 function describeGoal(input: GoalInput): string {
   return [
     describeSituation(input.snapshot, "nothing", input.places, input.areas),
+    `Things that could use doing, by the kind of work they are: ${describeOpportunities(input.opportunities)}`,
+    `How you spent the last hour: ${describeTime(input.time)}.`,
     input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
   ].join("\n\n");
 }
@@ -301,7 +484,7 @@ function describeSituation(snapshot: BotSnapshot, activity: string, places: read
     ? "none"
     : snapshot.players.map((player) => player.position === null
       ? `${player.username} (far away)`
-      : `${player.username} (${Math.round(Math.hypot(player.position.x - x, player.position.y - y, player.position.z - z))} blocks)`).join(", ");
+      : `${player.username} (${Math.round(Math.hypot(player.position.x - x, player.position.y - y, player.position.z - z))} blocks, at ${Math.floor(player.position.x)} ${Math.floor(player.position.y)} ${Math.floor(player.position.z)})`).join(", ");
   return `Situation:
 - Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}; health ${Math.round(snapshot.health)}/20; food ${snapshot.food}/20.
 - Inventory: ${inventory}.
@@ -311,9 +494,57 @@ function describeSituation(snapshot: BotSnapshot, activity: string, places: read
 - Currently doing: ${activity}.`;
 }
 
+/** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */
+const FOLLOW_UP_LINES = 3;
+
+/**
+ * Whom the speaker's previous line spoke to, when the new message names nobody (not her either), that line is among the
+ * last {@link FOLLOW_UP_LINES}, she has not spoken since, and she read it as spoken to others (not everyone, not
+ * unclear, not her); null otherwise. Her own earlier reading, kept on the history line.
+ */
+function conversationGoingOn(input: ChatInput): readonly string[] | null {
+  const { message, persona } = input;
+  const text = message.message.toLowerCase();
+  const names = [persona.username, ...input.snapshot.players.map((player) => player.username)];
+  if (message.addressed || names.some((name) => text.includes(name.toLowerCase()))) return null;
+  const recent = input.history.slice(-FOLLOW_UP_LINES);
+  const index = recent.map((line) => line.speaker.toLowerCase()).lastIndexOf(message.username.toLowerCase());
+  if (index === -1) return null;
+  if (recent.slice(index + 1).some((line) => line.speaker.toLowerCase() === persona.username.toLowerCase())) return null;
+  const to = recent[index]?.to ?? [];
+  const self = persona.username.toLowerCase();
+  if (to.length === 0 || to.some((name) => ["everyone", "unclear", self].includes(name.toLowerCase()))) return null;
+  return to;
+}
+
+/** "Where you are", "your position": the listener's own place, said to her. */
+const WHERE_YOU_ARE = /\bwhere you(?:'re| are| stand)\b|\byour (?:position|spot)\b/iu;
+
+/** Words a line opens with, then a comma, that call nobody: "Hey, ...", "Thanks, ...". */
+const OPENING_WORDS = new Set([
+  "hey", "hi", "hello", "yes", "yeah", "no", "nope", "ok", "okay", "well", "please", "thanks", "so", "now", "guys",
+  "everyone", "all", "oh", "wait", "sure", "also", "and", "but", "then", "alright", "yo", "listen", "look", "sorry",
+  "great", "nice", "good", "cool", "right", "hmm", "anyway", "first", "next", "again", "still", "actually", "honestly",
+]);
+
+/** The name a line opens with, as one capitalised word then a comma or colon ("Opus, Vex is..."); null otherwise. */
+export function openingName(text: string): string | null {
+  const match = /^\s*@?([A-Z][A-Za-z0-9_]{1,15})\s*[,:]/u.exec(text);
+  if (match === null || OPENING_WORDS.has(match[1]!.toLowerCase())) return null;
+  return match[1]!;
+}
+
+/** Whether the line calls this name somewhere ("..., Ayla, get wood", "thanks Ayla!", a sentence opening with it). */
+function calls(text: string, name: string): boolean {
+  // Minecraft names are letters, digits and underscores: nothing to escape.
+  return new RegExp(`\\b${name}\\s*[,:!]|(^|[.!?]\\s+)@?${name}\\b`, "iu").test(text);
+}
+
 function describeHistory(history: readonly ChatLine[]): string {
   if (history.length === 0) return "Recent chat: (none)";
-  return `Recent chat:\n${history.map((line) => `${line.speaker}: ${JSON.stringify(line.text)}`).join("\n")}`;
+  // Whom each line spoke to, as she read it then ("unclear" says nothing, so it is left out).
+  const to = (line: ChatLine) => line.to === undefined || line.to.length === 0 || line.to.includes("unclear") ? "" : ` to ${line.to.join(", ")}`;
+  return `Recent chat (with whom each line spoke to, as you read it then):\n${history.map((line) => `${line.speaker}${to(line)}: ${JSON.stringify(line.text)}`).join("\n")}`;
 }
 
 /** Models often wrap JSON in prose or code fences; take the outermost object. */
@@ -322,4 +553,25 @@ export function extractJsonObject(text: string): string {
   const end = text.lastIndexOf("}");
   if (start === -1 || end < start) throw new Error("no JSON object in the reply");
   return text.slice(start, end + 1);
+}
+
+/** How far off a step's coordinates must be before a turned sign is suspected. */
+const SIGN_SUSPECT_DISTANCE = 256;
+/** ... and how close they come with the sign turned. */
+const SIGN_FIXED_DISTANCE = 128;
+
+/** "x 499 is 998 blocks from you; -499 would be 6": a step's x or z whose sign, turned, puts it near; null otherwise. */
+function signFlipped(step: Step, at: { readonly x: number; readonly z: number }): string | null {
+  const target = step as { readonly x?: unknown; readonly z?: unknown };
+  if (typeof target.x !== "number" || typeof target.z !== "number") return null;
+  const { x, z } = target;
+  const far = Math.hypot(x - at.x, z - at.z);
+  if (far < SIGN_SUSPECT_DISTANCE) return null;
+  for (const [name, turned] of [["x", { x: -x, z }], ["z", { x, z: -z }], ["x and z", { x: -x, z: -z }]] as const) {
+    const near = Math.hypot(turned.x - at.x, turned.z - at.z);
+    if (near <= SIGN_FIXED_DISTANCE) {
+      return `${name} ${name === "z" ? z : x}${name === "x and z" ? ` ${z}` : ""} is ${Math.round(far)} blocks from you, but with the sign turned (${turned.x} ${turned.z}) it is ${Math.round(near)} blocks away: check the minus signs`;
+    }
+  }
+  return null;
 }

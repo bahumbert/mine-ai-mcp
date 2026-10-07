@@ -192,7 +192,11 @@ function planNeededItem(
     sources.push({ kind: "missing", count: remaining });
     return { state, item: { id: itemId, count, sources } };
   };
-  const recipes = bot.recipesAll(itemId, null, true);
+  // A recolouring recipe (a bed or wool dyed into another colour) makes nothing new: planned, it sent a bot after
+  // black wool and lily of the valley for its first white bed (live 2026-10-04). Kept only when it is the sole recipe.
+  const allRecipes = bot.recipesAll(itemId, null, true);
+  const fresh = allRecipes.filter((recipe) => !isRecolouring(bot, itemId, recipe));
+  const recipes = fresh.length > 0 ? fresh : allRecipes;
   if (recipes.length === 0) return missingLeaf();
 
   const nextAncestors = new Set(ancestors).add(itemId);
@@ -371,4 +375,21 @@ export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarge
     plan: evidence(bot, "ready", state, plannedTargets),
     applications: state.applications,
   };
+}
+
+/** The family of an item named with its colour: "bed" for white_bed, "wool" for red_wool; null for others. */
+const COLOURS = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
+function colouredFamily(name: string): string | null {
+  const colour = [...COLOURS].sort((a, b) => b.length - a.length).find((candidate) => name.startsWith(`${candidate}_`));
+  return colour === undefined ? null : name.slice(colour.length + 1);
+}
+
+/** Whether a recipe for a coloured item takes another of the same family (a black bed dyed white). */
+function isRecolouring(bot: Bot, itemId: number, recipe: Parameters<typeof recipeInputs>[0]): boolean {
+  const family = colouredFamily(bot.registry.items[itemId]?.name ?? "");
+  if (family === null) return false;
+  return recipeInputs(recipe).some((ingredient) => {
+    const name = bot.registry.items[ingredient.id]?.name ?? "";
+    return name !== "" && (name === family || colouredFamily(name) === family);
+  });
 }

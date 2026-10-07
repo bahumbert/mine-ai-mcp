@@ -27,6 +27,8 @@ import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-
 const MAX_CROSSINGS = 2;
 /** Deep open water in a row on the straight way that a bot with a boat crosses by boat before trying a way round. */
 const BOAT_FIRST_LENGTH = 24;
+/** How far past its target a boat ride may go looking for land before it turns back. */
+const BOAT_OVERSHOOT = 32;
 import {
   navigateOutcomes,
   parseNavigateRequest,
@@ -216,6 +218,20 @@ export async function navigate(
   }
 }
 
+/** How far above the bot the way on must lie before a stalled route climbs straight up first. */
+const CLIMB_OUT_HEIGHT = 12;
+
+/** The feet height of the highest place to stand in a column (its surface, above any caves); null when not loaded. */
+function highestFloor(bot: Bot, x: number, z: number): number | null {
+  const dimension = bot.game as typeof bot.game & { minY: number; height: number };
+  for (let y = dimension.minY + dimension.height - 3; y >= dimension.minY; y--) {
+    const block = bot.blockAt(new Vec3(x, y, z));
+    if (!block) return null;
+    if (block.boundingBox === "block" && standable(bot, new Vec3(x, y + 1, z))) return y + 1;
+  }
+  return null;
+}
+
 function beginNavigate(
   bot: Bot,
   request: NavigateRequest,
@@ -223,6 +239,7 @@ function beginNavigate(
   lifetime: AbortSignal,
   observe: ObserveRequest = () => {},
   crossings = 0,
+  climbed = false,
 ) {
   const toolLoss = request.dig ? observeToolTierLoss(bot) : null;
   lifetime.addEventListener("abort", () => toolLoss?.close(), { once: true });
@@ -334,20 +351,23 @@ function beginNavigate(
       if (!carriesBoat(bot)) {
         return { ...stopped, status: "failed", error: navigateOutcomes.deepWater(request, water.start, water.length) };
       }
+      // Already out on the water. Just off the boat by the far bank (live 2026-10-04), the way on is ashore: no boat
+      // goes back in. Out at sea otherwise (live 2026-10-04: Vex, swimming at sea, was told "no shore at the water's
+      // level" ten times in a row), the boat goes in where she is.
+      const atSea = water.shore === null;
+      if (atSea && crossings > 0) return beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
       // To the water's edge, at the water's level: from a cliff the water is out of reach for a boat.
-      const spot = launchSpot(bot, water.start);
+      const spot = atSea ? bot.entity.position.floored() : launchSpot(bot, water.start);
       if (spot === null) return { ...stopped, status: "failed", error: navigateOutcomes.boatCrossingFailed("no shore at the water's level near where the deep water starts") };
-      if (bot.entity.position.distanceTo(spot.offset(0.5, 0, 0.5)) > 1.5) {
+      if (!atSea && bot.entity.position.distanceTo(spot.offset(0.5, 0, 0.5)) > 1.5) {
         const shore = { ...request, x: spot.x, y: spot.y, z: spot.z, range: 0 };
         const atShore = await beginNavigate(bot, shore, dependencies, lifetime, () => {}, MAX_CROSSINGS)(context);
         if (atShore.status !== "succeeded") return { ...stopped, status: "failed", error: navigateOutcomes.boatCrossingFailed(`could not reach the water's edge at ${spot.x} ${spot.y} ${spot.z}: ${atShore.status === "failed" ? atShore.error : atShore.status}`) };
       }
-      // Already out on the water (off the boat by the far bank, live 2026-10-04): ashore there was the way, no boat
-      // goes back in; the route goes on from the land.
-      if (water.shore === null) return beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
       const from = bot.entity.position;
       const length = Math.hypot(request.x - from.x, request.z - from.z);
-      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal);
+      // At most a little past the target: across to it, not on over open sea.
+      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length + BOAT_OVERSHOOT);
       if (context.signal?.aborted) return stopped;
       if (crossed.status !== "crossed") {
         // Where the ride left her, not where the route had stopped before it.
@@ -407,6 +427,21 @@ function beginNavigate(
     }
 
     elapsedMs += route.elapsedMs;
+    // Deep under the ground with the way on far above, a route through the rock stalls (live 2026-10-04: Ayla, at y 1,
+    // saw every route to the surface 30 blocks off stop "planning_stalled" for 15 minutes; one straight up worked):
+    // the surface straight above first, digging up to it, then the way on from there.
+    const climbOut = async (stopped: NavigateResult): Promise<NavigateResult | null> => {
+      if (climbed || !request.dig || context.signal?.aborted) return null;
+      const feet = bot.entity.position;
+      const above = highestFloor(bot, Math.floor(feet.x), Math.floor(feet.z));
+      const goal = destination?.y ?? request.y;
+      if (above === null || above - feet.y < CLIMB_OUT_HEIGHT || (goal !== null && goal - feet.y < CLIMB_OUT_HEIGHT)) return null;
+      const up = { ...request, x: Math.floor(feet.x), y: above, z: Math.floor(feet.z), range: 1 };
+      const climb = await beginNavigate(bot, up, dependencies, lifetime, () => {}, MAX_CROSSINGS, true)(context);
+      if (climb.status !== "succeeded") return null;
+      const onward = await beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings, true)(context);
+      return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start } };
+    };
     const evidence = navigationEvidence(
       bot,
       evidenceRequest(),
@@ -424,7 +459,8 @@ function beginNavigate(
       };
     }
     if (route.status === "stopped") {
-      return overWater({ status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence });
+      const stopped: NavigateResult = { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
+      return (await climbOut(stopped)) ?? overWater(stopped);
     }
     if (destination === null) {
       return overWater({

@@ -15,8 +15,21 @@ const STARTING_SEEDS = 16;
 const tendedSchema = z.object({
   tended: z.object({
     after: z.object({ crops: z.record(z.string(), z.number()), emptyFarmland: z.number() }),
+    skipped: z.record(z.string(), z.array(z.unknown())).optional(),
   }),
 });
+
+/**
+ * Cells `tend_crops` left as they were, counted by reason ("6 not tillable (cobblestone)"); null when none. Live
+ * 2026-10-03: told only "11 cells could not be farmed; see skipped" (a list the model never sees), she guessed she
+ * needed a hoe, fetched one, dropped both she carried and fetched them again.
+ */
+function skippedCells(skipped: Readonly<Record<string, readonly unknown[]>> | undefined): string | null {
+  const reasons = Object.entries(skipped ?? {}).filter(([, cells]) => cells.length > 0);
+  if (reasons.length === 0) return null;
+  const total = reasons.reduce((sum, [, cells]) => sum + cells.length, 0);
+  return `${total} cell${total === 1 ? "" : "s"} left as they were: ${reasons.map(([reason, cells]) => `${cells.length} ${reason}`).join(", ")}`;
+}
 
 function carried(snapshot: BotSnapshot, item: string): number {
   return snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
@@ -96,7 +109,7 @@ async function prepareAndPlant(context: SkillContext, plot: FarmPlot, crop: stri
     placedLater: new Set([waterKey]),
     // Soil a hoe can till (live 2026-10-03: hollows filled with spare cobblestone were "not tillable").
     fillWith: "dirt",
-  }, [], regionId);
+  }, [], [regionId]);
   if (leveled.status !== "done") return leveled.status === "stopped" ? leveled : { status: "failed", detail: `could not level the site of ${what}: ${leveled.detail}` };
 
   const middle = (await context.runtime.blocksIn(water, water)).blocks.get(waterKey);
@@ -139,7 +152,9 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
   const input = { x1: plot.min.x, z1: plot.min.z, x2: plot.max.x, z2: plot.max.z, y: plot.water.y, ...(plant !== null && { plant }) };
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
-  const after = tendedSchema.safeParse(outcome.result).data?.tended.after;
+  const tended = tendedSchema.safeParse(outcome.result).data?.tended;
+  const after = tended?.after;
+  const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});
   const state = {
     planted: crops.reduce((sum, [, count]) => sum + count, 0),
@@ -157,6 +172,6 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
     : `${state.empty} farmland empty`;
   const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}`;
   if (outcome.status === "succeeded") return { status: "done", detail: `${doneDetail}: ${summary}` };
-  if (outcome.status === "partial") return { status: "done", detail: `${doneDetail}, partly: ${summary}; ${outcome.error ?? ""}` };
-  return { status: "failed", detail: `farming the ${crop} plot around ${plot.water.x} ${plot.water.y} ${plot.water.z} stopped: ${outcome.error ?? outcome.status}` };
+  if (outcome.status === "partial") return { status: "done", detail: `${doneDetail}, partly: ${summary}; ${left ?? outcome.error ?? ""}` };
+  return { status: "failed", detail: `farming the ${crop} plot around ${plot.water.x} ${plot.water.y} ${plot.water.z} stopped: ${left === null ? (outcome.error ?? outcome.status) : `${summary}; ${left}`}` };
 }

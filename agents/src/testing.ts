@@ -2,7 +2,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, BlockKind, ToolClass } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -34,6 +35,8 @@ export class FakeRuntime implements BotRuntime {
     health: 20,
     food: 20,
     inventory: [],
+    foods: [],
+    mobs: [],
     players: [],
     policy: null,
   };
@@ -98,7 +101,11 @@ export class FakeRuntime implements BotRuntime {
     return true;
   }
 
-  async craftingNeeds(items: readonly ItemCount[]): Promise<CraftingNeeds> {
+  /** The `prefer` lists `craftingNeeds` was given, in order (the fake planner does not use them). */
+  readonly preferences: (readonly string[])[] = [];
+
+  async craftingNeeds(items: readonly ItemCount[], prefer: readonly string[] = []): Promise<CraftingNeeds> {
+    this.preferences.push(prefer);
     if (items.some(({ item }) => this.unplannable.includes(item))) return { status: "planner_failed", missing: [] };
     if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
     const leaves = new Map<string, number>();
@@ -142,18 +149,66 @@ export class FakeRuntime implements BotRuntime {
     iron_ore: ["stone_pickaxe", "iron_pickaxe"],
   };
 
+  /** The game's block tags the fake reports per block name, on a `blockKinds` lookup only, like the runtime (others: none). */
+  blockTags: Readonly<Record<string, readonly string[]>> = {
+    dirt: ["mineable/shovel"], grass_block: ["mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
+    stone: ["mineable/pickaxe"], cobblestone: ["mineable/pickaxe"], iron_ore: ["mineable/pickaxe"], coal_ore: ["mineable/pickaxe"],
+    oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"],
+  };
+
+  /** Where blocks were seen, by name, as the bot data's frontier map would answer (others: never seen). */
+  seen: Readonly<Record<string, SeenBlock>> = {};
+
+  /** A successful `navigate` moves the bot to its target (off by default: most tests keep the bot where it is). */
+  walkOnNavigate = false;
+
+  /** Surface water share of explored chunks, by "chunkX,chunkZ" (others: never explored). */
+  water: Readonly<Record<string, number>> = {};
+
+  async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
+    const known = chunksAlong(from, to).map(([x, z]) => this.water[`${x},${z}`]).filter((share) => share !== undefined);
+    return known.length === 0 ? null : { chunks: known.length, share: known.reduce((sum, share) => sum + share, 0) / known.length };
+  }
+
+  /** Chunks it has explored, by "chunkX,chunkZ", beside those in `water` (others: never seen). */
+  explored: ReadonlySet<string> = new Set();
+
+  async unseenAlong(from: Position, to: Position): Promise<number | null> {
+    return firstUnseen(from, chunksAlong(from, to), new Set([...this.explored, ...Object.keys(this.water)]));
+  }
+
+  async nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null> {
+    const land = Object.entries(this.water).filter(([, share]) => share < 0.5)
+      .map(([key]) => { const [x, z] = key.split(",").map(Number) as [number, number]; return { x: x * 16 + 8, z: z * 16 + 8 }; })
+      .sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z));
+    return land[0] ?? null;
+  }
+
+  async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
+    const seen = this.seen[block];
+    return seen === undefined || seen.dimension !== "overworld" || Math.hypot(seen.x - from.x, seen.z - from.z) <= beyond ? [] : [seen].slice(0, limit);
+  }
+
+  async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {
+    const seen = this.seen[block];
+    if (seen === undefined) return null;
+    return seen.dimension !== "overworld" || Math.hypot(seen.x - from.x, seen.z - from.z) > beyond ? seen : null;
+  }
+
   async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {
-    return Object.fromEntries(names.map((name) => [name, this.kindOf(name)]));
+    return Object.fromEntries(names.map((name) => [name, { ...this.kindOf(name), tags: this.blockTags[name] ?? [] }]));
   }
 
   private kindOf(name: string): BlockKind {
     return { tool: this.toolClasses[name] ?? null, solid: !FAKE_NOT_SOLID.has(name), harvest: this.harvestTools[name] ?? null };
   }
 
-  async findBlocks(name: string, limit: number): Promise<readonly Position[]> {
+  async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const at = this.snapshot.position;
-    return [...this.world].filter(([, block]) => block === name)
-      .map(([key]) => { const [x, y, z] = key.split(",").map(Number) as [number, number, number]; return { x, y, z }; })
+    // The runtime's `logs` selector matches every wood's log.
+    const matches = (block: string) => block === name || (name === "logs" && block.endsWith("_log"));
+    return [...this.world].filter(([, block]) => matches(block))
+      .map(([key, block]) => { const [x, y, z] = key.split(",").map(Number) as [number, number, number]; return { x, y, z, name: block }; })
       .sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y, a.z - at.z) - Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z))
       .slice(0, limit);
   }
@@ -253,11 +308,16 @@ export class FakeRuntime implements BotRuntime {
   /** A `tend_crops` result for the plot: every cell but the middle planted (src/actions/tend-crops/contract.ts). */
   /** Replaces the `tend_crops` result the fake settles with, when a test needs a particular plot. */
   tendAfter: Readonly<Record<string, unknown>> | null = null;
+  /** Cells `tend_crops` leaves as they were, by reason: the fake then settles it as partial ([TEND_INCOMPLETE]). */
+  tendSkipped: Readonly<Record<string, readonly { x: number; z: number }[]>> | null = null;
+  /** How such a tend settles: partial, or failed when no cell changed. */
+  tendSkippedStatus: "partial" | "failed" = "partial";
 
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
-    if (this.tendAfter !== null) return { tended: { after: this.tendAfter } };
+    const skipped = this.tendSkipped ?? {};
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped } };
     const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
-    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 } } };
+    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped } };
   }
 
   /** What a successful action does to the inventory (leaves only: the fake crafts in one go). */
@@ -319,7 +379,15 @@ export class FakeRuntime implements BotRuntime {
       return { state: "settled", actionId, status: "failed", error: failure, ...(result !== undefined && { result }) };
     }
     this.applyEffects(action.tool, action.input);
+    if (action.tool === "navigate" && this.walkOnNavigate) {
+      // It reaches the ground asked for, at the height it stands.
+      this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
+    }
     const result = action.tool === "tend_crops" ? this.tendResult(action.input) : undefined;
+    if (action.tool === "tend_crops" && this.tendSkipped !== null) {
+      const cells = Object.values(this.tendSkipped).reduce((sum, list) => sum + list.length, 0);
+      return { state: "settled", actionId, status: this.tendSkippedStatus, error: `[TEND_INCOMPLETE] ${cells} cells could not be farmed; see skipped.`, result };
+    }
     return { state: "settled", actionId, status: "succeeded", error: null, ...(result !== undefined && { result }) };
   }
 }
@@ -333,7 +401,6 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     description: "A test companion.",
     traits: [],
     voice: "Plain.",
-    aptitudes: {},
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.

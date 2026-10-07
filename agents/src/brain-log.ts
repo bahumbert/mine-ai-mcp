@@ -1,6 +1,9 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
+import type { Activity } from "./activities.ts";
 import type { ChatTurn } from "./chat-model.ts";
+import type { Opportunity } from "./opportunities.ts";
+import type { ActivityTotal } from "./time-spent.ts";
 
 /**
  * The brain's log, read by the monitor's Mind tab (spec 2026-10-02-monitor-shows-the-mind): one JSON line per event,
@@ -42,6 +45,9 @@ export type BrainEvent =
     readonly requester: string | null;
     readonly outcome?: "done" | "failed";
     readonly detail?: string;
+    /** For its own objectives: the opportunities and the last hour's time the goal tier saw when it chose this one. */
+    readonly opportunities?: readonly Opportunity[];
+    readonly time?: readonly ActivityTotal[];
   }
   | {
     readonly kind: "step";
@@ -53,10 +59,22 @@ export type BrainEvent =
     readonly outcome: "done" | "failed" | "interrupted";
     readonly detail: string;
     readonly ms: number;
+    /** The kind of work the step was (spec 2026-10-03-specialisations-preferences); null for errands. */
+    readonly activity?: Activity | null;
+    /** How its time divided between activities: its walking is travelling, a phase another activity (spec 2026-10-04). */
+    readonly times?: readonly { readonly activity: Activity; readonly ms: number }[];
   }
   | { readonly kind: "progress"; readonly objective: string; readonly fact: string; readonly asked: boolean }
   /** What it is doing now: the stack (top last), the step running, if any. */
-  | { readonly kind: "state"; readonly stack: readonly StackEntry[]; readonly step: string | null };
+  | { readonly kind: "state"; readonly stack: readonly StackEntry[]; readonly step: string | null }
+  /** Written once when the brain starts: who the character is (the monitor's character card; the session starts here). */
+  | {
+    readonly kind: "persona";
+    readonly name: string;
+    readonly stance: string;
+    readonly goal: string | null;
+    readonly preferences: Readonly<Record<"loves" | "likes" | "dislikes" | "hates", Activity>> | null;
+  };
 
 export class BrainLog {
   private seq = 0;

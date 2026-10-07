@@ -1,3 +1,4 @@
+import { DEFAULT_NAVIGATION_POLICY } from "../../survival/policy/contract.js";
 import {
   allSqlQuery,
   botEventSchema,
@@ -40,7 +41,7 @@ export const unreadEventsPageQuery = defineSqlQuery({
     LIMIT ?
   `,
   parseRow: (row) => {
-    const payload: unknown = JSON.parse(String(row.payload_json));
+    const payload: unknown = withNavigationDefaults(JSON.parse(String(row.payload_json)));
     return botEventSchema.parse({
       eventId: row.event_id,
       botId: row.bot_id,
@@ -57,6 +58,22 @@ export const unreadEventsPageQuery = defineSqlQuery({
     });
   },
 });
+
+/**
+ * A status recorded before `dig_straight_down` existed reads back with its default (live 2026-10-04: Tom's old events
+ * failed validation on his first read, and his brain stopped).
+ */
+export function withNavigationDefaults(payload: unknown): unknown {
+  const policy = (payload as { status?: { policy?: Record<string, unknown> } } | null)?.status?.policy;
+  if (policy === undefined || policy === null || typeof policy !== "object") return payload;
+  for (const key of ["defaults", "effective"]) {
+    const navigation = (policy[key] as { navigation?: Record<string, unknown> } | undefined)?.navigation;
+    if (navigation !== undefined && navigation !== null && typeof navigation === "object" && !("dig_straight_down" in navigation)) {
+      navigation.dig_straight_down = DEFAULT_NAVIGATION_POLICY.dig_straight_down;
+    }
+  }
+  return payload;
+}
 
 export const remainingEventsQuery = defineSqlQuery({
   id: "remaining-events-count",

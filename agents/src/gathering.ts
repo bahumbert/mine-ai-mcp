@@ -4,6 +4,12 @@ import { errorCode, type BotRuntime, type ItemCount, type Position, type Smeltin
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
+/**
+ * How far (horizontally) a fetch goes for what it gathers, from where each collect starts (spec 2026-10-03
+ * fetch-range): never a trip by itself (live 2026-10-03: unbounded, a fetch for a scarce wood walked 900 blocks across
+ * an ocean). Farther is a decision of the model: a `go_to` of its own.
+ */
+export const FETCH_RANGE = 64;
 /** The runtime's `smelt_item` limit per call: one furnace input slot. */
 const MAX_SMELT = 64;
 /** Gather/craft/smelt rounds before giving up; a house takes about five (logs, table, pickaxe, stone, crafting),
@@ -68,6 +74,8 @@ interface Knowledge {
   readonly source: Map<string, string | null>;
   /** Items that only come from crops someone grows (wheat): a farm, not gathering, gets them. */
   readonly cropOnly: Set<string>;
+  /** The woods growing nearby, nearest first, looked up once: recipes that take any wood are planned with them. */
+  woods: readonly string[] | null;
 }
 
 /**
@@ -93,13 +101,24 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const knowledge: Knowledge = { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), cropOnly: new Set() };
+  const knowledge = newKnowledge();
+  // Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
+  // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
+  // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone).
+  keep = (await Promise.all(keep.map(async (entry) => ((await howToGet(context.runtime, entry.item, knowledge)) === "gather" ? null : entry))))
+    .filter((entry): entry is ItemCount => entry !== null);
   const actions: string[] = [];
+  /** Her own items a craft used and that were not replaced, none being near. */
+  const usedOwn: ItemCount[] = [];
+  const finish = (detail: string): GatherResult => ({
+    status: "done",
+    detail: usedOwn.length === 0 ? detail : `${detail}; used ${describeMaterials(usedOwn)} of what you carried (none near to replace it)`,
+  });
   let wanted = [...bill];
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     const inventory = (await context.runtime.status()).inventory;
     const missing = shortfall(wanted, inventory);
-    if (missing.length === 0) return { status: "done", detail: actions.length === 0 ? "had everything" : actions.join(", ") };
+    if (missing.length === 0) return finish(actions.length === 0 ? "had everything" : actions.join(", "));
     const plan = await planRound(context.runtime, missing, inventory, knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
@@ -123,12 +142,25 @@ export async function gatherMaterials(
       else return { status: "failed", detail: `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt` };
     }
     if (step.status === "stopped") return step;
+    // What a craft took from her own items is replaced only from what is near: when the replacement is out of range,
+    // she goes on with what was asked for and says what she used (live 2026-10-03: a wooden pickaxe used one of Vex's
+    // own dark oak logs, and replacing it walked 700 blocks; with the range, it ended the fetch instead).
+    if (step.status === "failed" && /^no \S+ within /u.test(step.detail)) {
+      const used = shortfall(keep, (await context.runtime.status()).inventory);
+      if (used.length > 0 && wanted.some((entry) => !bill.some((asked) => asked.item === entry.item && asked.count >= entry.count))) {
+        wanted = [...bill];
+        usedOwn.push(...used);
+        continue;
+      }
+    }
     if (step.status === "failed") {
       // A setback that still got something (a pickaxe that broke after 15 of 16 stones) or a fight that interrupted
       // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
       // without progress for any other reason ends the gathering.
       const after = shortfall(wanted, (await context.runtime.status()).inventory);
-      if (units(after) >= units(missing) && errorCode(step.detail) !== "HOSTILE_CONTACT") return step;
+      // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
+      // round goes on without it, or makes another.
+      if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) return step;
       actions.push(`setback (${step.detail})`);
       continue;
     }
@@ -136,7 +168,7 @@ export async function gatherMaterials(
   }
   const left = shortfall(wanted, (await context.runtime.status()).inventory);
   return left.length === 0
-    ? { status: "done", detail: actions.join(", ") }
+    ? finish(actions.join(", "))
     : { status: "failed", detail: `still missing ${describeMaterials(left)} after ${MAX_ROUNDS} rounds of gathering` };
 }
 
@@ -161,6 +193,39 @@ function keepWhatCraftingUsed(wanted: readonly ItemCount[], keep: readonly ItemC
 
 function units(items: readonly ItemCount[]): number {
   return items.reduce((sum, { count }) => sum + count, 0);
+}
+
+function newKnowledge(): Knowledge {
+  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), cropOnly: new Set(), woods: null };
+}
+
+/** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, or broken from `block`. */
+export type ObtainedBy =
+  | { readonly way: "craft" | "smelt" | "farm" | "none" }
+  | { readonly way: "gather"; readonly block: string };
+
+/** How `get_items` would get `item` (the runtime's game data: recipes, furnace recipes, loot tables). */
+export async function obtainedBy(runtime: BotRuntime, item: string): Promise<ObtainedBy> {
+  const knowledge = newKnowledge();
+  const how = await howToGet(runtime, item, knowledge);
+  if (how === null) return { way: "none" };
+  if (how !== "gather") return { way: how };
+  const block = await sourceBlock(runtime, item, knowledge);
+  if (block !== null) return { way: "gather", block };
+  return { way: knowledge.cropOnly.has(item) ? "farm" : "none" };
+}
+
+/** Woods loaded around her, looked at for the nearest logs of any kind. */
+const WOOD_SCAN = 48;
+
+/**
+ * The logs loaded nearby, nearest first, once per gathering: what a player chops for sticks, a table or wooden tools.
+ * Carrying no wood, the crafting planner otherwise named the first wood in registry order (live 2026-10-03: Vex walked
+ * 900 blocks, across an ocean, for pale oak, with oak and birch all around).
+ */
+async function nearbyWoods(runtime: BotRuntime, knowledge: Knowledge): Promise<readonly string[]> {
+  knowledge.woods ??= [...new Set((await runtime.findBlocks("logs", WOOD_SCAN)).map((found) => found.name))];
+  return knowledge.woods;
 }
 
 /** How `item` is obtained: crafted, smelted (with its recipes), or gathered as it is; null when it is no item. */
@@ -289,7 +354,8 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   };
   const need = async (item: string, count: number): Promise<string | null> => {
     const how = await howToGet(runtime, item, knowledge);
-    if (how === null) return `${item} is not a Minecraft item`;
+    // A family named without its colour (live 2026-10-04: "wool"): the white one, what a white sheep gives.
+    if (how === null) return (await howToGet(runtime, `white_${item}`, knowledge)) === null ? `${item} is not a Minecraft item id` : `${item} is named with its colour in Minecraft: white_${item} (or red_${item}, black_${item}, ...)`;
     const into = how === "craft" ? crafted : how === "smelt" ? smelts : null;
     if (into === null) return gathered(item, count);
     into.set(item, (into.get(item) ?? 0) + count);
@@ -325,7 +391,7 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
     const batch = [...crafted].map(([item, count]) => ({ item, count }));
     if (batch.length === 0 && tools.length === 0) continue;
     leaves = new Map();
-    const needs = await runtime.craftingNeeds(withTools(batch, tools, inventory));
+    const needs = await runtime.craftingNeeds(withTools(batch, tools, inventory), await nearbyWoods(runtime, knowledge));
     if (needs.status === "uncraftable" || needs.status === "planner_failed" || needs.status === "unknown") {
       return `cannot work out how to craft ${describeMaterials([...batch, ...tools.map((item) => ({ item, count: 1 }))])}`;
     }
@@ -395,12 +461,114 @@ async function collectAll(context: GatherContext, targets: readonly (readonly [s
     context.progress?.(`gathering ${total} ${block} for ${purpose}`);
     for (let left = total; left > 0; left -= MAX_COLLECT) {
       const count = Math.min(left, MAX_COLLECT);
-      const step = await act(context, "collect_block", { block_name: block, count }, `Gather ${count} ${block} for ${purpose}.`);
-      if (step !== null) return step;
+      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
+      if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step);
+      if (step !== null) return step.status === "failed" ? { status: "failed", detail: await notNear(context, block, step.detail) } : step;
     }
     done.push(`collected ${total} ${block}`);
   }
   return { status: "done", detail: done.join(", ") };
+}
+
+/**
+ * How far a gathering walks by itself to where it saw the block before, when none it may take is near; farther, the
+ * model is told where and decides on the trip.
+ */
+const AUTO_TRIP = 512;
+/** Places tried, nearest first, in one gathering. */
+const FAR_TRIES = 5;
+/** The nearest places looked at, at most, in one gathering. */
+const FAR_CANDIDATES = 256;
+/**
+ * Places that held nothing she may take, by bot (chunk middles, "x,z"), for this run: not tried again. The runtime
+ * rescans a chunk loaded again after 10 minutes, so its record catches up with the world anyway.
+ */
+const triedPlaces = new WeakMap<BotRuntime, Set<string>>();
+
+/** Nothing within range, or nothing there she can take (inside protected areas, under water, blocked). */
+function noneUsableNear(detail: string): boolean {
+  const code = errorCode(detail);
+  return code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS" ||
+    (code === "NO_REACHABLE_MATCHING_TARGETS" && !/no carried tool/u.test(detail));
+}
+
+/**
+ * None of `block` near that she may take: the whole world she knows (the bot data's record of what each explored
+ * chunk holds), nearest first, never a place that held nothing already; walked to and collected there up to
+ * {@link AUTO_TRIP} blocks away; farther, she is told where it is. Null when collected, else what went wrong (live
+ * 2026-10-04: every oak log near Ayla was a wall of her houses, a forest 140 blocks off, and every order failed).
+ */
+async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult): Promise<GatherResult | null> {
+  const tried = triedPlaces.get(context.runtime) ?? new Set<string>();
+  triedPlaces.set(context.runtime, tried);
+  // Places holding a protected area come last: their blocks are often its walls (live 2026-10-04: the nearest oak logs
+  // Ayla had seen were in the chunks of her own houses, and she walked to them).
+  const areas = await context.runtime.protectedRegions().catch(() => []);
+  const guarded = (x: number, z: number) => areas.some((area) => area.min.x <= x + 8 && area.max.x >= x - 8 && area.min.z <= z + 8 && area.max.z >= z - 8);
+  // The nearest places she saw it, read once (live 2026-10-04: one query per place, through thousands of chunks, held
+  // Ayla still for minutes): those she may take from first, then the rest.
+  const start = (await context.runtime.status()).position;
+  const places = (await context.runtime.seenPlaces(block, start, FETCH_RANGE, FAR_CANDIDATES).catch(() => []))
+    .filter((place) => !tried.has(`${place.x},${place.z}`));
+  const ordered = [...places.filter((place) => !guarded(place.x, place.z)), ...places.filter((place) => guarded(place.x, place.z))];
+  let last = failed;
+  let tries = 0;
+  for (const seen of ordered) {
+    if (tries >= FAR_TRIES || context.signal.aborted) break;
+    const here = (await context.runtime.status()).position;
+    if (Math.hypot(seen.x - here.x, seen.z - here.z) > AUTO_TRIP) {
+      return tries > 0 ? last : { status: "failed", detail: `no ${block} near that you may take; the nearest you know of is ${describeWay(here, seen)}, around ${seen.x} ${seen.z}: go_to there and get_items again if it is worth the trip, use another material, or say so` };
+    }
+    tries += 1;
+    context.progress?.(`going ${describeWay(here, seen)} to the ${block} seen there, for ${purpose}`);
+    const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
+    let there = await act(context, "navigate", { x: seen.x, z: seen.z, range: 12 }, why);
+    // Caves under the ground: the walk is over the ground, the highest height the runtime lists (as `explore` does).
+    const surface = there?.status === "failed" ? /observed standable feet heights: (-?\d+)/u.exec(there.detail)?.[1] : undefined;
+    if (surface !== undefined) there = await act(context, "navigate", { x: seen.x, y: Number(surface), z: seen.z, range: 12 }, why);
+    if (there !== null) {
+      last = there;
+      continue;
+    }
+    const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
+    if (step === null) return null;
+    last = step;
+    if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
+    tried.add(`${seen.x},${seen.z}`);
+  }
+  return last;
+}
+
+/** The eight compass directions, by the angle from east going south (Minecraft's +z is south). */
+const COMPASS = ["east", "south-east", "south", "south-west", "west", "north-west", "north", "north-east"] as const;
+
+/**
+ * A collect that found nothing in range, told with what the bot knows: where it saw that block before beyond that range
+ * (the bot data's explored chunks), how far and which way, or that it knows of none; the model decides what to do (go there, use another
+ * material, tell whoever asked). Other failures are passed on as they are.
+ */
+export async function notNear(context: Pick<GatherContext, "runtime">, block: string, detail: string): Promise<string> {
+  const code = errorCode(detail);
+  if (code !== "NO_TARGET_IN_RANGE" && code !== "NO_LOADED_MATCHING_TARGETS") return detail;
+  const here = (await context.runtime.status()).position;
+  const seen = await context.runtime.seenAt(block, here, FETCH_RANGE).catch(() => null);
+  const near = `no ${block} within ${FETCH_RANGE} blocks`;
+  if (seen === null) return `${near}, and you know of none farther away: explore for it (toward land you have not seen), use another material, or say so (${detail})`;
+  if (seen.dimension !== "overworld") return `${near}; you saw some in ${seen.dimension.replaceAll("_", " ")} around ${seen.x} ${seen.z} (${detail})`;
+  // Across water she knows (the explored chunks on the straight way are mostly water): a trip by boat (spec 2026-10-04).
+  const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
+  if (water !== null && water.share > 0.5) {
+    const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+    const trip = boat ? "go_to there crosses by boat (you carry one)" : "take a boat (get_items oak_boat) and go_to there";
+    return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
+  }
+  return `${near}; you saw some ${describeWay(here, seen)}, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: go_to there yourself if it is worth the trip, use another material, or say so (${detail})`;
+}
+
+/** "18 blocks south-west": how far `to` is from `from` across the ground, and which way. */
+export function describeWay(from: { readonly x: number; readonly z: number }, to: { readonly x: number; readonly z: number }): string {
+  const [dx, dz] = [to.x - from.x, to.z - from.z];
+  return `${Math.round(Math.hypot(dx, dz))} blocks ${COMPASS[(Math.round(Math.atan2(dz, dx) / (Math.PI / 4)) + 8) % 8]}`;
 }
 
 /** Walks back near `home` when farther than {@link HOME_RANGE}; null when there (or back). */
@@ -454,8 +622,11 @@ const STATION_RANGE = 16;
  */
 export async function walkToStation(context: GatherContext, block: "crafting_table" | "furnace"): Promise<Position | null> {
   const here = (await context.runtime.status()).position;
-  const station = (await context.runtime.findBlocks(block, 1))[0];
-  if (station === undefined || Math.hypot(station.x - here.x, station.y - here.y, station.z - here.z) > STATION_RANGE) return null;
+  const found = (await context.runtime.findBlocks(block, 1))[0];
+  if (found === undefined || Math.hypot(found.x - here.x, found.y - here.y, found.z - here.z) > STATION_RANGE) return null;
+  // Coordinates only: the result is spread into `navigate` and `smelt_item` inputs, which refuse unknown keys (live
+  // 2026-10-03: the block's `name` made every walk to a crafting table fail validation).
+  const station = { x: found.x, y: found.y, z: found.z };
   const outcome = await context.body.act("navigate", { ...station, range: 2 }, `Walk to the ${block.replaceAll("_", " ")} close by to use it.`, { signal: context.signal });
   return outcome.status === "succeeded" ? station : null;
 }

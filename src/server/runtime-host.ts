@@ -17,6 +17,7 @@ import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecr
 import type { HostOptions } from "./config.js";
 import { registerIncidentCaptureRoute } from "./incident-route.js";
 import { createMinecraftMcpServer } from "./mcp.js";
+import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 
@@ -38,6 +39,8 @@ type ConnectionSettlement =
 
 async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
   using resources = new DisposableStack();
+  const neoforgeComponents =
+    configuration.neoforgeComponents === null ? null : readNeoForgeComponents(configuration.neoforgeComponents);
   const bot = mineflayer.createBot({
     host: configuration.minecraftHost,
     port: configuration.minecraftPort,
@@ -46,6 +49,7 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
     version: configuration.version,
     ...BOT_PHYSICS_OPTIONS,
   });
+  if (neoforgeComponents !== null) joinAsNeoForgeClient(bot, neoforgeComponents);
   // Survival perception, navigation, and diagnostics each keep a permanent
   // respawn and physicsTick listener; the steady-state count sits just past
   // Node's default cap of ten, so raise it while keeping a finite ceiling
