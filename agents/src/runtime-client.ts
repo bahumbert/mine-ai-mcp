@@ -75,6 +75,11 @@ export interface BotSnapshot {
   readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[] } | null;
   /** The overworld's day or night (null elsewhere) and minutes until it changes; unset when the runtime did not say. */
   readonly clock?: { readonly phase: "day" | "night" | null; readonly minutesUntilChange: number | null };
+  /** Her best carried tool and worn armour per class (`view_status` tools; item null: none); unset when not reported. */
+  readonly gear?: {
+    readonly tools: readonly { readonly class: string; readonly item: string | null }[];
+    readonly armour: readonly { readonly class: string; readonly item: string | null }[];
+  };
 }
 
 export interface PlayerMessage {
@@ -316,6 +321,10 @@ const viewStatusSchema = z.object({
         mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number() }) })).default([]),
       }),
       clock: z.object({ phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable() }).optional(),
+      tools: z.object({
+        tools: z.array(z.object({ class: z.string(), item: z.string().nullable() })),
+        armour: z.array(z.object({ class: z.string(), item: z.string().nullable() })),
+      }).optional(),
     }),
   }),
   survivalPolicy: z.object({
@@ -483,6 +492,7 @@ export class McpBotRuntime implements BotRuntime {
       mobs: mobSpecies(situation.nearby.mobs),
       players: situation.nearby.players,
       ...(situation.clock === undefined ? {} : { clock: situation.clock }),
+      ...(situation.tools === undefined ? {} : { gear: situation.tools }),
       policy: data.survivalPolicy === undefined
         ? null
         : {

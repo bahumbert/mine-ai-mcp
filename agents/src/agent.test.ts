@@ -26,8 +26,9 @@ function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRunt
   return { agent, ...tiers };
 }
 
-function say(username: string, message: string) {
-  return { username, channel: "chat" as const, message, addressed: false };
+/** A chat line; addressed to her (her name in it) unless said otherwise: only those start a conversation (owner rule). */
+function say(username: string, message: string, addressed = true) {
+  return { username, channel: "chat" as const, message, addressed };
 }
 
 function bodyCalls(runtime: FakeRuntime): string[] {

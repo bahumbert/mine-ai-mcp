@@ -102,6 +102,19 @@ test("no sword, pickaxe or axe carried is a crafting opportunity, in stone once 
   assert.match(texts(settled({ snapshot: snapshot({ inventory: stone, foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) }))[0]!, /get_items stone_sword, stone_axe /u);
 });
 
+test("with tools, her gear is said, so better gear can be thought of; with none, the missing tools say it", () => {
+  // Owner, 2026-10-07: Vex carried 100 raw iron and a stone sword, never thinking of better gear.
+  const gear = {
+    tools: [{ class: "pickaxe", item: "stone_pickaxe" }, { class: "axe", item: null }, { class: "sword", item: "stone_sword" }, { class: "shovel", item: null }],
+    armour: [{ class: "helmet", item: null }, { class: "chestplate", item: "leather_chestplate" }, { class: "leggings", item: null }, { class: "boots", item: null }],
+  };
+  assert.deepEqual(texts(settled({ snapshot: { ...settled().snapshot, gear } })), [
+    "(crafting) your gear: stone_pickaxe, no axe, stone_sword; armour: no helmet, leather_chestplate, no leggings, no boots (better tools and armour are crafted from what you mine and smelt)",
+  ]);
+  const bare = { ...gear, tools: gear.tools.map((entry) => ({ ...entry, item: null })) };
+  assert.equal(texts(settled({ snapshot: { ...settled().snapshot, gear: bare } })).length, 0);
+});
+
 test("at most six, the most pressing first: worn tools, missing tools and food before the rest", () => {
   const found = findOpportunities({
     now: NOW,

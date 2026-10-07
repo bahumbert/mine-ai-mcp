@@ -199,7 +199,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, otherAgents: this.options.otherAgents }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -727,7 +727,7 @@ export class Agent {
   }
 
   private remember(speaker: string, text: string): ChatLine {
-    const line = { speaker, text };
+    const line = { speaker, text, at: Date.now() };
     this.history.push(line);
     if (this.history.length > HISTORY_LINES) this.history.splice(0, this.history.length - HISTORY_LINES);
     return line;

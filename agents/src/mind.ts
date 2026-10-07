@@ -12,6 +12,8 @@ export interface ChatLine {
    * answered with its own line; absent when it never read it (another agent's line).
    */
   readonly to?: readonly string[];
+  /** When it was said (ms since the epoch); a conversation goes quiet after a while. */
+  readonly at?: number;
 }
 
 /**
@@ -49,8 +51,6 @@ export interface ChatInput {
   readonly areas: readonly ProtectedArea[];
   /** Whether a request may wait ("later"): only while it works for someone else. Default true. */
   readonly canWait?: boolean;
-  /** The other AI characters' usernames: players, but no one a line between people is spoken to. */
-  readonly otherAgents?: readonly string[];
 }
 
 export interface ChatDecision {

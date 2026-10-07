@@ -7,7 +7,8 @@ import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
 
-function chatInput(message: string, addressed = false): ChatInput {
+/** A chat line from Steve; addressed to her unless said otherwise (only those start a conversation: owner rule). */
+function chatInput(message: string, addressed = true): ChatInput {
   return {
     persona: testPersona(),
     message: { username: "Steve", channel: "chat", message, addressed },
@@ -176,9 +177,11 @@ test("the objective that just failed, chosen again as it was, is sent back once 
 });
 
 test("an unnamed line right after the speaker spoke to someone else is sent back once if taken for her; said again, it stands", async () => {
-  // Live 2026-10-04: "fix it now" after "Opus, Vex is going through the ocean" was taken by both characters.
+  // Live 2026-10-04: "fix it now" after "Opus, Vex is going through the ocean" was taken by both characters. In a
+  // conversation with her (an unnamed line reaches the model only then), the speaker turned to Opus.
   const { chat, mind } = scriptedMind();
-  const input = { ...chatInput("fix it now"), history: [{ speaker: "Steve", text: "Opus, Vex fell in the water", to: ["Opus"] }] };
+  const talking = [{ speaker: "Steve", text: "Ayla, wood please", to: ["Ayla"] }, { speaker: "Ayla", text: "On my way!", to: ["Steve"] }];
+  const input = { ...chatInput("fix it now", false), history: [...talking, { speaker: "Steve", text: "Opus, Vex fell in the water", to: ["Opus"] }] };
   chat.reply({ spoken_to: ["Ayla"], say: "On it!", route: "act", request: "fix it" }, { spoken_to: ["Opus"], say: "", route: "ignore", request: "" });
   assert.equal((await mind.chat(input, signal)).route, "ignore");
   assert.match(chat.requests[0]?.[1]?.content ?? "", /Steve to Opus: "Opus, Vex fell in the water"/u);
@@ -187,37 +190,34 @@ test("an unnamed line right after the speaker spoke to someone else is sent back
   chat.reply({ spoken_to: ["Ayla"], say: "Fine.", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "Fine.", route: "talk", request: "" });
   assert.equal((await mind.chat(input, signal)).route, "talk", "said again, it stands");
 
-  // Her name in it, or her own line since, or a line she read as for her: no check.
+  // Her own line since, or the speaker's last line read as for her: no check.
   chat.reply({ spoken_to: ["Ayla"], say: "Sure.", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, history: [...input.history, { speaker: "Ayla", text: "Hm?" }] }, signal)).route, "talk");
+  assert.equal((await mind.chat({ ...input, history: [...input.history, { speaker: "Ayla", text: "Hm?", to: ["Steve"] }] }, signal)).route, "talk");
   chat.reply({ spoken_to: ["Ayla"], say: "Sure.", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, wood please", to: ["Ayla"] }] }, signal)).route, "talk");
+  assert.equal((await mind.chat({ ...input, history: talking }, signal)).route, "talk");
 });
 
-test("with other people around, an unnamed line is theirs unless its speaker is talking with her", async () => {
-  // Live 2026-10-07, real world: players chatted among themselves in French; each line, read as spoken to whoever said
-  // it, got an answer from her.
+test("a conversation starts only when she is addressed; an unnamed line is hers only while one with its speaker goes on", async () => {
+  // Owner rule 2026-10-07, after the real world: players chatted among themselves in French, and each line got an answer.
   const { chat, mind } = scriptedMind();
-  const crowd = { ...new FakeRuntime().snapshot, players: [{ username: "StarOr1", position: null }, { username: "Nonomie38", position: null }] };
-  const input = { ...chatInput("je vois plus les skins"), snapshot: crowd };
-  chat.reply({ spoken_to: ["Steve"], say: "Oh no, Steve!", route: "talk", request: "" });
-  assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 1]);
-  // Read as for everyone, chit-chat among them is still theirs (live, local: "oui, magnifique" answered by both bots).
-  chat.reply({ spoken_to: ["everyone"], say: "Oui, magnifique !", route: "talk", request: "" });
-  assert.equal((await mind.chat(input, signal)).route, "ignore");
-  // Her own earlier answer, with a line since, is no conversation with her: each wrong answer made the next look like one.
-  chat.reply({ spoken_to: ["unclear"], say: "Ah bon ?", route: "talk", request: "" });
-  const older = [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"] }, { speaker: "StarOr1", text: "moi oui" }];
-  assert.equal((await mind.chat({ ...input, history: older }, signal)).route, "ignore");
-
-  // Talking with her (her line to him, or his to her, just before), or naming her, it is hers to answer.
-  chat.reply({ spoken_to: ["unclear"], say: "Ah bon ?", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"] }] }, signal)).route, "talk");
-  chat.reply({ spoken_to: ["Ayla"], say: "Oui !", route: "talk", request: "" });
+  const input = chatInput("je vois plus les skins", false);
+  // Not addressed, no conversation with her: left alone, the model not even asked.
+  assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 0]);
+  // Her name, or a whisper, starts one.
+  chat.reply({ spoken_to: ["Ayla"], language: "French", say: "Oui !", route: "talk", request: "" });
   assert.equal((await mind.chat({ ...input, message: { ...input.message, message: "Ayla tu viens ?", addressed: true } }, signal)).route, "talk");
-  // Other AI characters are no one a line between people is spoken to: alone with them, Steve's line is still hers.
-  chat.reply({ spoken_to: ["unclear"], say: "Coming!", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, snapshot: { ...crowd, players: [{ username: "Vex", position: null }] }, otherAgents: ["Vex"] }, signal)).route, "talk");
+  chat.reply({ spoken_to: ["Ayla"], say: "Oui ?", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...input, message: { ...input.message, channel: "whisper" } }, signal)).route, "talk");
+  // Going on: he spoke to her, or she answered him, within the last lines and minutes; then unnamed lines are read.
+  const now = Date.now();
+  chat.reply({ spoken_to: ["Ayla"], say: "Ah bon ?", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"], at: now }] }, signal)).route, "talk");
+  // Gone quiet (minutes ago, or six lines of others since): over.
+  const requests = chat.requests.length;
+  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, salut", to: ["Ayla"], at: now - 10 * 60_000 }] }, signal)).route, "ignore");
+  const others = Array.from({ length: 6 }, (_, index) => ({ speaker: "Bob", text: `ligne ${index}`, at: now }));
+  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, salut", to: ["Ayla"], at: now }, ...others] }, signal)).route, "ignore");
+  assert.equal(chat.requests.length, requests);
 });
 
 test("a reply sent back for answering a line it read as for someone else keeps that reading", async () => {
@@ -308,7 +308,7 @@ test("every model call is reported with its tier, prompt, raw replies and decisi
 test("a character with preferences names the kind of work a request is before answering; one without is never asked", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const input = (persona: ReturnType<typeof testPersona>): ChatInput => ({
-    persona, message: { username: "Tom", channel: "chat", message: "get me 20 stone", addressed: false }, history: [], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
+    persona, message: { username: "Tom", channel: "chat", message: "get me 20 stone", addressed: true }, history: [], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
   });
   const { mind, chat } = scriptedMind();
   chat.reply({ work: "mining", say: "Ugh, stone... fine.", route: "act", request: "get Tom 20 stone" }, { say: "Sure!", route: "act", request: "get Tom 20 stone" });
@@ -317,8 +317,9 @@ test("a character with preferences names the kind of work a request is before an
 });
 
 test("the chat tier names who a line speaks to first; a line it reads as for others only is never taken on", async () => {
+  // In a conversation with her (StarOr1 spoke to her just before), so the model reads these lines.
   const input = (message: string): ChatInput => ({
-    persona: testPersona(), message: { username: "StarOr1", channel: "chat", message, addressed: false }, history: [], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
+    persona: testPersona(), message: { username: "StarOr1", channel: "chat", message, addressed: false }, history: [{ speaker: "StarOr1", text: "Ayla, hi", to: ["Ayla"] }], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
   });
   const { mind, chat } = scriptedMind();
   // Live 2026-10-03: "Opus, ..." (the owner talking to the controller) was taken as an order. Read as for Opus, an
@@ -353,7 +354,7 @@ test("give_up or done written as a skill inside step is read as what it says, it
  */
 test("the speaker is never one of the listeners, and a line for her is never ignored", async () => {
   const input = (message: string): ChatInput => ({
-    persona: testPersona(), message: { username: "StarOr1", channel: "chat", message, addressed: false }, history: [], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
+    persona: testPersona(), message: { username: "StarOr1", channel: "chat", message, addressed: false }, history: [{ speaker: "Ayla", text: "Harvesting now!", to: ["StarOr1"] }], snapshot: new FakeRuntime().snapshot, activity: "idle", places: [], areas: [],
   });
   const { mind, chat } = scriptedMind();
   chat.reply(

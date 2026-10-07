@@ -94,6 +94,13 @@ export class LlmMind implements Mind {
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
     const { message } = input;
+    // Owner rule (2026-10-07): a conversation with her starts only when she is addressed, by her name or a whisper; a
+    // line naming nobody is hers only while a conversation with its speaker goes on (live 2026-10-07, real world: four
+    // players chatting among themselves in French each got an answer). The model is not asked about the others; they
+    // stay in her chat history, so a later line is still read in their light.
+    if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input)) {
+      return { say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
+    }
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const canWait = input.canWait ?? true;
     const request = [
@@ -132,13 +139,6 @@ export class LlmMind implements Mind {
       if (reply.route !== "ignore" && !speaksTo(to, input.persona.username)) {
         firstReading ??= to;
         throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
-      }
-      // A line naming nobody, with other people there to hear it, is their chat unless its speaker is talking with her
-      // (live 2026-10-07, real world: four players chatted among themselves in French; read as spoken to whoever said
-      // it, so to nobody, every line got an answer from her). Only the chit-chat is left to them: a request naming
-      // nobody may still be hers (owner: players rarely use the name), and alone with her, any unnamed line is hers.
-      if (reply.route === "talk" && !message.addressed && !to.some((name) => !["unclear", "everyone"].includes(name.toLowerCase())) && othersAround(input) && !talkingWithHer(input)) {
-        return { to: ["unclear"], say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
       }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
       // to let pass (the bench: held to them too, she answered every line to "Opus").
@@ -363,8 +363,9 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   is not who it speaks to ("Opus, Vex fell in the water" speaks to Opus, about Vex). A reply to what you said, or
   a follow-up to a request made to you, speaks to you even without your name.
   A message that goes on with a conversation someone else is having (a reply to what another player or character
-  said, a follow-up to a message that named someone else) speaks to them, by name. Players rarely use your name: a
-  message that names nobody and continues no other conversation is for you too. Any name counts, even one you do not
+  said, a follow-up to a message that named someone else) speaks to them, by name. A message that names nobody
+  reaches you only while you are talking with its speaker: it goes on with that conversation, so it is for you unless
+  it plainly turns to someone else. Any name counts, even one you do not
   know (another player, the server's operator, someone not in the game).
 - "language": the language the message is written in (e.g. "French", "English"), whatever language you and the
   recent chat use.
@@ -514,25 +515,25 @@ function describeSituation(snapshot: BotSnapshot, activity: string, places: read
 - Currently doing: ${activity}.`;
 }
 
-/** Lines back an exchange with her still counts as going on. */
+/** Lines back a conversation with her still counts as going on... */
 const EXCHANGE_LINES = 6;
-
-/** Whether a person other than the speaker (not her, not another AI character) is online to be spoken to. */
-function othersAround(input: ChatInput): boolean {
-  const notListeners = new Set([input.message.username, input.persona.username, ...(input.otherAgents ?? [])].map((name) => name.toLowerCase()));
-  return input.snapshot.players.some((player) => !notListeners.has(player.username.toLowerCase()));
-}
+/** ... and how long since its last line (a pause this long ends it). */
+const EXCHANGE_MS = 3 * 60_000;
 
 /**
- * Whether the speaker is talking with her: they spoke to her within the last {@link EXCHANGE_LINES} lines, or her line
- * to them is the last one said. Her own earlier answers are not enough (live 2026-10-07, local: each line she answered
- * wrongly made the next one look like a conversation with her).
+ * Whether a conversation between the speaker and her is going on: within the last {@link EXCHANGE_LINES} lines and
+ * {@link EXCHANGE_MS}, the speaker spoke to her (as she read it) or she answered the speaker. Only an addressed line
+ * starts one, so her own answers cannot start one by themselves.
  */
-function talkingWithHer(input: ChatInput): boolean {
+export function talkingWithHer(input: Pick<ChatInput, "message" | "persona" | "history">, now = Date.now()): boolean {
   const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
-  const spokeTo = (line: ChatLine | undefined, by: string, listener: string) =>
-    line !== undefined && line.speaker.toLowerCase() === by && (line.to ?? []).some((name) => name.toLowerCase() === listener);
-  return input.history.slice(-EXCHANGE_LINES).some((line) => spokeTo(line, speaker, self)) || spokeTo(input.history.at(-1), self, speaker);
+  const between = (line: ChatLine) => {
+    const by = line.speaker.toLowerCase();
+    const to = (line.to ?? []).map((name) => name.toLowerCase());
+    return (by === speaker && to.includes(self)) || (by === self && to.includes(speaker));
+  };
+  const last = input.history.slice(-EXCHANGE_LINES).findLast(between);
+  return last !== undefined && (last.at === undefined || now - last.at <= EXCHANGE_MS);
 }
 
 /** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */
