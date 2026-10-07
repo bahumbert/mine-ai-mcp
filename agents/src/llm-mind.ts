@@ -40,11 +40,16 @@ const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for wha
   forests, jungle in jungles, acacia in savannas; cobblestone is what mining stone gives (get_items cobblestone).
 - get_items fetches from anywhere you have seen what it needs, nearest first; explore only for what you have never
   seen, toward unseen land (an explore result says how far it is each way).
+- Ores (coal, iron, copper, gold, redstone, lapis, diamond) lie underground almost everywhere, and the map of what
+  you have seen leaves the common ones out: get_items what they drop (raw_iron, coal, raw_copper, diamond...) digs for
+  them near you; an ore block itself (iron_ore) is never got, and walking the surface (explore) does not find them.
 - Crops ripen over time near water (wheat in about half an hour), so a farm is planted now and harvested later; bread is crafted from 3 wheat.
   Seeds are not food (wheat_seeds cannot be eaten): food is bread, apples, carrots, potatoes, or meat from hunting
   animals (cow, pig, chicken, sheep), cooked with get_items (cooked_beef, cooked_porkchop...).
 - Deep water (the sea, wide lakes) is never swum: it is crossed by boat, which go_to does by itself when you carry
-  one (get_items oak_boat: 5 planks of one wood); without one, go another way over land.`;
+  one (get_items oak_boat: 5 planks of one wood); without one, go another way over land.
+- Items named "unknown" are things this world adds that you cannot use: ignore them; drop_item unknown only when you
+  need the room.`;
 
 /** The model behind each tier; they may all be the same model. `action` picks work steps, `planner` own objectives. */
 export interface TierModels {

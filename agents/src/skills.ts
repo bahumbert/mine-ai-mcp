@@ -6,12 +6,12 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, oreDrop, walkToStation } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
-import { errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -672,6 +672,12 @@ const EXPLORE_MAX_WALK = 384;
  * 400 blocks north over water for "3 chunks".
  */
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
+  // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
+  // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
+  if (step.for !== undefined && /_ore$/u.test(step.for)) {
+    const drop = oreDrop(step.for) ?? step.for;
+    return { status: "failed", detail: `${step.for} lies underground nearly everywhere, and walking the surface does not find it: get_items ${drop} digs for it near where you are (making the pickaxe it needs)` };
+  }
   const setOut = await context.runtime.status();
   const start = setOut.position;
   // A block she already knows of is named in the result, with get_items to fetch it (live 2026-10-07: Ayla explored
@@ -726,7 +732,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
       // blocks out over water, was refused all eight ways, fifteen steps in a row). Her own chunk: a line ending where
       // she stands counts it (the start of a line never does).
       const atSea = await context.runtime.waterAlong({ x: start.x - 16, y: start.y, z: start.z }, start).catch(() => null);
-      if (atSea !== null && atSea.share > MOSTLY_WATER) {
+      if (atSea !== null && atSea.share > MOSTLY_WATER && await onWater(context.runtime, start)) {
         const land = await context.runtime.nearestLand(start).catch(() => null);
         const back = land === null ? "you know of no land near" : `the nearest land you have seen is ${describeWay(start, land)}, around ${land.x} ${Math.floor(start.y)} ${land.z}: go_to there first`;
         return { status: "failed", detail: `you are out on the water, and ${ahead}; ${back}` };
@@ -783,6 +789,20 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
 
 /** How near where a way was sailed without land it counts as the same way. */
 const OPEN_SEA_NEAR = 256;
+
+/**
+ * Whether she stands in or on water: a mostly-water chunk is not enough (live 2026-10-07: Ayla, on a hill by the sea,
+ * was told she was "out on the water").
+ */
+async function onWater(runtime: BotRuntime, at: Position): Promise<boolean> {
+  const x = Math.floor(at.x);
+  const y = Math.floor(at.y);
+  const z = Math.floor(at.z);
+  const area = await runtime.blocksIn({ x, y: y - 1, z }, { x, y, z }).catch(() => null);
+  if (area === null) return true;
+  const names = [y, y - 1].map((level) => area.blocks.get(areaKey(x, level, z)));
+  return names.every((name) => name === undefined) || names.includes("water");
+}
 /** Ways sailed without finding land, by bot, this run. */
 const openSeas = new WeakMap<object, { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[]>();
 

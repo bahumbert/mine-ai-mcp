@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
@@ -54,6 +55,32 @@ function requireApplicationRoom(bot: Bot, recipe: CraftApplication["recipe"]): v
   }
 }
 
+/** Time for the slot updates that follow an unreadable whole-inventory packet (see `craftOnce`). */
+const UNSEEN_RESULT_SETTLE_MS = 1_500;
+
+/**
+ * One native application. On a server whose whole-inventory packet this client cannot read (modded items, NeoForge,
+ * live 2026-10-07), the crafting result can arrive inside it and Mineflayer reports "Server did not update crafting
+ * result" for a craft the server did: the window is closed (the grid goes back to the inventory), and once the slot
+ * updates have come, a result in the inventory counts as crafted.
+ */
+async function craftOnce(
+  bot: Bot,
+  recipe: CraftApplication["recipe"],
+  craftingTable: NonNullable<Parameters<Bot["craft"]>[2]> | null,
+): Promise<void> {
+  const output = recipe.result as { readonly id: number; readonly count: number };
+  const before = bot.inventory.count(output.id, null);
+  try {
+    await bot.craft(recipe, 1, craftingTable ?? undefined);
+  } catch (cause) {
+    if (!/did not update crafting result/u.test(String(cause))) throw cause;
+    bot.closeWindow(bot.currentWindow ?? bot.inventory);
+    await sleep(UNSEEN_RESULT_SETTLE_MS);
+    if (bot.inventory.count(output.id, null) < before + output.count) throw cause;
+  }
+}
+
 /** Execute one native recipe application at a time and close the inventory afterward. */
 export async function executeCraftPlan(
   bot: Bot,
@@ -69,7 +96,7 @@ export async function executeCraftPlan(
       for (let made = 0; made < application.applications; made += 1) {
         signal?.throwIfAborted();
         requireApplicationRoom(bot, application.recipe);
-        await bot.craft(application.recipe, 1, craftingTable ?? undefined);
+        await craftOnce(bot, application.recipe, craftingTable);
       }
       completedSteps += 1;
     }

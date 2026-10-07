@@ -802,6 +802,13 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x, call.input.z, call.input.y]), [["navigate", 64, 0, undefined]]);
   assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; no dark_oak_log seen on the way");
 
+  // An ore is dug for, not walked to (live 2026-10-07: Vex explored for iron_ore, which the map leaves out).
+  const before = runtime.submitted.length;
+  const ore = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "iron_ore" }), contextFor(runtime));
+  assert.equal(ore.status, "failed");
+  assert.match("detail" in ore ? ore.detail : "", /^iron_ore lies underground nearly everywhere, and walking the surface does not find it: get_items raw_iron digs for it/u);
+  assert.equal(runtime.submitted.length, before);
+
   // Live 2026-10-07: Ayla explored "for spruce_log" some forty times while she knew of spruce 169 blocks away; the
   // result names the known one and the step that fetches it.
   const near = new FakeRuntime();
@@ -880,8 +887,13 @@ test("out on the water, explore names the nearest land instead of another way", 
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 62, z: 8 } };
   runtime.water = { "0,0": 1, "-1,0": 1, "1,0": 1, "2,0": 1, "0,-1": 1, "0,-2": 1, "-3,0": 0.1 };
+  runtime.world.set("8,61,8", "water");
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
   assert.deepEqual(result, { status: "failed", detail: "you are out on the water, and east is water as far as you have seen (100% of the next 2 chunks); the nearest land you have seen is 48 blocks west, around -40 62 8: go_to there first" });
+  // On dry ground by the sea (live 2026-10-07: Ayla on a hill), the chunk's water is no reason to say so.
+  runtime.world.set("8,61,8", "stone");
+  const ashore = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
+  assert.match(ashore.status === "failed" ? ashore.detail : "", /^east is water as far as you have seen .*: explore another way, or say so$/u);
 });
 
 test("a leg over caves or under trees is walked again at the ground's height, the listed one nearest hers", async () => {

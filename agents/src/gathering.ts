@@ -301,7 +301,22 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
 function notDropped(item: string, knowledge: Knowledge): string {
   // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
   if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
+  // An ore block drops its raw material, never itself without silk touch (live 2026-10-07: Vex asked for iron_ore).
+  const drop = oreDrop(item);
+  if (drop !== null) return `${item} is never got as itself: mined, it drops ${drop}; get_items ${drop}`;
   return `no block or mob drops ${item}, and it is not crafted or smelted`;
+}
+
+/** Vanilla ores by name, and what one drops when mined without silk touch. */
+const ORE_DROPS: Readonly<Record<string, string>> = {
+  coal: "coal", iron: "raw_iron", copper: "raw_copper", gold: "raw_gold", redstone: "redstone", lapis: "lapis_lazuli",
+  diamond: "diamond", emerald: "emerald", nether_quartz: "quartz", nether_gold: "gold_nugget",
+};
+
+/** What an ore block (`iron_ore`, `deepslate_iron_ore`...) drops when mined; null for any other name. */
+export function oreDrop(block: string): string | null {
+  const ore = /^(?:deepslate_)?(.+)_ore$/u.exec(block)?.[1];
+  return ore === undefined ? null : ORE_DROPS[ore] ?? null;
 }
 
 /** A drop this likely, or more, makes a mob a source to hunt (cod drop bone meal 5% of the time: no source). */
