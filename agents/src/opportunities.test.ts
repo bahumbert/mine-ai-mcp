@@ -16,11 +16,14 @@ const farm = (overrides: Partial<KnownFarm> = {}): KnownFarm => ({
   state: { planted: 80, ripe: 0, empty: 0 }, ...overrides,
 });
 
-/** A character with everything in order: a home, a bed, food, no farm, nothing worn out. */
+/** A sword, a pickaxe and an axe: no tool missing. */
+const TOOLS = [{ name: "iron_sword", count: 1 }, { name: "iron_pickaxe", count: 1 }, { name: "iron_axe", count: 1 }];
+
+/** A character with everything in order: a home, a bed, food, tools, no farm, nothing worn out. */
 const settled = (overrides: Partial<OpportunityFacts> = {}): OpportunityFacts => ({
   now: NOW,
   snapshot: snapshot({
-    inventory: [{ name: "bread", count: 8 }, { name: "red_bed", count: 1 }],
+    inventory: [{ name: "bread", count: 8 }, { name: "red_bed", count: 1 }, ...TOOLS],
     foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }],
   }),
   farms: [],
@@ -40,20 +43,20 @@ test("a tool nearly worn out is a crafting opportunity; a fresh one is not", () 
   const inventory = [
     { name: "stone_pickaxe", count: 1, durability: { remaining: 12, maximum: 131 } },
     { name: "iron_axe", count: 1, durability: { remaining: 200, maximum: 250 } },
-    { name: "bread", count: 8 }, { name: "red_bed", count: 1 },
+    { name: "bread", count: 8 }, { name: "red_bed", count: 1 }, { name: "wooden_sword", count: 1 },
   ];
   const facts = settled();
   assert.deepEqual(texts({ ...facts, snapshot: { ...facts.snapshot, inventory } }), ["(crafting) your stone_pickaxe has 12 uses left"]);
 });
 
 test("food carried for less than a day is an opportunity to farm, hunt or cook", () => {
-  const facts = settled({ snapshot: snapshot({ food: 14, inventory: [{ name: "bread", count: 2 }, { name: "red_bed", count: 1 }], foods: [{ name: "bread", count: 2, points: 5, saturation: 6 }] }) });
+  const facts = settled({ snapshot: snapshot({ food: 14, inventory: [{ name: "bread", count: 2 }, { name: "red_bed", count: 1 }, ...TOOLS], foods: [{ name: "bread", count: 2, points: 5, saturation: 6 }] }) });
   assert.deepEqual(texts(facts), ["(farming, hunting, cooking) you carry food for 10 hunger points (2 bread); your hunger is 14/20"]);
-  const none = settled({ snapshot: snapshot({ inventory: [{ name: "red_bed", count: 1 }] }) });
+  const none = settled({ snapshot: snapshot({ inventory: [{ name: "red_bed", count: 1 }, ...TOOLS] }) });
   assert.deepEqual(texts(none), ["(farming, hunting, cooking) you carry no food; your hunger is 20/20"]);
   // Starving, with animals in sight (live 2026-10-04: Ayla tried to eat seeds and to farm, never to hunt).
   const mobs = [{ name: "cow", hostile: false, count: 2, distance: 18.4 }, { name: "zombie", hostile: true, count: 1, distance: 9 }];
-  const starving = settled({ snapshot: snapshot({ food: 4, mobs, inventory: [{ name: "red_bed", count: 1 }] }) });
+  const starving = settled({ snapshot: snapshot({ food: 4, mobs, inventory: [{ name: "red_bed", count: 1 }, ...TOOLS] }) });
   assert.deepEqual(texts(starving), ["(farming, hunting, cooking) you carry no food; your hunger is 4/20: you are starving, food comes before anything else; a new crop takes many minutes to grow, an animal near is quicker; animals in sight: 2 cow 18 blocks away"]);
 });
 
@@ -86,10 +89,20 @@ test("an unfinished house comes before having no home; the materials a home need
 });
 
 test("no bed carried is a crafting opportunity", () => {
-  assert.deepEqual(texts(settled({ snapshot: snapshot({ inventory: [{ name: "bread", count: 8 }], foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) })), ["(crafting) you carry no bed"]);
+  assert.deepEqual(texts(settled({ snapshot: snapshot({ inventory: [{ name: "bread", count: 8 }, ...TOOLS], foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) })), ["(crafting) you carry no bed"]);
 });
 
-test("at most six, the most pressing first: worn tools and food before the rest", () => {
+test("no sword, pickaxe or axe carried is a crafting opportunity, in stone once she carries cobblestone", () => {
+  // Owner, real world 2026-10-07: Ayla did everything with her hands.
+  const inventory = [{ name: "bread", count: 8 }, { name: "red_bed", count: 1 }, { name: "wooden_pickaxe", count: 1 }];
+  assert.deepEqual(texts(settled({ snapshot: snapshot({ inventory, foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) })), [
+    "(crafting) you carry no sword, no axe: you fight and work bare-handed, slow and in danger; get_items wooden_sword, wooden_axe makes them in a few minutes",
+  ]);
+  const stone = [...inventory, { name: "cobblestone", count: 12 }];
+  assert.match(texts(settled({ snapshot: snapshot({ inventory: stone, foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) }))[0]!, /get_items stone_sword, stone_axe /u);
+});
+
+test("at most six, the most pressing first: worn tools, missing tools and food before the rest", () => {
   const found = findOpportunities({
     now: NOW,
     snapshot: snapshot({ inventory: [{ name: "stone_pickaxe", count: 1, durability: { remaining: 3, maximum: 131 } }] }),
@@ -99,9 +112,10 @@ test("at most six, the most pressing first: worn tools and food before the rest"
     houseShortfall: [{ item: "oak_log", count: 22, activity: "woodcutting" }, { item: "cobblestone", count: 16, activity: "mining" }],
   });
   assert.equal(found.length, MAX_OPPORTUNITIES);
-  assert.deepEqual(found.slice(0, 2).map((opportunity) => opportunity.activities[0]), ["crafting", "farming"]);
+  assert.deepEqual(found.slice(0, 3).map((opportunity) => opportunity.activities[0]), ["crafting", "crafting", "farming"]);
   assert.match(found[0]!.text, /stone_pickaxe/u);
-  assert.match(found[1]!.text, /no food/u);
+  assert.match(found[1]!.text, /no sword, no axe/u);
+  assert.match(found[2]!.text, /no food/u);
 });
 
 test("opportunities read as one line each for the goal tier", () => {

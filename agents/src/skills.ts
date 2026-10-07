@@ -314,8 +314,15 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
       return { status: "stopped" };
     }
     if (prepared.status === "failed") {
-      leaveUnfinished(0, false);
       await releaseArea(context, protection.area.regionId);
+      // A site another protected area overlaps cannot be prepared later either: the unfinished house is forgotten, not
+      // offered again and again (live 2026-10-07: Ayla's unfinished house overlapped her other house #12; she went
+      // back to it, protected a "temp_house" over it, and tried again).
+      if (/overlaps protected area/u.test(prepared.detail)) {
+        if (context.building !== undefined) context.building.unfinished = null;
+        return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}; that unfinished house is given up: build a new one somewhere clear` };
+      }
+      leaveUnfinished(0, false);
       return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}` };
     }
     context.phase?.("building");
@@ -667,15 +674,12 @@ const EXPLORE_MAX_WALK = 384;
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
   const setOut = await context.runtime.status();
   const start = setOut.position;
-  // Exploring is for what she knows of nowhere (live 2026-10-07: Ayla explored "for spruce_log" some forty times while
-  // she knew of spruce 169 blocks away; live 2026-10-04: Vex explored three more times after "the nearest dark_oak_log
-  // is 37 blocks east"): a known one is fetched, and get_items goes there by itself.
-  if (step.for !== undefined) {
-    const known = (await nearestFree(context, step.for)) ?? (await knownPlaces(context.runtime, step.for, start))[0];
-    if (known !== undefined) {
-      return { status: "failed", detail: `you already know of ${step.for} ${describeWay(start, known)}, around ${known.x} ${known.z}: get_items ${step.for} goes there and gathers it (a way across deep water needs a boat); explore only for what you know of nowhere` };
-    }
-  }
+  // A block she already knows of is named in the result, with get_items to fetch it (live 2026-10-07: Ayla explored
+  // "for spruce_log" some forty times while she knew of spruce 169 blocks away). The walk still goes: stopping it there
+  // made both bots ask for the same explore again and again, each one walking nowhere (live 2026-10-07, free time).
+  const knownBefore = step.for === undefined
+    ? undefined
+    : (await nearestFree(context, step.for)) ?? (await knownPlaces(context.runtime, step.for, start))[0];
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
   const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
@@ -763,7 +767,10 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   ];
   if (step.for !== undefined) {
     const nearest = found ?? await nearestFree(context, step.for);
-    parts.push(nearest === undefined ? `no ${step.for} seen on the way` : `the nearest ${step.for} is ${describeWay(here, nearest)}, at ${nearest.x} ${nearest.y} ${nearest.z}`);
+    const known = nearest ?? knownBefore;
+    parts.push(known === undefined
+      ? `no ${step.for} seen on the way`
+      : `the nearest ${step.for} you know of is ${describeWay(here, known)}, around ${known.x} ${known.z}: get_items ${step.for} goes there and gathers it`);
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");

@@ -73,6 +73,8 @@ export interface BotSnapshot {
   readonly players: readonly NearbyPlayer[];
   /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
   readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[] } | null;
+  /** The overworld's day or night (null elsewhere) and minutes until it changes; unset when the runtime did not say. */
+  readonly clock?: { readonly phase: "day" | "night" | null; readonly minutesUntilChange: number | null };
 }
 
 export interface PlayerMessage {
@@ -89,7 +91,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
   | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
-  | "tend_crops" | "use_bucket";
+  | "tend_crops" | "use_bucket" | "raw_action";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -309,6 +311,7 @@ const viewStatusSchema = z.object({
         players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })),
         mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number() }) })).default([]),
       }),
+      clock: z.object({ phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable() }).optional(),
     }),
   }),
   survivalPolicy: z.object({
@@ -470,6 +473,7 @@ export class McpBotRuntime implements BotRuntime {
       foods: situation.inventory.foods,
       mobs: mobSpecies(situation.nearby.mobs),
       players: situation.nearby.players,
+      ...(situation.clock === undefined ? {} : { clock: situation.clock }),
       policy: data.survivalPolicy === undefined
         ? null
         : {

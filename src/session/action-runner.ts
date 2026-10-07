@@ -172,7 +172,9 @@ function measured<Name extends string, Result extends ActionResult>(
   result: Result | RuntimeFailure,
   interruptions: readonly string[] = [],
 ): ActionOutput<Name, Result> {
-  const output: ActionOutput<Name, Result> = { action, durationMs: Date.now() - startedAtMs, result };
+  // The wall clock can step back (WSL resyncing its clock, live 2026-10-07): a negative duration failed the output
+  // schema and every view_status call with it.
+  const output: ActionOutput<Name, Result> = { action, durationMs: Math.max(0, Date.now() - startedAtMs), result };
   return interruptions.length > 0 ? { ...output, interruptions: [...interruptions] } : output;
 }
 

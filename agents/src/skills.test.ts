@@ -794,7 +794,7 @@ test("a way sailed without finding land is not sailed again from near there", as
   assert.doesNotMatch(east.status === "failed" ? east.detail : "", /open sea/u);
 });
 
-test("explore walks one compass way from where she stands, in legs, and says where it ended; a known block is fetched, not explored for", async () => {
+test("explore walks one compass way from where she stands, in legs, and says where it ended and where a known block is", async () => {
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
@@ -802,19 +802,19 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x, call.input.z, call.input.y]), [["navigate", 64, 0, undefined]]);
   assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; no dark_oak_log seen on the way");
 
-  // Live 2026-10-07: Ayla explored "for spruce_log" some forty times while she knew of spruce 169 blocks away.
+  // Live 2026-10-07: Ayla explored "for spruce_log" some forty times while she knew of spruce 169 blocks away; the
+  // result names the known one and the step that fetches it.
   const near = new FakeRuntime();
   near.walkOnNavigate = true;
   near.snapshot = { ...near.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
   near.world.set("80,64,2", "oak_log");
-  const known = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "oak_log" }), contextFor(near));
-  assert.deepEqual(near.submitted, []);
-  assert.match(known.status === "failed" ? known.detail : "", /^you already know of oak_log 80 blocks east, around 80 2: get_items oak_log goes there and gathers it/u);
+  const found = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "oak_log" }), contextFor(near));
+  assert.equal(withoutWays(found.status === "done" ? found.detail : ""), "explored east: now 96 blocks east from where you started, at 96 64 0; the nearest oak_log you know of is 16 blocks west, around 80 2: get_items oak_log goes there and gathers it");
   // Seen before, out of sight now: the bot data's record counts too.
   const seen = new FakeRuntime();
   seen.seen = { spruce_log: { dimension: "overworld", x: -366, z: -18 } };
   const recorded = await runStep(stepSchema.parse({ skill: "explore", toward: "north", for: "spruce_log" }), contextFor(seen));
-  assert.match(recorded.status === "failed" ? recorded.detail : "", /^you already know of spruce_log \d+ blocks west, around -366 -18: get_items spruce_log/u);
+  assert.match("detail" in recorded ? recorded.detail : "", /the nearest spruce_log you know of is \d+ blocks west, around -366 -18: get_items spruce_log goes there/u);
 });
 
 test("a walk that stopped is not \"done\" because the block is in sight farther off: it says why it stopped", async () => {
@@ -836,10 +836,10 @@ test("a recorded place found empty is not offered again: explore no longer sends
   assert.match(near.status === "failed" ? near.detail : "", /^no spruce_log within 64 blocks, and you know of none farther away/u);
   runtime.snapshot = { ...runtime.snapshot, position: { x: 200.5, y: 64, z: 0.5 } };
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "spruce_log" }), contextFor(runtime));
-  assert.doesNotMatch(result.status === "failed" ? result.detail : "", /already know/u);
+  assert.match("detail" in result ? result.detail : "", /no spruce_log seen on the way/u);
 });
 
-test("explore names only blocks she may take: a log in a wall of her protected house is not one she knows of", async () => {
+test("explore names only blocks she may take: a log in a wall of her protected house is not \"the nearest\"", async () => {
   // Live 2026-10-04: all 48 oak logs near Ayla were walls of her houses, and explore kept naming them.
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
@@ -848,7 +848,7 @@ test("explore names only blocks she may take: a log in a wall of her protected h
   runtime.world.set("150,64,0", "oak_log");
   const house = { regionId: 4, label: "small medieval house", owner: "Ayla", reason: "", min: { x: 36, y: 60, z: -4 }, max: { x: 44, y: 70, z: 4 } } as unknown as ProtectedArea;
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "oak_log" }), contextFor(runtime, { areas: [house] }));
-  assert.match(result.status === "failed" ? result.detail : "", /^you already know of oak_log 150 blocks east, around 150 0:/u);
+  assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; the nearest oak_log you know of is 86 blocks east, around 150 0: get_items oak_log goes there and gathers it");
 });
 
 test("explore does not set off toward ground she knows to be mostly water, and says how much water she crossed", async () => {
@@ -941,7 +941,8 @@ test("a new house whose site cannot be prepared does not keep its site protected
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
   // A protected area beside the site (not over it) that the leveling's own check does not see: Tom's, added once the
   // house is protected, so preparing the site fails the way a worn-out tool would.
-  const context = contextFor(runtime, { style: "medieval" });
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const context = contextFor(runtime, { style: "medieval", building });
   const protect = runtime.protectRegion.bind(runtime);
   runtime.protectRegion = async (request) => {
     const outcome = await protect(request);
@@ -950,8 +951,10 @@ test("a new house whose site cannot be prepared does not keep its site protected
   };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^could not prepare the site of a small medieval house/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^could not prepare the site of a small medieval house.*that unfinished house is given up/u);
   assert.deepEqual(runtime.areas.map((area) => area.label), ["Tom's garden"], "the house's own box released");
+  // Live 2026-10-07: an unfinished house over another protected area was offered again and again.
+  assert.equal(building.unfinished, null);
 });
 
 test("level_area never levels over a protected area, her own houses included", async () => {

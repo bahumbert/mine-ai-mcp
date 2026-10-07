@@ -121,9 +121,27 @@ function noBed(facts: OpportunityFacts): Opportunity[] {
   return facts.snapshot.inventory.some((stack) => stack.name.endsWith("_bed")) ? [] : [{ activities: ["crafting"], text: "you carry no bed" }];
 }
 
+/** The tools every player makes first; any tier counts (`wooden_sword`, `iron_pickaxe`, ...). */
+const FIRST_TOOLS = ["sword", "pickaxe", "axe"] as const;
+
+/**
+ * Bare hands (owner, real-world session 2026-10-07: Ayla did everything with her hands, a sword never made, and
+ * nights there are dangerous): the tools she has none of, a sword first.
+ */
+function missingTools(facts: OpportunityFacts): Opportunity[] {
+  const missing = FIRST_TOOLS.filter((tool) => !facts.snapshot.inventory.some((stack) => stack.name.endsWith(`_${tool}`)));
+  if (missing.length === 0) return [];
+  const stone = facts.snapshot.inventory.some((stack) => stack.name === "cobblestone" || stack.name === "cobbled_deepslate") ? "stone" : "wooden";
+  return [{
+    activities: ["crafting"],
+    text: `you carry no ${missing.join(", no ")}: you fight and work bare-handed, slow and in danger; ` +
+      `get_items ${missing.map((tool) => `${stone}_${tool}`).join(", ")} makes them in a few minutes`,
+  }];
+}
+
 /** Every opportunity found, the most pressing first (a tool about to break, food), at most {@link MAX_OPPORTUNITIES}. */
 export function findOpportunities(facts: OpportunityFacts): Opportunity[] {
-  return [wornTools, lowFood, farmsToHarvest, unfinishedHouse, farmsToSow, noHome, noBed]
+  return [wornTools, missingTools, lowFood, farmsToHarvest, unfinishedHouse, farmsToSow, noHome, noBed]
     .flatMap((finder) => finder(facts))
     .slice(0, MAX_OPPORTUNITIES);
 }

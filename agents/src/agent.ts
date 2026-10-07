@@ -9,6 +9,7 @@ import type { BrainEvent } from "./brain-log.ts";
 import { sameWords, type ChatLine, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type Shortfall } from "./opportunities.ts";
+import { shelterForNight, underCover } from "./night-shelter.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
@@ -24,6 +25,10 @@ const KNOWN_PLACES = 8;
 const STEP_MEMORY = 20;
 /** Outcomes of its own objectives remembered for the goal tier. */
 const OWN_MEMORY = 5;
+/** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
+const NIGHT_CHECK_MS = 20_000;
+/** After a night shelter could not be made, how long before it is tried again. */
+const SHELTER_RETRY_MS = 5 * 60_000;
 /** Farms it remembers and every tier sees. */
 const KNOWN_FARMS = 4;
 /** Unusable model replies in a row before an objective is dropped. */
@@ -126,6 +131,12 @@ export class Agent {
   private nextGoalCall = 0;
   private wake: (() => void) | null = null;
   private runSignal: AbortSignal = new AbortController().signal;
+  /** The night shelter running now (see {@link shelterIfNight}); an order stops it. */
+  private sheltering: AbortController | null = null;
+  /** No shelter tried before then: the last one could not be dug here. */
+  private shelterRetryAt = 0;
+  /** When the sky was last looked at for nightfall during a step of its own. */
+  private nightCheckedAt = 0;
 
   constructor(private readonly options: AgentOptions) {
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
@@ -157,6 +168,7 @@ export class Agent {
         for (const message of await this.options.runtime.readMessages()) {
           await this.handle(message).catch((error: unknown) => this.options.log(`could not handle "${message.message}": ${String(error)}`));
         }
+        await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
     } finally {
@@ -226,6 +238,7 @@ export class Agent {
   private take(objective: Objective): void {
     const current = this.stack.at(-1);
     current?.step?.abort();
+    this.sheltering?.abort();
     this.stack.push(newWork(objective));
     this.journalObjective("taken", objective);
     this.wake?.();
@@ -245,6 +258,7 @@ export class Agent {
     while (!signal.aborted) {
       const work = this.stack.at(-1);
       try {
+        if (await this.shelterIfNight(work)) continue;
         if (work !== undefined) await this.advance(work);
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
       } catch (error) {
@@ -253,6 +267,71 @@ export class Agent {
         await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
       }
     }
+  }
+
+  /**
+   * TEMPORARY night measure (see night-shelter.ts): at nightfall, a step of its own goal is set aside (the objective
+   * stays on the stack and resumes in the morning). Looked at every {@link NIGHT_CHECK_MS}.
+   */
+  private async stopOwnStepAtNightfall(): Promise<void> {
+    if (!this.options.persona.settings.shelterAtNight || Date.now() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
+    const top = this.stack.at(-1);
+    if (top?.step == null || top.objective.requester !== null || Date.now() < this.shelterRetryAt) return;
+    this.nightCheckedAt = Date.now();
+    if (!(await this.outInTheNight())) return;
+    this.options.log("night fell: setting the step aside to dig in");
+    top.step.abort();
+  }
+
+  /** Night in the overworld, and nothing over its head (underground or under a roof the night is no worse). */
+  private async outInTheNight(): Promise<boolean> {
+    const { runtime } = this.options;
+    const snapshot = await runtime.status();
+    return snapshot.clock?.phase === "night" && !(await underCover(runtime, snapshot.position));
+  }
+
+  /**
+   * TEMPORARY night measure (see night-shelter.ts): at night, unless working on an order, it digs in and waits for the
+   * day. True when it took the turn (sheltered, or tried to); a shelter that could not be made is not tried again for
+   * {@link SHELTER_RETRY_MS}, so it goes on with its work meanwhile.
+   */
+  private async shelterIfNight(work: Work | undefined): Promise<boolean> {
+    const { persona, runtime, log } = this.options;
+    if (!persona.settings.shelterAtNight || Date.now() < this.shelterRetryAt) return false;
+    if (work !== undefined && work.objective.requester !== null) return false;
+    if (!(await this.outInTheNight())) return false;
+    const controller = new AbortController();
+    this.sheltering = controller;
+    const objective = work?.objective.text ?? "(own goal)";
+    const label = "shelter for the night";
+    log(`night: ${label}`);
+    this.journalState(label);
+    const started = Date.now();
+    let result: SkillResult;
+    try {
+      result = await shelterForNight({
+        runtime,
+        body: this.body,
+        signal: AbortSignal.any([controller.signal, this.runSignal]),
+        areas: this.areas,
+        dayCame: async () => (await runtime.status()).clock?.phase !== "night",
+      });
+    } catch (error) {
+      result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.sheltering = null;
+    }
+    if (result.status === "failed") this.shelterRetryAt = Date.now() + SHELTER_RETRY_MS;
+    const outcome = result.status === "stopped" ? "interrupted" : result.status;
+    const detail = result.status === "stopped" ? "left for an order, or stopped" : result.detail;
+    log(`  -> ${label}: ${outcome}: ${detail}`);
+    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: Date.now() - started, activity: null });
+    this.journalState(null);
+    if (result.status === "done") {
+      this.lately.push(`${label}: ${detail}`);
+      if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
+    }
+    return true;
   }
 
   /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */

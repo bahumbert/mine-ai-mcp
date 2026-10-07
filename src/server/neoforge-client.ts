@@ -71,9 +71,36 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
     if (client.state === "configuration" && client.listenerCount("ping") === 1) client.write("pong", { id: packet.id });
   });
   unknownStatesAsStone(bot.registry as unknown as BlockRegistry);
-  tolerateUnparsed(client, packetId(bot.version, "window_items"), (windowId) => mirrorInventoryInto(bot, windowId));
+  const send = client.write.bind(client);
+  const ids = { windowItems: packetId(bot.version, "window_items"), setSlot: packetId(bot.version, "set_slot") };
+  const resent = new Map<number, number>();
+  tolerateUnparsed(client, ids, (windowId, stateId) => {
+    if (windowId !== 0) mirrorInventoryInto(bot, windowId);
+    // Once a second at most: a stale state id makes the server answer with the whole contents again.
+    if (Date.now() - (resent.get(windowId) ?? 0) < 1000) return;
+    resent.set(windowId, Date.now());
+    setImmediate(() => askSlotBySlot(send, bot, windowId, stateId));
+  });
   clickWithoutPrediction(client);
 }
+
+/**
+ * Asks the server for a window's contents slot by slot, after its whole-contents packet could not be read (live
+ * 2026-10-07: the player inventory's, at login, so every slot looked empty; she clicked slots that held something
+ * else, and could neither put her boat in the water nor drop it): a click that does nothing (outside the window,
+ * empty cursor) claiming every slot is empty, so the server sends each slot that is not, one update each, and an
+ * unreadable one still tells its slot (see `tolerateUnparsed`).
+ */
+export function askSlotBySlot(send: ProtocolClient["write"], bot: Pick<Bot, "currentWindow">, windowId: number, stateId: number): void {
+  const slots = windowId === 0 ? PLAYER_INVENTORY_SLOTS : bot.currentWindow?.id === windowId ? bot.currentWindow.slots.length : 0;
+  if (slots === 0) return;
+  const empty = { itemCount: 0, components: [], removeComponents: [] };
+  const changedSlots = Array.from({ length: slots }, (_, location) => ({ location, item: empty }));
+  send("window_click", { windowId, stateId, slot: -999, mouseButton: 0, mode: 0, changedSlots, cursorItem: empty });
+}
+
+/** The player inventory window's slots: crafting result and grid, armour, main, hotbar, off hand. */
+const PLAYER_INVENTORY_SLOTS = 46;
 
 /** The play-state id of a clientbound packet in `version`'s protocol data; null when it has none. */
 export function packetId(version: string, name: string): number | null {
@@ -149,9 +176,15 @@ export function unknownStatesAsStone(registry: BlockRegistry): void {
  * logged once per packet id (then every 100th), instead of closing the connection (live 2026-10-05: 0x77
  * declare_recipes with farmersdelight:cutting recipes). A window's contents (`windowItemsId`) holding a modded item
  * become an empty contents packet for that window instead (live 2026-10-07: skipped, a crafting table never "opened"
- * and every boat craft timed out): the window opens, and `unreadableWindow` fills what it can.
+ * and every boat craft timed out): the window opens, and `unreadableWindow` fills what it can. A slot update
+ * (`setSlot`) holding such an item becomes an update with that item's id and count, components left out: the slot
+ * shows taken, by an item named "unknown" when its id is a modded one.
  */
-export function tolerateUnparsed(client: Pick<ProtocolClient, "on" | "deserializer">, windowItemsId: number | null, unreadableWindow: (windowId: number) => void): void {
+export function tolerateUnparsed(
+  client: Pick<ProtocolClient, "on" | "deserializer">,
+  ids: { readonly windowItems: number | null; readonly setSlot: number | null },
+  unreadableWindow: (windowId: number, stateId: number) => void,
+): void {
   const seen = new Map<number, number>();
   client.on("state", (state: string) => {
     if (state !== "play") return;
@@ -167,13 +200,26 @@ export function tolerateUnparsed(client: Pick<ProtocolClient, "on" | "deserializ
         if (count === 1 || count % 100 === 0) {
           console.error(`[neoforge] skipped play packet 0x${id.toString(16)} (${count}x): ${String(error).slice(0, 160)}`);
         }
-        if (id === windowItemsId && buffer.length > 2) {
+        if (id === ids.windowItems && buffer.length > 2) {
           // Window ids stay below 128, one byte whether the id is a byte or a varint; the state id follows.
           const windowId = buffer[1]!;
           const [stateId] = readVarint(buffer, 2);
-          unreadableWindow(windowId);
+          unreadableWindow(windowId, stateId);
           const params = { windowId, stateId, items: [] };
           return { data: { name: "window_items", params }, metadata: { size: buffer.length }, buffer, fullBuffer: buffer };
+        }
+        const slotAt = id === ids.setSlot && buffer.length > 2 ? readVarint(buffer, 2)[1] : buffer.length;
+        if (slotAt + 3 <= buffer.length) {
+          // The window id (the cursor's, -1, a byte up to 1.21.1), the state id, the slot (a short), then the item:
+          // its count and id come before its components.
+          const windowId = buffer[1] === 0xff ? -1 : buffer[1]!;
+          const [stateId] = readVarint(buffer, 2);
+          const slot = buffer.readInt16BE(slotAt);
+          const [itemCount, idAt] = readVarint(buffer, slotAt + 2);
+          const [itemId] = idAt < buffer.length ? readVarint(buffer, idAt) : [-1];
+          const item = { itemCount, itemId, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] };
+          const params = { windowId, stateId, slot, item };
+          return { data: { name: "set_slot", params }, metadata: { size: buffer.length }, buffer, fullBuffer: buffer };
         }
         return { data: { name: "neoforge_unparsed", params: { id } }, metadata: { size: buffer.length }, buffer, fullBuffer: buffer };
       }

@@ -77,6 +77,11 @@ export const personaSchema = z.strictObject({
     narrateEverySeconds: z.number().int().min(0).max(3_600).default(30),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
+    /**
+     * TEMPORARY (owner, 2026-10-07, until real night awareness): at night, unless on an order, it digs a roofed hole
+     * and waits there for the day (agents/src/night-shelter.ts).
+     */
+    shelterAtNight: z.boolean().default(true),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
   models: z.strictObject({ chat: modelId.optional(), action: modelId.optional(), planner: modelId.optional() }).default({}),

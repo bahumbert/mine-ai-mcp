@@ -149,12 +149,18 @@ function boatsCarried(bot: Bot): number {
   return bot.inventory.items().filter((item) => item.name.endsWith("_boat") || item.name.endsWith("_raft")).reduce((sum, item) => sum + item.count, 0);
 }
 
-function nearestBoat(bot: Bot, around: Vec3, within: number): Entity | null {
+function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: Entity) => boolean = () => true): Entity | null {
   const boats = Object.values(bot.entities).filter((entity) =>
     entity !== bot.entity && (entity.name?.endsWith("_boat") || entity.name?.endsWith("_raft") || entity.name === "boat") &&
-    entity.position.distanceTo(around) <= within);
+    entity.position.distanceTo(around) <= within && accept(entity));
   boats.sort((a, b) => a.position.distanceTo(around) - b.position.distanceTo(around));
   return boats[0] ?? null;
+}
+
+/** An empty boat on the water within `within` blocks of her, nobody in it. */
+function afloatBoat(bot: Bot, within: number): Entity | null {
+  return nearestBoat(bot, bot.entity.position, within, (entity) =>
+    entity.passengers.length === 0 && isWater(bot, Math.floor(entity.position.x), Math.floor(entity.position.y), Math.floor(entity.position.z)));
 }
 
 /**
@@ -162,20 +168,24 @@ function nearestBoat(bot: Bot, around: Vec3, within: number): Entity | null {
  * of the far shore and takes the boat back. The bot stands at the shore, facing the water.
  */
 export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING): Promise<CrossingResult> {
+  // A boat already afloat by her (one put there by an earlier try whose boat went unseen, live 2026-10-07: the
+  // owner saw it there while she kept saying it could not be put in the water) is the one she gets into.
+  let boat: Entity | null = afloatBoat(bot, 4);
   const item = bot.inventory.items().find((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
-  if (item === undefined) return { status: "failed", blocks: 0, detail: "no boat is carried" };
-  await bot.equip(item, "hand");
-  // A plant at the feet or the head stops the server's look ray: cleared first.
-  for (const dy of [0, 1]) {
-    const plant = bot.blockAt(bot.entity.position.floored().offset(0, dy, 0));
-    if (plant !== null && !isAir(plant.name) && plant.name !== "water" && plant.boundingBox === "empty") await bot.dig(plant, true).catch(() => undefined);
+  if (item === undefined && boat === null) return { status: "failed", blocks: 0, detail: "no boat is carried" };
+  if (item !== undefined && boat === null) {
+    await bot.equip(item, "hand");
+    // A plant at the feet or the head stops the server's look ray: cleared first.
+    for (const dy of [0, 1]) {
+      const plant = bot.blockAt(bot.entity.position.floored().offset(0, dy, 0));
+      if (plant !== null && !isAir(plant.name) && plant.name !== "water" && plant.boundingBox === "empty") await bot.dig(plant, true).catch(() => undefined);
+    }
+    await bot.equip(item, "hand");
   }
-  await bot.equip(item, "hand");
   const eye = bot.entity.position.offset(0, 1.62, 0);
   const level = Math.floor(bot.entity.position.y);
   // Placed by the look: aimed at the water's surface 2.5 blocks out or more (closer, it would touch the shore), the way
   // on first, then turning away from it as the shore allows (live 2026-10-04: straight on was the shore's bend).
-  let boat: Entity | null = null;
   const tries: { readonly x: number; readonly z: number }[] = [];
   for (const turn of [0, 30, -30, 60, -60, 90, -90]) {
     const angle = (turn * Math.PI) / 180;
@@ -183,6 +193,7 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     for (const distance of [2.5, 3, 3.5, 4]) tries.push({ x: eye.x + way.x * distance, z: eye.z + way.z * distance });
   }
   let attempts = 0;
+  const known = new Set(Object.values(bot.entities).map((entity) => entity.id));
   for (const at of tries) {
     if (boat !== null || attempts >= 6) break;
     const surface = waterSurface(bot, Math.floor(at.x), Math.floor(at.z), level);
@@ -202,7 +213,10 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     await sleep(100);
     bot.deactivateItem();
     await sleep(700);
-    boat = boatsCarried(bot) < before ? nearestBoat(bot, bot.entity.position, 6) : null;
+    // Put in the water: one boat fewer carried, or a new boat by her (the inventory may not show it, live
+    // 2026-10-07 on a modded server).
+    const appeared = nearestBoat(bot, bot.entity.position, 6, (entity) => !known.has(entity.id));
+    boat = appeared ?? (boatsCarried(bot) < before ? nearestBoat(bot, bot.entity.position, 6) : null);
   }
   if (boat === null) return { status: "failed", blocks: 0, detail: "could not put the boat in the water here" };
 
