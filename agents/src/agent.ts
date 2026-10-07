@@ -17,6 +17,7 @@ import { lastOfPlay, minutesByActivity, RECENT_MINUTES, type ActivityTime } from
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
+const STARTUP_RETRY_MS = 10_000;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
 /** Known places shown to the models; the oldest is forgotten first. */
@@ -160,7 +161,18 @@ export class Agent {
     await this.recallMemory();
     await this.rotateActivityNotes();
     await this.recallAreas();
-    await this.keepSettings(await this.options.runtime.status());
+    // One failed read must not end the brain (live 2026-10-05: an unreadable modded item on the ground failed
+    // view_status, and the brain stopped before its first step).
+    for (;;) {
+      try {
+        await this.keepSettings(await this.options.runtime.status());
+        break;
+      } catch (error) {
+        if (signal.aborted) return;
+        this.options.log(`status unreadable, retrying: ${String(error)}`);
+        await sleep(STARTUP_RETRY_MS, undefined, { signal }).catch(() => undefined);
+      }
+    }
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
     const working = this.workLoop(signal);
     try {
