@@ -298,16 +298,9 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
   return recipes.length > 0 ? "smelt" : "gather";
 }
 
-/**
- * Why `item` is no item id, with the id meant when it is plain: a family named without its colour (live 2026-10-04:
- * "wool": the white one, what a white sheep gives) or a plural (live 2026-10-07: "sticks", three steps in a row).
- */
-async function unknownItem(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
-  if ((await howToGet(runtime, `white_${item}`, knowledge)) !== null) return `${item} is named with its colour in Minecraft: white_${item} (or red_${item}, black_${item}, ...)`;
-  for (const singular of new Set([item.replace(/es$/u, ""), item.replace(/s$/u, "")])) {
-    if (singular !== item && (await howToGet(runtime, singular, knowledge)) !== null) return `${item} is not a Minecraft item id: the item is ${singular}`;
-  }
-  return `${item} is not a Minecraft item id`;
+/** Why `item` is no item id, in the runtime's words: they name the registry ids close to it ("sticks": stick). */
+async function unknownItem(runtime: BotRuntime, item: string): Promise<string> {
+  return (await runtime.craftingNeeds([{ item, count: 1 }])).error ?? `${item} is not a Minecraft item id`;
 }
 
 async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
@@ -450,7 +443,7 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   };
   const need = async (item: string, count: number): Promise<string | null> => {
     const how = await howToGet(runtime, item, knowledge);
-    if (how === null) return unknownItem(runtime, item, knowledge);
+    if (how === null) return unknownItem(runtime, item);
     const into = how === "craft" ? crafted : how === "smelt" ? smelts : null;
     if (into === null) return gathered(item, count);
     into.set(item, (into.get(item) ?? 0) + count);

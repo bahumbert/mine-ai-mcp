@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { fuelCapacity, NAMED_FUELS, smeltingData } from "../../world/smelting.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import {
   parseViewSmeltingRecipesRequest,
@@ -39,7 +40,10 @@ export async function viewSmeltingRecipes(
       .map((item) => ({ item, recipes: (data?.recipes ?? []).filter((recipe) => recipe.output === item).map((recipe) => ({ ...recipe, inputs: [...recipe.inputs] })) })),
     fuels: fuels(bot),
   };
-  if (unknown.length > 0) return { status: "failed", error: viewSmeltingRecipesOutcomes.unknownItems(unknown), smelting };
+  if (unknown.length > 0) {
+    const names = Object.keys(bot.registry.itemsByName);
+    return { status: "failed", error: viewSmeltingRecipesOutcomes.unknownItems(unknown.map((item) => withSimilar(item, names))), smelting };
+  }
   if (data === null) return { status: "failed", error: viewSmeltingRecipesOutcomes.dataUnavailable(bot.version), smelting };
   return { status: "succeeded", smelting };
 }

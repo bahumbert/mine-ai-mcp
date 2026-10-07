@@ -112,12 +112,12 @@ test("the harvest tool comes from game data and climbs the tiers: a wooden picka
   assert.ok(calls.indexOf("collect iron_ore") > calls.indexOf("craft stone_pickaxe at table"), calls.join(" | "));
 });
 
-test("an item asked for by a wrong name is answered with the right one: a plural, an ore block", async () => {
+test("an item asked for by a wrong name is answered by the runtime, and an ore block with what it drops", async () => {
   const runtime = new FakeRuntime();
-  // Live 2026-10-07: "sticks", three steps in a row.
-  runtime.notItems = new Set(["sticks", "white_sticks"]);
+  // Live 2026-10-07: "sticks", three steps in a row; the runtime's answer names the ids close to it.
+  runtime.notItems = new Set(["sticks"]);
   const plural = await runStep({ skill: "get_items", items: [{ item: "sticks", count: 4 }] }, contextFor(runtime));
-  assert.deepEqual(plural, { status: "failed", detail: "sticks is not a Minecraft item id: the item is stick" });
+  assert.deepEqual(plural, { status: "failed", detail: "[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: sticks." });
   // Live 2026-10-07: Vex asked for iron_ore, which only silk touch gets; what it drops comes from the game data.
   runtime.notDropped = new Set([...runtime.notDropped, "iron_ore"]);
   const ore = await runStep({ skill: "get_items", items: [{ item: "iron_ore", count: 2 }] }, contextFor(runtime));
@@ -789,6 +789,10 @@ test("explore walks on through land she has seen to where unseen land comes into
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
   const north = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
   assert.match(north.status === "failed" ? north.detail : "", /^north is land you have seen as far as 512 blocks: explore another way \(.*east \d+ blocks/u);
+  // What it was for, she already knows of: the refusal says so, with the step that fetches it.
+  runtime.world.set("20,64,8", "oak_log");
+  const known = await runStep(stepSchema.parse({ skill: "explore", toward: "north", for: "oak_log" }), contextFor(runtime));
+  assert.match(known.status === "failed" ? known.detail : "", /; you already know of oak_log 12 blocks east, around 20 8: get_items oak_log fetches it$/u);
 });
 
 test("a way sailed without finding land is not sailed again from near there", async () => {
@@ -819,6 +823,12 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   const ore = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "iron_ore" }), contextFor(runtime));
   assert.equal(ore.status, "failed");
   assert.match("detail" in ore ? ore.detail : "", /^iron_ore lies underground nearly everywhere, and walking the surface does not find it: get_items raw_iron digs for it/u);
+  assert.equal(runtime.submitted.length, before);
+
+  // Only blocks are seen on the way (live 2026-10-07: Ayla explored for "water_source").
+  runtime.notBlocks = new Set(["water_source"]);
+  const notBlock = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "water_source" }), contextFor(runtime));
+  assert.deepEqual(notBlock, { status: "failed", detail: "water_source is not a block: explore looks for a block by its Minecraft name; get_items gets an item" });
   assert.equal(runtime.submitted.length, before);
 
   // What is made is not found (live 2026-10-07: Ayla explored for a crafting_table).
@@ -883,7 +893,7 @@ test("explore does not set off toward ground she knows to be mostly water, and s
   runtime.walkOnNavigate = true;
   runtime.water = { "0,-1": 0.9, "0,-2": 0.95, "1,0": 0.25, "2,0": 0, "3,0": 0, "4,0": 0 };
   const refused = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
-  assert.deepEqual(refused, { status: "failed", detail: "north is water as far as you have seen (93% of the next 2 chunks): explore another way, or say so" });
+  assert.deepEqual(refused, { status: "failed", detail: "north is water as far as you have seen (93% of the next 2 chunks): explore another way, carry a boat to cross it, or say so" });
   assert.deepEqual(runtime.submitted, []);
   const east = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
   assert.match(withoutWays(east.status === "done" ? east.detail : ""), /; 6% of the ground crossed was water$/u);
@@ -911,7 +921,7 @@ test("out on the water, explore names the nearest land instead of another way", 
   // On dry ground by the sea (live 2026-10-07: Ayla on a hill), the chunk's water is no reason to say so.
   runtime.world.set("8,61,8", "stone");
   const ashore = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
-  assert.match(ashore.status === "failed" ? ashore.detail : "", /^east is water as far as you have seen .*: explore another way, or say so$/u);
+  assert.match(ashore.status === "failed" ? ashore.detail : "", /^east is water as far as you have seen .*: explore another way, carry a boat to cross it, or say so$/u);
 });
 
 test("a leg over caves or under trees is walked again at the ground's height, the listed one nearest hers", async () => {

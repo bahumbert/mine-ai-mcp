@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { planCraftingFromInventory, type CraftTarget } from "../../utils/craft-plan.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock } from "../markdown.js";
 import {
@@ -37,7 +38,7 @@ export async function viewCraftingRequirements(
   for (const requested of request.items) {
     const item = bot.registry.itemsByName[requested.itemName];
     if (!item) {
-      unknownItems.push(requested.itemName);
+      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
       continue;
     }
     targets.push({ id: item.id, name: item.name, count: requested.count });

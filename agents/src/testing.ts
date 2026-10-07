@@ -118,7 +118,8 @@ export class FakeRuntime implements BotRuntime {
 
   async craftingNeeds(items: readonly ItemCount[], prefer: readonly string[] = []): Promise<CraftingNeeds> {
     this.preferences.push(prefer);
-    if (items.some(({ item }) => this.notItems.has(item))) return { status: "unknown", missing: [] };
+    const unknown = items.filter(({ item }) => this.notItems.has(item)).map(({ item }) => item);
+    if (unknown.length > 0) return { status: "unknown", missing: [], error: `[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: ${unknown.join(", ")}.` };
     if (items.some(({ item }) => this.unplannable.includes(item))) return { status: "planner_failed", missing: [] };
     if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
     const leaves = new Map<string, number>();
@@ -223,8 +224,11 @@ export class FakeRuntime implements BotRuntime {
     return seen.dimension !== "overworld" || Math.hypot(seen.x - from.x, seen.z - from.z) > beyond ? seen : null;
   }
 
+  /** Names that are no block (`blockKinds` leaves them out). */
+  notBlocks: ReadonlySet<string> = new Set();
+
   async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {
-    return Object.fromEntries(names.map((name) => [name, { ...this.kindOf(name), tags: this.blockTags[name] ?? [] }]));
+    return Object.fromEntries(names.filter((name) => !this.notBlocks.has(name)).map((name) => [name, { ...this.kindOf(name), tags: this.blockTags[name] ?? [] }]));
   }
 
   private kindOf(name: string): BlockKind {

@@ -7,6 +7,7 @@ import type { Position3 } from "../../utils/index.js";
 import { executeCraftPlan } from "../../world/crafting.js";
 import { carriedCount, settledNow, settleInventoryMinimum, type SettledInventoryCount } from "../../world/index.js";
 import type { WorldBlock } from "../../world/placement.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock, unconfirmedCount } from "../markdown.js";
 import { formatWorkstation, useTemporaryWorkstation, workstationOperations } from "../temporary-workstation.js";
@@ -157,10 +158,7 @@ async function craftBatch(
   for (const requested of request.items) {
     const target = bot.registry.itemsByName[requested.itemName];
     if (!target) {
-      // A plural is the commonest slip (live 2026-10-07: "sticks", three times in a row): name the item id.
-      const singular = [requested.itemName.replace(/es$/u, ""), requested.itemName.replace(/s$/u, "")]
-        .find((name) => name !== requested.itemName && bot.registry.itemsByName[name] !== undefined);
-      unknownItems.push(singular === undefined ? requested.itemName : `${requested.itemName} (the item id is ${singular})`);
+      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
       requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0 });
       continue;
     }
@@ -250,7 +248,7 @@ async function craftBatch(
   if (execution.kind === "failed") {
     return {
       status: execution.completedSteps > 0 ? "partial" : "failed",
-      error: craftItemOutcomes.executionFailed(execution.cause),
+      error: craftItemOutcomes.executionFailed(execution.cause, carriedCount(bot, "unknown")),
       craft: observed,
     };
   }

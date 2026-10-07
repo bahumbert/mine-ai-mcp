@@ -672,6 +672,11 @@ const EXPLORE_MAX_WALK = 384;
  * 400 blocks north over water for "3 chunks".
  */
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
+  // Only a block is seen on the way (live 2026-10-07: explore for "water_source", "deep_water", "raw_iron").
+  const kinds = step.for === undefined ? null : await context.runtime.blockKinds([step.for]).catch(() => null);
+  if (step.for !== undefined && kinds !== null && kinds[step.for] === undefined) {
+    return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item` };
+  }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
   if (step.for !== undefined && /_ore$/u.test(step.for)) {
@@ -693,6 +698,11 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   const knownBefore = step.for === undefined
     ? undefined
     : (await nearestFree(context, step.for)) ?? (await knownPlaces(context.runtime, step.for, start))[0];
+  // A refused walk names what she already knows of it (live 2026-10-07: Ayla tried explore for oak_log six ways in a
+  // row, all seen or water, while she knew of oak 45 blocks off).
+  const knownNote = knownBefore === undefined || step.for === undefined
+    ? ""
+    : `; you already know of ${step.for} ${describeWay(start, knownBefore)}, around ${knownBefore.x} ${knownBefore.z}: get_items ${step.for} fetches it`;
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
   const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
@@ -703,7 +713,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   // chunks beyond it.
   const unseen = await context.runtime.unseenAlong(start, { x: start.x + dx * EXPLORE_REACH, z: start.z + dz * EXPLORE_REACH, y: start.y }).catch(() => null);
   if (unseen === null) {
-    return { status: "failed", detail: `${step.toward} is land you have seen as far as ${EXPLORE_REACH} blocks: explore another way (${await unseenWays(context, start)})` };
+    return { status: "failed", detail: `${step.toward} is land you have seen as far as ${EXPLORE_REACH} blocks: explore another way (${await unseenWays(context, start)})${knownNote}` };
   }
   // A way already sailed from near here without finding land is not sailed again (live 2026-10-04: Vex rode 450
   // blocks of sea out and back nine times, from the same base, north, north-west, north-east and north again).
@@ -744,7 +754,9 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
         const back = land === null ? "you know of no land near" : `the nearest land you have seen is ${describeWay(start, land)}, around ${land.x} ${Math.floor(start.y)} ${land.z}: go_to there first`;
         return { status: "failed", detail: `you are out on the water, and ${ahead}; ${back}` };
       }
-      return { status: "failed", detail: `${ahead}: explore another way, or say so` };
+      // Unseen land may lie only across water (live 2026-10-07: every way from Ayla's coast was seen or water, and she
+      // tried them all, twice, with no boat): a boat is the way on.
+      return { status: "failed", detail: `${ahead}: explore another way, carry a boat to cross it, or say so${knownNote}` };
     }
     let outcome = await context.body.act("navigate", { x: target.x, z: target.z, range: 4 }, why, { signal: context.signal });
     // Caves under the ground and trees over it make the column ambiguous: the walk is to the ground at her own height

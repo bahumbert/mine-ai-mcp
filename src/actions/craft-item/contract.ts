@@ -75,8 +75,11 @@ export const craftItemOutcomes = {
     `[CRAFT_PLAN_UNAVAILABLE] The recursive planner found recipes but could not produce concrete plans for: ${itemList(items)}.`,
   craftingTableRequired:
     "[CRAFTING_TABLE_REQUIRED] This recipe batch needs a crafting table within the bot's four-block interaction reach; none is in reach and no carried one could be placed beside the bot.",
-  executionFailed: (cause: unknown) =>
-    `[CRAFT_EXECUTION_FAILED] Mineflayer stopped while executing the selected recipe batch: ${cause instanceof Error ? cause.message : String(cause)}`,
+  executionFailed: (cause: unknown, unreadable = 0) =>
+    `[CRAFT_EXECUTION_FAILED] Mineflayer stopped while executing the selected recipe batch: ${cause instanceof Error ? cause.message : String(cause)}` +
+    // Live 2026-10-07 (NeoForge): with a modded item carried, the server's inventory updates cannot be read whole, and
+    // the crafting result goes unseen; once the bot dropped them, every craft worked.
+    (unreadable === 0 ? "" : ` The bot carries ${unreadable} item(s) this client cannot read (named "unknown"), a known cause of this: drop them (drop_item unknown), then craft again.`),
   resultNotObserved: (items: readonly CraftedItemEvidence[]) =>
     `[CRAFT_RESULTS_NOT_OBSERVED] The selected recipe batch finished without the requested gains: ${items.map(({ item, gained, requested }) => `${item} ${gained}/${requested}`).join(", ")}.`,
 } as const;

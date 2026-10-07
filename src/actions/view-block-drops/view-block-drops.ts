@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { blockDropsData, sourcesOf } from "../../world/block-drops.js";
 import { mobSourcesOf } from "../../world/mob-drops.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import {
   parseViewBlockDropsRequest,
@@ -40,7 +41,10 @@ export async function viewBlockDrops(
       .filter((block) => !unknown.includes(block))
       .map((block) => ({ block, drops: (data?.blocks[block] ?? []).map((drop) => ({ ...drop, ...(drop.state && { state: { ...drop.state } }) })) })),
   };
-  if (unknown.length > 0) return { status: "failed", error: viewBlockDropsOutcomes.unknownNames(unknown), drops };
+  if (unknown.length > 0) {
+    const names = [...new Set([...Object.keys(bot.registry.itemsByName), ...Object.keys(bot.registry.blocksByName)])];
+    return { status: "failed", error: viewBlockDropsOutcomes.unknownNames(unknown.map((name) => withSimilar(name, names))), drops };
+  }
   if (data === null) return { status: "failed", error: viewBlockDropsOutcomes.dataUnavailable(bot.version), drops };
   return { status: "succeeded", drops };
 }

@@ -34,7 +34,7 @@ export async function prepareCraftingStation(
     const bootstrap = planCraftingFromInventory(bot, [table]);
     if (bootstrap.kind !== "ready") return { kind: "plan_failed", preparation: bootstrap };
     const made = await executeCraftPlan(bot, bootstrap.applications, null, signal);
-    if (made.kind === "failed") return { kind: "failed", error: craftItemOutcomes.executionFailed(made.cause) };
+    if (made.kind === "failed") return { kind: "failed", error: craftItemOutcomes.executionFailed(made.cause, carriedCount(bot, "unknown")) };
     const observed = await settleInventoryCount(bot, table.name, 1, { signal });
     if (observed.count < 1)
       return { kind: "failed", error: "The crafting table made for this batch was not observed." };

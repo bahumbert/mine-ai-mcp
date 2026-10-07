@@ -122,6 +122,8 @@ export interface CraftingNeeds {
   readonly status: "ready" | "missing_materials" | "uncraftable" | "planner_failed" | "unknown";
   /** Leaf materials the bot lacks, including a crafting table's own when none is carried or in reach. */
   readonly missing: readonly ItemCount[];
+  /** Why there is no plan, in the runtime's words (an unknown name comes with the registry names close to it). */
+  readonly error?: string;
 }
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
@@ -327,6 +329,7 @@ const policyEditSchema = z.object({ result: z.object({ status: z.string() }) });
 const craftingRequirementsSchema = z.object({
   result: z.object({
     status: z.string(),
+    error: z.string().optional(),
     requirements: z.object({
       plan: z.object({
         status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
@@ -509,7 +512,7 @@ export class McpBotRuntime implements BotRuntime {
     const { result } = craftingRequirementsSchema.parse(await this.call("view_crafting_requirements", input, "Work out what crafting these would take."));
     // Only an item Minecraft does not have fails without a plan.
     const plan = result.requirements?.plan;
-    if (plan === undefined) return { status: "unknown", missing: [] };
+    if (plan === undefined) return { status: "unknown", missing: [], ...(result.error !== undefined && { error: result.error }) };
     return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
   }
 
