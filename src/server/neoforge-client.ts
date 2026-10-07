@@ -74,8 +74,14 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
   const send = client.write.bind(client);
   const ids = { windowItems: packetId(bot.version, "window_items"), setSlot: packetId(bot.version, "set_slot") };
   const resent = new Map<number, number>();
+  let dropped = false;
   tolerateUnparsed(client, ids, (windowId, stateId) => {
     if (windowId !== 0) mirrorInventoryInto(bot, windowId);
+    // At login, once her slots are known: the modded items go (see `dropModdedItems`).
+    if (windowId === 0 && !dropped) {
+      dropped = true;
+      setTimeout(() => void dropModdedItems(bot), MODDED_DROP_DELAY_MS);
+    }
     // Once a second at most: a stale state id makes the server answer with the whole contents again.
     if (Date.now() - (resent.get(windowId) ?? 0) < 1000) return;
     resent.set(windowId, Date.now());
@@ -100,6 +106,27 @@ function traceWindows(client: ProtocolClient): void {
     console.error(`[trace] set_slot w${packet.windowId} s${packet.stateId} slot ${packet.slot} ${item(packet.item)}`));
   client.on("window_items", (packet: { windowId: number; stateId: number; items: unknown[] }) =>
     console.error(`[trace] window_items w${packet.windowId} s${packet.stateId} ${packet.items.length} items`));
+}
+
+/** Time for the slot-by-slot answer to arrive after login before the modded items are dropped. */
+const MODDED_DROP_DELAY_MS = 2_000;
+
+/**
+ * Drops the carried items the vanilla game data does not know (modded ones, named "unknown"), once, at login. Their
+ * data is read wrongly (a modded data component), and with one in the inventory every whole-inventory packet is
+ * unreadable (live 2026-10-07: 8 of item #10937; the server resends the whole inventory whenever a click's state id
+ * is behind, so crafting results were lost and crafts failed "Server did not update crafting result"). She cannot
+ * use them anyway; they land at her feet.
+ */
+async function dropModdedItems(bot: Bot): Promise<void> {
+  const items = bot.registry.items as Record<number, unknown>;
+  for (const item of bot.inventory.items().filter((stack) => items[stack.type] === undefined)) {
+    if (bot.currentWindow !== null) return;
+    await bot.tossStack(item).then(
+      () => console.error(`[neoforge] dropped modded item #${item.type} x${item.count} (slot ${item.slot}): its data cannot be read`),
+      (error: unknown) => console.error(`[neoforge] could not drop modded item #${item.type} (slot ${item.slot}): ${String(error)}`),
+    );
+  }
 }
 
 /**
