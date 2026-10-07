@@ -61,6 +61,9 @@ export interface TierModels {
 const chatReplySchema = z.object({
   // Asked first in every reply; one without it is read as saying nothing about who (the check below then passes).
   spoken_to: z.union([z.string(), z.array(z.string())]).default([]),
+  // Named before "say" is written: told only to answer in the player's language, French lines got English answers
+  // (live 2026-10-07, real world and local).
+  language: z.string().default(""),
   work: z.string().default(""),
   say: z.string().default(""),
   route: z.enum(ROUTES),
@@ -99,7 +102,9 @@ export class LlmMind implements Mind {
       // once. The reply is written from what she knows: that it stops now.
       ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
       describeHistory(input.history),
-      `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}`,
+      // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
+      // 2026-10-07).
+      `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
     ].join("\n\n");
     const ongoing = conversationGoingOn(input);
     let sentBack = false;
@@ -132,7 +137,7 @@ export class LlmMind implements Mind {
       // (live 2026-10-07, real world: four players chatted among themselves in French; read as spoken to whoever said
       // it, so to nobody, every line got an answer from her). Only the chit-chat is left to them: a request naming
       // nobody may still be hers (owner: players rarely use the name), and alone with her, any unnamed line is hers.
-      if (reply.route === "talk" && !message.addressed && !to.some((name) => name.toLowerCase() !== "unclear") && othersAround(input) && !talkingWithHer(input)) {
+      if (reply.route === "talk" && !message.addressed && !to.some((name) => !["unclear", "everyone"].includes(name.toLowerCase())) && othersAround(input) && !talkingWithHer(input)) {
         return { to: ["unclear"], say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
       }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
@@ -350,7 +355,7 @@ export function chatSystemPrompt(persona: Persona, canWait = true): string {
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "say": "...", "route": "...", "request": "..."}` : `{"spoken_to": [...], "work": "...", "say": "...", "route": "...", "request": "..."}`}.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "language": "...", "say": "...", "route": "...", "request": "..."}` : `{"spoken_to": [...], "language": "...", "work": "...", "say": "...", "route": "...", "request": "..."}`}.
 - "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
   the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
   "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
@@ -361,6 +366,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   said, a follow-up to a message that named someone else) speaks to them, by name. Players rarely use your name: a
   message that names nobody and continues no other conversation is for you too. Any name counts, even one you do not
   know (another player, the server's operator, someone not in the game).
+- "language": the language the message is written in (e.g. "French", "English"), whatever language you and the
+  recent chat use.
 - "route":
   "ignore" = "spoken_to" does not include you (${persona.username}, "everyone" or "unclear"): never take it on or answer it,
   even when you could; "say" is "".
@@ -381,7 +388,7 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   him a small house there"); when "Players online" has the speaker far away (no coordinates), never make coordinates
   up: write "where Steve is" and say you cannot see them from here; "where you are" and "your position" mean where you
   stand: write your own coordinates; otherwise "".
-- "say": your chat line; "" to stay silent. Write it in the language of the message you answer (a message in French
+- "say": your chat line; "" to stay silent. Write it in "language", the message's language (a message in French
   gets a French line), whatever language you think in. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
   and then say what you finish first, as "Currently doing" shows it; never invent work you are not doing.` : ""}
@@ -516,14 +523,16 @@ function othersAround(input: ChatInput): boolean {
   return input.snapshot.players.some((player) => !notListeners.has(player.username.toLowerCase()));
 }
 
-/** Whether the speaker and she spoke to each other within the last {@link EXCHANGE_LINES} lines. */
+/**
+ * Whether the speaker is talking with her: they spoke to her within the last {@link EXCHANGE_LINES} lines, or her line
+ * to them is the last one said. Her own earlier answers are not enough (live 2026-10-07, local: each line she answered
+ * wrongly made the next one look like a conversation with her).
+ */
 function talkingWithHer(input: ChatInput): boolean {
   const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
-  return input.history.slice(-EXCHANGE_LINES).some((line) => {
-    const by = line.speaker.toLowerCase();
-    const to = (line.to ?? []).map((name) => name.toLowerCase());
-    return (by === speaker && to.includes(self)) || (by === self && to.includes(speaker));
-  });
+  const spokeTo = (line: ChatLine | undefined, by: string, listener: string) =>
+    line !== undefined && line.speaker.toLowerCase() === by && (line.to ?? []).some((name) => name.toLowerCase() === listener);
+  return input.history.slice(-EXCHANGE_LINES).some((line) => spokeTo(line, speaker, self)) || spokeTo(input.history.at(-1), self, speaker);
 }
 
 /** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */

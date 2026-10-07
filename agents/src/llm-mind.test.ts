@@ -102,7 +102,7 @@ test("preferences reach the init prompt as feelings, never as a rule: her feelin
 test("with preferences, how a request is taken is the character's call; the work tier may pick the liked way; narration may show it", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
-  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "work": "\.\.\.", "say": "\.\.\.", "route": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "route": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
   assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow/u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
@@ -202,6 +202,13 @@ test("with other people around, an unnamed line is theirs unless its speaker is 
   const input = { ...chatInput("je vois plus les skins"), snapshot: crowd };
   chat.reply({ spoken_to: ["Steve"], say: "Oh no, Steve!", route: "talk", request: "" });
   assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 1]);
+  // Read as for everyone, chit-chat among them is still theirs (live, local: "oui, magnifique" answered by both bots).
+  chat.reply({ spoken_to: ["everyone"], say: "Oui, magnifique !", route: "talk", request: "" });
+  assert.equal((await mind.chat(input, signal)).route, "ignore");
+  // Her own earlier answer, with a line since, is no conversation with her: each wrong answer made the next look like one.
+  chat.reply({ spoken_to: ["unclear"], say: "Ah bon ?", route: "talk", request: "" });
+  const older = [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"] }, { speaker: "StarOr1", text: "moi oui" }];
+  assert.equal((await mind.chat({ ...input, history: older }, signal)).route, "ignore");
 
   // Talking with her (her line to him, or his to her, just before), or naming her, it is hers to answer.
   chat.reply({ spoken_to: ["unclear"], say: "Ah bon ?", route: "talk", request: "" });
