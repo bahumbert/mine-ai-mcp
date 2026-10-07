@@ -66,6 +66,11 @@ export const personaSchema = z.strictObject({
     maxStepsPerObjective: z.number().int().min(1).max(500).default(40),
     /** The same step ending the same way this many times in a row means it is going nowhere: it gives the objective up. */
     maxSameStepInARow: z.number().int().min(2).max(50).default(3),
+    /**
+     * One skill failing this many times in a row, whatever its input, means it is going round in circles (live
+     * 2026-10-07: explore failed in every direction in turn for 12 minutes): it gives the objective up.
+     */
+    maxSkillFailuresInARow: z.number().int().min(2).max(50).default(6),
     /** After a "stop", how long it rests before going back to its own goal. */
     restAfterStopSeconds: z.number().int().min(0).max(3_600).default(60),
     /** Working on an order, at most one line about what it does now every this many seconds (0: at each change). */

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { blockDropsData, likeliestOrdinaryDrop, ordinaryDrops, ripeState, seedOf, sourcesOf } from "./block-drops.js";
 
-test("the shipped data serves the server's version, or the nearest older one, or none", () => {
+test("the shipped data serves the server's version, or the nearest older one, or a newer patch, or none", () => {
   assert.equal(blockDropsData("1.21.4")?.version, "1.21.4");
   assert.equal(blockDropsData("1.21.9")?.version, "1.21.4");
+  assert.equal(blockDropsData("1.21.1")?.version, "1.21.4");
   assert.equal(blockDropsData("1.20.1"), null);
 });
 

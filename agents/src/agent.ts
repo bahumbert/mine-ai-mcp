@@ -65,10 +65,12 @@ interface Work {
   /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
   lastFact: string;
   spokenAt: number;
+  /** The skill whose steps failed last, and how many times in a row. */
+  failing: { skill: string; count: number };
 }
 
 function newWork(objective: Objective): Work {
-  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now() };
+  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 } };
 }
 
 /**
@@ -365,6 +367,14 @@ export class Agent {
     const last = work.steps.slice(-same);
     if (record.outcome !== "interrupted" && last.length === same && last.every((step) => step.step === record.step && step.outcome === record.outcome && step.detail === record.detail)) {
       this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
+      return;
+    }
+    if (record.outcome === "interrupted") return;
+    work.failing = record.outcome === "failed"
+      ? { skill: decision.step.skill, count: work.failing.skill === decision.step.skill ? work.failing.count + 1 : 1 }
+      : { skill: "", count: 0 };
+    if (work.failing.count >= persona.settings.maxSkillFailuresInARow) {
+      this.finish(work, "failed", `${decision.step.skill.replaceAll("_", " ")} failed ${work.failing.count} times in a row, whichever way it was tried; the last: ${record.detail}`);
     }
   }
 

@@ -1,6 +1,6 @@
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
-import { errorCode, type BotRuntime, type ItemCount, type Position, type SmeltingRecipe } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type ItemCount, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -470,11 +470,6 @@ async function collectAll(context: GatherContext, targets: readonly (readonly [s
   return { status: "done", detail: done.join(", ") };
 }
 
-/**
- * How far a gathering walks by itself to where it saw the block before, when none it may take is near; farther, the
- * model is told where and decides on the trip.
- */
-const AUTO_TRIP = 512;
 /** Places tried, nearest first, in one gathering. */
 const FAR_TRIES = 5;
 /** The nearest places looked at, at most, in one gathering. */
@@ -493,39 +488,57 @@ function noneUsableNear(detail: string): boolean {
 }
 
 /**
- * None of `block` near that she may take: the whole world she knows (the bot data's record of what each explored
- * chunk holds), nearest first, never a place that held nothing already; walked to and collected there up to
- * {@link AUTO_TRIP} blocks away; farther, she is told where it is. Null when collected, else what went wrong (live
- * 2026-10-04: every oak log near Ayla was a wall of her houses, a forest 140 blocks off, and every order failed).
+ * The places beyond the near search where she saw `block` (the bot data's record of what each explored chunk holds),
+ * nearest first, at any distance, never one she found empty already nor one holding a protected area: gathering is
+ * mining, and the blocks of a protected area are its walls (owner, 2026-10-07: "skip entirely protected things"; live
+ * 2026-10-04: the nearest oak logs Ayla had seen were her own houses'). The near search still takes the free blocks
+ * around them.
+ */
+export async function knownPlaces(runtime: BotRuntime, block: string, from: Position): Promise<readonly SeenBlock[]> {
+  const tried = triedPlaces.get(runtime) ?? new Set<string>();
+  triedPlaces.set(runtime, tried);
+  const areas = await runtime.protectedRegions().catch(() => []);
+  const guarded = (x: number, z: number) => areas.some((area) => area.min.x <= x + 8 && area.max.x >= x - 8 && area.min.z <= z + 8 && area.max.z >= z - 8);
+  // Read once (live 2026-10-04: one query per place, through thousands of chunks, held Ayla still for minutes).
+  return (await runtime.seenPlaces(block, from, FETCH_RANGE, FAR_CANDIDATES).catch(() => []))
+    .filter((place) => !tried.has(`${place.x},${place.z}`) && !guarded(place.x, place.z));
+}
+
+/**
+ * The ground among the standable heights `navigate` lists for a column ("observed standable feet heights: 75, 66, -22"):
+ * the one closest to her own height, neither a cave far below nor the top of the trees (live 2026-10-07: the highest
+ * listed height was a forest canopy, and every walk went for the leaves); undefined when none is listed.
+ */
+export function groundHeight(error: string | null | undefined, feetY: number): number | undefined {
+  const listed = /observed standable feet heights: (-?\d+(?:, -?\d+)*)/u.exec(error ?? "")?.[1];
+  if (listed === undefined) return undefined;
+  return listed.split(", ").map(Number).sort((a, b) => Math.abs(a - feetY) - Math.abs(b - feetY))[0];
+}
+
+/**
+ * None of `block` near that she may take: the nearest places she knows of ({@link knownPlaces}), at any distance, walked
+ * to and collected there (owner, 2026-10-07: "return the closest known resource and that's it"; a way over deep water
+ * needs a boat, and `navigate` says so). Null when collected, else what went wrong; with no place known, she is told to
+ * explore.
  */
 async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult): Promise<GatherResult | null> {
   const tried = triedPlaces.get(context.runtime) ?? new Set<string>();
   triedPlaces.set(context.runtime, tried);
-  // Places holding a protected area come last: their blocks are often its walls (live 2026-10-04: the nearest oak logs
-  // Ayla had seen were in the chunks of her own houses, and she walked to them).
-  const areas = await context.runtime.protectedRegions().catch(() => []);
-  const guarded = (x: number, z: number) => areas.some((area) => area.min.x <= x + 8 && area.max.x >= x - 8 && area.min.z <= z + 8 && area.max.z >= z - 8);
-  // The nearest places she saw it, read once (live 2026-10-04: one query per place, through thousands of chunks, held
-  // Ayla still for minutes): those she may take from first, then the rest.
-  const start = (await context.runtime.status()).position;
-  const places = (await context.runtime.seenPlaces(block, start, FETCH_RANGE, FAR_CANDIDATES).catch(() => []))
-    .filter((place) => !tried.has(`${place.x},${place.z}`));
-  const ordered = [...places.filter((place) => !guarded(place.x, place.z)), ...places.filter((place) => guarded(place.x, place.z))];
+  const places = await knownPlaces(context.runtime, block, (await context.runtime.status()).position);
+  if (places.length === 0) {
+    const why = failed.status === "failed" ? ` (${failed.detail})` : "";
+    return { status: "failed", detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
+  }
   let last = failed;
-  let tries = 0;
-  for (const seen of ordered) {
-    if (tries >= FAR_TRIES || context.signal.aborted) break;
+  for (const seen of places.slice(0, FAR_TRIES)) {
+    if (context.signal.aborted) break;
     const here = (await context.runtime.status()).position;
-    if (Math.hypot(seen.x - here.x, seen.z - here.z) > AUTO_TRIP) {
-      return tries > 0 ? last : { status: "failed", detail: `no ${block} near that you may take; the nearest you know of is ${describeWay(here, seen)}, around ${seen.x} ${seen.z}: go_to there and get_items again if it is worth the trip, use another material, or say so` };
-    }
-    tries += 1;
     context.progress?.(`going ${describeWay(here, seen)} to the ${block} seen there, for ${purpose}`);
     const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
     let there = await act(context, "navigate", { x: seen.x, z: seen.z, range: 12 }, why);
-    // Caves under the ground: the walk is over the ground, the highest height the runtime lists (as `explore` does).
-    const surface = there?.status === "failed" ? /observed standable feet heights: (-?\d+)/u.exec(there.detail)?.[1] : undefined;
-    if (surface !== undefined) there = await act(context, "navigate", { x: seen.x, y: Number(surface), z: seen.z, range: 12 }, why);
+    // Caves under the ground, trees over it: the walk is to the ground at her own height (as `explore` does).
+    const ground = there?.status === "failed" ? groundHeight(there.detail, here.y) : undefined;
+    if (ground !== undefined) there = await act(context, "navigate", { x: seen.x, y: ground, z: seen.z, range: 12 }, why);
     if (there !== null) {
       last = there;
       continue;

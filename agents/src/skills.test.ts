@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
+import { groundHeight } from "./gathering.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import type { ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -149,10 +150,10 @@ test("items that cannot be found end get_items, saying why", async () => {
   runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded spruce_log blocks.";
   const result = await runStep({ skill: "get_items", items: [{ item: "spruce_planks", count: 8 }] }, contextFor(runtime));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^no \w+ within 64 blocks, and you know of none farther away: explore for it \(toward land you have not seen\), use another material, or say so \(\[NO_LOADED_MATCHING_TARGETS\]/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^no \w+ within 64 blocks that you may take, and you know of none farther away outside protected areas: explore for it \(toward land you have not seen\), use another material, or say so \(\[NO_LOADED_MATCHING_TARGETS\]/u);
 });
 
-test("get_items with none near she may take goes to where she saw it, nearest first; far beyond, she is told where", async () => {
+test("get_items with none near she may take goes to the nearest place she saw it, however far, never into a protected area", async () => {
   // Live 2026-10-04: every oak log near Ayla was a wall of her houses, a forest 140 blocks off, and every order failed.
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
@@ -166,10 +167,23 @@ test("get_items with none near she may take goes to where she saw it, nearest fi
 
   const far = new FakeRuntime();
   far.recipes = HOUSE_RECIPES;
+  far.walkOnNavigate = true;
+  far.simulateInventory = true;
   far.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either." };
   far.seen = { oak_log: { dimension: "overworld", x: 900, z: 0 } };
-  const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(far));
-  assert.match(told.status === "failed" ? told.detail : "", /no oak_log near that you may take; the nearest you know of is 900 blocks east, around 900 0: go_to there and get_items again/u);
+  const walked = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(far));
+  assert.equal(walked.status, "done", JSON.stringify(walked));
+  assert.deepEqual(far.submitted.slice(0, 3).map((call) => [call.tool, call.input.x ?? call.input.block_name]), [["collect_block", "oak_log"], ["navigate", 900], ["collect_block", "oak_log"]]);
+
+  // Owner, 2026-10-07: gathering is mining, and a protected area's blocks are its walls: such a place is never a trip.
+  const guarded = new FakeRuntime();
+  guarded.recipes = HOUSE_RECIPES;
+  guarded.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either." };
+  guarded.seen = { oak_log: { dimension: "overworld", x: 150, z: 8 } };
+  guarded.areas = [{ regionId: 4, owner: "self", label: "small medieval house", min: { x: 145, y: 60, z: 4 }, max: { x: 151, y: 70, z: 10 } }];
+  const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(guarded));
+  assert.match(told.status === "failed" ? told.detail : "", /^no oak_log within 64 blocks that you may take, and you know of none farther away outside protected areas: explore for it/u);
+  assert.deepEqual(guarded.submitted.filter((call) => call.tool === "navigate"), []);
 });
 
 test("a fetch stays within 64 blocks and, finding nothing, says where she last saw some and which way", async () => {
@@ -699,8 +713,9 @@ test("explore walks on through land she has seen to where unseen land comes into
   // Seen: 20 chunks east of her (to x 320), and everything north as far as it is looked for.
   runtime.explored = new Set([...Array.from({ length: 20 }, (_, i) => `${i},0`), ...Array.from({ length: 40 }, (_, i) => `0,${-i}`)]);
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 2 }), contextFor(runtime));
-  // Unseen from x 328, 320 blocks east of her: it comes into sight 128 short of it, then 2 chunks on, 224 blocks in all.
-  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 7);
+  // Unseen from x 328, 320 blocks east of her: it comes into sight 128 short of it, then 2 chunks on, 224 blocks in all,
+  // in legs of 96 blocks (owner, live 2026-10-07: 32-block legs were a stream of hops she could see past).
+  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 3);
   assert.match(result.status === "done" ? result.detail : "", /^explored east: now 224 blocks east from where you started, at 232 64 8; unseen land from here: /u);
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
   const north = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
@@ -722,25 +737,39 @@ test("a way sailed without finding land is not sailed again from near there", as
   assert.doesNotMatch(east.status === "failed" ? east.detail : "", /open sea/u);
 });
 
-test("explore walks one compass way from where she stands, in legs, and says where it ended and where the block is", async () => {
+test("explore walks one compass way from where she stands, in legs, and says where it ended; a known block is fetched, not explored for", async () => {
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "dark_oak_log" }), contextFor(runtime));
-  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x, call.input.z, call.input.y]), [["navigate", 32, 0, undefined], ["navigate", 64, 0, undefined]]);
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x, call.input.z, call.input.y]), [["navigate", 64, 0, undefined]]);
   assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; no dark_oak_log seen on the way");
 
-  // Asked for a block, it stops once one is within fetching range.
+  // Live 2026-10-07: Ayla explored "for spruce_log" some forty times while she knew of spruce 169 blocks away.
   const near = new FakeRuntime();
   near.walkOnNavigate = true;
   near.snapshot = { ...near.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
   near.world.set("80,64,2", "oak_log");
-  const found = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "oak_log" }), contextFor(near));
-  assert.equal(near.submitted.length, 1);
-  assert.equal(withoutWays(found.status === "done" ? found.detail : ""), "explored east: now 32 blocks east from where you started, at 32 64 0; the nearest oak_log is 48 blocks east, at 80 64 2");
+  const known = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "oak_log" }), contextFor(near));
+  assert.deepEqual(near.submitted, []);
+  assert.match(known.status === "failed" ? known.detail : "", /^you already know of oak_log 80 blocks east, around 80 2: get_items oak_log goes there and gathers it/u);
+  // Seen before, out of sight now: the bot data's record counts too.
+  const seen = new FakeRuntime();
+  seen.seen = { spruce_log: { dimension: "overworld", x: -366, z: -18 } };
+  const recorded = await runStep(stepSchema.parse({ skill: "explore", toward: "north", for: "spruce_log" }), contextFor(seen));
+  assert.match(recorded.status === "failed" ? recorded.detail : "", /^you already know of spruce_log \d+ blocks west, around -366 -18: get_items spruce_log/u);
 });
 
-test("explore names only blocks she may take: a log in a wall of her protected house is not \"the nearest\"", async () => {
+test("a walk that stopped is not \"done\" because the block is in sight farther off: it says why it stopped", async () => {
+  // Live 2026-10-07: "explored north: now 0 blocks ... the nearest spruce_log is 169 blocks" returned done, forty times.
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
+  runtime.failures.navigate = "[NAVIGATION_STOPPED] Pathfinder stopped: planning_stalled.";
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "dark_oak_log" }), contextFor(runtime));
+  assert.match(result.status === "failed" ? result.detail : "", /^exploring east stopped \(\[NAVIGATION_STOPPED\] Pathfinder stopped: planning_stalled\.\): now 0 blocks/u);
+});
+
+test("explore names only blocks she may take: a log in a wall of her protected house is not one she knows of", async () => {
   // Live 2026-10-04: all 48 oak logs near Ayla were walls of her houses, and explore kept naming them.
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
@@ -749,7 +778,7 @@ test("explore names only blocks she may take: a log in a wall of her protected h
   runtime.world.set("150,64,0", "oak_log");
   const house = { regionId: 4, label: "small medieval house", owner: "Ayla", reason: "", min: { x: 36, y: 60, z: -4 }, max: { x: 44, y: 70, z: 4 } } as unknown as ProtectedArea;
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "oak_log" }), contextFor(runtime, { areas: [house] }));
-  assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; the nearest oak_log is 86 blocks east, at 150 64 0");
+  assert.match(result.status === "failed" ? result.detail : "", /^you already know of oak_log 150 blocks east, around 150 0:/u);
 });
 
 test("explore does not set off toward ground she knows to be mostly water, and says how much water she crossed", async () => {
@@ -785,7 +814,7 @@ test("out on the water, explore names the nearest land instead of another way", 
   assert.deepEqual(result, { status: "failed", detail: "you are out on the water, and east is water as far as you have seen (100% of the next 2 chunks); the nearest land you have seen is 48 blocks west, around -40 62 8: go_to there first" });
 });
 
-test("a leg over caves is walked again at the ground's height, the highest the runtime lists", async () => {
+test("a leg over caves or under trees is walked again at the ground's height, the listed one nearest hers", async () => {
   // Live 2026-10-04: navigate without y refused columns with caves under them ([NAVIGATION_HEIGHT_REQUIRED]).
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
@@ -794,6 +823,9 @@ test("a leg over caves is walked again at the ground's height, the highest the r
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 2 }), contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.map((call) => [call.input.x, call.input.y, call.input.z]), [[32, undefined, 0], [32, 70, 0]]);
+  // Live 2026-10-07: the highest listed height was a forest canopy, and every walk went for the leaves.
+  assert.equal(groundHeight("observed standable feet heights: 76, 66, -22.", 66), 66);
+  assert.equal(groundHeight("no heights here", 66), undefined);
 });
 
 test("explore stopped on the way says why and where it got to; known water ahead ends the walk where it is", async () => {

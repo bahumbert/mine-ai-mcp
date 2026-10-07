@@ -88,6 +88,24 @@ test("the same step failing the same way several times in a row ends the objecti
   assert.equal(action.requests.length, 3);
 });
 
+test("one skill failing again and again, whichever way it is tried, ends the objective", async (t) => {
+  // Live 2026-10-07: explore failed in every direction in turn for 12 minutes.
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded matching blocks.";
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxSkillFailuresInARow: 3 } });
+  chat.reply({ say: "Okay!", route: "act", request: "collect some wood" }, { say: "No wood around, sorry!" });
+  action.reply(
+    { step: { skill: "collect_block", block: "birch_log", count: 5 } },
+    { step: { skill: "collect_block", block: "oak_log", count: 5 } },
+    { step: { skill: "collect_block", block: "spruce_log", count: 5 } },
+    { step: { skill: "collect_block", block: "acacia_log", count: 5 } },
+  );
+  await agent.handle(say("Steve", "get me some wood"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(action.requests.length, 3);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect block failed 3 times in a row, whichever way it was tried; the last: no spruce_log within 64 blocks/u);
+});
+
 test("chatting while working is answered at once and the work goes on", async (t) => {
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 200;

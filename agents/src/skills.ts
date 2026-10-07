@@ -6,7 +6,7 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, notNear, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, walkToStation } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
@@ -634,8 +634,13 @@ export function houseBox(cells: readonly Position[]): { readonly min: Position; 
   };
 }
 
-/** One leg of an exploring walk: within loaded ground, so `navigate` sees the surface (and the water) it goes to. */
-const EXPLORE_LEG = 32;
+/**
+ * One leg of an exploring walk: within loaded ground, so `navigate` sees the surface (and the water) it goes to; a
+ * leg of 32 blocks made the walk a stream of 2-chunk hops she could see past (owner, live 2026-10-07).
+ */
+const EXPLORE_LEG = 96;
+/** A leg that ends over known water is shortened to this, so the land before the shore is still walked. */
+const SHORE_LEG = 32;
 /** Above this share of water in the explored ground of the next leg, the walk does not go on. */
 const MOSTLY_WATER = 0.5;
 /** How far ahead unseen land is looked for, along each way. */
@@ -659,6 +664,15 @@ const EXPLORE_MAX_WALK = 384;
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
   const setOut = await context.runtime.status();
   const start = setOut.position;
+  // Exploring is for what she knows of nowhere (live 2026-10-07: Ayla explored "for spruce_log" some forty times while
+  // she knew of spruce 169 blocks away; live 2026-10-04: Vex explored three more times after "the nearest dark_oak_log
+  // is 37 blocks east"): a known one is fetched, and get_items goes there by itself.
+  if (step.for !== undefined) {
+    const known = (await nearestFree(context, step.for)) ?? (await knownPlaces(context.runtime, step.for, start))[0];
+    if (known !== undefined) {
+      return { status: "failed", detail: `you already know of ${step.for} ${describeWay(start, known)}, around ${known.x} ${known.z}: get_items ${step.for} goes there and gathers it (a way across deep water needs a boat); explore only for what you know of nowhere` };
+    }
+  }
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
   const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
@@ -686,7 +700,12 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   for (let walked = 0; walked < total;) {
     let leg = Math.min(EXPLORE_LEG, total - walked);
     let target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
-    const water = await context.runtime.waterAlong(here, target).catch(() => null);
+    let water = await context.runtime.waterAlong(here, target).catch(() => null);
+    while (!boat && water !== null && water.share > MOSTLY_WATER && leg > SHORE_LEG) {
+      leg = SHORE_LEG;
+      target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
+      water = await context.runtime.waterAlong(here, target).catch(() => null);
+    }
     if (water !== null && water.share > MOSTLY_WATER && boat) {
       leg = total - walked;
       target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
@@ -708,11 +727,11 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
       return { status: "failed", detail: `${ahead}: explore another way, or say so` };
     }
     let outcome = await context.body.act("navigate", { x: target.x, z: target.z, range: 4 }, why, { signal: context.signal });
-    // Caves under the ground make the column ambiguous: the walk is over the ground, the highest height it lists
-    // (live 2026-10-04: "[NAVIGATION_HEIGHT_REQUIRED] … observed standable feet heights: 70, -19, -47").
-    const surface = /observed standable feet heights: (-?\d+)/u.exec(outcome.error ?? "")?.[1];
-    if (outcome.status !== "succeeded" && !context.signal.aborted && surface !== undefined) {
-      outcome = await context.body.act("navigate", { x: target.x, y: Number(surface), z: target.z, range: 4 }, why, { signal: context.signal });
+    // Caves under the ground and trees over it make the column ambiguous: the walk is to the ground at her own height
+    // (live 2026-10-04: "observed standable feet heights: 70, -19, -47"; live 2026-10-07: the highest was a canopy).
+    const ground = outcome.status === "succeeded" ? undefined : groundHeight(outcome.error, here.y);
+    if (outcome.status !== "succeeded" && !context.signal.aborted && ground !== undefined) {
+      outcome = await context.body.act("navigate", { x: target.x, y: ground, z: target.z, range: 4 }, why, { signal: context.signal });
     }
     if (context.signal.aborted) return { status: "stopped" };
     const before = here;
@@ -740,12 +759,14 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     ...(crossed === null || crossed.share === 0 ? [] : [`${Math.round(crossed.share * 100)}% of the ground crossed was water`]),
   ];
   if (step.for !== undefined) {
-    found ??= await nearestFree(context, step.for);
-    parts.push(found === undefined ? `no ${step.for} seen on the way` : `the nearest ${step.for} is ${describeWay(here, found)}, at ${found.x} ${found.y} ${found.z}`);
+    const nearest = found ?? await nearestFree(context, step.for);
+    parts.push(nearest === undefined ? `no ${step.for} seen on the way` : `the nearest ${step.for} is ${describeWay(here, nearest)}, at ${nearest.x} ${nearest.y} ${nearest.z}`);
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
   if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, blocks: Number(noLand[1]) });
+  // Done only when the walk went its whole way or found what it was for within reach: a walk that stopped says why,
+  // even when the block is in sight farther off (live 2026-10-07: "done" after 0 blocks, forty times).
   if (stop === null || found !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
   return { status: "failed", detail: `exploring ${step.toward} stopped (${stop}): ${parts.join("; ")}` };
 }
