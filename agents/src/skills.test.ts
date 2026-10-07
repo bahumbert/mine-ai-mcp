@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { groundHeight } from "./gathering.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import type { ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -177,7 +176,7 @@ test("drop_item drops several items in one step, and the single-item form still 
   const step = stepSchema.parse({ skill: "drop_item", items: [{ item: "snowball" }, { item: "granite", count: 10 }] });
   const result = await runStep(step, contextFor(runtime));
   assert.equal(result.status, "done");
-  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "snowball" }, { item_name: "granite", count: 10 }]]);
+  assert.deepEqual(runtime.submitted.map((call) => [call.input.items, call.input.in_a_hole]), [[[{ item_name: "snowball" }, { item_name: "granite", count: 10 }], true]]);
   assert.equal(stepSchema.safeParse({ skill: "drop_item", item: "dirt" }).success, true);
   assert.equal(stepSchema.safeParse({ skill: "drop_item" }).success, false);
 });
@@ -747,6 +746,15 @@ test("a crafting table close by is walked to and used; a far one is not, her own
   far.world.set("40,64,3", "crafting_table");
   assert.equal((await runStep({ skill: "get_items", items: [{ item: "wooden_pickaxe", count: 1 }] }, contextFor(far))).status, "done");
   assert.deepEqual(far.submitted.filter((call) => call.tool === "craft_item").map(describeCall), ["craft wooden_pickaxe at table"]);
+
+  // Without a table of her own, that one 40 blocks off is worth the walk (owner, 2026-10-07: 48 blocks).
+  const none = new FakeRuntime();
+  none.recipes = HOUSE_RECIPES;
+  none.simulateInventory = true;
+  none.snapshot = { ...none.snapshot, inventory: [{ name: "oak_log", count: 4 }] };
+  none.world.set("40,64,3", "crafting_table");
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "wooden_pickaxe", count: 1 }] }, contextFor(none))).status, "done");
+  assert.deepEqual(none.submitted.filter((call) => call.tool === "navigate" || call.tool === "craft_item").map((call) => call.tool === "navigate" ? `walk to ${call.input.x} ${call.input.z}` : describeCall(call)), ["walk to 40 3", "craft wooden_pickaxe"]);
 });
 
 test("level_area says where markers out of range are, so the next step can walk there", async () => {
@@ -788,7 +796,7 @@ test("explore walks on through land she has seen to where unseen land comes into
   assert.match(result.status === "done" ? result.detail : "", /^explored east: now 224 blocks east from where you started, at 232 64 8; unseen land from here: /u);
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
   const north = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
-  assert.match(north.status === "failed" ? north.detail : "", /^north is land you have seen as far as 512 blocks: explore another way \(.*east \d+ blocks/u);
+  assert.match(north.status === "failed" ? north.detail : "", /^north is land you have seen as far as 512 blocks\. Unseen land lies .*east \d+ blocks.*: explore one of those ways; the walk crosses the land you know to get there \(up to 384 blocks a step\)$/u);
   // What it was for, she already knows of: the refusal says so, with the step that fetches it.
   runtime.world.set("20,64,8", "oak_log");
   const known = await runStep(stepSchema.parse({ skill: "explore", toward: "north", for: "oak_log" }), contextFor(runtime));
@@ -907,7 +915,7 @@ test("with a boat, explore sets off over the water: one leg to the whole distanc
   runtime.water = { "0,-1": 0.9, "0,-2": 0.95, "0,-3": 0.95, "0,-4": 0.9 };
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
   assert.equal(result.status, "done");
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input), [{ x: 8, z: -56, range: 4 }]);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input), [{ x: 8, z: -56, near_y: 64, range: 4 }]);
 });
 
 test("out on the water, explore names the nearest land instead of another way", async () => {
@@ -924,18 +932,15 @@ test("out on the water, explore names the nearest land instead of another way", 
   assert.match(ashore.status === "failed" ? ashore.detail : "", /^east is water as far as you have seen .*: explore another way, carry a boat to cross it, or say so$/u);
 });
 
-test("a leg over caves or under trees is walked again at the ground's height, the listed one nearest hers", async () => {
-  // Live 2026-10-04: navigate without y refused columns with caves under them ([NAVIGATION_HEIGHT_REQUIRED]).
+test("a leg over caves or under trees goes to the ground nearest her own height, in one call", async () => {
+  // Live 2026-10-04: navigate without y refused columns with caves under them ([NAVIGATION_HEIGHT_REQUIRED]); live
+  // 2026-10-07: the refused first call and its retry showed as errors. near_y lets the runtime take that floor.
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
-  runtime.failNext.navigate = { error: "[NAVIGATION_STOPPED] Pathfinder stopped: [NAVIGATION_HEIGHT_REQUIRED] Column 32, 0 has highest block grass_block at y=69; observed standable feet heights: 70, -19, -47. Supply y to choose a floor.." };
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 2 }), contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(runtime.submitted.map((call) => [call.input.x, call.input.y, call.input.z]), [[32, undefined, 0], [32, 70, 0]]);
-  // Live 2026-10-07: the highest listed height was a forest canopy, and every walk went for the leaves.
-  assert.equal(groundHeight("observed standable feet heights: 76, 66, -22.", 66), 66);
-  assert.equal(groundHeight("no heights here", 66), undefined);
+  assert.deepEqual(runtime.submitted.map((call) => [call.input.x, call.input.y, call.input.near_y, call.input.z]), [[32, undefined, 64, 0]]);
 });
 
 test("explore stopped on the way says why and where it got to; known water ahead ends the walk where it is", async () => {

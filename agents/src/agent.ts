@@ -199,7 +199,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, otherAgents: this.options.otherAgents }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;

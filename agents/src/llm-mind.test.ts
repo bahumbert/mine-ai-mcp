@@ -194,6 +194,25 @@ test("an unnamed line right after the speaker spoke to someone else is sent back
   assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, wood please", to: ["Ayla"] }] }, signal)).route, "talk");
 });
 
+test("with other people around, an unnamed line is theirs unless its speaker is talking with her", async () => {
+  // Live 2026-10-07, real world: players chatted among themselves in French; each line, read as spoken to whoever said
+  // it, got an answer from her.
+  const { chat, mind } = scriptedMind();
+  const crowd = { ...new FakeRuntime().snapshot, players: [{ username: "StarOr1", position: null }, { username: "Nonomie38", position: null }] };
+  const input = { ...chatInput("je vois plus les skins"), snapshot: crowd };
+  chat.reply({ spoken_to: ["Steve"], say: "Oh no, Steve!", route: "talk", request: "" });
+  assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 1]);
+
+  // Talking with her (her line to him, or his to her, just before), or naming her, it is hers to answer.
+  chat.reply({ spoken_to: ["unclear"], say: "Ah bon ?", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...input, history: [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"] }] }, signal)).route, "talk");
+  chat.reply({ spoken_to: ["Ayla"], say: "Oui !", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...input, message: { ...input.message, message: "Ayla tu viens ?", addressed: true } }, signal)).route, "talk");
+  // Other AI characters are no one a line between people is spoken to: alone with them, Steve's line is still hers.
+  chat.reply({ spoken_to: ["unclear"], say: "Coming!", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...input, snapshot: { ...crowd, players: [{ username: "Vex", position: null }] }, otherAgents: ["Vex"] }, signal)).route, "talk");
+});
+
 test("a reply sent back for answering a line it read as for someone else keeps that reading", async () => {
   // Live 2026-10-04: "nice work today, thanks Vex" came back read as spoken to the speaker, which let it through.
   const { chat, mind } = scriptedMind();

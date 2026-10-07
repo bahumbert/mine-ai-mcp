@@ -222,11 +222,35 @@ test("omitted height refuses a canopy, overhang, or Nether roof instead of choos
   }
 });
 
+test("with near_y, a column under a canopy resolves to the floor nearest that height in one call", async () => {
+  // Live 2026-10-07: each explore leg under trees was refused, then asked again with y (two calls, one shown failed).
+  const { bot } = botFixture(64);
+  const blockAt = bot.blockAt;
+  bot.blockAt = ((cell: Vec3) =>
+    cell.y === 70
+      ? { name: "oak_leaves", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
+      : blockAt(cell)) as Bot["blockAt"];
+  const run: NavigateDependencies["navigate"] = async ({ goal }) => {
+    const resolved = goal.resolve(undefined as never);
+    assert.equal(resolved.kind, "active");
+    bot.entity.position.set(3.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 1 };
+  };
+  const output = await new ActionRunner().run(
+    createNavigateAction(bot, fakeNavigation, dependencies(run)),
+    { x: 3, z: 0, near_y: 63 },
+  );
+  assert.equal(output.result.status, "succeeded", "error" in output.result ? output.result.error : "");
+  if (!("navigation" in output.result)) throw new Error("expected navigation evidence");
+  assert.equal(output.result.navigation.target.y, 64);
+});
+
 test("parses one absolute destination and defaults its reached range", () => {
   assert.deepEqual(parseNavigateRequest({ x: 12, y: 65, z: -4 }), {
     x: 12,
     y: 65,
     z: -4,
+    nearY: null,
     range: 1,
     scaffold: true,
     dig: true,
@@ -236,6 +260,7 @@ test("parses one absolute destination and defaults its reached range", () => {
     x: 12,
     y: null,
     z: -4,
+    nearY: null,
     range: 1,
     scaffold: false,
     dig: false,

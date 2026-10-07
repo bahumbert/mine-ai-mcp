@@ -6,7 +6,7 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, obtainedBy, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
@@ -106,7 +106,10 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
         const entries = dropEntries(step);
         const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
         const what = entries.map((entry) => `${entry.count ?? "all the"} ${entry.item}`).join(", ");
-        const dropped = await once(context, "drop_item", { items, allow_equipped: true }, why, `dropped ${what}`);
+        // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
+        // (owner, live 2026-10-07). Where no hole can be dug (water, bedrock), it goes on the ground as before.
+        let dropped = await once(context, "drop_item", { items, allow_equipped: true, in_a_hole: true }, why, `buried ${what}`);
+        if (dropped.status === "failed") dropped = await once(context, "drop_item", { items, allow_equipped: true }, why, `dropped ${what}`);
         // How much room it made is what a drop is for (live 2026-10-02: 30 of 36 panes dropped freed no slot).
         const stacks = (await context.runtime.status()).inventory.length;
         const room = `${Math.max(0, INVENTORY_SLOTS - stacks)} of ${INVENTORY_SLOTS} inventory slots free`;
@@ -713,7 +716,13 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   // chunks beyond it.
   const unseen = await context.runtime.unseenAlong(start, { x: start.x + dx * EXPLORE_REACH, z: start.z + dz * EXPLORE_REACH, y: start.y }).catch(() => null);
   if (unseen === null) {
-    return { status: "failed", detail: `${step.toward} is land you have seen as far as ${EXPLORE_REACH} blocks: explore another way (${await unseenWays(context, start)})${knownNote}` };
+    // Said plainly that the walk itself crosses known land to the unseen (live 2026-10-07: the model tried seen ways
+    // again and again, as if it had to be at the edge first).
+    const { near } = await unseenWayList(context, start);
+    const detail = near.length > 0
+      ? `${step.toward} is land you have seen as far as ${EXPLORE_REACH} blocks. Unseen land lies ${near.join(", ")}: explore one of those ways; the walk crosses the land you know to get there (up to ${EXPLORE_MAX_WALK} blocks a step)`
+      : `every way from here is land you have seen as far as ${EXPLORE_REACH} blocks: go_to a place farther than that first, then explore from there`;
+    return { status: "failed", detail: `${detail}${knownNote}` };
   }
   // A way already sailed from near here without finding land is not sailed again (live 2026-10-04: Vex rode 450
   // blocks of sea out and back nine times, from the same base, north, north-west, north-east and north again).
@@ -758,13 +767,9 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
       // tried them all, twice, with no boat): a boat is the way on.
       return { status: "failed", detail: `${ahead}: explore another way, carry a boat to cross it, or say so${knownNote}` };
     }
-    let outcome = await context.body.act("navigate", { x: target.x, z: target.z, range: 4 }, why, { signal: context.signal });
-    // Caves under the ground and trees over it make the column ambiguous: the walk is to the ground at her own height
-    // (live 2026-10-04: "observed standable feet heights: 70, -19, -47"; live 2026-10-07: the highest was a canopy).
-    const ground = outcome.status === "succeeded" ? undefined : groundHeight(outcome.error, here.y);
-    if (outcome.status !== "succeeded" && !context.signal.aborted && ground !== undefined) {
-      outcome = await context.body.act("navigate", { x: target.x, y: ground, z: target.z, range: 4 }, why, { signal: context.signal });
-    }
+    // Caves under the ground and trees over it make the column ambiguous: the walk is to the ground nearest her own
+    // height (live 2026-10-04: "observed standable feet heights: 70, -19, -47"; live 2026-10-07: the highest was a canopy).
+    const outcome = await context.body.act("navigate", { x: target.x, z: target.z, near_y: Math.floor(here.y), range: 4 }, why, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
     const before = here;
     here = (await context.runtime.status()).position;
@@ -833,6 +838,12 @@ function openSeaWays(runtime: object): { readonly toward: string; readonly from:
 
 /** "north 180 blocks, east 40 blocks; seen as far as 512 blocks: south, west": how far unseen land is each way. */
 async function unseenWays(context: SkillContext, from: Position): Promise<string> {
+  const { near, none } = await unseenWayList(context, from);
+  return [near.join(", "), none.length === 0 ? "" : `seen as far as ${EXPLORE_REACH} blocks: ${none.join(", ")}`].filter((part) => part !== "").join("; ");
+}
+
+/** The ways with unseen land within reach ("north 180 blocks"), nearest first, and those seen all the way. */
+async function unseenWayList(context: SkillContext, from: Position): Promise<{ readonly near: readonly string[]; readonly none: readonly string[] }> {
   const near: string[] = [];
   const none: string[] = [];
   const ways = await Promise.all(Object.entries(COMPASS_HEADINGS).map(async ([way, degrees]) => {
@@ -844,7 +855,7 @@ async function unseenWays(context: SkillContext, from: Position): Promise<string
     if (distance === null) none.push(way);
     else near.push(`${way} ${distance} blocks`);
   }
-  return [near.join(", "), none.length === 0 ? "" : `seen as far as ${EXPLORE_REACH} blocks: ${none.join(", ")}`].filter((part) => part !== "").join("; ");
+  return { near, none };
 }
 
 /** How many of the nearest blocks of a name are looked through for one outside every protected area. */

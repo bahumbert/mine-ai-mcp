@@ -1,6 +1,6 @@
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
-import { errorCode, type BotRuntime, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
+import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -498,7 +498,10 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   for (const [block, count] of leaves) collect.set(block, (collect.get(block) ?? 0) + count);
   for (const [item, { mob, count }] of huntedLeaves) hunt.set(item, { mob, count: (hunt.get(item)?.count ?? 0) + count });
   const toolFirst = await chooseTool(runtime, tools);
-  const tableFirst = (toolFirst !== null || crafted.size > 0) && carried(inventory, TABLE.item) === 0;
+  // A placed table she would walk to is used instead of making one (live 2026-10-07: a table was crafted, and lost,
+  // beside one already standing).
+  const tableFirst = (toolFirst !== null || crafted.size > 0) && carried(inventory, TABLE.item) === 0
+    && (await placedStation(runtime, TABLE.item, STATION_RANGE_NONE_CARRIED)) === undefined;
   return {
     collect,
     hunt,
@@ -615,17 +618,6 @@ async function forgetEmptyNear(runtime: BotRuntime, block: string, here: Positio
 }
 
 /**
- * The ground among the standable heights `navigate` lists for a column ("observed standable feet heights: 75, 66, -22"):
- * the one closest to her own height, neither a cave far below nor the top of the trees (live 2026-10-07: the highest
- * listed height was a forest canopy, and every walk went for the leaves); undefined when none is listed.
- */
-export function groundHeight(error: string | null | undefined, feetY: number): number | undefined {
-  const listed = /observed standable feet heights: (-?\d+(?:, -?\d+)*)/u.exec(error ?? "")?.[1];
-  if (listed === undefined) return undefined;
-  return listed.split(", ").map(Number).sort((a, b) => Math.abs(a - feetY) - Math.abs(b - feetY))[0];
-}
-
-/**
  * None of `block` near that she may take: the nearest places she knows of ({@link knownPlaces}), at any distance, walked
  * to and collected there (owner, 2026-10-07: "return the closest known resource and that's it"; a way over deep water
  * needs a boat, and `navigate` says so). Null when collected, else what went wrong; with no place known, she is told to
@@ -647,10 +639,8 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     const here = (await context.runtime.status()).position;
     context.progress?.(`going ${describeWay(here, seen)} to the ${block} seen there, for ${purpose}`);
     const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
-    let there = await act(context, "navigate", { x: seen.x, z: seen.z, range: 12 }, why);
-    // Caves under the ground, trees over it: the walk is to the ground at her own height (as `explore` does).
-    const ground = there?.status === "failed" ? groundHeight(there.detail, here.y) : undefined;
-    if (ground !== undefined) there = await act(context, "navigate", { x: seen.x, y: ground, z: seen.z, range: 12 }, why);
+    // Caves under the ground, trees over it: the walk is to the ground nearest her own height (as `explore` does).
+    const there = await act(context, "navigate", { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
     if (there !== null) {
       last = there;
       continue;
@@ -737,9 +727,7 @@ async function withRoomForStation(context: GatherContext, site: Site, run: () =>
   const land = await context.runtime.nearestLand(here).catch(() => null);
   if (land === null) return first;
   const why = "Step onto dry, open ground to set the workstation down.";
-  let moved = await act(context, "navigate", { x: land.x, z: land.z, range: 4 }, why);
-  const ground = moved?.status === "failed" ? groundHeight(moved.detail, here.y) : undefined;
-  if (ground !== undefined) moved = await act(context, "navigate", { x: land.x, y: ground, z: land.z, range: 4 }, why);
+  const moved = await act(context, "navigate", { x: land.x, z: land.z, near_y: Math.floor(here.y), range: 4 }, why);
   if (moved !== null) return first;
   site.home = (await context.runtime.status()).position;
   return run();
@@ -769,15 +757,22 @@ async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose: strin
 
 /** Within this many blocks, a placed crafting table or furnace is walked to and used instead of setting one down. */
 const STATION_RANGE = 16;
+/**
+ * Without one of her own, a placed one is walked to from farther: making one costs materials, not just a few steps
+ * (owner, 2026-10-07).
+ */
+const STATION_RANGE_NONE_CARRIED = 48;
 
 /**
- * Walks up to the nearest placed `block` when one is within {@link STATION_RANGE}; where it stands, or null when none
- * is that close or the way there fails (then a carried one is set down as before).
+ * Walks up to the nearest placed `block` when one is within {@link STATION_RANGE} (or
+ * {@link STATION_RANGE_NONE_CARRIED} when she carries none); where it stands, or null when none is that close or the
+ * way there fails (then a carried one is set down as before).
  */
 export async function walkToStation(context: GatherContext, block: "crafting_table" | "furnace"): Promise<Position | null> {
-  const here = (await context.runtime.status()).position;
-  const found = (await context.runtime.findBlocks(block, 1))[0];
-  if (found === undefined || Math.hypot(found.x - here.x, found.y - here.y, found.z - here.z) > STATION_RANGE) return null;
+  const { inventory } = await context.runtime.status();
+  const range = inventory.some((stack) => stack.name === block) ? STATION_RANGE : STATION_RANGE_NONE_CARRIED;
+  const found = await placedStation(context.runtime, block, range);
+  if (found === undefined) return null;
   // Coordinates only: the result is spread into `navigate` and `smelt_item` inputs, which refuse unknown keys (live
   // 2026-10-03: the block's `name` made every walk to a crafting table fail validation).
   const station = { x: found.x, y: found.y, z: found.z };
@@ -787,6 +782,13 @@ export async function walkToStation(context: GatherContext, block: "crafting_tab
 
 /** Told the inventory just before and just after one craft or smelt. */
 type Spent = (before: Stacks, after: Stacks) => void;
+
+/** The nearest placed `block` within `range` blocks of her; undefined when none is that close. */
+async function placedStation(runtime: BotRuntime, block: string, range: number): Promise<FoundBlock | undefined> {
+  const here = (await runtime.status()).position;
+  const found = (await runtime.findBlocks(block, 1))[0];
+  return found !== undefined && Math.hypot(found.x - here.x, found.y - here.y, found.z - here.z) <= range ? found : undefined;
+}
 
 /** `withTable`: set the carried crafting table down for this batch and pick it up again. */
 async function craft(context: GatherContext, items: readonly ItemCount[], purpose: string, withTable: boolean, spent: Spent): Promise<GatherResult> {

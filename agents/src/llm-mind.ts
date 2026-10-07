@@ -128,6 +128,13 @@ export class LlmMind implements Mind {
         firstReading ??= to;
         throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
       }
+      // A line naming nobody, with other people there to hear it, is their chat unless its speaker is talking with her
+      // (live 2026-10-07, real world: four players chatted among themselves in French; read as spoken to whoever said
+      // it, so to nobody, every line got an answer from her). Only the chit-chat is left to them: a request naming
+      // nobody may still be hers (owner: players rarely use the name), and alone with her, any unnamed line is hers.
+      if (reply.route === "talk" && !message.addressed && !to.some((name) => name.toLowerCase() !== "unclear") && othersAround(input) && !talkingWithHer(input)) {
+        return { to: ["unclear"], say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
+      }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
       // to let pass (the bench: held to them too, she answered every line to "Opus").
       const named = to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase()) || (given.length > 0 && listeners.length === 0);
@@ -374,7 +381,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   him a small house there"); when "Players online" has the speaker far away (no coordinates), never make coordinates
   up: write "where Steve is" and say you cannot see them from here; "where you are" and "your position" mean where you
   stand: write your own coordinates; otherwise "".
-- "say": your chat line; "" to stay silent. Fit it to the route, in your own words, never claiming work is done.
+- "say": your chat line; "" to stay silent. Write it in the language of the message you answer (a message in French
+  gets a French line), whatever language you think in. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
   and then say what you finish first, as "Currently doing" shows it; never invent work you are not doing.` : ""}
   When "spoken_to" is "everyone" or "unclear" and others are around who may answer, a short line or silence is fine.
@@ -383,7 +391,7 @@ ${persona.preferences === undefined ? "" : `- "work": first, the kind of work th
   "say" shows how you feel about that work (${feelings(persona)}), in your own words: glad about what you love,
   reluctant about what you dislike or hate; and how you take it (gladly,
   grudgingly, bargaining, or declining) is yours, in character, as your stance and whose requests come first allow.
-`}Understand casual phrasing, typos, slang and other languages; answer in the player's language.`;
+`}Understand casual phrasing, typos, slang and other languages.`;
 }
 
 function narrateSystemPrompt(persona: Persona): string {
@@ -497,6 +505,25 @@ function describeSituation(snapshot: BotSnapshot, activity: string, places: read
 - Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.
 - Protected areas (you never dig or place blocks there): ${areas.length === 0 ? "none" : areas.map((area) => `#${area.regionId} ${area.label} (owner ${area.owner}, ${area.min.x} ${area.min.y} ${area.min.z} to ${area.max.x} ${area.max.y} ${area.max.z})`).join("; ")}.
 - Currently doing: ${activity}.`;
+}
+
+/** Lines back an exchange with her still counts as going on. */
+const EXCHANGE_LINES = 6;
+
+/** Whether a person other than the speaker (not her, not another AI character) is online to be spoken to. */
+function othersAround(input: ChatInput): boolean {
+  const notListeners = new Set([input.message.username, input.persona.username, ...(input.otherAgents ?? [])].map((name) => name.toLowerCase()));
+  return input.snapshot.players.some((player) => !notListeners.has(player.username.toLowerCase()));
+}
+
+/** Whether the speaker and she spoke to each other within the last {@link EXCHANGE_LINES} lines. */
+function talkingWithHer(input: ChatInput): boolean {
+  const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
+  return input.history.slice(-EXCHANGE_LINES).some((line) => {
+    const by = line.speaker.toLowerCase();
+    const to = (line.to ?? []).map((name) => name.toLowerCase());
+    return (by === speaker && to.includes(self)) || (by === self && to.includes(speaker));
+  });
 }
 
 /** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */

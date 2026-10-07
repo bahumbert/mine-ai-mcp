@@ -97,7 +97,7 @@ const SHORE_SEARCH_RADIUS = 8;
 
 type SurfaceObservation =
   | { readonly kind: "surface"; readonly y: number; readonly name: string; readonly solid: boolean }
-  | { readonly kind: "ambiguous"; readonly observation: string };
+  | { readonly kind: "ambiguous"; readonly observation: string; readonly floors: readonly number[] };
 
 /** Omitted height may resolve only an unambiguous outdoor column, never choose among floors. */
 function surfaceAt(bot: Bot, x: number, z: number): SurfaceObservation | null {
@@ -117,7 +117,8 @@ function surfaceAt(bot: Bot, x: number, z: number): SurfaceObservation | null {
   if (highest && (highest.name.endsWith("_leaves") || highest.name === "bedrock" || floors.length > 1)) {
     return {
       kind: "ambiguous",
-      observation: `[NAVIGATION_HEIGHT_REQUIRED] Column ${x}, ${z} has highest block ${highest.name} at y=${highest.y}; observed standable feet heights: ${floors.join(", ") || "none"}. Supply y to choose a floor.`,
+      observation: `[NAVIGATION_HEIGHT_REQUIRED] Column ${x}, ${z} has highest block ${highest.name} at y=${highest.y}; observed standable feet heights: ${floors.join(", ") || "none"}. Supply y (or near_y) to choose a floor.`,
+      floors,
     };
   }
   return highest;
@@ -325,7 +326,16 @@ function beginNavigate(
             const approach = nearXzGoal(request, request.range).resolve(observation);
             return approach.kind === "active" ? { ...approach, isSatisfied: () => false } : approach;
           }
-          if (surface.kind === "ambiguous") return { kind: "invalid", observation: surface.observation };
+          if (surface.kind === "ambiguous") {
+            // The caller named the height it means (its own feet): the floor nearest it, neither the canopy nor a cave.
+            const nearY = request.nearY ?? null;
+            if (nearY === null || surface.floors.length === 0) return { kind: "invalid", observation: surface.observation };
+            const floor = [...surface.floors].sort((a, b) => Math.abs(a - nearY) - Math.abs(b - nearY))[0]!;
+            destination = { x: request.x, y: floor, z: request.z };
+            const problem = portalProblem();
+            if (problem) return { kind: "invalid", observation: problem };
+            return nearGoal(destination, request.range).resolve(observation);
+          }
           const shore = shoreNear(bot, request);
           if (!shore)
             return { kind: "invalid", observation: navigateOutcomes.targetOnWater(request, SHORE_SEARCH_RADIUS) };

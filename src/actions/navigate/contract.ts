@@ -17,6 +17,13 @@ export const navigateInputSchema = z
         "Absolute target feet-block Y coordinate. Omit it only for unambiguous outdoor ground. Roofs, foliage, and multiple floors require y to choose a known floor, ledge, or tunnel.",
       ),
     z: z.number().int().describe("Absolute target block Z coordinate."),
+    near_y: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "With y omitted: when the column has several standable heights (trees over the ground, caves under it), go to the one nearest this height, usually the bot's own feet, instead of refusing the target.",
+      ),
     range: z
       .number()
       .nonnegative()
@@ -47,6 +54,8 @@ export interface NavigateRequest {
   /** Null asks for the ground at x,z at any height. */
   readonly y: number | null;
   readonly z: number;
+  /** With `y` null: the floor nearest this height is taken when the column has several. */
+  readonly nearY?: number | null;
   readonly range: number;
   readonly scaffold: boolean;
   readonly dig: boolean;
@@ -60,6 +69,7 @@ export function parseNavigateRequest(input: unknown): NavigateRequest {
     x: value.x,
     y: value.y ?? null,
     z: value.z,
+    nearY: value.near_y ?? null,
     range: value.range,
     scaffold: value.scaffold,
     dig: value.dig,
