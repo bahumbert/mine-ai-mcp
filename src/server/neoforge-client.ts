@@ -82,6 +82,24 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
     setImmediate(() => askSlotBySlot(send, bot, windowId, stateId));
   });
   clickWithoutPrediction(client);
+  if (process.env.MINE_AI_TRACE_WINDOWS === "1") traceWindows(client);
+}
+
+/** Diagnostics (env MINE_AI_TRACE_WINDOWS=1): every container click sent and slot update received, one line each. */
+function traceWindows(client: ProtocolClient): void {
+  const write = client.write.bind(client);
+  client.write = (name, params) => {
+    if (name === "window_click") {
+      const click = params as { windowId: number; stateId: number; slot: number; mouseButton: number; mode: number; changedSlots: unknown[] };
+      console.error(`[trace] click w${click.windowId} s${click.stateId} slot ${click.slot} b${click.mouseButton} m${click.mode} claimed ${click.changedSlots.length}`);
+    }
+    write(name, params);
+  };
+  const item = (raw: { itemCount?: number; itemId?: number } | undefined) => (raw?.itemCount ? `${raw.itemCount}x#${raw.itemId}` : "-");
+  client.on("set_slot", (packet: { windowId: number; stateId: number; slot: number; item?: { itemCount?: number; itemId?: number } }) =>
+    console.error(`[trace] set_slot w${packet.windowId} s${packet.stateId} slot ${packet.slot} ${item(packet.item)}`));
+  client.on("window_items", (packet: { windowId: number; stateId: number; items: unknown[] }) =>
+    console.error(`[trace] window_items w${packet.windowId} s${packet.stateId} ${packet.items.length} items`));
 }
 
 /**
