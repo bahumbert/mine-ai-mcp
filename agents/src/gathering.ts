@@ -298,25 +298,27 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
   return recipes.length > 0 ? "smelt" : "gather";
 }
 
-function notDropped(item: string, knowledge: Knowledge): string {
-  // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
-  if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
-  // An ore block drops its raw material, never itself without silk touch (live 2026-10-07: Vex asked for iron_ore).
-  const drop = oreDrop(item);
-  if (drop !== null) return `${item} is never got as itself: mined, it drops ${drop}; get_items ${drop}`;
-  return `no block or mob drops ${item}, and it is not crafted or smelted`;
+/**
+ * Why `item` is no item id, with the id meant when it is plain: a family named without its colour (live 2026-10-04:
+ * "wool": the white one, what a white sheep gives) or a plural (live 2026-10-07: "sticks", three steps in a row).
+ */
+async function unknownItem(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
+  if ((await howToGet(runtime, `white_${item}`, knowledge)) !== null) return `${item} is named with its colour in Minecraft: white_${item} (or red_${item}, black_${item}, ...)`;
+  for (const singular of new Set([item.replace(/es$/u, ""), item.replace(/s$/u, "")])) {
+    if (singular !== item && (await howToGet(runtime, singular, knowledge)) !== null) return `${item} is not a Minecraft item id: the item is ${singular}`;
+  }
+  return `${item} is not a Minecraft item id`;
 }
 
-/** Vanilla ores by name, and what one drops when mined without silk touch. */
-const ORE_DROPS: Readonly<Record<string, string>> = {
-  coal: "coal", iron: "raw_iron", copper: "raw_copper", gold: "raw_gold", redstone: "redstone", lapis: "lapis_lazuli",
-  diamond: "diamond", emerald: "emerald", nether_quartz: "quartz", nether_gold: "gold_nugget",
-};
-
-/** What an ore block (`iron_ore`, `deepslate_iron_ore`...) drops when mined; null for any other name. */
-export function oreDrop(block: string): string | null {
-  const ore = /^(?:deepslate_)?(.+)_ore$/u.exec(block)?.[1];
-  return ore === undefined ? null : ORE_DROPS[ore] ?? null;
+async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
+  // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
+  if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
+  // A block that drops something else is asked for by its drop (live 2026-10-07: Vex asked for iron_ore, which drops
+  // raw_iron without silk touch).
+  const known: Readonly<Record<string, readonly string[]>> = await runtime.blockDrops([item]).catch(() => ({}));
+  const drops = (known[item] ?? []).filter((drop) => drop !== item);
+  if (drops.length > 0) return `${item} is never got as itself: broken, it drops ${drops.join(", ")}; get_items ${drops[0]}`;
+  return `no block or mob drops ${item}, and it is not crafted or smelted`;
 }
 
 /** A drop this likely, or more, makes a mob a source to hunt (cod drop bone meal 5% of the time: no source). */
@@ -441,15 +443,14 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   const jobs = new Map<string, SmeltJob>();
   const gathered = async (item: string, count: number): Promise<string | null> => {
     const from = await gatherFrom(runtime, item, knowledge);
-    if (from === null) return notDropped(item, knowledge);
+    if (from === null) return notDropped(runtime, item, knowledge);
     if ("mob" in from) hunt.set(item, { mob: from.mob, count: (hunt.get(item)?.count ?? 0) + count });
     else collect.set(from.block, (collect.get(from.block) ?? 0) + count);
     return null;
   };
   const need = async (item: string, count: number): Promise<string | null> => {
     const how = await howToGet(runtime, item, knowledge);
-    // A family named without its colour (live 2026-10-04: "wool"): the white one, what a white sheep gives.
-    if (how === null) return (await howToGet(runtime, `white_${item}`, knowledge)) === null ? `${item} is not a Minecraft item id` : `${item} is named with its colour in Minecraft: white_${item} (or red_${item}, black_${item}, ...)`;
+    if (how === null) return unknownItem(runtime, item, knowledge);
     const into = how === "craft" ? crafted : how === "smelt" ? smelts : null;
     if (into === null) return gathered(item, count);
     into.set(item, (into.get(item) ?? 0) + count);
@@ -495,7 +496,7 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
       if ((await howToGet(runtime, leaf.item, knowledge)) === "smelt") smelts.set(leaf.item, Math.max(smelts.get(leaf.item) ?? 0, leaf.count));
       else {
         const from = await gatherFrom(runtime, leaf.item, knowledge);
-        if (from === null) return notDropped(leaf.item, knowledge);
+        if (from === null) return notDropped(runtime, leaf.item, knowledge);
         if ("mob" in from) huntedLeaves.set(leaf.item, { mob: from.mob, count: (huntedLeaves.get(leaf.item)?.count ?? 0) + leaf.count });
         else leaves.set(from.block, (leaves.get(from.block) ?? 0) + leaf.count);
       }

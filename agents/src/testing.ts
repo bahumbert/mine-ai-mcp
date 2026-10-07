@@ -113,9 +113,12 @@ export class FakeRuntime implements BotRuntime {
 
   /** The `prefer` lists `craftingNeeds` was given, in order (the fake planner does not use them). */
   readonly preferences: (readonly string[])[] = [];
+  /** Names that are no item id at all (`craftingNeeds` answers unknown). */
+  notItems: ReadonlySet<string> = new Set();
 
   async craftingNeeds(items: readonly ItemCount[], prefer: readonly string[] = []): Promise<CraftingNeeds> {
     this.preferences.push(prefer);
+    if (items.some(({ item }) => this.notItems.has(item))) return { status: "unknown", missing: [] };
     if (items.some(({ item }) => this.unplannable.includes(item))) return { status: "planner_failed", missing: [] };
     if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
     const leaves = new Map<string, number>();
@@ -140,6 +143,14 @@ export class FakeRuntime implements BotRuntime {
 
   async mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>> {
     return Object.fromEntries(items.map((item) => [item, this.mobDrops[item] ?? []]));
+  }
+
+  /** What each block drops: the items whose `dropSources` list it, else the block itself unless listed in `notDropped`. */
+  async blockDrops(blocks: readonly string[]): Promise<Readonly<Record<string, readonly string[]>>> {
+    return Object.fromEntries(blocks.map((block) => {
+      const items = Object.entries(this.dropSources).filter(([, sources]) => sources.some((source) => source.block === block)).map(([item]) => item);
+      return [block, items.length > 0 ? items : this.notDropped.has(block) ? [] : [block]];
+    }));
   }
 
   /** The world's blocks for `blocksIn`/`findBlocks`, by `x,y,z`; unlisted cells are dirt up to `groundTop`, air above. */

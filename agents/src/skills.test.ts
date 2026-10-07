@@ -112,6 +112,18 @@ test("the harvest tool comes from game data and climbs the tiers: a wooden picka
   assert.ok(calls.indexOf("collect iron_ore") > calls.indexOf("craft stone_pickaxe at table"), calls.join(" | "));
 });
 
+test("an item asked for by a wrong name is answered with the right one: a plural, an ore block", async () => {
+  const runtime = new FakeRuntime();
+  // Live 2026-10-07: "sticks", three steps in a row.
+  runtime.notItems = new Set(["sticks", "white_sticks"]);
+  const plural = await runStep({ skill: "get_items", items: [{ item: "sticks", count: 4 }] }, contextFor(runtime));
+  assert.deepEqual(plural, { status: "failed", detail: "sticks is not a Minecraft item id: the item is stick" });
+  // Live 2026-10-07: Vex asked for iron_ore, which only silk touch gets; what it drops comes from the game data.
+  runtime.notDropped = new Set([...runtime.notDropped, "iron_ore"]);
+  const ore = await runStep({ skill: "get_items", items: [{ item: "iron_ore", count: 2 }] }, contextFor(runtime));
+  assert.deepEqual(ore, { status: "failed", detail: "iron_ore is never got as itself: broken, it drops raw_iron; get_items raw_iron" });
+});
+
 test("get_items gathers an item from the block that drops it, from game data: wheat seeds from grass", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;

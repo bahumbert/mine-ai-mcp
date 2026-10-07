@@ -6,7 +6,7 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, obtainedBy, oreDrop, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, groundHeight, knownPlaces, notNear, obtainedBy, walkToStation } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
@@ -675,7 +675,8 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
   if (step.for !== undefined && /_ore$/u.test(step.for)) {
-    const drop = oreDrop(step.for) ?? step.for;
+    const drops: Readonly<Record<string, readonly string[]>> = await context.runtime.blockDrops([step.for]).catch(() => ({}));
+    const drop = drops[step.for]?.[0] ?? step.for;
     return { status: "failed", detail: `${step.for} lies underground nearly everywhere, and walking the surface does not find it: get_items ${drop} digs for it near where you are (making the pickaxe it needs)` };
   }
   // What is crafted is not found (live 2026-10-07: Ayla explored for a crafting_table, four ways in a row). A smelted

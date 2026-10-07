@@ -97,6 +97,14 @@ test("crafts each requested target and reports the gain actually observed in inv
   }
 });
 
+test("an unknown plural names the item id it stands for", async () => {
+  const { bot, craftCalls } = craftingBot({ oak_planks: 2 }, false);
+  const result = await craftItem(bot, navigation, { items: [{ itemName: "sticks", count: 4 }, { itemName: "gizmo", count: 1 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: sticks (the item id is stick), gizmo.");
+  assert.deepEqual(craftCalls, []);
+});
+
 /** A plan short of any leaf material is refused whole: nothing is consumed and nothing is crafted. */
 const missingMaterialBatches = [
   {

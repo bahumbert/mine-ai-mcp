@@ -157,7 +157,10 @@ async function craftBatch(
   for (const requested of request.items) {
     const target = bot.registry.itemsByName[requested.itemName];
     if (!target) {
-      unknownItems.push(requested.itemName);
+      // A plural is the commonest slip (live 2026-10-07: "sticks", three times in a row): name the item id.
+      const singular = [requested.itemName.replace(/es$/u, ""), requested.itemName.replace(/s$/u, "")]
+        .find((name) => name !== requested.itemName && bot.registry.itemsByName[name] !== undefined);
+      unknownItems.push(singular === undefined ? requested.itemName : `${requested.itemName} (the item id is ${singular})`);
       requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0 });
       continue;
     }

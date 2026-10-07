@@ -244,6 +244,8 @@ export interface BotRuntime {
   blockSources(items: readonly string[]): Promise<Readonly<Record<string, readonly DropSource[]>>>;
   /** The mobs each item drops from when killed, likeliest first, hostile ones marked (`view_block_drops`). */
   mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>>;
+  /** What each block drops when broken without silk touch or shears (`view_block_drops`, the game's loot tables). */
+  blockDrops(blocks: readonly string[]): Promise<Readonly<Record<string, readonly string[]>>>;
   /** Every block of the box between two corners (inclusive), read in slices through `view_blocks`. */
   blocksIn(min: Position, max: Position): Promise<BlockArea>;
   /** The nearest loaded blocks of that name (or the runtime's `logs` selector: any wood), nearest first (`view_blocks` find). */
@@ -352,6 +354,10 @@ const blockDropsSchema = z.object({
         sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean() })),
         mobs: z.array(z.object({ mob: z.string(), chance: z.number(), hostile: z.boolean() })).default([]),
       })),
+      blocks: z.array(z.object({
+        block: z.string(),
+        drops: z.array(z.object({ item: z.string(), tool: z.string().optional() })),
+      })).default([]),
     }).optional(),
   }),
 });
@@ -526,6 +532,12 @@ export class McpBotRuntime implements BotRuntime {
   async mobSources(items: readonly string[]): Promise<Readonly<Record<string, readonly MobSource[]>>> {
     const { result } = blockDropsSchema.parse(await this.call("view_block_drops", { items: [...items] }, "Work out which animals drop what I need."));
     return Object.fromEntries((result.drops?.items ?? []).map(({ item, mobs }) => [item, mobs]));
+  }
+
+  async blockDrops(blocks: readonly string[]): Promise<Readonly<Record<string, readonly string[]>>> {
+    const { result } = blockDropsSchema.parse(await this.call("view_block_drops", { blocks: [...blocks] }, "Work out what breaking a block gives."));
+    // A drop that needs a tool (silk touch, shears) is not what an ordinary break gives.
+    return Object.fromEntries((result.drops?.blocks ?? []).map(({ block, drops }) => [block, [...new Set(drops.filter((drop) => drop.tool === undefined).map((drop) => drop.item))]]));
   }
 
   async blocksIn(min: Position, max: Position): Promise<BlockArea> {
