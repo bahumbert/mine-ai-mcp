@@ -678,10 +678,11 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     const drop = oreDrop(step.for) ?? step.for;
     return { status: "failed", detail: `${step.for} lies underground nearly everywhere, and walking the surface does not find it: get_items ${drop} digs for it near where you are (making the pickaxe it needs)` };
   }
-  // What is made is not found (live 2026-10-07: Ayla explored for a crafting_table, four ways in a row).
+  // What is crafted is not found (live 2026-10-07: Ayla explored for a crafting_table, four ways in a row). A smelted
+  // block may also lie about (stone: live, Vex explored for it and was wrongly told it is only smelted).
   const made = step.for === undefined ? null : (await obtainedBy(context.runtime, step.for).catch(() => null))?.way;
-  if (made === "craft" || made === "smelt") {
-    return { status: "failed", detail: `${step.for} is ${made === "craft" ? "crafted" : "smelted"}, not found: get_items ${step.for} makes it` };
+  if (made === "craft") {
+    return { status: "failed", detail: `${step.for} is crafted, not found: get_items ${step.for} makes it` };
   }
   const setOut = await context.runtime.status();
   const start = setOut.position;
