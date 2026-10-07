@@ -220,6 +220,23 @@ test("a conversation starts only when she is addressed; an unnamed line is hers 
   assert.equal(chat.requests.length, requests);
 });
 
+test("in a conversation with her, an unnamed line right after someone else spoke to its speaker goes back once", async () => {
+  // Live 2026-10-07, local: Tom's "ok j'arrive", right after Bob's "Tom, tu viens miner avec moi ?", was answered by Ayla.
+  const { chat, mind } = scriptedMind();
+  const crowd = { ...new FakeRuntime().snapshot, players: [{ username: "Steve", position: null }, { username: "Bob", position: null }] };
+  // Bob's line is not hers: left to them, it keeps whom it names.
+  const bob = await mind.chat({ ...chatInput("Steve, tu viens miner ?", false), message: { username: "Bob", channel: "chat", message: "Steve, tu viens miner ?", addressed: false }, snapshot: crowd }, signal);
+  assert.deepEqual([bob.route, bob.to, chat.requests.length], ["ignore", ["Steve"], 0]);
+  const history = [
+    { speaker: "Steve", text: "Ayla, tu as besoin d'aide ?", to: ["Ayla"] },
+    { speaker: "Ayla", text: "Non merci !", to: ["Steve"] },
+    { speaker: "Bob", text: "Steve, tu viens miner ?", to: ["Steve"] },
+  ];
+  chat.reply({ spoken_to: ["Ayla"], say: "Super !", route: "talk", request: "" }, { spoken_to: ["Bob"], say: "", route: "ignore", request: "" });
+  assert.equal((await mind.chat({ ...chatInput("ok j'arrive", false), snapshot: crowd, history }, signal)).route, "ignore");
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /Bob spoke to Steve just before this line, which names nobody: it most likely answers Bob/u);
+});
+
 test("a reply sent back for answering a line it read as for someone else keeps that reading", async () => {
   // Live 2026-10-04: "nice work today, thanks Vex" came back read as spoken to the speaker, which let it through.
   const { chat, mind } = scriptedMind();

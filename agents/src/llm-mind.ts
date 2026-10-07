@@ -99,7 +99,10 @@ export class LlmMind implements Mind {
     // players chatting among themselves in French each got an answer). The model is not asked about the others; they
     // stay in her chat history, so a later line is still read in their light.
     if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input)) {
-      return { say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
+      // Whom it names is kept with it, so a later line can be read as answering them.
+      const named = input.snapshot.players.map((player) => player.username)
+        .filter((name) => name.toLowerCase() !== message.username.toLowerCase() && namesWord(message.message, name));
+      return { ...(named.length > 0 && { to: named }), say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
     }
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const canWait = input.canWait ?? true;
@@ -114,6 +117,7 @@ export class LlmMind implements Mind {
       `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
     ].join("\n\n");
     const ongoing = conversationGoingOn(input);
+    const answering = message.addressed ? null : answeringSomeoneElse(input);
     let sentBack = false;
     let requestSentBack = false;
     let whereSentBack = false;
@@ -152,6 +156,13 @@ export class LlmMind implements Mind {
       if (ongoing !== null && !sentBack && reply.route !== "ignore" && !to.includes("everyone")) {
         sentBack = true;
         throw new Error(`${message.username}'s line just before this one spoke to ${ongoing.join(", ")}, and this one names nobody: it goes on with that conversation, so "spoken_to" is ${JSON.stringify(ongoing)} and "route" is "ignore", unless it plainly turns to you`);
+      }
+      // In a conversation with her, someone else just spoke to the speaker: an unnamed line most likely answers them
+      // (live 2026-10-07, local: Tom's "ok j'arrive", right after Bob's "Tom, tu viens miner avec moi ?", was answered
+      // by Ayla). Taken for her, it goes back once with that fact; said again, it stands.
+      if (answering !== null && !sentBack && reply.route !== "ignore" && !to.includes("everyone")) {
+        sentBack = true;
+        throw new Error(`${answering} spoke to ${message.username} just before this line, which names nobody: it most likely answers ${answering}, so "spoken_to" is ${JSON.stringify([answering])} and "route" is "ignore", unless it plainly turns to you`);
       }
       // A line opening with someone else's name, then a comma, is spoken to them; her name later in it talks about her:
       // taken for her, it goes back once with that fact (live 2026-10-04 and the bench 2/3: "Opus, Vex is going through
@@ -367,8 +378,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   reaches you only while you are talking with its speaker: it goes on with that conversation, so it is for you unless
   it plainly turns to someone else. Any name counts, even one you do not
   know (another player, the server's operator, someone not in the game).
-- "language": the language the message is written in (e.g. "French", "English"), whatever language you and the
-  recent chat use.
+- "language": the language the new message's own words are written in (e.g. "French", "English"); the recent chat
+  and your own lines may be in another one (live 2026-10-07: an English line after French chat was named French).
 - "route":
   "ignore" = "spoken_to" does not include you (${persona.username}, "everyone" or "unclear"): never take it on or answer it,
   even when you could; "say" is "".
@@ -534,6 +545,26 @@ export function talkingWithHer(input: Pick<ChatInput, "message" | "persona" | "h
   };
   const last = input.history.slice(-EXCHANGE_LINES).findLast(between);
   return last !== undefined && (last.at === undefined || now - last.at <= EXCHANGE_MS);
+}
+
+/**
+ * Who else spoke to the speaker since the speaker's last exchange with her, within the last {@link EXCHANGE_LINES}
+ * lines (the latest one); null when nobody did.
+ */
+function answeringSomeoneElse(input: Pick<ChatInput, "message" | "persona" | "history">): string | null {
+  const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
+  for (const line of input.history.slice(-EXCHANGE_LINES).reverse()) {
+    const by = line.speaker.toLowerCase();
+    const to = (line.to ?? []).map((name) => name.toLowerCase());
+    if ((by === speaker && to.includes(self)) || (by === self && to.includes(speaker))) return null;
+    if (by !== speaker && by !== self && to.includes(speaker)) return line.speaker;
+  }
+  return null;
+}
+
+/** Whether `text` holds `name` as a word, as the runtime finds her own name (letters, digits, underscores). */
+function namesWord(text: string, name: string): boolean {
+  return text.toLowerCase().split(/[^a-z0-9_]+/u).includes(name.toLowerCase());
 }
 
 /** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */
