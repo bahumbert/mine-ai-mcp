@@ -43,3 +43,13 @@ test("activity notes older than the last hour of play are found to forget; the o
   assert.deepEqual(staleActivityNotes(rows, 60), [6, 4]);
   assert.match(activityNotesQuery("Ayla"), /bot_id = 'Ayla' AND substr\(context, 1, \d+\) = 'brain memory: activity_time ' ORDER BY note_id DESC/u);
 });
+
+test("a step's purpose is remembered with its time; a note from before has none", () => {
+  const { note, context } = memoryNote({ kind: "activity_time", time: { activity: "woodcutting", purpose: "building", ended: "2026-10-03T12:00:00.000Z", minutes: 2.5 } });
+  assert.equal(note, "I spent 2.5 min woodcutting for building (until 2026-10-03T12:00:00.000Z).");
+  assert.deepEqual(recall([context], LIMITS).times, [{ activity: "woodcutting", purpose: "building", ended: "2026-10-03T12:00:00.000Z", minutes: 2.5 }]);
+  const old = 'brain memory: activity_time {"kind":"activity_time","time":{"activity":"mining","ended":"2026-10-03T12:00:00.000Z","minutes":3}}';
+  assert.deepEqual(recall([old], LIMITS).times, [{ activity: "mining", ended: "2026-10-03T12:00:00.000Z", minutes: 3 }]);
+  const unknown = 'brain memory: activity_time {"kind":"activity_time","time":{"activity":"mining","purpose":"knitting","ended":"2026-10-03T12:00:00.000Z","minutes":3}}';
+  assert.deepEqual(recall([unknown], LIMITS).times, [], "a purpose of ours or none");
+});

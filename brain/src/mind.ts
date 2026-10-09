@@ -1,4 +1,6 @@
 import type { Step } from "./actions.ts";
+import type { Activity } from "./activities.ts";
+import type { ActivityChance } from "./activity-draw.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
@@ -72,6 +74,11 @@ export interface ChatDecision {
 export interface Objective {
   readonly text: string;
   readonly requester: string | null;
+  /**
+   * The kind of work it is for (spec 2026-10-09-activity-draw), in the models' own reading: the goal tier's "for", or the
+   * chat tier's "work" for a request; null when none. Every step under the objective counts its time for it.
+   */
+  readonly purpose: Activity | null;
 }
 
 /** One step already taken for the current objective, as the work tier sees it. */
@@ -121,6 +128,19 @@ export interface GoalInput {
   readonly opportunities: readonly Opportunity[];
   /** Minutes per activity over the last hour, most first. */
   readonly time: readonly ActivityTotal[];
+  /**
+   * The activities drawn for this call, by their chances (spec 2026-10-09-activity-draw): what it feels like doing now,
+   * the first, else the second. Empty when none is available.
+   */
+  readonly drawn: readonly Activity[];
+  /** The chance of each available activity, most likely first: the kinds of work its "for" may name. */
+  readonly chances: readonly ActivityChance[];
+}
+
+/** The goal tier's answer: the objective, and the kind of work it is for (null when it named none we know). */
+export interface ChosenObjective {
+  readonly text: string;
+  readonly purpose: Activity | null;
 }
 
 export interface NarrateInput {
@@ -139,7 +159,7 @@ export interface Mind {
   /** Work tier (action model): the next step towards an objective, seeing what the last steps did. */
   next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision>;
   /** Goal tier (planner model): the next concrete objective towards the character's own goal. */
-  chooseObjective(input: GoalInput, signal: AbortSignal): Promise<string>;
+  chooseObjective(input: GoalInput, signal: AbortSignal): Promise<ChosenObjective>;
   /** Chat tier: one in-character line about an order (how it ended, or what it does now); empty means say nothing. */
   narrate(input: NarrateInput, signal: AbortSignal): Promise<string>;
 }

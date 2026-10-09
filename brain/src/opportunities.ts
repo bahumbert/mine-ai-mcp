@@ -163,6 +163,12 @@ export function findOpportunities(facts: OpportunityFacts): Opportunity[] {
     .slice(0, MAX_OPPORTUNITIES);
 }
 
+/** The opportunities for the drawn activities first, then the others, each group in its order: none is dropped. */
+export function drawnFirst(opportunities: readonly Opportunity[], drawn: readonly Activity[]): Opportunity[] {
+  const wanted = (opportunity: Opportunity) => opportunity.activities.some((activity) => drawn.includes(activity));
+  return [...opportunities.filter(wanted), ...opportunities.filter((opportunity) => !wanted(opportunity))];
+}
+
 /** One line each, `- (farming) ...`, for the goal tier's situation. */
 export function describeOpportunities(opportunities: readonly Opportunity[]): string {
   if (opportunities.length === 0) return "none that you know of";

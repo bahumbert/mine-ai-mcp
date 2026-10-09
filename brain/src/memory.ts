@@ -81,7 +81,7 @@ const memorySchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("activity_time"),
-    time: z.object({ activity: z.enum(ACTIVITIES), ended: z.string(), minutes: z.number().min(0) }),
+    time: z.object({ activity: z.enum(ACTIVITIES), purpose: z.enum(ACTIVITIES).optional(), ended: z.string(), minutes: z.number().min(0) }),
   }),
 ]);
 
@@ -104,7 +104,7 @@ function describe(memory: Memory): string {
       const { farm } = memory;
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
     }
-    case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity} (until ${memory.time.ended}).`;
+    case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }
 }
 

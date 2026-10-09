@@ -32,6 +32,9 @@ export type Tier = (typeof TIERS)[number];
 
 const modelId = z.string().trim().min(1);
 
+/** A feeling's pull in the activity draw: 0 (never) to 10. */
+const feelingMultiplier = (fallback: number) => z.number().min(0).max(10).default(fallback);
+
 /**
  * A character, as data (ADR-004). The Minecraft username must match the `--username` of the bot's host, because
  * that is the account the character speaks and acts through.
@@ -82,6 +85,18 @@ export const personaSchema = z.strictObject({
      * and waits there for the day (brain/src/night-shelter.ts).
      */
     shelterAtNight: z.boolean().default(true),
+    /**
+     * How strongly each feeling pulls when it picks its own objective (spec 2026-10-09-activity-draw): the chance of an
+     * activity is its feeling's multiplier over the sum of them all. A character may be more or less driven by its
+     * tastes; never 0 by default, since it does a hated thing sometimes. Defaults are the owner's pick, 2026-10-09.
+     */
+    feelingMultipliers: z.strictObject({
+      loves: feelingMultiplier(2),
+      likes: feelingMultiplier(1.5),
+      neutral: feelingMultiplier(1),
+      dislikes: feelingMultiplier(0.6),
+      hates: feelingMultiplier(0.3),
+    }).prefault({}),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
   models: z.strictObject({ chat: modelId.optional(), action: modelId.optional(), planner: modelId.optional() }).default({}),

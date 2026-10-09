@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Activity } from "./activities.ts";
+import type { ActivityChance } from "./activity-draw.ts";
 import type { ChatTurn } from "./chat-model.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { ActivityTotal } from "./time-spent.ts";
@@ -52,6 +53,11 @@ export type BrainEvent =
     /** For its own objectives: the opportunities and the last hour's time the goal tier saw when it chose this one. */
     readonly opportunities?: readonly Opportunity[];
     readonly time?: readonly ActivityTotal[];
+    /** The kind of work the objective is for (spec 2026-10-09-activity-draw); null when none. */
+    readonly purpose?: Activity | null;
+    /** For its own objectives: the two activities drawn, and the chances of the likeliest five. */
+    readonly drawn?: readonly Activity[];
+    readonly chances?: readonly ActivityChance[];
   }
   | {
     readonly kind: "step";
@@ -67,6 +73,8 @@ export type BrainEvent =
     readonly activity?: Activity | null;
     /** How its time divided between activities: its walking is travelling, a phase another activity (spec 2026-10-04). */
     readonly times?: readonly { readonly activity: Activity; readonly ms: number }[];
+    /** What the step's objective was for (spec 2026-10-09-activity-draw); null when none. */
+    readonly purpose?: Activity | null;
   }
   | { readonly kind: "progress"; readonly objective: string; readonly fact: string; readonly asked: boolean }
   /** What it is doing now: the stack (top last), the step running, if any. */

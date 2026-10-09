@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describeStep, type Step } from "./actions.ts";
-import { activityOf, activityTimes, gatheringActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
+import { describeStep, SKILL_NAMES, type Step } from "./actions.ts";
+import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
+import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import { shortfall } from "./building/blueprint.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
@@ -13,7 +14,7 @@ import { shelterForNight, underCover } from "./night-shelter.ts";
 import type { Persona } from "./persona.ts";
 import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
-import { lastOfPlay, minutesByActivity, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
+import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
@@ -32,6 +33,8 @@ const NIGHT_CHECK_MS = 20_000;
 const SHELTER_RETRY_MS = 5 * 60_000;
 /** Farms it remembers and every tier sees. */
 const KNOWN_FARMS = 4;
+/** Chances of the likeliest activities kept in the brain log with each own objective. */
+const TOP_CHANCES = 5;
 /** Unusable model replies in a row before an objective is dropped. */
 const MAX_BAD_REPLIES = 2;
 /** Activity records read back at start: more than an hour of steps. */
@@ -58,6 +61,8 @@ export interface AgentOptions {
   readonly typing?: TypingPace;
   /** Told what the character takes on, does and reports (the brain log, read by the monitor). */
   readonly journal?: (event: BrainEvent) => void;
+  /** Where the activity draw gets its chance, a number in [0, 1); tests inject a seeded one. Default `Math.random`. */
+  readonly random?: () => number;
 }
 
 /** One objective on the stack and what was done for it. */
@@ -218,7 +223,7 @@ export class Agent {
     }
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
-    const asked = { text: decision.request, requester: message.username };
+    const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work) };
     if ((route === "act" || route === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
       return;
@@ -353,13 +358,19 @@ export class Agent {
     if (!(await this.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
     const opportunities = await this.opportunities(snapshot);
-    const time = minutesByActivity(lastOfPlay(this.times));
-    const text = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time }, this.runSignal);
+    const hour = lastOfPlay(this.times);
+    const time = minutesByActivity(hour);
+    // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
+    // the hour's time spent *for* each, not the kind of work the body did.
+    const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
+    const chances = activityChances(availableActivities(persona.skills ?? SKILL_NAMES, snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
+    const drawn = drawTwo(chances, this.options.random ?? Math.random);
+    const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
-    log(`own objective: ${JSON.stringify(text)}`);
-    this.stack.push(newWork({ text, requester: null }));
-    this.options.journal?.({ kind: "objective", event: "own", text, requester: null, opportunities, time });
+    log(`own objective: ${JSON.stringify(text)}${purpose === null ? " (no kind of work named for it)" : ` (for ${purpose})`}`);
+    this.stack.push(newWork({ text, requester: null, purpose }));
+    this.options.journal?.({ kind: "objective", event: "own", text, requester: null, opportunities, time, purpose, drawn, chances: chances.slice(0, TOP_CHANCES) });
     this.journalState(null);
     return true;
   }
@@ -438,13 +449,14 @@ export class Agent {
     const ended = Date.now();
     const ms = ended - started;
     const { activity, spans } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
-    for (const span of spans) this.spent({ activity: span.activity, ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
+    const { purpose } = work.objective;
+    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
     const record: StepRecord = result.status === "stopped"
       ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
       : { step: label, outcome: result.status, detail: result.detail };
     work.steps.push(record);
-    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans });
+    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     if (work.steps.length > STEP_MEMORY) work.steps.splice(0, work.steps.length - STEP_MEMORY);
     log(`  -> ${record.outcome}: ${record.detail}`);
@@ -701,7 +713,7 @@ export class Agent {
   }
 
   private journalObjective(event: "taken" | "queued" | "own", objective: Objective): void {
-    this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester });
+    this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester, purpose: objective.purpose });
     this.journalState(null);
   }
 

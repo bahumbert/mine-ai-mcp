@@ -3,9 +3,9 @@ import { SKILL_NAMES, skillUsage, stepSchema, type SkillName, type Step } from "
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
-import { ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
-import { ACTIVITIES, describeActivity } from "./activities.ts";
-import { describeOpportunities } from "./opportunities.ts";
+import { ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
+import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import type { Persona, Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import { describeTime } from "./time-spent.ts";
@@ -80,7 +80,8 @@ function speaksTo(to: readonly string[], username: string): boolean {
   return to.length === 0 || to.some((name) => ["everyone", "unclear", "you"].includes(name.toLowerCase()) || name.toLowerCase() === username.toLowerCase());
 }
 const workReplySchema = z.object({ thought: z.string().default(""), step: z.unknown().optional(), done: z.string().optional(), give_up: z.string().optional() });
-const goalReplySchema = z.object({ objective: z.string().trim().min(1) });
+// "for" is the kind of work the objective is for (spec 2026-10-09-activity-draw); one we do not know is no purpose.
+const goalReplySchema = z.object({ objective: z.string().trim().min(1), for: z.string().optional() });
 const narrateReplySchema = z.object({ say: z.string().default("") });
 
 /** A {@link Mind} backed by chat models answering in JSON, one per tier. */
@@ -238,19 +239,23 @@ export class LlmMind implements Mind {
     });
   }
 
-  async chooseObjective(input: GoalInput, signal: AbortSignal): Promise<string> {
+  async chooseObjective(input: GoalInput, signal: AbortSignal): Promise<ChosenObjective> {
     // The objective that just failed, chosen again in the same words, goes back once with its reason; chosen a second
     // time, it stands (live 2026-10-03: "Build a small medieval house at my current position" three times in a row,
     // each failing on logs that were all inside her protected houses).
     let sentBack = false;
-    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona), describeGoal(input), signal, (json) => {
-      const { objective } = goalReplySchema.parse(json);
+    // In our own order, not the chances': the list says what exists, the draw says what is likely.
+    const available = ACTIVITIES.filter((activity) => input.chances.some((entry) => entry.activity === activity));
+    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona, available), describeGoal(input), signal, (json) => {
+      const { objective, for: purpose } = goalReplySchema.parse(json);
       const failed = input.lastFailed;
       if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
         sentBack = true;
         throw new Error(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
       }
-      return objective;
+      // Only a kind of work it could take on now is a purpose (none known: any of ours).
+      const named = parseActivity(purpose);
+      return { text: objective, purpose: named !== null && (available.length === 0 || available.includes(named)) ? named : null };
     });
   }
 
@@ -455,16 +460,19 @@ or {"give_up": "<why>"}.`;
 }
 
 /** The goal tier (ADR-011): the next concrete objective towards the character's own goal. */
-function goalSystemPrompt(persona: Persona): string {
+function goalSystemPrompt(persona: Persona, available: readonly Activity[]): string {
+  const kinds = available.length === 0 ? "none of the kinds of work you know" : `one of ${available.map(describeActivity).join(", ")}`;
   return `${personaPrompt(persona)}
 
 Nobody needs you right now. Pick your next objective towards your own goal: one concrete thing to do now that a few
-steps of these skills can achieve, given what you carry, where you are and what you did lately. The situation lists
-things that could use doing and how you spent the last hour: weigh them with what you love and hate; you may do
-something else entirely, follow your tastes, or vary what you do:
+steps of these skills can achieve, given what you carry, where you are and what you did lately. The situation says
+what you feel like doing now and lists things that could use doing. Pick an objective for what you feel like now (the
+first, else the second), using the things that could use doing; something urgent comes first (starving, no tools for
+it, night), and then say so:
 ${skillList(persona)}
 ${MINECRAFT_FACTS}
-Reply with only a JSON object: {"objective": "<one sentence>"}.`;
+Reply with only a JSON object: {"objective": "<one sentence>", "for": "<kind of work>"}. "for" is the kind of work the
+objective is for, the walking and gathering it takes included (a house is building): ${kinds}, or "none".`;
 }
 
 function describeStepRecord(record: StepRecord, index: number): string {
@@ -502,10 +510,11 @@ function nowCarried(input: WorkInput): string {
 function describeGoal(input: GoalInput): string {
   return [
     describeSituation(input.snapshot, "nothing", input.places, input.areas),
-    `Things that could use doing, by the kind of work they are: ${describeOpportunities(input.opportunities)}`,
+    input.drawn.length === 0 ? "" : `Right now you feel most like ${input.drawn.map(describeActivity).join(", or else ")}.`,
+    `Things that could use doing, by the kind of work they are: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
     `How you spent the last hour: ${describeTime(input.time)}.`,
     input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
-  ].join("\n\n");
+  ].filter((part) => part !== "").join("\n\n");
 }
 
 function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[]): string {

@@ -49,3 +49,15 @@ test("the characters live differently: Ayla farms and builds, Vex mines and expl
   assert.deepEqual((await load("ayla")).preferences, { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" });
   assert.deepEqual((await load("vex")).preferences, { loves: "mining", likes: "exploring", dislikes: "building", hates: "farming" });
 });
+
+test("feeling multipliers default to the owner's pick and each may be set from 0 to 10 (spec 2026-10-09-activity-draw)", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const defaults = { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 };
+  assert.deepEqual(personaSchema.parse(base).settings.feelingMultipliers, defaults);
+  assert.deepEqual(personaSchema.parse({ ...base, settings: {} }).settings.feelingMultipliers, defaults);
+  assert.deepEqual(personaSchema.parse({ ...base, settings: { feelingMultipliers: { loves: 5, hates: 0 } } }).settings.feelingMultipliers, { ...defaults, loves: 5, hates: 0 }, "the others keep their defaults");
+  assert.equal(personaSchema.parse({ ...base, settings: { feelingMultipliers: { neutral: 10 } } }).settings.feelingMultipliers.neutral, 10);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { loves: 11 } } }).success, false, "above 10");
+  assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { hates: -0.1 } } }).success, false, "below 0");
+  assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { adores: 3 } } }).success, false, "a feeling of ours");
+});

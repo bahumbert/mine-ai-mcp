@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Step } from "./actions.ts";
-import { activityOf, activityTimes, describeActivity, gatheringActivity, type ActionTime, type ActivityFacts } from "./activities.ts";
+import { activityOf, activityTimes, describeActivity, gatheringActivity, parseActivity, type ActionTime, type ActivityFacts } from "./activities.ts";
 
 // Fixture tags, so the rule is tested rather than the names: a log is whatever the game files under `logs`.
 const facts: ActivityFacts = {
@@ -84,4 +84,17 @@ test("a step's walking counts travelling, its phases change the activity, and st
   assert.deepEqual(house, [{ activity: "building", ms: 190_000 }, { activity: "terraforming", ms: 100_000 }, { activity: "travelling", ms: 10_000 }]);
   assert.deepEqual(activityTimes({ skill: "follow_player", player: "Tom", distance: 3 }, [walk(50_000, 50_000)], facts, 0, 60_000), [{ activity: "following", ms: 60_000 }]);
   assert.deepEqual(activityTimes({ skill: "give_item", player: "Tom", item: "bread", count: 1 }, [walk(8_000, 8_000)], facts, 0, 9_000), [{ activity: "travelling", ms: 8_000 }]);
+});
+
+test("a model's name for a kind of work is read as the activity, by id or as the prompts word it; anything else is none", () => {
+  assert.equal(parseActivity("building"), "building");
+  assert.equal(parseActivity("  Mining "), "mining");
+  assert.equal(parseActivity("mob_combat"), "mob_combat");
+  assert.equal(parseActivity("fighting monsters"), "mob_combat");
+  assert.equal(parseActivity("cutting wood"), "woodcutting");
+  assert.equal(parseActivity("Digging Dirt And Sand"), "digging");
+  assert.equal(parseActivity("none"), null);
+  assert.equal(parseActivity(""), null);
+  assert.equal(parseActivity("knitting"), null);
+  assert.equal(parseActivity(undefined), null);
 });

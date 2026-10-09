@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeTime, lastOfPlay, minutesByActivity, type ActivityTime } from "./time-spent.ts";
+import { describeTime, lastOfPlay, minutesByActivity, minutesByPurpose, type ActivityTime } from "./time-spent.ts";
 
 const at = (minutesAgo: number) => new Date(Date.parse("2026-10-03T12:00:00Z") - minutesAgo * 60_000).toISOString();
 const now = Date.parse("2026-10-03T12:00:00Z");
@@ -34,4 +34,20 @@ test("the last hour is of play: summed back from the newest step, offline time n
   const kept = lastOfPlay(records);
   assert.deepEqual(kept.map((record) => [record.activity, Number(record.minutes.toFixed(1))]), [["farming", 19.6], ["building", 15], ["farming", 25], ["exploring", 0.4]]);
   assert.deepEqual(lastOfPlay(records, 30).map((record) => record.activity), ["building", "farming", "exploring"]);
+});
+
+test("purpose minutes count a step for what its objective was for; an old record without one counts its own activity", () => {
+  const spent: ActivityTime[] = [
+    { activity: "woodcutting", purpose: "building", ended: at(30), minutes: 10 },
+    { activity: "building", purpose: "building", ended: at(20), minutes: 0.5 },
+    { activity: "travelling", purpose: "mining", ended: at(10), minutes: 2 },
+    { activity: "farming", ended: at(5), minutes: 4 },
+    { activity: "mining", ended: at(90), minutes: 30 },
+  ];
+  assert.deepEqual(minutesByPurpose(spent, hourAgo), [
+    { activity: "building", minutes: 10.5 },
+    { activity: "farming", minutes: 4 },
+    { activity: "mining", minutes: 2 },
+  ]);
+  assert.deepEqual(minutesByActivity(spent, hourAgo).map((total) => total.activity), ["woodcutting", "farming", "travelling", "building"], "by kind of work is unchanged");
 });

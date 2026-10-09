@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Agent } from "./agent.ts";
+import { Agent, type AgentOptions } from "./agent.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
@@ -363,7 +363,7 @@ test("the journal gets what it takes on, its stack, each step with its input and
   await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
   assert.deepEqual(events.filter((event) => event.kind === "objective").map((event) => [event.event, event.text, event.requester]), [["taken", "collect 2 dirt", "Steve"], ["finished", "collect 2 dirt", "Steve"]]);
   const step = events.find((event) => event.kind === "step");
-  assert.deepEqual(step && { ...step, ms: 0, times: step.kind === "step" ? step.times?.map((time) => time.activity) : undefined }, { kind: "step", objective: "collect 2 dirt", requester: "Steve", step: "collect 2 dirt", input: { skill: "collect_block", block: "dirt", count: 2 }, thought: "Dirt is right here.", outcome: "done", detail: "collected 2 dirt", ms: 0, activity: "digging", times: ["digging"] });
+  assert.deepEqual(step && { ...step, ms: 0, times: step.kind === "step" ? step.times?.map((time) => time.activity) : undefined }, { kind: "step", objective: "collect 2 dirt", requester: "Steve", step: "collect 2 dirt", input: { skill: "collect_block", block: "dirt", count: 2 }, thought: "Dirt is right here.", outcome: "done", detail: "collected 2 dirt", ms: 0, activity: "digging", times: ["digging"], purpose: null });
   const states = events.filter((event) => event.kind === "state");
   assert.ok(states.some((state) => state.step === "collect 2 dirt" && state.stack.length === 1));
   assert.deepEqual(states.at(-1), { kind: "state", stack: [], step: null });
@@ -386,7 +386,11 @@ test("the goal tier sees what could use doing and how the last hour went, time r
   assert.match(system, /You love farming and like building; you dislike fighting monsters and hate mining\./u);
   // The last hour of play, not of the clock: mining that ended 90 min ago is still in it (spec 2026-10-04).
   assert.match(request, /How you spent the last hour: mining 30 min, farming 12 min, building 4 min\./u);
-  assert.match(request, /Things that could use doing, by the kind of work they are: \n- \(crafting\) your stone_pickaxe has 5 uses left\n- \(farming, hunting, cooking\) you carry no food; your hunger is 15\/20\n- \(building\) you have no house of your own yet\n/u);
+  // The ones for the activities drawn come first (a random draw here), so the order is not asserted.
+  assert.match(request, /Things that could use doing, by the kind of work they are: \n- \(/u);
+  assert.match(request, /- \(crafting\) your stone_pickaxe has 5 uses left/u);
+  assert.match(request, /- \(farming, hunting, cooking\) you carry no food; your hunger is 15\/20/u);
+  assert.match(request, /- \(building\) you have no house of your own yet/u);
   // Each missing material is tagged with the work get_items would do for it: logs are cut, crafted items crafted.
   assert.match(request, /- \(cutting wood\) a house of your own needs 20 more oak_log/u);
   assert.match(request, /- \(crafting\) a house of your own needs [^\n]*spruce_stairs/u);
@@ -400,4 +404,103 @@ test("each finished step counts towards its activity, for the next goal call", a
   await until(() => planner.requests.length === 2);
   assert.match(planner.requests[1]?.[1]?.content ?? "", /How you spent the last hour: mining under a minute\./u);
   assert.match(planner.requests[0]?.[1]?.content ?? "", /How you spent the last hour: nothing yet\./u);
+});
+
+/** A running agent that also reports its journal. */
+function journaledAgent(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
+  const events: BrainEvent[] = [];
+  const tiers = scriptedMind();
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  return { agent, events, ...tiers };
+}
+
+test("an own objective carries the purpose the goal tier gave; every step under it counts for it, its gathering included", async (t) => {
+  const runtime = new FakeRuntime();
+  const { events, planner, action } = journaledAgent(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "get logs for my house", for: "building" }, { objective: "rest", for: "none" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 2 } }, { done: "got logs" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  const own = events.find((event) => event.kind === "objective" && event.event === "own");
+  assert.equal(own?.kind === "objective" ? own.purpose : "missing", "building");
+  const step = events.find((event) => event.kind === "step");
+  assert.ok(step?.kind === "step" && step.purpose === "building" && step.activity === "woodcutting", "cut for building");
+});
+
+test("a goal reply with no usable \"for\" has no purpose", async (t) => {
+  const runtime = new FakeRuntime();
+  const { events, planner, action } = journaledAgent(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "get stone", for: "knitting" }, { objective: "rest" });
+  action.reply({ step: { skill: "collect_block", block: "stone", count: 1 } }, { done: "got stone" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  const own = events.find((event) => event.kind === "objective" && event.event === "own");
+  assert.equal(own?.kind === "objective" ? own.purpose : "missing", null);
+  const step = events.find((event) => event.kind === "step");
+  assert.ok(step?.kind === "step" && step.purpose === null);
+});
+
+test("a request's purpose is the work the chat tier named; \"none\" is no purpose", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, events, chat, action } = journaledAgent(t, runtime, { preferences: { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } });
+  chat.reply({ work: "mining", say: "Ugh.", route: "act", request: "mine 2 stone" }, { say: "Done." }, { work: "none", say: "Sure.", route: "act", request: "say hi to Tom" }, { say: "Done." });
+  action.reply({ step: { skill: "collect_block", block: "stone", count: 2 } }, { done: "2 stone" }, { done: "said hi" });
+  await agent.handle(say("Steve", "mine me 2 stone"));
+  await until(() => events.filter((event) => event.kind === "objective" && event.event === "finished").length === 1);
+  await agent.handle(say("Steve", "say hi to Tom"));
+  await until(() => events.filter((event) => event.kind === "objective" && event.event === "finished").length === 2);
+  assert.deepEqual(events.flatMap((event) => event.kind === "objective" && event.event === "taken" ? [[event.text, event.purpose]] : []), [["mine 2 stone", "mining"], ["say hi to Tom", null]]);
+  const step = events.find((event) => event.kind === "step");
+  assert.ok(step?.kind === "step" && step.purpose === "mining");
+});
+
+const BUILDER = { loves: "building", likes: "farming", dislikes: "mob_combat", hates: "mining" } as const;
+
+test("the goal call draws two activities by their chances and tells the goal tier; the journal keeps the draw", async (t) => {
+  const runtime = new FakeRuntime();
+  const { events, planner } = journaledAgent(t, runtime, { goal: "live well", preferences: BUILDER }, { random: () => 0 });
+  planner.reply({ objective: "build a house", for: "building" }, { objective: "rest" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "own"));
+  assert.match(planner.requests[0]?.[1]?.content ?? "", /Right now you feel most like building, or else farming\./u);
+  assert.match(planner.requests[0]?.[0]?.content ?? "", /one of building, reshaping ground, farming, mining, cutting wood, digging dirt and sand, foraging, exploring, crafting, cooking/u);
+  const own = events.find((event) => event.kind === "objective" && event.event === "own");
+  assert.ok(own?.kind === "objective");
+  assert.deepEqual(own.drawn, ["building", "farming"]);
+  assert.equal(own.purpose, "building");
+  assert.equal(own.chances?.length, 5, "the top five");
+  assert.deepEqual(own.chances?.slice(0, 2).map((entry) => entry.activity), ["building", "farming"]);
+  assert.ok(own.chances?.every((entry, index, all) => index === 0 || all[index - 1]!.chance >= entry.chance));
+});
+
+test("an activity the last hour went to for is less likely, by purpose: cutting logs for a house counts against building", async (t) => {
+  const runtime = new FakeRuntime();
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  runtime.notes = [memoryNote({ kind: "activity_time", time: { activity: "woodcutting", purpose: "building", ended: minutesAgo(5), minutes: 30 } })];
+  const { events, planner } = journaledAgent(t, runtime, { goal: "live well", preferences: BUILDER }, { random: () => 0 });
+  planner.reply({ objective: "tend my farm", for: "farming" }, { objective: "rest" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "own"));
+  const own = events.find((event) => event.kind === "objective" && event.event === "own");
+  assert.ok(own?.kind === "objective");
+  // Building: 2 × (1 − 30/60) = 1 against farming 1.5, so farming is now the likeliest; woodcutting itself was no choice.
+  assert.deepEqual(own.drawn?.[0], "farming");
+  const chance = (activity: string) => own.chances?.find((entry) => entry.activity === activity)?.chance ?? NaN;
+  assert.ok(Math.abs(chance("building") / chance("farming") - 1 / 1.5) < 1e-9);
+  // Ten available activities: building 1, farming 1.5, mining (hated) 0.3, seven neutral at 1 (woodcutting among them: the
+  // logs were cut for building, so they did not count against it).
+  assert.ok(Math.abs(chance("farming") - 1.5 / 9.8) < 1e-9);
+});
+
+test("only what a skill of the persona can do is drawn, and an animal in sight makes hunting available", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, mobs: [{ name: "cow", hostile: false, count: 2, distance: 9 }] };
+  const { events, planner } = journaledAgent(t, runtime, { goal: "live well", skills: ["build", "hunt"] }, { random: () => 0 });
+  planner.reply({ objective: "build" }, { objective: "rest" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "own"));
+  const own = events.find((event) => event.kind === "objective" && event.event === "own");
+  assert.ok(own?.kind === "objective");
+  assert.deepEqual(own.chances?.map((entry) => entry.activity).sort(), ["building", "hunting"]);
 });

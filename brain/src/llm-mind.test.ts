@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
 import { chatSystemPrompt, LlmMind, openingName, personaPrompt } from "./llm-mind.ts";
-import type { ChatInput, WorkInput } from "./mind.ts";
+import type { ChatInput, GoalInput, WorkInput } from "./mind.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
@@ -23,7 +23,7 @@ function chatInput(message: string, addressed = true): ChatInput {
 function workInput(text: string, overrides: Partial<WorkInput> = {}): WorkInput {
   return {
     persona: testPersona(),
-    objective: { text, requester: "Steve" },
+    objective: { text, requester: "Steve", purpose: null },
     snapshot: new FakeRuntime().snapshot,
     places: [],
     areas: [],
@@ -83,7 +83,7 @@ test("the work tier sees the objective, who asked, what was set aside, places an
   await mind.next(workInput("go to the roof", {
     places: [house],
     areas: [{ regionId: 2, label: "small medieval house", owner: "Ayla", min: { x: -6, y: 63, z: -3 }, max: { x: 0, y: 70, z: 3 } }],
-    paused: [{ text: "gather wood for my base", requester: null }],
+    paused: [{ text: "gather wood for my base", requester: null, purpose: null }],
     steps: [{ step: "go to Steve", outcome: "done", detail: "reached Steve" }],
   }), signal);
   const request = action.requests[0]?.[1]?.content ?? "";
@@ -109,7 +109,7 @@ test("with preferences, how a request is taken is the character's call; the work
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
   const { mind, action, chat } = scriptedMind();
   action.reply({ done: "nothing to do" });
-  await mind.next({ persona: testPersona({ preferences }), objective: { text: "get food", requester: null }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] }, signal);
+  await mind.next({ persona: testPersona({ preferences }), objective: { text: "get food", requester: null, purpose: null }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] }, signal);
   assert.match(action.requests[0]?.[0]?.content ?? "", /- When there are several ways to reach the objective \(food from a farm or from hunting\), you may pick the one\n  you like\./u);
   chat.reply({ say: "Tilling again!" });
   await mind.narrate({ persona: testPersona({ preferences }), objective: "make a farm", outcome: "progress", detail: "tilling", history: [] }, signal);
@@ -119,7 +119,7 @@ test("with preferences, how a request is taken is the character's call; the work
 test("the work tier knows crops ripen over time near water and bread is made from wheat", async () => {
   const { mind, action } = scriptedMind();
   action.reply({ done: "ok" });
-  await mind.next({ persona: testPersona(), objective: { text: "make bread", requester: "Tom" }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] }, new AbortController().signal);
+  await mind.next({ persona: testPersona(), objective: { text: "make bread", requester: "Tom", purpose: null }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] }, new AbortController().signal);
   assert.match(action.requests[0]?.[0]?.content ?? "", /Crops ripen over time near water[^\n]*bread is crafted from 3 wheat/u);
   // Live 2026-10-03: "give Tom 1 bread" ended "done (gave Tom 1 bread)" right after crafting it; no give step ran.
   assert.match(action.requests[0]?.[0]?.content ?? "", /answer done only when the steps so far did every part of it/u);
@@ -148,9 +148,10 @@ test("the goal tier picks the next own objective, knowing how the last ones went
     areas: [],
     lately: ["craft a crafting_table: done (crafted it)"],
     opportunities: [],
-    time: [],
+    time: [], drawn: [], chances: [],
   }, signal);
-  assert.equal(objective, "Collect 16 oak_log for my base.");
+  assert.equal(objective.text, "Collect 16 oak_log for my base.");
+  assert.equal(objective.purpose, null, "no \"for\" in the reply: no purpose");
   assert.match(planner.requests[0]?.[1]?.content ?? "", /- craft a crafting_table: done \(crafted it\)/u);
 });
 
@@ -164,16 +165,16 @@ test("the objective that just failed, chosen again as it was, is sent back once 
     lately: ["Build a small medieval house here.: failed (All nearby oak logs are in protected areas.)"],
     lastFailed: { objective: "Build a small medieval house here.", reason: "All nearby oak logs are in protected areas." },
     opportunities: [],
-    time: [],
+    time: [], drawn: [], chances: [],
   };
   planner.reply({ objective: "build a small medieval house here" }, { objective: "Fetch oak logs from beyond my old houses, then build." });
-  assert.equal(await mind.chooseObjective(input, signal), "Fetch oak logs from beyond my old houses, then build.");
+  assert.equal((await mind.chooseObjective(input, signal)).text, "Fetch oak logs from beyond my old houses, then build.");
   assert.match(planner.requests[1]?.at(-1)?.content ?? "", /is what you just tried, and it failed: All nearby oak logs are in protected areas\./u);
 
   planner.reply({ objective: "Build a small medieval house here." }, { objective: "Build a small medieval house here." });
-  assert.equal(await mind.chooseObjective(input, signal), "Build a small medieval house here.");
+  assert.equal((await mind.chooseObjective(input, signal)).text, "Build a small medieval house here.");
   planner.reply({ objective: "Build a small medieval house here." });
-  assert.equal(await mind.chooseObjective({ ...input, lastFailed: null }, signal), "Build a small medieval house here.", "nothing failed: never sent back");
+  assert.equal((await mind.chooseObjective({ ...input, lastFailed: null }, signal)).text, "Build a small medieval house here.", "nothing failed: never sent back");
 });
 
 test("an unnamed line right after the speaker spoke to someone else is sent back once if taken for her; said again, it stands", async () => {
@@ -317,7 +318,7 @@ test("every model call is reported with its tier, prompt, raw replies and decisi
   assert.deepEqual(call?.result, { say: "Hi!", route: "talk", request: "" });
 
   models.planner.reply("nope", "still nope", "nope again");
-  await assert.rejects(mind.chooseObjective({ persona: testPersona(), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [] }, signal));
+  await assert.rejects(mind.chooseObjective({ persona: testPersona(), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [] }, signal));
   assert.equal(calls[1]?.tier, "goal");
   assert.match(calls[1]?.error ?? "", /^\[LLM_BAD_REPLY\]/u);
 });
@@ -359,7 +360,7 @@ test("the chat tier names who a line speaks to first; a line it reads as for oth
 
 test("give_up or done written as a skill inside step is read as what it says, its reason kept", async () => {
   const { mind, action } = scriptedMind();
-  const work: WorkInput = { persona: testPersona(), objective: { text: "build a house", requester: "StarOr1" }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] };
+  const work: WorkInput = { persona: testPersona(), objective: { text: "build a house", requester: "StarOr1", purpose: null }, snapshot: new FakeRuntime().snapshot, places: [], areas: [], steps: [], paused: [] };
   action.reply({ thought: "No logs.", step: { skill: "give_up", reason: "All nearby oak logs are in protected areas." } }, { step: { skill: "done", summary: "built it" } });
   assert.deepEqual(await mind.next(work, signal), { kind: "give_up", reason: "All nearby oak logs are in protected areas." });
   assert.deepEqual(await mind.next(work, signal), { kind: "done", summary: "built it" });
@@ -426,4 +427,71 @@ test("\"where you are\" is her own position, and taking an order on never promis
   assert.deepEqual([decision.request, decision.say], ["build a small house at 0 64 0", "On it!"]);
   assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"where you are" in Steve's line is where you stand, at 0 64 0/u);
   assert.match(chat.requests[2]?.at(-1)?.content ?? "", /"say" must not promise to finish anything first/u);
+});
+
+test("the goal tier's \"for\" names the kind of work the objective is for, by id or in words; an unknown or missing one is no purpose", async () => {
+  const { planner, mind } = scriptedMind();
+  const input = { persona: testPersona({ goal: "build yourself a base" }), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [] };
+  planner.reply({ objective: "Build a house.", for: "building" }, { objective: "Fight.", for: "fighting monsters" }, { objective: "Dream.", for: "knitting" }, { objective: "Rest.", for: "none" });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Build a house.", purpose: "building" });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Fight.", purpose: "mob_combat" });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Dream.", purpose: null });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Rest.", purpose: null });
+  assert.equal(planner.requests.length, 4, "an unknown \"for\" is not sent back");
+});
+
+/** A goal call's input for a character with a goal, a snapshot with nothing in it, and the given draw. */
+function goalInput(overrides: Partial<GoalInput> = {}): GoalInput {
+  return { persona: testPersona({ goal: "build yourself a base" }), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [], ...overrides };
+}
+
+const chancesOf = (...activities: GoalInput["drawn"]) => activities.map((activity) => ({ activity, chance: 1 / activities.length }));
+
+test("the goal tier is told what it feels like doing now, before the things that could use doing", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Build a house.", for: "building" }, { objective: "Mine.", for: "mining" }, { objective: "Rest." });
+  await mind.chooseObjective(goalInput({ drawn: ["building", "mob_combat"], chances: chancesOf("building", "mob_combat", "mining") }), signal);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /Right now you feel most like building, or else fighting monsters\./u);
+  assert.ok(request.indexOf("Right now you feel most like") < request.indexOf("Things that could use doing"));
+  await mind.chooseObjective(goalInput({ drawn: ["mining"], chances: chancesOf("mining") }), signal);
+  assert.match(planner.requests[1]?.[1]?.content ?? "", /Right now you feel most like mining\./u);
+  await mind.chooseObjective(goalInput(), signal);
+  assert.doesNotMatch(planner.requests[2]?.[1]?.content ?? "", /you feel most like/u, "nothing drawn: nothing said");
+});
+
+test("the things that could use doing for a drawn activity come first, the others keep their order, none is dropped", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Eat." });
+  const opportunities = [
+    { activities: ["crafting" as const], text: "your stone_pickaxe has 5 uses left" },
+    { activities: ["farming" as const, "hunting" as const], text: "you carry no food; you are starving" },
+    { activities: ["building" as const], text: "you have no house of your own yet" },
+    { activities: ["crafting" as const], text: "you carry no bed" },
+  ];
+  await mind.chooseObjective(goalInput({ opportunities, drawn: ["building", "crafting"], chances: chancesOf("building", "crafting", "farming") }), signal);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  const at = (text: string) => request.indexOf(text);
+  assert.ok(at("stone_pickaxe") < at("no house of your own") && at("no house of your own") < at("no bed") && at("no bed") < at("you are starving"), request);
+  assert.ok(at("you are starving") > -1, "an urgent opportunity is still shown whatever the draw");
+});
+
+test("the goal prompt asks for what it feels like now, urgent things first, and a \"for\" among the available activities", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Build." });
+  await mind.chooseObjective(goalInput({ drawn: ["building"], chances: chancesOf("building", "mob_combat") }), signal);
+  const system = planner.requests[0]?.[0]?.content ?? "";
+  assert.match(system, /Pick an objective for what you feel like now \(the\s+first, else the second\)/u);
+  assert.match(system, /something urgent comes first \(starving, no tools for\s+it, night\), and then say so/u);
+  assert.match(system, /\{"objective": "<one sentence>", "for": "<kind of work>"\}/u);
+  assert.match(system, /"for" is the kind of work[\s\S]*one of building, fighting monsters/u);
+  assert.doesNotMatch(system, /follow your tastes, or vary/u);
+});
+
+test("a \"for\" outside the available activities is no purpose", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Hunt.", for: "hunting" }, { objective: "Mine.", for: "mining" });
+  const input = goalInput({ drawn: ["building", "mining"], chances: chancesOf("building", "mining") });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Hunt.", purpose: null });
+  assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Mine.", purpose: "mining" });
 });

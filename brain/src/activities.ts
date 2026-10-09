@@ -1,4 +1,4 @@
-import type { Step } from "./actions.ts";
+import type { SkillName, Step } from "./actions.ts";
 import type { ForegroundTool } from "./runtime-client.ts";
 
 /**
@@ -33,6 +33,16 @@ const WORDS: Readonly<Partial<Record<Activity, string>>> = {
 /** How an activity reads in a prompt or the monitor: `fighting monsters` for `mob_combat`. */
 export function describeActivity(activity: Activity): string {
   return WORDS[activity] ?? activity;
+}
+
+/**
+ * The activity a model named: by id (`mob_combat`) or as the prompts word it (`fighting monsters`), in any case.
+ * Anything else, "none" included, is no activity.
+ */
+export function parseActivity(text: string | undefined): Activity | null {
+  if (text === undefined) return null;
+  const words = text.trim().toLowerCase().replace(/[_\s]+/gu, " ");
+  return ACTIVITIES.find((activity) => activity.replaceAll("_", " ") === words || describeActivity(activity).toLowerCase() === words) ?? null;
 }
 
 /** Game facts the activity of a step depends on, looked up by the agent through the runtime. */
@@ -122,6 +132,31 @@ export function activityOf(step: Step, actions: readonly ActionTime[], facts: Ac
     case "release_area": return null;
   }
 }
+
+/**
+ * The kinds of work each skill can do ({@link activityOf} answers one of them): what a character with that skill can
+ * take on (spec 2026-10-09-activity-draw, section 2). `hunt` is both: which one depends on the mob. Errands are none.
+ */
+export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> = {
+  build: ["building"],
+  level_area: ["terraforming"],
+  farm: ["farming"],
+  explore: ["exploring"],
+  go_to: ["travelling"],
+  go_to_player: ["travelling"],
+  follow_player: ["following"],
+  hunt: ["hunting", "mob_combat"],
+  collect_block: ["woodcutting", "mining", "digging", "foraging"],
+  craft_item: ["crafting", "cooking"],
+  get_items: ["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"],
+  give_item: [],
+  drop_item: [],
+  eat: [],
+  equip: [],
+  sleep: [],
+  protect_area: [],
+  release_area: [],
+};
 
 /** A part of a step's time spent on one activity. */
 export interface ActivitySpan {

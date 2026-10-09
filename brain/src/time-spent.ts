@@ -1,8 +1,15 @@
 import { describeActivity, type Activity } from "./activities.ts";
 
-/** One finished step's work: its activity, when it ended, how long it took. */
+/** One finished step's work: its activity, what it was for, when it ended, how long it took. */
 export interface ActivityTime {
+  /** The kind of work the body did (spec 2026-10-03): chopping, walking, placing. */
   readonly activity: Activity;
+  /**
+   * What the objective it belonged to was for (spec 2026-10-09-activity-draw): the walks and gathering of a house count
+   * for building. Absent: the objective had no kind of work, or the record is from before purposes (it counts its own
+   * activity).
+   */
+  readonly purpose?: Activity;
   /** ISO time the step ended. */
   readonly ended: string;
   readonly minutes: number;
@@ -40,12 +47,24 @@ export function lastOfPlay(records: readonly ActivityTime[], minutes = RECENT_MI
  * part after it. Steps with no activity were never recorded.
  */
 export function minutesByActivity(records: readonly ActivityTime[], since = Number.NEGATIVE_INFINITY): ActivityTotal[] {
+  return minutesBy(records, since, (record) => record.activity);
+}
+
+/**
+ * Like {@link minutesByActivity}, but by what the time was for (spec 2026-10-09-activity-draw): the walks and gathering
+ * of a house count for building. A record with no purpose counts its own activity.
+ */
+export function minutesByPurpose(records: readonly ActivityTime[], since = Number.NEGATIVE_INFINITY): ActivityTotal[] {
+  return minutesBy(records, since, (record) => record.purpose ?? record.activity);
+}
+
+function minutesBy(records: readonly ActivityTime[], since: number, key: (record: ActivityTime) => Activity): ActivityTotal[] {
   const totals = new Map<Activity, number>();
   for (const record of records) {
     const ended = Date.parse(record.ended);
     if (!Number.isFinite(ended) || ended <= since) continue;
     const minutes = Math.min(record.minutes, (ended - since) / 60_000);
-    totals.set(record.activity, (totals.get(record.activity) ?? 0) + minutes);
+    totals.set(key(record), (totals.get(key(record)) ?? 0) + minutes);
   }
   return [...totals].map(([activity, minutes]) => ({ activity, minutes })).sort((a, b) => b.minutes - a.minutes);
 }
