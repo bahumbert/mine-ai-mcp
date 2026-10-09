@@ -94,6 +94,22 @@ test("the same step failing the same way several times in a row ends the objecti
   assert.equal(action.requests.length, 3);
 });
 
+test("the same failure between other steps ends the objective too", async (t) => {
+  // Live 2026-10-09: Ayla's farm in a cave failed "25 not tillable (air)" 20 times, each after a different step.
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
+  runtime.failures.craft_item = "[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: birch_thing.";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "I can't find any birch, sorry!" });
+  const collect = { step: { skill: "collect_block", block: "birch_log", count: 5 } };
+  const craft = { step: { skill: "craft_item", item: "birch_thing", count: 1 } };
+  action.reply(collect, craft, collect, craft, collect, craft);
+  await agent.handle(say("Steve", "get me some birch"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(action.requests.length, 5);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times: no birch_log within 64 blocks/u);
+});
+
 test("one skill failing again and again, whichever way it is tried, ends the objective", async (t) => {
   // Live 2026-10-07: explore failed in every direction in turn for 12 minutes.
   const runtime = new FakeRuntime();

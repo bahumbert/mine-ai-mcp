@@ -173,5 +173,10 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
   const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}`;
   if (outcome.status === "succeeded") return { status: "done", detail: `${doneDetail}: ${summary}` };
   if (outcome.status === "partial") return { status: "done", detail: `${doneDetail}, partly: ${summary}; ${left ?? outcome.error ?? ""}` };
-  return { status: "failed", detail: `farming the ${crop} plot around ${plot.water.x} ${plot.water.y} ${plot.water.z} stopped: ${left === null ? (outcome.error ?? outcome.status) : `${summary}; ${left}`}` };
+  // Ground of air: the plot hangs in a cave or over a pit (live 2026-10-09: Ayla, in a cave at y 10, farmed "near my
+  // current position" 20 times, each "25 not tillable (air)").
+  const noGround = (tended?.skipped?.["not tillable (air)"]?.length ?? 0) >= plot.size * plot.size
+    ? `; there is no ground at y ${plot.water.y} here (a cave or a pit): farm on grass or dirt under the open sky, at its height`
+    : "";
+  return { status: "failed", detail: `farming the ${crop} plot around ${plot.water.x} ${plot.water.y} ${plot.water.z} stopped: ${left === null ? (outcome.error ?? outcome.status) : `${summary}; ${left}`}${noGround}` };
 }

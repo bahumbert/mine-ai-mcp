@@ -529,6 +529,13 @@ export class Agent {
       this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
       return;
     }
+    // The same failure between other steps is the same loop (live 2026-10-09: Ayla's farm in a cave failed "25 not
+    // tillable (air)" 20 times in 11 minutes, each time after a different step; Vex's explore for coal_ore, 9 times in
+    // four ways). The detail names what failed, so a step written differently that fails the same way counts too.
+    if (record.outcome === "failed" && work.steps.filter((step) => step.outcome === "failed" && step.detail === record.detail).length >= same) {
+      this.finish(work, "failed", `${record.step} failed the same way ${same} times: ${record.detail}`);
+      return;
+    }
     if (record.outcome === "interrupted") return;
     work.failing = record.outcome === "failed"
       ? { skill: decision.step.skill, count: work.failing.skill === decision.step.skill ? work.failing.count + 1 : 1 }

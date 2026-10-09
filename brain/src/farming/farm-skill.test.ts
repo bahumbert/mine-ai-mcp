@@ -141,6 +141,16 @@ test("cells a tend left as they were are counted by reason, not left as a list s
   assert.match(failed.status === "failed" ? failed.detail : "", /stopped: .*; 3 cells left as they were: 2 not tillable \(cobblestone\), 1 unreachable: no path$/u);
 });
 
+test("a plot whose ground is air says it is in a cave or over a pit, and to farm under the open sky", async () => {
+  // Live 2026-10-09: Ayla, in a cave at y 10, farmed there 20 times, each "25 not tillable (air)".
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  runtime.tendSkipped = { "not tillable (air)": Array.from({ length: 25 }, (_, index) => ({ x: index % 5, z: Math.floor(index / 5) })) };
+  runtime.tendSkippedStatus = "failed";
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5, x: 4, y: 10, z: 6 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /25 not tillable \(air\); there is no ground at y \d+ here \(a cave or a pit\): farm on grass or dirt under the open sky/u);
+});
+
 test("a farm she knows, asked for another crop: the crop asked is planted on empty farmland when carried", async () => {
   const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "carrot", count: 6 }]);
   const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 70, ripe: 0, empty: 10 } }];

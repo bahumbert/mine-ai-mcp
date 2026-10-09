@@ -154,7 +154,8 @@ async function tossItem(
     };
   }
 
-  const expected = requested ?? carriedBefore;
+  // A count above what is carried drops all of it: that is done, not a toss the server swallowed (live 2026-10-09).
+  const expected = Math.min(requested ?? carriedBefore, carriedBefore);
   const settled = await settleInventoryCount(bot, itemName, Math.max(0, carriedBefore - expected), {
     timeoutMs: settleMs,
     signal: context.signal,

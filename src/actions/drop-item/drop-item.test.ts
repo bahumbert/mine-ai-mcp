@@ -150,6 +150,23 @@ test("drops only the requested count, leaving the rest carried", async () => {
   assert.equal(result.drop.dropped[0]?.carriedAfter, 54);
 });
 
+test("a count above what is carried drops all of it and succeeds", async () => {
+  // Live 2026-10-09: "drop 16 oak_planks" with 2 carried dropped both, then failed DROP_NOT_OBSERVED; the step was
+  // retried and each retry failed DROP_NOT_CARRIED for the planks already gone.
+  const { bot } = dropBot({ carried: [{ name: "oak_planks", count: 2, type: 1 }, { name: "cobblestone", count: 64, type: 2 }] });
+
+  const result = await dropItem(
+    bot,
+    parseDropItemRequest({ items: [{ item_name: "oak_planks", count: 16 }, { item_name: "cobblestone", count: 10 }] }),
+    {},
+    deps(),
+    createDiscardedItems(),
+  );
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(result.drop.dropped.map((entry) => [entry.item, entry.dropped, entry.carriedAfter, entry.error]), [["oak_planks", 2, 0, undefined], ["cobblestone", 10, 54, undefined]]);
+});
+
 test("never drops worn armour, and refuses the held item without allow_equipped", async () => {
   const { bot, items } = dropBot({
     carried: [
