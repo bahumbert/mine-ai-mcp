@@ -129,6 +129,8 @@ export class LlmMind implements Mind {
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
     // it through).
     let firstReading: readonly string[] | null = null;
+    const called = calledOthers(input);
+    const answering = answeredElsewhere(input);
     return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
@@ -149,6 +151,19 @@ export class LlmMind implements Mind {
       if (reply.route !== "ignore" && !speaksTo(to, input.persona.username)) {
         firstReading ??= to;
         throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
+      }
+      // Answering a line it reads as spoken to her by name ("everyone"/"unclear" do not count): held to the facts below.
+      const answersAsHers = reply.route !== "ignore" && to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase());
+      // The message calls others by name and names her without calling her: a reply that speaks to her and answers it is
+      // the misreading the facts were given against (bench 2026-10-09, French). Taking an order on is not held to it:
+      // "Ayla, get wood and Vex mine stone" gives Vex an order with no comma after his name (bench: Vex 0/3 when held).
+      if (answersAsHers && reply.route !== "act" && reply.route !== "later" && called.length > 0) {
+        throw new Error(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
+      }
+      // The line answers someone else who just spoke to its speaker, and names nobody: a reply that speaks to her and
+      // answers it ignores the fact given in the prompt (bench 2026-10-09, "ok j'arrive").
+      if (answersAsHers && answering !== null) {
+        throw new Error(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
       }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
       // to let pass (the bench: held to them too, she answered every line to "Opus").
@@ -555,9 +570,63 @@ function answeringSomeoneElse(input: Pick<ChatInput, "message" | "persona" | "hi
   return null;
 }
 
+/** Who spoke to the speaker just before a message that is not addressed to her (see {@link answeringSomeoneElse}); null otherwise. */
+function answeredElsewhere(input: ChatInput): string | null {
+  return input.message.addressed ? null : answeringSomeoneElse(input);
+}
+
 /** Whether `text` holds `name` as a word, as the runtime finds her own name (letters, digits, underscores). */
 function namesWord(text: string, name: string): boolean {
   return text.toLowerCase().split(/[^a-z0-9_]+/u).includes(name.toLowerCase());
+}
+
+/** A character of a name, as the runtime's word test counts it (any language's letters, digits, underscores). */
+function isNameChar(char: string | undefined): boolean {
+  return char !== undefined && /[\p{L}\p{N}_]/u.test(char);
+}
+
+/** Whether `text` has `name`, as a whole word, at `at`. */
+function nameAt(text: string, at: number, name: string): boolean {
+  return name.length > 0 && text.slice(at, at + name.length).toLowerCase() === name.toLowerCase() && !isNameChar(text[at + name.length]) && !isNameChar(text[at - 1]);
+}
+
+/**
+ * The known names a message calls, as spelled in `names`, once each, in the order they appear (ADR-017 point 7): a name
+ * as a whole word followed by optional spaces and `,` or `:`, wherever it stands, or written `@name`. Names and
+ * punctuation only, never words: "Opus, Vex is going through the ocean" calls Opus and merely names Vex, and "Ayla, get
+ * wood and Vex, mine stone" calls both. A name before a comma that is not a call ("nice work, thanks Vex, see you") is
+ * read as one; a call without the comma ("... and Vex mine stone") is missed.
+ */
+export function calledNames(text: string, names: readonly string[]): string[] {
+  const called: string[] = [];
+  for (let at = 0; at < text.length; at += 1) {
+    const name = names.find((candidate) => nameAt(text, at, candidate));
+    if (name === undefined || called.includes(name)) continue;
+    if (text[at - 1] === "@" || [",", ":"].includes(text.slice(at + name.length).trimStart()[0] ?? "")) called.push(name);
+  }
+  return called;
+}
+
+/**
+ * The known names the message calls when it calls others and not her yet names her inside a sentence (or is addressed to
+ * her by the runtime); empty otherwise. The one condition for the fact in the prompt and for the reply check.
+ */
+function calledOthers(input: ChatInput): string[] {
+  const { message, persona } = input;
+  const called = calledNames(message.message, knownNamesOf(input));
+  const herself = called.some((name) => name.toLowerCase() === persona.username.toLowerCase());
+  return herself || !(message.addressed || namesWord(message.message, persona.username)) ? [] : called;
+}
+
+/** The names the chat tier knows: hers, players online, speakers and `to` names in the history, and the configured ones. */
+function knownNamesOf(input: ChatInput): string[] {
+  const unnamed = ["everyone", "unclear", "you"];
+  const all = [input.persona.username, ...input.snapshot.players.map((player) => player.username), ...input.history.flatMap((line) => [line.speaker, ...(line.to ?? [])]), ...(input.knownNames ?? [])];
+  const known: string[] = [];
+  for (const name of all) {
+    if (name.length > 0 && !unnamed.includes(name.toLowerCase()) && !known.some((other) => other.toLowerCase() === name.toLowerCase())) known.push(name);
+  }
+  return known;
 }
 
 /** Lines back a follow-up is looked for: the speaker's line just before, not one from long ago. */
@@ -592,13 +661,16 @@ export function describeConversation(input: ChatInput, now = Date.now()): string
   const { message } = input;
   const facts: string[] = [];
   const last = lastExchange(input);
-  if (last !== undefined && talkingWithHer(input, now)) {
+  // Someone else speaking to the speaker after the exchange with her ended it: the two facts would contradict.
+  const answering = answeredElsewhere(input);
+  if (last !== undefined && answering === null && talkingWithHer(input, now)) {
     facts.push(`You are talking with ${message.username}${last.at === undefined ? "" : ` (your last exchange was ${Math.max(0, Math.round((now - last.at) / 1_000))} s ago)`}.`);
   }
   const ongoing = conversationGoingOn(input);
   if (ongoing !== null) facts.push(`${message.username}'s line just before this one spoke to ${ongoing.join(", ")}, not to you, and this message names nobody.`);
-  const answering = message.addressed ? null : answeringSomeoneElse(input);
   if (answering !== null) facts.push(`${answering} spoke to ${message.username} just before this message, which names nobody.`);
+  const called = calledOthers(input);
+  if (called.length > 0) facts.push(`This message calls ${called.join(", ")} by name (a name followed by a comma or colon); it names you without calling you.`);
   return facts.length === 0 ? "" : `About this message:\n${facts.map((fact) => `- ${fact}`).join("\n")}`;
 }
 

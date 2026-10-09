@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
-import { chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
+import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import type { ChatInput, GoalInput, WorkInput } from "./mind.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
@@ -372,6 +372,122 @@ test("what the history shows about a message is given in the prompt before the c
   assert.equal(describeConversation({ ...answering, message: { ...answering.message, addressed: true } }).includes("spoke to Steve"), false);
   assert.equal(describeConversation({ ...input, message: { ...input.message, message: "fix it Opus" } }).includes("just before this one"), false);
   assert.equal(describeConversation(chatInput("hi", true)), "");
+});
+
+test("calledNames: known names opening a sentence before a comma or colon, or written @name (ADR-017 point 7)", () => {
+  const names = ["Opus", "Vex", "Ayla"];
+  assert.deepEqual(calledNames("Opus, Vex is going through the Ocean without boat, you said you fixed that", names), ["Opus"]);
+  assert.deepEqual(calledNames("Opus, Vex traverse l'océan sans bateau, tu avais dit que c'était réglé", names), ["Opus"]);
+  assert.deepEqual(calledNames("Ayla, get wood. Vex, mine stone.", names), ["Ayla", "Vex"]);
+  assert.deepEqual(calledNames("nice work today, thanks Vex", names), []);
+  assert.deepEqual(calledNames("@Ayla come", names), ["Ayla"]);
+  assert.deepEqual(calledNames("Ok, Vex get wood", ["Vex", "Ayla"]), []);
+  assert.deepEqual(calledNames("opus: help", names), ["Opus"]);
+  assert.deepEqual(calledNames("Vex , dig", names), ["Vex"]);
+  assert.deepEqual(calledNames("Vexing, dig\nvex: now", names), ["Vex"]);
+  assert.deepEqual(calledNames("Opus, Opus: Opus!", names), ["Opus"]);
+  assert.deepEqual(calledNames("Ayla, get some wood and Vex, mine some stone.", names), ["Ayla", "Vex"]);
+  assert.deepEqual(calledNames("nice work, thanks Vex, see you", names), ["Vex"]);
+  assert.deepEqual(calledNames("Ayla, get some wood and Vex mine some stone", names), ["Ayla"], "no comma after the second name: not a call");
+});
+
+test("describeConversation tells a character named without being called that another name is called (ADR-017 point 7)", () => {
+  const vex = testPersona({ id: "vex", username: "Vex", displayName: "Vex" });
+  const opusLine = (persona = vex): ChatInput => ({ ...chatInput("Opus, Vex is going through the Ocean without boat, you said you fixed that", false), persona, snapshot: crowded() });
+  const fact = /- This message calls Opus by name \(a name followed by a comma or colon\); it names you without calling you\./u;
+  assert.match(describeConversation({ ...opusLine(), knownNames: ["Opus"] }), fact);
+  assert.match(describeConversation(opusLine()), fact, "Opus is a player online here");
+  // Not named: the fact is for a character the message names.
+  const ayla = opusLine(testPersona());
+  assert.equal(describeConversation({ ...ayla, knownNames: ["Opus"] }).includes("calls Opus"), false);
+  // Called herself: nothing to add.
+  const both: ChatInput = { ...chatInput("Ayla, get wood. Vex, mine stone.", true), snapshot: crowded(), knownNames: ["Opus"] };
+  assert.equal(describeConversation({ ...both, persona: vex }).includes("calls"), false);
+  assert.equal(describeConversation(both).includes("calls"), false);
+  // No known name beyond hers, no fact.
+  const alone = { ...chatInput("Opus, Ayla is going through the ocean"), snapshot: new FakeRuntime().snapshot };
+  assert.equal(describeConversation(alone), "");
+  // A name from the history is known too.
+  const spoken = { ...alone, history: [{ speaker: "Opus", text: "hello", to: ["everyone"] }] };
+  assert.match(describeConversation(spoken), /calls Opus by name/u);
+});
+
+test("a reply that speaks to her when the message calls others by name and names her without calling her goes back, unless it takes an order on (ADR-017 point 7)", async () => {
+  const vex = testPersona({ id: "vex", username: "Vex", displayName: "Vex" });
+  const input = (line: string): ChatInput => ({ ...chatInput(line, true), persona: vex, snapshot: crowded(), knownNames: ["Opus"] });
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["Vex"], say: "Sorry!", route: "talk", request: "" }, { spoken_to: ["Opus"], say: "", route: "ignore", request: "" });
+    const decision = await mind.chat(input("Opus, Vex traverse l'océan sans bateau"), signal);
+    assert.equal(decision.route, "ignore");
+    assert.equal(chat.requests.length, 2);
+    const sentBack = JSON.stringify(chat.requests[1]);
+    assert.ok(sentBack.includes("spoken_to"), sentBack);
+    assert.ok(sentBack.includes("the message calls Opus by name and names you without calling you"), sentBack);
+  }
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["everyone"], say: "Hm.", route: "talk", request: "" });
+    assert.equal((await mind.chat(input("Opus, Vex traverse l'océan sans bateau"), signal)).route, "talk");
+    assert.equal(chat.requests.length, 1, "not sent back");
+  }
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["Vex"], say: "On it!", route: "act", request: "mine some stone" });
+    assert.equal((await mind.chat(input("Ayla, get some wood. Vex, mine some stone."), signal)).route, "act");
+    assert.equal(chat.requests.length, 1, "called herself: not sent back");
+  }
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["Vex"], say: "On it!", route: "act", request: "mine some stone" });
+    assert.equal((await mind.chat(input("Ayla, get some wood and Vex mine some stone"), signal)).route, "act");
+    assert.equal(chat.requests.length, 1, "an order taken on is not held to the called names");
+  }
+});
+
+test("a conversation interrupted by someone else speaking to the speaker is not given as going on", () => {
+  // Bench: "ok j'arrive" after Ayla's exchange with StarOr1 and Bob's "StarOr1, tu viens miner avec moi ?" got both facts.
+  const input: ChatInput = {
+    ...chatInput("ok j'arrive", false),
+    message: { username: "StarOr1", channel: "chat", message: "ok j'arrive", addressed: false },
+    history: [
+      { speaker: "StarOr1", text: "Ayla, tu as besoin d'aide ?", to: ["Ayla"], at: Date.now() - 20_000 },
+      { speaker: "Ayla", text: "Non merci !", to: ["StarOr1"], at: Date.now() - 19_000 },
+      { speaker: "Bob", text: "StarOr1, tu viens miner avec moi ?", to: ["StarOr1"], at: Date.now() - 5_000 },
+    ],
+    snapshot: { ...new FakeRuntime().snapshot, players: [{ username: "StarOr1", position: null }, { username: "Bob", position: null }] },
+  };
+  const facts = describeConversation(input);
+  assert.match(facts, /- Bob spoke to StarOr1 just before this message, which names nobody./u);
+  assert.equal(facts.includes("You are talking with"), false);
+});
+
+test("a reply that speaks to her when the line answers someone else who just spoke to its speaker goes back (ADR-017)", async () => {
+  const lines = (ayla: boolean) => [
+    { speaker: "StarOr1", text: "Ayla, tu as besoin d'aide ?", to: ["Ayla"], at: Date.now() - 20_000 },
+    { speaker: "Ayla", text: "Non merci !", to: ["StarOr1"], at: Date.now() - 19_000 },
+    { speaker: "Bob", text: "StarOr1, tu viens miner avec moi ?", to: ["StarOr1"], at: Date.now() - 5_000 },
+    ...(ayla ? [{ speaker: "Ayla", text: "Super !", to: ["StarOr1"], at: Date.now() - 2_000 }] : []),
+  ];
+  const input = (addressed: boolean, ayla = false): ChatInput => ({
+    ...chatInput("ok j'arrive", addressed),
+    message: { username: "StarOr1", channel: "chat", message: "ok j'arrive", addressed },
+    history: lines(ayla),
+    snapshot: { ...new FakeRuntime().snapshot, players: [{ username: "StarOr1", position: null }, { username: "Bob", position: null }] },
+  });
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["Ayla"], say: "Super !", route: "talk", request: "" }, { spoken_to: ["Bob"], say: "", route: "ignore", request: "" });
+    assert.equal((await mind.chat(input(false), signal)).route, "ignore");
+    assert.equal(chat.requests.length, 2);
+    assert.ok(JSON.stringify(chat.requests[1]).includes("this message names nobody and Bob spoke to StarOr1 just before it: it answers Bob, not you"));
+  }
+  for (const [name, given] of [["addressed", input(true)], ["Ayla answered after Bob", input(false, true)]] as const) {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ spoken_to: ["Ayla"], say: "Super !", route: "talk", request: "" });
+    assert.equal((await mind.chat(given, signal)).route, "talk", name);
+    assert.equal(chat.requests.length, 1, `${name}: not sent back`);
+  }
 });
 
 test("no function of the chat tier reads what a player wrote beyond whether it names someone (ADR-017)", () => {

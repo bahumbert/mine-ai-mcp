@@ -57,6 +57,8 @@ export interface ChatInput {
   readonly areas: readonly ProtectedArea[];
   /** Whether a request may wait ("later"): only while it works for someone else. Default true. */
   readonly canWait?: boolean;
+  /** People talked to who are not players here (the controller, say), from the brain's `--known-names`; a name called in a message. */
+  readonly knownNames?: readonly string[];
 }
 
 export interface ChatDecision {

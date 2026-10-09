@@ -64,6 +64,8 @@ export interface AgentOptions {
   readonly journal?: (event: BrainEvent) => void;
   /** Where the activity draw gets its chance, a number in [0, 1); tests inject a seeded one. Default `Math.random`. */
   readonly random?: () => number;
+  /** People talked to who are not players here (e.g. the controller): a message opening with their name, then a comma, calls them. Default none. */
+  readonly knownNames?: readonly string[];
 }
 
 /** One objective on the stack and what was done for it. */
@@ -244,7 +246,7 @@ export class Agent {
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [] }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;

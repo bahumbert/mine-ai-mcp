@@ -135,7 +135,7 @@ MINE_AI_LLM_TIMEOUT_MS=30000
 ```
 
 A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`); `--chat-model`,
-`--action-model` and `--planner-model` override everything. `bun run brain --help` lists all of it.
+`--action-model` and `--planner-model` override everything. `--known-names Opus,...` lists people the agents are talked to who are not players here, so a line opening with one of those names and a comma is read as spoken to them. `bun run brain --help` lists all of it.
 
 ## Layout
 

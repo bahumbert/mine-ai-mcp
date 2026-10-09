@@ -14,9 +14,9 @@ function steveAt(x: number) {
 }
 
 /** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */
-function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}) {
+function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -177,6 +177,14 @@ test("whom she read a line as spoken to stays with it in the chat history, and h
   await agent.handle(say("Steve", "hi Ayla"));
   await agent.handle(say("Steve", "how are you"));
   assert.match(chat.requests[2]?.[1]?.content ?? "", /Steve to Opus: "Opus, teleport me"\nSteve to [^:]+: "hi Ayla"\n[^\n]+ to Steve: "Hello Steve!"/u);
+});
+
+test("the brain's known names reach the chat tier, which tells her who a line calls", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, { id: "vex", username: "Vex", displayName: "Vex" }, { knownNames: ["Opus"] });
+  chat.reply({ spoken_to: ["Opus"], say: "", route: "ignore", request: "" });
+  await agent.handle(say("Steve", "Opus, Vex is going through the Ocean without boat, you said you fixed that"));
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /This message calls Opus by name \(a name followed by a comma or colon\); it names you without calling you\./u);
 });
 
 test("a request she is already working on is not taken or queued again", async (t) => {

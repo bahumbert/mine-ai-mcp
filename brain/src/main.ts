@@ -11,6 +11,8 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
+  --known-names      Comma list of people the agents are talked to who are not players here (e.g. Opus): a message opening
+                     a sentence with one of these names and a comma or colon is read as spoken to them.
   --<tier>-model     Model id for that tier, for every agent (overrides personas and environment).
 
 Each agent thinks with three LLM tiers (ADR-008): chat (fast: answers and routes every message), action (turns a
@@ -95,6 +97,7 @@ async function main(): Promise<void> {
       "chat-model": { type: "string" },
       "action-model": { type: "string" },
       "planner-model": { type: "string" },
+      "known-names": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -104,6 +107,7 @@ async function main(): Promise<void> {
   }
   const specs = readSpecs(values.agent);
   const personas = await Promise.all(specs.map((spec) => loadPersona(spec.personaPath)));
+  const knownNames = (values["known-names"] ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
   const usernames = personas.map((persona) => persona.username);
   const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
   const minds = personas.map((persona, index) => {
@@ -130,6 +134,7 @@ async function main(): Promise<void> {
       runtime: runtimes[index]!,
       mind: minds[index]!,
       otherAgents: usernames.filter((name) => name !== persona.username),
+      knownNames,
       log,
       ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
     });
