@@ -19,7 +19,7 @@ export const styleSchema = z.strictObject({
 export type Style = z.infer<typeof styleSchema> & { readonly palette: Palette; readonly variants?: Variants };
 
 /** Where the style files live; one JSON file per style, named after its id. */
-export const STYLES_DIRECTORY = new URL("../../styles/", import.meta.url);
+export const STYLES_DIRECTORY = new URL("../../building-styles/", import.meta.url);
 
 export function loadStyles(directory: URL = STYLES_DIRECTORY): ReadonlyMap<string, Style> {
   const styles = new Map<string, Style>();
@@ -33,7 +33,7 @@ export function loadStyles(directory: URL = STYLES_DIRECTORY): ReadonlyMap<strin
   return styles;
 }
 
-/** The styles shipped in `brain/styles/`, loaded once. */
+/** The styles shipped in `brain/building-styles/`, loaded once. */
 export const STYLES = loadStyles();
 
 /** Used when neither the request nor the persona names a known style. */

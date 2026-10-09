@@ -56,7 +56,7 @@ blocks), make a crop farm or tend one it made (below). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
-**Building** (`src/building/`, ADR-010): a style is a JSON palette (`styles/<id>.json`: block per material role +
+**Building** (`src/building/`, ADR-010): a style is a JSON palette (`building-styles/<id>.json`: block per material role +
 roof type, plus `variants`: the stairs and slab of a role) fed to a parametric generator (`house.ts`): stair roofs
 facing up their slope with a slab ridge, pillars standing and trim beams along the walls (block states, ADR-013; a
 style without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
@@ -143,7 +143,7 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
 | `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
-| `styles/*.json` | Style palettes (material role → block) and house options |
+| `building-styles/*.json` | Style palettes (material role → block) and house options |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
 | `src/say.ts` | Dev CLI: make another bot host say a chat line (a scripted player for live tests) |
 | `src/gathering.ts` | Gather and craft items like a player (`get_items` skill) |
