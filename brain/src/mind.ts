@@ -74,8 +74,6 @@ export interface ChatDecision {
   readonly to?: readonly string[];
   /** For `act` and `later`: where the request happens, as the chat tier read it (the request already carries the coordinates the code wrote). */
   readonly place?: Place;
-  /** For `act` and `later`: the online player the chat tier named as the one asking; the objective's requester when present. */
-  readonly for?: string;
   /** With `act`: the chat tier's judgment that its own line starts the work right now. */
   readonly startsNow?: boolean;
 }

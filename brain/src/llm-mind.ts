@@ -70,9 +70,8 @@ const chatReplySchema = z.object({
   // 2026-10-09-chat-handling, B: replaces an English regex over the line).
   starts_now: z.boolean().optional(),
   route: z.enum(ROUTES),
-  // Where the request happens and for whom; the code writes the coordinates itself and resolves the name.
+  // Where the request happens; the code writes the coordinates itself.
   place: z.enum(PLACES).optional(),
-  for: z.string().optional(),
   request: z.string().default(""),
 });
 
@@ -165,7 +164,6 @@ export class LlmMind implements Mind {
       }
       if ((reply.route === "act" || reply.route === "later") && restated === "") throw new Error(`"request" is required when "route" is "${reply.route}"`);
       const acts = reply.route === "act" || reply.route === "later";
-      const requester = acts && reply.for !== undefined ? playerNamed(reply.for, input) : undefined;
       return {
         ...(to.length > 0 && { to }),
         say: reply.say,
@@ -173,7 +171,6 @@ export class LlmMind implements Mind {
         request: acts ? withPlace(restated, reply.place, input) : restated,
         ...(input.persona.preferences !== undefined && { work: reply.work.trim() }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
-        ...(requester !== undefined && { for: requester }),
         ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }),
       };
     });
@@ -347,7 +344,7 @@ export function chatSystemPrompt(persona: Persona, canWait = true): string {
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "language": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "for": "...", "request": "..."}` : `{"spoken_to": [...], "language": "...", "work": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "for": "...", "request": "..."}`}.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "language": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "language": "...", "work": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
 - "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
   the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
   "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
@@ -382,8 +379,6 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   language), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
   coordinates for "speaker" or "you" in "request": they are added for you. When "Players online" has the speaker far
   away (no coordinates) and the request happens where they are, say in your line that you cannot see them from here.
-- "for": the name of the player who asks (the message's author unless it is asked in someone else's name), as in
-  "Players online"; never "me".
 - "request": for act and later, what the player asks of you (only your part when the message asks several people;
   not your own plan), in one standalone sentence keeping every username, Minecraft id, number and named place the
   player gave, word for word (e.g. "give Steve 5 oak_log", "level the zone between the gold_block markers"); otherwise "".
@@ -605,13 +600,6 @@ export function describeConversation(input: ChatInput, now = Date.now()): string
   const answering = message.addressed ? null : answeringSomeoneElse(input);
   if (answering !== null) facts.push(`${answering} spoke to ${message.username} just before this message, which names nobody.`);
   return facts.length === 0 ? "" : `About this message:\n${facts.map((fact) => `- ${fact}`).join("\n")}`;
-}
-
-/** The online player (other than her) a reply's `for` names, as the server spells them; undefined for "me", herself or an unknown. */
-function playerNamed(name: string, input: ChatInput): string | undefined {
-  const wanted = name.trim().replace(/^@/u, "").toLowerCase();
-  if (wanted === "" || wanted === input.persona.username.toLowerCase()) return undefined;
-  return input.snapshot.players.find((player) => player.username.toLowerCase() === wanted)?.username;
 }
 
 /**

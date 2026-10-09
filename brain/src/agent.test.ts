@@ -555,6 +555,31 @@ test("a reply whose speaker said something since is dropped unspoken; the newest
   assert.deepEqual(events.filter((event) => event.kind === "chat").map((event) => [event.text, event.superseded]), [["Ayla build a house", true], ["Ayla no wait, stop", false]]);
 });
 
+test("a superseded stop still stops; only its line is dropped", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, restAfterStopSeconds: 60 } });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  const release = chat.hold();
+  chat.reply(
+    { spoken_to: ["Ayla"], say: "Okay, stopping.", route: "stop", request: "" },
+    { spoken_to: ["Ayla"], say: "Right.", route: "talk", request: "" },
+  );
+  runtime.inbox.push(say("Steve", "Ayla, stop"));
+  await until(() => chat.requests.length === 1);
+  runtime.inbox.push(say("Steve", "Ayla, please"));
+  await sleep(40);
+  release();
+  await until(() => runtime.said.length === 1);
+  await until(() => runtime.cancelled.length === 1);
+  assert.deepEqual(runtime.said, ["Right."]);
+  assert.equal(agent.activity, "idle");
+  await sleep(300);
+  assert.equal(planner.requests.length, 1, "no new own objective while resting");
+});
+
 test("another player's line does not supersede a reply", async (t) => {
   const runtime = new FakeRuntime();
   const { chat } = journaledAgent(t, runtime);
@@ -569,7 +594,7 @@ test("another player's line does not supersede a reply", async (t) => {
   assert.deepEqual(runtime.said, ["Hi Steve!", "Hi Bob!"]);
 });
 
-test("an order is stored with its speaker as requester, even when the chat tier names another player as asking", async (t) => {
+test("an order is stored with its speaker as requester; a stray \"for\" in the reply is ignored", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3), { username: "Bob", position: { x: 5, y: 64, z: 0 } }] };
   const { agent, chat, action } = agentFor(t, runtime);

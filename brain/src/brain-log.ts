@@ -92,9 +92,8 @@ export type BrainEvent =
     readonly say: string;
     readonly superseded: boolean;
     readonly to?: readonly string[];
-    /** What the chat tier read besides the route: where the request happens, who asks, whether the line starts it now. */
+    /** What the chat tier read besides the route: where the request happens, whether the line starts it now. */
     readonly place?: Place;
-    readonly for?: string;
     readonly startsNow?: boolean;
   }
   /** What it is doing now: the stack (top last), the step running, if any. */

@@ -232,7 +232,8 @@ export class Agent {
 
   /**
    * Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind work.
-   * `heard`: the message as the inbox gave it; when its speaker has said something since, the reply is dropped unspoken.
+   * `heard`: the message as the inbox gave it; when its speaker has said something since, the reply is dropped unspoken
+   * (a "stop" still stops: only its line is dropped).
    */
   async handle(message: PlayerMessage, heard?: Heard): Promise<void> {
     const heardAt = Date.now();
@@ -257,23 +258,26 @@ export class Agent {
     // Its speaker went on while the model thought: this reply answers a state that is gone. The newest lines are read
     // next, with this one in the history (spec 2026-10-09-chat-handling, A).
     const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
-    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.for !== undefined && { for: decision.for }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
+    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
     if (superseded) {
-      log("  superseded: its speaker said something since, the reply is dropped");
+      // The line answers a state that is gone and is dropped, but a stop is not: it was meant, and the newer line
+      // (read next) does not take it back.
+      if (route === "stop") {
+        log("  superseded: its speaker said something since; the line is dropped but the stop is kept");
+        this.stopAndRest();
+      } else {
+        log("  superseded: its speaker said something since, the reply is dropped");
+      }
       return;
     }
     if (route === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo);
-    if (route === "stop") {
-      this.stopAll();
-      this.restUntil = Date.now() + persona.settings.restAfterStopSeconds * 1_000;
-    }
+    if (route === "stop") this.stopAndRest();
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
-    // The speaker is the requester: their authority is the order's (a line naming someone else as asking does not
-    // borrow that player's place in `authority`).
+    // The speaker is the requester: their authority is the order's.
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work) };
     if ((route === "act" || route === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
@@ -779,6 +783,12 @@ export class Agent {
     this.stack.length = 0;
     this.journalState(null);
     this.wake?.();
+  }
+
+  /** A player's "stop": everything ends, and no goal of its own starts for the persona's rest time. */
+  private stopAndRest(): void {
+    this.stopAll();
+    this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */

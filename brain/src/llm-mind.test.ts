@@ -104,7 +104,7 @@ test("preferences reach the init prompt as feelings, never as a rule: her feelin
 test("with preferences, how a request is taken is the character's call; the work tier may pick the liked way; narration may show it", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
-  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "for": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
   assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow/u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
@@ -398,17 +398,6 @@ test("the code writes where a request happens, from the reply's place: the speak
   }
 });
 
-test("the reply's \"for\" names who asks when that is a player online; \"me\", herself or an unknown keep the speaker", async () => {
-  const { chat, mind } = scriptedMind();
-  const ask = (who: string) => ({ spoken_to: ["Ayla"], say: "Sure!", route: "act", request: "get 5 oak_log", for: who });
-  chat.reply(ask("tom"), ask("me"), ask("Ayla"), ask("Nobody"), ask("@Steve"), { spoken_to: ["Ayla"], say: "Sure!", route: "talk", request: "", for: "Tom" });
-  const input: ChatInput = { ...chatInput("Ayla, get 5 logs"), snapshot: crowded() };
-  assert.equal((await mind.chat(input, signal)).for, "Tom");
-  for (const _ of ["me", "Ayla", "Nobody"]) assert.equal((await mind.chat(input, signal)).for, undefined);
-  assert.equal((await mind.chat(input, signal)).for, "Steve");
-  assert.equal((await mind.chat(input, signal)).for, undefined, "only a request has a requester");
-});
-
 test("\"act\" whose own line does not start now goes back; later and talk are not held to it", async () => {
   // Live 2026-10-04: "Just let me finish this little project first" with "act". The model judges its own line, in its
   // language (starts_now), instead of an English regex over it.
@@ -426,12 +415,12 @@ test("\"act\" whose own line does not start now goes back; later and talk are no
   assert.equal((await mind.chat(chatInput("Ayla, ready?"), signal)).route, "talk");
 });
 
-test("the chat prompt explains place, for and starts_now, and no longer asks for coordinates in the request", () => {
+test("the chat prompt explains place and starts_now, and no longer asks for coordinates in the request", () => {
   const prompt = chatSystemPrompt(testPersona());
-  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "for": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(prompt, /- "place": where the request happens/u);
   assert.match(prompt, /Never write\n  coordinates for "speaker" or "you" in "request": they are added for you/u);
-  assert.match(prompt, /- "for": the name of the player who asks/u);
+  assert.doesNotMatch(prompt, /"for"/u);
   assert.doesNotMatch(prompt, /write them as the speaker's name and coordinates/u);
 });
 
