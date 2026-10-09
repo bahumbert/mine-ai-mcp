@@ -50,6 +50,14 @@ test("the characters live differently: Ayla farms and builds, Vex mines and expl
   assert.deepEqual((await load("vex")).preferences, { loves: "mining", likes: "exploring", dislikes: "building", hates: "farming" });
 });
 
+test("a step's time limit defaults to 10 minutes and may be set from 0.01 to 120", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.equal(personaSchema.parse(base).settings.maxStepMinutes, 10);
+  assert.equal(personaSchema.parse({ ...base, settings: { maxStepMinutes: 0.5 } }).settings.maxStepMinutes, 0.5);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { maxStepMinutes: 0 } }).success, false, "below 0.01");
+  assert.equal(personaSchema.safeParse({ ...base, settings: { maxStepMinutes: 121 } }).success, false, "above 120");
+});
+
 test("feeling multipliers default to the owner's pick and each may be set from 0 to 10 (spec 2026-10-09-activity-draw)", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
   const defaults = { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 };

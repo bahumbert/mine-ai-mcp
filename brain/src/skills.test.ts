@@ -3,7 +3,7 @@ import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
-import type { ProtectedArea } from "./runtime-client.ts";
+import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "./testing.ts";
 
@@ -867,6 +867,62 @@ test("a walk that stopped is not \"done\" because the block is in sight farther 
   runtime.failures.navigate = "[NAVIGATION_STOPPED] Pathfinder stopped: planning_stalled.";
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "dark_oak_log" }), contextFor(runtime));
   assert.match(result.status === "failed" ? result.detail : "", /^exploring east stopped \(\[NAVIGATION_STOPPED\] Pathfinder stopped: planning_stalled\.\): now 0 blocks/u);
+});
+
+/** A fake whose snapshot lists these mobs once the bot stands at or past `fromX` (what loads as she walks on). */
+class MobsLoadAt extends FakeRuntime {
+  constructor(private readonly fromX: number, private readonly mobs: BotSnapshot["mobs"]) { super(); }
+
+  override async status(): Promise<BotSnapshot> {
+    return { ...this.snapshot, mobs: this.snapshot.position.x >= this.fromX ? this.mobs : [] };
+  }
+}
+
+test("explore for an animal walks leg by leg and stops on the leg where one comes into sight, saying which way and how far", async () => {
+  // Live 2026-10-09, 10 bots: five needed sheep (wool for a bed) and asked explore for sheep, pig, zombie.
+  const sheep = { name: "sheep", hostile: false, count: 3, distance: 23, position: { x: 112, y: 64, z: -16 } };
+  const runtime = new MobsLoadAt(96, [sheep]);
+  runtime.walkOnNavigate = true;
+  runtime.notBlocks = new Set(["sheep"]);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "sheep" }), contextFor(runtime));
+  // The first leg of 96 blocks brought the sheep into the list: the second leg is not walked.
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x, call.input.z]), [["navigate", 96, 0]]);
+  assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 96 blocks east from where you started, at 96 64 0; found sheep 23 blocks north-east, around 112 -16: get_items what you want from it hunts it there");
+});
+
+test("explore for an animal that never comes into sight ends as today, saying none was seen; one already in sight is not walked to", async () => {
+  const none = new FakeRuntime();
+  none.walkOnNavigate = true;
+  none.notBlocks = new Set(["pig"]);
+  none.snapshot = { ...none.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, mobs: [{ name: "sheep", hostile: false, count: 2, distance: 9 }] };
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "pig" }), contextFor(none));
+  assert.deepEqual(none.submitted.map((call) => [call.tool, call.input.x, call.input.z]), [["navigate", 96, 0], ["navigate", 128, 0]]);
+  assert.equal(withoutWays(result.status === "done" ? result.detail : ""), "explored east: now 128 blocks east from where you started, at 128 64 0; no pig seen on the way");
+
+  // Already loaded: say so, no walk (get_items hunts it where it is).
+  const near = new FakeRuntime();
+  near.notBlocks = new Set(["zombie"]);
+  near.snapshot = { ...near.snapshot, mobs: [{ name: "zombie", hostile: true, count: 1, distance: 40 }] };
+  const here = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "zombie" }), contextFor(near));
+  assert.equal(near.submitted.length, 0);
+  assert.match(here.status === "done" ? here.detail : "", /^zombie already in sight, 40 blocks away: get_items what you want from it hunts it there$/u);
+});
+
+test("explore for a name that is neither a block nor a creature keeps the refusal; a block is unchanged", async () => {
+  const runtime = new FakeRuntime();
+  runtime.walkOnNavigate = true;
+  runtime.notBlocks = new Set(["water_source", "unicorn"]);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 } };
+  for (const name of ["water_source", "unicorn"]) {
+    const refused = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: name }), contextFor(runtime));
+    assert.equal(refused.status, "failed");
+    assert.match("detail" in refused ? refused.detail : "", new RegExp(`^${name} is not a block: explore looks for a block by its Minecraft name`, "u"));
+  }
+  assert.equal(runtime.submitted.length, 0);
+  // A block is looked for as ever.
+  const block = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "dark_oak_log" }), contextFor(runtime));
+  assert.equal(withoutWays(block.status === "done" ? block.detail : ""), "explored east: now 64 blocks east from where you started, at 64 64 0; no dark_oak_log seen on the way");
 });
 
 test("a recorded place found empty is not offered again: explore no longer sends her back to it", async () => {

@@ -464,18 +464,28 @@ export class NavigationRun {
   /** Start the plan-ahead search from where a partial segment will end, stoppable on its own. */
   #startContinuation(goal: ActiveGoal, plan: RoutePlan, observation: NavigationObservation): PendingContinuation {
     const control = new AbortController();
+    const result = this.#plan(
+      goal,
+      plan.endNode,
+      observation,
+      "segment_continuation",
+      AbortSignal.any([this.context.signal, control.signal]),
+      { effects: plan.steps.flatMap((step) => step.effects) },
+    ).catch((cause: unknown): PlanningResult => {
+      // The search can reach the arrival while the segment is still walked, and
+      // the process's callback then throws the caller's abort reason (a bare
+      // string). That is the run being stopped, as it is for the foreground.
+      if (this.context.signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
+      throw cause;
+    });
+    // Nothing awaits this promise while the segment is walked, and a runtime
+    // exits on a rejection nobody handles. Whoever awaits it later still sees it.
+    result.catch(() => undefined);
     return {
       from: plan.endNode,
       scaffold: this.#policy.scaffold,
-      result: this.#plan(
-        goal,
-        plan.endNode,
-        observation,
-        "segment_continuation",
-        AbortSignal.any([this.context.signal, control.signal]),
-        { effects: plan.steps.flatMap((step) => step.effects) },
-      ),
-      abandon: () => control.abort("continuation abandoned"),
+      result,
+      abandon: () => control.abort(new Error("continuation abandoned")),
     };
   }
   /**

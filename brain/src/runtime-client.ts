@@ -58,6 +58,8 @@ export interface NearbyMob {
   readonly hostile: boolean;
   readonly count: number;
   readonly distance: number;
+  /** Where the nearest one stands, when the runtime said. */
+  readonly position?: Position;
 }
 
 /** The slice of `view_status` the brain reasons about. */
@@ -319,7 +321,7 @@ const viewStatusSchema = z.object({
       }),
       nearby: z.object({
         players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })),
-        mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number() }) })).default([]),
+        mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number(), position: positionSchema.optional() }) })).default([]),
       }),
       clock: z.object({ phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable() }).optional(),
       tools: z.object({
@@ -455,13 +457,14 @@ const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"
 const EVENT_PAGE = 100;
 
 /** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
-function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number } }[]): NearbyMob[] {
+function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number; position?: Position | undefined } }[]): NearbyMob[] {
   const species = new Map<string, NearbyMob>();
   for (const group of groups) {
     const seen = species.get(group.name);
+    const nearest = { distance: group.nearest.distance, ...(group.nearest.position === undefined ? {} : { position: group.nearest.position }) };
     species.set(group.name, seen === undefined
-      ? { name: group.name, hostile: group.hostile, count: group.count, distance: group.nearest.distance }
-      : { ...seen, count: seen.count + group.count, distance: Math.min(seen.distance, group.nearest.distance) });
+      ? { name: group.name, hostile: group.hostile, count: group.count, ...nearest }
+      : { ...seen, count: seen.count + group.count, ...(group.nearest.distance < seen.distance ? nearest : {}) });
   }
   return [...species.values()].sort((a, b) => a.distance - b.distance);
 }

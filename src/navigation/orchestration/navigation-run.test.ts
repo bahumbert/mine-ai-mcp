@@ -14,6 +14,8 @@ import { createMovementPolicy } from "../movements/policy.js";
 import type { NavigationObservation } from "../world/world.js";
 import { createNavigator } from "./navigator.js";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 
@@ -259,6 +261,19 @@ test("an arrival cancelled by observed pickup is stopped rather than an internal
   });
   assert.equal(outcome.kind, "stopped");
   assert.deepEqual(errors, []);
+});
+
+test("a plan-ahead search that arrives after the caller stopped the run rejects nothing unhandled", () => {
+  // Live 2026-10-09: the runtime exited on the bare abort reason of a mining
+  // route. The scenario runs in a child process so the runtime's own verdict
+  // on an unhandled rejection is what is asserted.
+  const child = spawnSync(process.execPath, [fileURLToPath(new URL("./continuation-abort.fixture.ts", import.meta.url))], {
+    encoding: "utf8",
+  });
+  const output = `${child.stdout}${child.stderr}`;
+  assert.match(output, /OUTCOME stopped arrivals=1/u, output);
+  assert.doesNotMatch(output, /UNHANDLED|ERROR/u, output);
+  assert.equal(child.status, 0, output);
 });
 
 // ── Continuing under one run ─────────────────────────────────────────────────

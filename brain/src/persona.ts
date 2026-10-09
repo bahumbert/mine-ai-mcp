@@ -70,6 +70,11 @@ export const personaSchema = z.strictObject({
     /** The same step ending the same way this many times in a row means it is going nowhere: it gives the objective up. */
     maxSameStepInARow: z.number().int().min(2).max(50).default(3),
     /**
+     * One step may run this many minutes (live 2026-10-09: single steps ran 10-22 minutes); then it is stopped and
+     * recorded as failed, what it gathered stays in the inventory.
+     */
+    maxStepMinutes: z.number().min(0.01).max(120).default(10),
+    /**
      * One skill failing this many times in a row, whatever its input, means it is going round in circles (live
      * 2026-10-07: explore failed in every direction in turn for 12 minutes): it gives the objective up.
      */

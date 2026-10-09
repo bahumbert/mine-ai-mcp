@@ -74,6 +74,8 @@ export interface AgentOptions {
 interface Work {
   readonly objective: Objective;
   readonly steps: StepRecord[];
+  /** What was carried after each of `steps` (name:count, sorted; null when unknown); not shown to the model, so prompts do not change. */
+  readonly carried: (string | null)[];
   taken: number;
   badReplies: number;
   /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
@@ -88,7 +90,7 @@ interface Work {
 }
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo };
 }
 
 /**
@@ -483,6 +485,12 @@ export class Agent {
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
     // travelling; a skill's phases (the house's site preparation) change the activity from then on.
     const actions: ActionTime[] = [];
+    // A step runs at most `maxStepMinutes` (live 2026-10-09: single steps ran 10-22 minutes).
+    let timedOut = false;
+    const limit = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("the step reached its time limit"));
+    }, persona.settings.maxStepMinutes * 60_000);
     this.body.onAction = (tool, input, ms) => {
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
     };
@@ -509,22 +517,33 @@ export class Agent {
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
+      clearTimeout(limit);
       work.step = null;
       this.body.onAction = null;
     }
     const ended = Date.now();
     const ms = ended - started;
-    const { activity, spans } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
+    const { activity, spans, carried } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
     const { purpose } = work.objective;
     for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
-    const record: StepRecord = result.status === "stopped"
-      ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
-      : { step: label, outcome: result.status, detail: result.detail };
+    // Stopped by the time limit (not by an order or a "stop"): it failed, and the model is told to choose a smaller step.
+    const overtime = timedOut && result.status !== "done"
+      ? `stopped after ${persona.settings.maxStepMinutes} minutes, still not done${result.status === "failed" ? `: ${result.detail}` : ""}; what it gathered so far is in your inventory: choose a nearer, smaller or different step`
+      : null;
+    const record: StepRecord = overtime !== null
+      ? { step: label, outcome: "failed", detail: overtime }
+      : result.status === "stopped"
+        ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
+        : { step: label, outcome: result.status, detail: result.detail };
     work.steps.push(record);
+    work.carried.push(carried);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
-    if (work.steps.length > STEP_MEMORY) work.steps.splice(0, work.steps.length - STEP_MEMORY);
+    if (work.steps.length > STEP_MEMORY) {
+      work.steps.splice(0, work.steps.length - STEP_MEMORY);
+      work.carried.splice(0, work.carried.length - STEP_MEMORY);
+    }
     log(`  -> ${record.outcome}: ${record.detail}`);
     const unfinished = JSON.stringify(this.building.unfinished);
     if (unfinished !== this.savedUnfinished) {
@@ -533,8 +552,12 @@ export class Agent {
     }
     // A model that keeps choosing a step that ends the same way is stuck; the loop must not spin until the step cap.
     const same = persona.settings.maxSameStepInARow;
+    // A step done each time but leaving the inventory different gained something (live 2026-10-09: three "collected 32
+    // cobblestone" in a row ended an objective as "changed nothing"): only an unchanged inventory means it is stuck.
     const last = work.steps.slice(-same);
-    if (record.outcome !== "interrupted" && last.length === same && last.every((step) => step.step === record.step && step.outcome === record.outcome && step.detail === record.detail)) {
+    const carriedLast = work.carried.slice(-same);
+    const gaining = record.outcome === "done" && carriedLast.some((kept) => kept !== carriedLast[0]);
+    if (record.outcome !== "interrupted" && !gaining && last.length === same && last.every((step) => step.step === record.step && step.outcome === record.outcome && step.detail === record.detail)) {
       this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
       return;
     }
@@ -618,7 +641,7 @@ export class Agent {
    * The kind of work a finished step was, from game facts the runtime gives (block tags, hostile species, foods),
    * learnt once per name. Null for errands, or when the facts cannot be read (the step still happened).
    */
-  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[] }> {
+  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null }> {
     try {
       const after = await this.options.runtime.status();
       for (const food of [...before.foods, ...after.foods]) this.foods.add(food.name);
@@ -626,10 +649,13 @@ export class Agent {
       const blocks = actions.flatMap((action) => action.tool === "collect_block" && typeof action.input.block_name === "string" ? [action.input.block_name] : []);
       if (step.skill === "collect_block") blocks.push(step.block);
       const facts = { tags: await this.tagsOf(blocks), hostile, foods: this.foods };
-      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases) };
+      const totals = new Map<string, number>();
+      for (const { name, count } of after.inventory) totals.set(name, (totals.get(name) ?? 0) + count);
+      const carried = [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
+      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried };
     } catch (error) {
       this.options.log(`could not tell what kind of work that was: ${String(error)}`);
-      return { activity: null, spans: [] };
+      return { activity: null, spans: [], carried: null };
     }
   }
 

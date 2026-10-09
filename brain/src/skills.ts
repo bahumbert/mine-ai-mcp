@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import minecraftData from "minecraft-data";
 import { z } from "zod";
 import type { Activity } from "./activities.ts";
 import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./actions.ts";
@@ -11,6 +12,7 @@ import type { HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
+import { ToolLosses } from "./building/tool-loss.ts";
 import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -342,6 +344,9 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     // A door fills the cell above its own too.
     if (cell.block.endsWith("_door")) lastPart.set(`${cell.x},${cell.y + 1},${cell.z}`, part);
   }));
+  // A tool worn out mid-build is made again once per kind, and the part is built again (live 2026-10-09: Tom's house
+  // stopped at part 1/9, "stone_pickaxe was lost").
+  const toolLosses = new ToolLosses();
   for (let index = 0; index < parts.length; index += 1) {
     const partIndex = index % plan.batches.length;
     const blocks = (parts[index] ?? []).filter((cell) => lastPart.get(`${cell.x},${cell.y},${cell.z}`) === partIndex).map(({ x, y, z, block, facing, half, axis }) => ({
@@ -363,9 +368,19 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
+      const lost = await toolLosses.handle(outcome.error, { reserved: plan.bill, inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
+      if (lost.status === "remade") {
+        index -= 1;
+        continue;
+      }
+      if (lost.status === "stopped" || context.signal.aborted) {
+        leaveUnfinished(Math.min(index, plan.batches.length - 1));
+        return { status: "stopped" };
+      }
+      const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
       leaveUnfinished(Math.min(index, plan.batches.length - 1));
       const again = context.building === undefined ? "" : "; building it again resumes it there";
-      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${again}` };
+      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${again}` };
     }
   }
   if (context.building !== undefined) context.building.unfinished = null;
@@ -665,6 +680,29 @@ const EXPLORE_REACH = 512;
 const SIGHT = 128;
 /** The longest walk one explore step makes. */
 const EXPLORE_MAX_WALK = 384;
+/**
+ * The entity registry that tells a creature's name from anything else: the newest one minecraft-data ships. The brain
+ * is not told the server's version, and creature names stay the same across versions (new ones are only added).
+ */
+const ENTITY_REGISTRY_VERSION = (minecraftData as unknown as { readonly supportedVersions: { readonly pc: readonly string[] } }).supportedVersions.pc.at(-1) ?? "";
+/** minecraft-data's entity types of the creatures that live in the world (the types `view_status` lists as mobs). */
+const CREATURE_TYPES: ReadonlySet<string> = new Set(["animal", "passive", "water_creature", "ambient", "hostile", "mob"]);
+/** What explore says after a creature it found: the way to what it drops. */
+const CREATURE_TAIL = "get_items what you want from it hunts it there";
+
+/** Whether `name` is a creature of the game (sheep, pig, zombie), by the entity registry. */
+function isCreature(name: string): boolean {
+  const entities = (minecraftData(ENTITY_REGISTRY_VERSION) as unknown as { readonly entitiesByName?: Readonly<Record<string, { readonly type?: string } | undefined>> } | undefined)?.entitiesByName;
+  const type = entities?.[name]?.type;
+  return type !== undefined && CREATURE_TYPES.has(type);
+}
+
+/** Where the nearest loaded creature of a kind is, from `from`: the way and distance when its position is known. */
+function creatureWhere(from: Position, mob: BotSnapshot["mobs"][number]): string {
+  return mob.position === undefined
+    ? `${Math.round(mob.distance)} blocks away`
+    : `${describeWay(from, mob.position)}, around ${Math.floor(mob.position.x)} ${Math.floor(mob.position.z)}`;
+}
 
 /**
  * Walks one compass way, `chunks` x 16 blocks from where she stands, in legs of {@link EXPLORE_LEG} blocks (`navigate`
@@ -675,38 +713,47 @@ const EXPLORE_MAX_WALK = 384;
  * 400 blocks north over water for "3 chunks".
  */
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
-  // Only a block is seen on the way (live 2026-10-07: explore for "water_source", "deep_water", "raw_iron"; live
-  // 2026-10-09, 10 bots: "sheep", "zombie", "pig" in four of them, so the refusal says how animals are found).
+  // A block or a creature is seen on the way, nothing else (live 2026-10-07: explore for "water_source", "deep_water",
+  // "raw_iron"; live 2026-10-09, 10 bots: "sheep", "zombie", "pig" in four of them, so a creature is walked toward and
+  // looked for among the loaded mobs after each leg).
   const kinds = step.for === undefined ? null : await context.runtime.blockKinds([step.for]).catch(() => null);
-  if (step.for !== undefined && kinds !== null && kinds[step.for] === undefined) {
+  const notBlock = step.for !== undefined && kinds !== null && kinds[step.for] === undefined;
+  const creature = notBlock && step.for !== undefined && isCreature(step.for) ? step.for : undefined;
+  if (notBlock && creature === undefined) {
     return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
   }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
-  if (step.for !== undefined && /_ore$/u.test(step.for)) {
-    const drops: Readonly<Record<string, readonly string[]>> = await context.runtime.blockDrops([step.for]).catch(() => ({}));
-    const drop = drops[step.for]?.[0] ?? step.for;
-    return { status: "failed", detail: `${step.for} lies underground nearly everywhere, and walking the surface does not find it: get_items ${drop} digs for it near where you are (making the pickaxe it needs)` };
+  const block = creature === undefined ? step.for : undefined;
+  if (block !== undefined && /_ore$/u.test(block)) {
+    const drops: Readonly<Record<string, readonly string[]>> = await context.runtime.blockDrops([block]).catch(() => ({}));
+    const drop = drops[block]?.[0] ?? block;
+    return { status: "failed", detail: `${block} lies underground nearly everywhere, and walking the surface does not find it: get_items ${drop} digs for it near where you are (making the pickaxe it needs)` };
   }
   // What is crafted is not found (live 2026-10-07: Ayla explored for a crafting_table, four ways in a row). A smelted
   // block may also lie about (stone: live, Vex explored for it and was wrongly told it is only smelted).
-  const made = step.for === undefined ? null : (await obtainedBy(context.runtime, step.for).catch(() => null))?.way;
+  const made = block === undefined ? null : (await obtainedBy(context.runtime, block).catch(() => null))?.way;
   if (made === "craft") {
-    return { status: "failed", detail: `${step.for} is crafted, not found: get_items ${step.for} makes it` };
+    return { status: "failed", detail: `${block} is crafted, not found: get_items ${block} makes it` };
   }
   const setOut = await context.runtime.status();
   const start = setOut.position;
+  // A creature already loaded needs no walk: it is hunted where it stands.
+  const loaded = creature === undefined ? undefined : setOut.mobs.find((mob) => mob.name === creature);
+  if (creature !== undefined && loaded !== undefined) {
+    return { status: "done", detail: `${creature} already in sight, ${creatureWhere(start, loaded)}: ${CREATURE_TAIL}` };
+  }
   // A block she already knows of is named in the result, with get_items to fetch it (live 2026-10-07: Ayla explored
   // "for spruce_log" some forty times while she knew of spruce 169 blocks away). The walk still goes: stopping it there
   // made both bots ask for the same explore again and again, each one walking nowhere (live 2026-10-07, free time).
-  const knownBefore = step.for === undefined
+  const knownBefore = block === undefined
     ? undefined
-    : (await nearestFree(context, step.for)) ?? (await knownPlaces(context.runtime, step.for, start))[0];
+    : (await nearestFree(context, block)) ?? (await knownPlaces(context.runtime, block, start))[0];
   // A refused walk names what she already knows of it (live 2026-10-07: Ayla tried explore for oak_log six ways in a
   // row, all seen or water, while she knew of oak 45 blocks off).
-  const knownNote = knownBefore === undefined || step.for === undefined
+  const knownNote = knownBefore === undefined || block === undefined
     ? ""
-    : `; you already know of ${step.for} ${describeWay(start, knownBefore)}, around ${knownBefore.x} ${knownBefore.z}: get_items ${step.for} fetches it`;
+    : `; you already know of ${block} ${describeWay(start, knownBefore)}, around ${knownBefore.x} ${knownBefore.z}: get_items ${block} fetches it`;
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
   const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
@@ -737,6 +784,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   let here = start;
   let stop: string | null = null;
   let found: FoundBlock | undefined;
+  let sighted: { readonly mob: BotSnapshot["mobs"][number]; readonly from: Position } | undefined;
   for (let walked = 0; walked < total;) {
     let leg = Math.min(EXPLORE_LEG, total - walked);
     let target = { x: Math.floor(here.x) + Math.round(dx * leg), y: here.y, z: Math.floor(here.z) + Math.round(dz * leg) };
@@ -773,7 +821,14 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     const outcome = await context.body.act("navigate", { x: target.x, z: target.z, near_y: Math.floor(here.y), range: 4 }, why, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
     const before = here;
-    here = (await context.runtime.status()).position;
+    const after = await context.runtime.status();
+    here = after.position;
+    // A creature loaded by this leg ends the walk, whatever else the leg did.
+    const mob = creature === undefined ? undefined : after.mobs.find((candidate) => candidate.name === creature);
+    if (mob !== undefined) {
+      sighted = { mob, from: here };
+      break;
+    }
     if (outcome.status !== "succeeded") {
       stop = outcome.error ?? `navigate ${outcome.status}`;
       break;
@@ -783,8 +838,8 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
       stop = "the way ahead did not take her any farther";
       break;
     }
-    if (step.for !== undefined) {
-      const nearest = await nearestFree(context, step.for);
+    if (block !== undefined) {
+      const nearest = await nearestFree(context, block);
       if (nearest !== undefined && Math.hypot(nearest.x - here.x, nearest.z - here.z) <= FETCH_RANGE) {
         found = nearest;
         break;
@@ -796,19 +851,21 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     `now ${describeWay(start, here)} from where you started, at ${Math.floor(here.x)} ${Math.floor(here.y)} ${Math.floor(here.z)}`,
     ...(crossed === null || crossed.share === 0 ? [] : [`${Math.round(crossed.share * 100)}% of the ground crossed was water`]),
   ];
-  if (step.for !== undefined) {
-    const nearest = found ?? await nearestFree(context, step.for);
+  if (creature !== undefined) {
+    parts.push(sighted === undefined ? `no ${creature} seen on the way` : `found ${creature} ${creatureWhere(sighted.from, sighted.mob)}: ${CREATURE_TAIL}`);
+  } else if (block !== undefined) {
+    const nearest = found ?? await nearestFree(context, block);
     const known = nearest ?? knownBefore;
     parts.push(known === undefined
-      ? `no ${step.for} seen on the way`
-      : `the nearest ${step.for} you know of is ${describeWay(here, known)}, around ${known.x} ${known.z}: get_items ${step.for} goes there and gathers it`);
+      ? `no ${block} seen on the way`
+      : `the nearest ${block} you know of is ${describeWay(here, known)}, around ${known.x} ${known.z}: get_items ${block} goes there and gathers it`);
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
   if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, blocks: Number(noLand[1]) });
   // Done only when the walk went its whole way or found what it was for within reach: a walk that stopped says why,
   // even when the block is in sight farther off (live 2026-10-07: "done" after 0 blocks, forty times).
-  if (stop === null || found !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
+  if (stop === null || found !== undefined || sighted !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
   return { status: "failed", detail: `exploring ${step.toward} stopped (${stop}): ${parts.join("; ")}` };
 }
 

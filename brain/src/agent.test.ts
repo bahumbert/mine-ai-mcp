@@ -110,6 +110,61 @@ test("the same failure between other steps ends the objective too", async (t) =>
   assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times: no birch_log within 64 blocks/u);
 });
 
+test("the same step done again and again ends the objective as changing nothing only when the inventory stayed the same", async (t) => {
+  const collect = { step: { skill: "collect_block", block: "cobblestone", count: 32 } };
+  {
+    // Live 2026-10-09: three "collected 32 cobblestone" in a row ended objectives although each gained items.
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    const { agent, chat, action } = agentFor(t, runtime);
+    chat.reply({ say: "Okay!", route: "act", request: "collect 96 cobblestone" }, { say: "Got them!" });
+    action.reply(collect, collect, collect, { done: "96 cobblestone collected" });
+    await agent.handle(say("Steve", "get me 96 cobblestone"));
+    await until(() => runtime.said.length === 2);
+    assert.equal(action.requests.length, 4, "the model was asked again after the third identical step");
+    assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
+  }
+  {
+    const runtime = new FakeRuntime();
+    const { agent, chat, action } = agentFor(t, runtime);
+    chat.reply({ say: "Okay!", route: "act", request: "collect 96 cobblestone" }, { say: "Nothing is happening, sorry!" });
+    action.reply(collect, collect, collect, collect);
+    await agent.handle(say("Steve", "get me 96 cobblestone"));
+    await until(() => runtime.said.length === 2);
+    assert.equal(action.requests.length, 3);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 32 cobblestone changed nothing 3 times in a row: collected 32 cobblestone/u);
+  }
+});
+
+test("a step running past the time limit is stopped and recorded as failed, telling the model to choose a smaller one", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxStepMinutes: 0.01 } });
+  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Too big, sorry!" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { give_up: "too much wood" });
+  await agent.handle(say("Steve", "get me 16 logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 1, "the collection was stopped");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 16 oak_log -> failed: stopped after 0\.01 minutes, still not done.*; what it gathered so far is in your inventory: choose a nearer, smaller or different step/u);
+});
+
+test("a step set aside for an order stays interrupted even with a time limit running", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, maxStepMinutes: 1 } });
+  planner.reply({ objective: "collect 16 oak_log for my base" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Coming!", route: "act", request: "come to Steve" }, { say: "Here I am." });
+  action.reply({ step: { skill: "go_to_player", player: "Steve" } }, { done: "I am next to Steve" }, { done: "enough wood for now" });
+  await agent.handle(say("Steve", "come here please"));
+  await until(() => action.requests.length === 4);
+  const resumed = action.requests[3]?.[1]?.content ?? "";
+  assert.match(resumed, /1\. collect 16 oak_log -> interrupted/u);
+  assert.doesNotMatch(resumed, /stopped after/u);
+});
+
 test("one skill failing again and again, whichever way it is tried, ends the objective", async (t) => {
   // Live 2026-10-07: explore failed in every direction in turn for 12 minutes.
   const runtime = new FakeRuntime();
