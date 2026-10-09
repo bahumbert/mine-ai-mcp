@@ -412,7 +412,11 @@ export async function dropItem(
       drop: evidence,
     };
   }
-  const failed = dropped.filter((entry) => entry.error).length;
+  // In a list, an item not carried is reported but is no failure once something else was carried: the inventory is
+  // already as asked for it (live 2026-10-09: drops listing tools she did not carry "failed 9 of 9" after freeing
+  // slots, and were sent again, tossing more). Nothing carried at all still fails (a wrong id).
+  const carriedAny = dropped.some((entry) => entry.carriedBefore > 0);
+  const failed = dropped.filter((entry) => entry.error && !(carriedAny && entry.carriedBefore === 0 && entry.error.startsWith("[DROP_NOT_CARRIED]"))).length;
   if (failed === 0) return { status: "succeeded", drop: evidence };
   return {
     status: failed === dropped.length ? "failed" : "partial",

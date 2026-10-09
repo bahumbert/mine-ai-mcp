@@ -217,7 +217,8 @@ test("allow_equipped releases the held item but never the worn one", async () =>
   assert.equal(result.drop.dropped[1]?.dropped, 1);
 });
 
-test("reports an item that is not carried without touching the others", async () => {
+test("reports an item that is not carried without touching the others, and is no failure once others were carried", async () => {
+  // Live 2026-10-09: drops listing tools she did not carry "failed 9 of 9" after freeing slots, and were sent again.
   const { bot } = dropBot({ carried: [{ name: "gravel", count: 4, type: 1 }] });
 
   const result = await dropItem(
@@ -228,10 +229,14 @@ test("reports an item that is not carried without touching the others", async ()
     createDiscardedItems(),
   );
 
-  assert.equal(result.status, "partial");
+  assert.equal(result.status, "succeeded");
   assert.match(result.drop.dropped[0]?.error ?? "", /\[DROP_NOT_CARRIED\]/);
   assert.equal(result.drop.dropped[1]?.dropped, 4);
-  assert.match(result.error ?? "", /\[DROP_INCOMPLETE\] 1 of 2 items/);
+
+  // Nothing listed is carried (a wrong id): still a failure.
+  const none = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "oak_plank" }] }), {}, deps(), createDiscardedItems());
+  assert.equal(none.status, "failed");
+  assert.match(none.error ?? "", /\[DROP_INCOMPLETE\] 1 of 1 item/);
 });
 
 test("a toss the server swallows or rejects is reported, not assumed", async () => {
