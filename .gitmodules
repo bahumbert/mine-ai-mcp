@@ -1,0 +1,5 @@
+[submodule ".agent"]
+	path = .agent
+	url = https://github.com/bahumbert/mine-ai-mcp-private.git
+	ignore = all
+	branch = main
