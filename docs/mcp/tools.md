@@ -966,8 +966,15 @@ defined in [src/server/async-tools.ts](../../src/server/async-tools.ts).
 
 Use `send_message` to communicate with other players via in-game public
 chat. The argument is `message`, containing the text string to broadcast.
+The optional `to` (a Minecraft username, 1 to 16 letters, digits or underscores)
+whispers the message to that one player instead, with at most 233 characters so
+it fits one `/tell` command. The player must be online (matched without regard
+to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
+and the result's `to` repeats the name asked for (on success, the name as the
+server spells it).
 Success proves the message was sent and the bot observed its own chat echo
-returned by the server. It does not use the body: it runs beside any foreground
+returned by the server (for a whisper, the server's
+`commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground
 action without being refused or cancelling it, and is a direct call (no
 `submission_id` or `wait_timeout_ms`). Defined in
 [src/actions/send-message/contract.ts](../../src/actions/send-message/contract.ts).

@@ -10,6 +10,9 @@ export const REFLEX_WAIT_MS = 30_000;
 /** `send_message` refuses longer lines. */
 const MAX_CHAT_LENGTH = 256;
 
+/** A whisper is one `/tell <name> ` command: the longest header leaves this much (src/actions/send-message/contract.ts). */
+const MAX_WHISPER_LENGTH = 233;
+
 export interface ActOutcome {
   readonly status: ActionStatus | "refused";
   readonly error: string | null;
@@ -65,17 +68,22 @@ export class Body {
   }
 
   /**
-   * Says one chat line, after as long as typing it would take counted from `since` (when the message it answers was
-   * heard); empty text says nothing. Resolves once the runtime settled the message.
+   * Says an answer as one chat line, or two when it is long (`toChatLines`), each after as long as typing it would take
+   * counted from `since` (when the message it answers was heard); with `to`, as a whisper to that player. Empty text
+   * says nothing. Resolves once the runtime settled the last line.
    */
-  say(text: string, since = Date.now()): Promise<void> {
-    const message = toChatLine(text);
-    if (message === "") return Promise.resolve();
+  say(text: string, since = Date.now(), to?: string): Promise<void> {
+    const messages = toChatLines(text, to === undefined ? MAX_CHAT_LENGTH : MAX_WHISPER_LENGTH);
+    if (messages.length === 0) return Promise.resolve();
     const line = this.speech.then(async () => {
-      const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (Date.now() - since);
-      if (wait > 0) await sleep(wait);
-      const outcome = await this.runtime.say(message);
-      if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
+      let from = since;
+      for (const message of messages) {
+        const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (Date.now() - from);
+        if (wait > 0) await sleep(wait);
+        const outcome = await this.runtime.say(message, to);
+        if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
+        from = Date.now();
+      }
     });
     this.speech = line.catch(() => undefined);
     return line;
@@ -139,12 +147,30 @@ export class Body {
   }
 }
 
-/** One legal chat line: single line, no command slash, at most 256 characters (cut at a word when possible). */
-export function toChatLine(text: string): string {
+/** Where an answer too long for one line is split: a sentence end (any script) followed by a space. */
+const SENTENCE_END = /[.!?\u2026\u3002\uFF01\uFF1F]\s/gu;
+
+/**
+ * An answer as legal chat lines: single lines, no command slash, none past `limit` characters, at most two. A long one
+ * is split at the last sentence end that fits, else at a word, instead of being cut; what does not fit in two lines is
+ * cut at a word of the second, ending "...".
+ */
+export function toChatLines(text: string, limit = MAX_CHAT_LENGTH): string[] {
   // Control characters and the legacy formatting sign are illegal in chat; model output may contain them.
-  const line = text.replace(/[\u0000-\u001f\u007f\u00a7\s]+/gu, " ").trim().replace(/^\/+/u, "").trim();
-  if (line.length <= MAX_CHAT_LENGTH) return line;
-  const cut = line.slice(0, MAX_CHAT_LENGTH - 3);
+  const line = text.replace(/[\u0000-\u001f\u007f\u00A7\s]+/gu, " ").trim().replace(/^\/+/u, "").trim();
+  if (line === "") return [];
+  if (line.length <= limit) return [line];
+  let end = -1;
+  for (const match of line.slice(0, limit + 1).matchAll(SENTENCE_END)) end = match.index + 1;
+  const space = line.lastIndexOf(" ", limit);
+  const at = end > limit / 4 ? end : space > limit / 4 ? space : limit;
+  return [line.slice(0, at).trim(), cutAtWord(line.slice(at).trim(), limit)];
+}
+
+/** `text` as it is when it fits, else cut at a word and ended with "...". */
+function cutAtWord(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit - 3);
   const space = cut.lastIndexOf(" ");
-  return `${space > MAX_CHAT_LENGTH / 2 ? cut.slice(0, space) : cut}...`;
+  return `${space > limit / 2 ? cut.slice(0, space) : cut}...`;
 }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
-import { chatSystemPrompt, LlmMind, openingName, personaPrompt } from "./llm-mind.ts";
+import { chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import type { ChatInput, WorkInput } from "./mind.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
@@ -103,7 +104,7 @@ test("preferences reach the init prompt as feelings, never as a rule: her feelin
 test("with preferences, how a request is taken is the character's call; the work tier may pick the liked way; narration may show it", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
-  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "route": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "for": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
   assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow/u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
@@ -176,27 +177,6 @@ test("the objective that just failed, chosen again as it was, is sent back once 
   assert.equal(await mind.chooseObjective({ ...input, lastFailed: null }, signal), "Build a small medieval house here.", "nothing failed: never sent back");
 });
 
-test("an unnamed line right after the speaker spoke to someone else is sent back once if taken for her; said again, it stands", async () => {
-  // Live 2026-10-04: "fix it now" after "Opus, Vex is going through the ocean" was taken by both characters. In a
-  // conversation with her (an unnamed line reaches the model only then), the speaker turned to Opus.
-  const { chat, mind } = scriptedMind();
-  const talking = [{ speaker: "Steve", text: "Ayla, wood please", to: ["Ayla"] }, { speaker: "Ayla", text: "On my way!", to: ["Steve"] }];
-  const input = { ...chatInput("fix it now", false), history: [...talking, { speaker: "Steve", text: "Opus, Vex fell in the water", to: ["Opus"] }] };
-  chat.reply({ spoken_to: ["Ayla"], say: "On it!", route: "act", request: "fix it" }, { spoken_to: ["Opus"], say: "", route: "ignore", request: "" });
-  assert.equal((await mind.chat(input, signal)).route, "ignore");
-  assert.match(chat.requests[0]?.[1]?.content ?? "", /Steve to Opus: "Opus, Vex fell in the water"/u);
-  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /Steve's line just before this one spoke to Opus, and this one names nobody/u);
-
-  chat.reply({ spoken_to: ["Ayla"], say: "Fine.", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "Fine.", route: "talk", request: "" });
-  assert.equal((await mind.chat(input, signal)).route, "talk", "said again, it stands");
-
-  // Her own line since, or the speaker's last line read as for her: no check.
-  chat.reply({ spoken_to: ["Ayla"], say: "Sure.", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, history: [...input.history, { speaker: "Ayla", text: "Hm?", to: ["Steve"] }] }, signal)).route, "talk");
-  chat.reply({ spoken_to: ["Ayla"], say: "Sure.", route: "talk", request: "" });
-  assert.equal((await mind.chat({ ...input, history: talking }, signal)).route, "talk");
-});
-
 test("a conversation starts only when she is addressed; an unnamed line is hers only while one with its speaker goes on", async () => {
   // Owner rule 2026-10-07, after the real world: players chatted among themselves in French, and each line got an answer.
   const { chat, mind } = scriptedMind();
@@ -220,23 +200,6 @@ test("a conversation starts only when she is addressed; an unnamed line is hers 
   assert.equal(chat.requests.length, requests);
 });
 
-test("in a conversation with her, an unnamed line right after someone else spoke to its speaker goes back once", async () => {
-  // Live 2026-10-07, local: Tom's "ok j'arrive", right after Bob's "Tom, tu viens miner avec moi ?", was answered by Ayla.
-  const { chat, mind } = scriptedMind();
-  const crowd = { ...new FakeRuntime().snapshot, players: [{ username: "Steve", position: null }, { username: "Bob", position: null }] };
-  // Bob's line is not hers: left to them, it keeps whom it names.
-  const bob = await mind.chat({ ...chatInput("Steve, tu viens miner ?", false), message: { username: "Bob", channel: "chat", message: "Steve, tu viens miner ?", addressed: false }, snapshot: crowd }, signal);
-  assert.deepEqual([bob.route, bob.to, chat.requests.length], ["ignore", ["Steve"], 0]);
-  const history = [
-    { speaker: "Steve", text: "Ayla, tu as besoin d'aide ?", to: ["Ayla"] },
-    { speaker: "Ayla", text: "Non merci !", to: ["Steve"] },
-    { speaker: "Bob", text: "Steve, tu viens miner ?", to: ["Steve"] },
-  ];
-  chat.reply({ spoken_to: ["Ayla"], say: "Super !", route: "talk", request: "" }, { spoken_to: ["Bob"], say: "", route: "ignore", request: "" });
-  assert.equal((await mind.chat({ ...chatInput("ok j'arrive", false), snapshot: crowd, history }, signal)).route, "ignore");
-  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /Bob spoke to Steve just before this line, which names nobody: it most likely answers Bob/u);
-});
-
 test("a reply sent back for answering a line it read as for someone else keeps that reading", async () => {
   // Live 2026-10-04: "nice work today, thanks Vex" came back read as spoken to the speaker, which let it through.
   const { chat, mind } = scriptedMind();
@@ -246,41 +209,6 @@ test("a reply sent back for answering a line it read as for someone else keeps t
   );
   const held = await mind.chat(chatInput("nice work today, thanks Vex"), signal);
   assert.deepEqual([held.route, held.to, held.say], ["ignore", ["Vex"], ""]);
-});
-
-test("a line opening with someone else's name goes back once when taken; the second reply stands", async () => {
-  // Live 2026-10-04 and the bench 2/3: "Opus, Vex is going through the Ocean without boat" answered by Vex.
-  const { chat, mind } = scriptedMind();
-  const line = "Opus, Ayla is going through the Ocean without boat, you said you fixed that";
-  chat.reply(
-    { spoken_to: ["Ayla"], say: "I'll get a boat!", route: "talk", request: "" },
-    { spoken_to: ["Opus"], say: "", route: "ignore", request: "" },
-  );
-  assert.equal((await mind.chat(chatInput(line, true), signal)).route, "ignore");
-  chat.reply(
-    { spoken_to: ["Ayla"], say: "I'll get a boat!", route: "talk", request: "" },
-    { spoken_to: ["Ayla"], say: "I'll get a boat!", route: "talk", request: "" },
-  );
-  assert.equal((await mind.chat(chatInput(line, true), signal)).route, "talk");
-});
-
-test("a request restated with \"me\" goes back once to name the speaker", async () => {
-  // The bench 3/3: "Vex, mine me some iron ore" restated as "mine me some iron ore"; the work tier never saw the chat.
-  const { chat, mind } = scriptedMind();
-  chat.reply(
-    { spoken_to: ["Ayla"], say: "Sure!", route: "act", request: "mine me some iron ore" },
-    { spoken_to: ["Ayla"], say: "Sure!", route: "act", request: "mine some iron ore for Steve" },
-  );
-  assert.equal((await mind.chat(chatInput("Ayla, mine me some iron ore", true), signal)).request, "mine some iron ore for Steve");
-  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"request" says "me", "my" or "I": .* with Steve.s name in their place, keeping everything else/u);
-  chat.reply({ spoken_to: ["Ayla"], say: "Sure!", route: "act", request: "mine iron ore for Steve, mine is gone" });
-  assert.equal((await mind.chat(chatInput("Ayla, mine iron ore", true), signal)).route, "act");
-});
-
-test("only a capitalised name before a comma opens a line to someone", () => {
-  assert.equal(openingName("Opus, Vex is going through the Ocean"), "Opus");
-  assert.equal(openingName("@Tom: come here"), "Tom");
-  for (const text of ["Hey, Ayla", "Thanks, that was quick", "opus, fix it", "Vex is going there", "Come here, Ayla"]) assert.equal(openingName(text), null, text);
 });
 
 test("the house skill line lists what the character's own style needs", async () => {
@@ -413,17 +341,95 @@ test("a build refused for missing materials is said to be ready once they are al
   assert.match(action.requests[1]?.at(-1)?.content ?? "", /Everything a small medieval house was missing \(3 oak_log, 1 oak_door\) is carried now: build it again\./u);
 });
 
-test("\"where you are\" is her own position, and taking an order on never promises to finish something first", async () => {
-  // Live 2026-10-04: "build yourself a small house right where you are now" became "at Tester's current position", and
-  // she said "Just let me finish this little project first".
+
+/** A snapshot with Steve in sight at 103 64 -40 and Tom far away, her own position 0 64 0. */
+function crowded() {
+  return { ...new FakeRuntime().snapshot, players: [{ username: "Steve", position: { x: 103.4, y: 64, z: -39.6 } }, { username: "Tom", position: null }, { username: "Opus", position: null }] };
+}
+
+test("what the history shows about a message is given in the prompt before the call, never sent back after it (ADR-017)", async () => {
+  // Live 2026-10-04: "fix it now" after "Opus, Vex is going through the ocean" was taken by both characters. These were
+  // send-backs with an English opening-word list; now the model is told, and its reply stands.
+  const { chat, mind } = scriptedMind();
+  const talking = [{ speaker: "Steve", text: "Ayla, wood please", to: ["Ayla"], at: Date.now() - 40_000 }, { speaker: "Ayla", text: "On my way!", to: ["Steve"], at: Date.now() - 39_000 }];
+  const input: ChatInput = { ...chatInput("fix it now", false), history: [...talking, { speaker: "Steve", text: "Opus, Vex fell in the water", to: ["Opus"] }], snapshot: crowded() };
+  chat.reply({ spoken_to: ["Ayla"], say: "On it!", route: "act", request: "fix it" });
+  const decision = await mind.chat(input, signal);
+  assert.equal(decision.route, "act", "a reply that is consistent with itself is not sent back");
+  assert.equal(chat.requests.length, 1);
+  const request = chat.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /About this message:\n- You are talking with Steve \(your last exchange was \d+ s ago\)\.\n- Steve's line just before this one spoke to Opus, not to you, and this message names nobody\./u);
+  assert.ok(request.indexOf("About this message") < request.indexOf("New message:"), "before the message");
+  // Someone else spoke to the speaker just before (live 2026-10-07: "ok j'arrive" after Bob's "Tom, tu viens miner ?").
+  const answering: ChatInput = {
+    ...chatInput("ok j'arrive", false),
+    snapshot: crowded(),
+    history: [{ speaker: "Steve", text: "Ayla, need help?", to: ["Ayla"] }, { speaker: "Ayla", text: "No thanks!", to: ["Steve"] }, { speaker: "Tom", text: "Steve, coming to mine?", to: ["Steve"] }],
+  };
+  assert.match(describeConversation(answering), /- Tom spoke to Steve just before this message, which names nobody\./u);
+  // An addressed line, a line naming a player, and an empty history show no such fact.
+  assert.equal(describeConversation({ ...answering, message: { ...answering.message, addressed: true } }).includes("spoke to Steve"), false);
+  assert.equal(describeConversation({ ...input, message: { ...input.message, message: "fix it Opus" } }).includes("just before this one"), false);
+  assert.equal(describeConversation(chatInput("hi", true)), "");
+});
+
+test("no function of the chat tier reads what a player wrote beyond whether it names someone (ADR-017)", () => {
+  const source = readFileSync(new URL("./llm-mind.ts", import.meta.url), "utf8");
+  for (const gone of ["openingName", "OPENING_WORDS", "WHERE_YOU_ARE", "finishSentBack", "requestSentBack"]) assert.ok(!source.includes(gone), gone);
+  // No regex literal over the line for "me", "my", "I", "where" or "first" (the English patches this replaced).
+  assert.doesNotMatch(source, /\\b\(?(?:\?:)?(?:\[Mm\]e|my|where|let me|first|finish)/u);
+});
+
+test("the code writes where a request happens, from the reply's place: the speaker's position or that she cannot see them, or her own", async () => {
+  const { chat, mind } = scriptedMind();
+  const input = (snapshot = crowded()): ChatInput => ({ ...chatInput("Ayla, build me a small house here"), snapshot });
+  const act = (place?: string) => ({ spoken_to: ["Ayla"], say: "On my way!", route: "act", request: "build Steve a small house", ...(place !== undefined && { place }) });
+  chat.reply(act("speaker"), act("speaker"), act("you"), act("named"), act("none"), act());
+  const seen = await mind.chat(input(), signal);
+  assert.deepEqual([seen.request, seen.place], ["build Steve a small house (at 103 64 -40, where Steve stands)", "speaker"]);
+  const unseen = await mind.chat(input({ ...crowded(), players: [{ username: "Steve", position: null }] }), signal);
+  assert.equal(unseen.request, "build Steve a small house (where Steve is; you cannot see them from here)");
+  const hers = await mind.chat(input(), signal);
+  assert.equal(hers.request, "build Steve a small house (at 0 64 0, where you stand)");
+  for (const expected of ["named", "none", undefined]) {
+    const asis = await mind.chat(input(), signal);
+    assert.deepEqual([asis.request, asis.place], ["build Steve a small house", expected]);
+  }
+});
+
+test("the reply's \"for\" names who asks when that is a player online; \"me\", herself or an unknown keep the speaker", async () => {
+  const { chat, mind } = scriptedMind();
+  const ask = (who: string) => ({ spoken_to: ["Ayla"], say: "Sure!", route: "act", request: "get 5 oak_log", for: who });
+  chat.reply(ask("tom"), ask("me"), ask("Ayla"), ask("Nobody"), ask("@Steve"), { spoken_to: ["Ayla"], say: "Sure!", route: "talk", request: "", for: "Tom" });
+  const input: ChatInput = { ...chatInput("Ayla, get 5 logs"), snapshot: crowded() };
+  assert.equal((await mind.chat(input, signal)).for, "Tom");
+  for (const _ of ["me", "Ayla", "Nobody"]) assert.equal((await mind.chat(input, signal)).for, undefined);
+  assert.equal((await mind.chat(input, signal)).for, "Steve");
+  assert.equal((await mind.chat(input, signal)).for, undefined, "only a request has a requester");
+});
+
+test("\"act\" whose own line does not start now goes back; later and talk are not held to it", async () => {
+  // Live 2026-10-04: "Just let me finish this little project first" with "act". The model judges its own line, in its
+  // language (starts_now), instead of an English regex over it.
   const { chat, mind } = scriptedMind();
   chat.reply(
-    { spoken_to: ["Ayla"], say: "Sure! Just let me finish this little project first.", route: "act", request: "build a small house at Steve's position" },
-    { spoken_to: ["Ayla"], say: "Sure! Just let me finish this little project first.", route: "act", request: "build a small house at 0 64 0" },
-    { spoken_to: ["Ayla"], say: "On it!", route: "act", request: "build a small house at 0 64 0" },
+    { spoken_to: ["Ayla"], say: "D'accord, je finis ça d'abord !", starts_now: false, route: "act", request: "build Steve a house" },
+    { spoken_to: ["Ayla"], say: "J'arrive tout de suite !", starts_now: true, route: "act", request: "build Steve a house" },
   );
-  const decision = await mind.chat(chatInput("Ayla, build yourself a small house right where you are", true), signal);
-  assert.deepEqual([decision.request, decision.say], ["build a small house at 0 64 0", "On it!"]);
-  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"where you are" in Steve's line is where you stand, at 0 64 0/u);
-  assert.match(chat.requests[2]?.at(-1)?.content ?? "", /"say" must not promise to finish anything first/u);
+  const decision = await mind.chat(chatInput("Ayla, construis-moi une maison"), signal);
+  assert.deepEqual([decision.say, decision.startsNow], ["J'arrive tout de suite !", true]);
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"starts_now" is false, but "act" stops what you were doing and starts at once/u);
+  chat.reply({ spoken_to: ["Ayla"], say: "After this.", starts_now: false, route: "later", request: "build Steve a house" });
+  assert.equal((await mind.chat(chatInput("Ayla, build me a house"), signal)).route, "later");
+  chat.reply({ spoken_to: ["Ayla"], say: "Hm.", starts_now: false, route: "talk", request: "" });
+  assert.equal((await mind.chat(chatInput("Ayla, ready?"), signal)).route, "talk");
+});
+
+test("the chat prompt explains place, for and starts_now, and no longer asks for coordinates in the request", () => {
+  const prompt = chatSystemPrompt(testPersona());
+  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "for": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(prompt, /- "place": where the request happens/u);
+  assert.match(prompt, /Never write\n  coordinates for "speaker" or "you" in "request": they are added for you/u);
+  assert.match(prompt, /- "for": the name of the player who asks/u);
+  assert.doesNotMatch(prompt, /write them as the speaker's name and coordinates/u);
 });

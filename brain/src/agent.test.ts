@@ -31,6 +31,11 @@ function say(username: string, message: string, addressed = true) {
   return { username, channel: "chat" as const, message, addressed };
 }
 
+/** Who each spoken line went to: a player's name for a whisper, undefined for public chat. */
+function spokenTo(runtime: FakeRuntime): unknown[] {
+  return runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input.to);
+}
+
 function bodyCalls(runtime: FakeRuntime): string[] {
   return runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool);
 }
@@ -400,4 +405,115 @@ test("each finished step counts towards its activity, for the next goal call", a
   await until(() => planner.requests.length === 2);
   assert.match(planner.requests[1]?.[1]?.content ?? "", /How you spent the last hour: mining under a minute\./u);
   assert.match(planner.requests[0]?.[1]?.content ?? "", /How you spent the last hour: nothing yet\./u);
+});
+
+/** An agent that journals, for the tests that read what it logged. */
+function journalingAgent(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}) {
+  const events: BrainEvent[] = [];
+  const tiers = scriptedMind();
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  return { agent, events, ...tiers };
+}
+
+test("three quick lines from one player are read together and answered once", async (t) => {
+  const runtime = new FakeRuntime();
+  const { chat, events } = journalingAgent(t, runtime, { settings: { ...testPersona().settings, chatBurstMs: 60 } });
+  chat.reply({ spoken_to: ["Ayla"], say: "I'm here!", route: "talk", request: "" });
+  runtime.inbox.push(say("Steve", "Ayla"), say("Steve", "are you there?"), say("Steve", "I need help"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 1);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Steve says in chat, naming you: "Ayla are you there\? I need help"/u);
+  assert.deepEqual(events.filter((event) => event.kind === "chat").map((event) => [event.lines, event.superseded]), [[3, false]]);
+});
+
+test("a line after the burst window is a message of its own", async (t) => {
+  const runtime = new FakeRuntime();
+  const { chat } = journalingAgent(t, runtime, { settings: { ...testPersona().settings, chatBurstMs: 30 } });
+  chat.reply({ spoken_to: ["Ayla"], say: "One.", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "Two.", route: "talk", request: "" });
+  runtime.inbox.push(say("Steve", "Ayla, first"));
+  await until(() => runtime.said.length === 1);
+  runtime.inbox.push(say("Steve", "Ayla, second"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(chat.requests.length, 2);
+});
+
+test("a reply whose speaker said something since is dropped unspoken; the newest line is read with the older one in history", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, events } = journalingAgent(t, runtime);
+  const release = chat.hold();
+  chat.reply(
+    { spoken_to: ["Ayla"], say: "On it!", route: "act", request: "build Steve a house" },
+    { spoken_to: ["Ayla"], say: "Stopping.", route: "stop", request: "" },
+  );
+  runtime.inbox.push(say("Steve", "Ayla build a house"));
+  await until(() => chat.requests.length === 1);
+  runtime.inbox.push(say("Steve", "Ayla no wait, stop"));
+  await sleep(40);
+  release();
+  await until(() => runtime.said.length === 1);
+  // One answer, to the latest state: the stale "On it!" was never spoken and nothing was taken on.
+  assert.deepEqual(runtime.said, ["Stopping."]);
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /Steve to Ayla: "Ayla build a house"/u);
+  assert.equal(agent.activity, "idle");
+  assert.deepEqual(events.filter((event) => event.kind === "objective"), []);
+  assert.deepEqual(events.filter((event) => event.kind === "chat").map((event) => [event.text, event.superseded]), [["Ayla build a house", true], ["Ayla no wait, stop", false]]);
+});
+
+test("another player's line does not supersede a reply", async (t) => {
+  const runtime = new FakeRuntime();
+  const { chat } = journalingAgent(t, runtime);
+  const release = chat.hold();
+  chat.reply({ spoken_to: ["Ayla"], say: "Hi Steve!", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "Hi Bob!", route: "talk", request: "" });
+  runtime.inbox.push(say("Steve", "hi Ayla"));
+  await until(() => chat.requests.length === 1);
+  runtime.inbox.push(say("Bob", "hi Ayla"));
+  await sleep(40);
+  release();
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.said, ["Hi Steve!", "Hi Bob!"]);
+});
+
+test("an order is stored with the player the chat tier named as asking, when that is a player online; else the speaker", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3), { username: "Bob", position: { x: 5, y: 64, z: 0 } }] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 2 dirt", for: "Bob" }, { say: "Done!" });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 2 } }, { done: "collected 2 dirt" });
+  await agent.handle(say("Steve", "Ayla, get 2 dirt for Bob"));
+  await until(() => action.requests.length >= 1);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Objective \(asked by Bob\): "collect 2 dirt"/u);
+});
+
+test("a whisper is answered by whisper, a public line in public chat", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply({ spoken_to: ["Ayla"], say: "Between us.", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "For everyone.", route: "talk", request: "" });
+  await agent.handle({ username: "Steve", channel: "whisper", message: "psst", addressed: false });
+  await agent.handle(say("Steve", "Ayla, hello"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.said, ["Between us.", "For everyone."]);
+  assert.deepEqual(spokenTo(runtime), ["Steve", undefined]);
+});
+
+test("an order given by whisper is narrated by whisper to the one who gave it; one given in public stays public", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Got it!" });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 2 } }, { done: "collected 2 dirt" });
+  await agent.handle({ username: "Steve", channel: "whisper", message: "get me 2 dirt", addressed: false });
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.said, ["On it.", "Got it!"]);
+  assert.deepEqual(spokenTo(runtime), ["Steve", "Steve"]);
+  chat.reply({ spoken_to: ["Ayla"], say: "Sure.", route: "act", request: "collect 3 dirt" }, { say: "Done." });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 3 } }, { done: "collected 3 dirt" });
+  await agent.handle(say("Steve", "Ayla, get 3 dirt"));
+  await until(() => runtime.said.length === 4);
+  assert.deepEqual(spokenTo(runtime), ["Steve", "Steve", undefined, undefined]);
 });

@@ -24,6 +24,10 @@ export interface ChatLine {
 export const ROUTES = ["ignore", "talk", "stop", "act", "later"] as const;
 export type Route = (typeof ROUTES)[number];
 
+/** Where a request happens, as the chat tier read it: where the speaker stands, where she stands, a place named, or nowhere in particular. */
+export const PLACES = ["speaker", "you", "named", "none"] as const;
+export type Place = (typeof PLACES)[number];
+
 /**
  * A place the agent knows because it made it (a house it built): without it, "go to the roof" had no coordinates and
  * the models invented some.
@@ -66,6 +70,12 @@ export interface ChatDecision {
   readonly work?: string;
   /** Who the line speaks to, as the chat tier read it: names, "everyone" or "unclear" (spec 2026-10-03 fetch-range-and-addressee). */
   readonly to?: readonly string[];
+  /** For `act` and `later`: where the request happens, as the chat tier read it (the request already carries the coordinates the code wrote). */
+  readonly place?: Place;
+  /** For `act` and `later`: the online player the chat tier named as the one asking; the objective's requester when present. */
+  readonly for?: string;
+  /** With `act`: the chat tier's judgment that its own line starts the work right now. */
+  readonly startsNow?: boolean;
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */
