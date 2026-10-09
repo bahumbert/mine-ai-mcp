@@ -61,6 +61,9 @@ export interface TierModels {
 const chatReplySchema = z.object({
   // Asked first in every reply; one without it is read as saying nothing about who (the check below then passes).
   spoken_to: z.union([z.string(), z.array(z.string())]).default([]),
+  // What the message asks of its listeners, "" for a remark: a line to everyone that asks nothing is not answered when
+  // it does not name her (owner 2026-10-09; bench: "pareil, je vois plus les skins" amid others' chat read as to everyone).
+  asks: z.string().default(""),
   // Named before "say" is written: told only to answer in the player's language, French lines got English answers
   // (live 2026-10-07, real world and local).
   language: z.string().default(""),
@@ -102,14 +105,23 @@ export class LlmMind implements Mind {
     const { message } = input;
     // Owner rule (2026-10-07): a conversation with her starts only when she is addressed, by her name or a whisper; a
     // line naming nobody is hers only while a conversation with its speaker goes on (live 2026-10-07, real world: four
-    // players chatting among themselves in French each got an answer). The model is not asked about the others; they
-    // stay in her chat history, so a later line is still read in their light.
-    if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input)) {
-      // Whom it names is kept with it, so a later line can be read as answering them.
+    // players chatting among themselves in French each got an answer), or when it speaks to everyone around (owner,
+    // 2026-10-09: "anyone got bread?" is answered). Such a line is still read by the model, told it is not addressed,
+    // and only its reading as spoken to everyone and asking them something lets it through.
+    const open = message.addressed || message.channel === "whisper" || talkingWithHer(input);
+    // Whom it names is kept with a line left alone, so a later line can be read as answering them; never the model's
+    // reading, which could name her and start a conversation she was not in.
+    const leftAlone = (): ChatDecision => {
       const named = input.snapshot.players.map((player) => player.username)
         .filter((name) => name.toLowerCase() !== message.username.toLowerCase() && namesWord(message.message, name));
       return { ...(named.length > 0 && { to: named }), say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
-    }
+    };
+    // Only a line naming nobody, out of anyone else's conversation, may be to everyone; the others are left alone without
+    // asking the model (bench 2026-10-09, each read as asking everyone whatever facts were given): it names someone else
+    // ("teleport me Opus", "Ayla viens construire..." for Vex), the speaker's previous line spoke to others ("fix it
+    // now" after a line to Opus), or others talked among themselves just before, none of it to her ("pareil, je vois
+    // plus les skins" after two players' lines on it).
+    if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return leftAlone();
     const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const canWait = input.canWait ?? true;
     const request = [
@@ -140,6 +152,11 @@ export class LlmMind implements Mind {
       const given = addressees(reply.spoken_to);
       const listeners = given.filter((name) => name.toLowerCase() !== message.username.toLowerCase());
       const to = given.length > 0 && listeners.length === 0 ? ["unclear"] : listeners;
+      // Not addressed and no conversation going on: hers only when read as spoken to everyone around and asking them
+      // something, and not when the
+      // history shows it answering someone else (bench 2026-10-09: "yeah, restarting now" after Bob asked the speaker,
+      // read as spoken to everyone).
+      if (!open && (answering !== null || reply.asks.trim() === "" || !to.some((name) => name.toLowerCase() === "everyone"))) return leftAlone();
       // Only checks read from the reply's own fields (spec 2026-10-09-chat-handling, B, ADR-017): a reply that
       // contradicts itself goes back. What the history shows is given in the prompt beforehand, and nothing here reads
       // what the player wrote.
@@ -359,7 +376,7 @@ export function chatSystemPrompt(persona: Persona, canWait = true): string {
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "language": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "language": "...", "work": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "asks": "...", "language": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "asks": "...", "language": "...", "work": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
 - "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
   the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
   "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
@@ -368,11 +385,14 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   a follow-up to a request made to you, speaks to you even without your name.
   A message that goes on with a conversation someone else is having (a reply to what another player or character
   said, a follow-up to a message that named someone else) speaks to them, by name. A message that names nobody
-  reaches you only while you are talking with its speaker: it goes on with that conversation, so it is for you unless
-  it plainly turns to someone else. Any name counts, even one you do not
+  goes on with your conversation while you are talking with its speaker, so it is for you unless it plainly turns to
+  someone else; otherwise it speaks to everyone only when it asks or calls all around (a remark, or a reply in a chat
+  among others, is ["unclear"]). Any name counts, even one you do not
   know (another player, the server's operator, someone not in the game). When "About this message" is given, it
   states what the recent chat shows about this message (who its speaker just spoke to, who just spoke to them, a
   conversation going on with you): weigh it with the message itself.
+- "asks": what the message asks of its listeners, in a few words (a question, a request, an order); "" when it asks
+  nothing (a remark, news, agreeing, thanks).
 - "language": the language the new message's own words are written in (e.g. "French", "English"); the recent chat
   and your own lines may be in another one (live 2026-10-07: an English line after French chat was named French).
 - "route":
@@ -401,7 +421,10 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   gets a French line), whatever language you think in. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
   and then say what you finish first, as "Currently doing" shows it; never invent work you are not doing.` : ""}
-  When "spoken_to" is "everyone" or "unclear" and others are around who may answer, a short line or silence is fine.
+  When "spoken_to" is "everyone", a question or request to all around ("anyone got bread?") gets your answer, "talk"
+  even when it is no: you have only what "Inventory" lists (an item it does not list, you do not have; never invent
+  one); a remark to all that asks nothing may get a short line or silence.
+  When it is "unclear" and others are around who may answer, a short line or silence is fine.
 ${persona.preferences === undefined ? "" : `- "work": first, the kind of work the message asks of you, one of ${ACTIVITIES.map(describeActivity).join(", ")}, or
   "none" (chat, or an errand like giving or following); mining is anything dug with a pickaxe (stone, ores). Your
   "say" shows how you feel about that work (${feelings(persona)}), in your own words: glad about what you love,
@@ -671,7 +694,32 @@ export function describeConversation(input: ChatInput, now = Date.now()): string
   if (answering !== null) facts.push(`${answering} spoke to ${message.username} just before this message, which names nobody.`);
   const called = calledOthers(input);
   if (called.length > 0) facts.push(`This message calls ${called.join(", ")} by name (a name followed by a comma or colon); it names you without calling you.`);
+  if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input, now)) {
+    facts.push(`This message does not name you, and you are not talking with ${message.username}: it is for you only if it asks or calls everyone around (a question or request to all); a remark, or a reply in a chat among others, is not.`);
+  }
   return facts.length === 0 ? "" : `About this message:\n${facts.map((fact) => `- ${fact}`).join("\n")}`;
+}
+
+/** Whether the message names, as a word, a known name other than hers and its speaker's (see {@link knownNamesOf}). */
+function namesSomeoneElse(input: ChatInput): boolean {
+  const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
+  return knownNamesOf(input).some((name) => ![speaker, self].includes(name.toLowerCase()) && namesWord(input.message.message, name));
+}
+
+/**
+ * The other players (not her, not the speaker) who spoke in the last {@link EXCHANGE_LINES} lines and {@link EXCHANGE_MS},
+ * when none of those lines spoke to her or was hers; empty otherwise. From the history's speakers and readings only
+ * (ADR-017).
+ */
+function othersChatting(input: Pick<ChatInput, "message" | "persona" | "history">, now = Date.now()): string[] {
+  const [speaker, self] = [input.message.username.toLowerCase(), input.persona.username.toLowerCase()];
+  const recent = input.history.slice(-EXCHANGE_LINES).filter((line) => line.at === undefined || now - line.at <= EXCHANGE_MS);
+  if (recent.some((line) => line.speaker.toLowerCase() === self || (line.to ?? []).some((name) => name.toLowerCase() === self))) return [];
+  const others: string[] = [];
+  for (const line of recent) {
+    if (line.speaker.toLowerCase() !== speaker && !others.some((name) => name.toLowerCase() === line.speaker.toLowerCase())) others.push(line.speaker);
+  }
+  return others;
 }
 
 /**

@@ -104,7 +104,7 @@ test("preferences reach the init prompt as feelings, never as a rule: her feelin
 test("with preferences, how a request is taken is the character's call; the work tier may pick the liked way; narration may show it", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
-  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
   assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow/u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
@@ -178,27 +178,52 @@ test("the objective that just failed, chosen again as it was, is sent back once 
   assert.equal((await mind.chooseObjective({ ...input, lastFailed: null }, signal)).text, "Build a small medieval house here.", "nothing failed: never sent back");
 });
 
-test("a conversation starts only when she is addressed; an unnamed line is hers only while one with its speaker goes on", async () => {
+test("a conversation starts only when she is addressed; an unnamed line is hers only while one with its speaker goes on, or when it speaks to everyone", async () => {
   // Owner rule 2026-10-07, after the real world: players chatted among themselves in French, and each line got an answer.
   const { chat, mind } = scriptedMind();
   const input = chatInput("je vois plus les skins", false);
-  // Not addressed, no conversation with her: left alone, the model not even asked.
-  assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 0]);
+  // Not addressed, no conversation with her: the model is told so, and only a reading as spoken to everyone gets through
+  // (owner 2026-10-09: "anyone got bread?" is answered). Her name in its reading never starts a conversation.
+  chat.reply(
+    { spoken_to: ["unclear"], language: "French", say: "Ah bon ?", route: "talk", request: "" },
+    { spoken_to: ["Ayla"], language: "French", say: "Moi non plus", route: "talk", request: "" },
+    { spoken_to: ["everyone"], asks: "who has bread?", language: "English", say: "No bread here, sorry!", route: "talk", request: "" },
+  );
+  const unclear = await mind.chat(input, signal);
+  assert.deepEqual([unclear.route, unclear.say, unclear.to], ["ignore", "", undefined]);
+  assert.match(chat.requests[0]?.at(-1)?.content ?? "", /does not name you, and you are not talking with Steve: it is for you only if it asks or calls everyone around/u);
+  assert.deepEqual([(await mind.chat(input, signal)).route, chat.requests.length], ["ignore", 2], "read as hers: left alone, not sent back");
+  const everyone = await mind.chat(chatInput("anyone got bread?", false), signal);
+  assert.deepEqual([everyone.route, everyone.say, everyone.to], ["talk", "No bread here, sorry!", ["everyone"]]);
+  // Others talking among themselves just before (here Bob asking the speaker), none of it to her: part of their chat,
+  // the model not asked. Minutes old, their lines no longer count.
+  const asked = chat.requests.length;
+  const now = Date.now();
+  const answer = await mind.chat({ ...chatInput("yeah, restarting now", false), history: [{ speaker: "Bob", text: "Steve, did you restart?", to: ["Steve"], at: now }] }, signal);
+  assert.deepEqual([answer.route, answer.say, chat.requests.length], ["ignore", "", asked]);
+  chat.reply({ spoken_to: ["everyone"], asks: "who has bread?", language: "English", say: "Not me, sorry!", route: "talk", request: "" });
+  assert.equal((await mind.chat({ ...chatInput("anyone got bread?", false), history: [{ speaker: "Bob", text: "brb", at: now - 10 * 60_000 }] }, signal)).route, "talk");
+  // A line to everyone that asks nothing: left alone.
+  chat.reply({ spoken_to: ["everyone"], asks: "", language: "English", say: "Ouch!", route: "talk", request: "" });
+  assert.equal((await mind.chat(chatInput("lol that creeper got me again", false), signal)).route, "ignore");
+  // Naming someone else, or after the speaker's line to someone else: left alone, the model not asked.
+  const before = chat.requests.length;
+  assert.equal((await mind.chat({ ...chatInput("teleport me Opus", false), knownNames: ["Opus"] }, signal)).route, "ignore");
+  assert.equal((await mind.chat({ ...chatInput("fix it now", false), history: [{ speaker: "Steve", text: "Opus, Vex is in the ocean", to: ["Opus"], at: now }] }, signal)).route, "ignore");
+  assert.equal(chat.requests.length, before);
   // Her name, or a whisper, starts one.
   chat.reply({ spoken_to: ["Ayla"], language: "French", say: "Oui !", route: "talk", request: "" });
   assert.equal((await mind.chat({ ...input, message: { ...input.message, message: "Ayla tu viens ?", addressed: true } }, signal)).route, "talk");
   chat.reply({ spoken_to: ["Ayla"], say: "Oui ?", route: "talk", request: "" });
   assert.equal((await mind.chat({ ...input, message: { ...input.message, channel: "whisper" } }, signal)).route, "talk");
   // Going on: he spoke to her, or she answered him, within the last lines and minutes; then unnamed lines are read.
-  const now = Date.now();
   chat.reply({ spoken_to: ["Ayla"], say: "Ah bon ?", route: "talk", request: "" });
   assert.equal((await mind.chat({ ...input, history: [{ speaker: "Ayla", text: "Tu as faim ?", to: ["Steve"], at: now }] }, signal)).route, "talk");
-  // Gone quiet (minutes ago, or six lines of others since): over.
-  const requests = chat.requests.length;
+  // Gone quiet (minutes ago, or six lines of others since): over, and her reading of the line as hers is not enough.
+  chat.reply({ spoken_to: ["Ayla"], say: "Ah bon ?", route: "talk", request: "" }, { spoken_to: ["Ayla"], say: "Ah bon ?", route: "talk", request: "" });
   assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, salut", to: ["Ayla"], at: now - 10 * 60_000 }] }, signal)).route, "ignore");
   const others = Array.from({ length: 6 }, (_, index) => ({ speaker: "Bob", text: `ligne ${index}`, at: now }));
   assert.equal((await mind.chat({ ...input, history: [{ speaker: "Steve", text: "Ayla, salut", to: ["Ayla"], at: now }, ...others] }, signal)).route, "ignore");
-  assert.equal(chat.requests.length, requests);
 });
 
 test("a reply sent back for answering a line it read as for someone else keeps that reading", async () => {
@@ -533,7 +558,7 @@ test("\"act\" whose own line does not start now goes back; later and talk are no
 
 test("the chat prompt explains place and starts_now, and no longer asks for coordinates in the request", () => {
   const prompt = chatSystemPrompt(testPersona());
-  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(prompt, /- "place": where the request happens/u);
   assert.match(prompt, /Never write\n  coordinates for "speaker" or "you" in "request": they are added for you/u);
   assert.doesNotMatch(prompt, /"for"/u);
