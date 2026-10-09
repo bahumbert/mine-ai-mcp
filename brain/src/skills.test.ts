@@ -836,7 +836,7 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   // Only blocks are seen on the way (live 2026-10-07: Ayla explored for "water_source").
   runtime.notBlocks = new Set(["water_source"]);
   const notBlock = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "water_source" }), contextFor(runtime));
-  assert.deepEqual(notBlock, { status: "failed", detail: "water_source is not a block: explore looks for a block by its Minecraft name; get_items gets an item" });
+  assert.deepEqual(notBlock, { status: "failed", detail: "water_source is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without \"for\": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)" });
   assert.equal(runtime.submitted.length, before);
 
   // What is made is not found (live 2026-10-07: Ayla explored for a crafting_table).

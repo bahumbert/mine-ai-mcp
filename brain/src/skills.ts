@@ -675,10 +675,11 @@ const EXPLORE_MAX_WALK = 384;
  * 400 blocks north over water for "3 chunks".
  */
 async function explore(context: SkillContext, step: Extract<Step, { skill: "explore" }>, why: string): Promise<SkillResult> {
-  // Only a block is seen on the way (live 2026-10-07: explore for "water_source", "deep_water", "raw_iron").
+  // Only a block is seen on the way (live 2026-10-07: explore for "water_source", "deep_water", "raw_iron"; live
+  // 2026-10-09, 10 bots: "sheep", "zombie", "pig" in four of them, so the refusal says how animals are found).
   const kinds = step.for === undefined ? null : await context.runtime.blockKinds([step.for]).catch(() => null);
   if (step.for !== undefined && kinds !== null && kinds[step.for] === undefined) {
-    return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item` };
+    return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
   }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
