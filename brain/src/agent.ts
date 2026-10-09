@@ -26,6 +26,8 @@ const HISTORY_LINES = 12;
 const KNOWN_PLACES = 8;
 /** Steps kept per objective for the work tier. */
 const STEP_MEMORY = 20;
+/** The longest wait after the same work loop error repeated. */
+const MAX_ERROR_WAIT_MS = 60_000;
 /** Outcomes of its own objectives remembered for the goal tier. */
 const OWN_MEMORY = 5;
 /** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
@@ -329,16 +331,23 @@ export class Agent {
 
   /** The work loop: one model decision and one step at a time for the top objective; own goal when idle. */
   private async workLoop(signal: AbortSignal): Promise<void> {
+    // The same error again and again (live 2026-10-09: a runtime that exited gave 1090 lines in 10 minutes) waits
+    // longer each time, up to a minute, and is logged at its 1st, 10th, 100th... occurrence.
+    let repeated = { error: "", count: 0 };
     while (!signal.aborted) {
       const work = this.stack.at(-1);
       try {
         if (await this.shelterIfNight(work)) continue;
         if (work !== undefined) await this.advance(work);
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
+        repeated = { error: "", count: 0 };
       } catch (error) {
         if (signal.aborted) break;
-        this.options.log(`work loop error: ${String(error)}`);
-        await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
+        const text = String(error);
+        repeated = text === repeated.error ? { error: text, count: repeated.count + 1 } : { error: text, count: 1 };
+        if (Number.isInteger(Math.log10(repeated.count))) this.options.log(`work loop error${repeated.count > 1 ? ` (${repeated.count} times)` : ""}: ${text}`);
+        const poll = this.options.pollMs ?? DEFAULT_POLL_MS;
+        await this.idle(Math.min(poll * 2 ** (repeated.count - 1), Math.max(poll, MAX_ERROR_WAIT_MS)));
       }
     }
   }
