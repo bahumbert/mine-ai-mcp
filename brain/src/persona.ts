@@ -78,6 +78,11 @@ export const personaSchema = z.strictObject({
     restAfterStopSeconds: z.number().int().min(0).max(3_600).default(60),
     /** Working on an order, at most one line about what it does now every this many seconds (0: at each change). */
     narrateEverySeconds: z.number().int().min(0).max(3_600).default(30),
+    /**
+     * Lines from one player less than this many ms apart are read together as one message and get one answer (spec
+     * 2026-10-09-chat-handling); 0 reads every line alone. Every reply waits at least this long after the last line.
+     */
+    chatBurstMs: z.number().int().min(0).max(10_000).default(1_500),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
     /**

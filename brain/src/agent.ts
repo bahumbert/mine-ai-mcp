@@ -5,6 +5,7 @@ import { activityChances, availableActivities, drawTwo } from "./activity-draw.t
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import { shortfall } from "./building/blueprint.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
+import { Inbox, type Heard } from "./inbox.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { sameWords, type ChatLine, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
@@ -78,10 +79,12 @@ interface Work {
   spokenAt: number;
   /** The skill whose steps failed last, and how many times in a row. */
   failing: { skill: string; count: number };
+  /** Who the order came from by whisper: its progress and its end are whispered back to them (spec 2026-10-09, C). */
+  whisperTo: string | null;
 }
 
-function newWork(objective: Objective): Work {
-  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 } };
+function newWork(objective: Objective, whisperTo: string | null = null): Work {
+  return { objective, steps: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo };
 }
 
 /**
@@ -93,6 +96,8 @@ function newWork(objective: Objective): Work {
  */
 export class Agent {
   private readonly body: Body;
+  /** What it hears, before the chat tier reads it: quick lines of one player are one message. */
+  private readonly inbox: Inbox;
   private readonly history: ChatLine[] = [];
   private readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
@@ -143,9 +148,12 @@ export class Agent {
   private shelterRetryAt = 0;
   /** When the sky was last looked at for nightfall during a step of its own. */
   private nightCheckedAt = 0;
+  /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
+  private wakeChat: (() => void) | null = null;
 
   constructor(private readonly options: AgentOptions) {
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
+    this.inbox = new Inbox(options.persona.settings.chatBurstMs);
   }
 
   get activity(): string {
@@ -180,26 +188,57 @@ export class Agent {
     }
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
     const working = this.workLoop(signal);
+    const chatting = this.chatLoop(signal);
     try {
       while (!signal.aborted) {
+        // Reading never waits for the chat tier: lines that come while it thinks are heard at once (and may supersede
+        // its reply), so a "stop" is not stuck behind a queue of calls.
         for (const message of await this.options.runtime.readMessages()) {
-          await this.handle(message).catch((error: unknown) => this.options.log(`could not handle "${message.message}": ${String(error)}`));
+          this.lastHeard.set(message.username.toLowerCase(), Date.now());
+          this.inbox.push(message);
+          this.wakeChat?.();
         }
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
     } finally {
       this.stopAll();
+      this.wakeChat?.();
       await working;
+      await chatting;
     }
   }
 
-  /** Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind work. */
-  async handle(message: PlayerMessage): Promise<void> {
+  /** The chat loop: one message at a time to the chat tier, once its speaker has paused for the burst window. */
+  private async chatLoop(signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      const heard = this.inbox.next();
+      if (heard === null) {
+        const wait = Math.min(this.options.pollMs ?? DEFAULT_POLL_MS, this.inbox.readyIn() ?? Number.POSITIVE_INFINITY);
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(done, wait);
+          function done() {
+            clearTimeout(timer);
+            resolve();
+          }
+          this.wakeChat = done;
+        });
+        this.wakeChat = null;
+        continue;
+      }
+      await this.handle(heard.message, heard).catch((error: unknown) => this.options.log(`could not handle "${heard.message.message}": ${String(error)}`));
+    }
+  }
+
+  /**
+   * Reacts to one incoming message. Returns once the reply is queued, not spoken, so "stop" is never stuck behind work.
+   * `heard`: the message as the inbox gave it; when its speaker has said something since, the reply is dropped unspoken.
+   */
+  async handle(message: PlayerMessage, heard?: Heard): Promise<void> {
     const heardAt = Date.now();
     this.lastHeard.set(message.username.toLowerCase(), heardAt);
     const { persona, mind, log } = this.options;
-    const heard = this.remember(message.username, message.message);
+    const line = this.remember(message.username, message.message);
     if (!this.listensTo(message.username)) return;
     let decision;
     try {
@@ -214,29 +253,41 @@ export class Agent {
     log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}`);
     // Whom it read the line as spoken to stays with the line: a follow-up is read in that light (live 2026-10-04:
     // "fix it now" after "Opus, Vex is going through the ocean" was taken by Vex).
-    if (decision.to !== undefined) this.annotate(heard, decision.to);
+    if (decision.to !== undefined) this.annotate(line, decision.to);
+    // Its speaker went on while the model thought: this reply answers a state that is gone. The newest lines are read
+    // next, with this one in the history (spec 2026-10-09-chat-handling, A).
+    const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
+    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.for !== undefined && { for: decision.for }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
+    if (superseded) {
+      log("  superseded: its speaker said something since, the reply is dropped");
+      return;
+    }
     if (route === "ignore") return;
-    this.speak(decision.say, heardAt, [message.username]);
+    // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
+    const whisperTo = message.channel === "whisper" ? message.username : null;
+    this.speak(decision.say, heardAt, [message.username], whisperTo);
     if (route === "stop") {
       this.stopAll();
       this.restUntil = Date.now() + persona.settings.restAfterStopSeconds * 1_000;
     }
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
+    // The speaker is the requester: their authority is the order's (a line naming someone else as asking does not
+    // borrow that player's place in `authority`).
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work) };
     if ((route === "act" || route === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
       return;
     }
-    if (route === "act") this.take(asked);
+    if (route === "act") this.take(asked, whisperTo);
     if (route === "later") {
       // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
       // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
       // only waits behind work done for someone.
       const top = this.stack.at(-1);
       const objective = asked;
-      if (top === undefined || top.objective.requester === null) this.take(objective);
-      else this.queue(objective);
+      if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
+      else this.queue(objective, whisperTo);
     }
   }
 
@@ -252,18 +303,18 @@ export class Agent {
   }
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
-  private take(objective: Objective): void {
+  private take(objective: Objective, whisperTo: string | null = null): void {
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.sheltering?.abort();
-    this.stack.push(newWork(objective));
+    this.stack.push(newWork(objective, whisperTo));
     this.journalObjective("taken", objective);
     this.wake?.();
   }
 
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
-  private queue(objective: Objective): void {
-    const work = newWork(objective);
+  private queue(objective: Objective, whisperTo: string | null = null): void {
+    const work = newWork(objective, whisperTo);
     if (this.stack.length === 0) this.stack.push(work);
     else this.stack.splice(this.stack.length - 1, 0, work);
     this.journalObjective("queued", objective);
@@ -497,7 +548,7 @@ export class Agent {
       this.memorize({ kind: "own_objective", outcome: outcomeLine });
       return;
     }
-    void this.narrate(objective.text, outcome, detail);
+    void this.narrate(objective.text, outcome, detail, work.whisperTo);
   }
 
   /**
@@ -698,15 +749,15 @@ export class Agent {
     this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
     if (!asked) return;
     work.spokenAt = Date.now();
-    void this.narrate(work.objective.text, "progress", fact);
+    void this.narrate(work.objective.text, "progress", fact, work.whisperTo);
   }
 
   /** Has the chat tier tell the players about an order: how it ended, or what it does now. */
-  private async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string): Promise<void> {
+  private async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string, whisperTo: string | null): Promise<void> {
     if (this.runSignal.aborted) return;
     try {
       const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);
-      this.speak(line);
+      this.speak(line, undefined, undefined, whisperTo);
     } catch (error) {
       this.options.log(`narration failed: ${String(error)}`);
     }
@@ -731,11 +782,11 @@ export class Agent {
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
-  private speak(text: string, since = Date.now(), to?: readonly string[]): void {
+  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null): void {
     if (text.trim() === "") return;
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);
-    this.body.say(text, since).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    this.body.say(text, since, whisperTo ?? undefined).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
   }
 
   private remember(speaker: string, text: string): ChatLine {

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Activity } from "./activities.ts";
 import type { ActivityChance } from "./activity-draw.ts";
 import type { ChatTurn } from "./chat-model.ts";
+import type { Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { ActivityTotal } from "./time-spent.ts";
 
@@ -77,6 +78,25 @@ export type BrainEvent =
     readonly purpose?: Activity | null;
   }
   | { readonly kind: "progress"; readonly objective: string; readonly fact: string; readonly asked: boolean }
+  /**
+   * A message the chat tier read (spec 2026-10-09-chat-handling): `lines` quick lines of one speaker joined into it;
+   * `superseded`: its speaker spoke again while the model thought, so the reply was dropped unspoken.
+   */
+  | {
+    readonly kind: "chat";
+    readonly speaker: string;
+    readonly text: string;
+    readonly channel: "chat" | "whisper";
+    readonly lines: number;
+    readonly route: Route;
+    readonly say: string;
+    readonly superseded: boolean;
+    readonly to?: readonly string[];
+    /** What the chat tier read besides the route: where the request happens, who asks, whether the line starts it now. */
+    readonly place?: Place;
+    readonly for?: string;
+    readonly startsNow?: boolean;
+  }
   /** What it is doing now: the stack (top last), the step running, if any. */
   | { readonly kind: "state"; readonly stack: readonly StackEntry[]; readonly step: string | null }
   /** Written once when the brain starts: who the character is (the monitor's character card; the session starts here). */

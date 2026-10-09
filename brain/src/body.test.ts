@@ -1,15 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, INSTANT_TYPING, toChatLine } from "./body.ts";
+import { Body, INSTANT_TYPING, toChatLines } from "./body.ts";
 import { FakeRuntime, until } from "./testing.ts";
 
 test("chat lines are single-line, never commands, and fit the 256-character limit", () => {
-  assert.equal(toChatLine("  /op me\nplease \u00a7cnow "), "op me please cnow");
-  const long = toChatLine(`${"word ".repeat(80)}end`);
-  assert.ok(long.length <= 256);
-  assert.ok(long.endsWith("..."));
-  assert.equal(toChatLine(" \n "), "");
+  assert.deepEqual(toChatLines("  /op me\nplease §cnow "), ["op me please cnow"]);
+  assert.deepEqual(toChatLines(" \n "), []);
+  const long = toChatLines(`${"word ".repeat(150)}end`);
+  assert.equal(long.length, 2);
+  assert.ok(long.every((line) => line.length <= 256));
+  assert.ok(long[1]!.endsWith("..."), "an answer longer than two lines ends cut");
 });
+
+test("an answer over 256 characters is split at a sentence end into two lines, not cut", () => {
+  const first = `${"Je vais chercher du bois pour la maison".padEnd(210, " et")}.`;
+  const second = "Ensuite je construis les murs, puis le toit !";
+  assert.deepEqual(toChatLines(`${first} ${second}`), [first, second]);
+  // No sentence end that fits: split at a word, and nothing is lost.
+  const run = `${"word ".repeat(40)}end`;
+  const words = toChatLines(`${run} ${run}`);
+  assert.equal(words.length, 2);
+  assert.ok(words[0]!.length <= 256 && !words[0]!.endsWith(" "));
+  assert.equal(`${words[0]} ${words[1]}`, `${run} ${run}`);
+});
+
+test("a whisper is split to a shorter limit, so each line is one /tell command", () => {
+  const lines = toChatLines(`${"abc. ".repeat(60)}end`, 233);
+  assert.equal(lines.length, 2);
+  assert.ok(lines.every((line) => line.length <= 233));
+});
+
+test("a long reply is sent as two lines in order, and a whisper goes to its player", async () => {
+  const runtime = new FakeRuntime();
+  const body = new Body(runtime, () => undefined, INSTANT_TYPING);
+  await body.say(`${"A".repeat(200)}. ${"B".repeat(100)}.`);
+  assert.deepEqual(runtime.said, [`${"A".repeat(200)}.`, `${"B".repeat(100)}.`]);
+  await body.say("psst", Date.now(), "Tom");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input.to), [undefined, undefined, "Tom"]);
+});
+
 
 test("a result left unretrieved by an earlier brain run is settled before the new action", async () => {
   const runtime = new FakeRuntime();

@@ -4,7 +4,15 @@ import type { ActionOutput } from "../action.js";
 
 export const SEND_MESSAGE = "send_message" as const;
 export const SEND_MESSAGE_DESCRIPTION =
-  "Send one public chat message and confirm that the connected bot observed its server echo. Commands and multiline messages are not accepted.";
+  "Send one public chat message, or with `to` a private whisper to one player online, and confirm that the connected bot observed the server's echo. Commands and multiline messages are not accepted.";
+
+/** Minecraft usernames: letters, digits and underscores, 1 to 16 characters (also the `/tell` target). */
+const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,16}$/u;
+/**
+ * A whisper is sent as `/tell <name> <message>`, which Mineflayer splits into several commands past 256 characters; the
+ * longest header (`/tell ` + a 16-letter name + a space) leaves this much for the text.
+ */
+export const MAX_WHISPER_LENGTH = 256 - "/tell ".length - 16 - 1;
 
 const publicMessageSchema = z
   .string()
@@ -15,17 +23,29 @@ const publicMessageSchema = z
   .refine((message) => !message.startsWith("/"), "Message must be public chat, not a command.")
   .describe("One public chat message, from 1 to 256 characters. Commands and line breaks are rejected.");
 
-export const sendMessageInputSchema = z.strictObject({
-  message: publicMessageSchema,
-});
+export const sendMessageInputSchema = z
+  .strictObject({
+    message: publicMessageSchema,
+    to: z
+      .string()
+      .regex(USERNAME_PATTERN, "Whisper target must be a Minecraft username.")
+      .optional()
+      .describe("A player online to whisper to instead of speaking in public chat; the text is then at most 233 characters."),
+  })
+  .refine((request) => request.to === undefined || request.message.length <= MAX_WHISPER_LENGTH, {
+    message: `A whisper must be at most ${MAX_WHISPER_LENGTH} characters.`,
+    path: ["message"],
+  });
 
 export interface SendMessageRequest {
   readonly message: string;
+  /** Set: a whisper to this player rather than public chat. */
+  readonly to?: string;
 }
 
 export const sendMessageResultSchema = z.discriminatedUnion("status", [
-  z.strictObject({ status: z.literal("succeeded"), message: z.string() }),
-  z.strictObject({ status: z.literal("failed"), error: z.string(), message: z.string() }),
+  z.strictObject({ status: z.literal("succeeded"), message: z.string(), to: z.string().optional() }),
+  z.strictObject({ status: z.literal("failed"), error: z.string(), message: z.string(), to: z.string().optional() }),
 ]);
 
 export type SendMessageResult = z.output<typeof sendMessageResultSchema>;
@@ -42,8 +62,9 @@ export function parseSendMessageRequest(input: unknown): SendMessageRequest {
 }
 
 export const sendMessageOutcomes = {
+  playerNotOnline: (name: string) => `[PLAYER_NOT_ONLINE] No player named ${name} is online besides this bot, so the whisper was not sent.`,
   notObserved: (seconds: number) =>
-    `[MESSAGE_NOT_OBSERVED] The bot did not observe its own public chat message within ${seconds} seconds.`,
+    `[MESSAGE_NOT_OBSERVED] The bot did not observe the server's echo of its message within ${seconds} seconds.`,
   sendFailed: (cause: unknown) =>
-    `[MESSAGE_SEND_FAILED] Mineflayer rejected the public chat message: ${cause instanceof Error ? cause.message : String(cause)}`,
+    `[MESSAGE_SEND_FAILED] Mineflayer rejected the chat message: ${cause instanceof Error ? cause.message : String(cause)}`,
 } as const;

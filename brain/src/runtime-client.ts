@@ -281,7 +281,8 @@ export interface BotRuntime {
   /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
   blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
-  say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
+  /** Public chat, or with `to` a whisper to that player online (`send_message`). */
+  say(message: string, to?: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
   /**
    * Whether routes may dig the block under the bot (a survival-policy setting, merged with the others). The runtime
    * resets every override on death and dimension change, so the brain checks it again from each snapshot.
@@ -643,8 +644,8 @@ export class McpBotRuntime implements BotRuntime {
     return kinds;
   }
 
-  async say(message: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
-    const { result } = sayResultSchema.parse(await this.call("send_message", { message }, "Speak in character."));
+  async say(message: string, to?: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
+    const { result } = sayResultSchema.parse(await this.call("send_message", { message, ...(to !== undefined && { to }) }, "Speak in character."));
     return { status: result.status, error: result.error ?? null };
   }
 

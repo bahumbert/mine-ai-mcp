@@ -19,7 +19,12 @@ safety checks, the models decide.
    and routes it: `ignore` (clearly for someone else — a message naming nobody is for it), `talk`, `stop`, `act`
    (it takes the request on now) or `later` (only when the player says it can wait, or while it works for someone
    ranked above them), restating what the player asked in one standalone
-   sentence. Whether to accept, and when, is its call, guided by the init prompt.
+   sentence. Whether to accept, and when, is its call, guided by the init prompt. Lines of one player less than
+   `settings.chatBurstMs` apart (default 1500; 0 reads each alone) are read together as one message; a reply whose
+   speaker said something more while the model thought is dropped unspoken and the newest lines are read next. A
+   whisper is answered by whisper (and so is the order it gives); an answer over 256 characters goes out as two lines.
+   The code gives the model facts about the chat (who the speaker just spoke to) before the call and sends a reply
+   back only when it contradicts itself; no word list or regex reads what a player wrote (ADR-017).
 3. **Objective stack**: what it takes on now goes on top; whatever was running is set aside (its step stops) and
    resumes afterwards; `later` goes just below the top, but only behind work done for someone: over its own goal a
    player's request always goes on top (owner rule; the model answered `later` anyway once). `stop` clears the stack and it rests
@@ -139,6 +144,7 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/main.ts` | CLI: personas × MCP URLs → agents; tier models from CLI/persona/env |
 | `src/persona.ts` | Persona schema (ADR-004/005/011): goal, authority, skills, settings |
 | `src/agent.ts` | Chat handling, objective stack, work loop, own-goal pacing, settings kept on the runtime |
+| `src/inbox.ts` | The lines heard, before the chat tier: bursts of one speaker joined, replies superseded |
 | `src/mind.ts`, `llm-mind.ts` | Chat, work and goal tiers + narration, init prompt, JSON repair round |
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
