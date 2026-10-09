@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { STYLES } from "./building/styles.ts";
 import { loadPersona, personaSchema } from "./persona.ts";
 
-test("the sample personas are valid and build in a shipped style", async () => {
+/** The characters live in the private part of the project (`personas/`): checked only where it is present. */
+const PERSONAS = new URL("../../personas/", import.meta.url);
+const noPersonas = { skip: existsSync(PERSONAS) ? false : "no personas/ in this checkout" };
+
+test("the personas are valid and build in a shipped style", noPersonas, async () => {
   for (const name of ["ayla", "vex", "real-world/ayla", "real-world/vex"]) {
-    const persona = await loadPersona(fileURLToPath(new URL(`../personas/${name}.json`, import.meta.url)));
+    const persona = await loadPersona(fileURLToPath(new URL(`${name}.json`, PERSONAS)));
     assert.equal(persona.id, name.split("/").at(-1));
     assert.ok(persona.style !== undefined && STYLES.has(persona.style), `${name} style ${persona.style}`);
   }
@@ -39,8 +44,8 @@ test("preferences name four different activities: one loved, one liked, one disl
   assert.equal(personaSchema.safeParse({ ...base, aptitudes: { farmer: 0.5 } }).success, false, "aptitudes are gone");
 });
 
-test("the sample characters live differently: Ayla farms and builds, Vex mines and explores", async () => {
-  const load = (name: string) => loadPersona(fileURLToPath(new URL(`../personas/${name}.json`, import.meta.url)));
+test("the characters live differently: Ayla farms and builds, Vex mines and explores", noPersonas, async () => {
+  const load = (name: string) => loadPersona(fileURLToPath(new URL(`${name}.json`, PERSONAS)));
   assert.deepEqual((await load("ayla")).preferences, { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" });
   assert.deepEqual((await load("vex")).preferences, { loves: "mining", likes: "exploring", dislikes: "building", hates: "farming" });
 });

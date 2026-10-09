@@ -92,12 +92,15 @@ come back is the model's choice.
 
 ## Run
 
+Characters are not shipped with the code: write one per character as `personas/<id>.json` at the repository root
+(schema: `personaSchema` in `src/persona.ts`).
+
 WSL, with a server and one host per bot running (`.agent/scripts/start-server.sh`, `start-host.sh`):
 
 ```bash
 BOT_NAME=Ayla LISTEN_PORT=25575 .agent/scripts/start-host.sh      # terminal 1 (per bot)
-bun run agents --agent agents/personas/ayla.json=http://127.0.0.1:25575/mcp   # terminal 2
-# more agents, one process:  --agent agents/personas/vex.json=http://127.0.0.1:25576/mcp
+bun run brain --agent personas/ayla.json=http://127.0.0.1:25575/mcp   # terminal 2
+# more agents, one process:  --agent personas/vex.json=http://127.0.0.1:25576/mcp
 ```
 
 Then just talk: "hey Ayla, stick with me", "could you grab me some wood?", "make me a crafting table",
@@ -106,7 +109,7 @@ Then just talk: "hey Ayla, stick with me", "could you grab me some wood?", "make
 To try one skill on a live bot without any LLM:
 
 ```bash
-bun agents/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small"}' --style japanese [--requester Steve]
+bun brain/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"small"}' --style japanese [--requester Steve]
 ```
 
 ## LLM configuration
@@ -127,7 +130,7 @@ MINE_AI_LLM_TIMEOUT_MS=30000
 ```
 
 A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`); `--chat-model`,
-`--action-model` and `--planner-model` override everything. `bun run agents --help` lists all of it.
+`--action-model` and `--planner-model` override everything. `bun run brain --help` lists all of it.
 
 ## Layout
 
@@ -148,5 +151,5 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/runtime-client.ts` | Typed MCP client for one bot |
 | `src/chat-model.ts` | OpenAI-compatible `/chat/completions` client |
 
-Tests: `bun test ./agents` (scripted fake models and a fake runtime, no server, no LLM). Known limits and next
+Tests: `bun test ./brain` (scripted fake models and a fake runtime, no server, no LLM). Known limits and next
 steps: `.agent/vision/backlog.md`.

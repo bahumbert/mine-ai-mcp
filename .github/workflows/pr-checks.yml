@@ -1,0 +1,66 @@
+# Pull request checks: the full test suite (blocking), and a report comment (token cost of the change, new or grown
+# long functions, duplicated code). The model review runs locally before pushing (pre-push gate), not here.
+name: PR checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Token cost and long functions (tokscan)
+        run: |
+          python .github/scripts/tokscan.py . --no-home --no-init --files 0 \
+            --compare "origin/${{ github.base_ref }}" --long-functions 80 \
+            --markdown tokscan.md --json tokscan.json > tokscan.log
+      - name: Duplicated code (jscpd)
+        run: |
+          npx --yes jscpd@4.0.5 src agents monitor --min-lines 12 --min-tokens 80 \
+            --ignore "**/*.test.ts,**/data/**" --reporters markdown --output jscpd --silent || true
+      - name: Post the report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "<!-- pr-checks-report -->"
+            echo "## PR report"
+            cat tokscan.md
+            echo
+            echo "### Duplicated code (jscpd, ≥ 12 lines)"
+            if [ -f jscpd/jscpd-report.md ]; then head -n 40 jscpd/jscpd-report.md; else echo "No report."; fi
+          } > report.md
+          id=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '[.[] | select(.body | startswith("<!-- pr-checks-report -->"))][0].id // empty')
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$id" -F body=@report.md > /dev/null
+          else
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file report.md
+          fi

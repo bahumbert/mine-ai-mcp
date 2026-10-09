@@ -33,7 +33,7 @@ export function loadStyles(directory: URL = STYLES_DIRECTORY): ReadonlyMap<strin
   return styles;
 }
 
-/** The styles shipped in `agents/styles/`, loaded once. */
+/** The styles shipped in `brain/styles/`, loaded once. */
 export const STYLES = loadStyles();
 
 /** Used when neither the request nor the persona names a known style. */

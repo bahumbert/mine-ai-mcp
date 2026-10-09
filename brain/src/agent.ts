@@ -49,7 +49,7 @@ export interface AgentOptions {
   readonly mind: Mind;
   /**
    * Usernames of the other agents. Never answered in Phase 1, so two bots cannot talk each other into an endless
-   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 4.
+   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5.
    */
   readonly otherAgents: readonly string[];
   readonly log: (line: string) => void;

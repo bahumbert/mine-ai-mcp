@@ -277,12 +277,17 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = Date.now();
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, ...outcome });
+  let promptTokens: number | null = null;
+  let contextTokens: number | null = null;
+  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
   let problem = "";
   for (let attempt = 0; attempt <= REPAIR_ROUNDS; attempt += 1) {
     let text: string;
     try {
-      text = await model.complete(turns, signal);
+      const reply = await model.complete(turns, signal);
+      text = reply.text;
+      if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
+      contextTokens = reply.contextTokens ?? contextTokens;
     } catch (error) {
       done({ error: error instanceof Error ? error.message : String(error) });
       throw error;

@@ -51,7 +51,7 @@ export const personaSchema = z.strictObject({
   listensTo: z.array(z.string().min(1).max(16)).default([]),
   /**
    * Whose orders come first, most important first (ADR-011); `*` = any other player. "Server" is the console
-   * operator. Told to the model, which decides; later derived from relationships (Phase 4).
+   * operator. Told to the model, which decides; later derived from relationships (Phase 5).
    */
   authority: z.array(z.string().min(1).max(16)).min(1).default(["*"]),
   /** The character's own long-term goal, worked on when nobody gives it an order; none = it waits for orders. */
@@ -79,7 +79,7 @@ export const personaSchema = z.strictObject({
     digStraightDown: z.boolean().default(false),
     /**
      * TEMPORARY (owner, 2026-10-07, until real night awareness): at night, unless on an order, it digs a roofed hole
-     * and waits there for the day (agents/src/night-shelter.ts).
+     * and waits there for the day (brain/src/night-shelter.ts).
      */
     shelterAtNight: z.boolean().default(true),
   }).prefault({}),

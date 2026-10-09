@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { ChatModel, ChatTurn } from "./chat-model.ts";
+import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
@@ -454,11 +454,11 @@ export class ScriptedModel implements ChatModel {
     return this;
   }
 
-  async complete(turns: readonly ChatTurn[]): Promise<string> {
+  async complete(turns: readonly ChatTurn[]): Promise<ChatReply> {
     this.requests.push([...turns]);
     const reply = this.replies.shift();
     if (reply === undefined) throw new Error(`${this.name}: no scripted reply left`);
-    return reply;
+    return { text: reply, promptTokens: null, contextTokens: null };
   }
 }
 

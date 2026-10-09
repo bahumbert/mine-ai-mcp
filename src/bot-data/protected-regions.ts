@@ -4,7 +4,7 @@ import type { SqlBotData, SqlBotDataRow } from "./sql-bot-data.js";
 
 /** The route check walks every region for each break it prices, so the list stays short. */
 export const MAX_PROTECTED_REGIONS = 64;
-/** A region is one build, not a claim on the map (territories are Phase 4). */
+/** A region is one build, not a claim on the map (territories are Phase 5). */
 export const MAX_REGION_SIDE = 64;
 
 export interface RegionRequest {
@@ -53,7 +53,7 @@ const sameCorner = (left: BlockCorner, right: BlockCorner) => left.x === right.x
  * The bot's protected regions, kept in memory: navigation asks about them for every break it prices, far too often
  * for a query. With the default per-bot data scope each database has one writer (its host), so reloading after each
  * write keeps the copy exact; hosts sharing one database (`--bot-data-scope shared`) see each other's regions only
- * after a restart (regions shared between bots wait for the Phase 4 store).
+ * after a restart (regions shared between bots wait for the Phase 5 store).
  */
 export class ProtectedRegionStore {
   readonly #data: SqlBotData;

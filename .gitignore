@@ -25,3 +25,18 @@ Thumbs.db
 
 # Claude Code machine-local settings
 .claude/settings.local.json
+
+# Private part of the project: its own repository (.agent/tooling/private.sh), shared by the owner on request
+.agent/
+personas/
+monitor/
+brain/bench/
+.claude/skills/
+.claude/agents/
+CLAUDE.md
+CLAUDE.local.md
+.worktreeinclude
+.mcp.json
+.mcp.json.template
+.superpowers/
+.serena/

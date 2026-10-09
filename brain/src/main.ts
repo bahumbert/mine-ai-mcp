@@ -7,7 +7,7 @@ import { LlmMind } from "./llm-mind.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 
-const USAGE = `Usage: bun agents/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
@@ -24,7 +24,9 @@ LLM environment (Bun also reads a .env file in the working directory):
   MINE_AI_LLM_<TIER>_BASE_URL   per-tier provider, e.g. a fast host for CHAT (falls back to MINE_AI_LLM_BASE_URL)
   MINE_AI_LLM_<TIER>_API_KEY    key for that provider (falls back to MINE_AI_LLM_API_KEY)
   MINE_AI_LLM_JSON_MODE         "false" if the provider rejects response_format json_object (default true)
-  MINE_AI_LLM_TIMEOUT_MS        per request, default 30000`;
+  MINE_AI_LLM_TIMEOUT_MS        per request, default 30000
+  MINE_AI_LLM_CONTEXT_TOKENS    the model's context window (also per tier), for the monitor's "context full" warning;
+                                unset: read from Ollama (its OpenAI API cuts a longer prompt silently)`;
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
 // Chat routes as well as it speaks: at 0.7 the same line was read as for another player one time and as an order the
@@ -63,7 +65,13 @@ function createModel(persona: Persona, tier: Tier, override: string | undefined)
     jsonMode: env("MINE_AI_LLM_JSON_MODE") !== "false",
     timeoutMs: Number(env("MINE_AI_LLM_TIMEOUT_MS") ?? DEFAULT_LLM_TIMEOUT_MS),
     temperature: TIER_TEMPERATURE[tier],
+    contextTokens: positiveInteger(env(`MINE_AI_LLM_${key}_CONTEXT_TOKENS`) ?? env("MINE_AI_LLM_CONTEXT_TOKENS")),
   });
+}
+
+function positiveInteger(value: string | undefined): number | null {
+  const number = Number(value);
+  return value !== undefined && Number.isInteger(number) && number > 0 ? number : null;
 }
 
 /**

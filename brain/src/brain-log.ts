@@ -25,6 +25,10 @@ export interface ModelCall {
   readonly turns: readonly ChatTurn[];
   /** The raw replies, one per attempt. */
   readonly replies: readonly string[];
+  /** The largest prompt of the attempts, in tokens as the server counted them; null when it does not say. */
+  readonly promptTokens?: number | null;
+  /** The context window the model ran with; null when unknown. A prompt near it was probably cut. */
+  readonly contextTokens?: number | null;
   /** The decision read from the last reply, or why none could be. */
   readonly result?: unknown;
   readonly error?: string;
