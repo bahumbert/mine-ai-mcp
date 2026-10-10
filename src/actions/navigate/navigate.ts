@@ -313,7 +313,8 @@ function beginNavigate(
         navigation: navigationEvidence(bot, request, start, startDimension, elapsedMs, scaffoldInventoryBefore, bucketBefore),
       };
     }
-    let route: NavigationResult;
+    // Unset until the first plan: the boat-first crossing below asks `overWater` before any route was planned.
+    let route: NavigationResult | undefined;
 
     // Keep an unloaded surface unresolved while approaching its column. Once
     // observed, freeze the actual destination, including height, for both search
@@ -362,7 +363,7 @@ function beginNavigate(
       // Perched high over deep water with no way down but the fall into it (live 2026-10-10: Lena, on a furnace 23 blocks
       // up): the planner offers the landing but never plans on from it, because swimming deep water is for a bot already
       // out on it. So the fall is made first, to the node the search reached, and the way on is planned from the sea.
-      const landing = route.status === "stopped" ? route.closest : undefined;
+      const landing = route?.status === "stopped" ? route.closest : undefined;
       if (landing !== undefined && landing.y < Math.floor(here.y) - DEFAULT_MAXIMUM_DROP &&
         bot.blockAt(new Vec3(landing.x, landing.y, landing.z))?.name === "water") {
         const fell = await beginNavigate(bot, { ...request, x: landing.x, y: landing.y, z: landing.z, range: 0 }, dependencies, lifetime, () => {}, MAX_CROSSINGS)(context);
@@ -405,7 +406,10 @@ function beginNavigate(
     // player does, rather than walked round (live 2026-10-04: two and a half minutes round a bay 380 blocks across).
     if (crossings === 0 && carriesBoat(bot)) {
       const ahead = deepWaterOnTheWay(bot, bot.entity.position, request);
-      if (ahead !== null && ahead.shore !== null && ahead.length >= BOAT_FIRST_LENGTH) {
+      // Not from high above the water (live 2026-10-10: Lena, 23 blocks up, crashed here): no boat goes in from a
+      // cliff; the route is planned first, and from a perch it falls into the water before crossing.
+      const nearTheWater = ahead !== null && bot.entity.position.y - ahead.start.y <= DEFAULT_MAXIMUM_DROP + 1;
+      if (ahead !== null && nearTheWater && ahead.shore !== null && ahead.length >= BOAT_FIRST_LENGTH) {
         return overWater({
           status: "failed",
           error: navigateOutcomes.deepWater(request, ahead.start, ahead.length),
