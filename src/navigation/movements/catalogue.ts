@@ -486,7 +486,11 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
   const from = context.state.node.feet;
   if (context.policy.dive && isWater(look(context, from.x, from.y, from.z))) return;
   const { x, y, z } = a;
-  for (let distance = 1; distance <= Math.max(context.policy.maximumDrop, context.policy.maximumBucketDrop ?? 0); distance += 1) {
+  const dryReach = Math.max(context.policy.maximumDrop, context.policy.maximumBucketDrop ?? 0);
+  // Past the dry reach only a landing in deep water is allowed, so the column
+  // is read on until a cell refuses it (solid or unloaded) rather than to a
+  // fixed depth.
+  for (let distance = 1; ; distance += 1) {
     const landingY = y - distance;
     // A refused landing is where a fall stops looking deeper, so the lava
     // rule other families leave to `settle` is asked of a dug landing here,
@@ -513,6 +517,25 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
     // step's preconditions. Baritone's MovementFall refuses these landings.
     const ceiling = look(context, x, landingY + 2, z);
     const buried = isFalling(ceiling);
+    // Water at least `WATER_LANDING_DEPTH` deep takes the body in from any
+    // height, and Minecraft cancels the fall damage on entering it. Its cells
+    // are not support, so this landing is tested on its own.
+    if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && deepWaterLanding(context, x, landingY, z)) {
+      out
+        .open("drop", x, landingY, z)
+        .cell(a.feet)
+        .cell(a.head)
+        .cell(landingFeet)
+        .cell(landingHead)
+        .hazard(distance > context.policy.maximumDrop ? distance * 2 : distance)
+        .overshoot(a.dx, a.dz)
+        .offer();
+      return;
+    }
+    if (distance > dryReach) {
+      if (landingFeet === NO_CELL) return;
+      continue;
+    }
     const bucketDrop = distance > context.policy.maximumDrop;
     if (bucketDrop && (isSolid(landingBlock) || isLiquid(landingBlock))) return;
     if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && safeLanding) {
@@ -530,6 +553,19 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
     }
     if (landingFeet === NO_CELL) return;
   }
+}
+
+/** Water blocks a column needs from the landing cell down for a fall of any height to end in it unharmed. */
+const WATER_LANDING_DEPTH = 2;
+
+/** Whether the landing cell and the ones under it hold enough water to break a fall. */
+function deepWaterLanding(context: MovementGenerationContext, x: number, landingY: number, z: number): boolean {
+  for (let depth = 0; depth < WATER_LANDING_DEPTH; depth += 1) {
+    const block = look(context, x, landingY - depth, z);
+    if (block.kind !== "loaded" || !isWater(block)) return false;
+    if (!block.traits.liquidSource && !canOccupyWater(context, x, landingY - depth, z)) return false;
+  }
+  return true;
 }
 
 /** The cell, or `NO_CELL` when it is one dig that would let lava in. */
