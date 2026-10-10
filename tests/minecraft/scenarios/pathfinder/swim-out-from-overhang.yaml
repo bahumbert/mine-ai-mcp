@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+
+name: swim-out-from-overhang
+tags: [regression]
+description: >-
+  Live 2026-10-10: Sana stood on the sea floor under an overhang and every route failed after seven nodes.
+  A bot on a sea floor eight deep, under a roof three wide, navigates to a shore twenty blocks east: the
+  plan swims out from under the roof and arrives alive.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -10 -63 -10 28 -40 10 air"
+
+geometry:
+  - fill: { block: stone, from: [-9, -63, -9], to: [27, -61, 9] }
+  # The sea, eight deep, from the west end to the shore.
+  - fill: { block: water, from: [-9, -60, -9], to: [19, -53, 9] }
+  # The shore: stone land from x 20, level with the sea surface.
+  - fill: { block: stone, from: [20, -60, -9], to: [27, -53, 9] }
+  # The overhang over the start: a roof three wide, three above the floor.
+  - fill: { block: stone, from: [-1, -57, -4], to: [1, -57, 4] }
+
+players:
+  - name: Swimmer
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+tick:
+  - "gamemode spectator @a[name=!Swimmer,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 22
+    y: -52
+    z: 0
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: Swimmer
+      pos: [22.5, -52, 0.5]
+      radius: 2.25
+    - { kind: health, who: Swimmer, health: 14 }
+    - { kind: completion, who: Swimmer }

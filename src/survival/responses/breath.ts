@@ -1,12 +1,13 @@
 import type { Bot } from "mineflayer";
 import { horizontalControlsToward } from "../../navigation/index.js";
+import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { airSupplyPoints, FULL_AIR_POINTS, isInWater } from "../perception/body.js";
 import { nearbySwimEscape, swimmingRoof } from "../positioning/swim-escape.js";
 import type { Budgets } from "../state/budgets.js";
 /**
- * Rise for air, swimming clear of an overhang or digging a sealed roof, until
- * the bar is full or the time is up.
+ * Rise for air, swimming clear of an overhang (to the nearest open column in reach) or, with none, digging up
+ * through the roof, until the bar is full or the time is up.
  */
 export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, maximumTicks: number) {
   let dug = 0;
@@ -63,8 +64,12 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
       const horizontal = escape ? horizontalControlsToward(bot.entity, escape, 0.05) : null;
       for (const control of ["forward", "back", "left", "right"] as const)
         bot.setControlState(control, horizontal?.[control] ?? false);
+      // No open column within reach: dig up through the roof, with the best tool carried. The reflex digs by the
+      // body in the water, never by the route policy, so its rule against mining under water does not apply here.
       if (roof?.diggable && !escape) {
         try {
+          const tool = selectHarvestTool(bot, roof);
+          if (tool && bot.heldItem?.name !== tool.name) await bot.equip(tool, "hand");
           await bot.dig(roof);
           dug += 1;
         } catch {

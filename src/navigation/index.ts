@@ -40,6 +40,7 @@ export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/p
 export { createNavigationRuntime, createMovements } from "./runtime.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
+export { type SwimCellReader, swimExitPath } from "./world/swimming.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
 export { hasSupportedCorridor } from "./world/block-geometry.js";
 export { isPassable, isHeadPassable, isSafeSupport } from "./world/block-geometry.js";

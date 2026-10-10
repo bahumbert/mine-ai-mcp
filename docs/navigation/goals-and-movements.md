@@ -123,7 +123,14 @@ remaining safe targets instead of repeatedly attempting the same wet work.
 Existing still-water mining is preserved: a surface swimming stance, or a supported
 submerged stance with an open ascent column and the runtime's live air budget, may
 admit water around the target. This exception never admits lava. Flowing water at
-the working stance requires isolation before mining.
+the working stance requires isolation before mining. A puddle in a roofed pocket is not still-water work: the
+stance must be open to the air above it (`waterMiningStance`), so a bot in a dug pocket never lets the sea in through
+a wall it mines (live 2026-10-10).
+
+A submerged route start needs a way up, not necessarily straight up: under a roof, the dive admission, the dive
+session and the planner use the swim to the nearest column open to the air (`swimAscent`, `swimExitPath` in
+`world/swimming.ts`, radius 12) and price it against the air budget. A bot standing in the water over deep water is
+"out at sea" for the deep-water step rule, wherever in the water column it stands.
 
 ### Terrain preservation and tools
 
