@@ -10,9 +10,16 @@ import { airSupplyTicks } from "../../world/air-supply.js";
 export const BREATH_REFLEX = "breath_reflex" as const;
 /** Check air every quarter second while another action or idle buoyancy owns movement. */
 const CHECK_INTERVAL_TICKS = 5;
+/** Surfacing this many times within the window and radius means the action keeps diving to a place it cannot reach on one breath. */
+const REPEAT_FIRINGS = 3;
+const REPEAT_WINDOW_MS = 3 * 60_000;
+const REPEAT_RADIUS = 4;
 
 /** The breathing response owns only its registration; runtime attaches idle buoyancy separately. */
-export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop: () => number | null = () => null): AsyncDisposable {
+export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop: () => number | null = () => null, now: () => number = Date.now): AsyncDisposable {
+  // Where and when the reflex recently finished a surfacing that resumed the action (live 2026-10-10 run 7: one navigate
+  // dived again from the same x/z for 40 minutes, 120 times).
+  let firings: { x: number; z: number; at: number }[] = [];
   return driver.register({
     name: BREATH_REFLEX,
     intervalTicks: CHECK_INTERVAL_TICKS,
@@ -56,13 +63,22 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
         healthAfter: bot.health,
       };
     },
-    continuation: (outcome) =>
-      outcome.ownedDive ? { kind: "return", reason: "Navigation dive budget failed; the breath backstop rescued the bot." } : outcome.kind === "air_full"
-        ? { kind: "resume" }
-        : {
-            kind: "return",
-            reason: outcome.kind === "air_unknown" ? "Own air metadata is unavailable." : "Full air was not observed.",
-          },
+    continuation: (outcome) => {
+      if (outcome.ownedDive) return { kind: "return", reason: "Navigation dive budget failed; the breath backstop rescued the bot." };
+      if (outcome.kind === "air_full") {
+        const { x, z } = bot.entity.position;
+        const at = now();
+        firings = firings.filter((earlier) => at - earlier.at <= REPEAT_WINDOW_MS && Math.hypot(x - earlier.x, z - earlier.z) <= REPEAT_RADIUS);
+        firings.push({ x, z, at });
+        if (firings.length < REPEAT_FIRINGS) return { kind: "resume" };
+        firings = [];
+        return { kind: "return", reason: "[BREATH] Out of air three times here: the target is too deep under water to reach holding breath." };
+      }
+      return {
+        kind: "return",
+        reason: outcome.kind === "air_unknown" ? "Own air metadata is unavailable." : "Full air was not observed.",
+      };
+    },
     failure: (outcome) =>
       outcome.kind === "stuck"
         ? { kind: "stuck", why: "The surface attempt ended before full air was observed." }
