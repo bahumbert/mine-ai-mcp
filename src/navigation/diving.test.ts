@@ -111,3 +111,33 @@ test("quantity completion still returns a mining process to air, while takeover 
   assert.equal(diving.active, false);
   assert.equal(bot.listenerCount("physicsTick"), 0);
 });
+
+test("roofed and with no air metadata, a submerged start takes its air as unchanged and plans a dive", async () => {
+  const world = new MemoryWorld();
+  for (let x = -3; x <= 3; x++)
+    for (let y = 59; y <= 66; y++)
+      world.load({ x, y, z: 0 }, y === 59 || (y === 62 && x >= -1 && x <= 1) ? { stateId: 1 } : y <= 63
+        ? { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } } : { stateId: 0 });
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 60.2, 0.5), metadata: [], onGround: true },
+    registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
+    blockAt: (p: Vec3) => {
+      const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone") } : null;
+    },
+    setControlState: () => {},
+  }) as unknown as Bot;
+  const ticking = setInterval(() => bot.emit("physicsTick"), 1);
+  try {
+    const diving = new Diving(bot, world);
+    let dive: unknown;
+    await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 3, y: 60, z: 0 }) }, async (request) => {
+      dive = request.movements.dive;
+      return { status: "completed", elapsedMs: 0 };
+    });
+    assert.deepEqual(Object.keys(dive as object), ["origin", "airTicks"]);
+    assert.equal((dive as { airTicks: number }).airTicks, 300);
+  } finally {
+    clearInterval(ticking);
+  }
+});
