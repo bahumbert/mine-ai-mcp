@@ -1,19 +1,20 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describeStep, SKILL_NAMES, stepKey, targetItems, type Step } from "./actions.ts";
+import { describeStep, stepKey, targetItems, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
-import { shortfall } from "./building/blueprint.ts";
+import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
+import { improvement, temporaryRoles } from "./building/materials.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
-import { findOpportunities, type Opportunity, type Shortfall } from "./opportunities.ts";
+import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
-import type { Persona } from "./persona.ts";
-import type { BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
+import { personaSkills, type Persona } from "./persona.ts";
+import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
 
@@ -23,6 +24,8 @@ const STARTUP_RETRY_MS = 10_000;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
 /** Known places shown to the models; the oldest is forgotten first. */
+/** Carried full blocks named to the goal tier as materials a house could use. */
+const MAX_CARRIED_BLOCKS = 5;
 const KNOWN_PLACES = 8;
 /** Steps kept per objective for the work tier. */
 const STEP_MEMORY = 20;
@@ -141,7 +144,8 @@ export class Agent {
   /** When each player (lower case) last said anything: a follow they asked for ends after a long silence. */
   private readonly lastHeard = new Map<string, number>();
   /** Game facts learnt from the runtime, kept for the session: block tags by name, foods seen, how items are got. */
-  private readonly blockTags = new Map<string, readonly string[]>();
+  /** The game's data per block name, as the runtime reports it (null: no such block), read once. */
+  private readonly blockKindCache = new Map<string, BlockKind | null>();
   private readonly foods = new Set<string>();
   private readonly itemActivities = new Map<string, Activity | null>();
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
@@ -440,7 +444,7 @@ export class Agent {
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
-    const chances = activityChances(availableActivities(persona.skills ?? SKILL_NAMES, snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
+    const chances = activityChances(availableActivities(personaSkills(persona), snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
@@ -509,6 +513,7 @@ export class Agent {
         self: persona.username,
         style: persona.style,
         remember: (place) => this.learnPlace(place),
+        ownHouse: () => this.temporaryHouse(),
         farms: this.farms,
         rememberFarm: (farm) => this.learnFarm(farm),
         building: this.building,
@@ -719,12 +724,18 @@ export class Agent {
 
   /** The game's block tags of these blocks, asked of the runtime once per name. */
   private async tagsOf(blocks: readonly string[]): Promise<Readonly<Record<string, readonly string[]>>> {
-    const unknown = [...new Set(blocks)].filter((block) => !this.blockTags.has(block));
+    const kinds = await this.kindsOf(blocks);
+    return Object.fromEntries(blocks.map((block) => [block, kinds.get(block)?.tags ?? []]));
+  }
+
+  /** The game's data for these names (an item that is no block has none), asking the runtime only for names not yet known. */
+  private async kindsOf(names: readonly string[]): Promise<ReadonlyMap<string, BlockKind | null>> {
+    const unknown = [...new Set(names)].filter((name) => !this.blockKindCache.has(name));
     if (unknown.length > 0) {
       const kinds = await this.options.runtime.blockKinds(unknown);
-      for (const block of unknown) this.blockTags.set(block, kinds[block]?.tags ?? []);
+      for (const name of unknown) this.blockKindCache.set(name, kinds[name] ?? null);
     }
-    return Object.fromEntries(blocks.map((block) => [block, this.blockTags.get(block) ?? []]));
+    return this.blockKindCache;
   }
 
   /** Counts a step's time towards its activity; a long enough one is remembered across restarts. */
@@ -739,21 +750,61 @@ export class Agent {
     const ownHome = this.places.some((place) => place.own === true);
     const unfinished = this.building.unfinished;
     let houseShortfall: Shortfall[] = [];
-    if (!ownHome && unfinished === null) {
-      try {
+    let smallHouse: OpportunityFacts["smallHouse"] = [];
+    let carriedBlocks: OpportunityFacts["carriedBlocks"] = [];
+    let temporaryHouse: OpportunityFacts["temporaryHouse"] = null;
+    try {
+      if (!ownHome && unfinished === null) {
         houseShortfall = await this.houseShortfall(snapshot);
-      } catch (error) {
-        this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
+        smallHouse = this.smallHouseRoles(snapshot);
+        carriedBlocks = await this.carriedBlocks(snapshot);
       }
+      temporaryHouse = await this.temporaryHouseFacts();
+    } catch (error) {
+      this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
-    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall });
+    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse });
+  }
+
+  /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */
+  private smallHouseRoles(snapshot: BotSnapshot): OpportunityFacts["smallHouse"] {
+    const cells = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).cells;
+    return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
+  }
+
+  /** The most carried blocks that fill a whole cell (what `build` may use for a wall, floor or roof), at most five. */
+  private async carriedBlocks(snapshot: BotSnapshot): Promise<OpportunityFacts["carriedBlocks"]> {
+    const kinds = await this.kindsOf(snapshot.inventory.map((stack) => stack.name));
+    const counts = new Map<string, number>();
+    for (const stack of snapshot.inventory) if (kinds.get(stack.name)?.fullCube === true) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
+    return [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, MAX_CARRIED_BLOCKS);
+  }
+
+  /** Its temporary own house, which roles are temporary, and what improving them needs beyond what it carries. */
+  private async temporaryHouseFacts(): Promise<OpportunityFacts["temporaryHouse"]> {
+    const place = this.temporaryHouse();
+    const house = place?.house;
+    if (house === undefined) return null;
+    const style = styleOrDefault(house.style);
+    const roles = temporaryRoles(house.materials, style);
+    const missing = shortfall(improvement(style, house, roles).bill, (await this.options.runtime.status()).inventory);
+    return {
+      door: house.door,
+      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] })),
+      shortfall: await this.withActivities(missing),
+    };
   }
 
   /** What a small house in its own style needs beyond what it carries, each with the work that gets it. */
   private async houseShortfall(snapshot: BotSnapshot): Promise<Shortfall[]> {
     const bill = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).bill;
+    return this.withActivities(shortfall(bill, snapshot.inventory));
+  }
+
+  /** Each missing material with the work that gets it (as `get_items` would); the ones no work gets are left out. */
+  private async withActivities(items: readonly MaterialCount[]): Promise<Shortfall[]> {
     const missing: Shortfall[] = [];
-    for (const { item, count } of shortfall(bill, snapshot.inventory)) {
+    for (const { item, count } of items) {
       let activity = this.itemActivities.get(item);
       if (activity === undefined) {
         const how = await obtainedBy(this.options.runtime, item);
@@ -765,6 +816,13 @@ export class Agent {
       if (activity !== null) missing.push({ item, count, activity });
     }
     return missing;
+  }
+
+  /** Its latest own house that still has temporary parts: the latest note of each place name counts, an improved one no longer. */
+  private temporaryHouse(): KnownPlace | null {
+    const latest = new Map<string, KnownPlace>();
+    for (const place of this.places) latest.set(place.name, place);
+    return [...latest.values()].reverse().find((place) => place.own === true && Object.keys(place.house?.materials ?? {}).length > 0) ?? null;
   }
 
   private learnPlace(place: KnownPlace): void {

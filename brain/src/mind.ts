@@ -1,9 +1,12 @@
 import type { Step } from "./actions.ts";
 import type { Activity } from "./activities.ts";
+import type { Facing } from "./building/blueprint.ts";
+import type { HouseSize } from "./building/house.ts";
+import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
-import type { BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
+import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import type { ActivityTotal } from "./time-spent.ts";
 
 export interface ChatLine {
@@ -41,6 +44,17 @@ export interface KnownPlace {
   readonly detail: string;
   /** A house it built for itself: its own home. */
   readonly own?: boolean;
+  /**
+   * A house it built: what is needed to build it again in place. `materials` holds only the roles built with other
+   * blocks than the style's; any such role makes the house temporary. Older notes have none.
+   */
+  readonly house?: {
+    readonly size: HouseSize;
+    readonly style: string;
+    readonly door: Position;
+    readonly facing: Facing;
+    readonly materials: Materials;
+  };
 }
 
 export interface ChatInput {

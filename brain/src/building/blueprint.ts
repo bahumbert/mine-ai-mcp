@@ -8,6 +8,12 @@ export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "
 export type Role = (typeof ROLES)[number];
 export type BlockRole = Exclude<Role, "air">;
 
+/** The roles a house is built with: every role but `air`; `build` may name a block for each. */
+export const BUILD_ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door"] as const satisfies readonly BlockRole[];
+
+/** The roles that hold the house up and shut it: a block for one of these must fill its cell. */
+export const STRUCTURAL_ROLES = BUILD_ROLES.slice(0, 6) as readonly BlockRole[];
+
 /** Shapes a cell may take from its role's material: stairs or a slab of the same wood or stone. */
 export const SHAPES = ["stairs", "slab"] as const;
 export type Shape = (typeof SHAPES)[number];

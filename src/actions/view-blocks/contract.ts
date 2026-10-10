@@ -158,6 +158,8 @@ export const foundBlockSchema = observedBlockSchema.extend({
 export const blockKindSchema = z.strictObject({
   tool: z.enum(["pickaxe", "shovel", "axe", "hoe"]).nullable(),
   solid: z.boolean(),
+  /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's own geometry. */
+  full_cube: z.boolean(),
   harvest: z.array(z.string()).nullable(),
 });
 

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
-import { SKILL_NAMES } from "./actions.ts";
+import { SKILL_NAMES, type SkillName } from "./actions.ts";
 import { ACTIVITIES, NEUTRAL_ACTIVITIES } from "./activities.ts";
 
 /** How an agent relates to players by default (ADR-005: later a per-relation value, one global stance for now). */
@@ -115,4 +115,10 @@ export async function loadPersona(path: string): Promise<Persona> {
   const parsed = personaSchema.safeParse(JSON.parse(await readFile(path, "utf8")));
   if (!parsed.success) throw new Error(`[PERSONA_INVALID] ${path}: ${z.prettifyError(parsed.error)}`);
   return parsed.data;
+}
+
+/** The skills a character may use: its own list or the whole catalog; one who may build may also improve its house. */
+export function personaSkills(persona: Pick<Persona, "skills">): readonly SkillName[] {
+  const skills = persona.skills ?? SKILL_NAMES;
+  return skills.includes("build") && !skills.includes("improve_house") ? [...skills, "improve_house"] : skills;
 }

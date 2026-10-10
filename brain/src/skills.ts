@@ -3,8 +3,9 @@ import minecraftData from "minecraft-data";
 import { z } from "zod";
 import type { Activity } from "./activities.ts";
 import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./actions.ts";
-import { describeMaterials, shortfall } from "./building/blueprint.ts";
-import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type Site } from "./building/plan.ts";
+import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
+import { checkMaterials, improvement } from "./building/materials.ts";
+import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation } from "./gathering.ts";
@@ -53,6 +54,8 @@ export interface SkillContext {
   readonly remember?: (place: KnownPlace) => void;
   /** The house left unfinished by an earlier build step, which the next build of the same kind resumes. */
   readonly building?: { unfinished: UnfinishedHouse | null };
+  /** Its own house that still has temporary parts, as last remembered (a place with a `house` whose materials are not empty). */
+  readonly ownHouse?: () => KnownPlace | null;
   /** The protected areas the agent knows (ADR-012), updated in place when a skill protects or releases one. */
   readonly areas?: ProtectedArea[];
   /** The character's own username: areas it owns are its own builds. */
@@ -76,6 +79,8 @@ export interface UnfinishedHouse {
   readonly part: number;
   /** False while its site is still to be leveled (an older note has none: its site counts as ready). */
   readonly prepared?: boolean;
+  /** The roles built with other blocks than the style's (an older note has none: as the style). */
+  readonly materials?: Materials;
 }
 
 export type SkillResult =
@@ -131,6 +136,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "protect_area": return await protectArea(context, step);
       case "release_area": return await releaseArea(context, step.area);
       case "build": return await build(context, step);
+      case "improve_house": return await improveHouse(context, step);
       case "farm": return await farm(context, step);
     }
   } catch (error) {
@@ -262,7 +268,13 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const unfinished = context.building?.unfinished;
   const resumed = unfinished?.kind === kind && distanceBetween(at ?? snapshot.position, unfinished.site.door) <= RESUME_RANGE ? unfinished : null;
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
-  const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)));
+  // A resumed house keeps the materials it was started with; the step's are ignored then.
+  const materials = resumed === null ? step.materials ?? {} : resumed.materials ?? {};
+  if (resumed === null && Object.keys(materials).length > 0) {
+    const refusal = checkMaterials(materials, style, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== "air")));
+    if (refusal !== null) return { status: "failed", detail: `cannot build ${what} with those materials: ${refusal}` };
+  }
+  const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)), materials);
   if (resumed === null) {
     // A new site clear of every protected area before anything is protected or dug, and if not, where the nearest
     // clear one is (live 2026-10-03: told only "choose another zone clear of it", she stepped one block at a time,
@@ -298,7 +310,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
   noteArea(context, protection.area);
   const leaveUnfinished = (part: number, prepared = true) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared };
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials };
   };
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
@@ -332,6 +344,81 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     }
     context.phase?.("building");
   }
+  const stopped = await buildParts(context, plan, what, {
+    reserved: plan.bill,
+    leave: (part) => leaveUnfinished(part),
+    again: context.building === undefined ? "" : "; building it again resumes it there",
+  });
+  if (stopped !== null) return stopped;
+  if (context.building !== undefined) context.building.unfinished = null;
+  const { door, facing } = plan.site;
+  const roof = plan.roofTop;
+  context.remember?.({
+    name: `the ${kind} you built${context.requester === undefined ? "" : ` for ${context.requester}`}`,
+    detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
+    ...(context.requester === undefined && { own: true }),
+    house: { size: step.size, style: style.id, door, facing, materials: plan.materials },
+  });
+  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
+}
+
+/**
+ * Swaps the temporary parts of its own house for the style's blocks, in place: the house's cells are sent again with
+ * the style's blocks in those roles, and `build_structure` digs the wrong block of a cell and places the right one
+ * (cells already right are skipped), so an interrupted swap is simply asked again.
+ */
+async function improveHouse(context: SkillContext, step: Extract<Step, { skill: "improve_house" }>): Promise<SkillResult> {
+  const place = context.ownHouse?.() ?? null;
+  const house = place?.house;
+  if (place === null || house === undefined || Object.keys(house.materials).length === 0) return { status: "failed", detail: "you have no temporary house of your own to improve" };
+  const style = styleOrDefault(house.style);
+  const temporary = Object.keys(house.materials) as BlockRole[];
+  const roles = step.roles ?? temporary;
+  const notTemporary = roles.filter((role) => !temporary.includes(role));
+  if (notTemporary.length > 0) return { status: "failed", detail: `your house is not temporary in ${notTemporary.join(", ")}: its temporary parts are ${temporary.join(", ")}` };
+  const { after, rest, bill } = improvement(style, house, roles);
+  const kind = `${house.size} ${style.id} house`;
+  const what = `your ${kind}`;
+  const snapshot = await context.runtime.status();
+  const missing = shortfall(bill, snapshot.inventory);
+  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} to improve ${what} (the rest is carried): fetch exactly the missing items with get_items, then improve again` };
+  const { x, y, z } = house.door;
+  context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
+  const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
+  if (context.signal.aborted) return { status: "stopped" };
+  if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
+  // Protected again under the same label (the runtime keeps one region per box), as a build does.
+  const protection = await context.runtime.protectRegion({
+    ...houseBox(after.batches.flat()),
+    label: kind,
+    reason: `Keep my own digging out of the ${kind} I am improving.`,
+  });
+  if (protection.status === "failed") return { status: "failed", detail: `could not protect ${what}: ${protection.error}` };
+  noteArea(context, protection.area);
+  const stopped = await buildParts(context, after, what, { reserved: bill, leave: () => undefined, again: "; improve your house again" });
+  if (stopped !== null) return stopped;
+  context.remember?.({ ...place, house: { ...house, materials: rest } });
+  const swapped = roles.map((role) => style.palette[role]);
+  const still = Object.entries(rest).map(([role, block]) => `${role} ${block}`).join(", ");
+  return { status: "done", detail: `improved ${what}: ${roles.join(", ")} now ${swapped.join(", ")}${still === "" ? "" : `; still temporary: ${still}`}` };
+}
+
+/** What stops {@link buildParts} short, and what it tells the model. */
+interface PartsOptions {
+  /** Blocks a remade tool must not use up: the house's bill. */
+  readonly reserved: readonly MaterialCount[];
+  /** Told the part (batch index) to start again from when the work stops before the end. */
+  readonly leave: (part: number) => void;
+  /** Ends the failure sentence: how the house is asked again. */
+  readonly again: string;
+}
+
+/**
+ * Sends a planned house to the runtime part by part, twice over: null when every part is built and checked, else the
+ * result that ends the step. Shared by `build` and `improve_house`, which send the same cells (the second with other
+ * blocks in some roles) and rely on `remove_wrong_blocks` to skip what is right and swap what is not.
+ */
+async function buildParts(context: SkillContext, plan: HousePlan, what: string, options: PartsOptions): Promise<SkillResult | null> {
   // A resumed house is checked again from its first part: `build_structure` skips the cells already right, and anything
   // dug out since (the doorstep under the door, by the gathering next to it: live 2026-10-01) is put back. The second
   // pass is the final check: anything a later part disturbed is put back before the house counts as built.
@@ -364,34 +451,25 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const input = { blocks, remove_wrong_blocks: true, ...(keep.length > 0 && { keep }) };
     const outcome = await context.body.act("build_structure", input, `Build ${what}, ${part}.`, { signal: context.signal });
     if (context.signal.aborted) {
-      leaveUnfinished(Math.min(index, plan.batches.length - 1));
+      options.leave(Math.min(index, plan.batches.length - 1));
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await toolLosses.handle(outcome.error, { reserved: plan.bill, inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
+      const lost = await toolLosses.handle(outcome.error, { reserved: options.reserved, inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
       if (lost.status === "remade") {
         index -= 1;
         continue;
       }
       if (lost.status === "stopped" || context.signal.aborted) {
-        leaveUnfinished(Math.min(index, plan.batches.length - 1));
+        options.leave(Math.min(index, plan.batches.length - 1));
         return { status: "stopped" };
       }
       const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
-      leaveUnfinished(Math.min(index, plan.batches.length - 1));
-      const again = context.building === undefined ? "" : "; building it again resumes it there";
-      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${again}` };
+      options.leave(Math.min(index, plan.batches.length - 1));
+      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${options.again}` };
     }
   }
-  if (context.building !== undefined) context.building.unfinished = null;
-  const { door, facing } = plan.site;
-  const roof = plan.roofTop;
-  context.remember?.({
-    name: `the ${kind} you built${context.requester === undefined ? "" : ` for ${context.requester}`}`,
-    detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
-    ...(context.requester === undefined && { own: true }),
-  });
-  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
+  return null;
 }
 
 /** The non-air cells of the parts before `index`: what a later part's routes must keep. */

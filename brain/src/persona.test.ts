@@ -3,7 +3,7 @@ import test from "node:test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { STYLES } from "./building/styles.ts";
-import { loadPersona, personaSchema } from "./persona.ts";
+import { loadPersona, personaSchema, personaSkills } from "./persona.ts";
 
 /** The characters live in the private part of the project (`personas/`): checked only where it is present. */
 const PERSONAS = new URL("../../personas/", import.meta.url);
@@ -66,4 +66,11 @@ test("feeling multipliers default to the owner's pick and each may be set from 0
   assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { loves: 11 } } }).success, false, "above 10");
   assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { hates: -0.1 } } }).success, false, "below 0");
   assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { adores: 3 } } }).success, false, "a feeling of ours");
+});
+
+test("a persona allowed to build may improve its house too", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to", "build"] })), ["go_to", "build", "improve_house"]);
+  assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to"] })), ["go_to"]);
+  assert.ok(personaSkills(personaSchema.parse(base)).includes("improve_house"));
 });

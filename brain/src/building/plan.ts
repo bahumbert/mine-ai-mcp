@@ -1,4 +1,4 @@
-import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
 import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 
@@ -45,6 +45,8 @@ export interface HousePlan {
   readonly style: Style;
   readonly size: HouseSize;
   readonly site: Site;
+  /** The roles built with other blocks than the style's; empty for a house as the style. */
+  readonly materials: Materials;
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
@@ -59,10 +61,19 @@ export function styleOrDefault(name: string | undefined): Style {
   return style;
 }
 
-export function planHouse(style: Style, size: HouseSize, site: Site): HousePlan {
+/** Blocks other than the style's for some roles (what a bot carries, what the ground gave): the house is temporary. */
+export type Materials = Partial<Record<BlockRole, string>>;
+
+/**
+ * The house for `style` at `site`. `materials` names other blocks for some roles; those roles are built with full
+ * blocks (the style's stairs and slabs belong to its own block). A role named with the style's own block is the style's.
+ */
+export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
+  const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => style.palette[role as BlockRole] !== block)) as Materials;
+  const variants = Object.fromEntries(Object.entries(style.variants ?? {}).filter(([role]) => other[role as BlockRole] === undefined));
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-  const cells = placeBlueprint(blueprint, style.palette, site.door, site.facing, style.variants);
-  return { style, size, site, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
+  const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants);
+  return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof). */

@@ -110,14 +110,14 @@ test("kinds give each named block's game data, harvest tools cheapest tier first
   const result = viewBlocks(Object.assign(fakeBot({}), { version: "1.21.4" }), request);
   assert.equal(result.status, "succeeded");
   const kinds = result.blocks.kinds!;
-  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, harvest: null, tags: undefined });
+  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, tags: undefined });
   assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
   assert.ok(kinds.stone!.tags.includes("mineable/pickaxe"));
   assert.equal(kinds.stone!.tool, "pickaxe");
   assert.equal(kinds.stone!.harvest![0], "wooden_pickaxe");
   assert.equal(kinds.iron_ore!.harvest![0], "stone_pickaxe");
   assert.ok(!kinds.iron_ore!.harvest!.includes("wooden_pickaxe"));
-  assert.match(formatViewBlocksResult(result), /- dirt: solid, mined fast with a shovel, drops by hand; tags: [^\n]*mineable\/shovel/);
+  assert.match(formatViewBlocksResult(result), /- dirt: solid, full cube, mined fast with a shovel, drops by hand; tags: [^\n]*mineable\/shovel/);
   const unknown = viewBlocks(fakeBot({}), parseViewBlocksRequest({ kinds: ["unobtainium"] }));
   assert.equal(unknown.status, "failed");
 });
@@ -191,4 +191,16 @@ test("cells report shape, liquid level, and waterlogging", () => {
   assert.match(markdown, /- 1, 64, 1: water \(source\)/);
   assert.match(markdown, /- 2, 64, 1: water \(flowing level 3\)/);
   assert.match(markdown, /- 3, 64, 1: oak_slab \(solid, waterlogged\)/);
+});
+
+test("kinds say whether a block is a full cube, from the runtime's own geometry", () => {
+  const request = parseViewBlocksRequest({ kinds: ["dirt", "cobblestone", "oak_stairs", "oak_slab", "glass_pane", "oak_door"] });
+  const bot = Object.assign(fakeBot({}), { version: "1.21.4" });
+  const kinds = viewBlocks(bot, request).blocks.kinds!;
+  assert.equal(kinds.dirt!.full_cube, true);
+  assert.equal(kinds.cobblestone!.full_cube, true);
+  for (const name of ["oak_stairs", "oak_slab", "glass_pane", "oak_door"]) assert.equal(kinds[name]!.full_cube, false, name);
+  const text = formatViewBlocksResult(viewBlocks(bot, request));
+  assert.match(text, /- dirt: solid, full cube,/u);
+  assert.match(text, /- oak_stairs: solid, not a full cube,/u);
 });

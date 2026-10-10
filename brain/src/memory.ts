@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { ACTIVITIES } from "./activities.ts";
+import { BUILD_ROLES } from "./building/blueprint.ts";
+import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -56,16 +58,20 @@ const PREFIX = "brain memory";
 const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time"] as const;
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
+const facing = z.enum(["north", "south", "east", "west"]);
+const materials = z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1));
+const houseSchema = z.object({ size: z.enum(Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]]), style: z.string().min(1), door: position, facing, materials });
 const memorySchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional() }) }),
+  z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional(), house: houseSchema.optional() }) }),
   z.object({ kind: z.literal("own_objective"), outcome: z.string().min(1) }),
   z.object({
     kind: z.literal("unfinished_house"),
     house: z.object({
       kind: z.string().min(1),
-      site: z.object({ door: position, facing: z.enum(["north", "south", "east", "west"]) }),
+      site: z.object({ door: position, facing }),
       part: z.number().int().min(0),
       prepared: z.boolean().optional(),
+      materials: materials.optional(),
     }).nullable(),
   }),
   z.object({

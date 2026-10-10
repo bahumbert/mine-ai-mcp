@@ -53,3 +53,19 @@ test("a step's purpose is remembered with its time; a note from before has none"
   const unknown = 'brain memory: activity_time {"kind":"activity_time","time":{"activity":"mining","purpose":"knitting","ended":"2026-10-03T12:00:00.000Z","minutes":3}}';
   assert.deepEqual(recall([unknown], LIMITS).times, [], "a purpose of ours or none");
 });
+
+test("a house place keeps its materials; an older note without them recalls unchanged", () => {
+  const house = { size: "small" as const, style: "medieval", door: { x: -2, y: 64, z: 0 }, facing: "east" as const, materials: { wall: "dirt", window: "air" } };
+  const place = { name: "the small medieval house you built", detail: "door -2 64 0 facing east", own: true, house };
+  assert.deepEqual(recall([memoryNote({ kind: "place", place }).context], LIMITS).places, [place]);
+  const older = { name: "the small medieval house you built", detail: "door -2 64 0 facing east", own: true };
+  assert.deepEqual(recall([memoryNote({ kind: "place", place: older }).context], LIMITS).places, [older]);
+});
+
+test("an unfinished house keeps its materials; an older note has none", () => {
+  const site = { door: { x: 1, y: 64, z: 2 }, facing: "north" as const };
+  const withMaterials = { kind: "small medieval house", site, part: 2, prepared: true, materials: { roof: "dirt" } };
+  assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: withMaterials }).context], LIMITS).unfinished, withMaterials);
+  const older = { kind: "small medieval house", site, part: 2 };
+  assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
+});

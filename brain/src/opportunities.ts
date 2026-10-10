@@ -1,6 +1,7 @@
 import { describeActivity, type Activity } from "./activities.ts";
+import type { BlockRole } from "./building/blueprint.ts";
 import type { KnownFarm } from "./memory.ts";
-import type { BotSnapshot } from "./runtime-client.ts";
+import type { BotSnapshot, Position } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 
 /**
@@ -31,6 +32,16 @@ export interface OpportunityFacts {
   readonly ownHome: boolean;
   /** What her style's small house needs beyond what she carries; looked up only while she has no home. */
   readonly houseShortfall: readonly Shortfall[];
+  /** The cells per role of her style's small house (air excluded); looked up only while she has no home. */
+  readonly smallHouse: readonly { readonly role: BlockRole; readonly count: number }[];
+  /** Carried blocks that fill a whole cell, most first, at most five: what `build` may use for a part; looked up only while she has no home. */
+  readonly carriedBlocks: readonly { readonly name: string; readonly count: number }[];
+  /** Her own house built with other blocks than her style's (it counts as her home), and what improving it needs. */
+  readonly temporaryHouse: {
+    readonly door: Position;
+    readonly roles: readonly { readonly role: BlockRole; readonly block: string; readonly style: string }[];
+    readonly shortfall: readonly Shortfall[];
+  } | null;
 }
 
 /** Shown to the goal tier at most: more is a list to read, not a hint. */
@@ -103,16 +114,37 @@ function unfinishedHouse(facts: OpportunityFacts): Opportunity[] {
   return [{ activities: ["building"], text: `your unfinished ${house.kind}, door at ${x} ${y} ${z}` }];
 }
 
+/** The missing materials as one line per kind of work that gets them: `<what> needs 22 more oak_log`. */
+function shortfallLines(what: string, missing: readonly Shortfall[]): Opportunity[] {
+  const byActivity = new Map<Activity, Shortfall[]>();
+  for (const entry of missing) byActivity.set(entry.activity, [...(byActivity.get(entry.activity) ?? []), entry]);
+  return [...byActivity].map(([activity, items]): Opportunity => ({
+    activities: [activity],
+    text: `${what} needs ${items.map((entry) => `${entry.count} more ${entry.item}`).join(", ")}`,
+  }));
+}
+
 function noHome(facts: OpportunityFacts): Opportunity[] {
   if (facts.ownHome || facts.unfinished !== null) return [];
-  const byActivity = new Map<Activity, Shortfall[]>();
-  for (const missing of facts.houseShortfall) byActivity.set(missing.activity, [...(byActivity.get(missing.activity) ?? []), missing]);
+  // The two ways to a first house: her style's blocks, or what she carries (`build` takes other blocks per role).
+  const takes = facts.smallHouse.length === 0 ? "" : `; a small house takes ${facts.smallHouse.map((entry) => `${entry.count} ${entry.role}`).join(", ")} blocks`;
+  const carries = facts.carriedBlocks.length === 0 ? "" : `; build can use other blocks per role: you carry ${facts.carriedBlocks.map((entry) => `${entry.count} ${entry.name}`).join(", ")}`;
   return [
-    { activities: ["building"], text: "you have no house of your own yet" },
-    ...[...byActivity].map(([activity, items]): Opportunity => ({
-      activities: [activity],
-      text: `a house of your own needs ${items.map((missing) => `${missing.count} more ${missing.item}`).join(", ")}`,
-    })),
+    { activities: ["building"], text: `you have no house of your own yet${takes}${carries}` },
+    ...shortfallLines("a house of your own", facts.houseShortfall),
+  ];
+}
+
+function temporaryHouse(facts: OpportunityFacts): Opportunity[] {
+  const house = facts.temporaryHouse;
+  if (house === null || house.roles.length === 0) return [];
+  const { x, y, z } = house.door;
+  return [
+    {
+      activities: ["building"],
+      text: `your house at door ${x} ${y} ${z} is temporary: ${house.roles.map((entry) => `${entry.role} ${entry.block}`).join(", ")} (your style: ${house.roles.map((entry) => entry.style).join(", ")})`,
+    },
+    ...shortfallLines("improving your house", house.shortfall),
   ];
 }
 
@@ -158,7 +190,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
 
 /** Every opportunity found, the most pressing first (a tool about to break, food), at most {@link MAX_OPPORTUNITIES}. */
 export function findOpportunities(facts: OpportunityFacts): Opportunity[] {
-  return [wornTools, missingTools, lowFood, farmsToHarvest, unfinishedHouse, farmsToSow, noHome, noBed, gear]
+  return [wornTools, missingTools, lowFood, farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noBed, gear]
     .flatMap((finder) => finder(facts))
     .slice(0, MAX_OPPORTUNITIES);
 }

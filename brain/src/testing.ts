@@ -182,7 +182,7 @@ export class FakeRuntime implements BotRuntime {
   blockTags: Readonly<Record<string, readonly string[]>> = {
     dirt: ["mineable/shovel"], grass_block: ["mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
     stone: ["mineable/pickaxe"], cobblestone: ["mineable/pickaxe"], iron_ore: ["mineable/pickaxe"], coal_ore: ["mineable/pickaxe"],
-    oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"],
+    oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"], oak_door: ["doors"], spruce_door: ["doors"],
   };
 
   /** Where blocks were seen, by name, as the bot data's frontier map would answer (others: never seen). */
@@ -232,7 +232,8 @@ export class FakeRuntime implements BotRuntime {
   }
 
   private kindOf(name: string): BlockKind {
-    return { tool: this.toolClasses[name] ?? null, solid: !FAKE_NOT_SOLID.has(name), harvest: this.harvestTools[name] ?? null };
+    const solid = !FAKE_NOT_SOLID.has(name);
+    return { tool: this.toolClasses[name] ?? null, solid, fullCube: solid && !/_(stairs|slab|door|pane)$/u.test(name), harvest: this.harvestTools[name] ?? null };
   }
 
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {

@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { describeStep, SKILL_NAMES, skillUsage, stepKey, stepSchema, type SkillName, type Step } from "./actions.ts";
+import { describeStep, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
-import type { Persona, Stance } from "./persona.ts";
+import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import { describeTime } from "./time-spent.ts";
 
@@ -317,10 +317,6 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
   const error = `[LLM_BAD_REPLY] ${model.name}: ${problem}`;
   done({ error });
   throw new Error(error);
-}
-
-function personaSkills(persona: Persona): readonly SkillName[] {
-  return persona.skills ?? SKILL_NAMES;
 }
 
 function describeAuthority(persona: Persona): string {
