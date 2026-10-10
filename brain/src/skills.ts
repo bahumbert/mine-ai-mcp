@@ -223,13 +223,41 @@ function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): {
     .filter((entry) => entry.count > 0);
 }
 
+const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
+const TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"];
+const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
+const tierRank = (item: string): number => { const rank = TIERS.indexOf(item.split("_")[0]!); return rank < 0 ? TIERS.length : rank; };
+
+/**
+ * The last tool of a class, the last bed and the last boat stay in the inventory: one is kept, the best tier carried
+ * (live 2026-10-10 run 8: Ayla dropped her stone pickaxe, axe, shovel, boat and bed; Yuki her axe while crafting one).
+ */
+function keepLastOfKind(entries: readonly { item: string; count?: number }[], inventory: readonly { name: string; count: number }[]): { entries: { item: string; count?: number }[]; kept: string[] } {
+  const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  const result = entries.map((entry) => ({ ...entry }));
+  const kept: string[] = [];
+  for (const kind of KEPT_KINDS) {
+    const owned = [...new Set(inventory.filter((stack) => kindOf(stack.name) === kind).map((stack) => stack.name))];
+    if (owned.length === 0) continue;
+    const dropping = (item: string) => { const entry = result.find((candidate) => candidate.item === item); return entry === undefined ? 0 : Math.min(entry.count ?? carried(item), carried(item)); };
+    if (owned.some((item) => carried(item) - dropping(item) > 0)) continue;
+    const keep = [...owned].sort((a, b) => tierRank(a) - tierRank(b))[0]!;
+    const entry = result.find((candidate) => candidate.item === keep);
+    if (entry === undefined) continue;
+    entry.count = Math.max(0, dropping(keep) - 1);
+    kept.push(`kept 1 ${keep}: your only ${kind}`);
+  }
+  return { entries: result.filter((entry) => entry.count !== 0), kept };
+}
+
 /**
  * Buries the items in a pit; only a place with no pit within reach (water all around, bedrock) puts them on the ground,
  * and then the bot walks off. The step says what was really dropped, never what was asked (live 2026-10-10 run 7: 26
  * identical drops each "done" while the action dropped 0), and whether the inventory has room again.
  */
 async function dropItems(context: SkillContext, step: Extract<Step, { skill: "drop_item" }>, why: string): Promise<SkillResult> {
-  const entries = dropEntries(step);
+  const { entries, kept } = keepLastOfKind(dropEntries(step), (await context.runtime.status()).inventory);
+  if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}` };
   const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
   const act = (input: Record<string, unknown>) => context.body.act("drop_item", { items, allow_equipped: true, ...input }, why, { signal: context.signal });
   // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
@@ -261,7 +289,8 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
   const free = Math.max(0, INVENTORY_SLOTS - (await context.runtime.status()).inventory.length);
   const room = free === 0 ? "the inventory is still full" : `the inventory has room again: ${free} of ${INVENTORY_SLOTS} slots free`;
   const failedPart = outcome.status === "partial" && outcome.error !== null ? ` (${outcome.error})` : "";
-  return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? ` on the ground${walkedOff}` : ""}${failedPart}; ${room}` };
+  const keptNote = kept.length > 0 ? `; ${kept.join("; ")}` : "";
+  return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? ` on the ground${walkedOff}` : ""}${failedPart}${keptNote}; ${room}` };
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
