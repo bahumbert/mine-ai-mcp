@@ -248,6 +248,24 @@ test("reports an item that is not carried without touching the others, and is no
   assert.match(none.error ?? "", /\[DROP_INCOMPLETE\] 1 of 1 item/);
 });
 
+test("the incomplete error says why each item failed (live 2026-10-10 run 8: 69 steps read only '4 of 4 items could not be dropped')", async () => {
+  const { bot } = dropBot({ carried: [], held: undefined });
+  const result = await dropItem(
+    bot,
+    parseDropItemRequest({ items: [{ item_name: "sand", count: 3 }, { item_name: "granite" }] }),
+    {},
+    deps(),
+    createDiscardedItems(),
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /\[DROP_INCOMPLETE\] 2 of 2 items could not be dropped: sand: not carried; granite: not carried/);
+
+  const swallowing = dropBot({ carried: [{ name: "gravel", count: 4, type: 1 }], swallows: "gravel" });
+  const swallowed = await dropItem(swallowing.bot, parseDropItemRequest({ items: [{ item_name: "gravel" }] }), {}, deps(), createDiscardedItems());
+  assert.equal(swallowed.status, "failed");
+  assert.match("error" in swallowed ? swallowed.error ?? "" : "", /could not be dropped: gravel: \[DROP_NOT_OBSERVED\]/);
+});
+
 test("a toss the server swallows or rejects is reported, not assumed", async () => {
   const gravel = parseDropItemRequest({ items: [{ item_name: "gravel" }] });
   const carried = [{ name: "gravel", count: 4, type: 1 }];
