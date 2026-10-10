@@ -809,6 +809,27 @@ test("a step whose items keep increasing is not stopped, and one without target 
   assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
 });
 
+test("a step whose target never rises but another item does is not stopped; one where nothing rises still is", async (t) => {
+  // Live 2026-10-10 run 8: "get 48 dark_oak_stairs" gathered 20 dark_oak_log for its planks and was stopped for no stairs.
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_mob_drop = 300;
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  const gains = setInterval(() => runtime.addItem("dark_oak_log", 1), 30);
+  t.after(() => clearInterval(gains));
+  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+  action.reply(HUNT, { done: "got the ink" });
+  await agent.handle(say("Steve", "get me 8 ink sacs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 0, "logs rising against a 120 ms window: the chain is progressing");
+  clearInterval(gains);
+  runtime.durations.collect_mob_drop = 100_000;
+  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "No squid, sorry!" });
+  action.reply(HUNT, { give_up: "no squid" });
+  await agent.handle(say("Steve", "get me 8 ink sacs again"));
+  await until(() => runtime.said.length === 4, 5_000);
+  assert.equal(runtime.cancelled.length, 1, "nothing rose: stopped as before");
+});
+
 test("with no house the goal tier is told what a small one takes and which full blocks she carries", async (t) => {
   const runtime = new FakeRuntime();
   runtime.notBlocks = new Set(["bread"]);

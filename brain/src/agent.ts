@@ -598,8 +598,15 @@ export class Agent {
     const { runtime, log } = this.options;
     const { minutes, sampleMs } = this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS };
     const carried = (snapshot: BotSnapshot, item: string) => snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+    const totals = (snapshot: BotSnapshot) => {
+      const counts = new Map<string, number>();
+      for (const stack of snapshot.inventory) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
+      return counts;
+    };
     const start = new Map(targets.map(({ item }) => [item, carried(before, item)]));
-    const best = new Map(start);
+    // Any item rising above its best counts, not only the targets: a chain still gathering the logs for the planks for
+    // the stairs is progressing (live 2026-10-10 run 8: "get 48 dark_oak_stairs" was stopped with 20 logs gathered).
+    const best = totals(before);
     let lastGainAt = Date.now();
     let stalled: string | null = null;
     let sampling = false;
@@ -608,8 +615,7 @@ export class Agent {
       sampling = true;
       runtime.status().then((snapshot) => {
         const now = Date.now();
-        for (const { item } of targets) {
-          const have = carried(snapshot, item);
+        for (const [item, have] of totals(snapshot)) {
           if (have > (best.get(item) ?? 0)) {
             best.set(item, have);
             lastGainAt = now;
