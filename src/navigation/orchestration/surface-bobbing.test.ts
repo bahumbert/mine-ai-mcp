@@ -24,3 +24,18 @@ test("surface bobbing tolerates only a held swimmer in the same still-water colu
   world.load({ x: 0, y: 62, z: 0 }, { stateId: 1, collisionShapes: [], traits: { liquid: "water", liquidSource: false } });
   assert.equal(isSurfaceBobbing(start, current, world), false);
 });
+
+test("a body hopping off the floor of a shallow flow is held; deep water and a current are not", () => {
+  const world = new MemoryWorld();
+  world.load({ x: 0, y: 59, z: 0 }, { stateId: 1 });
+  world.load({ x: 0, y: 60, z: 0 }, { stateId: 1, collisionShapes: [], traits: { liquid: "water", liquidSource: false } });
+  world.load({ x: 0, y: 61, z: 0 }, { stateId: 0 });
+  const start = { ...observation(), stance: "supported" as const, position: { x: 0.5, y: 60, z: 0.5 } };
+  const hop = { ...start, stance: "airborne" as const, position: { x: 0.5, y: 61.5, z: 0.5 } };
+  assert.equal(isSurfaceBobbing(start, hop, world), true);
+  assert.equal(isSurfaceBobbing(start, { ...hop, position: { x: 0.8, y: 61.5, z: 0.5 } }, world), false);
+  assert.equal(isSurfaceBobbing(start, { ...hop, position: { x: 0.5, y: 63.5, z: 0.5 } }, world), false);
+  assert.equal(isSurfaceBobbing({ ...start, stance: "airborne" }, hop, world), false);
+  world.load({ x: 0, y: 59, z: 0 }, { stateId: 1, collisionShapes: [], traits: { liquid: "water", liquidSource: false } });
+  assert.equal(isSurfaceBobbing(start, hop, world), false);
+});
