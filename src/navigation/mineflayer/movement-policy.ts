@@ -497,7 +497,10 @@ export function createMineflayerMovementPolicy(
       // to be "deep" by its own cell alone (live 2026-10-10: stranded on the floor, every way up refused as a swim
       // across deep water). So the whole water column over the feet is asked.
       const water = waterIn(world);
-      seaAnswer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z);
+      // Already swimming (feet and head in water) is at sea too: a 1-wide roofed pocket fails the open-water span
+      // test (live 2026-10-10), and refusing the sea there leaves no way out.
+      seaAnswer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z) ||
+        (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z));
       for (let y = feet.y; !seaAnswer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
         seaAnswer = isDeepOpenWater(water, feet.x, y, feet.z);
     }
