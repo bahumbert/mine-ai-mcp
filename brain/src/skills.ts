@@ -109,19 +109,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
         return collected.status === "failed" ? { status: "failed", detail: await notNear(context, step.block, collected.detail) } : collected;
       }
       case "give_item": return await give(context, step.player, step.item, step.count);
-      case "drop_item": {
-        const entries = dropEntries(step);
-        const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
-        const what = entries.map((entry) => `${entry.count ?? "all the"} ${entry.item}`).join(", ");
-        // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
-        // (owner, live 2026-10-07). Where no hole can be dug (water, bedrock), it goes on the ground as before.
-        let dropped = await once(context, "drop_item", { items, allow_equipped: true, in_a_hole: true }, why, `buried ${what}`);
-        if (dropped.status === "failed") dropped = await once(context, "drop_item", { items, allow_equipped: true }, why, `dropped ${what}`);
-        // How much room it made is what a drop is for (live 2026-10-02: 30 of 36 panes dropped freed no slot).
-        const stacks = (await context.runtime.status()).inventory.length;
-        const room = `${Math.max(0, INVENTORY_SLOTS - stacks)} of ${INVENTORY_SLOTS} inventory slots free`;
-        return dropped.status === "stopped" ? dropped : { ...dropped, detail: `${dropped.detail}; ${room}` };
-      }
+      case "drop_item": return await dropItems(context, step, why);
       case "craft_item":
         // A table close by is used where it stands; else the runtime sets a carried one down.
         await walkToStation(context, "crafting_table");
@@ -220,6 +208,60 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return { status: "done", detail: doneDetail };
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
+}
+
+/** How far a bot walks off after a ground toss, so it does not pick the items straight up again. */
+const WALK_OFF_DISTANCE = 10;
+const WALK_OFF_RANGE = 3;
+
+/** What the action says it really dropped (its `drop.dropped` counts); null when the result carries none. */
+function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): { item: string; count: number }[] | null {
+  const dropped = (result?.drop as { dropped?: unknown } | undefined)?.dropped;
+  if (!Array.isArray(dropped)) return null;
+  return dropped
+    .map((entry: { item?: unknown; dropped?: unknown }) => ({ item: String(entry.item), count: Number(entry.dropped) }))
+    .filter((entry) => entry.count > 0);
+}
+
+/**
+ * Buries the items in a pit; only a place with no pit within reach (water all around, bedrock) puts them on the ground,
+ * and then the bot walks off. The step says what was really dropped, never what was asked (live 2026-10-10 run 7: 26
+ * identical drops each "done" while the action dropped 0), and whether the inventory has room again.
+ */
+async function dropItems(context: SkillContext, step: Extract<Step, { skill: "drop_item" }>, why: string): Promise<SkillResult> {
+  const entries = dropEntries(step);
+  const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
+  const act = (input: Record<string, unknown>) => context.body.act("drop_item", { items, allow_equipped: true, ...input }, why, { signal: context.signal });
+  // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
+  // (owner, live 2026-10-07).
+  let outcome = await act({ in_a_hole: true });
+  if (context.signal.aborted) return { status: "stopped" };
+  let onGround = false;
+  if (outcome.status !== "succeeded" && (outcome.error ?? "").includes("[DROP_HOLE_UNAVAILABLE]")) {
+    outcome = await act({});
+    if (context.signal.aborted) return { status: "stopped" };
+    onGround = true;
+  }
+  const dropped = reallyDropped(outcome.result);
+  const total = dropped === null ? (outcome.status === "succeeded" ? 1 : 0) : dropped.reduce((sum, entry) => sum + entry.count, 0);
+  if (total === 0) return { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` };
+  const what = dropped === null ? entries.map((entry) => `${entry.count ?? "all the"} ${entry.item}`).join(", ") : dropped.map((entry) => `${entry.count} ${entry.item}`).join(", ");
+  let walkedOff = "";
+  if (onGround) {
+    const here = (await context.runtime.status()).position;
+    walkedOff = ", but could not walk away from them";
+    for (const [dx, dz] of [[WALK_OFF_DISTANCE, 0], [-WALK_OFF_DISTANCE, 0], [0, WALK_OFF_DISTANCE], [0, -WALK_OFF_DISTANCE]]) {
+      const away = await context.body.act("navigate", navigateInput({ x: here.x + dx!, y: here.y, z: here.z + dz! }, WALK_OFF_RANGE), "Walk away from the items I dropped so I do not pick them up again.", { signal: context.signal });
+      if (context.signal.aborted) return { status: "stopped" };
+      if (away.status === "succeeded") { walkedOff = " and walked away from them"; break; }
+    }
+  }
+  // How much room it made is what a drop is for (live 2026-10-02: 30 of 36 panes dropped freed no slot); say so, or the
+  // model does not see the problem solved (owner, live 2026-10-10).
+  const free = Math.max(0, INVENTORY_SLOTS - (await context.runtime.status()).inventory.length);
+  const room = free === 0 ? "the inventory is still full" : `the inventory has room again: ${free} of ${INVENTORY_SLOTS} slots free`;
+  const failedPart = outcome.status === "partial" && outcome.error !== null ? ` (${outcome.error})` : "";
+  return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? ` on the ground${walkedOff}` : ""}${failedPart}; ${room}` };
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
