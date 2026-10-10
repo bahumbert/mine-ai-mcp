@@ -157,3 +157,27 @@ test("a bridge over a deep drop is never a mining target, the same block on the 
   bot.entity.position = new Vec3(1.5, 65, 0.5);
   assert.deepEqual(reasonFor(1), { kind: "prohibited", reason: "the block the bot stands on" });
 });
+
+test("standing mid-bridge over a 20-deep gap, no bridge block is a target; cobblestone on the ground still is", () => {
+  const bot = botFixture();
+  const blocks = blockClass(bot);
+  // Bridge at y 64, x 0..9 along z 0, over a gap down to y 44; ground at y 63 for x <= -1 and x >= 10, and cobblestone 15 away.
+  const cell = (x: number, y: number, z: number) =>
+    y === 64 && z === 0 && x >= 0 && x <= 9 ? "cobblestone"
+      : y === 64 && z === 0 && x === 25 ? "cobblestone"
+        : (x <= -1 || x >= 10) && y <= 63 ? "stone" : y <= 43 ? "stone" : "air";
+  bot.blockAt = (position) => {
+    const block = blocks.fromStateId(bot.registry.blocksByName[cell(position.x, position.y, position.z)]!.defaultState, 0);
+    block.position = position;
+    return block;
+  };
+  const world = {
+    blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!),
+    revision: 0, subscribe: () => () => {},
+  };
+  bot.entity.position = new Vec3(5.5, 65, 0.5);
+  const policy = createMineflayerMovementPolicy(bot);
+  const verdict = (x: number) => evaluateMineTarget(bot, policy, bot.blockAt(new Vec3(x, 64, 0))!, world, 0).kind;
+  for (let x = 0; x <= 9; x += 1) assert.equal(verdict(x), "prohibited", `bridge block ${x}`);
+  assert.equal(verdict(25), "mineable", "the cobblestone on the ground");
+});
