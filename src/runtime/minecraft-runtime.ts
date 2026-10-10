@@ -43,6 +43,7 @@ import { attachEndermanGazeControl } from "../survival/guards/enderman-gaze.js";
 import { createCombatController, createHostileStepFieldProvider, type CombatController } from "../survival/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
+import { isInWater } from "../survival/perception/body.js";
 import { attachDragonReflex } from "../survival/reflexes/dragon.js";
 import { attachFireReflex } from "../survival/reflexes/fire.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
@@ -305,7 +306,7 @@ export async function createMinecraftRuntime(
   const protectedRegions = new ProtectedRegionStore(botData);
   setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
-  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), position: () => bot.entity?.position ? {
+  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), inWater: () => isInWater(bot), position: () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null });
   const sampleProgress = () => runner.samplePosition();

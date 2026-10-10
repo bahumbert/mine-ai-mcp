@@ -8,6 +8,7 @@
  * kick settled it. Whatever spins, the work it reports does not change, and
  * that is what this watches, the way `smelt_item` watches cook progress.
  */
+import { AnchorTravel } from "../session/anchor-travel.js";
 import type { Position3 } from "../utils/index.js";
 
 /** How often the work and the position are sampled when the caller does not say. */
@@ -24,6 +25,8 @@ export interface StallWatchOptions {
   /** Anything that changes when the action makes progress, such as `blocks broken:items gained`. */
   readonly work: () => string | number;
   readonly position: () => Position3;
+  /** Whether the bot is in water now: bobbing there is not walking. Default: never. */
+  readonly inWater?: () => boolean;
   readonly stallMs: number;
   readonly sampleMs?: number;
   readonly describe: (facts: StallFacts) => string;
@@ -43,12 +46,12 @@ export function watchForStall(options: StallWatchOptions): StallWatch {
   let reason: string | null = null;
   let lastWork = options.work();
   let lastChange = Date.now();
-  let last = options.position();
+  const travel = new AnchorTravel();
+  travel.add(options.position(), false);
   let walked = 0;
   const timer = setInterval(() => {
     const here = options.position();
-    walked += Math.hypot(here.x - last.x, here.y - last.y, here.z - last.z);
-    last = here;
+    walked += travel.add(here, options.inWater?.() ?? false);
     const work = options.work();
     if (work !== lastWork) {
       lastWork = work;

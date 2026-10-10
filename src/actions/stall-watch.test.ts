@@ -47,3 +47,21 @@ test("closing the watch stops its sampling, so a settled run is never aborted af
   await pause(80);
   assert.equal(watch.signal.aborted, false);
 });
+
+test("a bot bobbing in water at one x/z walked nothing, however far it moved up and down", async () => {
+  let tick = 0;
+  const watch = watchForStall({
+    work: () => 0,
+    position: () => ({ x: 0.5, y: 56 + (tick++ % 2) * 6, z: 0.5 }),
+    inWater: () => true,
+    stallMs: 60,
+    sampleMs: 5,
+    describe: ({ walked }) => `walked ${walked}`,
+  });
+  try {
+    await pause(150);
+    assert.equal(watch.reason(), "walked 0");
+  } finally {
+    watch.close();
+  }
+});
