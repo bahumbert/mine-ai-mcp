@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
-import { admitsDive, holdSwimDepth, openWaterSurface, swimExitPath, swimTravelTicks } from "./swimming.js";
+import { admitsDive, holdSwimDepth, openWaterSurface, swimBreathPath, swimExitPath, swimTravelTicks } from "./swimming.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { WELL_FED, planningStart } from "../../test-support/navigation.js";
@@ -115,4 +115,15 @@ test("an exit farther than the radius is not found, and a blocked column is cros
   const sea = slice(overhang);
   assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [], 2), null);
   assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [{ x: 4, z: 0 }])?.at(-1)?.x, 5);
+});
+
+test("a flooded roofed cell reaches the one-cell air pocket in reach, and breath is free once the head is dry", () => {
+  // Flooded and roofed all over; the swimmer on the floor at x 1, an air pocket one cell wide and high at x 4, y 3.
+  const pocket = slice(["#########", "~~~~.~~~~".replace("~~~~.~~~~", "####.####"), "~~~~~~~~~", "~~~~~~~~~", "#########"]);
+  const path = swimBreathPath(pocket, { x: 1, y: 1, z: 0 });
+  assert.ok(path && path.length > 0, "the pocket is a breathing cell");
+  assert.deepEqual(path.at(-1), { x: 4, y: 2, z: 0 }, "feet in water under the pocket, head in its air");
+  assert.deepEqual(swimBreathPath(pocket, { x: 4, y: 2, z: 0 }), [], "head already dry: nothing to swim");
+  const sealed = slice(["#####", "#~~~#", "#~~~#", "#####"]);
+  assert.equal(swimBreathPath(sealed, { x: 2, y: 1, z: 0 }), null, "no air in reach, no breathing cell");
 });
