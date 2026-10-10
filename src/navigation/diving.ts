@@ -16,7 +16,13 @@ interface DiveSession {
   returning: boolean;
   stop: AbortController;
   completedWork: number;
+  /** The air metadata stayed absent through a submerged observation: the server sends it when it changes, so it is full. */
+  unchangedAir: boolean;
 }
+
+const FULL_AIR_TICKS = 300;
+/** How long a submerged bot with no air metadata is watched before the air is taken as unchanged. */
+const AIR_OBSERVATION_TICKS = 40;
 
 /** Scoped declaration shared with survival; never a switch that removes the reflex. */
 export class Diving {
@@ -70,7 +76,7 @@ export class Diving {
   async run(options: NavigateOptions, navigate: Navigate) {
     if (this.#session) throw new Error("Navigation already owns a dive session.");
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled: new AbortController(), completedWork: 0 };
+      cancelled: new AbortController(), completedWork: 0, unchangedAir: false };
     this.#session = session;
     const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
@@ -82,7 +88,7 @@ export class Diving {
       if (!session.owned || session.returning || session.stop.signal.aborted) return;
       const feet = this.bot.entity.position.floored();
       const ascent = swimAscent(this.#read, feet);
-      const air = airSupplyTicks(this.bot);
+      const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
       // With a lost corridor the survival backstop must take over; do not call it a planned return.
       if (!ascent) return;
       if (this.bot.blockAt(feet.offset(0, 1, 0))?.name === "water" &&
@@ -106,11 +112,23 @@ export class Diving {
           }
         } finally { this.bot.setControlState("jump", false); }
       }
+      // Roofed, there is no surface to breathe at to make the server report the air (live 2026-10-10: a bot stuck on
+      // the sea floor under an overhang never got a dive budget, so no route out). The server sends the air whenever
+      // it changes, so a head kept under water for a moment with none sent means it is not running down.
+      if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface === null) {
+        for (let ticks = 0; ticks < AIR_OBSERVATION_TICKS && airSupplyTicks(this.bot) === null &&
+          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water"; ticks++) {
+          options.signal?.throwIfAborted();
+          await waitForPhysicsTicks(this.bot, 1, lifetime);
+        }
+        session.unchangedAir = airSupplyTicks(this.bot) === null &&
+          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
+      }
       for (;;) {
         options.signal?.throwIfAborted();
         if (options.stopSignal?.aborted) return { status: "stopped" as const,
           reason: String(options.stopSignal.reason), elapsedMs: Date.now() - started };
-        const air = airSupplyTicks(this.bot);
+        const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
         session.owned = session.owned || (options.movements.allowSwimming && air !== null && swimAscent(this.#read, origin.floored()) !== null &&
