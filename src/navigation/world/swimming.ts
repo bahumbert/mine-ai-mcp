@@ -72,26 +72,24 @@ const STEPS = [
 ] as const;
 
 /**
- * The swim from `start` to the nearest cell whose column is open all the way up: breadth-first through the water and
- * air a body fits in (two cells high), so an overhang is swum round, never judged by a straight line. The cells run
- * from the first stroke to the exit; empty when the start is itself under open sky; null when no exit lies within the
- * radius. `blocked` names columns already tried in vain: they are crossed but never chosen.
+ * The nearest cell, by breadth-first swim through the water and air a body fits in (two cells high), that `goal`
+ * accepts: the cells run from the first stroke to it; empty when the start is itself accepted; null when none lies
+ * within the radius.
  */
-export function swimExitPath(
+function swimPath(
   read: SwimCellReader,
   start: BlockPosition,
-  blocked: readonly { x: number; z: number }[] = [],
-  radius = SWIM_EXIT_RADIUS,
+  goal: (cell: BlockPosition) => boolean,
+  radius: number,
 ): BlockPosition[] | null {
   const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
-  const isBlocked = (x: number, z: number) => blocked.some((column) => column.x === x && column.z === z);
   const fits = (x: number, y: number, z: number) => passable(read(x, y, z)) && passable(read(x, y + 1, z));
   const parents = new Map<string, string | null>([[key(start.x, start.y, start.z), null]]);
   const cells = new Map<string, BlockPosition>([[key(start.x, start.y, start.z), start]]);
   const queue = [start];
   for (let head = 0; head < queue.length; head++) {
     const cell = queue[head]!;
-    if (!isBlocked(cell.x, cell.z) && columnOpen(read, cell.x, cell.y + 1, cell.z)) {
+    if (goal(cell)) {
       const path: BlockPosition[] = [];
       for (let at: string | null | undefined = key(cell.x, cell.y, cell.z); at; at = parents.get(at))
         if (parents.get(at) !== null) path.unshift(cells.get(at)!);
@@ -109,6 +107,32 @@ export function swimExitPath(
   }
   return null;
 }
+
+/**
+ * The swim from `start` to the nearest cell whose column is open all the way up, so an overhang is swum round, never
+ * judged by a straight line. Empty when the start is itself under open sky; null when no exit lies within the radius.
+ * `blocked` names columns already tried in vain: they are crossed but never chosen.
+ */
+export function swimExitPath(
+  read: SwimCellReader,
+  start: BlockPosition,
+  blocked: readonly { x: number; z: number }[] = [],
+  radius = SWIM_EXIT_RADIUS,
+): BlockPosition[] | null {
+  const isBlocked = (x: number, z: number) => blocked.some((column) => column.x === x && column.z === z);
+  return swimPath(read, start, (cell) => !isBlocked(cell.x, cell.z) && columnOpen(read, cell.x, cell.y + 1, cell.z), radius);
+}
+
+/**
+ * The swim from `start` to the nearest cell where the body fits and the head is in air, an air pocket included
+ * (`swimExitPath` wants a column open to the sky, which a roofed stream or pocket never has). Empty when the head is
+ * already in air; null when no such cell lies within the radius.
+ */
+export function swimBreathPath(read: SwimCellReader, start: BlockPosition, radius = SWIM_EXIT_RADIUS): BlockPosition[] | null {
+  const bodyFits = (cell: BlockPosition) => passable(read(cell.x, cell.y, cell.z)) && read(cell.x, cell.y + 1, cell.z) === "air";
+  return swimPath(read, start, bodyFits, radius);
+}
+
 
 export function swimTravelTicks(from: Position3, to: Position3): number {
   return Math.hypot(to.x - from.x, to.z - from.z) * SWIM_HORIZONTAL_TICKS +
@@ -136,6 +160,18 @@ function exitTravelTicks(from: BlockPosition, path: readonly BlockPosition[]): n
   return ticks;
 }
 
+/** Ticks of held breath on a swim to a breathing cell: a stroke costs only while the head is under water at either end. */
+function breathTravelTicks(read: SwimCellReader, from: BlockPosition, path: readonly BlockPosition[]): number {
+  let ticks = 0;
+  let at = from;
+  for (const next of path) {
+    if (read(at.x, at.y + 1, at.z) === "water" || read(next.x, next.y + 1, next.z) === "water")
+      ticks += (ticks === 0 ? 8 : 0) + (next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS);
+    at = next;
+  }
+  return ticks;
+}
+
 /** The way up to air from a submerged cell: the cell where the head breaks the surface, and the ticks the swim takes. */
 export interface SwimAscent {
   readonly surface: BlockPosition;
@@ -143,7 +179,8 @@ export interface SwimAscent {
 }
 
 /**
- * The way up from `feet`: straight up an open column, or, under a roof, the swim to the nearest open column
+ * The way up from `feet`: straight up an open column, else the nearest cell with the head in air (an air pocket or a
+ * stream with air round the head counts), else, under a roof, the swim to the nearest open column
  * (`swimExitPath`) and the rise there. Null when neither leads to air (live 2026-10-10: a bot on the sea floor under
  * an overhang had no ascent for the planner, so no route out).
  */
@@ -151,6 +188,8 @@ export function swimAscent(read: WorldView["blockAt"], feet: BlockPosition): Swi
   const direct = openWaterSurface(read, feet);
   if (direct !== null) return { surface: direct, ticks: swimTravelTicks(feet, direct) };
   const cells = swimCellsOf(read);
+  const breath = swimBreathPath(cells, feet);
+  if (breath !== null) return { surface: breath.at(-1) ?? feet, ticks: breathTravelTicks(cells, feet, breath) };
   const path = swimExitPath(cells, feet);
   if (path === null) return null;
   const exit = path.at(-1) ?? feet;
