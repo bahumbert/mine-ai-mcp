@@ -10,6 +10,7 @@ import type { ActionContext } from "../action.js";
 import type { DroppedItem, HoleClosure } from "./contract.js";
 import { type InventoryItem, type placeSolidBlockInto } from "../../world/placement.js";
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
+import { protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 
 const SIDES = [
   [1, 0],
@@ -52,17 +53,21 @@ function dryOpening(bot: Bot, bottom: Vec3): boolean {
   );
 }
 
-/** Make an enclosed pit beside the body, clearing a tunnel wall above it when needed. */
-export async function prepareDisposalHole(
-  bot: Bot,
-  movements: MovementPolicy,
-  breakInPlace: BreakBlockInPlace,
-  context: ActionContext,
-): Promise<Vec3> {
-  const feet = bot.entity.position.floored();
-  if (!bot.entity.onGround || !wall(bot, feet.offset(0, -1, 0)))
-    throw new DisposalHoleError("[DROP_HOLE_UNAVAILABLE] The bot is not standing on full, dry ground.");
-  const position = bot.entity.position;
+/** How far from the bot a stance with a fit pit is looked for, in blocks. */
+export const HOLE_SEARCH_RADIUS = 8;
+
+const openingCells = (cell: Vec3) => [cell.offset(0, 3, 0), cell.offset(0, 2, 0), cell.offset(0, 1, 0), cell];
+
+/** No cell of the pit or its opening may lie in a protected region, the bot's own included. */
+function inProtectedRegion(bot: Bot, bottom: Vec3): boolean {
+  const regions = readProtectedRegions(bot);
+  if (regions.length === 0) return false;
+  const dimension = bot.game?.dimension ?? "";
+  return openingCells(bottom).some((cell) => protectedRegionAt(regions, dimension, cell.x, cell.y, cell.z) !== null);
+}
+
+/** The pit beside a stance (its feet cell and the body's exact position), when one of its four cells fits. */
+function pitBeside(bot: Bot, feet: Vec3, position: Vec3): Vec3 | null {
   const candidates = SIDES.map(([dx, dz]) => feet.offset(dx, -2, dz))
     // Never remove any ground beneath the body's footprint at a cell edge.
     .filter(
@@ -71,19 +76,69 @@ export async function prepareDisposalHole(
         Math.abs(position.z - cell.z - 0.5) >= 0.5 + PLAYER_HALF_WIDTH,
     )
     .sort((a, b) => a.offset(0.5, 0, 0.5).distanceTo(position) - b.offset(0.5, 0, 0.5).distanceTo(position));
-  const opening = (cell: Vec3) => [cell.offset(0, 3, 0), cell.offset(0, 2, 0), cell.offset(0, 1, 0), cell];
-  const bottom = candidates.find((cell) => {
-    if (!enclosed(bot, cell) || !dryOpening(bot, cell)) return false;
-    return opening(cell).every((position) => {
-      if (air(bot, position)) return true;
-      const block = bot.blockAt(position);
-      if (!block || !wall(bot, position)) return false;
-      const { traits } = observeMineflayerBlock(block);
-      return traits.safeToBreak && !traits.interactive;
-    });
-  });
-  if (!bottom)
-    throw new DisposalHoleError("[DROP_HOLE_UNAVAILABLE] No adjacent terrain can be excavated into a dry, enclosed disposal pit.");
+  return (
+    candidates.find((cell) => {
+      if (!enclosed(bot, cell) || !dryOpening(bot, cell) || inProtectedRegion(bot, cell)) return false;
+      return openingCells(cell).every((position) => {
+        if (air(bot, position)) return true;
+        const block = bot.blockAt(position);
+        if (!block || !wall(bot, position)) return false;
+        const { traits } = observeMineflayerBlock(block);
+        return traits.safeToBreak && !traits.interactive;
+      });
+    }) ?? null
+  );
+}
+
+/** Standable full dry ground with free body room, outside every protected region. */
+function standable(bot: Bot, feet: Vec3): boolean {
+  if (!wall(bot, feet.offset(0, -1, 0)) || !air(bot, feet) || !air(bot, feet.offset(0, 1, 0))) return false;
+  return protectedRegionAt(readProtectedRegions(bot), bot.game?.dimension ?? "", feet.x, feet.y, feet.z) === null;
+}
+
+/** The nearest other stance within the search radius that has a fit pit beside it. */
+function nearestPitStance(bot: Bot): Vec3 | null {
+  const origin = bot.entity.position.floored();
+  let best: { stance: Vec3; cost: number } | null = null;
+  for (let dx = -HOLE_SEARCH_RADIUS; dx <= HOLE_SEARCH_RADIUS; dx++)
+    for (let dz = -HOLE_SEARCH_RADIUS; dz <= HOLE_SEARCH_RADIUS; dz++)
+      for (const dy of [0, -1, 1, -2, 2]) {
+        const cost = Math.hypot(dx, dz) + Math.abs(dy);
+        if (Math.hypot(dx, dz) > HOLE_SEARCH_RADIUS || cost === 0 || (best && cost >= best.cost)) continue;
+        const stance = origin.offset(dx, dy, dz);
+        if (standable(bot, stance) && pitBeside(bot, stance, stance.offset(0.5, 0, 0.5))) best = { stance, cost };
+      }
+  return best?.stance ?? null;
+}
+
+/**
+ * Make an enclosed pit beside the body, clearing a tunnel wall above it when needed. When none of the four cells
+ * beside the feet fits (or the bot is not on dry ground), the nearest stance within `HOLE_SEARCH_RADIUS` blocks that
+ * has one is walked to through `moveTo` (which returns a failure reason, or nothing), and the pit is dug there.
+ */
+export async function prepareDisposalHole(
+  bot: Bot,
+  movements: MovementPolicy,
+  breakInPlace: BreakBlockInPlace,
+  context: ActionContext,
+  moveTo?: (stance: Vec3) => Promise<string | undefined>,
+): Promise<Vec3> {
+  const feet = bot.entity.position.floored();
+  let bottom =
+    bot.entity.onGround && wall(bot, feet.offset(0, -1, 0)) ? pitBeside(bot, feet, bot.entity.position) : null;
+  if (!bottom) {
+    const stance = moveTo ? nearestPitStance(bot) : null;
+    if (!stance)
+      throw new DisposalHoleError(
+        `[DROP_HOLE_UNAVAILABLE] No place within ${HOLE_SEARCH_RADIUS} blocks has dry, enclosed ground that can be excavated into a disposal pit outside protected regions.`,
+      );
+    const failure = await moveTo!(stance);
+    context.signal?.throwIfAborted();
+    if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk to a place for the pit: ${failure}`);
+    bottom = pitBeside(bot, bot.entity.position.floored(), bot.entity.position);
+    if (!bottom) throw new DisposalHoleError("[DROP_HOLE_CHANGED] The place chosen for the pit no longer fits on arrival.");
+  }
+  const opening = openingCells;
   for (const position of opening(bottom)) {
     context.signal?.throwIfAborted();
     if (air(bot, position)) continue;

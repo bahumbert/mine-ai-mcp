@@ -6,6 +6,7 @@ import minecraftData from "minecraft-data";
 import { Vec3 } from "vec3";
 import { blockClass } from "../../navigation/mineflayer/world.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { prepareDisposalHole, observeHoleDrops, sealDisposalHole, snapshotDroppedCounts } from "./disposal-hole.js";
 
 const registry = minecraftData("1.21.4");
@@ -185,5 +186,84 @@ test("hole evidence counts merged stack growth and ignores existing items", asyn
       50,
     ),
     false,
+  );
+});
+
+/** Water over the pit layer around the bot, so no cell within `radius` blocks fits a pit. */
+function floodAround(changed: Map<string, string>, radius: number) {
+  for (let x = -radius; x <= radius; x++)
+    for (let z = -radius; z <= radius; z++) changed.set(new Vec3(x, 62, z).toString(), "water");
+}
+
+test("a pit is dug at the nearest fit stance when none beside the feet fits", async () => {
+  const { bot, changed } = ground();
+  floodAround(changed, 4);
+  const moves: Vec3[] = [];
+  const digs: Vec3[] = [];
+  const bottom = await prepareDisposalHole(
+    bot,
+    createMovementPolicy(),
+    async ({ position }) => {
+      digs.push(new Vec3(position.x, position.y, position.z));
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    {},
+    async (stance) => {
+      moves.push(stance);
+      bot.entity.position = stance.offset(0.5, 0, 0.5);
+      return undefined;
+    },
+  );
+  assert.equal(moves.length, 1);
+  assert.ok(Math.hypot(moves[0]!.x, moves[0]!.z) >= 4.5, "the stance is outside the flooded patch");
+  assert.ok(Math.hypot(moves[0]!.x, moves[0]!.z) <= 8);
+  assert.equal(Math.abs(bottom.x - moves[0]!.x) + Math.abs(bottom.z - moves[0]!.z), 1, "the pit is beside the stance");
+  assert.equal(digs.length, 2, "the pit is dug where the bot now stands");
+});
+
+test("a pit cell inside a protected region is never chosen, the bot's own region included", async () => {
+  const { bot, changed } = ground();
+  Object.assign(bot, { game: { dimension: "overworld" } });
+  setProtectedRegionsProvider(bot, () => [
+    {
+      regionId: 1,
+      dimension: "overworld",
+      min: { x: -3, y: 55, z: -3 },
+      max: { x: 3, y: 70, z: 3 },
+      owner: "someone",
+      label: "house",
+    },
+  ]);
+  const digs: Vec3[] = [];
+  const bottom = await prepareDisposalHole(
+    bot,
+    createMovementPolicy(),
+    async ({ position }) => {
+      digs.push(new Vec3(position.x, position.y, position.z));
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    {},
+    async (stance) => {
+      bot.entity.position = stance.offset(0.5, 0, 0.5);
+      return undefined;
+    },
+  );
+  for (const cell of [bottom, ...digs]) assert.ok(Math.max(Math.abs(cell.x), Math.abs(cell.z)) > 3, `${cell} is outside`);
+});
+
+test("nothing within eight blocks that fits reports the radius", async () => {
+  const { bot, changed } = ground();
+  floodAround(changed, 12);
+  await assert.rejects(
+    prepareDisposalHole(
+      bot,
+      createMovementPolicy(),
+      async () => assert.fail("no dig"),
+      {},
+      async () => assert.fail("no walk"),
+    ),
+    /DROP_HOLE_UNAVAILABLE.*within 8 blocks/,
   );
 });

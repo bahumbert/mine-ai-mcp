@@ -235,6 +235,30 @@ function rememberDiscards(bot: Bot, baseline: ReadonlySet<number>, discarded: Di
   discarded.remember(ids);
 }
 
+/** Walk to the feet cell of a stance chosen for the pit; the failure reason, or nothing once there. */
+async function walkToStance(
+  bot: Bot,
+  stance: Vec3,
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<string | undefined> {
+  const goal = customGoal(
+    `pit-stance:${stance.x},${stance.y},${stance.z}`,
+    (node) => node.feet.x === stance.x && node.feet.y === stance.y && node.feet.z === stance.z,
+    (node) =>
+      (Math.abs(node.feet.x - stance.x) + Math.abs(node.feet.z - stance.z) + Math.abs(node.feet.y - stance.y)) *
+      HORIZONTAL_TICKS_PER_BLOCK,
+  );
+  try {
+    const route = await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal });
+    const here = bot.entity.position.floored();
+    return here.equals(stance) ? undefined : describeNavigation(route);
+  } catch (cause) {
+    context.signal?.throwIfAborted();
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
 /** Walk clear of the hole so the next request's route does not start beside, or in, the pit. */
 async function stepAwayFromHole(
   bot: Bot,
@@ -324,7 +348,13 @@ export async function dropItem(
       if (request.destination.kind === "player") {
         recipient = await approachPlayer(bot, request.destination.name, dependencies, context);
       } else {
-        hole = await prepareDisposalHole(bot, dependencies.createMovements(bot), dependencies.breakInPlace, context);
+        hole = await prepareDisposalHole(
+          bot,
+          dependencies.createMovements(bot),
+          dependencies.breakInPlace,
+          context,
+          (stance) => walkToStance(bot, stance, dependencies, context),
+        );
       }
     } catch (cause) {
       context.signal?.throwIfAborted();
