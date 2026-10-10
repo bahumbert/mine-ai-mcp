@@ -137,6 +137,24 @@ test("the same step done again and again ends the objective as changing nothing 
   }
 });
 
+test("a drop that worked and is repeated ends the objective although the inventory changes in between", async (t) => {
+  // Live 2026-10-10 run 7: drop, pick the items up again, drop... 26 times: the changing inventory counted as gaining.
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "coal", count: 16 }] };
+  let count = 16;
+  for (let i = 0; i < 3; i++) {
+    runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "coal", dropped: 16 }], effect: () => { count += 1; runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "coal", count }] }; } });
+  }
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "make room" }, { say: "I keep dropping the same thing, sorry!" });
+  const drop = { step: { skill: "drop_item", items: [{ item: "coal" }] } };
+  action.reply(drop, drop, drop, drop);
+  await agent.handle(say("Steve", "make room"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(action.requests.length, 3);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /changed nothing 3 times in a row/u);
+});
+
 test("a step set aside for an order stays interrupted", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };

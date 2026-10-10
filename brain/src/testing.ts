@@ -48,7 +48,7 @@ export class FakeRuntime implements BotRuntime {
   /** The action result a failing tool settles with (e.g. a `build_structure` audit). */
   failureResults: Partial<Record<ForegroundTool, Readonly<Record<string, unknown>>>> = {};
   /** What each next `drop_item` settles with (the runtime's `drop.dropped` counts); none queued: a bare success. */
-  dropOutcomes: { readonly status: "succeeded" | "partial" | "failed"; readonly error: string | null; readonly dropped: readonly { readonly item: string; readonly dropped: number }[] }[] = [];
+  dropOutcomes: { readonly status: "succeeded" | "partial" | "failed"; readonly error: string | null; readonly dropped: readonly { readonly item: string; readonly dropped: number }[]; readonly effect?: () => void }[] = [];
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   /** The next call of that tool fails once with this error, after `effect` (what it got done before failing). */
@@ -405,6 +405,7 @@ export class FakeRuntime implements BotRuntime {
     }
     if (action.tool === "drop_item" && this.dropOutcomes.length > 0) {
       const outcome = this.dropOutcomes.shift()!;
+      outcome.effect?.();
       return { state: "settled", actionId, status: outcome.status, error: outcome.error, result: { status: outcome.status, drop: { dropped: outcome.dropped } } };
     }
     const once = this.failNext[action.tool];
