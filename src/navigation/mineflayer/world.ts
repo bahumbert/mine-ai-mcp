@@ -120,6 +120,7 @@ function traits(block: MineflayerBlock): BlockTraits {
     falling: block.name === "sand" || block.name === "gravel" || block.name.endsWith("concrete_powder"),
     yielding: block.name === "big_dripleaf",
     damaging: DAMAGING.has(block.name) || liquid === "lava",
+    entangling: block.name === "cobweb",
     interactive:
       INTERACTIVE.has(block.name) ||
       openable ||

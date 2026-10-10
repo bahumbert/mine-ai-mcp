@@ -576,3 +576,39 @@ test("a route stopped at the shore of deep open water, with no boat carried, say
     /^\[NAVIGATION_DEEP_WATER\] The way to 60, 0 crosses deep open water from about 10, 0 \(31\+ blocks of it seen\); no boat is carried/u,
   );
 });
+
+test("a route with no path is planned once more with the common block the bot carries when the policy list holds none", async () => {
+  const { bot } = botFixture();
+  const registry = minecraftData("1.21.4");
+  const stone = { name: "stone", count: 80, type: registry.itemsByName.stone!.id };
+  bot.registry = registry as never;
+  (bot as { version: string }).version = "1.21.4";
+  bot.inventory = { items: () => [stone], count: (type: number) => (type === stone.type ? stone.count : 0) } as never;
+  const movementOptions: unknown[] = [];
+  let attempts = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    attempts++;
+    if (attempts === 1) return { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true };
+    bot.entity.position.set(5.5, 64, 0.5);
+    stone.count = 74;
+    return { status: "completed", elapsedMs: 1 };
+  }, movementOptions));
+  const output = await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1 });
+  assert.equal(output.result.status, "succeeded");
+  assert.deepEqual(movementOptions.map((options) => (options as { scaffoldFallback?: boolean }).scaffoldFallback), [undefined, true]);
+  assert.match(formatNavigateResult(output.result as never), /stone: 80 → 74 \(used 6\)/);
+});
+
+test("a route with no path is not replanned with a fallback when the policy list already holds a scaffold block", async () => {
+  const { bot } = botFixture();
+  const registry = minecraftData("1.21.4");
+  const carried = [{ name: "dirt", count: 4, type: registry.itemsByName.dirt!.id }, { name: "stone", count: 80, type: registry.itemsByName.stone!.id }];
+  bot.registry = registry as never;
+  bot.inventory = { items: () => carried, count: () => 0 } as never;
+  const movementOptions: unknown[] = [];
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => (
+    { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true }
+  ), movementOptions));
+  await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1 });
+  assert.equal(movementOptions.length, 1);
+});

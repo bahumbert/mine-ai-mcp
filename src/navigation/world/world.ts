@@ -63,6 +63,11 @@ export interface BlockTraits {
   readonly yielding: boolean;
   /** Contact harms the player: magma, fire, cactus, berry bushes. */
   readonly damaging: boolean;
+  /**
+   * Contact holds the body in place until the block is broken: a cobweb. It has no collision, yet a route cannot walk
+   * through it, so it is a block to dig, never a free cell.
+   */
+  readonly entangling?: boolean;
   /** Right-clicking this block opens or operates it instead of placing against it. */
   readonly interactive: boolean;
   /** How far a parkour jump can start from this block's top. */
