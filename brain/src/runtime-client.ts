@@ -176,6 +176,8 @@ export type ToolClass = "pickaxe" | "shovel" | "axe" | "hoe";
 export interface BlockKind {
   readonly tool: ToolClass | null;
   readonly solid: boolean;
+  /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's geometry. */
+  readonly fullCube?: boolean;
   readonly harvest: readonly string[] | null;
   /** The game's block tags it belongs to (`logs`, `crops`...); only a `blockKinds` lookup reports them. */
   readonly tags?: readonly string[];
@@ -380,9 +382,10 @@ const blockDropsSchema = z.object({
 const blockKindSchema = z.object({
   tool: z.enum(["pickaxe", "shovel", "axe", "hoe"]).nullable(),
   solid: z.boolean(),
+  full_cube: z.boolean().optional(),
   harvest: z.array(z.string()).nullable().default(null),
   tags: z.array(z.string()).optional(),
-});
+}).transform(({ full_cube, ...kind }) => (full_cube === undefined ? kind : { ...kind, fullCube: full_cube }));
 
 const viewBoxSchema = z.object({
   result: z.object({

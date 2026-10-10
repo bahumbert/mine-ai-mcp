@@ -57,7 +57,8 @@ Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, c
 come back), eat, equip, sleep, hunt
 mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
 respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
-blocks), make a crop farm or tend one it made (below). A persona
+blocks; `materials` names other full blocks per role for a temporary house) and `improve_house` it later (swap the
+temporary parts back to the style's blocks, in place), make a crop farm or tend one it made (below). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 

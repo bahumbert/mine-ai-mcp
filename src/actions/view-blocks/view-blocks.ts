@@ -10,7 +10,9 @@
  * a glance where a list of eighty-one does not.
  */
 import type { Bot } from "mineflayer";
+import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
+import { observeMineflayerBlock } from "../../navigation/index.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { findLoadedBlockPositions, isLiquid } from "../../world/index.js";
 import { defineAction } from "../action.js";
@@ -101,7 +103,8 @@ export function kindOf(bot: Pick<Bot, "registry">, name: string): BlockKind | nu
   // Item ids follow the game's tier order (wooden, stone, golden, iron, diamond, netherite): the lowest is the cheapest.
   const ids = Object.keys(block.harvestTools ?? {}).map(Number).sort((a, b) => a - b);
   const harvest = ids.map((id) => bot.registry.items[id]?.name).filter((item): item is string => item !== undefined);
-  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", harvest: harvest.length > 0 ? harvest : null };
+  const fullCube = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(block.defaultState, 0)).geometry.fullCube;
+  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", full_cube: fullCube, harvest: harvest.length > 0 ? harvest : null };
 }
 
 function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNullable<ViewBlocksReport["box"]> {
@@ -125,7 +128,7 @@ function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNulla
     kinds: Object.fromEntries(
       [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => [
         name,
-        kindOf(bot, name) ?? { tool: null, solid: false, harvest: null },
+        kindOf(bot, name) ?? { tool: null, solid: false, full_cube: false, harvest: null },
       ]),
     ),
   };
@@ -234,7 +237,7 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     for (const [name, kind] of Object.entries(blocks.kinds)) {
       const harvest = kind.harvest === null ? "drops by hand" : `drops only with ${kind.harvest.join(" or ")}`;
       const tags = kind.tags.length === 0 ? "" : `; tags: ${kind.tags.join(", ")}`;
-      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}${tags}`);
+      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.full_cube ? "full cube" : "not a full cube"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}${tags}`);
     }
   }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);

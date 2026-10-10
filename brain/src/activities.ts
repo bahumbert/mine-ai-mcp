@@ -103,7 +103,8 @@ function actionActivity(action: ActionTime, facts: ActivityFacts): Activity | nu
  */
 export function activityOf(step: Step, actions: readonly ActionTime[], facts: ActivityFacts): Activity | null {
   switch (step.skill) {
-    case "build": return "building";
+    case "build":
+    case "improve_house": return "building";
     case "level_area": return "terraforming";
     case "farm": return "farming";
     case "hunt": return facts.hostile.has(step.mob) ? "mob_combat" : "hunting";
@@ -139,6 +140,7 @@ export function activityOf(step: Step, actions: readonly ActionTime[], facts: Ac
  */
 export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> = {
   build: ["building"],
+  improve_house: ["building"],
   level_area: ["terraforming"],
   farm: ["farming"],
   explore: ["exploring"],

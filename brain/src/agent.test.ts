@@ -790,3 +790,31 @@ test("a step whose items keep increasing is not stopped, and one without target 
   assert.ok(statuses.calls - sampled < 8, `a collect step (about 300 ms) looks at the inventory only before and after, not every 10 ms (${statuses.calls - sampled} calls; the hunt: ${sampled})`);
   assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
 });
+
+test("with no house the goal tier is told what a small one takes and which full blocks she carries", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.notBlocks = new Set(["bread"]);
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 150 }, { name: "cobblestone", count: 64 }, { name: "oak_door", count: 1 }, { name: "bread", count: 3 }] };
+  runtime.recipes = { spruce_stairs: { makes: 4, needs: [{ item: "spruce_planks", count: 6 }] } };
+  const { planner } = agentFor(t, runtime, { goal: "live well", style: "medieval" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /- \(building\) you have no house of your own yet; a small house takes 16 foundation, 9 floor, 27 wall, [^\n]*; build can use other blocks per role: you carry 150 dirt, 64 cobblestone\n/u);
+});
+
+test("a temporary own house is a home: the goal tier sees what is temporary and what improving it needs", async (t) => {
+  const runtime = new FakeRuntime();
+  const place = {
+    name: "the small medieval house you built", detail: "door 0 64 2 facing north", own: true,
+    house: { size: "small" as const, style: "medieval", door: { x: 0, y: 64, z: 2 }, facing: "north" as const, materials: { wall: "dirt" } },
+  };
+  runtime.notes = [memoryNote({ kind: "place", place })];
+  const { planner } = agentFor(t, runtime, { goal: "live well", style: "medieval" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /- \(building\) your house at door 0 64 2 is temporary: wall dirt \(your style: oak_planks\)/u);
+  assert.match(request, /improving your house needs \d+ more oak_planks/u);
+  assert.doesNotMatch(request, /no house of your own/u);
+});

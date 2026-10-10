@@ -30,6 +30,9 @@ const settled = (overrides: Partial<OpportunityFacts> = {}): OpportunityFacts =>
   unfinished: null,
   ownHome: true,
   houseShortfall: [],
+  smallHouse: [],
+  carriedBlocks: [],
+  temporaryHouse: null,
   ...overrides,
 });
 
@@ -123,6 +126,9 @@ test("at most six, the most pressing first: worn tools, missing tools and food b
     unfinished: null,
     ownHome: false,
     houseShortfall: [{ item: "oak_log", count: 22, activity: "woodcutting" }, { item: "cobblestone", count: 16, activity: "mining" }],
+    smallHouse: [],
+    carriedBlocks: [],
+    temporaryHouse: null,
   });
   assert.equal(found.length, MAX_OPPORTUNITIES);
   assert.deepEqual(found.slice(0, 3).map((opportunity) => opportunity.activities[0]), ["crafting", "crafting", "farming"]);
@@ -134,4 +140,32 @@ test("at most six, the most pressing first: worn tools, missing tools and food b
 test("opportunities read as one line each for the goal tier", () => {
   assert.equal(describeOpportunities([]), "none that you know of");
   assert.equal(describeOpportunities([{ activities: ["crafting"], text: "you carry no bed" }, { activities: ["farming", "hunting"], text: "x" }]), "\n- (crafting) you carry no bed\n- (farming, hunting) x");
+});
+
+test("with no house, her style's cost and the full blocks she carries are said on the first line, shortfall lines unchanged", () => {
+  const smallHouse = [{ role: "foundation" as const, count: 16 }, { role: "floor" as const, count: 25 }, { role: "wall" as const, count: 34 }];
+  const carriedBlocks = [{ name: "dirt", count: 150 }, { name: "cobblestone", count: 64 }];
+  const houseShortfall = [{ item: "oak_planks", count: 34, activity: "woodcutting" as const }];
+  assert.deepEqual(texts(settled({ ownHome: false, smallHouse, carriedBlocks, houseShortfall })), [
+    "(building) you have no house of your own yet; a small house takes 16 foundation, 25 floor, 34 wall blocks; build can use other blocks per role: you carry 150 dirt, 64 cobblestone",
+    "(woodcutting) a house of your own needs 34 more oak_planks",
+  ]);
+  assert.deepEqual(texts(settled({ ownHome: false, smallHouse })), [
+    "(building) you have no house of your own yet; a small house takes 16 foundation, 25 floor, 34 wall blocks",
+  ]);
+});
+
+test("a temporary house is a home: its temporary parts and what improving it needs are said, by work", () => {
+  const temporaryHouse = {
+    door: { x: 4, y: 64, z: 2 },
+    roles: [{ role: "wall" as const, block: "dirt", style: "oak_planks" }, { role: "roof" as const, block: "dirt", style: "spruce_planks" }],
+    shortfall: [{ item: "oak_planks", count: 34, activity: "woodcutting" as const }, { item: "spruce_stairs", count: 42, activity: "crafting" as const }],
+  };
+  assert.deepEqual(texts(settled({ temporaryHouse })), [
+    "(building) your house at door 4 64 2 is temporary: wall dirt, roof dirt (your style: oak_planks, spruce_planks)",
+    "(woodcutting) improving your house needs 34 more oak_planks",
+    "(crafting) improving your house needs 42 more spruce_stairs",
+  ]);
+  assert.deepEqual(texts(settled({ temporaryHouse: { ...temporaryHouse, roles: [] } })), []);
+  assert.deepEqual(texts(settled()), []);
 });
