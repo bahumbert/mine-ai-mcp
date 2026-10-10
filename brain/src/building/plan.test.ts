@@ -20,6 +20,14 @@ test("a role built with another block takes it in every cell of the role, the ot
   assert.equal(dirt.bill.find((entry) => entry.item === "oak_planks")?.count, 36 - plain.cells.filter((cell) => cell.role === "wall").length);
 });
 
+test("pillars and trim built with another block ask no log axis (live 2026-10-10: cobblestone corners never audited right)", () => {
+  const plain = planHouse(medieval, "small", site);
+  assert.ok(plain.cells.some((cell) => (cell.role === "pillar" || cell.role === "trim") && cell.axis !== undefined));
+  const plan = planHouse(medieval, "small", site, { pillar: "cobblestone", trim: "cobblestone" });
+  const frame = plan.cells.filter((cell) => cell.role === "pillar" || cell.role === "trim");
+  assert.ok(frame.length > 0 && frame.every((cell) => cell.block === "cobblestone" && cell.axis === undefined));
+});
+
 test("a roof built with another block builds full blocks: the style's stairs and slabs are not asked", () => {
   const plan = planHouse(medieval, "small", site, { roof: "dirt" });
   const roof = plan.cells.filter((cell) => cell.role === "roof");

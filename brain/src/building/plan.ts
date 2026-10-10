@@ -66,13 +66,16 @@ export type Materials = Partial<Record<BlockRole, string>>;
 
 /**
  * The house for `style` at `site`. `materials` names other blocks for some roles; those roles are built with full
- * blocks (the style's stairs and slabs belong to its own block). A role named with the style's own block is the style's.
+ * blocks (the style's stairs and slabs belong to its own block), and ask no log axis either (live 2026-10-10:
+ * cobblestone pillars asked an axis cobblestone has, so the audit never saw them right). A role named with the style's
+ * own block is the style's.
  */
 export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
   const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => style.palette[role as BlockRole] !== block)) as Materials;
   const variants = Object.fromEntries(Object.entries(style.variants ?? {}).filter(([role]) => other[role as BlockRole] === undefined));
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-  const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants);
+  const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants)
+    .map((cell) => cell.axis === undefined || other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, ...rest }) => rest)(cell));
   return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
 }
 
