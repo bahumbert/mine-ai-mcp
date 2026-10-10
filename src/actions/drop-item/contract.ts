@@ -162,6 +162,6 @@ export const dropItemOutcomes = {
   playerUnreachable: (name: string, reason: string) =>
     `[DROP_PLAYER_UNREACHABLE] Pathfinder could not reach ${name}: ${reason}.`,
   playerLeft: (name: string) => `[DROP_PLAYER_LEFT] ${name} stopped being observed before the items were tossed.`,
-  incomplete: (failed: number, total: number) =>
-    `[DROP_INCOMPLETE] ${failed} of ${total} item${total === 1 ? "" : "s"} could not be dropped.`,
+  incomplete: (failed: number, total: number, reasons: readonly string[] = []) =>
+    `[DROP_INCOMPLETE] ${failed} of ${total} item${total === 1 ? "" : "s"} could not be dropped${reasons.length > 0 ? `: ${reasons.join("; ")}` : ""}.`,
 } as const;

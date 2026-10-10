@@ -1254,3 +1254,36 @@ test("improving the walls sends the style's blocks for them, remembers the roof 
   assert.deepEqual(places.at(-1)!.house?.materials, {});
   assert.deepEqual(roof, { status: "done", detail: "improved your small medieval house: roof now spruce_planks" });
 });
+
+test("drop_item keeps the last tool of a class, the last bed and the last boat (live 2026-10-10 run 8: pickaxe, axe, shovel, boat and bed dropped)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 20 }, { name: "white_bed", count: 1 }, { name: "oak_boat", count: 1 }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 20 }] });
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_pickaxe" }, { item: "dirt" }, { item: "white_bed" }, { item: "oak_boat" }] }), contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "dirt" }]], "only the dirt went to the action");
+  const detail = result.status === "done" ? result.detail : "";
+  assert.match(detail, /kept 1 stone_pickaxe: your only pickaxe/u);
+  assert.match(detail, /kept 1 white_bed: your only bed/u);
+  assert.match(detail, /kept 1 oak_boat: your only boat/u);
+
+  const several = new FakeRuntime();
+  several.snapshot = { ...several.snapshot, inventory: [{ name: "stone_pickaxe", count: 3 }, { name: "wooden_pickaxe", count: 1 }] };
+  several.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "stone_pickaxe", dropped: 2 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_pickaxe", count: 2 }] }), contextFor(several));
+  assert.deepEqual(several.submitted.map((call) => call.input.items), [[{ item_name: "stone_pickaxe", count: 2 }]], "two of three is fine");
+
+  // Dropping every pickaxe keeps the best one, not the one named first.
+  const tiers = new FakeRuntime();
+  tiers.snapshot = { ...tiers.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1 }, { name: "iron_pickaxe", count: 1 }] };
+  tiers.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "wooden_pickaxe", dropped: 1 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "wooden_pickaxe" }, { item: "iron_pickaxe" }] }), contextFor(tiers));
+  assert.deepEqual(tiers.submitted.map((call) => call.input.items), [[{ item_name: "wooden_pickaxe" }]]);
+
+  const only = new FakeRuntime();
+  only.snapshot = { ...only.snapshot, inventory: [{ name: "stone_axe", count: 1 }] };
+  const refused = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_axe" }] }), contextFor(only));
+  assert.equal(refused.status, "failed");
+  assert.match(refused.status === "failed" ? refused.detail : "", /kept 1 stone_axe: your only axe/u);
+  assert.deepEqual(only.submitted, []);
+});

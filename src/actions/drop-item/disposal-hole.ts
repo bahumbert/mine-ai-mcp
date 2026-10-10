@@ -10,6 +10,7 @@ import type { ActionContext } from "../action.js";
 import type { DroppedItem, HoleClosure } from "./contract.js";
 import { type InventoryItem, type placeSolidBlockInto } from "../../world/placement.js";
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
+import { droppedItemName } from "../../world/item-pickup.js";
 import { protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 
 const SIDES = [
@@ -66,6 +67,18 @@ function inProtectedRegion(bot: Bot, bottom: Vec3): boolean {
   return openingCells(bottom).some((cell) => protectedRegionAt(regions, dimension, cell.x, cell.y, cell.z) !== null);
 }
 
+/** How near a dropped item may lie to a pit's cells before the pit counts as already holding discards. */
+const PIT_ITEM_REACH = 1.5;
+
+/** Digging into a pit that holds items hands them back to the bot (live 2026-10-10 run 8: buried items came back). */
+function holdsDroppedItem(bot: Bot, bottom: Vec3): boolean {
+  const centre = bottom.offset(0.5, 0.5, 0.5);
+  return Object.values(bot.entities ?? {}).some((entity) => {
+    if (droppedItemName(entity) === null) return false;
+    return [0, 1].some((up) => entity.position.distanceTo(centre.offset(0, up, 0)) <= PIT_ITEM_REACH);
+  });
+}
+
 /** The pit beside a stance (its feet cell and the body's exact position), when one of its four cells fits. */
 function pitBeside(bot: Bot, feet: Vec3, position: Vec3): Vec3 | null {
   const candidates = SIDES.map(([dx, dz]) => feet.offset(dx, -2, dz))
@@ -78,7 +91,7 @@ function pitBeside(bot: Bot, feet: Vec3, position: Vec3): Vec3 | null {
     .sort((a, b) => a.offset(0.5, 0, 0.5).distanceTo(position) - b.offset(0.5, 0, 0.5).distanceTo(position));
   return (
     candidates.find((cell) => {
-      if (!enclosed(bot, cell) || !dryOpening(bot, cell) || inProtectedRegion(bot, cell)) return false;
+      if (!enclosed(bot, cell) || !dryOpening(bot, cell) || inProtectedRegion(bot, cell) || holdsDroppedItem(bot, cell)) return false;
       return openingCells(cell).every((position) => {
         if (air(bot, position)) return true;
         const block = bot.blockAt(position);
