@@ -44,6 +44,8 @@ export type NavigationResult =
       readonly elapsedMs: number;
       /** Set when the route ended because no path (or no usable partial route) was found, whatever was carried. */
       readonly calculationFailed?: true;
+      /** With a calculation failure, the planned node nearest the goal: where the search got to. */
+      readonly closest?: BlockPosition;
       /** The block whose planned break failed and ended the route, when one did. */
       readonly failedBreak?: BlockPosition;
     };
@@ -156,6 +158,9 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     reason: [outcomeReason(outcome), pending].filter(Boolean).join(" "),
     elapsedMs,
     ...(failedBreak && { failedBreak }),
-    ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && { calculationFailed: true as const }),
+    ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && {
+      calculationFailed: true as const,
+      closest: outcome.failure.kind === "no_path" ? outcome.failure.closest.position : outcome.failure.limit.closest.position,
+    }),
   };
 }

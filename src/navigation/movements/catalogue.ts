@@ -525,6 +525,7 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
         .cell(landingFeet)
         .cell(landingHead)
         .hazard(distance > context.policy.maximumDrop ? distance * 2 : distance)
+        .landsInWater()
         .overshoot(a.dx, a.dz)
         .offer();
       return;
@@ -573,6 +574,7 @@ function fallIntoDeepWater(context: MovementGenerationContext, a: Approach, star
     .cell(landingFeet)
     .cell(landingHead)
     .hazard((y - landingY) * 2)
+    .landsInWater()
     .overshoot(a.dx, a.dz)
     .offer();
 }

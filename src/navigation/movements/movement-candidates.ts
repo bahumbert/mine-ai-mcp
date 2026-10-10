@@ -153,6 +153,7 @@ export class MovementCandidates implements GeneratedMovements {
    */
   #tickScale = 1;
   #hazard = 0;
+  #landsInWater = false;
   #context!: MovementGenerationContext;
 
   /** Start filling rows for one expansion. */
@@ -181,6 +182,7 @@ export class MovementCandidates implements GeneratedMovements {
     this.#overshootDz[row] = 0;
     this.#tickScale = 1;
     this.#hazard = 0;
+    this.#landsInWater = false;
     return this;
   }
 
@@ -200,6 +202,15 @@ export class MovementCandidates implements GeneratedMovements {
 
   hazard(penalty: number): this {
     this.#hazard = penalty;
+    return this;
+  }
+
+  /**
+   * The movement is a fall that ends in deep water. The policy's step rule against swimming into deep open water is
+   * about setting out across it, not about where a fall from a perch ends: it has no other way down.
+   */
+  landsInWater(): this {
+    this.#landsInWater = true;
     return this;
   }
 
@@ -277,7 +288,7 @@ export class MovementCandidates implements GeneratedMovements {
   offer(): void {
     const context = this.#context;
     const row = this.length;
-    let hazard = stepHazard(context, this.toX[row]!, this.toY[row]!, this.toZ[row]!);
+    let hazard = this.#landsInWater ? 0 : stepHazard(context, this.toX[row]!, this.toY[row]!, this.toZ[row]!);
     if (hazard === null) return;
     if (context.policy.decideMovement) {
       const decision = context.policy.decideMovement(this.#kind[row]!, context.state.node.feet,
