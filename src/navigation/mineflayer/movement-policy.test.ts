@@ -3,7 +3,7 @@ import { createMovements } from "../runtime.js";
 import { BREAK_OPENS_INTO_LIQUID } from "../movements/policy.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
-import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY } from "./movement-policy.js";
+import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY, fallbackScaffoldItem } from "./movement-policy.js";
 import { Vec3 } from "vec3";
 import { blockClass, observeMineflayerBlock } from "./world.js";
 import minecraftData from "minecraft-data";
@@ -296,4 +296,29 @@ test("routes never set off across deep open water, but a bot already out on it s
 
   bot.entity.position = new Vec3(30.5, 62.2, 0.5);
   assert.equal(policy.decideStep(25, 62, 0, oceanWorld).kind, "allowed", "out at sea, the way back is open");
+});
+
+/** A bot carrying `items`, on the version whose block data the fallback reads. */
+const versioned = (items: FakeStack[]) => botFixture({ items }, { version: "1.21.4" });
+
+test("the scaffold fallback spends the plentiful common block it carries, never a valuable, a workstation or a falling block", () => {
+  const stack = (name: string, count: number) => ({ name, count });
+  const choice = (...items: Array<[string, number]>) =>
+    fallbackScaffoldItem(versioned(items.map(([name, count]) => stack(name, count))))?.name ?? null;
+  assert.equal(choice(["stone", 80]), "stone");
+  assert.equal(choice(["oak_planks", 74]), "oak_planks");
+  assert.equal(choice(["furnace", 1]), null, "a workstation answers a right-click");
+  assert.equal(choice(["sand", 64]), null, "a falling block buries the cell it is placed in");
+  assert.equal(choice(["oak_log", 64]), null);
+  assert.equal(choice(["diamond_block", 9]), null);
+  assert.equal(choice(["stone", 5], ["oak_planks", 40], ["furnace", 1], ["diamond_block", 99]), "oak_planks", "the one carried most of");
+  assert.equal(fallbackScaffoldItem(versioned([stack("stone", 80)]), new Set(["stone"])), null, "a fetched material stays");
+});
+
+test("only a bot asked for the fallback may scaffold with a block outside the survival policy's list", () => {
+  const bot = versioned([{ name: "stone", count: 80 }]);
+  assert.equal(createMovements(bot).scaffold, null);
+  assert.equal(createMovements(bot, { scaffoldFallback: true }).scaffold?.itemType, bot.registry.itemsByName.stone!.id);
+  const withCobble = versioned([{ name: "stone", count: 80 }, { name: "cobblestone", count: 2 }]);
+  assert.equal(createMovements(withCobble, { scaffoldFallback: true }).scaffold?.itemType, withCobble.registry.itemsByName.cobblestone!.id);
 });

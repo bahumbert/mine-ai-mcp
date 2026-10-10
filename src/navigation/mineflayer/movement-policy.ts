@@ -28,6 +28,7 @@ import {
   type WorldView,
 } from "../world/world.js";
 import { blockClass, observeMineflayerBlock } from "./world.js";
+import { tagsOf } from "../../world/block-tags.js";
 
 /** The only carried blocks standard navigation may spend to create a route: the cheap, plentiful block of each terrain. */
 export const STANDARD_SCAFFOLD_ITEMS = DEFAULT_SCAFFOLD_BLOCKS;
@@ -50,6 +51,33 @@ export function preferredScaffoldItem(bot: Bot, protectedNames: ReadonlySet<stri
       return item;
   }
   return null;
+}
+/**
+ * The block tags that mark the game's own common terrain and building stock: the
+ * stones, dirts, planks, bricks and terracotta a player builds with freely. A
+ * valuable (a metal or gem block), a log, a wool or a workstation is in none of them.
+ */
+const FALLBACK_SCAFFOLD_TAGS = ["base_stone_overworld", "base_stone_nether", "dirt", "planks", "stone_bricks", "terracotta"] as const;
+
+/**
+ * The carried block a route may bridge with when the bot has none of the survival
+ * policy's `scaffold_blocks` and no route exists without one (a bot stranded on a
+ * perch). Among the carried blocks that are a full solid cube to stand on, not
+ * falling, not interactive and in a common-stock tag, the one carried most of; the
+ * policy's own list is never consulted here, `preferredScaffoldItem` owns that.
+ */
+export function fallbackScaffoldItem(bot: Bot, protectedNames: ReadonlySet<string> = new Set()) {
+  let best: InventoryItem | null = null;
+  for (const item of bot.inventory.items()) {
+    if (protectedNames.has(item.name) || (best !== null && best.count >= item.count)) continue;
+    const block = bot.registry.blocksByName[item.name];
+    if (!block) continue;
+    if (!tagsOf(item.name, bot.version).some((tag) => (FALLBACK_SCAFFOLD_TAGS as readonly string[]).includes(tag))) continue;
+    const { geometry, traits } = observeMineflayerBlock(blockClass(bot).fromStateId(block.defaultState, 0));
+    if (geometry.fullCube && geometry.safeSupport && !traits.interactive && !traits.falling && traits.liquid === null)
+      best = item;
+  }
+  return best;
 }
 const ROUTE_PROTECTED_CROPS = [
   "wheat",
@@ -75,6 +103,8 @@ export interface MineflayerMovementPolicyOptions {
   readonly protectedBlockNames?: readonly string[];
   readonly protectedScaffoldNames?: readonly string[];
   readonly scaffolding?: boolean;
+  /** Also bridge with a common block the bot carries when it has none of the policy's scaffold blocks (`fallbackScaffoldItem`). */
+  readonly scaffoldFallback?: boolean;
   /** Additional route cost per placed block. Standard navigation uses 20. */
   readonly placementPenalty?: number;
   readonly allowDigging?: boolean;
@@ -296,9 +326,9 @@ function stateCount(registry: Bot["registry"]): number {
   return highest + 1;
 }
 
-function scaffoldSelection(bot: Bot, protectedNames: ReadonlySet<string>, enabled: boolean): ScaffoldSelection | null {
+function scaffoldSelection(bot: Bot, protectedNames: ReadonlySet<string>, enabled: boolean, fallback: boolean): ScaffoldSelection | null {
   if (!enabled) return null;
-  const item = preferredScaffoldItem(bot, protectedNames);
+  const item = preferredScaffoldItem(bot, protectedNames) ?? (fallback ? fallbackScaffoldItem(bot, protectedNames) : null);
   if (!item) return null;
   const block = bot.registry.blocksByName[item.name]!;
   if (!block.states?.some((state) => state.name === "axis"))
@@ -539,7 +569,7 @@ export function createMineflayerMovementPolicy(
       return readNavigationPolicy(bot).bucket_drops && bucketAvailable(bot) ? MAXIMUM_BUCKET_DROP : 0;
     },
     get scaffold() {
-      return scaffoldSelection(bot, protectedScaffolds, scaffolding);
+      return scaffoldSelection(bot, protectedScaffolds, scaffolding, options.scaffoldFallback ?? false);
     },
   });
 }

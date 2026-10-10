@@ -42,6 +42,8 @@ export type NavigationResult =
       readonly status: "stopped";
       readonly reason: string;
       readonly elapsedMs: number;
+      /** Set when the route ended because no path (or no usable partial route) was found, whatever was carried. */
+      readonly calculationFailed?: true;
       /** The block whose planned break failed and ended the route, when one did. */
       readonly failedBreak?: BlockPosition;
     };
@@ -154,5 +156,6 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     reason: [outcomeReason(outcome), pending].filter(Boolean).join(" "),
     elapsedMs,
     ...(failedBreak && { failedBreak }),
+    ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && { calculationFailed: true as const }),
   };
 }

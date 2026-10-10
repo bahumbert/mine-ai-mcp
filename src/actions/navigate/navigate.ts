@@ -13,7 +13,7 @@ import {
   type NavigationResult,
   type NavigationRuntime,
 } from "../../navigation/index.js";
-import { scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
+import { fallbackScaffoldItem, preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { isSafeSupport, navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
@@ -402,13 +402,30 @@ function beginNavigate(
     }
 
     try {
-      route = await dependencies.navigate({
-        movements: dependencies.createMovements(bot, { scaffolding: request.scaffold, allowDigging: request.dig }),
-        goal,
-        signal: context.signal,
-        ...(toolLoss && { stopSignal: toolLoss.signal }),
-        ...(toolLoss && { onToolSelected: toolLoss.select }),
-      });
+      const attempt = (scaffoldFallback: boolean) =>
+        dependencies.navigate({
+          movements: dependencies.createMovements(bot, {
+            scaffolding: request.scaffold,
+            allowDigging: request.dig,
+            ...(scaffoldFallback && { scaffoldFallback }),
+          }),
+          goal,
+          signal: context.signal,
+          ...(toolLoss && { stopSignal: toolLoss.signal }),
+          ...(toolLoss && { onToolSelected: toolLoss.select }),
+        });
+      route = await attempt(false);
+      // No path and none of the policy's scaffold blocks carried (a bot stranded on a perch with only stone): plan
+      // once more with the common block it holds the most of, and report the stock it spends beside the others.
+      if (route.status === "stopped" && route.calculationFailed && request.scaffold && preferredScaffoldItem(bot) === null) {
+        const fallback = fallbackScaffoldItem(bot);
+        if (fallback !== null) {
+          scaffoldInventoryBefore.set(fallback.name, bot.inventory.count(fallback.type, null));
+          const firstElapsedMs = route.elapsedMs;
+          route = await attempt(true);
+          route = { ...route, elapsedMs: route.elapsedMs + firstElapsedMs };
+        }
+      }
       const lost = toolLoss?.loss();
       if (lost) {
         elapsedMs += Date.now() - startedAt;
