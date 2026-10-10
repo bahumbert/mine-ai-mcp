@@ -158,6 +158,19 @@ export function stepKey(step: Step): string {
   return JSON.stringify(canonical(step));
 }
 
+/**
+ * The items a step is out to obtain, with how many: what `get_items`, `hunt` and `craft_item` name. The other steps name
+ * no item (a block is not its drop) or have progress checks of their own in the runtime action they run.
+ */
+export function targetItems(step: Step): readonly { readonly item: string; readonly count: number }[] {
+  switch (step.skill) {
+    case "get_items": return step.items;
+    case "hunt": return [{ item: step.drop, count: step.count }];
+    case "craft_item": return [{ item: step.item, count: step.count }];
+    default: return [];
+  }
+}
+
 /** One line for logs and prompts, e.g. `collect 5 oak_log`. */
 export function describeStep(step: Step): string {
   switch (step.skill) {

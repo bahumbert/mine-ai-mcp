@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describeStep, SKILL_NAMES, stepKey, type Step } from "./actions.ts";
+import { describeStep, SKILL_NAMES, stepKey, targetItems, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
@@ -8,7 +8,7 @@ import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
-import { sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
+import { FAILED_STEP_MINUTES, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -30,9 +30,11 @@ const STEP_MEMORY = 20;
 const MAX_ERROR_WAIT_MS = 60_000;
 /** Outcomes of its own objectives remembered for the goal tier. */
 const OWN_MEMORY = 5;
-/** How long a failed step is shown to the work tier of other objectives, and how many are kept (live 2026-10-10). */
-const FAILED_STEP_MINUTES = 30;
+/** How many failed steps are kept (live 2026-10-10). */
 const FAILED_STEP_MEMORY = 8;
+/** A step out to obtain items is stopped when none of them increased in the inventory for this long (owner, 2026-10-10), looked at every {@link GAIN_SAMPLE_MS}. */
+const NO_GAIN_MINUTES = 5;
+const GAIN_SAMPLE_MS = 30_000;
 /** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
 const NIGHT_CHECK_MS = 20_000;
 /** After a night shelter could not be made, how long before it is tried again. */
@@ -71,6 +73,8 @@ export interface AgentOptions {
   readonly random?: () => number;
   /** People talked to who are not players here (e.g. the controller): a message opening with their name, then a comma, calls them. Default none. */
   readonly knownNames?: readonly string[];
+  /** Minutes without any target item gained before a step is stopped, and how often the inventory is looked at; tests shorten them. */
+  readonly noGain?: { readonly minutes: number; readonly sampleMs: number };
 }
 
 /** One objective on the stack and what was done for it. */
@@ -147,8 +151,8 @@ export class Agent {
   private readonly lately: string[] = [];
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
   private lastFailed: { readonly objective: string; readonly reason: string } | null = null;
-  /** Steps that failed lately, whatever the objective, newest last: shown to the work tier of its other objectives. */
-  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number }[] = [];
+  /** Steps that failed lately, whatever the objective, newest last: shown to the work tier, which refuses a second repeat. */
+  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number; readonly failures: readonly number[] }[] = [];
   private restUntil = 0;
   private nextGoalCall = 0;
   private wake: (() => void) | null = null;
@@ -458,7 +462,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(work.objective) }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures() }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;
@@ -490,12 +494,7 @@ export class Agent {
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
     // travelling; a skill's phases (the house's site preparation) change the activity from then on.
     const actions: ActionTime[] = [];
-    // A step runs at most `maxStepMinutes` (live 2026-10-09: single steps ran 10-22 minutes).
-    let timedOut = false;
-    const limit = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new Error("the step reached its time limit"));
-    }, persona.settings.maxStepMinutes * 60_000);
+    const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
     };
@@ -522,7 +521,7 @@ export class Agent {
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
-      clearTimeout(limit);
+      gain.stop();
       work.step = null;
       this.body.onAction = null;
     }
@@ -532,12 +531,10 @@ export class Agent {
     const { purpose } = work.objective;
     for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
-    // Stopped by the time limit (not by an order or a "stop"): it failed, and the model is told to choose a smaller step.
-    const overtime = timedOut && result.status !== "done"
-      ? `stopped after ${persona.settings.maxStepMinutes} minutes, still not done${result.status === "failed" ? `: ${result.detail}` : ""}; what it gathered so far is in your inventory: choose a nearer, smaller or different step`
-      : null;
-    const record: StepRecord = overtime !== null
-      ? { step: label, outcome: "failed", detail: overtime }
+    // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
+    const stalled = gain.stalled();
+    const record: StepRecord = stalled !== null && result.status !== "done"
+      ? { step: label, outcome: "failed", detail: stalled }
       : result.status === "stopped"
         ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
         : { step: label, outcome: result.status, detail: result.detail };
@@ -583,20 +580,59 @@ export class Agent {
     }
   }
 
-  /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step only, at most {@link FAILED_STEP_MEMORY}). */
+  /**
+   * A step out to obtain items (see `targetItems`) is aborted when none of them increased in the inventory for
+   * {@link NO_GAIN_MINUTES} minutes (live 2026-10-09: single steps ran 10-22 minutes, a squid hunt gained nothing for
+   * 30). `view_status` only reads, so the inventory is looked at while the action runs. `stalled` says why it was stopped.
+   */
+  private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null } {
+    const targets = targetItems(step);
+    if (targets.length === 0) return { stop: () => undefined, stalled: () => null };
+    const { runtime, log } = this.options;
+    const { minutes, sampleMs } = this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS };
+    const carried = (snapshot: BotSnapshot, item: string) => snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+    const start = new Map(targets.map(({ item }) => [item, carried(before, item)]));
+    const best = new Map(start);
+    let lastGainAt = Date.now();
+    let stalled: string | null = null;
+    let sampling = false;
+    const timer = setInterval(() => {
+      if (sampling || stalled !== null) return;
+      sampling = true;
+      runtime.status().then((snapshot) => {
+        const now = Date.now();
+        for (const { item } of targets) {
+          const have = carried(snapshot, item);
+          if (have > (best.get(item) ?? 0)) {
+            best.set(item, have);
+            lastGainAt = now;
+          }
+        }
+        if (stalled !== null || now - lastGainAt < minutes * 60_000) return;
+        const progress = targets.map(({ item, count }) => `${Math.max(0, carried(snapshot, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ");
+        stalled = `nothing gained in ${minutes} minutes: ${progress} so far (the rest is in your inventory)`;
+        controller.abort(new Error(stalled));
+      }).catch((error: unknown) => log(`could not look at the inventory during a step: ${String(error)}`)).finally(() => { sampling = false; });
+    }, sampleMs);
+    return { stop: () => clearInterval(timer), stalled: () => stalled };
+  }
+
+  /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
   private rememberFailedStep(objective: Objective, step: string, key: string, detail: string): void {
+    const now = Date.now();
+    const before = this.failedSteps.find((failure) => failure.key === key)?.failures ?? [];
     const kept = this.failedSteps.filter((failure) => failure.key !== key);
-    kept.push({ objective, step, key, detail, at: Date.now() });
+    kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now] });
     this.failedSteps.splice(0, this.failedSteps.length, ...kept.slice(-FAILED_STEP_MEMORY));
   }
 
-  /** The steps that failed lately for other objectives than this one, most recent first. */
-  private earlierFailures(objective: Objective): EarlierFailure[] {
+  /** The steps that failed lately for any objective, this one included, most recent first. */
+  private earlierFailures(): EarlierFailure[] {
     const now = Date.now();
     return this.failedSteps
-      .filter((failure) => failure.objective !== objective && now - failure.at <= FAILED_STEP_MINUTES * 60_000)
+      .filter((failure) => now - failure.at <= FAILED_STEP_MINUTES * 60_000)
       .reverse()
-      .map(({ step, key, detail, objective: other, at }) => ({ step, key, detail, objective: other.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)) }));
+      .map(({ step, key, detail, objective, at, failures }) => ({ step, key, detail, objective: objective.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)), count: failures.filter((failed) => now - failed <= FAILED_STEP_MINUTES * 60_000).length }));
   }
 
   /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */

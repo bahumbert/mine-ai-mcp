@@ -633,25 +633,43 @@ test("a \"for\" outside the available activities is no purpose", async () => {
   assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Mine.", purpose: "mining" });
 });
 
-test("a step that failed lately in another objective is shown, sent back once with its reason, and runs when sent again", async () => {
-  // Live 2026-10-10: Mira sent "craft cooked_beef" 18 times over six objectives worded differently.
-  const { action, mind } = scriptedMind();
+test("a step that failed once is shown and runs when sent again; failed twice, it is refused every time", async () => {
+  // Live 2026-10-10, run 6: sent back once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times.
   const craft = { skill: "craft_item", item: "cooked_beef", count: 6 } as const;
-  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.", objective: "Cook some food", minutesAgo: 4 };
-  action.reply({ thought: "Cook it.", step: craft }, { thought: "Still this.", step: craft });
-  const decision = await mind.next(workInput("Cook beef in the furnace", { earlierFailures: [earlier] }), signal);
-  assert.deepEqual(decision, { kind: "step", step: craft, thought: "Still this." });
-  assert.match(action.requests[0]?.[1]?.content ?? "", /Steps that failed lately in your other objectives[^\n]*\n- craft 3 cooked_beef, 4 minutes ago, for "Cook some food": \[ITEMS_NOT_CRAFTABLE\]/u);
-  assert.match(action.requests[1]?.at(-1)?.content ?? "", /"craft 6 cooked_beef" failed 4 minutes ago the same way.*Smelted in a furnace instead/u);
+  const once = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.", objective: "Cook some food", minutesAgo: 4, count: 1 };
+  const first = scriptedMind();
+  first.action.reply({ thought: "Cook it.", step: craft });
+  assert.deepEqual(await first.mind.next(workInput("Cook beef in the furnace", { earlierFailures: [once] }), signal), { kind: "step", step: craft, thought: "Cook it." });
+  assert.equal(first.action.requests.length, 1, "not sent back");
+  assert.match(first.action.requests[0]?.[1]?.content ?? "", /Steps that failed lately in your objectives[^\n]*\n- craft 3 cooked_beef, 4 minutes ago, for "Cook some food": \[ITEMS_NOT_CRAFTABLE\]/u);
+  const twice = { ...once, count: 2 };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const refused = scriptedMind();
+    refused.action.reply({ thought: "Again.", step: craft }, { thought: "Again.", step: craft }, { thought: "Again.", step: craft });
+    await assert.rejects(refused.mind.next(workInput("Cook beef in the furnace", { earlierFailures: [twice] }), signal), /LLM_BAD_REPLY/u);
+    assert.equal(refused.action.requests.length, 3, "refused at every try, until the repair rounds run out");
+    assert.match(refused.action.requests[1]?.at(-1)?.content ?? "", /"craft 6 cooked_beef" failed 2 times in the last 30 minutes, the last 4 minutes ago.*Smelted in a furnace instead.*refused: choose a different step, or give this objective up/u);
+  }
+  const shown = scriptedMind();
+  shown.action.reply({ thought: "Other.", step: { skill: "collect_block", block: "oak_log", count: 1 } });
+  await shown.mind.next(workInput("Cook beef", { earlierFailures: [twice] }), signal);
+  assert.match(shown.action.requests[0]?.[1]?.content ?? "", /- craft 3 cooked_beef, failed 2 times, the last 4 minutes ago, for "Cook some food" \(refused now\)/u);
 });
 
 test("a step unlike the ones that failed lately is not sent back; counts aside, the same thing is the same step", async () => {
   const { action, mind } = scriptedMind();
-  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), detail: "no recipe", objective: "Cook", minutesAgo: 2 };
+  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), detail: "no recipe", objective: "Cook", minutesAgo: 2, count: 2 };
   action.reply({ thought: "Furnace.", step: { skill: "get_items", items: [{ item: "cooked_beef", count: 3 }] } });
   assert.equal((await mind.next(workInput("Cook beef", { earlierFailures: [earlier] }), signal)).kind, "step");
   assert.equal(action.requests.length, 1);
   assert.equal(stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), stepKey({ skill: "craft_item", item: "cooked_beef", count: 64 }));
   assert.notEqual(stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), stepKey({ skill: "craft_item", item: "bread", count: 3 }));
   assert.equal(stepKey({ skill: "get_items", items: [{ item: "a", count: 1 }, { item: "b", count: 2 }] }), stepKey({ skill: "get_items", items: [{ item: "b", count: 9 }, { item: "a", count: 9 }] }));
+});
+
+test("the work tier is told a failed or refused step comes back with its reason, is accepted once more, and that giving up beats trying again", async () => {
+  const { mind, action } = scriptedMind();
+  action.reply({ done: "ok" });
+  await mind.next(workInput("anything"), signal);
+  assert.match((action.requests[0]?.[0]?.content ?? "").replace(/\s+/gu, " "), /A step that failed or was refused comes back with its reason: follow what the reason says, or choose a different step\. The same step is accepted once more at most\. When nothing works for an objective, give it up and choose another one: giving up is better than trying again\./u);
 });

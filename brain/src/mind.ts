@@ -98,13 +98,19 @@ export interface StepRecord {
   readonly detail: string;
 }
 
-/** A step that failed for another objective lately (its key from `stepKey`). */
+/** How long a failed step is remembered, and how many failures in that time refuse it (owner, 2026-10-10: one retry). */
+export const FAILED_STEP_MINUTES = 30;
+export const MAX_STEP_FAILURES = 2;
+
+/** A step that failed lately, for any objective (its key from `stepKey`); its second failure refuses it. */
 export interface EarlierFailure {
   readonly step: string;
   readonly key: string;
   readonly detail: string;
   readonly objective: string;
   readonly minutesAgo: number;
+  /** How many times it failed in the last {@link FAILED_STEP_MINUTES} minutes (the latest is the one shown). */
+  readonly count: number;
 }
 
 export interface WorkInput {
@@ -118,7 +124,7 @@ export interface WorkInput {
   readonly steps: readonly StepRecord[];
   /** Objectives set aside for this one, to resume afterwards. */
   readonly paused: readonly Objective[];
-  /** Steps that failed for its other objectives lately, most recent first: sent again as they are, they go back once. */
+  /** Steps that failed lately for any of its objectives, most recent first: sent again once they run, after a second failure they are refused. */
   readonly earlierFailures?: readonly EarlierFailure[];
 }
 

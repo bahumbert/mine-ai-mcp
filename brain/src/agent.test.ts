@@ -83,15 +83,16 @@ test("a failed step is shown to the model, which may give up and say why in char
 test("the same step failing the same way several times in a row ends the objective instead of looping", async (t) => {
   const runtime = new FakeRuntime();
   runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
-  const { agent, chat, action } = agentFor(t, runtime);
+  // Two in a row: a step failed twice is refused from then on (one retry), so the guard is tried at its smallest.
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxSameStepInARow: 2 } });
   chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "I can't find any birch, sorry!" });
   const collect = { step: { skill: "collect_block", block: "birch_log", count: 5 } };
-  action.reply(collect, collect, collect, collect);
+  action.reply(collect, collect, collect);
   await agent.handle(say("Steve", "get me some birch"));
   await until(() => runtime.said.length === 2);
-  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 3);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times in a row: no birch_log within 64 blocks/u);
-  assert.equal(action.requests.length, 3);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 2 times in a row: no birch_log within 64 blocks/u);
+  assert.equal(action.requests.length, 2);
 });
 
 test("the same failure between other steps ends the objective too", async (t) => {
@@ -99,15 +100,15 @@ test("the same failure between other steps ends the objective too", async (t) =>
   const runtime = new FakeRuntime();
   runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
   runtime.failures.craft_item = "[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: birch_thing.";
-  const { agent, chat, action } = agentFor(t, runtime);
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxSameStepInARow: 2 } });
   chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "I can't find any birch, sorry!" });
   const collect = { step: { skill: "collect_block", block: "birch_log", count: 5 } };
   const craft = { step: { skill: "craft_item", item: "birch_thing", count: 1 } };
-  action.reply(collect, craft, collect, craft, collect, craft);
+  action.reply(collect, craft, collect, craft);
   await agent.handle(say("Steve", "get me some birch"));
   await until(() => runtime.said.length === 2);
-  assert.equal(action.requests.length, 5);
-  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 3 times: no birch_log within 64 blocks/u);
+  assert.equal(action.requests.length, 3);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 2 times: no birch_log within 64 blocks/u);
 });
 
 test("the same step done again and again ends the objective as changing nothing only when the inventory stayed the same", async (t) => {
@@ -136,23 +137,11 @@ test("the same step done again and again ends the objective as changing nothing 
   }
 });
 
-test("a step running past the time limit is stopped and recorded as failed, telling the model to choose a smaller one", async (t) => {
-  const runtime = new FakeRuntime();
-  runtime.durations.collect_block = 100_000;
-  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxStepMinutes: 0.01 } });
-  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Too big, sorry!" });
-  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { give_up: "too much wood" });
-  await agent.handle(say("Steve", "get me 16 logs"));
-  await until(() => runtime.said.length === 2, 5_000);
-  assert.equal(runtime.cancelled.length, 1, "the collection was stopped");
-  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 16 oak_log -> failed: stopped after 0\.01 minutes, still not done.*; what it gathered so far is in your inventory: choose a nearer, smaller or different step/u);
-});
-
-test("a step set aside for an order stays interrupted even with a time limit running", async (t) => {
+test("a step set aside for an order stays interrupted", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
   runtime.durations.collect_block = 100_000;
-  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, maxStepMinutes: 1 } });
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
   planner.reply({ objective: "collect 16 oak_log for my base" });
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
   await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
@@ -162,8 +151,7 @@ test("a step set aside for an order stays interrupted even with a time limit run
   await until(() => action.requests.length === 4);
   const resumed = action.requests[3]?.[1]?.content ?? "";
   assert.match(resumed, /1\. collect 16 oak_log -> interrupted/u);
-  assert.doesNotMatch(resumed, /stopped after/u);
-});
+  });
 
 test("one skill failing again and again, whichever way it is tried, ends the objective", async (t) => {
   // Live 2026-10-07: explore failed in every direction in turn for 12 minutes.
@@ -711,17 +699,94 @@ test("an order given by whisper is narrated by whisper to the one who gave it; o
   assert.deepEqual(spokenTo(runtime), ["Steve", "Steve", undefined, undefined]);
 });
 
-test("a step that failed for one objective is shown to the work tier of the next one", async (t) => {
-  // Live 2026-10-10: Mira's "craft cooked_beef" failed in six objectives worded differently, each starting afresh.
+/** Orders asking, one after the other, for a craft that has no recipe (live 2026-10-10: it failed in six objectives). */
+function craftOrders(t: Parameters<typeof agentFor>[0]) {
   const runtime = new FakeRuntime();
   runtime.failures.craft_item = "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef.";
-  const { agent, chat, action } = agentFor(t, runtime);
-  chat.reply({ say: "Okay!", route: "act", request: "cook 3 beef" }, { say: "Can't, sorry." }, { say: "Sure!", route: "act", request: "make me cooked beef" }, { say: "Can't." });
-  action.reply({ step: { skill: "craft_item", item: "cooked_beef", count: 3 } }, { give_up: "No recipe." }, { give_up: "Still none." });
-  await agent.handle(say("Steve", "cook me some beef"));
-  await until(() => runtime.said.length === 2);
-  await agent.handle(say("Steve", "make me cooked beef then"));
-  await until(() => runtime.said.length === 4);
-  assert.doesNotMatch(action.requests[1]?.[1]?.content ?? "", /failed lately in your other objectives/u, "not for its own objective");
-  assert.match(action.requests[2]?.[1]?.content ?? "", /Steps that failed lately in your other objectives[^\n]*\n- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef": \[ITEMS_NOT_CRAFTABLE\]/u);
+  const tiers = agentFor(t, runtime);
+  let said = 0;
+  const order = async (request: string, ...steps: object[]) => {
+    const before = tiers.action.requests.length;
+    tiers.chat.reply({ say: "Okay!", route: "act", request }, { say: "Can't, sorry." });
+    tiers.action.reply(...steps);
+    await tiers.agent.handle(say("Steve", request));
+    said += 2;
+    await until(() => runtime.said.length === said);
+    return tiers.action.requests.slice(before).map((request) => request.at(-1)?.content ?? "");
+  };
+  return { order };
+}
+
+const CRAFT = { step: { skill: "craft_item", item: "cooked_beef", count: 3 } };
+
+test("a step that failed once is shown to the work tier, for its own objective too, and runs again", async (t) => {
+  const { order } = craftOrders(t);
+  const prompts = await order("cook 3 beef", CRAFT, CRAFT, { give_up: "No recipe." });
+  assert.doesNotMatch(prompts[0] ?? "", /failed lately/u);
+  assert.match(prompts[1] ?? "", /Steps that failed lately in your objectives[^\n]*\n- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef": \[ITEMS_NOT_CRAFTABLE\]/u);
+  assert.equal(prompts.length, 3, "the second try ran, no send-back");
+});
+
+test("a step that failed twice is refused every time, for any objective, until the 30 minutes are over", async (t) => {
+  let offset = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, "now", () => now() + offset);
+  const { order } = craftOrders(t);
+  await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
+  // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
+  const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT, CRAFT, CRAFT, CRAFT);
+  assert.match(prompts[0] ?? "", /- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef"/u);
+  assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago, for "make me cooked beef then" \(refused now\)/u);
+  assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
+  assert.equal(prompts.length, 7, "refused at every try until the objective ended");
+  offset = 31 * 60_000;
+  const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
+  assert.doesNotMatch(later[0] ?? "", /failed lately/u);
+  assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
+});
+
+const HUNT = { step: { skill: "hunt", mob: "glow_squid", drop: "ink_sac", count: 8 } };
+/** A short window (0.002 minutes = 120 ms) looked at every 10 ms, instead of 5 minutes every 30 seconds. */
+const QUICK_GAIN = { noGain: { minutes: 0.002, sampleMs: 10 } };
+
+test("a step out to obtain items that gains none for the whole window is stopped and fails, saying how far it got", async (t) => {
+  // Live 2026-10-09: Vex's "hunt glow_squid for 8 ink_sac" ran to the time limit three times, gaining nothing.
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_mob_drop = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "No squid, sorry!" });
+  action.reply(HUNT, { give_up: "no squid" });
+  await agent.handle(say("Steve", "get me 8 ink sacs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 1, "the hunt was stopped");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> failed: nothing gained in 0\.002 minutes: 0 of 8 ink_sac so far \(the rest is in your inventory\)/u);
+});
+
+test("a step whose items keep increasing is not stopped, and one without target items is never sampled", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_mob_drop = 300;
+  runtime.durations.collect_block = 300;
+  const statuses = { calls: 0 };
+  const status = runtime.status.bind(runtime);
+  runtime.status = async () => {
+    statuses.calls += 1;
+    return status();
+  };
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
+  t.after(() => clearInterval(gains));
+  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+  action.reply(HUNT, { done: "got the ink" });
+  await agent.handle(say("Steve", "get me 8 ink sacs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms against a 120 ms window: not stopped");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> done/u);
+  clearInterval(gains);
+  const sampled = statuses.calls;
+  chat.reply({ say: "Okay!", route: "act", request: "collect 1 dirt" }, { say: "Done!" });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 1 } }, { done: "dirt" });
+  await agent.handle(say("Steve", "get me a dirt"));
+  await until(() => runtime.said.length === 4, 5_000);
+  assert.ok(statuses.calls - sampled < 8, `a collect step (about 300 ms) looks at the inventory only before and after, not every 10 ms (${statuses.calls - sampled} calls; the hunt: ${sampled})`);
+  assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
 });
