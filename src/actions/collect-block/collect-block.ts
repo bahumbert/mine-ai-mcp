@@ -23,6 +23,7 @@ import {
 } from "../../navigation/processes/mining/mine-process.js";
 import { evaluateMineTarget, type MineTargetDecision } from "../../navigation/processes/mining/target-safety.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { isInWater } from "../../survival/perception/body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
 import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
@@ -266,6 +267,7 @@ function beginCollectBlock(
     const stall = watchForStall({
       work: () => `${broken.length}:${gained()}`,
       position: () => bot.entity.position,
+      inWater: () => isInWater(bot),
       stallMs: COLLECT_STALL_MS,
       describe: ({ seconds, walked }) =>
         outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(start))),

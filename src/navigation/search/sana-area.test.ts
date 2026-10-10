@@ -97,3 +97,36 @@ test("a bot wading with its head dry is refused deep open water", () => {
 test("a bot submerged in a one-wide pocket may step on into deep open water", () => {
   assert.equal(stepIntoSea({ x: 22, y: 60, z: 0 }).kind, "allowed");
 });
+
+/**
+ * A 2-deep channel (water y 59-60, air above) at x 0-4 beside deep open water (y 59-61) from x 5 east, over a stone
+ * floor at y 58; `roofAt` puts one stone block over the water column at that x (live 2026-10-10 run 7: a river mouth).
+ */
+function channelAndSea(bot: ReturnType<typeof sanaBot>, roofAt?: number): MemoryWorld {
+  const world = new MemoryWorld();
+  const Block = blockClass(bot);
+  const put = (x: number, y: number, z: number, name: string) => {
+    const block = observeMineflayerBlock(Block.fromStateId(registry.blocksByName[name]!.defaultState, 0));
+    if (block.kind !== "loaded") throw new Error(name);
+    world.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
+  };
+  for (let x = -3; x <= 24; x++) for (let z = -8; z <= 8; z++) for (let y = 58; y <= 64; y++) {
+    const water = x >= 0 && ((x >= 5 && y <= 61 && y >= 59) || (y === 59 || y === 60));
+    put(x, y, z, y === 58 ? "stone" : x === roofAt && z === 0 && y === 61 ? "stone" : water ? "water" : "air");
+  }
+  return world;
+}
+
+function stepIntoSeaFromChannel(roofAt?: number) {
+  const bot = sanaBot();
+  bot.entity.position = new Vec3(4.5, 59, 0.5);
+  return createMovements(bot).decideStep(10, 61, 0, channelAndSea(bot, roofAt));
+}
+
+test("a bot swimming in an open channel is refused deep open water (a river mouth is not the sea)", () => {
+  assert.equal(stepIntoSeaFromChannel().kind, "prohibited");
+});
+
+test("the same swimming bot under a solid roof may step on into deep open water", () => {
+  assert.equal(stepIntoSeaFromChannel(4).kind, "allowed");
+});

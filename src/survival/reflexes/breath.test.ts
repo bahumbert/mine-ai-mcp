@@ -236,3 +236,44 @@ test("a dry bot under the same roof is left alone by the breath reflex", async (
   assert.deepEqual(digs, []);
   await control[Symbol.asyncDispose]();
 });
+
+/** The reflex's continuation after a full-air surfacing, driven at chosen positions and times. */
+function breathContinuations(t: Parameters<typeof waterFixture>[0]) {
+  const fixture = waterFixture(t);
+  let definition: { continuation: (outcome: unknown) => { kind: string; reason?: string } } | undefined;
+  let clock = 0;
+  const driver = { register: (captured: typeof definition) => { definition = captured; return { [Symbol.asyncDispose]: async () => {} }; } };
+  attachBreathReflex(fixture.bot, driver as never, () => null, () => clock);
+  return {
+    surfaceAt: (x: number, atMs: number) => {
+      clock = atMs;
+      Object.assign(fixture.entity, { position: new Vec3(x + 0.5, 50, 0.5) });
+      return definition!.continuation({ kind: "air_full", ownedDive: false });
+    },
+  };
+}
+
+const MINUTE = 60_000;
+
+test("the third breath reflex at the same place within three minutes ends the action instead of resuming it", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000).kind, "resume");
+  const third = surfaceAt(2, 38_000);
+  assert.equal(third.kind, "return");
+  assert.match(third.reason ?? "", /Out of air three times here/);
+});
+
+test("three breath reflexes ten blocks apart all resume", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(10, 19_000).kind, "resume");
+  assert.equal(surfaceAt(20, 38_000).kind, "resume");
+});
+
+test("a third breath reflex after three minutes starts the count again and resumes", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(0, 19_000).kind, "resume");
+  assert.equal(surfaceAt(0, 3 * MINUTE + 1).kind, "resume");
+});
