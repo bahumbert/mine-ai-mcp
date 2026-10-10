@@ -267,3 +267,29 @@ test("nothing within eight blocks that fits reports the radius", async () => {
     /DROP_HOLE_UNAVAILABLE.*within 8 blocks/,
   );
 });
+
+test("a pit that holds a dropped item is skipped for the next one (live 2026-10-10 run 8: buried items came back)", async () => {
+  const { bot, changed } = ground();
+  const item = { id: 5, name: "item", position: new Vec3(1.5, 62.1, 0.5), getDroppedItem: () => ({ name: "dirt", count: 3 }) };
+  Object.assign(bot, { entities: { 5: item } });
+  const digs: Vec3[] = [];
+  const bottom = await prepareDisposalHole(
+    bot,
+    createMovementPolicy(),
+    async ({ position }) => {
+      digs.push(new Vec3(position.x, position.y, position.z));
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    {},
+  );
+  assert.notDeepEqual(bottom, new Vec3(1, 62, 0), "the pit with the item in it is not reused");
+  assert.equal(digs.length, 2);
+  // An item that is not within reach of the pit's cells does not matter.
+  item.position = new Vec3(9.5, 62.1, 9.5);
+  const free = await prepareDisposalHole(bot, createMovementPolicy(), async ({ position }) => {
+    changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+    return { status: "broken" };
+  }, {});
+  assert.ok(free);
+});
