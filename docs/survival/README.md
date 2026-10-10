@@ -126,6 +126,11 @@ footing, dragon, hostile and hunger responses. Each response supplies observatio
 decision, execution and settlement; it does not create another arbitration loop.
 Idle water stabilization has a named baseline owner and yields on admission.
 
+The breath response (`responses/breath.ts`) rises for air. Under a roof it swims to the nearest column open to the air
+(`swimExitPath`, breadth-first through water and air within 12 blocks, see `positioning/swim-escape.ts`); only when no
+such column exists does it dig up through the roof, with the best tool carried. The dig is the body's own and never
+goes through the route policy, so the policy's rule against mining under water does not apply to it.
+
 [`CombatPerception`](../../src/survival/perception/combat/observations.ts) shares packet and
 visibility observations across readers. Relationship facts distinguish avoidance
 from permission to defend. [`decideCombatResponse`](../../src/survival/policy/combat/decision.ts)

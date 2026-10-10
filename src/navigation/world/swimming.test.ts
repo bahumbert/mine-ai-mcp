@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
-import { admitsDive, holdSwimDepth, openWaterSurface, swimTravelTicks } from "./swimming.js";
+import { admitsDive, holdSwimDepth, openWaterSurface, swimExitPath, swimTravelTicks } from "./swimming.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { WELL_FED, planningStart } from "../../test-support/navigation.js";
@@ -77,4 +77,42 @@ test("depth holding arrests inherited momentum and stays in a band under pinned 
   assert.ok(max - min < 0.18, `hold varied from ${min} to ${max}`);
   assert.ok(swimTravelTicks({ x: 0, y: 63, z: 0 }, { x: 0, y: 61, z: 0 }) >
     swimTravelTicks({ x: 0, y: 61, z: 0 }, { x: 0, y: 63, z: 0 }));
+});
+
+/** Rows of text over a flat slice: `~` water, `.` air, `#` solid. Row 0 is the highest layer. */
+function slice(layers: string[]): (x: number, y: number, z: number) => "water" | "air" | "solid" | "unknown" {
+  return (x, y, z) => {
+    const row = layers[layers.length - 1 - y];
+    if (z !== 0 || row === undefined) return y >= layers.length ? "air" : "solid";
+    const ch = row[x];
+    return ch === "~" ? "water" : ch === "." ? "air" : ch === "#" ? "solid" : "unknown";
+  };
+}
+
+// An overhang at y 3 over x 0..3, the swimmer under it at x 1, y 2; the sea floor is y 0.
+const overhang = [
+  "~~~~~~~~~~",
+  "####~~~~~~",
+  "~~~~~~~~~~",
+  "~~~~~~~~~~",
+  "##########",
+];
+
+test("an exit path swims round an overhang to the nearest open column", () => {
+  const path = swimExitPath(slice(overhang), { x: 1, y: 2, z: 0 });
+  assert.ok(path && path.length > 0);
+  assert.equal(path.at(-1)?.x, 4, "the nearest column with no roof is the first past the overhang");
+});
+
+test("an open column straight up is its own exit, and a sealed pocket has none", () => {
+  const open = slice(["~~~", "~~~", "~~~", "###"]);
+  assert.deepEqual(swimExitPath(open, { x: 1, y: 1, z: 0 }), []);
+  const sealed = slice(["#####", "#~~~#", "#~~~#", "#####"]);
+  assert.equal(swimExitPath(sealed, { x: 2, y: 1, z: 0 }), null);
+});
+
+test("an exit farther than the radius is not found, and a blocked column is crossed but not chosen", () => {
+  const sea = slice(overhang);
+  assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [], 2), null);
+  assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [{ x: 4, z: 0 }])?.at(-1)?.x, 5);
 });

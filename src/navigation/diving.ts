@@ -6,7 +6,7 @@ import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import type { WorldView } from "./world/world.js";
-import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimTravelTicks } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
@@ -36,16 +36,16 @@ export class Diving {
     if (!session?.owned) return null;
     if (this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "air") return DIVE_BACKSTOP_TICKS;
     const feet = this.bot.entity.position.floored();
-    const surface = openWaterSurface(this.#read, feet);
-    if (!surface) return 300; // The admission premise disappeared: request immediate rescue.
-    return swimTravelTicks(this.bot.entity.position, surface) + DIVE_BACKSTOP_TICKS;
+    const ascent = swimAscent(this.#read, feet);
+    if (!ascent) return 300; // The admission premise disappeared: request immediate rescue.
+    return ascent.ticks + DIVE_BACKSTOP_TICKS;
   }
 
   committed(plan: Pick<RoutePlan, "steps">): void {
     const session = this.#session;
     if (!session) return;
     if (plan.steps.some(({ to }) => this.world.blockAt(to.x, to.y + 1, to.z).kind === "loaded" &&
-      this.bot.blockAt(new Vec3(to.x, to.y + 1, to.z))?.name === "water" && openWaterSurface(this.#read, to))) {
+      this.bot.blockAt(new Vec3(to.x, to.y + 1, to.z))?.name === "water" && swimAscent(this.#read, to))) {
       session.owned = true;
     }
   }
@@ -81,12 +81,12 @@ export class Diving {
     const tick = () => {
       if (!session.owned || session.returning || session.stop.signal.aborted) return;
       const feet = this.bot.entity.position.floored();
-      const surface = openWaterSurface(this.#read, feet);
+      const ascent = swimAscent(this.#read, feet);
       const air = airSupplyTicks(this.bot);
       // With a lost corridor the survival backstop must take over; do not call it a planned return.
-      if (!surface) return;
+      if (!ascent) return;
       if (this.bot.blockAt(feet.offset(0, 1, 0))?.name === "water" &&
-        (air === null || air <= swimTravelTicks(this.bot.entity.position, surface) + DIVE_RESERVE_TICKS))
+        (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
         session.stop.abort(BREATHING_STOP);
     };
     this.bot.on("physicsTick", tick);
@@ -113,7 +113,7 @@ export class Diving {
         const air = airSupplyTicks(this.bot);
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
-        session.owned = session.owned || (options.movements.allowSwimming && air !== null && openWaterSurface(this.#read, origin.floored()) !== null &&
+        session.owned = session.owned || (options.movements.allowSwimming && air !== null && swimAscent(this.#read, origin.floored()) !== null &&
           this.bot.blockAt(origin.offset(0, 1.62, 0))?.name === "water");
         const movements: MovementPolicy = { ...options.movements,
           get scaffold() { return options.movements.scaffold; },
@@ -128,7 +128,7 @@ export class Diving {
           this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
         if ((!continuingDive && !returnToProcess) || session.cancelled.signal.aborted || options.signal?.aborted ||
           (options.stopSignal?.aborted && !returnToProcess)) return result;
-        const surface = openWaterSurface(this.#read, this.bot.entity.position.floored());
+        const surface = swimAscent(this.#read, this.bot.entity.position.floored())?.surface;
         if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: Date.now() - started };
         const progress = `${this.bot.entity.position.floored()}:${session.completedWork}`;
         repeatedStops = progress === previousStop ? repeatedStops + 1 : 0;

@@ -1,15 +1,33 @@
 import type { BlockObservation, BlockPosition, WorldView } from "./world.js";
 import { isHeadPassable, isSafeSupport } from "./block-geometry.js";
-import { openWaterSurface } from "./swimming.js";
+import { OPEN_COLUMN_REACH, openWaterSurface } from "./swimming.js";
 
-/** Existing still-water work, never permission to flood a dry mining stance. */
+/**
+ * Whether nothing solid roofs the column above this cell within the reach a swimmer climbs (water and air both let a
+ * swimmer through). A puddle in a sealed pocket has a roof; a pond or the sea has none. A cell the world does not
+ * show ends the scan: the column is then open as far as it is known.
+ */
+function roofless(read: WorldView["blockAt"], x: number, y: number, z: number): boolean {
+  for (let above = y; above <= y + OPEN_COLUMN_REACH; above++) {
+    const block = read(x, above, z);
+    if (block.kind !== "loaded") return true;
+    if (block.collisionShapes.length > 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Existing still-water work, never permission to flood a dry mining stance. A puddle the bot stands in only counts
+ * when the water is open to the air above it: sealing in a roofed pocket by letting the sea in behind a wall is the
+ * flood this rule exists to prevent (live 2026-10-10: a dug pocket with a puddle on its floor, then the sea).
+ */
 export function waterMiningStance(read: WorldView["blockAt"], feet: BlockPosition, supported: boolean): boolean {
   const body = read(feet.x, feet.y, feet.z);
   if (body.kind !== "loaded" || body.traits.liquid !== "water" || !body.traits.liquidSource ||
     body.traits.waterlogged || body.collisionShapes.length > 0) return false;
   const head = read(feet.x, feet.y + 1, feet.z);
   if (head.kind !== "loaded") return false;
-  if (head.traits.liquid === null && isHeadPassable(head)) return true;
+  if (head.traits.liquid === null && isHeadPassable(head)) return roofless(read, feet.x, feet.y + 2, feet.z);
   // Submerged work additionally passes the runtime's live dive/air admission.
   return supported && openWaterSurface(read, feet) !== null;
 }

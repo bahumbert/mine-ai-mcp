@@ -20,6 +20,7 @@ import type { BreakEvaluation, MovementPolicy, PolicyDecision, ToolSelection } f
 import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
 import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
+import { OPEN_COLUMN_REACH } from "../world/swimming.js";
 import {
   packKey,
   type BlockObservation,
@@ -492,7 +493,13 @@ export function createMineflayerMovementPolicy(
     const key = `${feet.x},${feet.y},${feet.z}`;
     if (key !== seaCell) {
       seaCell = key;
-      seaAnswer = isDeepOpenWater(waterIn(world), feet.x, feet.y, feet.z) || isDeepOpenWater(waterIn(world), feet.x, feet.y - 1, feet.z);
+      // The sea above counts as much as the sea under the feet: a bot on the sea floor stands in water too shallow
+      // to be "deep" by its own cell alone (live 2026-10-10: stranded on the floor, every way up refused as a swim
+      // across deep water). So the whole water column over the feet is asked.
+      const water = waterIn(world);
+      seaAnswer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z);
+      for (let y = feet.y; !seaAnswer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
+        seaAnswer = isDeepOpenWater(water, feet.x, y, feet.z);
     }
     return seaAnswer;
   };
