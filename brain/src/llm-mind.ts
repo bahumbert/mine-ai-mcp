@@ -466,7 +466,8 @@ ${MINECRAFT_FACTS}
 ${persona.preferences === undefined ? "" : `- When there are several ways to reach the objective (food from a farm or from hunting), you may pick the one
   you like.
 `}- Read the steps so far: never repeat a step that failed the same way, or that changed nothing (same place, same
-  inventory); try another way, or give up. Skills that need a block or a mob find it themselves: do not walk around
+  inventory); try another way, or give up. A drop that succeeded is not repeated: if the inventory fills again, drop
+  something else or stop gathering. Skills that need a block or a mob find it themselves: do not walk around
   to look for things first.
 - When the objective is reached, answer done only when the steps so far did every part of it: making something for
   someone is not giving it to them (a give step must have succeeded); never claim what no step did. When it is impossible, unclear, or you do not know how, give up and

@@ -155,6 +155,8 @@ export const dropItemOutcomes = {
     `[DROP_REJECTED] Mineflayer could not toss ${item}: ${cause instanceof Error ? cause.message : String(cause)}`,
   notObserved: (item: string, remaining: number) =>
     `[DROP_NOT_OBSERVED] The inventory still holds ${item} x${remaining} after tossing.`,
+  pickedUp: (item: string) =>
+    `[DROP_PICKED_UP] ${item} came back into the inventory after the toss: it was picked up again, so nothing was dropped.`,
   playerNotFound: (name: string) =>
     `[DROP_PLAYER_NOT_FOUND] No player named ${name} is loaded nearby; move closer or check the name.`,
   playerUnreachable: (name: string, reason: string) =>

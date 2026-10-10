@@ -564,7 +564,9 @@ export class Agent {
     // cobblestone" in a row ended an objective as "changed nothing"): only an unchanged inventory means it is stuck.
     const last = work.steps.slice(-same);
     const carriedLast = work.carried.slice(-same);
-    const gaining = record.outcome === "done" && carriedLast.some((kept) => kept !== carriedLast[0]);
+    // A drop is never "gaining": one that worked needs no repeat, and drop, pick up, drop moves the inventory too (live
+    // 2026-10-10 run 7: one drop step 26 times in a row).
+    const gaining = record.outcome === "done" && decision.step.skill !== "drop_item" && carriedLast.some((kept) => kept !== carriedLast[0]);
     if (record.outcome !== "interrupted" && !gaining && last.length === same && last.every((step) => step.step === record.step && step.outcome === record.outcome && step.detail === record.detail)) {
       this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
       return;

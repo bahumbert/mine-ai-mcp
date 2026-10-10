@@ -181,6 +181,36 @@ test("drop_item drops several items in one step, and the single-item form still 
   assert.equal(stepSchema.safeParse({ skill: "drop_item" }).success, false);
 });
 
+test("drop_item names what was really dropped, and says the inventory has room again", async () => {
+  // Live 2026-10-10 run 7: every drop was reported "dropped 16 coal, 32 cobblestone" while the action had dropped 0.
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 5 }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 32 }] });
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone", count: 32 }] }), contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.match(result.status === "done" ? result.detail : "", /32 cobblestone.*the inventory has room again: 35 of 36 slots free/u);
+});
+
+test("a drop that dropped nothing fails with the action's reason, and a water-locked pit falls back to the ground", async () => {
+  const runtime = new FakeRuntime();
+  runtime.dropOutcomes.push({ status: "failed", error: "[DROP_PICKED_UP] coal came back into the inventory after the toss", dropped: [{ item: "coal", dropped: 0 }] });
+  const failed = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "coal" }] }), contextFor(runtime));
+  assert.equal(failed.status, "failed");
+  assert.match(failed.status === "failed" ? failed.detail : "", /DROP_PICKED_UP/u);
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["drop_item"], "no ground toss after a pit that failed otherwise");
+
+  const water = new FakeRuntime();
+  water.walkOnNavigate = true;
+  water.dropOutcomes.push(
+    { status: "failed", error: "[DROP_HOLE_UNAVAILABLE] No place within 8 blocks", dropped: [] },
+    { status: "succeeded", error: null, dropped: [{ item: "coal", dropped: 4 }] },
+  );
+  const ground = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "coal" }] }), contextFor(water));
+  assert.equal(ground.status, "done");
+  assert.deepEqual(water.submitted.map((call) => [call.tool, call.input.in_a_hole]), [["drop_item", true], ["drop_item", undefined], ["navigate", undefined]], "walked away after the ground toss");
+  assert.match(ground.status === "done" ? ground.detail : "", /4 coal/u);
+});
+
 test("an item no block drops, and nothing crafts or smelts, ends get_items saying so", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
