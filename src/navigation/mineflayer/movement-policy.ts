@@ -497,10 +497,19 @@ export function createMineflayerMovementPolicy(
       // to be "deep" by its own cell alone (live 2026-10-10: stranded on the floor, every way up refused as a swim
       // across deep water). So the whole water column over the feet is asked.
       const water = waterIn(world);
-      // Already swimming (feet and head in water) is at sea too: a 1-wide roofed pocket fails the open-water span
-      // test (live 2026-10-10), and refusing the sea there leaves no way out.
+      // Already swimming (feet and head in water) under a roof is at sea too: a 1-wide roofed pocket fails the
+      // open-water span test (live 2026-10-10), and refusing the sea there leaves no way out. With open air over
+      // the water (a river mouth, a shore) it is not: run 7 swam ~130 blocks out to sea that way.
+      const roofed = (): boolean => {
+        for (let y = feet.y; y <= feet.y + OPEN_COLUMN_REACH; y++) {
+          if (water(feet.x, y, feet.z)) continue;
+          const block = world.blockAt(feet.x, y, feet.z);
+          return block.kind === "loaded" && block.collisionShapes.length > 0;
+        }
+        return false;
+      };
       seaAnswer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z) ||
-        (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z));
+        (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z) && roofed());
       for (let y = feet.y; !seaAnswer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
         seaAnswer = isDeepOpenWater(water, feet.x, y, feet.z);
     }
