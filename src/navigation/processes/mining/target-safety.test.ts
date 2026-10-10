@@ -39,7 +39,7 @@ test("missing isolation material rejects a dry water barrier but retains a swimm
   let submergedTarget = false;
   bot.blockAt = (position) => {
     const name = position.equals(new Vec3(2, 64, 0)) || (submergedTarget && position.equals(new Vec3(1, 65, 0)))
-      ? "water" : position.equals(new Vec3(1, 64, 0)) ? "stone" : "air";
+      ? "water" : position.equals(new Vec3(1, 64, 0)) ? "stone" : position.y < 63 ? "stone" : "air";
     const block = blocks.fromStateId(bot.registry.blocksByName[name]!.minStateId, 0);
     block.position = position;
     return block;
@@ -111,7 +111,8 @@ test("a block inside a protected region is never a mining target, and the refusa
   const bot = botFixture();
   const blocks = blockClass(bot);
   bot.blockAt = (position) => {
-    const block = blocks.fromStateId(bot.registry.blocksByName[position.equals(new Vec3(1, 64, 0)) ? "dirt" : "air"]!.defaultState, 0);
+    const name = position.equals(new Vec3(1, 64, 0)) ? "dirt" : position.y < 63 ? "stone" : "air";
+    const block = blocks.fromStateId(bot.registry.blocksByName[name]!.defaultState, 0);
     block.position = position;
     return block;
   };
@@ -129,4 +130,30 @@ test("a block inside a protected region is never a mining target, and the refusa
   assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
     kind: "prohibited", reason: "inside protected region #3 'Tom's place' (owner Tom)",
   });
+});
+
+test("a bridge over a deep drop is never a mining target, the same block on the ground is", () => {
+  const bot = botFixture();
+  const blocks = blockClass(bot);
+  // A cobblestone bridge at y 64 along z 0, x 0..4: ground at y 63 under x 0..1, a 10-deep gap under x 2..4.
+  const cell = (x: number, y: number, z: number) =>
+    y === 64 && z === 0 && x >= 0 && x <= 4 ? "cobblestone" : y === 63 && x <= 1 ? "stone" : y <= 52 ? "stone" : "air";
+  bot.blockAt = (position) => {
+    const block = blocks.fromStateId(bot.registry.blocksByName[cell(position.x, position.y, position.z)]!.defaultState, 0);
+    block.position = position;
+    return block;
+  };
+  const world = {
+    blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!),
+    revision: 0, subscribe: () => () => {},
+  };
+  bot.entity.position = new Vec3(9.5, 64, 9.5);
+  const policy = createMineflayerMovementPolicy(bot);
+  const reasonFor = (x: number) => evaluateMineTarget(bot, policy, bot.blockAt(new Vec3(x, 64, 0))!, world, 0);
+  assert.equal(reasonFor(3).kind, "prohibited", "over the gap");
+  assert.match((reasonFor(3) as { reason: string }).reason, /walkway over a drop/);
+  assert.equal(reasonFor(1).kind, "mineable", "on the ground");
+  assert.deepEqual(reasonFor(0), { kind: "mineable", routeMayBreak: true }, "the ground end of the bridge");
+  bot.entity.position = new Vec3(1.5, 65, 0.5);
+  assert.deepEqual(reasonFor(1), { kind: "prohibited", reason: "the block the bot stands on" });
 });

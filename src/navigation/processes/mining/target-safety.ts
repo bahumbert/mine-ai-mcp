@@ -29,6 +29,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
 import { waterMiningStance } from "../../world/water.js";
+import { MAXIMUM_BUCKET_DROP } from "../../mineflayer/movement-policy.js";
 import {
   observeMineflayerBlock,
   type BlockPosition,
@@ -127,6 +128,29 @@ function fallingColumnStop(
 }
 
 /**
+ * Whether the block is a walkway in the air: something to stand on, with nothing under it for more blocks than a fall
+ * is safe from and no deep water to land in. A bridge or a pillar the bot built is one, and mining it strands the bot
+ * (live 2026-10-10: Lena mined the blocks of her own bridge over a 23-block drop). A natural ceiling is not (solid above).
+ */
+export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, position: BlockPosition): boolean {
+  const open = (y: number) => {
+    const block = world.blockAt(position.x, y, position.z);
+    return block.kind === "loaded" && block.traits.empty && block.traits.liquid === null;
+  };
+  if (!open(position.y + 1)) return false;
+  let depth = 0;
+  for (let y = position.y - 1; open(y); y -= 1) {
+    depth += 1;
+    if (depth > MAXIMUM_BUCKET_DROP) return true;
+  }
+  if (depth <= movements.maximumDrop) return false;
+  const landing = world.blockAt(position.x, position.y - 1 - depth, position.z);
+  const below = world.blockAt(position.x, position.y - 2 - depth, position.z);
+  const deepWater = (block: typeof landing) => block.kind === "loaded" && block.traits.liquid === "water";
+  return !(deepWater(landing) && deepWater(below));
+}
+
+/**
  * The mine process's one target rule. Callers hand it a loaded matching block;
  * it answers whether the block can come out with the available placement
  * budget, and what has to happen first.
@@ -140,6 +164,14 @@ export function evaluateMineTarget(
 ): MineTargetDecision {
   if (!plausibleToBreak(block)) return { kind: "prohibited", reason: `${block.name} cannot be broken at all` };
   const position = { x: block.position.x, y: block.position.y, z: block.position.z };
+  // Never the block under the bot's own feet, nor a walkway it built over a drop.
+  const feet = bot.entity.position;
+  if (position.x === Math.floor(feet.x) && position.z === Math.floor(feet.z) && position.y === Math.ceil(feet.y) - 1) {
+    return { kind: "prohibited", reason: "the block the bot stands on" };
+  }
+  if (isWalkwayOverDrop(movements, world, position)) {
+    return { kind: "prohibited", reason: "a walkway over a drop: mining it would strand the bot" };
+  }
   const evaluation = movements.evaluateBreak(observeMineflayerBlock(block), position, world);
   const decision = evaluation.decision;
   const floodRule = decision.kind === "prohibited" && decision.cause === "opens_into_liquid";

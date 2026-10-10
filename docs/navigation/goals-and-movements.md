@@ -60,7 +60,7 @@ The catalogue recognises eleven distinct movement kinds:
 The catalogue applies geometric constraints before producing movement edges:
 
 - **Diagonal travel**: Diagonal land movements are generated only when both orthogonal corner blocks are passable. Diagonals cover `sqrt(2)` blocks of distance, so their tick cost is multiplied by `Math.SQRT2` to prevent zig-zag bias.
-- **Descending drops**: Drops must land on safe support up to `maximumDrop` blocks below. Landings beneath falling sand or gravel are rejected to prevent the bot from being buried.
+- **Descending drops**: Drops must land on safe support up to `maximumDrop` blocks below. Landings beneath falling sand or gravel are rejected to prevent the bot from being buried. A fall of any height (up to the column the world holds) is also a `drop` when it lands in water at least two blocks deep, since entering water cancels the fall damage; it is priced at twice its length so a dry route of similar length wins.
 - **Gap jumping**: Jumps check vertical headroom across intermediate air blocks. A sprint jump arcs higher than standing height, so cells two blocks above intermediate positions must stay clear.
 - **Sprint qualification**: Sprint edges are offered only when player food is at least six, matching Minecraft's physical requirement in [world/observation.ts](../../src/navigation/world/world.ts).
 - **What counts as a floor**: Support is judged from a block's collision boxes in [world/block-geometry.ts](../../src/navigation/world/block-geometry.ts): a full-width top within an eighth of a block of full height is a tread, so soul sand and mud are floors and a lower slab is not. Two name-derived traits override the boxes. A `damaging` block (magma, fire, cactus) is never safe support, and a `yielding` block, the big dripleaf, is never a tread at all: its leaf tilts under a standing body within a second and drops it into whatever lies beneath.
@@ -97,7 +97,7 @@ The factory [`createMineflayerMovementPolicy`](../../src/navigation/mineflayer/m
 Production navigation avoids destroying farmlands and stepping on dangerous terrain:
 
 - **Protected crops**: The policy prohibits breaking crops in `ROUTE_PROTECTED_CROPS`, including wheat, carrots, potatoes, beetroots, melon stems, pumpkin stems, berries, and cocoa.
-- **Avoided blocks**: The policy forbids stepping into or directly over blocks in `AVOID_BLOCKS`, including fire, soul fire, cobwebs, lava, and bubble columns.
+- **Avoided blocks**: The policy forbids stepping into or directly over blocks in `AVOID_BLOCKS`, including fire, soul fire, lava, and bubble columns. A cobweb is not avoided but dug: it has no collision yet holds the body, so its cell is a block to break (`entangling` trait), priced by the best carried tool's break time with no terrain penalty.
 - **Damaging blocks**: Blocks with contact damage, such as magma blocks, campfires, sweet berry bushes, and wither roses, are rejected as walkable ground in [mineflayer/world.ts](../../src/navigation/mineflayer/world.ts).
 
 ### Liquid hazard rules
@@ -133,7 +133,7 @@ Tool selection calls `selectHarvestTool` to pick the carried inventory item that
 
 ### Scaffold selection
 
-Scaffold placement uses carried items named by `navigation.scaffold_blocks` in the survival policy. Its default is `"dirt"`, `"cobblestone"`, `"cobbled_deepslate"`, `"netherrack"`, `"basalt"`, then `"end_stone"`. The first usable carried, unprotected name wins, so the array is an explicit preference order; unsafe, falling, interactive, liquid, or partial blocks are skipped. The choice is made from the live inventory each time a search starts; within one search the choice is fixed. An empty list disables automatic scaffold placement. A block with an axis, such as basalt, is predicted in the state the placement face produces, since the server aligns it with that face.
+Scaffold placement uses carried items named by `navigation.scaffold_blocks` in the survival policy. Its default is `"dirt"`, `"cobblestone"`, `"cobbled_deepslate"`, `"netherrack"`, `"basalt"`, then `"end_stone"`. The first usable carried, unprotected name wins, so the array is an explicit preference order; unsafe, falling, interactive, liquid, or partial blocks are skipped. The choice is made from the live inventory each time a search starts; within one search the choice is fixed. An empty list disables automatic scaffold placement. When a route finds no path and none of these names is carried, `navigate` plans once more with `scaffoldFallback`: the carried block (`fallbackScaffoldItem`) the bot holds most of among full solid cubes that are not falling or interactive and belong to the game's own common-stock tags (`base_stone_overworld`, `base_stone_nether`, `dirt`, `planks`, `stone_bricks`, `terracotta`). The stock it spends is reported with the others. A block with an axis, such as basalt, is predicted in the state the placement face produces, since the server aligns it with that face.
 
 ## Water-bucket descents
 
