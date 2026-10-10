@@ -1,0 +1,69 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-over-lake-with-boats
+tags: [reliability]
+description: >-
+  Leave a perch high over a wide, deep lake, with boats carried and the far beach more than twelve blocks
+  from the water the bot lands in. The fall into the lake is the only way down, so deep open water must
+  not refuse the landing; from the water the bot reaches the beach.
+
+# Lena, live 2026-10-10: on a furnace 23 blocks over eight blocks of water, three boats carried, every explore
+# stopped at "no shore at the water's level near where the deep water starts". The lake is 22 long and 11 wide
+# (deep open water: nine in a row both ways, three deep), walled by a cliff on the west and the rim on the sides.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -2 -62 -8 34 -25 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -2, -62, -8 ], to: [ 34, -61, 8 ] }
+  # The cliff round the lake: west wall, side rims, all above the water.
+  - fill: { block: stone, from: [ -1, -60, -6 ], to: [ -1, -40, 6 ] }
+  - fill: { block: stone, from: [ 0, -60, -6 ], to: [ 22, -40, -6 ] }
+  - fill: { block: stone, from: [ 0, -60, 6 ], to: [ 22, -40, 6 ] }
+  - fill: { block: water, from: [ 0, -60, -5 ], to: [ 22, -53, 5 ] }
+  # The far beach, level with the water's surface.
+  - fill: { block: stone, from: [ 23, -60, -6 ], to: [ 34, -53, 6 ] }
+  # The perch: one block floating twenty-odd blocks over the middle of the lake, nothing under it (Lena stood on a furnace).
+  - setblock: { block: stone, at: [ 8, -31, 0 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 8.5, -30, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 3
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 30
+    y: -52
+    z: 0
+    range: 2
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: reach
+      who: PerchBot
+      pos: [ 30.5, -52, 0.5 ]
+      radius: 3.0
+    - kind: health
+      who: PerchBot
+      health: 20
+    - kind: completion
+      who: PerchBot

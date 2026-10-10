@@ -13,7 +13,7 @@ import {
   type NavigationResult,
   type NavigationRuntime,
 } from "../../navigation/index.js";
-import { fallbackScaffoldItem, preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
+import { DEFAULT_MAXIMUM_DROP, fallbackScaffoldItem, preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { isSafeSupport, navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
@@ -21,6 +21,7 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { clearBodyWebs } from "./web-clearance.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
 
 /** Deep-water crossings one request makes by boat: there and on to the far side, then once more at most. */
@@ -358,6 +359,18 @@ function beginNavigate(
       const here = bot.entity.position.clone();
       const water = deepWaterOnTheWay(bot, here, request);
       if (water === null) return stopped;
+      // Perched high over deep water with no way down but the fall into it (live 2026-10-10: Lena, on a furnace 23 blocks
+      // up): the planner offers the landing but never plans on from it, because swimming deep water is for a bot already
+      // out on it. So the fall is made first, to the node the search reached, and the way on is planned from the sea.
+      const landing = route.status === "stopped" ? route.closest : undefined;
+      if (landing !== undefined && landing.y < Math.floor(here.y) - DEFAULT_MAXIMUM_DROP &&
+        bot.blockAt(new Vec3(landing.x, landing.y, landing.z))?.name === "water") {
+        const fell = await beginNavigate(bot, { ...request, x: landing.x, y: landing.y, z: landing.z, range: 0 }, dependencies, lifetime, () => {}, MAX_CROSSINGS)(context);
+        if (fell.status === "succeeded") {
+          const onward = await beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
+          return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start } };
+        }
+      }
       if (!carriesBoat(bot)) {
         return { ...stopped, status: "failed", error: navigateOutcomes.deepWater(request, water.start, water.length) };
       }
@@ -402,6 +415,7 @@ function beginNavigate(
     }
 
     try {
+      if (request.dig) await clearBodyWebs(bot, context.signal);
       const attempt = (scaffoldFallback: boolean) =>
         dependencies.navigate({
           movements: dependencies.createMovements(bot, {

@@ -1,0 +1,65 @@
+template: ../../templates/flat-single-action.yaml
+
+name: cobweb-in-the-body
+tags: [reliability]
+description: >-
+  Step up one block to the only way out while a cobweb fills the cell of the bot's own head. A body in a web
+  cannot jump, so the web round the body must be broken before the step is tried.
+
+# Tom, live 2026-10-10, in a mineshaft: the step up was planned, but his head cell held a cobweb and every
+# attempt ended "No observed settled arrival". The cell is walled on three sides by deepslate, a web at his
+# head and beside his feet; the one exit is up onto a deepslate step and on over open floor.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -40 8 air"
+
+geometry:
+  - fill: { block: deepslate, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # Walls of the pocket: west, east and north, three high; the south side is the step block.
+  - fill: { block: deepslate, from: [ -1, -60, -1 ], to: [ -1, -57, 1 ] }
+  - fill: { block: deepslate, from: [ 1, -60, -1 ], to: [ 1, -57, 1 ] }
+  - fill: { block: deepslate, from: [ 0, -60, -1 ], to: [ 0, -57, -1 ] }
+  # The step: one block up at z 1, open air and floor beyond it.
+  - setblock: { block: deepslate, at: [ 0, -60, 1 ] }
+  # Cobwebs in the bot's head cell and a cell of its feet.
+  - setblock: { block: cobweb, at: [ 0, -59, 0 ] }
+  - setblock: { block: cobweb, at: [ 0, -59, 1 ] }
+
+players:
+  - name: WebBot
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: wooden_sword
+        count: 1
+
+tick:
+  - "gamemode spectator @a[name=!WebBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 5
+    y: -60
+    z: 4
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: reach
+      who: WebBot
+      pos: [ 5.5, -60, 4.5 ]
+      radius: 2.0
+    - kind: completion
+      who: WebBot
