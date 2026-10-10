@@ -395,7 +395,7 @@ test("items picked up again after the toss are no drop (live 2026-10-10 run 7: c
   const result = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal" }] }), {}, deps(), createDiscardedItems());
 
   assert.equal(result.status, "failed");
-  assert.match(result.drop.dropped[0]?.error ?? "", /[DROP_PICKED_UP] coal came back into the inventory/);
+  assert.match(result.drop.dropped[0]?.error ?? "", /^[DROP_PICKED_UP] coal came back into the inventory/);
   assert.equal(result.drop.dropped[0]?.dropped, 0);
 });
 
