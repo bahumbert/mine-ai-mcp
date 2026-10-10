@@ -4,16 +4,22 @@ import { Agent } from "./agent.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
+import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
   --known-names      Comma list of people the agents are talked to who are not players here (e.g. Opus): a message opening
                      a sentence with one of these names and a comma or colon is read as spoken to them.
   --<tier>-model     Model id for that tier, for every agent (overrides personas and environment).
+  --model-slots      How many model calls the server runs at once (Ollama's OLLAMA_NUM_PARALLEL; default: env MODEL_SLOTS,
+                     else unknown). Only used to tell the monitor's "Model queue" panel how many calls wait.
+  --start-gap        Seconds between one agent's start and the next one's (default 0: all at once). The model server
+                     queues first calls from many bots at once for a minute or more.
+  --start-when-free  Also start the next agent only once a model slot is free (needs --model-slots).
 
 Each agent thinks with three LLM tiers (ADR-008): chat (fast: answers and routes every message), action (turns a
 request into skill steps) and planner (bigger jobs). They may all use the same model.
@@ -71,6 +77,13 @@ function createModel(persona: Persona, tier: Tier, override: string | undefined)
   });
 }
 
+function startGapMs(value: string | undefined): number {
+  if (value === undefined) return 0;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) throw new Error(`[BAD_START_ARG] --start-gap expects seconds (0 or more), got ${value}`);
+  return seconds * 1000;
+}
+
 function positiveInteger(value: string | undefined): number | null {
   const number = Number(value);
   return value !== undefined && Number.isInteger(number) && number > 0 ? number : null;
@@ -98,6 +111,9 @@ async function main(): Promise<void> {
       "action-model": { type: "string" },
       "planner-model": { type: "string" },
       "known-names": { type: "string" },
+      "model-slots": { type: "string" },
+      "start-gap": { type: "string" },
+      "start-when-free": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -110,11 +126,17 @@ async function main(): Promise<void> {
   const knownNames = (values["known-names"] ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
   const usernames = personas.map((persona) => persona.username);
   const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
+  const slots = positiveInteger(values["model-slots"] ?? env("MODEL_SLOTS"));
+  const gapMs = startGapMs(values["start-gap"]);
+  if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
+  // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
+  const firstLog = brainLogs.find((log) => log !== null);
+  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE) });
   const minds = personas.map((persona, index) => {
     const models = {
-      chat: createModel(persona, "chat", values["chat-model"]),
-      action: createModel(persona, "action", values["action-model"]),
-      planner: createModel(persona, "planner", values["planner-model"]),
+      chat: queue.track(createModel(persona, "chat", values["chat-model"]), persona.id),
+      action: queue.track(createModel(persona, "action", values["action-model"]), persona.id),
+      planner: queue.track(createModel(persona, "planner", values["planner-model"]), persona.id),
     };
     console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
     const brainLog = brainLogs[index];
@@ -127,20 +149,29 @@ async function main(): Promise<void> {
   process.once("SIGINT", () => shutdown.abort());
   process.once("SIGTERM", () => shutdown.abort());
 
-  const runs = personas.map((persona, index) => {
-    const log = (line: string) => console.log(`${new Date().toISOString()} [${persona.id}] ${line}`);
-    const agent = new Agent({
-      persona,
-      runtime: runtimes[index]!,
-      mind: minds[index]!,
-      otherAgents: usernames.filter((name) => name !== persona.username),
-      knownNames,
-      log,
-      ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
-    });
-    return agent.run(shutdown.signal).catch((error: unknown) => log(`stopped on error: ${String(error)}`));
-  });
+  const runs: Promise<void>[] = [];
+  await startStaggered(
+    personas.map((persona, index) => ({ persona, index })),
+    ({ persona, index }, afterMs) => {
+      const log = (line: string) => console.log(`${new Date().toISOString()} [${persona.id}] ${line}`);
+      const agent = new Agent({
+        persona,
+        runtime: runtimes[index]!,
+        mind: minds[index]!,
+        otherAgents: usernames.filter((name) => name !== persona.username),
+        knownNames,
+        log,
+        ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
+      });
+      queue.started(persona.id);
+      const after = afterMs === null ? "first" : `+${(afterMs / 1000).toFixed(1)}s after the previous`;
+      log(`started ${persona.id} (${after}, ${queue.inFlight()} model calls in flight)`);
+      runs.push(agent.run(shutdown.signal).catch((error: unknown) => log(`stopped on error: ${String(error)}`)));
+    },
+    { gapMs, whenFree: values["start-when-free"] ? (signal) => queue.whenFree(signal) : null, signal: shutdown.signal },
+  );
   await Promise.all(runs);
+  queue.flush();
   await Promise.all(runtimes.map((runtime) => runtime.close()));
 }
 

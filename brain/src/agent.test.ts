@@ -710,3 +710,18 @@ test("an order given by whisper is narrated by whisper to the one who gave it; o
   await until(() => runtime.said.length === 4);
   assert.deepEqual(spokenTo(runtime), ["Steve", "Steve", undefined, undefined]);
 });
+
+test("a step that failed for one objective is shown to the work tier of the next one", async (t) => {
+  // Live 2026-10-10: Mira's "craft cooked_beef" failed in six objectives worded differently, each starting afresh.
+  const runtime = new FakeRuntime();
+  runtime.failures.craft_item = "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef.";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "cook 3 beef" }, { say: "Can't, sorry." }, { say: "Sure!", route: "act", request: "make me cooked beef" }, { say: "Can't." });
+  action.reply({ step: { skill: "craft_item", item: "cooked_beef", count: 3 } }, { give_up: "No recipe." }, { give_up: "Still none." });
+  await agent.handle(say("Steve", "cook me some beef"));
+  await until(() => runtime.said.length === 2);
+  await agent.handle(say("Steve", "make me cooked beef then"));
+  await until(() => runtime.said.length === 4);
+  assert.doesNotMatch(action.requests[1]?.[1]?.content ?? "", /failed lately in your other objectives/u, "not for its own objective");
+  assert.match(action.requests[2]?.[1]?.content ?? "", /Steps that failed lately in your other objectives[^\n]*\n- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef": \[ITEMS_NOT_CRAFTABLE\]/u);
+});

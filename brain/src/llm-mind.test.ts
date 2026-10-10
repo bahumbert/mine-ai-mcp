@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import type { ChatInput, GoalInput, WorkInput } from "./mind.ts";
+import { stepKey } from "./actions.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
@@ -630,4 +631,27 @@ test("a \"for\" outside the available activities is no purpose", async () => {
   const input = goalInput({ drawn: ["building", "mining"], chances: chancesOf("building", "mining") });
   assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Hunt.", purpose: null });
   assert.deepEqual(await mind.chooseObjective(input, signal), { text: "Mine.", purpose: "mining" });
+});
+
+test("a step that failed lately in another objective is shown, sent back once with its reason, and runs when sent again", async () => {
+  // Live 2026-10-10: Mira sent "craft cooked_beef" 18 times over six objectives worded differently.
+  const { action, mind } = scriptedMind();
+  const craft = { skill: "craft_item", item: "cooked_beef", count: 6 } as const;
+  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.", objective: "Cook some food", minutesAgo: 4 };
+  action.reply({ thought: "Cook it.", step: craft }, { thought: "Still this.", step: craft });
+  const decision = await mind.next(workInput("Cook beef in the furnace", { earlierFailures: [earlier] }), signal);
+  assert.deepEqual(decision, { kind: "step", step: craft, thought: "Still this." });
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Steps that failed lately in your other objectives[^\n]*\n- craft 3 cooked_beef, 4 minutes ago, for "Cook some food": \[ITEMS_NOT_CRAFTABLE\]/u);
+  assert.match(action.requests[1]?.at(-1)?.content ?? "", /"craft 6 cooked_beef" failed 4 minutes ago the same way.*Smelted in a furnace instead/u);
+});
+
+test("a step unlike the ones that failed lately is not sent back; counts aside, the same thing is the same step", async () => {
+  const { action, mind } = scriptedMind();
+  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), detail: "no recipe", objective: "Cook", minutesAgo: 2 };
+  action.reply({ thought: "Furnace.", step: { skill: "get_items", items: [{ item: "cooked_beef", count: 3 }] } });
+  assert.equal((await mind.next(workInput("Cook beef", { earlierFailures: [earlier] }), signal)).kind, "step");
+  assert.equal(action.requests.length, 1);
+  assert.equal(stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), stepKey({ skill: "craft_item", item: "cooked_beef", count: 64 }));
+  assert.notEqual(stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), stepKey({ skill: "craft_item", item: "bread", count: 3 }));
+  assert.equal(stepKey({ skill: "get_items", items: [{ item: "a", count: 1 }, { item: "b", count: 2 }] }), stepKey({ skill: "get_items", items: [{ item: "b", count: 9 }, { item: "a", count: 9 }] }));
 });

@@ -144,6 +144,20 @@ export function skillUsage(skill: SkillName, style: Style): string {
   }
 }
 
+/**
+ * What a step does, amounts aside: its skill and what it is about, so "craft 3 cooked_beef" and "craft 6 cooked_beef"
+ * are the same step, and a list's order does not matter.
+ */
+export function stepKey(step: Step): string {
+  const amounts = new Set(["count", "chunks", "distance"]);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map((entry) => JSON.stringify(canonical(entry))).sort();
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !amounts.has(key)).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, canonical(entry)]));
+  };
+  return JSON.stringify(canonical(step));
+}
+
 /** One line for logs and prompts, e.g. `collect 5 oak_log`. */
 export function describeStep(step: Step): string {
   switch (step.skill) {

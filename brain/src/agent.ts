@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describeStep, SKILL_NAMES, type Step } from "./actions.ts";
+import { describeStep, SKILL_NAMES, stepKey, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
@@ -8,7 +8,7 @@ import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
-import { sameWords, type ChatLine, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
+import { sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -30,6 +30,9 @@ const STEP_MEMORY = 20;
 const MAX_ERROR_WAIT_MS = 60_000;
 /** Outcomes of its own objectives remembered for the goal tier. */
 const OWN_MEMORY = 5;
+/** How long a failed step is shown to the work tier of other objectives, and how many are kept (live 2026-10-10). */
+const FAILED_STEP_MINUTES = 30;
+const FAILED_STEP_MEMORY = 8;
 /** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
 const NIGHT_CHECK_MS = 20_000;
 /** After a night shelter could not be made, how long before it is tried again. */
@@ -144,6 +147,8 @@ export class Agent {
   private readonly lately: string[] = [];
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
   private lastFailed: { readonly objective: string; readonly reason: string } | null = null;
+  /** Steps that failed lately, whatever the objective, newest last: shown to the work tier of its other objectives. */
+  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number }[] = [];
   private restUntil = 0;
   private nextGoalCall = 0;
   private wake: (() => void) | null = null;
@@ -453,7 +458,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(work.objective) }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;
@@ -538,6 +543,7 @@ export class Agent {
         : { step: label, outcome: result.status, detail: result.detail };
     work.steps.push(record);
     work.carried.push(carried);
+    if (record.outcome === "failed") this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     if (work.steps.length > STEP_MEMORY) {
@@ -575,6 +581,22 @@ export class Agent {
     if (work.failing.count >= persona.settings.maxSkillFailuresInARow) {
       this.finish(work, "failed", `${decision.step.skill.replaceAll("_", " ")} failed ${work.failing.count} times in a row, whichever way it was tried; the last: ${record.detail}`);
     }
+  }
+
+  /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step only, at most {@link FAILED_STEP_MEMORY}). */
+  private rememberFailedStep(objective: Objective, step: string, key: string, detail: string): void {
+    const kept = this.failedSteps.filter((failure) => failure.key !== key);
+    kept.push({ objective, step, key, detail, at: Date.now() });
+    this.failedSteps.splice(0, this.failedSteps.length, ...kept.slice(-FAILED_STEP_MEMORY));
+  }
+
+  /** The steps that failed lately for other objectives than this one, most recent first. */
+  private earlierFailures(objective: Objective): EarlierFailure[] {
+    const now = Date.now();
+    return this.failedSteps
+      .filter((failure) => failure.objective !== objective && now - failure.at <= FAILED_STEP_MINUTES * 60_000)
+      .reverse()
+      .map(({ step, key, detail, objective: other, at }) => ({ step, key, detail, objective: other.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)) }));
   }
 
   /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */

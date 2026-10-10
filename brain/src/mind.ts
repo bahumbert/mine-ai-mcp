@@ -98,6 +98,15 @@ export interface StepRecord {
   readonly detail: string;
 }
 
+/** A step that failed for another objective lately (its key from `stepKey`). */
+export interface EarlierFailure {
+  readonly step: string;
+  readonly key: string;
+  readonly detail: string;
+  readonly objective: string;
+  readonly minutesAgo: number;
+}
+
 export interface WorkInput {
   readonly persona: Persona;
   readonly objective: Objective;
@@ -109,6 +118,8 @@ export interface WorkInput {
   readonly steps: readonly StepRecord[];
   /** Objectives set aside for this one, to resume afterwards. */
   readonly paused: readonly Objective[];
+  /** Steps that failed for its other objectives lately, most recent first: sent again as they are, they go back once. */
+  readonly earlierFailures?: readonly EarlierFailure[];
 }
 
 /** The work tier's answer: the next step, or the objective is over. */

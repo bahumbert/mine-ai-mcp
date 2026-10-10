@@ -67,8 +67,9 @@ function itemList(items: readonly string[]): string {
 export const craftItemOutcomes = {
   unknownItems: (items: readonly string[]) =>
     `[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: ${itemList(items)}.`,
-  uncraftable: (items: readonly string[]) =>
-    `[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: ${itemList(items)}.`,
+  uncraftable: (items: readonly string[], smelted: readonly { readonly item: string; readonly from: readonly string[] }[] = []) =>
+    `[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: ${itemList(items)}.` +
+    (smelted.length === 0 ? "" : ` Smelted in a furnace instead: ${smelted.map(({ item, from }) => `${item} from ${from.join(" or ")}`).join("; ")}.`),
   missingMaterials: (materials: readonly CraftMaterial[]) =>
     `[CRAFT_MATERIALS_MISSING] Missing leaf materials: ${materials.map(({ item, count }) => `${item} x${count}`).join(", ")}.`,
   plannerFailed: (items: readonly string[]) =>

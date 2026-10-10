@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { SKILL_NAMES, skillUsage, stepSchema, type SkillName, type Step } from "./actions.ts";
+import { describeStep, SKILL_NAMES, skillUsage, stepKey, stepSchema, type SkillName, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
-import { PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import type { Persona, Stance } from "./persona.ts";
@@ -211,6 +211,7 @@ export class LlmMind implements Mind {
   async next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision> {
     const skills = personaSkills(input.persona);
     let signChecked = false;
+    let repeatChecked = false;
     return this.ask("work", this.models.action, workSystemPrompt(input.persona), describeWork(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
       // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
@@ -230,6 +231,14 @@ export class LlmMind implements Mind {
         if (flipped !== null) {
           signChecked = true;
           throw new Error(`${flipped}: if you meant that, send the same step again`);
+        }
+        // A step that failed for an earlier objective, chosen again in other words (live 2026-10-10: Mira sent "craft
+        // cooked_beef" 18 times over six objectives, each new one starting from no steps).
+        const key = stepKey(step.data);
+        const earlier = repeatChecked ? undefined : input.earlierFailures?.find((failure) => failure.key === key);
+        if (earlier !== undefined) {
+          repeatChecked = true;
+          throw new Error(`"${describeStep(step.data)}" failed ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago the same way, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. Choose another step, or send it again if something has changed since`);
         }
         return { kind: "step", step: step.data, thought: reply.thought };
       }
@@ -498,8 +507,16 @@ function describeWork(input: WorkInput): string {
     `Objective (${whose}): ${JSON.stringify(objective.text)}`,
     input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
     steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
+    describeEarlierFailures(input.earlierFailures ?? []),
     nowCarried(input),
   ].filter((part) => part !== "").join("\n\n");
+}
+
+/** Facts before, not corrections after (ADR-017): what already failed for its other objectives, and why. */
+function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
+  if (failures.length === 0) return "";
+  const lines = failures.map((failure) => `- ${failure.step}, ${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago, for ${JSON.stringify(failure.objective)}: ${failure.detail}`);
+  return `Steps that failed lately in your other objectives (sent again as they are, they fail again; the reason says what to do instead):\n${lines.join("\n")}`;
 }
 
 /**

@@ -333,26 +333,48 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   }
   if (vehicle !== null) bot.emit("dismount", vehicle);
 
-  // The boat back: broken by hand, it drops and is picked up.
-  const left = nearestBoat(bot, new Vec3(x, y, z), 6);
-  let hits = 0;
-  while (left !== null && bot.entities[left.id] !== undefined && hits < 15) {
-    await bot.lookAt(left.position.offset(0, 0.3, 0), true);
-    bot.attack(left);
-    hits += 1;
-    await sleep(300);
-  }
-  await sleep(1500);
-  // Its item floated off before it was picked up: swum after, a few blocks of the water by the bank.
-  if (boatsCarried(bot) === 0 && !signal?.aborted) {
-    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > 0, 15_000);
-  }
+  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), 6), signal);
   const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
   const detail = `rode ${Math.round(ridden)} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}`;
   return { status: stoppedBy === "" ? "crossed" : "failed", blocks: Math.round(ridden), detail };
 }
 
+
+/**
+ * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when a boat is carried
+ * after.
+ */
+export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: AbortSignal, settleMs = 1500): Promise<boolean> {
+  let hits = 0;
+  while (boat !== null && bot.entities[boat.id] !== undefined && hits < 15) {
+    await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
+    bot.attack(boat);
+    hits += 1;
+    await sleep(300);
+  }
+  await sleep(settleMs);
+  // Its item floated off before it was picked up: swum after, a few blocks of the water by the bank.
+  if (boatsCarried(bot) === 0 && !signal?.aborted) {
+    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > 0, 15_000);
+  }
+  return boatsCarried(bot) > 0;
+}
+
+/**
+ * A boat she stands on (not in) out on deep water, with none carried; null otherwise. Live 2026-10-10: Vex stood on
+ * a boat at sea a whole run (got off it at a login or a stop), every way refused "no boat is carried" and no
+ * crafting table could be set on the water to make one: taken back, it is the way off the sea.
+ */
+export function boatUnderFeetAtSea(bot: Bot): Entity | null {
+  if (bot.entity.vehicle || bot.entities === undefined) return null;
+  const feet = bot.entity.position;
+  const boat = nearestBoat(bot, feet, 1.5, (entity) => feet.y >= entity.position.y && feet.y - entity.position.y < 1.2);
+  if (boat === null || carriesBoat(bot)) return null;
+  const [x, z] = [Math.floor(boat.position.x), Math.floor(boat.position.z)];
+  const surface = waterSurface(bot, x, z, Math.floor(feet.y));
+  return surface !== null && isDeepOpenWater((wx, wy, wz) => isWater(bot, wx, wy, wz), x, surface, z) ? boat : null;
+}
 
 /**
  * Where along the shore ahead a swimmer can climb out: the sideways offset from `from` (+ to the heading's left, - to

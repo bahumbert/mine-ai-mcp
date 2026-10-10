@@ -5,6 +5,7 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { planCraftingFromInventory, type CraftPreparation, type CraftTarget } from "../../utils/craft-plan.js";
 import type { Position3 } from "../../utils/index.js";
 import { executeCraftPlan } from "../../world/crafting.js";
+import { recipesFor } from "../../world/smelting.js";
 import { carriedCount, settledNow, settleInventoryMinimum, type SettledInventoryCount } from "../../world/index.js";
 import type { WorldBlock } from "../../world/placement.js";
 import { withSimilar } from "../../world/similar-names.js";
@@ -80,13 +81,20 @@ function craftEvidence({
 function preparationFailureResult(
   preparation: FailedCraftPreparation,
   evidence: CraftEvidenceInput,
+  version: string,
 ): Extract<CraftItemResult, { status: "failed" }> {
   let error: string;
 
   switch (preparation.kind) {
-    case "uncraftable":
-      error = craftItemOutcomes.uncraftable(preparation.items);
+    case "uncraftable": {
+      // What a furnace makes is said, from the game's recipes (live 2026-10-10: "craft cooked_beef" sent 18 times).
+      const smelted = preparation.items.flatMap((item) => {
+        const from = [...new Set(recipesFor(item, version).flatMap((recipe) => recipe.inputs))];
+        return from.length === 0 ? [] : [{ item, from: from.slice(0, 3) }];
+      });
+      error = craftItemOutcomes.uncraftable(preparation.items, smelted);
       break;
+    }
     case "missing_materials":
       error = craftItemOutcomes.missingMaterials(preparation.plan.missingMaterials);
       break;
@@ -181,12 +189,12 @@ async function craftBatch(
   }
 
   const initialPlan = planCraftingFromInventory(bot, items);
-  if (initialPlan.kind !== "ready") return preparationFailureResult(initialPlan, { items: requestedItems });
+  if (initialPlan.kind !== "ready") return preparationFailureResult(initialPlan, { items: requestedItems }, bot.version);
   const station = providedTable
     ? { kind: "ready" as const, craftingTable: providedTable, usedCarriedTable: 0, craftingTablePlaced: undefined }
     : await prepareCraftingStation(bot, items, initialPlan.plan.requiresCraftingTable, context.signal);
   if (station.kind === "plan_failed") {
-    const failure = preparationFailureResult(station.preparation, { items: requestedItems });
+    const failure = preparationFailureResult(station.preparation, { items: requestedItems }, bot.version);
     return {
       ...failure,
       error: `No crafting table is in reach or carried. Preparing one for this batch: ${failure.error}`,
@@ -220,7 +228,7 @@ async function craftBatch(
         after: settledNow(bot, name),
         usedForWorkstation: name === "crafting_table" ? usedCarriedTable : 0,
       })),
-    });
+    }, bot.version);
   }
   const execution = await executeCraftPlan(bot, preparation.applications, craftingTable, context.signal);
   // Wait for each requested gain after the server corrects optimistic clicks.
