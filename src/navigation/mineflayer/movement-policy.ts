@@ -94,7 +94,7 @@ const ROUTE_PROTECTED_CROPS = [
   "nether_wart",
   "cocoa",
 ] as const;
-const AVOID_BLOCKS = ["fire", "soul_fire", "cobweb", "lava", "bubble_column"] as const;
+const AVOID_BLOCKS = ["fire", "soul_fire", "lava", "bubble_column"] as const;
 
 type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
@@ -451,6 +451,8 @@ export function createMineflayerMovementPolicy(
       return breakByState.remember(observation, prohibited);
     }
     if (options.requireHarvestTool && !plan.harvestable) return breakByState.remember(observation, unharvestable);
+    // A web is no terrain to preserve: breaking it is the only way through, priced by the best carried tool's time.
+    if (observation.traits.entangling) return breakByState.remember(observation, { decision: ALLOWED_STEP, tool: plan.tool });
     return breakByState.remember(observation, { decision: terrainBreak, tool: plan.tool });
   };
 

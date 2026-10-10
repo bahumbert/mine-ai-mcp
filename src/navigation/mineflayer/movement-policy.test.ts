@@ -322,3 +322,22 @@ test("only a bot asked for the fallback may scaffold with a block outside the su
   const withCobble = versioned([{ name: "stone", count: 80 }, { name: "cobblestone", count: 2 }]);
   assert.equal(createMovements(withCobble, { scaffoldFallback: true }).scaffold?.itemType, withCobble.registry.itemsByName.cobblestone!.id);
 });
+
+test("a cobweb is a block to break at the best carried tool's time, no longer a wall", () => {
+  const registry = minecraftData("1.21.4");
+  const web = observed(botFixture(), "cobweb");
+  assert.equal(web.traits.entangling, true);
+  assert.equal(web.geometry.passable, false);
+  const ticksWith = (...items: string[]) => {
+    const bot = botFixture({ items: items.map((name) => ({ name, count: 1, type: registry.itemsByName[name]!.id })) });
+    const policy = createMovements(bot);
+    const verdict = policy.evaluateBreak(web, { x: 1, y: 64, z: 0 }, world);
+    assert.equal(verdict.decision.kind, "allowed", "webs are not terrain to preserve");
+    assert.equal(policy.decideStep(1, 64, 0, { ...world, blockAt: () => web } as never).kind, "allowed");
+    return verdict.tool.expectedTicks;
+  };
+  const byHand = ticksWith();
+  const withSword = ticksWith("wooden_sword");
+  assert.ok(withSword < byHand, `a sword (${withSword} ticks) is faster than a hand (${byHand})`);
+  assert.equal(ticksWith("wooden_sword", "stick"), withSword);
+});
