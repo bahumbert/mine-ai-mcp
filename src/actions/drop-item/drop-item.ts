@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { dropCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -55,6 +56,9 @@ import {
  */
 const TOSS_SETTLE_MS = 1_500;
 
+/** Items a bot stands over are picked up again within a couple of seconds; wait this long to see it happen. */
+const PICKUP_WAIT_MS = 3_000;
+
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
 const HANDOVER_RANGE = 2;
 
@@ -77,6 +81,8 @@ export interface DropItemDependencies {
   readonly createMovements: (bot: Bot) => ReturnType<typeof createMovements>;
   /** How long the server gets to show a toss in the inventory and, for a hole, on the ground. */
   readonly settleMs?: number;
+  /** How long after the toss the carried count is read again to catch items picked straight back up. */
+  readonly pickupWaitMs?: number;
 }
 
 function productionDependencies(navigation: NavigationRuntime): DropItemDependencies {
@@ -405,6 +411,26 @@ export async function dropItem(
     }
 
     dropped.push(await tossItem(bot, itemName, count, context, dependencies.settleMs ?? TOSS_SETTLE_MS));
+  }
+
+  // Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
+  // times over): read the carried count again after a short wait and report only the net drop.
+  if (request.destination.kind !== "player" && dropped.some((entry) => entry.dropped > 0 && !entry.error)) {
+    await delay(dependencies.pickupWaitMs ?? PICKUP_WAIT_MS, undefined, { signal: context.signal });
+    for (const [index, entry] of dropped.entries()) {
+      if (entry.dropped <= 0 || entry.error) continue;
+      const now = carriedCount(bot, entry.item);
+      if (now <= entry.carriedAfter) continue;
+      const net = Math.max(0, entry.carriedBefore - now);
+      dropped[index] = {
+        ...entry,
+        carriedAfter: now,
+        dropped: net,
+        ...(net === 0 && {
+          error: hole ? dropItemOutcomes.notObserved(entry.item, now) : dropItemOutcomes.pickedUp(entry.item),
+        }),
+      };
+    }
   }
 
   // Claim what this toss put on the ground so the hunt's sweep leaves it alone.

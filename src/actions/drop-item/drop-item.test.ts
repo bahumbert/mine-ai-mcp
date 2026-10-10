@@ -20,6 +20,8 @@ interface DropBotOptions {
   readonly existingItems?: readonly { id: number; name: string; distance?: number }[];
   /** Entity id the server spawns for each successful toss, as the real one does. */
   readonly spawnsEntityId?: number;
+  /** The tossed items come back into the inventory (picked up again) this long after the toss. */
+  readonly returnsAfterMs?: number;
 }
 
 function dropBot(options: DropBotOptions) {
@@ -56,6 +58,10 @@ function dropBot(options: DropBotOptions) {
     entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name);
   };
 
+  const comeBack = (stack: FakeStack) => {
+    if (options.returnsAfterMs !== undefined) setTimeout(() => items.push(stack), options.returnsAfterMs);
+  };
+
   const bot = botFixture(
     {
       items,
@@ -79,6 +85,7 @@ function dropBot(options: DropBotOptions) {
         if (stack.name === options.swallows) return;
         removeStack(stack);
         spawnTossed(stack.name);
+        comeBack({ ...stack });
       },
       toss: async (type: number, _metadata: number | null, count: number) => {
         const stack = items.find((candidate) => candidate.type === type);
@@ -87,6 +94,7 @@ function dropBot(options: DropBotOptions) {
         if (stack.name === options.swallows) return;
         removeFrom(stack, count);
         spawnTossed(stack.name);
+        comeBack({ ...stack, count });
       },
     },
   );
@@ -100,6 +108,7 @@ function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependenci
     placeInto: async () => ({ kind: "failed", error: "not placed in this test" }),
     createMovements: (() => ({})) as never,
     settleMs: 50,
+    pickupWaitMs: 150,
     ...overrides,
   };
 }
@@ -378,4 +387,23 @@ test("formats the drop, the location, and the pickup warning", () => {
   assert.match(markdown, /Dropped at `100\.5, 3\.0, 92\.5`/);
   assert.match(markdown, /Free slots 2 → 3/);
   assert.match(markdown, /despawn after about five minutes/);
+});
+
+test("items picked up again after the toss are no drop (live 2026-10-10 run 7: coal dropped and picked straight up)", async () => {
+  const { bot } = dropBot({ carried: [{ name: "coal", count: 16, type: 1 }], returnsAfterMs: 80 });
+
+  const result = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal" }] }), {}, deps(), createDiscardedItems());
+
+  assert.equal(result.status, "failed");
+  assert.match(result.drop.dropped[0]?.error ?? "", /[DROP_PICKED_UP] coal came back into the inventory/);
+  assert.equal(result.drop.dropped[0]?.dropped, 0);
+});
+
+test("picked-up items never count, even from a partial toss", async () => {
+  const { bot } = dropBot({ carried: [{ name: "coal", count: 16, type: 1 }, { name: "coal", count: 8, type: 2 }], returnsAfterMs: 80 });
+
+  const result = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal", count: 8 }] }), {}, deps(), createDiscardedItems());
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.drop.dropped[0]?.dropped, 0);
 });
