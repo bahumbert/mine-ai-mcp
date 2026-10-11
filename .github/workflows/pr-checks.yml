@@ -43,7 +43,7 @@ jobs:
             --markdown tokscan.md --json tokscan.json > tokscan.log
       - name: Duplicated code (jscpd)
         run: |
-          npx --yes jscpd@4.0.5 src agents monitor --min-lines 12 --min-tokens 80 \
+          npx --yes jscpd@4.0.5 src brain/src --min-lines 12 --min-tokens 80 \
             --ignore "**/*.test.ts,**/data/**" --reporters markdown --output jscpd --silent || true
       - name: Post the report
         env:
