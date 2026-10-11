@@ -465,7 +465,7 @@ export function createCollectBlockAction(
     inputSchema: collectBlockInputSchema,
     resultSchema: collectBlockResultSchema,
     formatResult: formatCollectBlockResult,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: COLLECT_BLOCK,
       destructiveHint: true,

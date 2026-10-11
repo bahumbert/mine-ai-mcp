@@ -683,7 +683,7 @@ export class ActionRunner {
     try {
       context.signal?.throwIfAborted();
       const execute = async () => {
-        if (execution.kind === "task" || execution.kind === "resumable_task") await execution.prepare?.();
+        if (execution.kind === "task" || execution.kind === "resumable_task") await execution.prepare?.(context.signal);
         context.signal.throwIfAborted();
         return runWithHighlighter(this.#highlighter?.scope(context.signal) ?? { enabled: false, signal: context.signal }, () =>
           run(context),

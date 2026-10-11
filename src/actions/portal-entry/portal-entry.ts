@@ -196,7 +196,7 @@ function createPortalAction(bot: Bot, navigation: NavigationRuntime, kind: "neth
     inputSchema: end ? enterEndPortalInputSchema : enterNetherPortalInputSchema,
     resultSchema: portalEntryResultSchema,
     formatResult: formatNavigateResult,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: { title: end ? ENTER_END_PORTAL : ENTER_NETHER_PORTAL, destructiveHint: true, openWorldHint: true },
     parse: end ? parseEndPortalRequest : parseNetherPortalRequest,
     begin: (request, lifetime, observe) => beginPortalEntry(bot, request, dependencies, lifetime, observe),

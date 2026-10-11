@@ -1,5 +1,6 @@
 import { channel } from "node:diagnostics_channel";
 import { randomUUID } from "node:crypto";
+import { markPhase } from "../diagnostics/freeze-watch.js";
 
 /** Matches navigation's 8 ms search slices, leaving room in a 50 ms physics tick. */
 export const EXECUTION_SLICE_MS = 8;
@@ -53,6 +54,7 @@ export class ExecutionScope implements Disposable {
   }
 
   #publish(event: ExecutionTransition, phase = this.#phase ?? "decide"): void {
+    markPhase(`${event.kind} ${this.owner.operation} ${phase}${"reason" in event && event.reason ? ` ${event.reason}` : ""}`);
     executionChannel.publish({
       ...event,
       scopeId: this.#id,

@@ -286,7 +286,7 @@ export function createBuildStructureAction(
     inputSchema: buildStructureInputSchema,
     resultSchema: buildStructureResultSchema,
     formatResult: formatBuildStructureResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: buildStructureAnnotations,
     parse: parseBuildStructureRequest,
     execute: (request, context) =>

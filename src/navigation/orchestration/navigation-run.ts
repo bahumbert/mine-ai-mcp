@@ -82,6 +82,7 @@ import type {
   SearchReason,
 } from "./outcome.js";
 import type { NavigationCalculationFailure } from "./process-events.js";
+import { markPhase } from "../../diagnostics/freeze-watch.js";
 
 /** The evidence fields the run counts as it goes: mutable here, copied into every outcome. */
 interface Counters {
@@ -1011,6 +1012,7 @@ export class NavigationRun {
       };
       let ticks = 0;
       resources.defer(bot.subscribePhysicsTick(() => {
+        markPhase("physicsTick: pin release");
         if (clear() || ++ticks >= PIN_RELEASE_TICKS) finish();
       }));
       signal.addEventListener("abort", finish, { once: true });

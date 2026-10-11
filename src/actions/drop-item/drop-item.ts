@@ -579,7 +579,7 @@ export function createDropItemAction(
     inputSchema: dropItemInputSchema,
     resultSchema: dropItemResultSchema,
     formatResult: formatDropItemResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: dropItemAnnotations,
     parse: parseDropItemRequest,
     execute: (request, context) => dropItem(bot, request, context, dependencies, discarded),

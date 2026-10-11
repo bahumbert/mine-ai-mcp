@@ -21,7 +21,6 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
-import { clearBodyWebs } from "./web-clearance.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
 
 /** Deep-water crossings one request makes by boat: there and on to the far side, then once more at most. */
@@ -419,7 +418,6 @@ function beginNavigate(
     }
 
     try {
-      if (request.dig) await clearBodyWebs(bot, context.signal);
       const attempt = (scaffoldFallback: boolean) =>
         dependencies.navigate({
           movements: dependencies.createMovements(bot, {
@@ -560,7 +558,7 @@ export function createNavigateAction(
     inputSchema: navigateInputSchema,
     resultSchema: navigateResultSchema,
     formatResult: formatNavigateResult,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: NAVIGATE,
       destructiveHint: true,

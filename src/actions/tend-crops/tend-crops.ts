@@ -94,7 +94,7 @@ export function createTendCropsAction(bot: Bot, navigation: NavigationRuntime) {
     inputSchema: tendCropsInputSchema,
     resultSchema: tendCropsResultSchema,
     formatResult: formatTendCropsResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: tendCropsAnnotations,
     parse: parseTendCropsRequest,
     execute: (request, context) =>

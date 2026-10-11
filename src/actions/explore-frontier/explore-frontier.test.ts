@@ -67,6 +67,7 @@ function botFixture(yaw = 0) {
     entity: { position: new Vec3(0, 64, 0), yaw, vehicle: null },
     game: { dimension: "overworld" },
     pathfinder,
+    blockAt: () => null,
     clearControlStates: () => {},
     deactivateItem: () => {},
     currentWindow: null,

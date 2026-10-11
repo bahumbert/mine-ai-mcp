@@ -273,7 +273,7 @@ export function createBarterAction(bot: Bot, navigation: NavigationRuntime) {
     inputSchema: barterInputSchema,
     resultSchema: barterResultSchema,
     parse: (input: unknown) => barterInputSchema.parse(input),
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
     begin: (request, lifetime) => beginBarter(bot, navigation, request, lifetime),
     formatResult: (result) =>

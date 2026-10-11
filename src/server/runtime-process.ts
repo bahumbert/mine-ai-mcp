@@ -1,4 +1,5 @@
 import { reportRuntimeLiveness } from "./runtime-liveness.js";
+import { startFreezeWatch } from "../diagnostics/freeze-watch.js";
 import type { RuntimeBootstrap } from "./host.js";
 
 // This private entrypoint can only be booted by the package's supervising host.
@@ -9,7 +10,9 @@ process.once("exit", () => reporting[Symbol.dispose]());
 
 try {
   // Our parent serializes this typed bootstrap; it is not a public input boundary.
-  const { source, configuration }: RuntimeBootstrap = JSON.parse(process.argv[2]!);
+  const { source, configuration, freezeDirectory }: RuntimeBootstrap = JSON.parse(process.argv[2]!);
+  const freeze = startFreezeWatch({ dir: freezeDirectory, botName: configuration.instanceId });
+  process.once("exit", () => freeze[Symbol.dispose]());
   const { startRuntimeHost } = await import("./runtime-host.js");
   const host = await startRuntimeHost(source, { ...configuration, listenHost: "127.0.0.1", listenPort: 0 });
   const requestStop = (failure?: unknown) => {

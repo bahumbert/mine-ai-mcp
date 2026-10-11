@@ -266,7 +266,7 @@ export function createActivatePortalAction(
     formatResult: formatActivatePortalResult,
     annotations: activatePortalAnnotations,
     parse: parseActivatePortalRequest,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     begin: (request) => (context) => activatePortal(bot, request, context, dependencies),
   });
 }

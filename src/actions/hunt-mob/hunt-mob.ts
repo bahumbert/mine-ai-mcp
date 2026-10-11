@@ -897,7 +897,7 @@ export function createCollectMobDropAction(
     inputSchema: huntMobInputSchema,
     resultSchema: huntMobResultSchema,
     formatResult: formatHuntMobResult,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: huntMobAnnotations,
     parse: parseHuntMobRequest,
     begin: (request, lifetime, observe) => {

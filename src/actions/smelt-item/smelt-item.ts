@@ -518,7 +518,7 @@ export function createSmeltItemAction(
     inputSchema: smeltItemInputSchema,
     resultSchema: smeltItemResultSchema,
     formatResult: formatSmeltItemResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: smeltItemAnnotations,
     parse: parseSmeltItemRequest,
     execute: (request, context) => smeltItem(bot, navigation, request, context, dependencies),

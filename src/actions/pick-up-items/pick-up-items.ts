@@ -272,7 +272,7 @@ export function createPickUpItemsAction(
     inputSchema: pickUpItemsInputSchema,
     resultSchema: pickUpItemsResultSchema,
     formatResult: formatPickUpItemsResult,
-    execution: {kind: 'resumable_task', prepare: () => prepareBotForMovement(bot, navigation)},
+    execution: {kind: 'resumable_task', prepare: (signal) => prepareBotForMovement(bot, navigation, signal)},
     annotations: {title: PICK_UP_ITEMS, destructiveHint: false, openWorldHint: true},
     parse: parsePickUpItemsRequest,
     begin: (request, lifetime, observe) => begin(bot, navigation, data, discarded, request, lifetime, observe)

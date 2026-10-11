@@ -881,11 +881,26 @@ function pillar(context: MovementGenerationContext, out: MovementCandidates): vo
   if (bridgePlacement(context, x, y, z, out)) out.offer();
 }
 
+/**
+ * Whether the block at this cell stands free in open air: nothing solid or liquid beside it at its own height.
+ * Digging straight down is switched off for fear of dropping into a cave, which starts where the ground does; a
+ * column with air on all four sides (a pillar top) is not ground, and without this rule it has no way down but a
+ * long placed staircase (live 2026-10-10: Tom, a 21 block pillar, no path for a whole run). Unloaded cells count
+ * as solid: nothing is known about them.
+ */
+function standsFree(context: MovementGenerationContext, x: number, y: number, z: number): boolean {
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    const side = look(context, x + dx, y, z + dz);
+    if (side.kind !== "loaded" || !isPassable(side) || side.traits.liquid !== null) return false;
+  }
+  return true;
+}
+
 /** Straight down through the block beneath the bot's feet onto whatever stands under it. */
 function directDownward(context: MovementGenerationContext, out: MovementCandidates): void {
-  if (!context.policy.allowDownward) return;
   const { x, z } = context.state.node.feet;
   const y = context.state.node.feet.y - 1;
+  if (!context.policy.allowDownward && !standsFree(context, x, y, z)) return;
   if (!isStandableTop(look(context, x, y - 1, z))) return;
   const destination = prepareCell(x, y, z, context);
   if (destination === NO_CELL || !context.cells.cellDug(destination)) return;
