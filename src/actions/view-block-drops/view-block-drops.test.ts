@@ -15,7 +15,7 @@ test("items list the blocks an ordinary break gathers them from; blocks list eve
   assert.deepEqual(result.drops.items.find((entry) => entry.item === "raw_iron")?.sources.map((source) => source.block).toSorted(), ["deepslate_iron_ore", "iron_ore"]);
   const seeds = result.drops.items.find((entry) => entry.item === "wheat_seeds")!.sources;
   assert.deepEqual(seeds[0], { block: seeds[0]!.block, chance: 0.125, planted: false });
-  assert.deepEqual(seeds.at(-1), { block: "wheat", chance: 1, planted: true });
+  assert.deepEqual(seeds.at(-1), { block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" });
   assert.deepEqual(result.drops.blocks, [{
     block: "wheat",
     drops: [
@@ -27,7 +27,17 @@ test("items list the blocks an ordinary break gathers them from; blocks list eve
   const text = formatViewBlockDropsResult(result);
   assert.match(text, /raw_iron: from (deepslate_iron_ore|iron_ore)/u);
   assert.match(text, /wheat: wheat when age=7; wheat_seeds; wheat_seeds when age=7/u);
-  assert.match(text, /wheat \(planted crop\)/u);
+  assert.match(text, /wheat \(planted crop, from wheat_seeds\)/u);
+});
+
+test("a planted source names the item the crop is planted from, a wild one names none", async () => {
+  const result = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["wheat", "wheat_seeds", "carrot", "beetroot"] }), {});
+  const sources = (item: string) => result.drops.items.find((entry) => entry.item === item)!.sources;
+  assert.deepEqual(sources("wheat").filter((source) => source.planted).map(({ block, seed }) => ({ block, seed })), [{ block: "wheat", seed: "wheat_seeds" }]);
+  assert.ok(sources("wheat_seeds").filter((source) => !source.planted).every((source) => !("seed" in source)));
+  assert.equal(sources("wheat_seeds").find((source) => source.block === "wheat")?.seed, "wheat_seeds");
+  assert.equal(sources("carrot").find((source) => source.block === "carrots")?.seed, "carrot");
+  assert.equal(sources("beetroot").find((source) => source.block === "beetroots")?.seed, "beetroot_seeds");
 });
 
 test("items also list the mobs that drop them, hostile ones marked", async () => {

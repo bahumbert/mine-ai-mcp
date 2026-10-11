@@ -27,11 +27,11 @@ test("the sources of an item put wild blocks before crops someone planted, then 
   assert.deepEqual(seeds.slice(0, 4).map((source) => [source.block, source.chance, source.planted]).toSorted(), [
     ["fern", 0.125, false], ["large_fern", 0.125, false], ["short_grass", 0.125, false], ["tall_grass", 0.125, false],
   ]);
-  assert.deepEqual(seeds.find((source) => source.block === "wheat"), { block: "wheat", chance: 1, planted: true });
+  assert.deepEqual(seeds.find((source) => source.block === "wheat"), { block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" });
   assert.deepEqual(sourcesOf("raw_iron", "1.21.4").map((source) => source.block).toSorted(), ["deepslate_iron_ore", "iron_ore"]);
   assert.deepEqual(sourcesOf("sugar_cane", "1.21.4"), [{ block: "sugar_cane", chance: 1, planted: false }]);
   // A crop's harvest comes from a farm too, not only its seed.
-  assert.deepEqual(sourcesOf("wheat", "1.21.4"), [{ block: "wheat", chance: 1, planted: true }]);
+  assert.deepEqual(sourcesOf("wheat", "1.21.4"), [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }]);
   assert.deepEqual(sourcesOf("diamond_pickaxe", "1.21.4"), []);
 });
 

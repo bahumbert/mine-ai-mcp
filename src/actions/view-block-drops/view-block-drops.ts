@@ -60,7 +60,7 @@ export function formatViewBlockDropsResult(result: ViewBlockDropsResult): string
     const hunted = mobs.length === 0 ? "" : `; hunted from ${mobs.map((source) => `${source.mob}${source.hostile ? " (hostile)" : ""}${describeChance(source.chance)}`).join(", ")}`;
     lines.push(sources.length === 0
       ? `- ${item}: no block drops it by an ordinary break${hunted}`
-      : `- ${item}: from ${sources.map((source) => `${source.block}${source.planted ? " (planted crop)" : ""}${describeChance(source.chance)}`).join(", ")}${hunted}`);
+      : `- ${item}: from ${sources.map((source) => `${source.block}${source.planted ? ` (planted crop${source.seed === undefined ? "" : `, from ${source.seed}`})` : ""}${describeChance(source.chance)}`).join(", ")}${hunted}`);
   }
   for (const { block, drops: list } of drops.blocks) {
     lines.push(list.length === 0

@@ -46,6 +46,7 @@ const sourceSchema = z.strictObject({
   block: z.string(),
   chance: z.number().positive().max(1),
   planted: z.boolean(),
+  seed: z.string().optional(),
 });
 
 const mobSourceSchema = z.strictObject({

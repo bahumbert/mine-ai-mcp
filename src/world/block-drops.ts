@@ -22,6 +22,8 @@ export interface DropSource {
    * it takes from a farm, so it comes after the wild sources.
    */
   readonly planted: boolean;
+  /** The item the crop is planted from, for a planted source (wheat_seeds for wheat). */
+  readonly seed?: string;
 }
 
 /** The block drops for `version`: its own file, else the nearest older shipped one, else null. */
@@ -61,7 +63,9 @@ export function sourcesOf(item: string, version: string): readonly DropSource[] 
   for (const block of Object.keys(blocks)) {
     const chance = Math.max(0, ...ordinaryDrops(block, version).filter((drop) => drop.item === item).map((drop) => drop.chance));
     if (chance === 0) continue;
-    sources.push({ block, chance, planted: ripeState(block, version) !== null });
+    const planted = ripeState(block, version) !== null;
+    const seed = planted ? seedOf(block, version) : null;
+    sources.push({ block, chance, planted, ...(seed === null ? {} : { seed }) });
   }
   return sources.sort((a, b) => Number(a.planted) - Number(b.planted) || b.chance - a.chance);
 }

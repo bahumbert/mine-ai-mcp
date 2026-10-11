@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
 export interface Position {
@@ -147,7 +148,7 @@ export interface DropSource {
   readonly chance: number;
   /** A crop the item grows into (wheat for wheat seeds): breaking it takes from a farm. */
   readonly planted: boolean;
-  /** The item the crop is planted from, for a planted source. */
+  /** For a planted source, the item the crop is planted from (wheat_seeds for wheat). */
   readonly seed?: string;
 }
 
@@ -370,7 +371,7 @@ const blockDropsSchema = z.object({
     drops: z.object({
       items: z.array(z.object({
         item: z.string(),
-        sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean() })),
+        sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean(), seed: z.string().optional() })),
         mobs: z.array(z.object({ mob: z.string(), chance: z.number(), hostile: z.boolean() })).default([]),
       })),
       blocks: z.array(z.object({
@@ -480,13 +481,30 @@ export function errorCode(error: string | null | undefined): string | null {
 }
 
 /** {@link BotRuntime} over one mine-ai-mcp host's Streamable HTTP endpoint (ADR-002: one MCP connection per bot). */
+/** The part of the MCP client the runtime client uses; tests give a fake. */
+export interface ToolClient {
+  callTool(call: { name: string; arguments: Record<string, unknown> }): Promise<Record<string, unknown>>;
+  close(): Promise<void>;
+}
+
 export class McpBotRuntime implements BotRuntime {
-  private constructor(private readonly client: Client) {}
+  /** The failure that made the client stale, until a new session is open. */
+  private lost: Error | null = null;
+
+  private constructor(private client: ToolClient, private readonly reopen: () => Promise<ToolClient>) {}
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
-    const client = new Client({ name: clientName, version: "0.1.0" });
-    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-    return new McpBotRuntime(client);
+    const open = async (): Promise<ToolClient> => {
+      const client = new Client({ name: clientName, version: "0.1.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(url)));
+      return client;
+    };
+    return new McpBotRuntime(await open(), open);
+  }
+
+  /** A runtime client over a given tool client, `reopen` giving the next one after a lost session (tests). */
+  static over(client: ToolClient, reopen: () => Promise<ToolClient> = async () => client): McpBotRuntime {
+    return new McpBotRuntime(client, reopen);
   }
 
   async status(): Promise<BotSnapshot> {
@@ -727,12 +745,65 @@ export class McpBotRuntime implements BotRuntime {
 
   /** Calls a tool in JSON mode and returns `response.data`; refused and failed results are data, not exceptions. */
   private async call(name: string, args: Readonly<Record<string, unknown>>, rationale: string): Promise<unknown> {
-    const reply = await this.client.callTool({ name, arguments: { ...args, rationale, response_format: "json" } });
+    if (this.lost !== null && !(await this.reconnect())) throw this.lost;
+    try {
+      return await this.callOnce(name, args, rationale);
+    } catch (error) {
+      if (!(error instanceof LostSession)) throw error;
+      this.lost = error.cause;
+      if (await this.reconnect()) throw new Error(`[BODY_RESTARTED] the body restarted: ${name} was not done`);
+      throw error.cause;
+    }
+  }
+
+  /** Opens a new session after a lost one (the runtime was restarted); false while it is not reachable. */
+  private async reconnect(): Promise<boolean> {
+    try {
+      const fresh = await this.reopen();
+      await this.client.close().catch(() => undefined);
+      this.client = fresh;
+      this.lost = null;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async callOnce(name: string, args: Readonly<Record<string, unknown>>, rationale: string): Promise<unknown> {
+    let reply: Awaited<ReturnType<ToolClient["callTool"]>>;
+    try {
+      reply = await this.client.callTool({ name, arguments: { ...args, rationale, response_format: "json" } });
+    } catch (error) {
+      if (error instanceof Error && isLostSession(error)) throw new LostSession(error);
+      throw error;
+    }
     const parsed = jsonReplySchema.safeParse(reply.structuredContent);
     if (parsed.success) return parsed.data.response.data;
     // Input validation and transport errors come back without structured content, only as text.
     const text = Array.isArray(reply.content) ? reply.content.map((part) => ("text" in part ? String(part.text) : "")).join(" ") : "";
-    throw new Error(`[MCP_CALL_FAILED] ${name}: ${text || "no structured response"}`);
+    const failure = new Error(`[MCP_CALL_FAILED] ${name}: ${text || "no structured response"}`);
+    if (/\[RUNTIME_(?:UNRESPONSIVE|EXITED)\]/u.test(text)) throw new LostSession(failure);
+    throw failure;
+  }
+}
+
+/**
+ * A thrown call that means the runtime may have been restarted: the session is gone (HTTP 404), the connection failed
+ * or closed, or the supervisor answered a pending call with the failure of a killed runtime. Anything else (a request
+ * timeout, another JSON-RPC error) leaves a live session alone: closing it could cut the action it is running.
+ */
+function isLostSession(error: Error): boolean {
+  if (error instanceof StreamableHTTPError && error.code === 404) return true;
+  if (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) return true;
+  if (/\[RUNTIME_(?:UNRESPONSIVE|EXITED)\]|session not found|\b404\b|fetch failed|ECONNREFUSED|ECONNRESET/iu.test(error.message)) return true;
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return code === "ECONNREFUSED" || code === "ECONNRESET";
+}
+
+/** The session with the runtime is gone (a thrown call, or a reply naming a killed runtime): it may have been restarted. */
+class LostSession extends Error {
+  constructor(override readonly cause: Error) {
+    super(cause.message);
   }
 }
 

@@ -7,6 +7,7 @@ import { IncidentRecorder, type SourceIdentity } from "../diagnostics/incident-r
 import {
   RUNTIME_HEARTBEAT_MS,
   RUNTIME_UNRESPONSIVE_MS,
+  RUNTIME_RESTART_WINDOW_MS,
   RUNTIME_STARTUP_MS,
   runtimeMessageSchema,
   type RuntimeActivity,
@@ -50,6 +51,8 @@ export interface McpSupervisorOptions {
   readonly incidents: { directory: string; retention: IncidentRetention };
   /** Silence allowed before `ready` and after it; for tests that cannot wait the real deadlines. */
   readonly deadlines?: { readonly startupMs: number; readonly unresponsiveMs: number };
+  /** One restart of a killed runtime per this window (default {@link RUNTIME_RESTART_WINDOW_MS}); 0 never restarts. For tests. */
+  readonly restartWindowMs?: number;
 }
 
 /** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
@@ -64,6 +67,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
   let stopping = false;
   let closing: Promise<void> | null = null;
   let child: ChildProcess | null = null;
+  let lastRestartAt: number | null = null;
   const pending = new Set<PendingRequest>();
   let activity: RuntimeActivity | null = null;
   let heartbeat: Extract<z.infer<typeof runtimeMessageSchema>, { kind: "heartbeat" }> | null = null;
@@ -140,12 +144,24 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       incident,
       activity,
     };
-    state = { kind: "failed", failure };
     for (const entry of pending) {
+      pending.delete(entry); // Its upstream error below is ours, not a second failure of the restarted runtime.
       entry.upstream.destroy();
       answerFailure(entry.response, entry.id, failure);
     }
     console.error(`[minecraft-supervisor] ${JSON.stringify(failure)}`);
+    const now = performance.now();
+    const window = options.restartWindowMs ?? RUNTIME_RESTART_WINDOW_MS;
+    if (!stopping && window > 0 && (lastRestartAt === null || now - lastRestartAt >= window)) {
+      lastRestartAt = now;
+      recorder.record("runtime_restarted", { after: code, previousPid: child?.pid });
+      state = { kind: "starting" };
+      lastHeartbeat = now;
+      observationResumedAt = now;
+      heartbeat = null;
+      activity = null;
+      startChild();
+    } else state = { kind: "failed", failure };
   };
 
   const app = createMcpExpressApp({ host: options.host, allowedHosts: ["127.0.0.1", "localhost", "[::1]"] });
@@ -220,32 +236,37 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       resolve();
     });
   });
-  child = spawn(options.executable, [...options.args], {
-    windowsHide: true,
-    stdio: ["ignore", "inherit", "inherit", "ipc"],
-  });
-  child.on("message", (raw: unknown) => {
-    const parsed = runtimeMessageSchema.safeParse(raw);
-    if (!parsed.success || state.kind === "failed" || state.kind === "failing") return;
-    const event = parsed.data;
-    if (event.kind !== "ready") activity = event.activity;
-    recorder.record(event.kind, event);
-    if (event.kind === "heartbeat") {
-      lastHeartbeat = performance.now();
-      heartbeat = event;
-    }
-    if (event.kind === "ready") {
-      state = { kind: "ready", port: event.port };
-      // Ready shows a live loop; the shorter deadline counts from here, not from the last start-up heartbeat.
-      lastHeartbeat = performance.now();
-    }
-  });
-  child.once("error", (error) => {
-    void fail("RUNTIME_EXITED", error.message);
-  });
-  child.once("exit", (code, signal) => {
-    void fail("RUNTIME_EXITED", `Runtime exited: code=${code}, signal=${signal}.`);
-  });
+  /** Starts the runtime child; a handler ignores any child but the current one (a killed one still exits later). */
+  const startChild = () => {
+    const started = spawn(options.executable, [...options.args], {
+      windowsHide: true,
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
+    });
+    child = started;
+    started.on("message", (raw: unknown) => {
+      const parsed = runtimeMessageSchema.safeParse(raw);
+      if (started !== child || !parsed.success || state.kind === "failed" || state.kind === "failing") return;
+      const event = parsed.data;
+      if (event.kind !== "ready") activity = event.activity;
+      recorder.record(event.kind, event);
+      if (event.kind === "heartbeat") {
+        lastHeartbeat = performance.now();
+        heartbeat = event;
+      }
+      if (event.kind === "ready") {
+        state = { kind: "ready", port: event.port };
+        // Ready shows a live loop; the shorter deadline counts from here, not from the last start-up heartbeat.
+        lastHeartbeat = performance.now();
+      }
+    });
+    started.once("error", (error) => {
+      if (started === child) void fail("RUNTIME_EXITED", error.message);
+    });
+    started.once("exit", (code, signal) => {
+      if (started === child) void fail("RUNTIME_EXITED", `Runtime exited: code=${code}, signal=${signal}.`);
+    });
+  };
+  startChild();
   const watchdog = setInterval(() => {
     const now = performance.now();
     watchdogDelayMs = Math.max(0, now - lastWatchdogTick - RUNTIME_HEARTBEAT_MS);
@@ -292,5 +313,5 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     await recorder.flush();
   };
   const close = () => (closing ??= stop());
-  return { server, child, close, [Symbol.asyncDispose]: close };
+  return { server, get child(): ChildProcess { return child!; }, close, [Symbol.asyncDispose]: close };
 }

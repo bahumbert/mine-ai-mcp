@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { RUNTIME_RESTART_WINDOW_MS } from "./runtime-liveness.js";
 import { startMcpSupervisor } from "./runtime-supervisor.js";
 
 const executable = process.execPath;
@@ -20,6 +21,7 @@ async function supervised(
   instanceId: string,
   launch?: (directory: string) => { executable: string; args: string[] },
   deadlines?: { startupMs: number; unresponsiveMs: number },
+  restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
@@ -31,6 +33,7 @@ async function supervised(
     source: { kind: "unavailable", reason: "test fixture" },
     incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
     deadlines,
+    restartWindowMs,
   });
   t.after(async () => {
     await supervisor.close();
@@ -202,4 +205,50 @@ test("a runtime silent past the startup deadline before ready is killed as unres
     body = await (await fetch(`${url}/health`)).text();
   } while (!body.includes('"state":"failed"'));
   assert.match(body, /RUNTIME_UNRESPONSIVE/);
+});
+
+const mcpCall = (url: string, id: number, tool: string) =>
+  fetch(`${url}/${tool}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool } }),
+  });
+const fastDeadlines = { startupMs: 10_000, unresponsiveMs: 1_000 };
+const stateOf = async (url: string): Promise<string> => (await (await fetch(`${url}/diagnostics/runtime`)).json()).state;
+
+test("a runtime killed as unresponsive is started again and answers", { timeout: 25_000 }, async (t) => {
+  const { url } = await supervised(t, "restart", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+  await whenHealthy(url);
+  assert.match(await (await mcpCall(url, 90, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
+  while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
+  assert.equal(await stateOf(url), "ready");
+});
+
+test("a second failure inside the restart window stays down and says it restarted before", { timeout: 25_000 }, async (t) => {
+  const { url } = await supervised(t, "restart-twice", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+  await whenHealthy(url);
+  await mcpCall(url, 91, "hang");
+  while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
+  assert.match(await (await mcpCall(url, 92, "hang")).text(), /RUNTIME_UNRESPONSIVE/);
+  await delay(1_500);
+  const health = await fetch(`${url}/health`);
+  assert.equal(health.status, 503);
+  const status = await health.json();
+  assert.equal(status.runtime.state, "failed");
+  assert.match(await readFile(status.runtime.failure.incident.artifact.path, "utf8"), /runtime_restarted/);
+  const afterwards = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 93, method: "tools/list" }),
+  });
+  assert.match(await afterwards.text(), /RUNTIME_UNRESPONSIVE/);
+});
+
+test("a supervisor stopped during a restart leaves no runtime behind", { timeout: 25_000 }, async (t) => {
+  const { supervisor, url } = await supervised(t, "restart-stop", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+  await whenHealthy(url);
+  await mcpCall(url, 95, "hang");
+  const restarted = supervisor.child;
+  await supervisor.close();
+  assert.ok(restarted.exitCode !== null || restarted.signalCode !== null, "close must reap the restarted runtime");
 });

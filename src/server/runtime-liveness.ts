@@ -11,6 +11,11 @@ export const RUNTIME_UNRESPONSIVE_MS = 5_000;
  * 5 s, while its module graph loaded). After `ready`, {@link RUNTIME_UNRESPONSIVE_MS} applies.
  */
 export const RUNTIME_STARTUP_MS = 30_000;
+/**
+ * A killed runtime is started again once per this window: a second failure inside it stays down, so a crash loop is
+ * not hidden behind restarts (a frozen runtime costs its bot a few seconds out of the world, not the whole session).
+ */
+export const RUNTIME_RESTART_WINDOW_MS = 10 * 60_000;
 
 const ownerSchema = z.object({
   bot: z.string(),
