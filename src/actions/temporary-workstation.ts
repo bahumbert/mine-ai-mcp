@@ -1,9 +1,14 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
-import type { NavigationRuntime } from "../navigation/index.js";
+import { createMovements, exactBlockGoal, type NavigationRuntime } from "../navigation/index.js";
 import { carriedCount } from "../world/inventory-count.js";
-import { placeCarriedBlockNearby, type NearbyPlacement } from "../world/nearby-placement.js";
+import {
+  findStandingSpot,
+  placeCarriedBlockNearby,
+  STANDING_SPOT_RADIUS,
+  type NearbyPlacement,
+} from "../world/nearby-placement.js";
 import type { WorldBlock } from "../world/placement.js";
 import { collectBlock } from "./collect-block/collect-block.js";
 import { parseCollectBlockRequest } from "./collect-block/contract.js";
@@ -27,6 +32,8 @@ type WorkstationName = WorkstationEvidence["block"];
 
 export interface WorkstationOperations {
   place(name: WorkstationName, signal?: AbortSignal): Promise<NearbyPlacement>;
+  /** Walk to the nearest spot where a player can stand and set the block down; false when there is none. */
+  moveToOpenGround(name: WorkstationName, context: ActionContext): Promise<boolean>;
   collect(
     name: WorkstationName,
     position: WorkstationEvidence["position"],
@@ -37,6 +44,13 @@ export interface WorkstationOperations {
 export function workstationOperations(bot: Bot, navigation: NavigationRuntime): WorkstationOperations {
   return {
     place: (name, signal) => placeCarriedBlockNearby(bot, name, { signal }),
+    moveToOpenGround: async (name, context) => {
+      const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name);
+      if (!spot) return false;
+      // Arriving short of it is not a failure here: the second placement is the judge.
+      await navigation.navigate({ movements: createMovements(bot), goal: exactBlockGoal(spot), signal: context.signal });
+      return true;
+    },
     collect: async (name, position, context) => {
       if (name === "furnace") {
         const block = bot.blockAt(new Vec3(position.x, position.y, position.z));
@@ -80,13 +94,19 @@ export async function useTemporaryWorkstation<Evidence extends object>(
   if (bot.inventory.emptySlotCount?.() === 0) {
     return failure(`[WORKSTATION_NO_ROOM] ${name}: no free inventory slot to pick it back up afterwards; make room first.`);
   }
-  const placement = await operations.place(name, context.signal);
+  let placement = await operations.place(name, context.signal);
+  // A player standing in water, or in a tunnel too tight to set anything down, takes a few steps first (live
+  // 2026-10-02: a bot logged in standing in water; 2026-10-10 run 9: Yuki, no_cell twice). Once.
+  if (placement.kind === "no_cell" && (await operations.moveToOpenGround(name, context))) {
+    context.signal?.throwIfAborted();
+    placement = await operations.place(name, context.signal);
+  }
   if (placement.kind === "no_item") {
     return failure(`[WORKSTATION_PLACEMENT_FAILED] ${name}: no_item.`);
   }
   if (placement.kind === "no_cell") {
     return failure(
-      `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_cell (no dry, clear cell with something solid to set it on within reach: in water, a tunnel or a crowded spot); move to open dry ground first.`,
+      `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_cell (no dry, clear cell within ${STANDING_SPOT_RADIUS} blocks: in water, a tunnel or a crowded spot); move to open dry ground first.`,
     );
   }
   // A placement may report unsettled inventory even though the block appeared.

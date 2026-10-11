@@ -118,7 +118,7 @@ export async function gatherMaterials(
  * cobblestone fetched for his house, and the build was short again): while `run` runs, those of `items` on the
  * runtime's scaffold list are taken off it, and the list is put back after (owner, 2026-10-07).
  */
-async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly string[], run: () => Promise<T>): Promise<T> {
+export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly string[], run: () => Promise<T>): Promise<T> {
   const policy = (await runtime.status()).policy;
   const scaffold = policy?.scaffoldBlocks ?? [];
   const kept = scaffold.filter((block) => items.includes(block));
@@ -206,7 +206,14 @@ async function gatherRounds(
       const after = shortfall(wanted, (await context.runtime.status()).inventory);
       // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
       // round goes on without it, or makes another.
-      if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) return step;
+      if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) {
+        if (actions.length === 0) return step;
+        // What the earlier rounds got is not lost with the last failure (live 2026-10-10: a fetch ended with only the
+        // last place's failure, and no word of the logs already carried).
+        const now = (await context.runtime.status()).inventory;
+        const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
+        return { status: "failed", detail: `got ${actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(wanted, now))}: ${step.detail}` };
+      }
       actions.push(`setback (${step.detail})`);
       continue;
     }
@@ -629,16 +636,29 @@ async function fetchFarther(context: GatherContext, block: string, count: number
   const tried = triedSet(context.runtime);
   const start = (await context.runtime.status()).position;
   const code = failed.status === "failed" ? errorCode(failed.detail) : null;
-  if (code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS") await forgetEmptyNear(context.runtime, block, start);
+  // Trees near that none could be reached are as good as none (live 2026-10-10: the same unreachable trees, round after round).
+  if (code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS" || code === "NO_REACHABLE_MATCHING_TARGETS") await forgetEmptyNear(context.runtime, block, start);
   const places = await knownPlaces(context.runtime, block, start);
   if (places.length === 0) {
     const why = failed.status === "failed" ? ` (${failed.detail})` : "";
     return { status: "failed", detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
   }
   let last = failed;
-  for (const seen of places.slice(0, FAR_TRIES)) {
-    if (context.signal.aborted) break;
+  let acrossWater = 0;
+  const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+  let tries = 0;
+  for (const seen of places) {
+    if (context.signal.aborted || tries >= FAR_TRIES) break;
     const here = (await context.runtime.status()).position;
+    // Across deep water with no boat the walk fails: not tried, and not marked either (a boat may come).
+    if (!boat) {
+      const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
+      if (water !== null && water.share > 0.5) {
+        acrossWater += 1;
+        continue;
+      }
+    }
+    tries += 1;
     context.progress?.(`going ${describeWay(here, seen)} to the ${block} seen there, for ${purpose}`);
     const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
     // Caves under the ground, trees over it: the walk is to the ground nearest her own height (as `explore` does).
@@ -646,6 +666,8 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     const there = await act(context, "navigate", { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
     context.heading?.(null);
     if (there !== null) {
+      // A place that could not be reached is not offered again by the next round.
+      tried.add(`${seen.x},${seen.z}`);
       last = there;
       continue;
     }
@@ -655,6 +677,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
     tried.add(`${seen.x},${seen.z}`);
   }
+  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: `the ${block} you know of is across the water: take a boat (get_items oak_boat) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})` };
   return last;
 }
 

@@ -157,3 +157,13 @@ test("a farm she knows, asked for another crop: the crop asked is planted on emp
   await runStep({ skill: "farm", crop: "carrot", size: 9 }, contextFor(runtime, { farms }));
   assert.equal(runtime.submitted[0]!.input.plant, "carrot");
 });
+
+test("a new farm whose plot overlaps a protected area names the nearest clear plot and protects nothing (live 2026-10-10: her own house undone)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "bucket", count: 1 }]);
+  runtime.areas = [{ regionId: 4, owner: "self", label: "small medieval house", min: { x: -3, y: 60, z: -3 }, max: { x: 3, y: 75, z: 3 } }];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 9 }, contextFor(runtime, { self: "self" }));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /overlaps protected area #4 'small medieval house' \(yours.*the nearest plot clear of them has its middle \d+ blocks .*, at -?\d+ 64 -?\d+: farm there/u);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "protect_region").length, 0);
+  assert.deepEqual(calls(runtime), []);
+});

@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { cellIntersectsPlayerBody } from "../utils/index.js";
-import { isDryPlacementSite, supportsFlatPlacement } from "./block-classification.js";
+import { isDryPlacementSite, isLiquid, supportsFlatPlacement } from "./block-classification.js";
 import { placeBlock, findPlacementSupport, type WorldBlock } from "./placement.js";
 import { chestOpeningObstruction } from "./chest-clearance.js";
 import { protectedRegionAt, readProtectedRegions } from "./protected-regions.js";
@@ -34,8 +34,15 @@ interface PlacementCell {
  * has walls on every side and no free floor, and the model walked off to
  * find open ground instead of crafting where it stood.
  */
-function chooseCell(bot: Bot, itemName: string, maxRadius: number, inRegions: boolean): PlacementCell | null {
-  const feet = bot.entity.position.floored();
+function chooseCell(
+  bot: Bot,
+  itemName: string,
+  maxRadius: number,
+  inRegions: boolean,
+  /** Where the bot stands, or would stand: its feet cell and its body position. */
+  from: { readonly feet: Vec3; readonly body: Vec3 } = { feet: bot.entity.position.floored(), body: bot.entity.position },
+): PlacementCell | null {
+  const { feet, body } = from;
   const regions = readProtectedRegions(bot);
   let chosen: { readonly cell: PlacementCell; readonly distance: number; readonly onFloor: boolean } | null = null;
   for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
@@ -43,7 +50,7 @@ function chooseCell(bot: Bot, itemName: string, maxRadius: number, inRegions: bo
       for (const dy of SEARCH_HEIGHTS) {
         const position = feet.offset(dx, dy, dz);
         const distance = position.distanceTo(feet);
-        if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, bot.entity.position)) continue;
+        if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, body)) continue;
         if (!isDryPlacementSite(bot.blockAt(position))) continue;
         if (chestOpeningObstruction(bot, itemName, position)) continue;
         if (!inRegions && protectedRegionAt(regions, bot.game.dimension, position.x, position.y, position.z) !== null) continue;
@@ -61,6 +68,48 @@ function chooseCell(bot: Bot, itemName: string, maxRadius: number, inRegions: bo
     }
   }
   return chosen?.cell ?? null;
+}
+
+/** How far a bot is sent for a spot where a workstation fits: a few steps, not a trek. */
+export const STANDING_SPOT_RADIUS = 8;
+/** Standing spots are looked for this far below and above the bot's feet. */
+const STANDING_SPOT_HEIGHT = 3;
+
+/** A cell a player stands in: feet and head clear and dry, something solid underneath that is not a liquid. */
+function canStandAt(bot: Bot, feet: Vec3): boolean {
+  const body = [bot.blockAt(feet), bot.blockAt(feet.offset(0, 1, 0))];
+  const floor = bot.blockAt(feet.offset(0, -1, 0));
+  if (body.some((block) => block === null || block.boundingBox !== "empty" || isLiquid(block))) return false;
+  return floor !== null && supportsFlatPlacement(floor) && !isLiquid(floor);
+}
+
+/**
+ * The nearest cell (straight-line, no path asked) where a player can stand and from which a block of this kind can
+ * be placed the way `placeCarriedBlockNearby` does, or null when there is none within `maxRadius` blocks across and
+ * three up or down. Loaded blocks only.
+ *
+ * Live 2026-10-02: a bot logged in standing in water, and a bot leveling inside its own cut had no free cell either;
+ * a player takes a few steps to open dry ground first. The caller walks there and places again.
+ */
+export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, itemName = "crafting_table"): Vec3 | null {
+  const origin = bot.entity.position.floored();
+  const spots: { readonly feet: Vec3; readonly distance: number }[] = [];
+  for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
+    for (let dz = -maxRadius; dz <= maxRadius; dz += 1) {
+      for (let dy = -STANDING_SPOT_HEIGHT; dy <= STANDING_SPOT_HEIGHT; dy += 1) {
+        const feet = origin.offset(dx, dy, dz);
+        const distance = feet.distanceTo(origin);
+        if (distance <= maxRadius && canStandAt(bot, feet)) spots.push({ feet, distance });
+      }
+    }
+  }
+  spots.sort((left, right) => left.distance - right.distance);
+  for (const { feet } of spots) {
+    const from = { feet, body: new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5) };
+    const found = chooseCell(bot, itemName, 3, false, from) ?? chooseCell(bot, itemName, 3, true, from);
+    if (found) return feet;
+  }
+  return null;
 }
 
 /**

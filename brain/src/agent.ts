@@ -5,8 +5,10 @@ import { activityChances, availableActivities, drawTwo } from "./activity-draw.t
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
 import { improvement, temporaryRoles } from "./building/materials.ts";
+import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
+import { junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
@@ -101,6 +103,8 @@ interface Work {
   whisperTo: string | null;
   /** Step key -> refusals since that step last ran (rule 2: three end the objective); counted by the mind, reset here. */
   readonly refused: Map<string, number>;
+  /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
+  readonly wanted: Set<string>;
 }
 
 /** What is carried, as `name:count` sorted (totals per name): compared to tell whether the inventory changed. */
@@ -110,8 +114,11 @@ function carriedOf(snapshot: BotSnapshot): string {
   return [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
 }
 
+/** The failures of a full inventory: a workstation without room, a pickup or a collect with no free slot. */
+const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot/u;
+
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map() };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set() };
 }
 
 /**
@@ -511,6 +518,7 @@ export class Agent {
     const actions: ActionTime[] = [];
     // The step runs: its earlier refusals are forgotten (rule 2 counts refusals with no run in between).
     work.refused.delete(stepKey(decision.step));
+    if (decision.step.skill === "get_items" || decision.step.skill === "craft_item") for (const { item } of targetItems(decision.step)) work.wanted.add(item);
     const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
@@ -531,6 +539,7 @@ export class Agent {
         rememberFarm: (farm) => this.learnFarm(farm),
         building: this.building,
         areas: this.areas,
+        ...(work.objective.requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
         phase: (activity) => phases.push({ activity, at: Date.now() }),
         heading: gain.heading,
         ...(work.objective.requester !== null && { heardFrom: () => this.lastHeard.get(work.objective.requester!.toLowerCase()) ?? started }),
@@ -546,17 +555,19 @@ export class Agent {
     }
     const ended = Date.now();
     const ms = ended - started;
-    const { activity, spans, carried, position } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
+    const { activity, spans, carried, position, room } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
     const { purpose } = work.objective;
     for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
     // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
     const stalled = gain.stalled();
-    const record: StepRecord = stalled !== null && result.status !== "done"
+    let record: StepRecord = stalled !== null && result.status !== "done"
       ? { step: label, outcome: "failed", detail: stalled }
       : result.status === "stopped"
         ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
         : { step: label, outcome: result.status, detail: result.detail };
+    // A full inventory names what to drop, with whole counts, and spares what the work needs (live 2026-10-10/11).
+    if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, this.neededFor(room, work))}` };
     work.steps.push(record);
     work.carried.push(carried);
     if (record.outcome === "failed") this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
@@ -751,7 +762,7 @@ export class Agent {
    * The kind of work a finished step was, from game facts the runtime gives (block tags, hostile species, foods),
    * learnt once per name. Null for errands, or when the facts cannot be read (the step still happened).
    */
-  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null }> {
+  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null; readonly room: Pick<BotSnapshot, "inventory" | "foods"> | null }> {
     try {
       const after = await this.options.runtime.status();
       for (const food of [...before.foods, ...after.foods]) this.foods.add(food.name);
@@ -760,11 +771,18 @@ export class Agent {
       if (step.skill === "collect_block") blocks.push(step.block);
       const facts = { tags: await this.tagsOf(blocks), hostile, foods: this.foods };
       const carried = carriedOf(after);
-      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried, position: after.position };
+      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried, position: after.position, room: { inventory: after.inventory, foods: after.foods } };
     } catch (error) {
       this.options.log(`could not tell what kind of work that was: ${String(error)}`);
-      return { activity: null, spans: [], carried: null, position: null };
+      return { activity: null, spans: [], carried: null, position: null, room: null };
     }
+  }
+
+  /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
+  private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
+    const house = this.building.unfinished;
+    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
+    return neededItems(snapshot, { houseBill, wanted: work.wanted });
   }
 
   /** The game's block tags of these blocks, asked of the runtime once per name. */

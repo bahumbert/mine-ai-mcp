@@ -958,3 +958,17 @@ test("a temporary own house is a home: the goal tier sees what is temporary and 
   assert.match(request, /improving your house needs \d+ more oak_planks/u);
   assert.doesNotMatch(request, /no house of your own/u);
 });
+
+test("a step failing for a full inventory names the junk with its whole count (live 2026-10-10: 18 of 238 snowballs dropped per step)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...Array.from({ length: 15 }, (_, index) => ({ name: "snowball", count: index === 0 ? 8 : 16 })), { name: "stone_pickaxe", count: 1 }] };
+  runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "Full, sorry." });
+  action.reply({ step: { skill: "collect_block", block: "birch_log", count: 5 } }, { step: { skill: "collect_block", block: "birch_log", count: 5 } });
+  await agent.handle(say("Steve", "get me some birch"));
+  await until(() => action.requests.length >= 2);
+  const prompt = JSON.stringify(action.requests[1]);
+  assert.match(prompt, /232 snowball \(15 slots\)/u);
+  assert.doesNotMatch(prompt, /1 stone_pickaxe \(1 slot\)/u, "the pickaxe is needed");
+});

@@ -3,6 +3,7 @@ import test from "node:test";
 import { describeStep, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
+import { neededItems } from "./inventory-room.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "./testing.ts";
@@ -1343,4 +1344,89 @@ test("a failed drop still says which tools it kept (live 2026-10-10 run 9: the k
   assert.match(detail, /DROP_PICKED_UP/u);
   assert.match(detail, /kept 1 wooden_pickaxe: your only pickaxe/u);
   assert.match(detail, /kept 1 wooden_hoe: your only hoe/u);
+});
+
+test("a drop of her own work keeps what the work needs (every tool, the house planks); an order drops anything", async () => {
+  const inventory = [{ name: "stone_pickaxe", count: 1 }, { name: "stone_axe", count: 1 }, { name: "wooden_axe", count: 1 }, { name: "oak_planks", count: 16 }, { name: "snowball", count: 40 }];
+  const step = stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_axe" }, { item: "wooden_axe" }, { item: "oak_planks" }, { item: "snowball" }] });
+  const own = new FakeRuntime();
+  own.snapshot = { ...own.snapshot, inventory };
+  own.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "snowball", dropped: 40 }] });
+  const result = await runStep(step, { ...contextFor(own), needed: (snapshot) => neededItems(snapshot, { houseBill: ["oak_planks"] }) });
+  assert.deepEqual(own.submitted.map((call) => call.input.items), [[{ item_name: "snowball" }]]);
+  const detail = result.status === "done" ? result.detail : "";
+  assert.match(detail, /kept all 16 oak_planks: your current work needs them/u);
+  assert.match(detail, /kept all 1 wooden_axe: your current work needs them/u);
+
+  const ordered = new FakeRuntime();
+  ordered.snapshot = { ...ordered.snapshot, inventory };
+  ordered.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "oak_planks", dropped: 16 }] });
+  await runStep(step, contextFor(ordered));
+  assert.deepEqual(ordered.submitted.map((call) => call.input.items), [[{ item_name: "wooden_axe" }, { item_name: "oak_planks" }, { item_name: "snowball" }]], "an order drops the planks and the spare axe (the best axe stays anyway)");
+});
+
+test("a far place whose walk failed is not walked to again by the next round, and one across the sea without a boat is not walked to", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.failures.navigate = "[NO_PATH] no route";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 300, z: 8 } };
+  await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+  await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1, "the second round does not offer the place again");
+
+  const sea = new FakeRuntime();
+  sea.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  sea.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  sea.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
+  const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(sea));
+  assert.deepEqual(sea.submitted.filter((call) => call.tool === "navigate"), []);
+  assert.match(told.status === "failed" ? told.detail : "", /the oak_log you know of is across the water: take a boat/u);
+});
+
+test("near trees none could be reached are not offered again, and a fetch failing after a partial gather says what it got", async () => {
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[NO_REACHABLE_MATCHING_TARGETS] Every loaded oak_log block was found but none could be reached.";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 20, z: 8 } };
+  await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate"), [], "the near place is marked, so no trip to it");
+
+  const partial = new FakeRuntime();
+  partial.recipes = HOUSE_RECIPES;
+  partial.failures.collect_block = "[SOMETHING_ODD] the axe slipped";
+  // The first collect fails but got 2 logs (a setback that gained); the next round fails with no gain at all.
+  partial.failNext.collect_block = { error: "[SOMETHING_ODD] the axe slipped", effect: () => { partial.snapshot = { ...partial.snapshot, inventory: [{ name: "oak_log", count: 2 }] }; } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(partial));
+  assert.equal(result.status === "failed" ? result.detail : "", "got setback ([SOMETHING_ODD] the axe slipped) so far (carried now: 2 oak_log); still missing 2 oak_log: [SOMETHING_ODD] the axe slipped");
+});
+
+test("resuming a house after a restart is not refused over her own earlier box: the runtime's regions are read, not what this session learnt", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
+  runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong" };
+  await runStep({ skill: "build", structure: "house", size: "small" }, { ...contextFor(runtime, { style: "medieval", building }), self: "self" });
+  const house = building.unfinished!;
+  // After the restart: the site is still to be leveled, and an older box of hers (a slightly different one) is in the runtime.
+  runtime.areas.push({ regionId: 99, owner: "self", label: house.kind, min: { x: house.site.door.x - 4, y: 60, z: house.site.door.z - 4 }, max: { x: house.site.door.x + 4, y: 80, z: house.site.door.z + 4 } });
+  const restarted = { unfinished: { ...house, part: 0, prepared: false } };
+  runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, { ...contextFor(runtime, { style: "medieval", building: restarted }), self: "self" });
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+});
+
+test("the house's materials are not scaffolding while it is built, and the list is put back after, also when the build stops", async () => {
+  const scaffold = ["dirt", "cobblestone", "oak_planks"];
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL, policy: { revision: "r1", digStraightDown: false, scaffoldBlocks: scaffold } };
+  const done = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", building: { unfinished: null } }));
+  assert.equal(done.status, "done", JSON.stringify(done));
+  assert.deepEqual(runtime.scaffoldSettings, [["dirt"], scaffold]);
+
+  const broken = new FakeRuntime();
+  broken.snapshot = { ...broken.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL, policy: { revision: "r1", digStraightDown: false, scaffoldBlocks: scaffold } };
+  broken.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong" };
+  const failed = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(broken, { style: "medieval", building: { unfinished: null } }));
+  assert.equal(failed.status, "failed");
+  assert.deepEqual(broken.scaffoldSettings, [["dirt"], scaffold]);
 });

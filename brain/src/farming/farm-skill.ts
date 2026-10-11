@@ -3,7 +3,8 @@ import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
 import type { KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
-import { findPlayer, levelZone, navigateInput, noteArea, releaseArea, type SkillContext, type SkillResult } from "../skills.ts";
+import { describeWay } from "../gathering.ts";
+import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, overlapsOf, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
 import { farmPlot, plotBehind, type FarmPlot } from "./plot.ts";
 
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
@@ -78,10 +79,24 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what}: ${there.error ?? there.status}` };
   }
+  // A plot clear of every protected area before anything is protected or dug, and if not, where the nearest clear one
+  // is (live 2026-10-10: a farm protected over her own house, then leveling failed, and the house was undone).
+  const areas = await context.runtime.protectedRegions();
+  const boxAt = (middle: Position) => ({
+    min: { x: plot.min.x - 1 + middle.x - water.x, y: water.y - 1, z: plot.min.z - 1 + middle.z - water.z },
+    max: { x: plot.max.x + 1 + middle.x - water.x, y: water.y + 2, z: plot.max.z + 1 + middle.z - water.z },
+  });
+  const blocked = overlapsOf(areas, boxAt(water));
+  if (blocked.length > 0) {
+    const clear = nearestClearSpot(areas, water, boxAt);
+    const where = clear === null
+      ? `no plot clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or farm somewhere else`
+      : `the nearest plot clear of them has its middle ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y + 1} ${clear.z}: farm there with those coordinates`;
+    return { status: "failed", detail: `the site of ${what} (middle at ${water.x} ${water.y + 1} ${water.z}) ${describeOverlaps(context, blocked)}; ${where}` };
+  }
   // Protected before the first change, ring included: her own gathering never digs or tramples into it (ADR-012).
   const protection = await context.runtime.protectRegion({
-    min: { x: plot.min.x - 1, y: water.y - 1, z: plot.min.z - 1 },
-    max: { x: plot.max.x + 1, y: water.y + 2, z: plot.max.z + 1 },
+    ...boxAt(water),
     label: `farm ${crop}`,
     reason: `Keep my own digging out of the ${crop} farm I am making.`,
   });

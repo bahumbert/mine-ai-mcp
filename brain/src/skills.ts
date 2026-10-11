@@ -8,8 +8,9 @@ import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation } from "./gathering.ts";
+import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
+import { KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
@@ -72,6 +73,8 @@ export interface SkillContext {
   readonly farms?: readonly KnownFarm[];
   /** Told about a farm made or tended, to remember it. */
   readonly rememberFarm?: (farm: KnownFarm) => void;
+  /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
+  readonly needed?: (snapshot: BotSnapshot) => ReadonlySet<string>;
 }
 
 export interface UnfinishedHouse {
@@ -221,9 +224,7 @@ function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): {
     .filter((entry) => entry.count > 0);
 }
 
-const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
 const TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"];
-const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
 const tierRank = (item: string): number => { const rank = TIERS.indexOf(item.split("_")[0]!); return rank < 0 ? TIERS.length : rank; };
 
 /**
@@ -254,7 +255,16 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
  * identical drops each "done" while the action dropped 0), and whether the inventory has room again.
  */
 async function dropItems(context: SkillContext, step: Extract<Step, { skill: "drop_item" }>, why: string): Promise<SkillResult> {
-  const { entries, kept } = keepLastOfKind(dropEntries(step), (await context.runtime.status()).inventory);
+  const before = await context.runtime.status();
+  const own = keepLastOfKind(dropEntries(step), before.inventory);
+  const needed = context.needed?.(before) ?? new Set<string>();
+  const kept = [...own.kept];
+  const entries = own.entries.filter((entry) => {
+    if (!needed.has(entry.item)) return true;
+    const all = before.inventory.filter((stack) => stack.name === entry.item).reduce((sum, stack) => sum + stack.count, 0);
+    kept.push(`kept all ${Math.min(entry.count ?? all, all)} ${entry.item}: your current work needs them`);
+    return false;
+  });
   if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}` };
   const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
   const act = (input: Record<string, unknown>) => context.body.act("drop_item", { items, allow_equipped: true, ...input }, why, { signal: context.signal });
@@ -361,6 +371,24 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}` };
   }
+  // The bill is not scaffolding while the house is built: the walks of the site's leveling used the very blocks it needs
+  // (live 2026-10-04: 16 of 36 cobblestone).
+  return withMaterialsKept(context.runtime, plan.bill.map((entry) => entry.item), () => buildOnSite(context, { step, kind, what, style, own, resumed, plan }));
+}
+
+/** What {@link build} worked out before the house is protected and built. */
+interface SitePlan {
+  readonly step: Extract<Step, { skill: "build" }>;
+  readonly kind: string;
+  readonly what: string;
+  readonly style: ReturnType<typeof styleOrDefault>;
+  readonly own: boolean;
+  readonly resumed: UnfinishedHouse | null;
+  readonly plan: HousePlan;
+}
+
+/** {@link build} from the protection of the site to the end. */
+async function buildOnSite(context: SkillContext, { step, kind, what, style, own, resumed, plan }: SitePlan): Promise<SkillResult> {
   // Protected before the first block and again on every resume (the runtime keeps one region per box): its own
   // gathering and goals must not dig into the house (ADR-012). The build itself still works inside it.
   const protection = await context.runtime.protectRegion({
@@ -384,7 +412,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
       // it (live 2026-10-02: 258 cobblestone mined for a site over a pond). Its own floor goes in even over water.
       below: 1,
       placedLater: new Set(plan.batches.flat().filter((cell) => cell.block !== "air").map((cell) => `${cell.x},${cell.y},${cell.z}`)),
-    }, plan.bill, [protection.area.regionId, ...earlierProtections(context, kind, plan.site.door, protection.area.regionId)]);
+    }, plan.bill, [protection.area.regionId, ...earlierProtections(context, kind, plan.site.door, protection.area.regionId, await context.runtime.protectedRegions())]);
     // Nothing of the house stands yet: its site is not kept protected (a resume protects it again).
     if (prepared.status === "stopped" || context.signal.aborted) {
       leaveUnfinished(0, false);
@@ -448,6 +476,24 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
+  return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, style, roles, after, rest, bill, kind, what }));
+}
+
+/** What {@link improveHouse} worked out before the house is protected and improved. */
+interface ImprovePlan {
+  readonly place: KnownPlace;
+  readonly house: NonNullable<KnownPlace["house"]>;
+  readonly style: ReturnType<typeof styleOrDefault>;
+  readonly roles: readonly BlockRole[];
+  readonly after: HousePlan;
+  readonly rest: Materials;
+  readonly bill: readonly MaterialCount[];
+  readonly kind: string;
+  readonly what: string;
+}
+
+/** {@link improveHouse} from the protection of the house to the end. */
+async function improveOnSite(context: SkillContext, { place, house, style, roles, after, rest, bill, kind, what }: ImprovePlan): Promise<SkillResult> {
   // Protected again under the same label (the runtime keeps one region per box), as a build does.
   const protection = await context.runtime.protectRegion({
     ...houseBox(after.batches.flat()),
@@ -1070,10 +1116,10 @@ async function nearestFree(context: SkillContext, name: string): Promise<FoundBl
 }
 
 /** How far around a refused house site the nearest clear one is looked for. */
-const SITE_SEARCH = 32;
+export const SITE_SEARCH = 32;
 
 /** Protected areas a box overlaps, her leveling margins and `except` (the region of the work itself) left out. */
-function overlapsOf(areas: readonly ProtectedArea[], { min, max }: { readonly min: Position; readonly max: Position }, except: readonly number[] = []): ProtectedArea[] {
+export function overlapsOf(areas: readonly ProtectedArea[], { min, max }: { readonly min: Position; readonly max: Position }, except: readonly number[] = []): ProtectedArea[] {
   return areas.filter((area) =>
     !except.includes(area.regionId) && !area.label.startsWith(LEVELING_LABEL) &&
     area.min.x <= max.x && area.max.x >= min.x && area.min.y <= max.y && area.max.y >= min.y && area.min.z <= max.z && area.max.z >= min.z);
@@ -1084,7 +1130,7 @@ function overlapsOf(areas: readonly ProtectedArea[], { min, max }: { readonly mi
  * model weighs it (live 2026-10-02: told only "release it first", she released Tom's area and then her own house to
  * level around Tom, and began digging the house).
  */
-function describeOverlaps(context: SkillContext, overlapping: readonly ProtectedArea[]): string {
+export function describeOverlaps(context: SkillContext, overlapping: readonly ProtectedArea[]): string {
   const whose = (area: ProtectedArea) => area.owner === context.self ? "yours: leveling would dig it up" : `owned by ${area.owner}`;
   return `overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => `#${area.regionId} '${area.label}' (${whose(area)})`).join(", ")}`;
 }
@@ -1092,9 +1138,10 @@ function describeOverlaps(context: SkillContext, overlapping: readonly Protected
 /**
  * Her own earlier protections of this same house: a region of hers, with its label, around its door (live 2026-10-04:
  * resuming her unfinished house, its site was refused for overlapping #12, the same house protected before with a
- * slightly different box).
+ * slightly different box). Read from the runtime, not from what this session learnt: after a restart the old box is
+ * still there, and it is hers all the same.
  */
-function earlierProtections(context: SkillContext, label: string, door: Position, current: number, areas: readonly ProtectedArea[] = context.areas ?? []): number[] {
+function earlierProtections(context: SkillContext, label: string, door: Position, current: number, areas: readonly ProtectedArea[]): number[] {
   return areas.filter((area) =>
     area.regionId !== current && area.owner === context.self && area.label === label &&
     door.x >= area.min.x - 1 && door.x <= area.max.x + 1 && door.z >= area.min.z - 1 && door.z <= area.max.z + 1,
@@ -1129,15 +1176,23 @@ function nearestClearSite(areas: readonly ProtectedArea[], style: ReturnType<typ
     const [dx, dz] = [door.x - refused.door.x, door.z - refused.door.z];
     return { min: { x: box.min.x + dx, y: box.min.y, z: box.min.z + dz }, max: { x: box.max.x + dx, y: box.max.y, z: box.max.z + dz } };
   };
+  return nearestClearSpot(areas, refused.door, boxFor);
+}
+
+/**
+ * The spot nearest `origin`, at its height, whose box (`boxAt`) overlaps no protected area, within {@link SITE_SEARCH}
+ * blocks; null when none. Shared by houses (their door) and farm plots (their middle).
+ */
+export function nearestClearSpot(areas: readonly ProtectedArea[], origin: Position, boxAt: (spot: Position) => { readonly min: Position; readonly max: Position }): Position | null {
   for (let ring = 1; ring <= SITE_SEARCH; ring += 1) {
-    const doors: Position[] = [];
+    const spots: Position[] = [];
     for (let dx = -ring; dx <= ring; dx += 1) {
       for (let dz = -ring; dz <= ring; dz += 1) {
-        if (Math.max(Math.abs(dx), Math.abs(dz)) === ring) doors.push({ x: refused.door.x + dx, y: refused.door.y, z: refused.door.z + dz });
+        if (Math.max(Math.abs(dx), Math.abs(dz)) === ring) spots.push({ x: origin.x + dx, y: origin.y, z: origin.z + dz });
       }
     }
-    doors.sort((a, b) => Math.hypot(a.x - refused.door.x, a.z - refused.door.z) - Math.hypot(b.x - refused.door.x, b.z - refused.door.z));
-    const clear = doors.find((door) => overlapsOf(areas, boxFor(door)).length === 0);
+    spots.sort((a, b) => Math.hypot(a.x - origin.x, a.z - origin.z) - Math.hypot(b.x - origin.x, b.z - origin.z));
+    const clear = spots.find((spot) => overlapsOf(areas, boxAt(spot)).length === 0);
     if (clear !== undefined) return clear;
   }
   return null;
