@@ -260,6 +260,10 @@ export class LlmMind implements Mind {
             throw new Error(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
           }
           if (wanted === "air") throw new Error("air is everywhere: to find a clear site, use the coordinates the last failure gave");
+          // A block the last explore already found known is fetched, not explored for again (live 2026-10-11 run 10: Kenji and
+          // Theo, "explore for oak_log" over and over, each result naming one 2-6 blocks away). Every time, from the records only.
+          const known = knownByEarlierExplore(input.steps, wanted);
+          if (known !== null) throw new Error(`your explore for ${wanted} found one known ${known}: get_items ${wanted} gathers it`);
         }
         // A step that just succeeded, sent again identically, goes back once per objective (live 2026-10-11, orders test:
         // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
@@ -537,6 +541,21 @@ ${skillList(persona)}
 ${MINECRAFT_FACTS}
 Reply with only a JSON object: {"objective": "<one sentence>", "for": "<kind of work>"}. "for" is the kind of work the
 objective is for, the walking and gathering it takes included (a house is building): ${kinds}, or "none".`;
+}
+
+/**
+ * Where the last explore for `block` said one is known ("the nearest oak_log you know of is <where>, around x z: ..."),
+ * or null: none explored for it, its result named none, or a `get_items` of it failed since (then it is not fetchable
+ * and exploring is fair). From the step records only.
+ */
+function knownByEarlierExplore(steps: readonly StepRecord[], block: string): string | null {
+  for (const record of steps.toReversed()) {
+    if (record.step.startsWith("get ") && record.outcome === "failed" && record.step.split(/[^a-z0-9_]+/u).includes(block)) return null;
+    if (!record.step.startsWith("explore ") || !record.step.endsWith(` for ${block}`)) continue;
+    // Done or failed: a walk that stopped still names the block it knows (skills.ts adds that before it decides the outcome).
+    return record.detail.includes("you know of") ? /you know of is (.*?): get_items /u.exec(record.detail)?.[1] ?? record.detail : null;
+  }
+  return null;
 }
 
 function describeStepRecord(record: StepRecord, index: number): string {

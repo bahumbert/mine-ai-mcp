@@ -92,7 +92,7 @@ test("a model's name for a kind of work is read as the activity, by id or as the
   assert.equal(parseActivity("mob_combat"), "mob_combat");
   assert.equal(parseActivity("fighting monsters"), "mob_combat");
   assert.equal(parseActivity("cutting wood"), "woodcutting");
-  assert.equal(parseActivity("Digging Dirt And Sand"), "digging");
+  assert.equal(parseActivity("Digging Out A Cellar, A Pond Or A Tunnel"), "digging");
   assert.equal(parseActivity("none"), null);
   assert.equal(parseActivity(""), null);
   assert.equal(parseActivity("knitting"), null);

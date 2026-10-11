@@ -122,8 +122,10 @@ test("the same step done again and again ends the objective as changing nothing 
     action.reply(collect, collect, collect, collect, { done: "96 cobblestone collected" });
     await agent.handle(say("Steve", "get me 96 cobblestone"));
     await until(() => runtime.said.length === 2);
-    assert.equal(action.requests.length, 5, "the model was asked again after the third identical step");
+    // 4 calls: the second identical step goes back once ("just succeeded") and is sent again.
+    assert.equal(action.requests.length, 4, "the objective ended after the third identical step that gained");
     assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 32 cobblestone done 3 times in a row/u);
   }
   {
     const runtime = new FakeRuntime();
@@ -134,6 +136,49 @@ test("the same step done again and again ends the objective as changing nothing 
     await until(() => runtime.said.length === 2);
     assert.equal(action.requests.length, 4);
     assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 32 cobblestone changed nothing 3 times in a row: collected 32 cobblestone/u);
+  }
+});
+
+test("the same successful step three times in a row ends the objective as done; a failure or another step in between resets the count", async (t) => {
+  // Live 2026-10-11 run 10: "collect 16 dirt" 60+ times under one own objective, each gaining.
+  const dirt = { step: { skill: "collect_block", block: "dirt", count: 16 } };
+  const sand = { step: { skill: "collect_block", block: "sand", count: 16 } };
+  {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    const { agent, chat, action } = agentFor(t, runtime);
+    chat.reply({ say: "Okay!", route: "act", request: "dig dirt" }, { say: "Done!" });
+    action.reply(dirt, dirt, dirt, dirt);
+    await agent.handle(say("Steve", "dig dirt"));
+    await until(() => runtime.said.length === 2);
+    assert.equal(action.requests.length, 4, "the model was not asked after the third step (the second went back once as just succeeded)");
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 16 dirt done 3 times in a row/u);
+  }
+  {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    const { agent, chat, action } = agentFor(t, runtime);
+    chat.reply({ say: "Okay!", route: "act", request: "dig dirt" }, { say: "Done!" });
+    const submit = runtime.submit.bind(runtime);
+    let collects = 0;
+    runtime.submit = async (tool, input, ...rest) => {
+      if (tool === "collect_block" && (collects += 1) === 2) runtime.failNext.collect_block = { error: "[NO_PATH] no route" };
+      return submit(tool, input, ...rest);
+    };
+    action.reply(dirt, dirt, dirt, dirt, { done: "enough" });
+    await agent.handle(say("Steve", "dig dirt"));
+    await until(() => runtime.said.length === 2);
+    assert.equal(action.requests.length, 5, "done, failed, done: not ended");
+  }
+  {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    const { agent, chat, action } = agentFor(t, runtime);
+    chat.reply({ say: "Okay!", route: "act", request: "dig" }, { say: "Done!" });
+    action.reply(dirt, sand, dirt, sand, { done: "enough" });
+    await agent.handle(say("Steve", "dig"));
+    await until(() => runtime.said.length === 2);
+    assert.equal(action.requests.length, 5, "two steps alternating: not ended");
   }
 });
 
@@ -556,7 +601,7 @@ test("the goal call draws two activities by their chances and tells the goal tie
   planner.reply({ objective: "build a house", for: "building" }, { objective: "rest" });
   await until(() => events.some((event) => event.kind === "objective" && event.event === "own"));
   assert.match(planner.requests[0]?.[1]?.content ?? "", /Right now you feel most like building, or else farming\./u);
-  assert.match(planner.requests[0]?.[0]?.content ?? "", /one of building, reshaping ground, farming, mining, cutting wood, digging dirt and sand, foraging, exploring, crafting, cooking/u);
+  assert.match(planner.requests[0]?.[0]?.content ?? "", /one of building, reshaping ground, farming, mining, cutting wood, digging out a cellar, a pond or a tunnel, foraging, exploring, crafting, cooking/u);
   const own = events.find((event) => event.kind === "objective" && event.event === "own");
   assert.ok(own?.kind === "objective");
   assert.deepEqual(own.drawn, ["building", "farming"]);

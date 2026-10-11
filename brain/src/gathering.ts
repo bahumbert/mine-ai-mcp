@@ -669,6 +669,8 @@ async function fetchFarther(context: GatherContext, block: string, count: number
       // A place that could not be reached is not offered again by the next round.
       tried.add(`${seen.x},${seen.z}`);
       last = there;
+      // The same water lies between her and the next far place: not walked to (live 2026-10-10 run 10: ~1500 blocks swum).
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: acrossWaterHint(block, failed) };
       continue;
     }
     const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
@@ -677,8 +679,13 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
     tried.add(`${seen.x},${seen.z}`);
   }
-  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: `the ${block} you know of is across the water: take a boat (get_items oak_boat) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})` };
+  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: acrossWaterHint(block, failed) };
   return last;
+}
+
+/** What a fetch tells when the places it knows lie across deep water and no boat is carried. */
+function acrossWaterHint(block: string, failed: GatherResult): string {
+  return `the ${block} you know of is across the water: take a boat (get_items oak_boat) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
 }
 
 /** The eight compass directions, by the angle from east going south (Minecraft's +z is south). */

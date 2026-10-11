@@ -744,6 +744,39 @@ test("explore for a player or for air goes back before it runs (live 2026-10-11 
   assert.match(action.requests[2]?.at(-1)?.content ?? "", /air is everywhere: to find a clear site, use the coordinates the last failure gave/u);
 });
 
+test("an explore for a block the last explore found known goes back every time, unless a get_items of it failed since (live 2026-10-11 run 10: explore for oak_log 40 times)", async () => {
+  const explore = (target: string) => ({ skill: "explore", toward: "north", chunks: 2, for: target }) as const;
+  const found = { step: describeStep(explore("oak_log")), outcome: "done", detail: "walked 2 chunks north: the nearest oak_log you know of is 4 blocks south, around 10 12: get_items oak_log goes there and gathers it" } as const;
+  const { action, mind } = scriptedMind();
+  action.reply({ thought: "Look.", step: explore("oak_log") }, { thought: "Gather.", done: "ok" }, { thought: "Look.", step: explore("oak_log") }, { thought: "Gather.", done: "ok" });
+  const input = workInput("get wood", { steps: [found] });
+  assert.equal((await mind.next(input, signal)).kind, "done");
+  assert.match(action.requests[1]?.at(-1)?.content ?? "", /your explore for oak_log found one known 4 blocks south, around 10 12: get_items oak_log gathers it/u);
+  // Every time, not once.
+  assert.equal((await mind.next(input, signal)).kind, "done");
+  assert.match(action.requests[3]?.at(-1)?.content ?? "", /your explore for oak_log found one known/u);
+
+  // An explore whose walk stopped (failed) but whose detail names the known block counts too.
+  const stopped = scriptedMind();
+  stopped.action.reply({ thought: "Look.", step: explore("oak_log") }, { thought: "Gather.", done: "ok" });
+  const stoppedInput = workInput("get wood", { steps: [{ step: describeStep({ ...explore("oak_log"), chunks: 3 }), outcome: "failed", detail: "walk stopped: the nearest oak_log you know of is 4 blocks south, around 10 12: get_items oak_log goes there and gathers it" }] });
+  assert.equal((await stopped.mind.next(stoppedInput, signal)).kind, "done");
+  assert.match(stopped.action.requests[1]?.at(-1)?.content ?? "", /your explore for oak_log found one known 4 blocks south/u);
+
+  // A failed get_items of that block since: the explore stands.
+  const failedGet = scriptedMind();
+  failedGet.action.reply({ thought: "Look.", step: explore("oak_log") });
+  const after = workInput("get wood", { steps: [found, { step: "get 16 oak_log", outcome: "failed", detail: "[NO_PATH] no route" }] });
+  assert.equal((await failedGet.mind.next(after, signal)).kind, "step");
+
+  // Another block stands; so does an explore whose result named none.
+  const other = scriptedMind();
+  other.action.reply({ thought: "Look.", step: explore("spruce_log") }, { thought: "Look.", step: explore("oak_log") });
+  assert.equal((await other.mind.next(input, signal)).kind, "step");
+  const none = workInput("get wood", { steps: [{ step: describeStep({ ...explore("oak_log"), chunks: 3 }), outcome: "done", detail: "no oak_log seen on the way" }] });
+  assert.equal((await other.mind.next(none, signal)).kind, "step");
+});
+
 test("the chat prompt keeps whom the work is for, and reads 'where you are' as the bot's own place (live 2026-10-11: 'build yourself a house' restated without 'yourself')", () => {
   const prompt = chatSystemPrompt(testPersona());
   assert.match(prompt, /keeps\s+whom the work is for, word for word when the speaker says it \("for yourself", "your own house", "for <name>"\)/u);

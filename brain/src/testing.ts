@@ -191,6 +191,8 @@ export class FakeRuntime implements BotRuntime {
 
   /** Where blocks were seen, by name, as the bot data's frontier map would answer (others: never seen). */
   seen: Readonly<Record<string, SeenBlock>> = {};
+  /** Further places for a block, after the one in {@link seen} (farther away, as the frontier map lists nearest first). */
+  alsoSeen: Readonly<Record<string, readonly SeenBlock[]>> = {};
 
   /** A successful `navigate` moves the bot to its target (off by default: most tests keep the bot where it is). */
   walkOnNavigate = false;
@@ -219,7 +221,8 @@ export class FakeRuntime implements BotRuntime {
 
   async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
     const seen = this.seen[block];
-    return seen === undefined || seen.dimension !== "overworld" || Math.hypot(seen.x - from.x, seen.z - from.z) <= beyond ? [] : [seen].slice(0, limit);
+    const places = [...(seen === undefined ? [] : [seen]), ...(this.alsoSeen[block] ?? [])];
+    return places.filter((place) => place.dimension === "overworld" && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit);
   }
 
   async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {

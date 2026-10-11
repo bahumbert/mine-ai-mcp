@@ -23,7 +23,7 @@ const WORDS: Readonly<Partial<Record<Activity, string>>> = {
   mob_combat: "fighting monsters",
   pvp: "fighting players",
   woodcutting: "cutting wood",
-  digging: "digging dirt and sand",
+  digging: "digging out a cellar, a pond or a tunnel",
   terraforming: "reshaping ground",
   following: "following someone",
   foraging: "foraging",
