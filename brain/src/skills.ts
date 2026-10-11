@@ -353,7 +353,8 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const areas = await context.runtime.protectedRegions();
     const blocked = overlapsOf(areas, siteBox(plan));
     if (blocked.length > 0) {
-      const clear = nearestClearSite(areas, style, step.size, plan.site, toward);
+      const found = nearestClearSite(areas, style, step.size, plan.site, toward);
+      const clear = found === null ? null : await groundedDoor(context.runtime, found);
       const where = clear === null
         ? `no site clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or build somewhere else`
         : `the nearest site clear of them has its door ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
@@ -1179,6 +1180,27 @@ function nearestClearSite(areas: readonly ProtectedArea[], style: ReturnType<typ
     return { min: { x: box.min.x + dx, y: box.min.y, z: box.min.z + dz }, max: { x: box.max.x + dx, y: box.max.y, z: box.max.z + dz } };
   };
   return nearestClearSpot(areas, refused.door, boxFor);
+}
+
+/** How far above and below a suggested site the ground of its column is looked for. */
+const GROUND_SEARCH = 16;
+
+/**
+ * `door` moved to the walking level of its column: the feet cell over the highest solid block (leaves are not ground)
+ * within {@link GROUND_SEARCH} of its height, as the walk to the site needs a cell to stand on (live 2026-10-11: a
+ * door suggested at 70 over ground at 66, and the `go to` there failed NAVIGATION_TARGET_UNSUPPORTED). Unchanged when
+ * the column shows no ground in that range.
+ */
+async function groundedDoor(runtime: BotRuntime, door: Position): Promise<Position> {
+  const area = await runtime.blocksIn({ x: door.x, y: door.y - GROUND_SEARCH, z: door.z }, { x: door.x, y: door.y + GROUND_SEARCH, z: door.z });
+  const solid = (y: number) => {
+    const block = area.blocks.get(areaKey(door.x, y, door.z));
+    return block !== undefined && !block.endsWith("_leaves") && area.kinds[block]?.solid === true;
+  };
+  for (let y = door.y + GROUND_SEARCH; y >= door.y - GROUND_SEARCH; y -= 1) {
+    if (solid(y)) return { ...door, y: y + 1 };
+  }
+  return door;
 }
 
 /**

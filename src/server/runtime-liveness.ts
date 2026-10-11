@@ -5,6 +5,12 @@ import { observeExecution, type ExecutionEvent } from "../execution/execution-sc
 // the observed Minecraft keepalive timeout. This never limits action duration.
 export const RUNTIME_HEARTBEAT_MS = 250;
 export const RUNTIME_UNRESPONSIVE_MS = 5_000;
+/**
+ * The silence allowed before the runtime reports `ready`: loading its modules blocks the event loop for seconds, more
+ * with the server, Ollama and other hosts starting beside it (live 2026-10-11: a host killed at start, heartbeat absent
+ * 5 s, while its module graph loaded). After `ready`, {@link RUNTIME_UNRESPONSIVE_MS} applies.
+ */
+export const RUNTIME_STARTUP_MS = 30_000;
 
 const ownerSchema = z.object({
   bot: z.string(),

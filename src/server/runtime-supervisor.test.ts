@@ -19,6 +19,7 @@ async function supervised(
   t: TestContext,
   instanceId: string,
   launch?: (directory: string) => { executable: string; args: string[] },
+  deadlines?: { startupMs: number; unresponsiveMs: number },
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
@@ -29,6 +30,7 @@ async function supervised(
     instanceId,
     source: { kind: "unavailable", reason: "test fixture" },
     incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
+    deadlines,
   });
   t.after(async () => {
     await supervisor.close();
@@ -178,4 +180,26 @@ test("a runtime launch failure stays observable and can be closed", { timeout: 5
   assert.match(body, /RUNTIME_EXITED/);
 
   await Promise.all([supervisor.close(), supervisor.close()]);
+});
+
+const slowStart = (blockMs: number) => (): { executable: string; args: string[] } => ({
+  executable,
+  args: [...process.execArgv, fileURLToPath(new URL("../test-support/slow-start-runtime.ts", import.meta.url)), String(blockMs)],
+});
+
+test("a runtime silent before ready for longer than the heartbeat deadline is not killed", { timeout: 15_000 }, async (t) => {
+  // Live 2026-10-11: a host was killed at start while its module graph loaded.
+  const { url } = await supervised(t, "slow-start", slowStart(1_500), { startupMs: 4_000, unresponsiveMs: 1_000 });
+  await whenHealthy(url);
+  assert.equal((await fetch(`${url}/health`)).status, 200);
+});
+
+test("a runtime silent past the startup deadline before ready is killed as unresponsive", { timeout: 15_000 }, async (t) => {
+  const { url } = await supervised(t, "stuck-start", slowStart(8_000), { startupMs: 2_000, unresponsiveMs: 1_000 });
+  let body: string;
+  do {
+    await delay(100);
+    body = await (await fetch(`${url}/health`)).text();
+  } while (!body.includes('"state":"failed"'));
+  assert.match(body, /RUNTIME_UNRESPONSIVE/);
 });

@@ -190,6 +190,11 @@ Overrides: ${JSON.stringify(event.payload.overrides)}
 Constraint: ${event.payload.constraint ?? "none"}`;
     case "dragon_reflex":
       return `### Event ${event.eventId}: dragon escape\n- Observed: ${event.observedAt}\n- Outcome: ${event.payload.outcome}\n- Health: ${event.payload.healthBefore} → ${event.payload.healthAfter}\n- Interrupted: ${event.payload.interrupted?.action ?? "nothing; the bot was idle"}\n- Reason: ${event.payload.reason ?? "clear of the observed hazard"}`;
+    case "navigation_own_regions_opened":
+      return `### Event ${event.eventId}: own regions opened to navigation
+- Observed: ${event.observedAt}
+- ${event.summary}
+- Search: ${event.payload.runId}`;
     case "stronghold_located":
       return `### Event ${event.eventId}: stronghold located\n- Observed: ${event.observedAt}\n- Search: ${event.payload.searchId}\n- Dimension: ${event.payload.dimension}\n- Portal frame: ${event.payload.confirmation.position.x}, ${event.payload.confirmation.position.y}, ${event.payload.confirmation.position.z}\n- Saved throws: ${event.payload.throwIds.join(", ") || "none; frame already loaded"}`;
     case "fire_reflex":

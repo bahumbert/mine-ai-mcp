@@ -53,6 +53,7 @@ import { attachHungerReflex } from "../survival/reflexes/hunger.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus } from "./frontier.js";
 import { observeEquipmentEvents } from "./equipment-events.js";
+import { observeNavigationEvents } from "./navigation-events.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { observeReflexActivity } from "./reflex-activity.js";
 import { observeBotStatus } from "./bot-status.js";
@@ -422,6 +423,7 @@ export async function createMinecraftRuntime(
   });
   resources.defer(observePlayerEvents(bot, botData, (reason) => runner.cancelActive(reason, { kind: "death" })));
   resources.defer(observeEquipmentEvents(bot, botData));
+  resources.defer(observeNavigationEvents(navigation, bot.username, botData));
   resources.defer(observeBotStatus(bot, botData));
   let bodyDimension = bot.game.dimension;
   const retireWorld = () => {

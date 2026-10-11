@@ -7,6 +7,7 @@ import { IncidentRecorder, type SourceIdentity } from "../diagnostics/incident-r
 import {
   RUNTIME_HEARTBEAT_MS,
   RUNTIME_UNRESPONSIVE_MS,
+  RUNTIME_STARTUP_MS,
   runtimeMessageSchema,
   type RuntimeActivity,
 } from "./runtime-liveness.js";
@@ -47,6 +48,8 @@ export interface McpSupervisorOptions {
   readonly instanceId: string;
   readonly source: SourceIdentity;
   readonly incidents: { directory: string; retention: IncidentRetention };
+  /** Silence allowed before `ready` and after it; for tests that cannot wait the real deadlines. */
+  readonly deadlines?: { readonly startupMs: number; readonly unresponsiveMs: number };
 }
 
 /** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
@@ -231,7 +234,11 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       lastHeartbeat = performance.now();
       heartbeat = event;
     }
-    if (event.kind === "ready") state = { kind: "ready", port: event.port };
+    if (event.kind === "ready") {
+      state = { kind: "ready", port: event.port };
+      // Ready shows a live loop; the shorter deadline counts from here, not from the last start-up heartbeat.
+      lastHeartbeat = performance.now();
+    }
   });
   child.once("error", (error) => {
     void fail("RUNTIME_EXITED", error.message);
@@ -246,7 +253,8 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     // A watchdog that missed its own liveness window cannot attribute that
     // gap to the child. Resume observation before judging it; queued IPC and
     // a child recovering from the same scheduling pause get a full window.
-    if (watchdogDelayMs >= RUNTIME_UNRESPONSIVE_MS) {
+    const deadlineMs = state.kind === "starting" ? (options.deadlines?.startupMs ?? RUNTIME_STARTUP_MS) : (options.deadlines?.unresponsiveMs ?? RUNTIME_UNRESPONSIVE_MS);
+    if (watchdogDelayMs >= deadlineMs) {
       observationResumedAt = now;
       recorder.record("supervisor_observation_resumed", {
         supervisorTickDelayMs: watchdogDelayMs,
@@ -254,7 +262,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       });
     }
     const age = now - Math.max(lastHeartbeat, observationResumedAt);
-    if (age >= RUNTIME_UNRESPONSIVE_MS)
+    if (age >= deadlineMs)
       void fail(
         "RUNTIME_UNRESPONSIVE",
         `Runtime event-loop heartbeat absent for ${Math.round(now - lastHeartbeat)} ms.`,

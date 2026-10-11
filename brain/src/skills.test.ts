@@ -1441,3 +1441,24 @@ test("protect_area with no player and no coordinates protects around herself, ow
   assert.equal(named.status, "done");
   assert.deepEqual([runtime.areas[0]?.owner, runtime.areas[1]?.owner], ["self", "self"], "her own name is no other owner");
 });
+
+test("the nearest clear site is named at the walking level of its column, not at the refused site's height", async () => {
+  // Live 2026-10-11: a door suggested at y=70 over ground at y=66; the `go to` there failed NAVIGATION_TARGET_UNSUPPORTED.
+  const first = new FakeRuntime();
+  first.snapshot = { ...first.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(first, { style: "medieval" }));
+  const old = { ...first.areas[0]!, regionId: 12, owner: "Ayla" };
+
+  const ask = async (lower: { x: number; z: number } | null) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+    runtime.areas = [old];
+    if (lower !== null) for (let y = 61; y <= 63; y += 1) runtime.world.set(`${lower.x},${y},${lower.z}`, "air");
+    const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", self: "Ayla" }));
+    return result.status === "failed" ? result.detail : "";
+  };
+  const flat = /at (-?\d+) (-?\d+) (-?\d+): build there/u.exec(await ask(null))!;
+  assert.equal(flat[2], "64");
+  const lowered = /at (-?\d+) (-?\d+) (-?\d+): build there/u.exec(await ask({ x: Number(flat[1]), z: Number(flat[3]) }))!;
+  assert.deepEqual([lowered[1], lowered[2], lowered[3]], [flat[1], "61", flat[3]], "the column's ground is 4 lower: the door stands on it");
+});
