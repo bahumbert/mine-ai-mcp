@@ -211,7 +211,7 @@ export class LlmMind implements Mind {
   async next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision> {
     const skills = personaSkills(input.persona);
     let signChecked = false;
-    return this.ask("work", this.models.action, workSystemPrompt(input.persona), describeWork(input), signal, (json) => {
+    return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), describeWork(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
       // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
       // oak logs are in protected areas", was lost with the rejected reply) is read as what it says.
@@ -442,18 +442,18 @@ ${persona.preferences === undefined ? "" : "\nYour feelings about the work may s
 Reply with only a JSON object: {"say": "<your chat line>"}.`;
 }
 
-function skillList(persona: Persona): string {
+function skillList(persona: Persona, improveHouse = true): string {
   const style = styleOrDefault(persona.style);
-  return personaSkills(persona).map((skill) => `- ${skillUsage(skill, style)}`).join("\n");
+  return personaSkills(persona).filter((skill) => improveHouse || skill !== "improve_house").map((skill) => `- ${skillUsage(skill, style)}`).join("\n");
 }
 
 /** The work tier (ADR-011): one step at a time, with the results of the last ones in view. */
-function workSystemPrompt(persona: Persona): string {
+function workSystemPrompt(persona: Persona, ownsTemporaryHouse: boolean): string {
   return `${personaPrompt(persona)}
 
 You work towards your current objective one step at a time: pick the next step, see what it did, then pick again.
 Skills (use only these, with this exact JSON):
-${skillList(persona)}
+${skillList(persona, ownsTemporaryHouse)}
 
 Rules:
 - In a request, "me" is whoever asked; "you" is ${persona.username}.

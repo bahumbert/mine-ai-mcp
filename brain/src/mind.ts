@@ -140,6 +140,8 @@ export interface WorkInput {
   readonly paused: readonly Objective[];
   /** Steps that failed lately for any of its objectives, most recent first: sent again once they run, after a second failure they are refused. */
   readonly earlierFailures?: readonly EarlierFailure[];
+  /** It owns a house with temporary parts: only then is `improve_house` offered in the skill list. */
+  readonly ownsTemporaryHouse?: boolean;
 }
 
 /** The work tier's answer: the next step, or the objective is over. */

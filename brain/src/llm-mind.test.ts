@@ -673,3 +673,13 @@ test("the work tier is told a failed or refused step comes back with its reason,
   await mind.next(workInput("anything"), signal);
   assert.match((action.requests[0]?.[0]?.content ?? "").replace(/\s+/gu, " "), /A step that failed or was refused comes back with its reason: follow what the reason says, or choose a different step\. The same step is accepted once more at most\. When nothing works for an objective, give it up and choose another one: giving up is better than trying again\./u);
 });
+
+test("the work prompt lists improve_house only for a character that owns a temporary house (live 2026-10-10 run 9: chosen 3 times with none)", async () => {
+  const { action, mind } = scriptedMind();
+  action.reply({ done: "ok" }, { done: "ok" });
+  await mind.next(workInput("tidy up", { ownsTemporaryHouse: true }), signal);
+  await mind.next(workInput("tidy up"), signal);
+  assert.match(action.requests[0]?.[0]?.content ?? "", /"skill":"improve_house"/u);
+  assert.doesNotMatch(action.requests[1]?.[0]?.content ?? "", /"skill":"improve_house"/u);
+  assert.match(action.requests[1]?.[0]?.content ?? "", /"skill":"build"/u, "the rest of the catalog is unchanged");
+});

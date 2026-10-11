@@ -22,6 +22,8 @@ interface DropBotOptions {
   readonly spawnsEntityId?: number;
   /** The tossed items come back into the inventory (picked up again) this long after the toss. */
   readonly returnsAfterMs?: number;
+  /** With `returnsAfterMs`: the items come back only if the bot is then within this many blocks of where it tossed them. */
+  readonly returnsWithin?: number;
 }
 
 function dropBot(options: DropBotOptions) {
@@ -58,11 +60,17 @@ function dropBot(options: DropBotOptions) {
     entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name);
   };
 
+  // eslint-disable-next-line prefer-const
+  let bot: ReturnType<typeof botFixture>;
   const comeBack = (stack: FakeStack) => {
-    if (options.returnsAfterMs !== undefined) setTimeout(() => items.push(stack), options.returnsAfterMs);
+    if (options.returnsAfterMs === undefined) return;
+    const tossedFrom = bot.entity.position.clone();
+    setTimeout(() => {
+      if (options.returnsWithin === undefined || bot.entity.position.distanceTo(tossedFrom) <= options.returnsWithin) items.push(stack);
+    }, options.returnsAfterMs);
   };
 
-  const bot = botFixture(
+  bot = botFixture(
     {
       items,
       slots,
@@ -424,4 +432,40 @@ test("picked-up items never count, even from a partial toss", async () => {
 
   assert.equal(result.status, "failed");
   assert.equal(result.drop.dropped[0]?.dropped, 0);
+});
+
+test("a ground drop walks off before the pickup check, so the items stay dropped (live 2026-10-10 run 9: ground toss picked straight back)", async () => {
+  const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4, type: 1 }], returnsAfterMs: 80, returnsWithin: 2 });
+  const goals: unknown[] = [];
+  const result = await dropItem(
+    bot,
+    parseDropItemRequest({ items: [{ item_name: "oak_log" }] }),
+    {},
+    deps({
+      navigate: (async (options: { goal: unknown }) => {
+        goals.push(options.goal);
+        bot.entity.position = bot.entity.position.offset(0, 0, 5);
+        return { status: "completed", elapsedMs: 10 };
+      }) as never,
+    }),
+    createDiscardedItems(),
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(goals.length, 1, "the first side was enough");
+  assert.equal(result.drop.dropped[0]?.dropped, 4);
+});
+
+test("a ground drop that cannot walk away still reports the items picked up again", async () => {
+  const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4, type: 1 }], returnsAfterMs: 80, returnsWithin: 2 });
+  let tries = 0;
+  const result = await dropItem(
+    bot,
+    parseDropItemRequest({ items: [{ item_name: "oak_log" }] }),
+    {},
+    deps({ navigate: (async () => { tries += 1; return { status: "stopped", elapsedMs: 5, reason: "no route" }; }) as never }),
+    createDiscardedItems(),
+  );
+  assert.equal(tries, 4, "all four sides were tried");
+  assert.equal(result.status, "failed");
+  assert.ok(result.drop.dropped[0]?.error?.startsWith("[DROP_PICKED_UP]"));
 });

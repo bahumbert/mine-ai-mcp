@@ -207,7 +207,7 @@ test("a drop that dropped nothing fails with the action's reason, and a water-lo
   );
   const ground = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "coal" }] }), contextFor(water));
   assert.equal(ground.status, "done");
-  assert.deepEqual(water.submitted.map((call) => [call.tool, call.input.in_a_hole]), [["drop_item", true], ["drop_item", undefined], ["navigate", undefined]], "walked away after the ground toss");
+  assert.deepEqual(water.submitted.map((call) => [call.tool, call.input.in_a_hole]), [["drop_item", true], ["drop_item", undefined]], "the action walks off itself, the step does not");
   assert.match(ground.status === "done" ? ground.detail : "", /4 coal/u);
 });
 
@@ -1286,4 +1286,16 @@ test("drop_item keeps the last tool of a class, the last bed and the last boat (
   assert.equal(refused.status, "failed");
   assert.match(refused.status === "failed" ? refused.detail : "", /kept 1 stone_axe: your only axe/u);
   assert.deepEqual(only.submitted, []);
+});
+
+test("a failed drop still says which tools it kept (live 2026-10-10 run 9: the kept hoe and pickaxe vanished from the failure text)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_hoe", count: 1 }, { name: "wooden_pickaxe", count: 1 }, { name: "oak_log", count: 4 }] };
+  runtime.dropOutcomes.push({ status: "failed", error: "[DROP_INCOMPLETE] 1 of 1 item could not be dropped: oak_log: [DROP_PICKED_UP] oak_log came back", dropped: [{ item: "oak_log", dropped: 0 }] });
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "oak_log" }, { item: "wooden_hoe" }, { item: "wooden_pickaxe" }] }), contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /DROP_PICKED_UP/u);
+  assert.match(detail, /kept 1 wooden_pickaxe: your only pickaxe/u);
+  assert.match(detail, /kept 1 wooden_hoe: your only hoe/u);
 });

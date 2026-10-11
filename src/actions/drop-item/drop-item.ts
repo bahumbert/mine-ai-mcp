@@ -265,6 +265,45 @@ async function walkToStance(
   }
 }
 
+/** How far from where the items landed a ground drop walks before the pickup check. */
+const GROUND_CLEARANCE = 4;
+
+/**
+ * Walk at least `GROUND_CLEARANCE` blocks from a ground toss: first the way opposite to where the bot faced when
+ * tossing, then the sides, then ahead. A route that does not get there is not an error here: the check that follows
+ * reports whatever came back.
+ */
+async function walkAwayFromToss(
+  bot: Bot,
+  from: { x: number; z: number },
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<void> {
+  const yaw = bot.entity.yaw ?? 0;
+  // Mineflayer's yaw 0 faces -z, and a positive yaw turns toward -x.
+  const ahead = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+  const sides = [
+    { x: -ahead.x, z: -ahead.z },
+    { x: -ahead.z, z: ahead.x },
+    { x: ahead.z, z: -ahead.x },
+    ahead,
+  ];
+  for (const [index, side] of sides.entries()) {
+    const reach = (node: { feet: { x: number; z: number } }) => (node.feet.x + 0.5 - from.x) * side.x + (node.feet.z + 0.5 - from.z) * side.z;
+    const goal = customGoal(
+      `clear-of-toss:${index}:${from.x.toFixed(1)},${from.z.toFixed(1)}`,
+      (node) => reach(node) >= GROUND_CLEARANCE,
+      (node) => Math.max(0, GROUND_CLEARANCE - reach(node)) * HORIZONTAL_TICKS_PER_BLOCK,
+    );
+    try {
+      await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal });
+    } catch {
+      context.signal?.throwIfAborted();
+    }
+    if (Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z) >= GROUND_CLEARANCE) return;
+  }
+}
+
 /** Walk clear of the hole so the next request's route does not start beside, or in, the pit. */
 async function stepAwayFromHole(
   bot: Bot,
@@ -413,10 +452,21 @@ export async function dropItem(
     dropped.push(await tossItem(bot, itemName, count, context, dependencies.settleMs ?? TOSS_SETTLE_MS));
   }
 
+  // Claim what this toss put on the ground so the hunt's sweep leaves it alone.
+  if (dropped.some((entry) => entry.dropped > 0)) rememberDiscards(bot, entityBaseline, discarded);
+
+  const tossedAt = Date.now();
+  const droppedAt = { ...bot.entity.position };
+  const anyDropped = dropped.some((entry) => entry.dropped > 0 && !entry.error);
+  // A ground toss lands at the bot's feet and is picked up again once its pickup delay ends (live 2026-10-10 run 9: a
+  // cave with no pit in reach, all four items "picked up again", twice): walk off before that, away from where the
+  // items landed, and only then wait out the check.
+  if (anyDropped && request.destination.kind === "ground") await walkAwayFromToss(bot, droppedAt, dependencies, context);
+
   // Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
   // times over): read the carried count again after a short wait and report only the net drop.
-  if (request.destination.kind !== "player" && dropped.some((entry) => entry.dropped > 0 && !entry.error)) {
-    await delay(dependencies.pickupWaitMs ?? PICKUP_WAIT_MS, undefined, { signal: context.signal });
+  if (request.destination.kind !== "player" && anyDropped) {
+    await delay(Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - (Date.now() - tossedAt)), undefined, { signal: context.signal });
     for (const [index, entry] of dropped.entries()) {
       if (entry.dropped <= 0 || entry.error) continue;
       const now = carriedCount(bot, entry.item);
@@ -433,13 +483,9 @@ export async function dropItem(
     }
   }
 
-  // Claim what this toss put on the ground so the hunt's sweep leaves it alone.
-  if (dropped.some((entry) => entry.dropped > 0)) rememberDiscards(bot, entityBaseline, discarded);
-
-  // Free slots and the toss position are read now: plugging the hole spends a
-  // block and stepping back moves the body, and neither is part of the drop.
+  // Free slots are read now: plugging the hole spends a block and stepping back moves the body, and neither is part of
+  // the drop.
   const freeSlotsAfter = bot.inventory.emptySlotCount();
-  const droppedAt = { ...bot.entity.position };
   let landed = true;
   let holeClosure: HoleClosure | null = null;
   if (hole) {

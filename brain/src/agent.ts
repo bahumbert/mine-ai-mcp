@@ -466,7 +466,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures() }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(), ownsTemporaryHouse: this.temporaryHouse() !== null }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;

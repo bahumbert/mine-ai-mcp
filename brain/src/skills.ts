@@ -210,10 +210,6 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
 }
 
-/** How far a bot walks off after a ground toss, so it does not pick the items straight up again. */
-const WALK_OFF_DISTANCE = 10;
-const WALK_OFF_RANGE = 3;
-
 /** What the action says it really dropped (its `drop.dropped` counts); null when the result carries none. */
 function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): { item: string; count: number }[] | null {
   const dropped = (result?.drop as { dropped?: unknown } | undefined)?.dropped;
@@ -252,7 +248,7 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
 
 /**
  * Buries the items in a pit; only a place with no pit within reach (water all around, bedrock) puts them on the ground,
- * and then the bot walks off. The step says what was really dropped, never what was asked (live 2026-10-10 run 7: 26
+ * and the action itself walks off from them. The step says what was really dropped, never what was asked (live 2026-10-10 run 7: 26
  * identical drops each "done" while the action dropped 0), and whether the inventory has room again.
  */
 async function dropItems(context: SkillContext, step: Extract<Step, { skill: "drop_item" }>, why: string): Promise<SkillResult> {
@@ -272,25 +268,15 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
   }
   const dropped = reallyDropped(outcome.result);
   const total = dropped === null ? (outcome.status === "succeeded" ? 1 : 0) : dropped.reduce((sum, entry) => sum + entry.count, 0);
-  if (total === 0) return { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` };
+  if (total === 0) return { status: "failed", detail: `${outcome.error ?? `drop_item ${outcome.status}`}${kept.length > 0 ? `; ${kept.join("; ")}` : ""}` };
   const what = dropped === null ? entries.map((entry) => `${entry.count ?? "all the"} ${entry.item}`).join(", ") : dropped.map((entry) => `${entry.count} ${entry.item}`).join(", ");
-  let walkedOff = "";
-  if (onGround) {
-    const here = (await context.runtime.status()).position;
-    walkedOff = ", but could not walk away from them";
-    for (const [dx, dz] of [[WALK_OFF_DISTANCE, 0], [-WALK_OFF_DISTANCE, 0], [0, WALK_OFF_DISTANCE], [0, -WALK_OFF_DISTANCE]]) {
-      const away = await context.body.act("navigate", navigateInput({ x: here.x + dx!, y: here.y, z: here.z + dz! }, WALK_OFF_RANGE), "Walk away from the items I dropped so I do not pick them up again.", { signal: context.signal });
-      if (context.signal.aborted) return { status: "stopped" };
-      if (away.status === "succeeded") { walkedOff = " and walked away from them"; break; }
-    }
-  }
   // How much room it made is what a drop is for (live 2026-10-02: 30 of 36 panes dropped freed no slot); say so, or the
   // model does not see the problem solved (owner, live 2026-10-10).
   const free = Math.max(0, INVENTORY_SLOTS - (await context.runtime.status()).inventory.length);
   const room = free === 0 ? "the inventory is still full" : `the inventory has room again: ${free} of ${INVENTORY_SLOTS} slots free`;
   const failedPart = outcome.status === "partial" && outcome.error !== null ? ` (${outcome.error})` : "";
   const keptNote = kept.length > 0 ? `; ${kept.join("; ")}` : "";
-  return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? ` on the ground${walkedOff}` : ""}${failedPart}${keptNote}; ${room}` };
+  return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? " on the ground" : ""}${failedPart}${keptNote}; ${room}` };
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
