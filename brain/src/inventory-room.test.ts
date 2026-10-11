@@ -28,3 +28,13 @@ test("junkHint with everything needed says to give something up", () => {
   const carried = snapshot([stack("stone_axe", 1)]);
   assert.match(junkHint(carried, neededItems(carried)), /everything you carry is needed/u);
 });
+
+test("neededItems: an item the objective names is never junk, and neither is the block a step mines (live 2026-10-11: Theo's hint dropped cobblestone for \"Mine cobblestone\")", () => {
+  const carried = snapshot([stack("cobblestone", 256), stack("dirt", 128), stack("oak_log", 4)]);
+  const needed = neededItems(carried, { objective: "Mine cobblestone", wanted: new Set(["oak_log"]) });
+  assert.deepEqual([...needed].sort(), ["cobblestone", "oak_log"]);
+  const hint = junkHint(carried, needed);
+  assert.match(hint, /128 dirt/u);
+  assert.doesNotMatch(hint, /cobblestone|oak_log/u);
+  assert.equal(neededItems(carried, { objective: "Mine something else" }).has("cobblestone"), false);
+});

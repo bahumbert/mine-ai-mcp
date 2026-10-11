@@ -240,6 +240,14 @@ export class LlmMind implements Mind {
           signChecked = true;
           throw new Error(`${flipped}: if you meant that, send the same step again`);
         }
+        // An area order "around you" is the bot's own area (live 2026-10-11, L7: place "you" was read right, then the
+        // step named the requester): sent back once per objective with where it stands.
+        const aroundRequester = step.data.skill === "protect_area" ? step.data.player : step.data.skill === "level_area" ? step.data.around : undefined;
+        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has("around you")) {
+          this.resent(input.objective).add("around you");
+          const { x, y, z } = input.snapshot.position;
+          throw new Error(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
+        }
         // A step that failed twice lately, for any objective, is refused every time (live 2026-10-10, run 6: sent back
         // once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times): one retry, then another step.
         const key = stepKey(step.data);
@@ -439,7 +447,9 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   "stop" = they want you to stop what you are doing, and only that (stop, halt, wait, enough). Any other request, even a
   short one (release that area, put it back, undo), is "act", never "stop".
   "act" = you take on what they ask now, setting your current work aside (you resume it afterwards), so your reply
-  says you start now, never that you finish something first.${canWait ? `
+  says you start now, never that you finish something first. Walking to someone, following, fetching and building are
+  things you can do: "come here", "follow me", "get me 5 logs" are "act" even though your line answers them
+  ("On my way!"); "talk" would start nothing.${canWait ? `
   "later" = you take it on for when your current work is done: only when they say it can wait, or while you work
   for someone who comes before them.` : ""}
   Take on (act, later) only what the things you can do achieve; anything else (teleporting, server commands, flying)
@@ -449,7 +459,7 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   first, wait or do it after something else. With "act" it is true (a false one is sent back).
 - "place": where the request happens (act and later; otherwise "none"): "speaker" = where the speaker stands now
   ("here", "come", "to me", around them), "you" = where you stand (their words for your own position, in any
-  language: "where you are", "where you stand", "around you"; the speaker's "you" is you), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
+  language: "where you are", "where you stand", "around you"; the speaker's "you" is you: "build yourself a house where you are" and "protect the area around you" are "you", never "speaker"; "come here", "build me a house here", "around me" are "speaker"), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
   coordinates for "speaker" or "you" in "request": they are added for you. When "Players online" has the speaker far
   away (no coordinates) and the request happens where they are, say in your line that you cannot see them from here.
 - "request": for act and later, what the player asks of you (only your part when the message asks several people;
@@ -542,16 +552,20 @@ function describeWork(input: WorkInput): string {
     `Objective (${whose}): ${JSON.stringify(objective.text)}`,
     input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
     steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
-    describeEarlierFailures(input.earlierFailures ?? []),
+    describeEarlierFailures((input.earlierFailures ?? []).filter((failure) => failure.objective === objective.text && !failure.changed)),
     nowCarried(input),
   ].filter((part) => part !== "").join("\n\n");
 }
-
-/** Facts before, not corrections after (ADR-017): what already failed for its other objectives, and why. */
+/**
+ * Facts before, not corrections after (ADR-017): what already failed for this objective, and why. Other objectives'
+ * failures guard by key (rule 2) but are not shown (live 2026-10-11: Theo's junk-drop hint of his own goal buried an
+ * order's materials); nor is one whose cause changed (the inventory or the place differs: "no boat is carried" stayed
+ * in a prompt while Vex crafted 13 boats).
+ */
 function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
   if (failures.length === 0) return "";
-  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago, for ${JSON.stringify(failure.objective)}${failure.count >= MAX_STEP_FAILURES ? (failure.changed ? " (allowed again: your inventory or place changed since)" : " (refused now)") : ""}: ${failure.detail}`);
-  return `Steps that failed lately in your objectives (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
+  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago${failure.count >= MAX_STEP_FAILURES ? " (refused now)" : ""}: ${failure.detail}`);
+  return `Steps that failed lately in this objective (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
 }
 
 /**

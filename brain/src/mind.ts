@@ -105,6 +105,8 @@ export interface Objective {
    * chat tier's "work" for a request; null when none. Every step under the objective counts its time for it.
    */
   readonly purpose: Activity | null;
+  /** For an order: where the chat tier read it happens ("you": around the bot itself; the request carries the coordinates). */
+  readonly place?: Place;
 }
 
 /** One step already taken for the current objective, as the work tier sees it. */

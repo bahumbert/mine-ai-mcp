@@ -310,21 +310,31 @@ export class Agent {
       }
       return;
     }
-    if (route === "ignore") return;
+    // A line naming nobody, soon after its speaker named another character, is that character's unless the model read
+    // it as spoken to her or to everyone (owner, 2026-10-11, L6: Ayla answered "thanks, no rush" meant for Vex although
+    // the fact was in her input).
+    if (talkedTo !== undefined && (decision.to ?? []).every((name) => name.toLowerCase() !== persona.username.toLowerCase() && name.toLowerCase() !== "everyone")) {
+      log(`  ignored: ${message.username} was talking to ${talkedTo.name} ${talkedTo.secondsAgo} s ago, the line names nobody and is not read as spoken to ${persona.username} or everyone`);
+      return;
+    }
+    // A "stop" with a request while nothing runs has nothing to stop: the request is the order (live 2026-10-11, L7:
+    // "release that area" routed stop while idle, and the area stayed).
+    const routed = decision.route === "stop" && this.stack.length === 0 && decision.request.trim() !== "" ? "act" : decision.route;
+    if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo);
-    if (route === "stop") this.stopAndRest();
+    if (routed === "stop") this.stopAndRest();
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
-    const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work) };
-    if ((route === "act" || route === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
+    const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work), ...(decision.place !== undefined && { place: decision.place }) };
+    if ((routed === "act" || routed === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
       return;
     }
-    if (route === "act") this.take(asked, whisperTo);
-    if (route === "later") {
+    if (routed === "act") this.take(asked, whisperTo);
+    if (routed === "later") {
       // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
       // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
       // only waits behind work done for someone.
@@ -521,7 +531,8 @@ export class Agent {
     const actions: ActionTime[] = [];
     // The step runs: its earlier refusals are forgotten (rule 2 counts refusals with no run in between).
     work.refused.delete(stepKey(decision.step));
-    if (decision.step.skill === "get_items" || decision.step.skill === "craft_item") for (const { item } of targetItems(decision.step)) work.wanted.add(item);
+    for (const { item } of targetItems(decision.step)) work.wanted.add(item);
+    if (decision.step.skill === "collect_block") work.wanted.add(decision.step.block);
     const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
@@ -785,7 +796,7 @@ export class Agent {
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
     const house = this.building.unfinished;
     const houseBill = house === null ? [] : planHouse(styleOrDefault(this.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
-    return neededItems(snapshot, { houseBill, wanted: work.wanted });
+    return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
   }
 
   /** The game's block tags of these blocks, asked of the runtime once per name. */

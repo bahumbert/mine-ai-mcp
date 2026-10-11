@@ -11,8 +11,10 @@ const STATIONS = ["crafting_table", "furnace"];
 export interface RoomFacts {
   /** The items of the unfinished house's bill of materials. */
   readonly houseBill?: readonly string[];
-  /** The items the objective's get_items / craft_item steps are out to obtain. */
+  /** The items the objective's steps are out to obtain (get_items, hunt, craft_item) and the blocks its collect_block steps mine. */
   readonly wanted?: ReadonlySet<string>;
+  /** The objective's text: any carried item it names (an id such as `cobblestone` in "Mine cobblestone") is what it gathers. */
+  readonly objective?: string;
 }
 
 /**
@@ -22,9 +24,10 @@ export interface RoomFacts {
  */
 export function neededItems(snapshot: Pick<BotSnapshot, "inventory" | "foods">, facts: RoomFacts = {}): Set<string> {
   const needed = new Set<string>([...(facts.houseBill ?? []), ...(facts.wanted ?? []), ...snapshot.foods.map((food) => food.name)]);
+  const named = new Set(facts.objective?.toLowerCase().match(/[a-z][a-z0-9_]*/gu) ?? []);
   for (const { name } of snapshot.inventory) {
     const last = name.split("_").at(-1)!;
-    if (kindOf(name) !== null || ARMOUR.includes(last) || STATIONS.includes(name)) needed.add(name);
+    if (kindOf(name) !== null || ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);
   }
   return needed;
 }

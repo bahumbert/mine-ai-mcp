@@ -737,11 +737,11 @@ function craftOrders(t: Parameters<typeof agentFor>[0]) {
 
 const CRAFT = { step: { skill: "craft_item", item: "cooked_beef", count: 3 } };
 
-test("a step that failed once is shown to the work tier, for its own objective too, and runs again", async (t) => {
+test("a step that failed once is shown to the work tier (its own objective only), and runs again", async (t) => {
   const { order } = craftOrders(t);
   const prompts = await order("cook 3 beef", CRAFT, CRAFT, { give_up: "No recipe." });
   assert.doesNotMatch(prompts[0] ?? "", /failed lately/u);
-  assert.match(prompts[1] ?? "", /Steps that failed lately in your objectives[^\n]*\n- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef": \[ITEMS_NOT_CRAFTABLE\]/u);
+  assert.match(prompts[1] ?? "", /Steps that failed lately in this objective[^\n]*\n- craft 3 cooked_beef, 1 minute ago: \[ITEMS_NOT_CRAFTABLE\]/u);
   assert.equal(prompts.length, 3, "the second try ran, no send-back");
 });
 
@@ -753,8 +753,8 @@ test("a step that failed twice is refused every time, for any objective, until t
   await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
   // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
   const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
-  assert.match(prompts[0] ?? "", /- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef"/u);
-  assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago, for "make me cooked beef then" \(refused now\)/u);
+  assert.doesNotMatch(prompts[0] ?? "", /failed lately/u, "another objective's failure is guarded by key, not shown");
+  assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago \(refused now\)/u);
   assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
   assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
   offset = 31 * 60_000;
@@ -802,23 +802,23 @@ test("a refused step is allowed again when the inventory changed or the bot move
   await order("cook 3 beef", CRAFT, CRAFT, { give_up: "No recipe." });
   assert.equal(crafts(), 2);
   const unchanged = await order("cook some beef", CRAFT, CRAFT, CRAFT);
-  assert.match(unchanged[0] ?? "", /\(refused now\)/u);
+  assert.doesNotMatch(unchanged[0] ?? "", /failed lately/u, "another objective's failure is guarded by key, not shown");
   assert.equal(crafts(), 2, "nothing changed: refused");
   runtime.addItem("oak_log", 1);
   const carried = await order("cook the beef", CRAFT, { give_up: "No recipe." });
-  assert.match(carried[0] ?? "", /\(allowed again: your inventory or place changed since\)/u);
+  assert.doesNotMatch(carried[0] ?? "", /failed lately/u);
   assert.equal(crafts(), 3, "the inventory changed: it ran");
   // That run failed again with the new inventory as its state: refused again until something else changes.
   const again = await order("cook beef now", CRAFT, CRAFT, CRAFT);
-  assert.match(again[0] ?? "", /\(refused now\)/u);
+  assert.doesNotMatch(again[0] ?? "", /failed lately/u);
   assert.equal(crafts(), 3);
   runtime.snapshot = { ...runtime.snapshot, position: { x: 7, y: 64, z: 0 } };
   const near = await order("cook beef please", CRAFT, CRAFT, CRAFT);
-  assert.match(near[0] ?? "", /\(refused now\)/u);
+  assert.doesNotMatch(near[0] ?? "", /failed lately/u);
   assert.equal(crafts(), 3, "7 blocks away is still the same place");
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 0 } };
   const moved = await order("cook beef then", CRAFT, { give_up: "No recipe." });
-  assert.match(moved[0] ?? "", /\(allowed again: your inventory or place changed since\)/u);
+  assert.doesNotMatch(moved[0] ?? "", /failed lately/u);
   assert.equal(crafts(), 4, "8 blocks away: it ran");
 });
 
@@ -1005,4 +1005,69 @@ test("a line naming nobody, right after its speaker named another character, car
   asked.length = 0;
   await seen("Vex", ["Ayla"]);
   assert.equal(asked.at(-1), undefined, "for Vex the line naming him is the conversation with him, not a fact");
+});
+
+test("the junk hint never lists what the objective gathers (live 2026-10-11: cobblestone listed for \"Mine cobblestone\")", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "cobblestone", count: 256 }, { name: "dirt", count: 128 }] };
+  runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "Mine cobblestone" }, { say: "Full, sorry." });
+  const mine = { step: { skill: "collect_block", block: "stone", count: 5 } };
+  action.reply(mine, mine);
+  await agent.handle(say("Steve", "mine some cobblestone"));
+  await until(() => action.requests.length >= 2);
+  const prompt = JSON.stringify(action.requests[1]);
+  assert.match(prompt, /128 dirt/u);
+  assert.doesNotMatch(prompt, /nothing you are doing needs[^"]*cobblestone/u);
+});
+
+test("a \"stop\" with a request while nothing runs is an order (live 2026-10-11, L7: \"release that area\" routed stop while idle); while busy it stops as before", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Releasing it.", route: "stop", request: "release that area" });
+  action.reply({ done: "released" });
+  await agent.handle(say("Steve", "release that area"));
+  await until(() => action.requests.length >= 1);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Objective \(asked by Steve\): "release that area"/u);
+  assert.deepEqual(runtime.cancelled, []);
+  await until(() => agent.activity === "idle");
+
+  const busy = new FakeRuntime();
+  busy.durations.collect_block = 100_000;
+  const second = agentFor(t, busy);
+  second.chat.reply({ say: "Okay.", route: "act", request: "collect 16 oak_log" }, { say: "Stopped.", route: "stop", request: "release that area" });
+  second.action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await second.agent.handle(say("Steve", "collect logs"));
+  await until(() => busy.submitted.some((call) => call.tool === "collect_block"));
+  await second.agent.handle(say("Steve", "release that area"));
+  await until(() => busy.cancelled.length === 1);
+  assert.equal(second.agent.activity, "idle", "busy: it stops, the request is not taken");
+});
+
+test("a line naming nobody within 60 s of its speaker naming another character is ignored, unless the model says it speaks to her or everyone (A5, live 2026-10-11, L6)", async (t) => {
+  const outcome = async (to: string[], afterMs: number) => {
+    const runtime = new FakeRuntime();
+    const tiers = scriptedMind();
+    const mind = { ...tiers.mind, chat: async (input: { message: { message: string } }) => input.message.message === "thanks" ? { to, say: "You're welcome!", route: "talk" as const, request: "" } : { to: ["Vex"], say: "", route: "ignore" as const, request: "" } } as unknown as typeof tiers.mind;
+    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const controller = new AbortController();
+    const running = agent.run(controller.signal);
+    t.after(async () => { controller.abort(); await running; });
+    const now = Date.now.bind(Date);
+    let offset = 0;
+    const clock = t.mock.method(Date, "now", () => now() + offset);
+    await agent.handle(say("Tester", "Vex, mine some stone", false));
+    runtime.said.length = 0;
+    offset = afterMs;
+    await agent.handle(say("Tester", "thanks", false));
+    clock.mock.restore();
+    return runtime.said.length;
+  };
+  assert.equal(await outcome(["Tester"], 20_000), 0, "the model read it as for the speaker only: ignored");
+  assert.equal(await outcome(["unclear"], 20_000), 0);
+  assert.equal(await outcome(["unclear"], 70_000), 1, "70 s later: routed as before");
+  assert.equal(await outcome(["Ayla"], 20_000), 1, "it names her");
+  assert.equal(await outcome(["everyone"], 20_000), 1, "it names everyone");
 });
