@@ -806,7 +806,9 @@ async function protectArea(context: SkillContext, step: Extract<Step, { skill: "
   } else if (step.x !== undefined && step.y !== undefined && step.z !== undefined) {
     centre = { x: step.x, y: step.y, z: step.z };
   } else {
-    return { status: "failed", detail: "protect_area needs a player or x, y and z" };
+    // Neither a player nor coordinates: where she stands (live 2026-10-11: "protect the area around you" came as the
+    // speaker's name four times).
+    centre = (await context.runtime.status()).position;
   }
   const c = { x: Math.floor(centre.x), y: Math.floor(centre.y), z: Math.floor(centre.z) };
   const r = step.radius;
@@ -815,7 +817,7 @@ async function protectArea(context: SkillContext, step: Extract<Step, { skill: "
     max: { x: c.x + r, y: c.y + r, z: c.z + r },
     label: step.label,
     reason: `I chose to protect ${step.label}.`,
-    ...(step.player !== undefined && { owner: step.player }),
+    ...(step.player !== undefined && !isSelf(step.player, context.self) && { owner: step.player }),
   });
   if (outcome.status === "failed") return { status: "failed", detail: outcome.error };
   noteArea(context, outcome.area);
@@ -1210,12 +1212,17 @@ export function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlaye
   return snapshot.players.find((entry) => entry.username.toLowerCase() === wanted);
 }
 
+/** Whether a username named in a step is her own. */
+function isSelf(username: string, self: string | undefined): boolean {
+  return self !== undefined && username.toLowerCase() === self.toLowerCase();
+}
+
 /**
  * Where a player named in a step stands; her own name is where she stands (live 2026-10-03: "level 4 blocks around
  * Ayla" failed five times with "cannot see Ayla", the players list holding only the others).
  */
 function whereIs(snapshot: BotSnapshot, username: string, self: string | undefined): Position | null {
-  if (self !== undefined && username.toLowerCase() === self.toLowerCase()) return snapshot.position;
+  if (isSelf(username, self)) return snapshot.position;
   return findPlayer(snapshot, username)?.position ?? null;
 }
 

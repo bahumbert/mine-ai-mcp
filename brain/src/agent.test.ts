@@ -119,20 +119,20 @@ test("the same step done again and again ends the objective as changing nothing 
     runtime.simulateInventory = true;
     const { agent, chat, action } = agentFor(t, runtime);
     chat.reply({ say: "Okay!", route: "act", request: "collect 96 cobblestone" }, { say: "Got them!" });
-    action.reply(collect, collect, collect, { done: "96 cobblestone collected" });
+    action.reply(collect, collect, collect, collect, { done: "96 cobblestone collected" });
     await agent.handle(say("Steve", "get me 96 cobblestone"));
     await until(() => runtime.said.length === 2);
-    assert.equal(action.requests.length, 4, "the model was asked again after the third identical step");
+    assert.equal(action.requests.length, 5, "the model was asked again after the third identical step");
     assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
   }
   {
     const runtime = new FakeRuntime();
     const { agent, chat, action } = agentFor(t, runtime);
     chat.reply({ say: "Okay!", route: "act", request: "collect 96 cobblestone" }, { say: "Nothing is happening, sorry!" });
-    action.reply(collect, collect, collect, collect);
+    action.reply(collect, collect, collect, collect, collect);
     await agent.handle(say("Steve", "get me 96 cobblestone"));
     await until(() => runtime.said.length === 2);
-    assert.equal(action.requests.length, 3);
+    assert.equal(action.requests.length, 4);
     assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 32 cobblestone changed nothing 3 times in a row: collected 32 cobblestone/u);
   }
 });
@@ -148,10 +148,10 @@ test("a drop that worked and is repeated ends the objective although the invento
   const { agent, chat, action } = agentFor(t, runtime);
   chat.reply({ say: "Okay!", route: "act", request: "make room" }, { say: "I keep dropping the same thing, sorry!" });
   const drop = { step: { skill: "drop_item", items: [{ item: "coal" }] } };
-  action.reply(drop, drop, drop, drop);
+  action.reply(drop, drop, drop, drop, drop);
   await agent.handle(say("Steve", "make room"));
   await until(() => runtime.said.length === 2);
-  assert.equal(action.requests.length, 3);
+  assert.equal(action.requests.length, 4);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /changed nothing 3 times in a row/u);
 });
 
@@ -971,4 +971,38 @@ test("a step failing for a full inventory names the junk with its whole count (l
   const prompt = JSON.stringify(action.requests[1]);
   assert.match(prompt, /232 snowball \(15 slots\)/u);
   assert.doesNotMatch(prompt, /1 stone_pickaxe \(1 slot\)/u, "the pickaxe is needed");
+});
+
+test("a give done and sent again identically goes back once, and the order ends done after one give", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "give Steve 2 dirt" }, { say: "Here you go!" });
+  const give = { step: { skill: "give_item", player: "Steve", item: "dirt", count: 2 } };
+  action.reply(give, give, { done: "Steve has 2 dirt" });
+  await agent.handle(say("Steve", "give me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "drop_item").length, 1);
+  assert.match(action.requests[2]?.at(-1)?.content ?? "", /just succeeded: if that did what was asked, answer done/u);
+});
+
+test("a line naming nobody, right after its speaker named another character, carries that as a fact for the others only (live 2026-10-11: 'thanks, no rush' answered by Ayla and Vex)", async (t) => {
+  const asked: (string | undefined)[] = [];
+  const seen = async (character: string, others: string[]) => {
+    const runtime = new FakeRuntime();
+    const tiers = scriptedMind();
+    const mind = { ...tiers.mind, chat: (input: Parameters<typeof tiers.mind.chat>[0], signal: AbortSignal) => { asked.push(input.talkedTo === undefined ? undefined : `${input.talkedTo.name}@${input.talkedTo.secondsAgo}`); return tiers.mind.chat(input, signal); } } as typeof tiers.mind;
+    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others, log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const controller = new AbortController();
+    const running = agent.run(controller.signal);
+    t.after(async () => { controller.abort(); await running; });
+    tiers.chat.reply({ route: "ignore", say: "", spoken_to: ["unclear"] }, { route: "ignore", say: "", spoken_to: ["unclear"] });
+    await agent.handle(say("Tester", "Vex, mine some stone", false));
+    await agent.handle(say("Tester", "thanks, no rush", false));
+  };
+  await seen("Ayla", ["Vex"]);
+  assert.match(asked.at(-1) ?? "", /^Vex@\d+$/u);
+  asked.length = 0;
+  await seen("Vex", ["Ayla"]);
+  assert.equal(asked.at(-1), undefined, "for Vex the line naming him is the conversation with him, not a fact");
 });

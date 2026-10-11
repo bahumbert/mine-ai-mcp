@@ -4,7 +4,7 @@ import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
-import { stepKey } from "./actions.ts";
+import { describeStep, stepKey } from "./actions.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
@@ -715,4 +715,51 @@ test("the work prompt lists improve_house only for a character that owns a tempo
   assert.match(action.requests[0]?.[0]?.content ?? "", /"skill":"improve_house"/u);
   assert.doesNotMatch(action.requests[1]?.[0]?.content ?? "", /"skill":"improve_house"/u);
   assert.match(action.requests[1]?.[0]?.content ?? "", /"skill":"build"/u, "the rest of the catalog is unchanged");
+});
+
+test("a step that just succeeded, sent again identically, goes back once per objective", async () => {
+  const give = { skill: "give_item", player: "Steve", item: "oak_log", count: 4 } as const;
+  const { action, mind } = scriptedMind();
+  action.reply({ thought: "Again.", step: give }, { thought: "Done.", done: "gave the logs" });
+  const input = workInput("give me 4 oak logs", { steps: [{ step: describeStep(give), outcome: "done", detail: "gave 4 oak_log" }] });
+  assert.deepEqual(await mind.next(input, signal), { kind: "done", summary: "gave the logs" });
+  assert.match(action.requests[1]?.at(-1)?.content ?? "", /just succeeded: if that did what was asked, answer done/u);
+  // Sent again after that, it stands.
+  action.reply({ thought: "Once more.", step: give });
+  assert.equal((await mind.next(input, signal)).kind, "step");
+  // A failed earlier record, or another step, is not a repeat.
+  const other = scriptedMind();
+  other.action.reply({ thought: "Retry.", step: give });
+  const failed = workInput("give me 4 oak logs", { steps: [{ step: describeStep(give), outcome: "failed", detail: "no" }] });
+  assert.equal((await other.mind.next(failed, signal)).kind, "step");
+});
+
+test("explore for a player or for air goes back before it runs (live 2026-10-11 improve test: 'explore for player' x3, 'explore for air' x7)", async () => {
+  const explore = (target: string) => ({ skill: "explore", toward: "north", chunks: 2, for: target }) as const;
+  const base = workInput("find a site");
+  const input = { ...base, snapshot: { ...base.snapshot, players: [{ username: "Tester", position: null }] } };
+  const { action, mind } = scriptedMind();
+  action.reply({ thought: "Look.", step: explore("tester") }, { thought: "Look.", step: explore("air") }, { thought: "Look.", step: explore("oak_log") });
+  assert.deepEqual((await mind.next(input, signal)).kind, "step");
+  assert.match(action.requests[1]?.at(-1)?.content ?? "", /"Tester" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are/u);
+  assert.match(action.requests[2]?.at(-1)?.content ?? "", /air is everywhere: to find a clear site, use the coordinates the last failure gave/u);
+});
+
+test("the chat prompt keeps whom the work is for, and reads 'where you are' as the bot's own place (live 2026-10-11: 'build yourself a house' restated without 'yourself')", () => {
+  const prompt = chatSystemPrompt(testPersona());
+  assert.match(prompt, /keeps\s+whom the work is for, word for word when the speaker says it \("for yourself", "your own house", "for <name>"\)/u);
+  assert.match(prompt, /"you" = where you stand[^]*"where you are", "where you stand", "around you"/u);
+  assert.match(prompt, /"speaker" = where the speaker stands now\s+\("here", "come"/u);
+});
+
+test("the chat prompt routes 'stop' only for stopping, any other short order is act (live 2026-10-11: 'release that area' routed stop)", () => {
+  const prompt = chatSystemPrompt(testPersona());
+  assert.match(prompt, /"stop" = they want you to stop what you are doing, and only that \(stop, halt, wait, enough\)\. Any other request, even a\s+short one \(release that area, put it back, undo\), is "act", never "stop"/u);
+});
+
+test("describeConversation states who the speaker was talking to when the line names nobody, and the chat prompt says it is most likely theirs", () => {
+  const input = { ...chatInput("thanks, no rush", false), talkedTo: { name: "Vex", secondsAgo: 23 } };
+  assert.match(describeConversation(input), /Steve was talking to Vex 23 s ago; this line names nobody\./u);
+  assert.doesNotMatch(describeConversation({ ...input, talkedTo: { name: "Ayla", secondsAgo: 23 } }), /was talking to/u);
+  assert.match(chatSystemPrompt(testPersona()), /names nobody, right after its speaker\s+talked to another character, is most likely for that one: ignore it unless it is plainly for everyone/u);
 });

@@ -73,6 +73,8 @@ export interface ChatInput {
   readonly canWait?: boolean;
   /** People talked to who are not players here (the controller, say), from the brain's `--known-names`; a name called in a message. */
   readonly knownNames?: readonly string[];
+  /** The character the speaker's latest line naming one was for, when this line names none and that was lately (see Agent.talkedTo). */
+  readonly talkedTo?: { readonly name: string; readonly secondsAgo: number };
 }
 
 export interface ChatDecision {

@@ -616,7 +616,6 @@ test("protect_area needs a player in sight or coordinates", async () => {
   const runtime = new FakeRuntime();
   const context = contextFor(runtime);
   assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", player: "Tom", label: "x" }), context), { status: "failed", detail: "cannot see Tom to protect the area around them" });
-  assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", label: "x" }), context), { status: "failed", detail: "protect_area needs a player or x, y and z" });
   assert.equal((await runStep(stepSchema.parse({ skill: "protect_area", x: 1, y: 64, z: 1, radius: 2, label: "spot" }), context)).status, "done");
   assert.equal(runtime.areas[0]?.owner, "self", "coordinates alone protect the character's own area");
   assert.equal(stepSchema.safeParse({ skill: "protect_area", player: "Tom", radius: 32, label: "x" }).success, false);
@@ -1429,4 +1428,16 @@ test("the house's materials are not scaffolding while it is built, and the list 
   const failed = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(broken, { style: "medieval", building: { unfinished: null } }));
   assert.equal(failed.status, "failed");
   assert.deepEqual(broken.scaffoldSettings, [["dirt"], scaffold]);
+});
+
+test("protect_area with no player and no coordinates protects around herself, owned as her own (live 2026-10-11: 'around you' came as the speaker's name)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 10.5, y: 64, z: -3.5 } };
+  const bare = await runStep({ skill: "protect_area", radius: 4, label: "camp" }, contextFor(runtime, { self: "Ayla" }));
+  assert.equal(bare.status, "done");
+  assert.deepEqual(runtime.areas[0]?.min, { x: 6, y: 60, z: -8 });
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 30.5, y: 64, z: -3.5 } };
+  const named = await runStep({ skill: "protect_area", player: "ayla", radius: 4, label: "camp two" }, contextFor(runtime, { self: "Ayla" }));
+  assert.equal(named.status, "done");
+  assert.deepEqual([runtime.areas[0]?.owner, runtime.areas[1]?.owner], ["self", "self"], "her own name is no other owner");
 });

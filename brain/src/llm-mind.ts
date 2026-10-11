@@ -208,6 +208,14 @@ export class LlmMind implements Mind {
     });
   }
 
+  /** Steps already sent back as a repeat of one that just succeeded, per objective. */
+  private readonly resends = new WeakMap<object, Set<string>>();
+  private resent(objective: object): Set<string> {
+    let sent = this.resends.get(objective);
+    if (sent === undefined) this.resends.set(objective, (sent = new Set()));
+    return sent;
+  }
+
   async next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision> {
     const skills = personaSkills(input.persona);
     let signChecked = false;
@@ -235,6 +243,24 @@ export class LlmMind implements Mind {
         // A step that failed twice lately, for any objective, is refused every time (live 2026-10-10, run 6: sent back
         // once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times): one retry, then another step.
         const key = stepKey(step.data);
+        // `explore` looks for blocks and mobs (live 2026-10-11, improve test: "for player" x3, "for air" x7): other things
+        // go back before they run. The runtime's own refusal stays for the rest.
+        if (step.data.skill === "explore" && step.data.for !== undefined) {
+          const wanted = step.data.for;
+          const player = input.snapshot.players.find((entry) => entry.username.toLowerCase() === wanted.toLowerCase());
+          if (player !== undefined || wanted === "player") {
+            throw new Error(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
+          }
+          if (wanted === "air") throw new Error("air is everywhere: to find a clear site, use the coordinates the last failure gave");
+        }
+        // A step that just succeeded, sent again identically, goes back once per objective (live 2026-10-11, orders test:
+        // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
+        const label = describeStep(step.data);
+        const last = input.steps.at(-1);
+        if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input.objective).has(label)) {
+          this.resent(input.objective).add(label);
+          throw new Error(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
+        }
         const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);
         if (earlier !== undefined) {
           // Rule 2 (owner, 2026-10-11): refused again and again with nothing changed, the objective is over.
@@ -400,7 +426,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   among others, is ["unclear"]). Any name counts, even one you do not
   know (another player, the server's operator, someone not in the game). When "About this message" is given, it
   states what the recent chat shows about this message (who its speaker just spoke to, who just spoke to them, a
-  conversation going on with you): weigh it with the message itself.
+  conversation going on with you): weigh it with the message itself. A line that names nobody, right after its speaker
+  talked to another character, is most likely for that one: ignore it unless it is plainly for everyone.
 - "asks": what the message asks of its listeners, in a few words (a question, a request, an order); "" when it asks
   nothing (a remark, news, agreeing, thanks).
 - "language": the language the new message's own words are written in (e.g. "French", "English"); the recent chat
@@ -409,7 +436,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   "ignore" = "spoken_to" does not include you (${persona.username}, "everyone" or "unclear"): never take it on or answer it,
   even when you could; "say" is "".
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
-  "stop" = they want you to stop what you are doing.
+  "stop" = they want you to stop what you are doing, and only that (stop, halt, wait, enough). Any other request, even a
+  short one (release that area, put it back, undo), is "act", never "stop".
   "act" = you take on what they ask now, setting your current work aside (you resume it afterwards), so your reply
   says you start now, never that you finish something first.${canWait ? `
   "later" = you take it on for when your current work is done: only when they say it can wait, or while you work
@@ -421,12 +449,14 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   first, wait or do it after something else. With "act" it is true (a false one is sent back).
 - "place": where the request happens (act and later; otherwise "none"): "speaker" = where the speaker stands now
   ("here", "come", "to me", around them), "you" = where you stand (their words for your own position, in any
-  language), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
+  language: "where you are", "where you stand", "around you"; the speaker's "you" is you), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
   coordinates for "speaker" or "you" in "request": they are added for you. When "Players online" has the speaker far
   away (no coordinates) and the request happens where they are, say in your line that you cannot see them from here.
 - "request": for act and later, what the player asks of you (only your part when the message asks several people;
   not your own plan), in one standalone sentence keeping every username, Minecraft id, number and named place the
-  player gave, word for word (e.g. "give Steve 5 oak_log", "level the zone between the gold_block markers"); otherwise "".
+  player gave, word for word (e.g. "give Steve 5 oak_log", "level the zone between the gold_block markers"); it also keeps
+  whom the work is for, word for word when the speaker says it ("for yourself", "your own house", "for <name>"):
+  dropping it changes who gets the result; otherwise "".
 - "say": your chat line; "" to stay silent. Write it in "language", the message's language (a message in French
   gets a French line), whatever language you think in. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
@@ -710,6 +740,10 @@ export function describeConversation(input: ChatInput, now = Date.now()): string
   const answering = answeredElsewhere(input);
   if (last !== undefined && answering === null && talkingWithHer(input, now)) {
     facts.push(`You are talking with ${message.username}${last.at === undefined ? "" : ` (your last exchange was ${Math.max(0, Math.round((now - last.at) / 1_000))} s ago)`}.`);
+  }
+  // The speaker's latest line naming a character, seen by every agent: a fact, whose reading is the model's.
+  if (input.talkedTo !== undefined && input.talkedTo.name.toLowerCase() !== input.persona.username.toLowerCase()) {
+    facts.push(`${message.username} was talking to ${input.talkedTo.name} ${input.talkedTo.secondsAgo} s ago; this line names nobody.`);
   }
   const ongoing = conversationGoingOn(input);
   if (ongoing !== null) facts.push(`${message.username}'s line just before this one spoke to ${ongoing.join(", ")}, not to you, and this message names nobody.`);

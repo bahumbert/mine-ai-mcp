@@ -133,6 +133,8 @@ export class Agent {
   /** What it hears, before the chat tier reads it: quick lines of one player are one message. */
   private readonly inbox: Inbox;
   private readonly history: ChatLine[] = [];
+  /** Per speaker (lower case), the latest character (this one or another agent) a line of theirs named, and when. */
+  private readonly lastNamed = new Map<string, { readonly name: string; readonly at: number }>();
   private readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
   private readonly farms: KnownFarm[] = [];
@@ -277,11 +279,12 @@ export class Agent {
     this.lastHeard.set(message.username.toLowerCase(), heardAt);
     const { persona, mind, log } = this.options;
     const line = this.remember(message.username, message.message);
+    const talkedTo = this.noteNamed(message, heardAt);
     if (!this.listensTo(message.username)) return;
     let decision;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [] }, this.runSignal);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }) }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -1014,6 +1017,24 @@ export class Agent {
     this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 
+  /**
+   * Remembers which character (this one or another agent) the line names; for a line naming none, who its speaker named
+   * last when that was within {@link TALKED_TO_MS} (live 2026-10-11: "thanks, no rush" after a line to Vex was answered by
+   * Ayla too). Names as words only, never what the line says.
+   */
+  private noteNamed(message: PlayerMessage, at: number): { name: string; secondsAgo: number } | undefined {
+    const speaker = message.username.toLowerCase();
+    const characters = [this.options.persona.username, ...this.options.otherAgents];
+    const named = characters.filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
+    if (this.options.otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
+    if (named.length > 0) {
+      this.lastNamed.set(speaker, { name: named[0]!, at });
+      return undefined;
+    }
+    const last = this.lastNamed.get(speaker);
+    return last !== undefined && last.name.toLowerCase() !== this.options.persona.username.toLowerCase() && at - last.at <= TALKED_TO_MS ? { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } : undefined;
+  }
+
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
   private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null): void {
     if (text.trim() === "") return;
@@ -1034,6 +1055,9 @@ export class Agent {
     if (index !== -1) this.history[index] = { ...line, to };
   }
 }
+
+/** How long after a line naming a character a line naming nobody is still shown as following it. */
+const TALKED_TO_MS = 60_000;
 
 /** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
 function minutesAgo(iso: string): string {
