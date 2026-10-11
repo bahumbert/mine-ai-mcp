@@ -1,6 +1,6 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
-import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
+import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
  * and what each costs, answered with Mineflayer's own knowledge of blocks,
@@ -16,7 +16,7 @@ import type { Bot } from "mineflayer";
 import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
-import type { BreakEvaluation, MovementPolicy, PolicyDecision, ToolSelection } from "../movements/policy.js";
+import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
 import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
@@ -466,10 +466,19 @@ export function createMineflayerMovementPolicy(
 
   // Read at each check rather than when the policy is made, like the navigation policy: a region protected while a
   // long action runs applies to its next search.
+  let ownRegionsOpen = false;
+  const ownRegionEscape: OwnRegionEscape | undefined = options.ignoreRegionsOwnedBy === undefined
+    ? {
+        inside: (x, y, z) => readProtectedRegions(bot).some((region) =>
+          sameOwner(region.owner, bot.username) && protectedRegionAt([region], bot.game.dimension, x, y, z) !== null),
+        open: () => { ownRegionsOpen = true; },
+        close: () => { ownRegionsOpen = false; },
+      }
+    : undefined;
   const regionRefusal = (x: number, y: number, z: number): PolicyDecision | null => {
     const regions = readProtectedRegions(bot);
     if (regions.length === 0) return null;
-    const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy);
+    const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy ?? (ownRegionsOpen ? bot.username : undefined));
     return region === null ? null : { kind: "prohibited", reason: `inside ${describeProtectedRegion(region)}` };
   };
 
@@ -583,6 +592,7 @@ export function createMineflayerMovementPolicy(
   // the setting as it stands when the planner asks.
   return Object.freeze({
     ...policy,
+    ...(ownRegionEscape !== undefined && { ownRegionEscape }),
     get allowDownward() {
       return readNavigationPolicy(bot).dig_straight_down;
     },

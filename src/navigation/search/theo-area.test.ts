@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { WELL_FED, observation, planningStart } from "../../test-support/navigation.js";
+import { FakeNavigationBot, WELL_FED, observation, onEvent, planningStart, settle } from "../../test-support/navigation.js";
+import { createNavigator } from "../orchestration/navigator.js";
+import type { NavigationEvent } from "../telemetry/index.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { customGoal, exactBlockGoal } from "../goals/index.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
@@ -45,7 +47,7 @@ const REGIONS: readonly ProtectedRegion[] = [
 ];
 
 function theoBot(regions: readonly ProtectedRegion[]) {
-  const bot = botFixture({ position: new Vec3(2302.47, 70, 494.5), items: [{ name: "dirt", count: 124 }] });
+  const bot = botFixture({ username: "Theo", position: new Vec3(2302.47, 70, 494.5), items: [{ name: "dirt", count: 124 }] });
   setProtectedRegionsProvider(bot as never, () => regions);
   return bot;
 }
@@ -66,13 +68,6 @@ function search(regions: readonly ProtectedRegion[], options?: Parameters<typeof
 
 const found = (update: { kind: string }) => update.kind === "complete" || update.kind === "segment_ready";
 
-// Live 2026-10-11 (improve test, Theo): every route from 2302 70 494 failed "no path found after 0 ms; visited 13 nodes".
-// The 3x3 house's door opens onto three cells walled at head height by dirt left from the 9x9 build, and the only ways
-// out are to dig or place in cells of region #4, Theo's own 'small medieval house', which every route refuses.
-test("Theo, shut in by dirt at head height inside his own house region, finds a way out", { skip: "reproduction of an open bug (B2): routes may not dig or place in the bot's own regions, even to leave one" }, () => {
-  assert.ok(found(search(REGIONS)));
-});
-
 test("the same search finds the way out when region #4 does not exist (the region is what shuts Theo in)", () => {
   assert.ok(found(search(REGIONS.filter((region) => region.regionId !== 4))));
 });
@@ -81,13 +76,63 @@ test("the same search finds the way out when the bot's own regions are open to i
   assert.ok(found(search(REGIONS, { ignoreRegionsOwnedBy: "Theo" })));
 });
 
-// Same stuck scene, drop_item's walk-off (live 2026-10-11, Theo: "[DROP_PICKED_UP] stone_pickaxe came back", nine items,
-// five attempts at 10:35-10:36, all from 2302 70 494): the 4-block walk away from the toss has nowhere to go inside the
-// cage (the room and the three cells outside the door are all within 3.5 blocks), so the toss is picked up again.
-test("Theo's drop_item walk-off reaches 4 blocks from the toss", { skip: "reproduction of an open bug (B3 = B2): the cage leaves no cell 4 blocks away" }, () => {
-  assert.ok(found(search(REGIONS, undefined, { x: 2302.47, z: 494.5 })));
-});
-
 test("without region #4 the walk-off reaches 4 blocks from the toss", () => {
   assert.ok(found(search(REGIONS.filter((region) => region.regionId !== 4), undefined, { x: 2302.47, z: 494.5 })));
+});
+
+/** One whole navigation from Theo's cell (the fake bot cannot dig or place, so a run that finds a route still fails to walk it). */
+async function run(regions: readonly ProtectedRegion[], toss?: boolean, shared?: { bot: ReturnType<typeof theoBot>; policy: ReturnType<typeof createMovements> }) {
+  const bot = shared?.bot ?? theoBot(regions);
+  const events: NavigationEvent[] = [];
+  const fake = new FakeNavigationBot();
+  fake.current = observation(START.x, START.y, START.z);
+  const navigator = createNavigator({ world: theoArea(bot), bot: fake, telemetry: onEvent((event) => events.push(event)) });
+  const goal = toss === true
+    ? customGoal("clear-of-toss", (node) => Math.hypot(node.feet.x + 0.5 - 2302.47, node.feet.z + 0.5 - 494.5) >= 4, (node) => Math.max(0, 4 - Math.hypot(node.feet.x + 0.5 - 2302.47, node.feet.z + 0.5 - 494.5)) * 4.6)
+    : exactBlockGoal({ x: 2296, y: 69, z: 486 });
+  const outcome = await settle(navigator, { goal, policy: shared?.policy ?? createMovements(bot) });
+  return { events, outcome };
+}
+
+// Live 2026-10-11 (improve test, Theo): every route from 2302 70 494 failed "no path found after 0 ms; visited 13 nodes",
+// and drop_item's 4-block walk-off found no cell, so every toss was picked up again. The 3x3 house's door opens onto
+// three cells walled at head height by dirt left from the 9x9 build; the only ways out dig or place in region #4,
+// Theo's own 'small medieval house'. A bot shut in by its own protection opens it to itself, once.
+for (const [name, toss] of [["the route out", false], ["drop_item's walk-off", true]] as const) {
+  test(`Theo, shut in by dirt inside his own house region, gets ${name} after opening his own regions once`, async () => {
+    const { events, outcome } = await run(REGIONS, toss);
+    const opened = events.findIndex((event) => event.kind === "own_regions_opened");
+    assert.ok(opened >= 0, "his own regions were opened");
+    assert.equal(events.filter((event) => event.kind === "own_regions_opened").length, 1);
+    assert.ok(events.slice(opened).some((event) => event.kind === "route_committed"), "a route was found after that");
+    void outcome;
+  });
+}
+
+test("a start in a region another player owns is not opened: the search stays without a route", async () => {
+  const others = REGIONS.map((region) => region.regionId === 4 ? { ...region, owner: "Tester" } : region);
+  const { events, outcome } = await run(others);
+  assert.ok(!events.some((event) => event.kind === "own_regions_opened"));
+  assert.ok(!events.some((event) => event.kind === "route_committed"));
+  assert.equal(outcome.kind, "failed");
+});
+
+test("a start outside every region of the bot does not replan", async () => {
+  const { events } = await run(REGIONS.filter((region) => region.regionId !== 4 && region.regionId !== 2 && region.regionId !== 5));
+  assert.ok(!events.some((event) => event.kind === "own_regions_opened"));
+});
+
+test("the opening lasts one run: the same policy refuses its own regions again afterwards, and a second run opens them again", async () => {
+  const bot = theoBot(REGIONS);
+  const policy = createMovements(bot);
+  const world = theoArea(bot);
+  const cell = { x: 2302, y: 71, z: 491 };
+  const dirt = world.blockAt(cell.x, cell.y, cell.z);
+  const refuses = () => policy.evaluateBreak(dirt, cell, world).decision.kind === "prohibited";
+  assert.ok(refuses(), "refused before");
+  const first = await run(REGIONS, false, { bot, policy });
+  assert.equal(first.events.filter((event) => event.kind === "own_regions_opened").length, 1);
+  assert.ok(refuses(), "refused again after the run");
+  const second = await run(REGIONS, false, { bot, policy });
+  assert.equal(second.events.filter((event) => event.kind === "own_regions_opened").length, 1, "opened again by the second run");
 });

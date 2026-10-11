@@ -58,9 +58,26 @@ export interface ScaffoldSelection {
   readonly stateIdByAxis?: Readonly<Record<"x" | "y" | "z", number>>;
 }
 
+/**
+ * The way out of a cage made of the bot's own protection. Routes may not dig or place in protected regions, the bot's
+ * own included; a bot shut in by blocks inside a region of its own (live 2026-10-11, Theo in his house's dirt scaffold)
+ * has no route at all. After a search finds none, a run asks whether the start lies in a region the bot owns and, if so,
+ * opens those regions to itself once.
+ */
+export interface OwnRegionEscape {
+  /** Whether this cell lies in a protected region the bot itself owns. */
+  readonly inside: (x: number, y: number, z: number) => boolean;
+  /** This policy may dig and scaffold in the bot's own regions until `close`. */
+  readonly open: () => void;
+  /** The run that opened them has ended: the policy, which its action reuses, refuses them again. */
+  readonly close: () => void;
+}
+
 export interface MovementPolicy {
   /** Scoped open-water admission, supplied by the navigation runtime. */
   readonly dive?: DiveAdmission;
+  /** Absent when the policy already ignores the bot's own regions (a build) or knows none. */
+  readonly ownRegionEscape?: OwnRegionEscape;
   readonly allowDigging: boolean;
   readonly allowPlacing: boolean;
   readonly allowDoors: boolean;

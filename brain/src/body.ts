@@ -7,6 +7,19 @@ export const WAIT_SLICE_MS = 1_000;
 /** Longest wait for a survival reflex to hand the body back before an action is reported as refused. */
 export const REFLEX_WAIT_MS = 30_000;
 
+/**
+ * How often a cancel is sent again to an action that stays pending, and how long after the first cancel the step is
+ * given back as failed. Live 2026-10-11 (orders test, Vex): a collect_block stayed `stopping` for 6 minutes after one
+ * cancel, and the brain waited for it, deaf to "stop", to the no-gain stop and to a new order.
+ */
+export const RECANCEL_MS = 5_000;
+export const STOP_GIVE_UP_MS = 30_000;
+
+export interface StopPace {
+  readonly recancelMs: number;
+  readonly giveUpMs: number;
+}
+
 /** `send_message` refuses longer lines. */
 const MAX_CHAT_LENGTH = 256;
 
@@ -54,7 +67,7 @@ export class Body {
   /** Told about every foreground action once it ends, with how long it ran (the time per activity counts it). */
   onAction: ((tool: ForegroundTool, input: Readonly<Record<string, unknown>>, ms: number) => void) | null = null;
 
-  constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void, private readonly typing: TypingPace = HUMAN_TYPING) {}
+  constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void, private readonly typing: TypingPace = HUMAN_TYPING, private readonly pace: StopPace = { recancelMs: RECANCEL_MS, giveUpMs: STOP_GIVE_UP_MS }) {}
 
   act(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions = {}): Promise<ActOutcome> {
     return this.exclusive(async () => {
@@ -100,13 +113,26 @@ export class Body {
     let state = await this.submit(tool, input, rationale, options.signal);
     let cancelled = false;
     let preempted = false;
+    let cancelledAt = 0;
+    let lastCancel = 0;
     while (state.state === "pending") {
       if (!cancelled) {
         const stop = options.signal?.aborted === true;
         if (stop || (options.interruptWhen !== undefined && await options.interruptWhen())) {
           cancelled = true;
           preempted = !stop;
+          cancelledAt = lastCancel = Date.now();
           await this.runtime.cancel(state.actionId, stop ? "Stopped by the agent." : "Re-planning.");
+        }
+      } else {
+        const waited = Date.now() - cancelledAt;
+        if (waited >= this.pace.giveUpMs) {
+          this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
+          return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+        }
+        if (Date.now() - lastCancel >= this.pace.recancelMs) {
+          lastCancel = Date.now();
+          await this.runtime.cancel(state.actionId, "Stopped by the agent.");
         }
       }
       state = await this.runtime.wait(state.actionId, WAIT_SLICE_MS);
@@ -142,8 +168,18 @@ export class Body {
 
   private async settle(actionId: string, reason: string): Promise<void> {
     await this.runtime.cancel(actionId, reason);
+    const started = Date.now();
+    let lastCancel = started;
     let state = await this.runtime.wait(actionId, WAIT_SLICE_MS);
-    while (state.state === "pending") state = await this.runtime.wait(actionId, WAIT_SLICE_MS);
+    while (state.state === "pending") {
+      // The same bound as in run: an action that will not stop must not hold the next one for ever.
+      if (Date.now() - started >= this.pace.giveUpMs) return;
+      if (Date.now() - lastCancel >= this.pace.recancelMs) {
+        lastCancel = Date.now();
+        await this.runtime.cancel(actionId, reason);
+      }
+      state = await this.runtime.wait(actionId, WAIT_SLICE_MS);
+    }
   }
 }
 

@@ -82,6 +82,8 @@ export interface NavigateOptions {
    * threat avoidance while their goal chooses the required separation.
    */
   readonly stepField?: null;
+  /** Told of each block the route placed as scaffold, once the world confirmed it. */
+  readonly onPlacement?: (placement: { readonly position: BlockPosition; readonly stateId: number }) => void;
 }
 
 /** The operation navigation exists to offer: one goal in, one settled route out. */
@@ -124,6 +126,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     policy: options.movements,
     ...(options.onArrival && { onArrival: options.onArrival }),
     ...(options.onCalculationFailure && { onCalculationFailure: options.onCalculationFailure }),
+    ...(options.onPlacement && { onPlacement: options.onPlacement }),
     stepField: options.stepField,
     signal,
     // Commit a useful partial route instead of retaining an ever-growing A*

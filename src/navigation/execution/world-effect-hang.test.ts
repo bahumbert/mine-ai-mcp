@@ -10,7 +10,7 @@ import { executeWorldEffect } from "./world-effect.js";
 // returns at once when targetDigBlock is null, so the dig promise (the effect's `completion`) never settles and
 // executeWorldEffect's `await completion` after a cancel or an expiry never returns. The action sat in "stopping" for
 // 6 minutes, deaf to cancel_foreground_action and to its own 180 s stall guard.
-test("a world effect whose completion never settles still returns after its cancel", { skip: "reproduction of an open bug (B1): `await completion` after effect.cancel() has no bound" }, async () => {
+test("a world effect whose completion never settles still returns after its cancel", async () => {
   const world = flatWorld();
   const position = { x: 0, y: 64, z: 0 };
   world.load(position, { stateId: 1 });
@@ -28,7 +28,9 @@ test("a world effect whose completion never settles still returns after its canc
       deadlineMs: Date.now() + 60_000,
     });
     setTimeout(() => abort.abort(), 20);
-    const settled = await Promise.race([pending, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2_000))]);
+    const settled = await Promise.race([pending, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
     assert.notEqual(settled, "hung");
+    assert.equal((settled as { result: { kind: string } }).result.kind, "cancelled");
+    assert.equal(ledger.activeCount, 0);
   } finally { unsubscribe(); }
 });
