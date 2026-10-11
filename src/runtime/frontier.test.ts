@@ -4,7 +4,8 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import { attachSessionFrontier, RESCAN_AFTER_MS } from "./frontier.js";
+import minecraftData from "minecraft-data";
+import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, seenInWorld } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
   return SqlBotData.create({
@@ -354,4 +355,47 @@ test("stops recording when the session frontier closes", (t) => {
   events.emit("chunkColumnLoad", new Vec3(16, 0, 16));
 
   assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count, 0);
+});
+
+test("counts the recorded chunks that hold a material; a material the scan leaves out counts none", async (t) => {
+  const { events, bot, data } = fixture();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  events.emit("chunkColumnLoad", new Vec3(48, 0, -32));
+  events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
+  await frontier.idle();
+
+  assert.equal(frontier.chunksWithMaterial("oak_log"), 2);
+  assert.equal(frontier.chunksWithMaterial("pale_oak_log"), 0);
+  // Stone is left out of the scan as everywhere: no chunk records it.
+  assert.equal(frontier.chunksWithMaterial("stone"), 0);
+});
+
+/** A bot whose loaded blocks within reach are `near` (block name -> count), asked as Mineflayer's findBlocks does. */
+function seeingBot(near: Record<string, number>): Bot {
+  const registry = minecraftData("1.21.4");
+  return {
+    version: "1.21.4",
+    registry,
+    findBlocks: ({ matching, count }: { matching: number; count: number }) => {
+      const name = registry.blocks[matching]?.name ?? "";
+      return Array.from({ length: Math.min(count, near[name] ?? 0) }, () => new Vec3(0, 0, 0));
+    },
+  } as unknown as Bot;
+}
+
+test("an item is as seen as the most-seen block it is gathered from: loaded blocks near the bot, or recorded chunks", () => {
+  const chunks: Record<string, number> = { oak_log: 12 };
+  const frontier = { chunksWithMaterial: (material: string) => chunks[material] ?? 0 };
+  const seen = seenInWorld(seeingBot({ stone: 500 }), frontier);
+  assert.equal(seen("oak_log"), 12);
+  // Near blocks are counted up to the cap.
+  assert.equal(seen("cobblestone"), SEEN_CAP);
+  assert.equal(seen("pale_oak_log"), 0);
+  // Deepslate is neither near nor recorded: cobbled_deepslate is unseen, though stone is common.
+  assert.equal(seen("cobbled_deepslate"), 0);
+  assert.equal(seenInWorld(seeingBot({ deepslate: 5 }), frontier)("cobbled_deepslate"), 5);
 });

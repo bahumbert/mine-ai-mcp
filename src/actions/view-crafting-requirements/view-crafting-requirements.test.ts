@@ -96,3 +96,15 @@ test("prefer names the wood to plan with when none is carried; the parsed reques
   assert.deepEqual((await ask(["birch_log"])).requirements.plan?.requiredMaterials, [{ item: "birch_log", count: 1 }]);
   assert.deepEqual(parseViewCraftingRequirementsRequest({ items: [{ item_name: "stick", count: 1 }] }).prefer, []);
 });
+
+test("with nothing carried, the plan names the wood the explored world has", async () => {
+  const { bot } = craftingBot({}, true, [
+    craftingRecipe("oak_planks", 4, { oak_log: 1 }),
+    craftingRecipe("birch_planks", 4, { birch_log: 1 }),
+    craftingRecipe("stick", 4, { oak_planks: 2 }),
+    craftingRecipe("stick", 4, { birch_planks: 2 }),
+  ]);
+  const request = parseViewCraftingRequirementsRequest({ items: [{ item_name: "stick", count: 4 }] });
+  const seen = (item: string) => (item === "birch_log" ? 7 : 0);
+  assert.deepEqual((await viewCraftingRequirements(bot, request, {}, seen)).requirements.plan?.requiredMaterials, [{ item: "birch_log", count: 1 }]);
+});

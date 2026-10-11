@@ -4,6 +4,7 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
+import { sourcesOf } from "../world/block-drops.js";
 import { CHUNK_WIDTH, chunkPosition } from "../world/chunks.js";
 
 export interface SessionFrontierStatus {
@@ -22,6 +23,11 @@ export interface SessionFrontier extends Disposable {
   status(): SessionFrontierStatus;
   idle(): Promise<void>;
   boundary(dimension: string, direction: { readonly x: number; readonly z: number }): number | null;
+  /**
+   * How many recorded chunks of the bot's dimension hold this block. The scan leaves out the blocks found nearly
+   * everywhere (stone, dirt, water...): none are recorded, so they count 0.
+   */
+  chunksWithMaterial(material: string): number;
   onRecorded(listener: (chunk: FrontierChunk) => void): () => void;
   close(): void;
 }
@@ -88,6 +94,32 @@ const ROUTINE_MATERIALS = new Set([
   "deepslate_lapis_ore",
   "deepslate_diamond_ore",
 ]);
+
+/** How far around the bot loaded blocks count as seen for the crafting planner (run 10: Mira, at the surface). */
+export const SEEN_RADIUS = 32;
+/** Loaded blocks of one kind counted at most: enough to tell near from none, cheap to ask. */
+export const SEEN_CAP = 64;
+
+/**
+ * How much of an item the explored world has, for the crafting planner's ties: over the blocks it is gathered from,
+ * the most of the loaded blocks of that kind within {@link SEEN_RADIUS} of the bot (up to {@link SEEN_CAP}) or the
+ * recorded chunks that hold it (the frontier leaves out stone, deepslate and the like, so those count by what is
+ * near). Run 10: a stone pickaxe planned cobbled_deepslate at the surface, Mira dug toward it for 18 minutes, with
+ * stone underfoot. Each block kind is asked once per call.
+ */
+export function seenInWorld(bot: Bot, frontier: Pick<SessionFrontier, "chunksWithMaterial">): (item: string) => number {
+  const byBlock = new Map<string, number>();
+  const blockSeen = (block: string): number => {
+    let seen = byBlock.get(block);
+    if (seen === undefined) {
+      const id = bot.registry.blocksByName[block]?.id;
+      const near = id === undefined ? 0 : bot.findBlocks({ matching: id, maxDistance: SEEN_RADIUS, count: SEEN_CAP }).length;
+      byBlock.set(block, (seen = Math.max(near, frontier.chunksWithMaterial(block))));
+    }
+    return seen;
+  };
+  return (item) => Math.max(0, ...sourcesOf(item, bot.version).map(({ block }) => blockSeen(block)));
+}
 
 /**
  * Records loaded chunks, useful material sets, and counted biome samples.
@@ -187,6 +219,16 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
       error: storageError ?? scanErrors.values().next().value ?? null,
     }),
     idle: () => processingPromise ?? Promise.resolve(),
+    chunksWithMaterial: (material): number => {
+      const dimension = bot.game.dimension;
+      const row = data.read(
+        `SELECT COUNT(*) AS count FROM frontier_chunk_materials AS m JOIN frontier_chunks AS c USING (chunk_key)
+         WHERE m.material = ? AND c.dimension = ?`,
+        material,
+        dimension,
+      )[0];
+      return Number(row?.count ?? 0);
+    },
     boundary: (dimension, direction): number | null => {
       const row = data.read(
         `

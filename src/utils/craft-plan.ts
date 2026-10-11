@@ -50,6 +50,12 @@ export interface CraftPlanOptions {
    * rather than the first wood in registry order. Unknown names are ignored.
    */
   readonly prefer?: readonly string[];
+  /**
+   * How much of an item the explored world has (chunks holding its sources; 0 when none seen). Among plans equally
+   * short of what is carried, the one whose missing materials are seen most wins, and a material seen nowhere comes
+   * last (run 10: a stone pickaxe planned cobbled_deepslate, which nobody had seen, over cobblestone).
+   */
+  readonly seen?: (item: string) => number;
 }
 
 interface PlanningState {
@@ -61,6 +67,8 @@ interface PlanningState {
   readonly applications: CraftApplication[];
   /** Item id -> rank among the caller's preferred materials (0 first); shared, never copied. */
   readonly prefer: ReadonlyMap<number, number>;
+  /** Item id -> how much of it the explored world has, when the caller knows; shared, never copied. */
+  readonly seen: ((itemId: number) => number) | null;
 }
 
 type ItemSource =
@@ -98,6 +106,7 @@ function copyState(state: PlanningState): PlanningState {
     missing: new Map(state.missing),
     applications: [...state.applications],
     prefer: state.prefer,
+    seen: state.seen,
   };
 }
 
@@ -120,19 +129,24 @@ function recipeInputs(recipe: MineflayerRecipe): readonly { id: number; count: n
  * table and a pickaxe were reported as one missing pale_oak_log, the first
  * planks recipe in registry order, and a gatherer then looked for pale oak in
  * an oak forest. A material it already carries is the one it can find again. Carrying none of them, the caller's
- * preferred materials come next, in its order (live 3 October: carrying nothing, a stone pickaxe was still "3
+ * explored world has the most of comes next (items seen nowhere last), then the caller's preferred materials, in its order (live 3 October: carrying nothing, a stone pickaxe was still "3
  * pale_oak_log", and the gatherer walked 900 blocks for them past oak and birch).
  */
-function missingScore(state: PlanningState): readonly [number, number, number, number, number] {
+function missingScore(state: PlanningState): readonly [number, number, number, number, number, number, number] {
   let missingUnits = 0;
   let unfamiliarUnits = 0;
+  let unseenUnits = 0;
+  let seenTotal = 0;
   let unpreferred = 0;
   for (const [itemId, count] of state.missing) {
     missingUnits += count;
     if (!state.carried.has(itemId)) unfamiliarUnits += count;
+    const seen = state.seen?.(itemId) ?? 1;
+    if (seen === 0) unseenUnits += count;
+    seenTotal += state.seen === null ? 0 : seen;
     unpreferred += count * (state.prefer.get(itemId) ?? state.prefer.size);
   }
-  return [missingUnits, unfamiliarUnits, unpreferred, state.missing.size, state.applications.length];
+  return [missingUnits, unfamiliarUnits, unseenUnits, -seenTotal, unpreferred, state.missing.size, state.applications.length];
 }
 
 function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidate | null): boolean {
@@ -323,8 +337,15 @@ export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarge
     const id = bot.registry.itemsByName[name]?.id;
     if (id !== undefined && !prefer.has(id)) prefer.set(id, prefer.size);
   }
+  const seenBy = new Map<number, number>();
+  const seen = options.seen === undefined ? null : (itemId: number): number => {
+    let chunks = seenBy.get(itemId);
+    if (chunks === undefined) seenBy.set(itemId, (chunks = options.seen!(itemName(bot, itemId))));
+    return chunks;
+  };
   let state: PlanningState = {
     prefer,
+    seen,
     available,
     craftedSurplus: new Map(),
     required: new Map(),

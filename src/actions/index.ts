@@ -12,7 +12,7 @@ import type { Bot } from "mineflayer";
 import { snapshotBotStatus, updateBotStatus, type SqlBotData } from "../bot-data/index.js";
 import type { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import type { NavigationRuntime } from "../navigation/index.js";
-import type { SessionFrontier } from "../runtime/frontier.js";
+import { seenInWorld, type SessionFrontier } from "../runtime/frontier.js";
 import type { ForegroundCancellation } from "../session/action-runner.js";
 import type { CombatController } from "../survival/index.js";
 import { createDiscardedItems } from "../world/discarded-items.js";
@@ -106,7 +106,8 @@ export function createActions(
     createTendCropsAction(bot, navigation),
     createCancelForegroundAction(cancelForegroundAction),
     createCollectBlockAction(bot, navigation, discarded),
-    createCraftItemAction(bot, navigation),
+    // A new measure per question: what is near the bot changes as it moves.
+    createCraftItemAction(bot, navigation, (item) => seenInWorld(bot, frontier)(item)),
     createDropItemAction(bot, navigation, discarded),
     createBarterAction(bot, navigation),
     createEatFoodAction(bot),
@@ -135,7 +136,7 @@ export function createActions(
     createUseBucketAction(bot, navigation),
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
-    createViewCraftingRequirementsAction(bot),
+    createViewCraftingRequirementsAction(bot, (item) => seenInWorld(bot, frontier)(item)),
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),

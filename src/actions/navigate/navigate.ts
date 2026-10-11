@@ -21,6 +21,8 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { feetAtSea } from "../../navigation/mineflayer/movement-policy.js";
+import { holdsWater } from "../../navigation/world/deep-water.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
 
 /** Deep-water crossings one request makes by boat: there and on to the far side, then once more at most. */
@@ -95,6 +97,12 @@ function targetSupported(bot: Bot, target: { x: number; y: number; z: number }, 
 /** How far around a watery target the existing shore search looks. */
 const SHORE_SEARCH_RADIUS = 8;
 
+/**
+ * How far from a bot at sea, without a boat, dry land is looked for before the asked route (run 10: Ayla, left
+ * standing in the water, swam ~1500 blocks because the planner allows deep water for a bot already out on it).
+ */
+const LAND_SEARCH = 32;
+
 type SurfaceObservation =
   | { readonly kind: "surface"; readonly y: number; readonly name: string; readonly solid: boolean }
   | { readonly kind: "ambiguous"; readonly observation: string; readonly floors: readonly number[] };
@@ -130,20 +138,22 @@ function surfaceAt(bot: Bot, x: number, z: number): SurfaceObservation | null {
  * bucket deaths in the playthroughs began with a walk to "the water at x,z",
  * which the ground goal resolved to the lake bed.
  */
-function shoreNear(bot: Bot, target: { x: number; z: number }): { x: number; z: number } | null {
+function shoreNear(bot: Bot, target: { x: number; z: number }, reach = SHORE_SEARCH_RADIUS): { x: number; z: number } | null {
   const surface = surfaceAt(bot, target.x, target.z);
   if (!surface || surface.kind === "ambiguous" || surface.solid) return target;
-  for (let radius = 1; radius <= SHORE_SEARCH_RADIUS; radius += 1) {
+  for (let radius = 1; radius <= reach; radius += 1) {
+    let nearest: { x: number; z: number } | null = null;
     for (let dx = -radius; dx <= radius; dx += 1) {
       for (let dz = -radius; dz <= radius; dz += 1) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
         const x = target.x + dx;
         const z = target.z + dz;
         const candidate = surfaceAt(bot, x, z);
-        if (candidate?.kind === "surface" && candidate.solid && standable(bot, new Vec3(x, candidate.y + 1, z)))
-          return { x, z };
+        if (candidate?.kind === "surface" && candidate.solid && standable(bot, new Vec3(x, candidate.y + 1, z)) &&
+          (nearest === null || Math.hypot(dx, dz) < Math.hypot(nearest.x - target.x, nearest.z - target.z))) nearest = { x, z };
       }
     }
+    if (nearest !== null) return nearest;
   }
   return null;
 }
@@ -241,6 +251,7 @@ function beginNavigate(
   observe: ObserveRequest = () => {},
   crossings = 0,
   climbed = false,
+  unbudgeted = false,
 ) {
   const toolLoss = request.dig ? observeToolTierLoss(bot) : null;
   lifetime.addEventListener("abort", () => toolLoss?.close(), { once: true });
@@ -282,7 +293,35 @@ function beginNavigate(
       ? `[NAVIGATION_PORTAL_INTENT_REQUIRED] Use ${block.name === "end_portal" ? "enter_end_portal" : "enter_nether_portal"} to enter this active portal.`
       : null;
   };
+  // The swim to land and a swim that started with no land in reach are not held to the swim budget.
+  let swimFree = unbudgeted;
+  let landLeg: Vec3 | null = null;
+  let landLegMs = 0;
+  /** The route, led by a swim to the nearest land when the bot starts at sea with no boat. */
   return async (context: ActionContext): Promise<NavigateResult> => {
+    if (crossings === 0 && !carriesBoat(bot) && standsAtSea(bot)) {
+      const land = shoreNear(bot, bot.entity.position.floored(), LAND_SEARCH);
+      const ground = land === null ? null : surfaceAt(bot, land.x, land.z);
+      if (land !== null && ground?.kind === "surface") {
+        const spot = new Vec3(land.x, ground.y + 1, land.z);
+        const leg = await beginNavigate(bot, { ...request, ...spot, range: 1 }, dependencies, lifetime, () => {}, MAX_CROSSINGS, false, true)(context);
+        if (leg.status !== "succeeded") {
+          return { ...leg, error: `${leg.error} (the swim to land at ${spot.x}, ${spot.y}, ${spot.z} came first)`, navigation: { ...leg.navigation, start } };
+        }
+        landLeg = spot;
+        landLegMs = leg.navigation.elapsedMs;
+      } else swimFree = true;
+    }
+    const result = await route0(context);
+    if (landLeg === null) return result;
+    const swam = `swam to land at ${landLeg.x}, ${landLeg.y}, ${landLeg.z} first`;
+    const navigation = { ...result.navigation, start, landLeg: { x: landLeg.x, y: landLeg.y, z: landLeg.z }, elapsedMs: result.navigation.elapsedMs + landLegMs };
+    return result.status === "failed" || result.status === "partial"
+      ? { ...result, error: `${result.error} (${swam})`, navigation }
+      : { ...result, navigation };
+  };
+
+  async function route0(context: ActionContext): Promise<NavigateResult> {
     const startedAt = Date.now();
     context.signal?.throwIfAborted();
     const problem = portalProblem();
@@ -417,7 +456,9 @@ function beginNavigate(
       }
     }
 
+    const swim = swimFree || carriesBoat(bot) ? null : watchSwim(bot);
     try {
+      const stopSignals = [toolLoss?.signal, swim?.signal].filter((signal) => signal !== undefined);
       const attempt = (scaffoldFallback: boolean) =>
         dependencies.navigate({
           movements: dependencies.createMovements(bot, {
@@ -427,7 +468,7 @@ function beginNavigate(
           }),
           goal,
           signal: context.signal,
-          ...(toolLoss && { stopSignal: toolLoss.signal }),
+          ...(stopSignals.length > 0 && { stopSignal: AbortSignal.any(stopSignals) }),
           ...(toolLoss && { onToolSelected: toolLoss.select }),
         });
       route = await attempt(false);
@@ -469,6 +510,10 @@ function beginNavigate(
       };
     }
 
+    finally {
+      swim?.close();
+    }
+
     elapsedMs += route.elapsedMs;
     // Deep under the ground with the way on far above, a route through the rock stalls (live 2026-10-04: Ayla, at y 1,
     // saw every route to the surface 30 blocks off stop "planning_stalled" for 15 minutes; one straight up worked):
@@ -501,6 +546,10 @@ function beginNavigate(
         navigation: evidence,
       };
     }
+    const swum = swim?.exceeded();
+    if (swum && route.status === "stopped") {
+      return { status: "failed", error: navigateOutcomes.deepWater(request, swum.start, swum.blocks), navigation: evidence };
+    }
     if (route.status === "stopped") {
       const stopped: NavigateResult = { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
       return (await climbOut(stopped)) ?? overWater(stopped);
@@ -521,7 +570,61 @@ function beginNavigate(
       });
     }
     return { status: "succeeded", navigation: evidence };
+  }
+}
+
+/**
+ * More than this many blocks swum in a row through deep open water with no boat stops the route (run 10: Ayla swam
+ * ~1500 blocks of sea; nothing measured the water during a route, only after it stopped).
+ */
+const SWIM_BUDGET = 32;
+
+/**
+ * Counts the blocks the bot moves in a row with its feet in deep open water; past {@link SWIM_BUDGET} its signal
+ * aborts, to stop the route. Reaching shallows or land starts the count over.
+ */
+function watchSwim(bot: Bot) {
+  const stop = new AbortController();
+  let last = bot.entity.position.clone();
+  let cell = "";
+  let atSea = false;
+  let start: Vec3 | null = null;
+  let swum = 0;
+  const onMove = () => {
+    const here = bot.entity.position;
+    const moved = Math.hypot(here.x - last.x, here.z - last.z);
+    last = here.clone();
+    const feet = here.floored();
+    const key = `${feet.x},${feet.y},${feet.z}`;
+    if (key !== cell) {
+      cell = key;
+      atSea = standsAtSea(bot);
+    }
+    if (!atSea) {
+      start = null;
+      swum = 0;
+      return;
+    }
+    start ??= feet;
+    swum += moved;
+    if (swum > SWIM_BUDGET && !stop.signal.aborted) stop.abort("[NAVIGATION_DEEP_WATER] swim budget spent");
   };
+  bot.on("move", onMove);
+  return {
+    signal: stop.signal,
+    close: () => void bot.off("move", onMove),
+    exceeded: () => (stop.signal.aborted && start !== null ? { start, blocks: Math.floor(swum) } : null),
+  };
+}
+
+/** Whether the bot's feet are in deep open water, by the same test the movement policy's sea exception uses. */
+function standsAtSea(bot: Bot): boolean {
+  const water = (x: number, y: number, z: number) => {
+    const block = bot.blockAt(new Vec3(x, y, z));
+    return block !== null && holdsWater(block.name, block.getProperties?.() ?? {});
+  };
+  const feet = bot.entity.position.floored();
+  return feetAtSea(water, feet, (x, y, z) => bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block");
 }
 
 export function formatNavigateResult(result: NavigateResult): string {
@@ -533,6 +636,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Target: \`${navigation.target.x}, ${navigation.target.y ?? "ground"}, ${navigation.target.z}\``,
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
+    ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,
     "- Scaffold stocks:",
     ...navigation.scaffolding.map(

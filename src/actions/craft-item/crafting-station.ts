@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { planCraftingFromInventory, type CraftPreparation, type CraftTarget } from "../../utils/craft-plan.js";
+import { planCraftingFromInventory, type CraftPlanOptions, type CraftPreparation, type CraftTarget } from "../../utils/craft-plan.js";
 import type { Position3 } from "../../utils/index.js";
 import { carriedCount, placeCarriedBlockNearby, settleInventoryCount, type WorldBlock } from "../../world/index.js";
 import { executeCraftPlan } from "../../world/crafting.js";
@@ -21,6 +21,7 @@ export async function prepareCraftingStation(
   items: readonly CraftTarget[],
   required: boolean,
   signal?: AbortSignal,
+  planOptions: CraftPlanOptions = {},
 ): Promise<CraftingStation> {
   if (!required) return { kind: "ready", craftingTable: null, usedCarriedTable: 0 };
   const nearby = bot.findBlock({ matching: bot.registry.blocksByName.crafting_table!.id, maxDistance: 4 });
@@ -29,9 +30,9 @@ export async function prepareCraftingStation(
   if (carriedBefore === 0) {
     const definition = bot.registry.itemsByName.crafting_table!;
     const table = { id: definition.id, name: definition.name, count: 1 };
-    const joint = planCraftingFromInventory(bot, [table, ...items]);
+    const joint = planCraftingFromInventory(bot, [table, ...items], planOptions);
     if (joint.kind !== "ready") return { kind: "plan_failed", preparation: joint };
-    const bootstrap = planCraftingFromInventory(bot, [table]);
+    const bootstrap = planCraftingFromInventory(bot, [table], planOptions);
     if (bootstrap.kind !== "ready") return { kind: "plan_failed", preparation: bootstrap };
     const made = await executeCraftPlan(bot, bootstrap.applications, null, signal);
     if (made.kind === "failed") return { kind: "failed", error: craftItemOutcomes.executionFailed(made.cause, carriedCount(bot, "unknown")) };

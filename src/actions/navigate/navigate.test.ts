@@ -20,7 +20,7 @@ function botFixture(groundY = 64) {
     ["dirt", 4],
     ["cobblestone", 11],
   ]);
-  const bot = {
+  const bot = Object.assign(new EventEmitter(), {
     blockAt: (cell: Vec3) =>
       cell.y < groundY
         ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
@@ -44,7 +44,7 @@ function botFixture(groundY = 64) {
       items: () => [...inventory].map(([name, count]) => ({ name, count })),
       count: (itemId: number) => inventory.get(itemId === 1 ? "dirt" : itemId === 2 ? "cobblestone" : "") ?? 0,
     },
-  } as unknown as Bot;
+  }) as unknown as Bot;
   return { bot, inventory };
 }
 
@@ -611,4 +611,140 @@ test("a route with no path is not replanned with a fallback when the policy list
   ), movementOptions));
   await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1 });
   assert.equal(movementOptions.length, 1);
+});
+
+/** A wide sea (water y 50 to 63, surface 63) from x -30 to 9, land (stone up to 63) beyond it on both sides. */
+function wideSeaBot(seaFrom = -30, seaTo = 9) {
+  const { bot, inventory } = botFixture();
+  bot.blockAt = ((cell: Vec3) => {
+    if (cell.x >= seaFrom && cell.x <= seaTo && cell.y >= 50 && cell.y <= 63) return { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+    return cell.y < 64
+      ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
+      : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+  }) as unknown as Bot["blockAt"];
+  bot.entity.position.set(0.5, 63, 0.5);
+  return { bot, inventory };
+}
+
+test("at sea with no boat the bot swims to the nearest land first, then the deep-water guard refuses the crossing", async () => {
+  const { bot } = wideSeaBot();
+  const goals: Array<{ x: number; z: number }> = [];
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ goal }) => {
+    calls++;
+    goals.push(goal as unknown as { x: number; z: number });
+    if (calls === 1) {
+      bot.entity.position.set(10.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 5 };
+    }
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.equal(calls, 2);
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? String(output.result.error) : "";
+  assert.match(error, /\[NAVIGATION_DEEP_WATER\]/u);
+  assert.match(error, /swam to land at 10, 64, 0 first/u);
+});
+
+test("at sea with no land within the search range the route goes as before", async () => {
+  const { bot } = wideSeaBot(-200, 200);
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -300, y: 64, z: 0 });
+  assert.equal(calls, 1);
+  assert.equal(output.result.status, "failed");
+  assert.doesNotMatch("error" in output.result ? String(output.result.error) : "", /swam to land/u);
+});
+
+test("at sea with a boat carried the route is unchanged: no land leg", async () => {
+  const { bot } = wideSeaBot();
+  (bot.inventory as { items: () => unknown }).items = () => [{ name: "oak_boat", count: 1 }];
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.equal(calls, 1);
+});
+
+test("a bot on land is not sent to land first", async () => {
+  const { bot } = wideSeaBot();
+  bot.entity.position.set(20.5, 64, 0.5);
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.equal(calls, 1);
+});
+
+/** A sea from x 0 to `seaTo` (water y 50 to 63), land either side; the bot on the west shore. */
+function swimBot(seaTo = 60) {
+  const { bot } = wideSeaBot(0, seaTo);
+  bot.entity.position.set(-5.5, 64, 0.5);
+  return bot;
+}
+
+/** A walk that swims east `blocks` blocks from the bot's place, one block per move, until told to stop. */
+function swimming(bot: Bot, blocks: number, seaTo = 60) {
+  const walk = { stoppedAt: null as number | null };
+  const navigate: NavigateDependencies["navigate"] = async ({ stopSignal }) => {
+    for (let moved = 0; moved < blocks; moved++) {
+      const x = bot.entity.position.x + 1;
+      bot.entity.position.set(x, x > seaTo + 1 ? 64 : 63, 0.5);
+      bot.emit("move", bot.entity.position);
+      if (stopSignal?.aborted) {
+        walk.stoppedAt = x;
+        return { status: "stopped", reason: String(stopSignal.reason), elapsedMs: 5 };
+      }
+    }
+    return { status: "completed", elapsedMs: 5 };
+  };
+  return { navigate, walk };
+}
+
+test("a route swimming more than the swim budget through deep open water with no boat stops with the deep-water outcome", async () => {
+  const bot = swimBot();
+  const { navigate, walk } = swimming(bot, 40);
+  const output = await new ActionRunner().run(createNavigateAction(bot, fakeNavigation, dependencies(navigate)), { x: 80, y: 64, z: 0 });
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? String(output.result.error) : "";
+  assert.match(error, /^\[NAVIGATION_DEEP_WATER\] The way to 80, 0 crosses deep open water from about \d+, 0 \(33\+ blocks of it seen\)/u);
+  assert.ok(walk.stoppedAt !== null && walk.stoppedAt < 36, `stopped at ${walk.stoppedAt}`);
+});
+
+test("a swim of 20 blocks through deep water is within the budget", async () => {
+  const bot = swimBot(19);
+  const { navigate, walk } = swimming(bot, 26, 19);
+  const output = await new ActionRunner().run(createNavigateAction(bot, fakeNavigation, dependencies(navigate)), { x: 20, y: 64, z: 0 });
+  assert.equal(output.result.status, "succeeded", "error" in output.result ? String(output.result.error) : "");
+  assert.equal(walk.stoppedAt, null);
+});
+
+test("the swim budget does not apply with a boat carried", async () => {
+  const bot = swimBot();
+  (bot.inventory as { items: () => unknown }).items = () => [{ name: "oak_boat", count: 1 }];
+  const { navigate, walk } = swimming(bot, 40);
+  await new ActionRunner().run(createNavigateAction(bot, fakeNavigation, dependencies(navigate)), { x: 80, y: 64, z: 0 });
+  assert.equal(walk.stoppedAt, null);
+});
+
+test("the swim to land and a swim with no land in reach are not stopped by the budget", async () => {
+  // Land leg: the nearest land is 40 blocks of sea away on the west side.
+  const near = wideSeaBot(-39, 60);
+  near.bot.entity.position.set(0.5, 63, 0.5);
+  const leg = swimming(near.bot, 40);
+  await new ActionRunner().run(createNavigateAction(near.bot, fakeNavigation, dependencies(leg.navigate)), { x: 80, y: 64, z: 0 });
+  assert.equal(leg.walk.stoppedAt, null);
+  // The open sea: no land within reach, the route goes as today.
+  const open = wideSeaBot(-200, 200);
+  const sea = swimming(open.bot, 40);
+  await new ActionRunner().run(createNavigateAction(open.bot, fakeNavigation, dependencies(sea.navigate)), { x: 210, y: 64, z: 0 });
+  assert.equal(sea.walk.stoppedAt, null);
 });

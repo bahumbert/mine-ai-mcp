@@ -34,6 +34,7 @@ function frontierFixture(initialBoundary = 0): TestFrontier {
     status: () => ({ observedChunks, pendingChunks: 0, error }),
     idle: async () => {},
     boundary: () => currentBoundary,
+    chunksWithMaterial: () => 0,
     onRecorded: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
