@@ -732,7 +732,7 @@ function craftOrders(t: Parameters<typeof agentFor>[0]) {
     await until(() => runtime.said.length === said);
     return tiers.action.requests.slice(before).map((request) => request.at(-1)?.content ?? "");
   };
-  return { order };
+  return { order, runtime };
 }
 
 const CRAFT = { step: { skill: "craft_item", item: "cooked_beef", count: 3 } };
@@ -752,15 +752,74 @@ test("a step that failed twice is refused every time, for any objective, until t
   const { order } = craftOrders(t);
   await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
   // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
-  const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT, CRAFT, CRAFT, CRAFT);
+  const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
   assert.match(prompts[0] ?? "", /- craft 3 cooked_beef, 1 minute ago, for "cook 3 beef"/u);
   assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago, for "make me cooked beef then" \(refused now\)/u);
   assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
-  assert.equal(prompts.length, 7, "refused at every try until the objective ended");
+  assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
   offset = 31 * 60_000;
   const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
   assert.doesNotMatch(later[0] ?? "", /failed lately/u);
   assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
+});
+
+test("a step refused three times ends the objective as failed; the count restarts when the step is allowed and runs", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.failures.craft_item = "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef.";
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  const ended = () => events.filter((event) => event.kind === "objective" && event.event === "finished");
+  chat.reply({ say: "Okay!", route: "act", request: "cook 3 beef" }, { say: "No." });
+  // Two failures, then the third send is refused three times in a row: the objective ends.
+  action.reply(CRAFT, CRAFT, CRAFT, CRAFT, CRAFT);
+  await agent.handle(say("Steve", "cook me 3 beef"));
+  await until(() => ended().length === 1);
+  const first = ended()[0];
+  assert.equal(first?.kind === "objective" && first.outcome, "failed");
+  assert.match(first?.kind === "objective" ? first.detail ?? "" : "", /^"craft 3 cooked_beef" was refused 3 times: it failed 2 times lately \(\[ITEMS_NOT_CRAFTABLE\][^)]*\) and nothing changed since$/u);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 2);
+});
+
+test("the refusal count of a step restarts when the step is allowed and runs", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.failures.craft_item = "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef.";
+  const { agent, events, chat, action } = journaledAgent(t, runtime, { settings: { ...testPersona().settings, maxSameStepInARow: 10 } });
+  runtime.simulateInventory = true;
+  const DIRT = { step: { skill: "collect_block", block: "dirt", count: 1 } };
+  chat.reply({ say: "Okay!", route: "act", request: "cook 3 beef" }, { say: "Cooked!" });
+  // Fails twice, refused once, then the dirt changes the inventory: allowed, runs (fails), and two more refusals make
+  // 2, not 3 (1 + 2 would have ended the objective).
+  action.reply(CRAFT, CRAFT, CRAFT, DIRT, CRAFT, CRAFT, CRAFT, { done: "ok" });
+  await agent.handle(say("Steve", "cook me 3 beef"));
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  const finished = events.find((event) => event.kind === "objective" && event.event === "finished");
+  assert.equal(finished?.kind === "objective" && `${finished.outcome}: ${finished.detail}`, "done: ok");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 3);
+});
+
+test("a refused step is allowed again when the inventory changed or the bot moved 8 blocks since its last failure (rule 2)", async (t) => {
+  const { order, runtime } = craftOrders(t);
+  const crafts = () => runtime.submitted.filter((call) => call.tool === "craft_item").length;
+  await order("cook 3 beef", CRAFT, CRAFT, { give_up: "No recipe." });
+  assert.equal(crafts(), 2);
+  const unchanged = await order("cook some beef", CRAFT, CRAFT, CRAFT);
+  assert.match(unchanged[0] ?? "", /\(refused now\)/u);
+  assert.equal(crafts(), 2, "nothing changed: refused");
+  runtime.addItem("oak_log", 1);
+  const carried = await order("cook the beef", CRAFT, { give_up: "No recipe." });
+  assert.match(carried[0] ?? "", /\(allowed again: your inventory or place changed since\)/u);
+  assert.equal(crafts(), 3, "the inventory changed: it ran");
+  // That run failed again with the new inventory as its state: refused again until something else changes.
+  const again = await order("cook beef now", CRAFT, CRAFT, CRAFT);
+  assert.match(again[0] ?? "", /\(refused now\)/u);
+  assert.equal(crafts(), 3);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 7, y: 64, z: 0 } };
+  const near = await order("cook beef please", CRAFT, CRAFT, CRAFT);
+  assert.match(near[0] ?? "", /\(refused now\)/u);
+  assert.equal(crafts(), 3, "7 blocks away is still the same place");
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 0 } };
+  const moved = await order("cook beef then", CRAFT, { give_up: "No recipe." });
+  assert.match(moved[0] ?? "", /\(allowed again: your inventory or place changed since\)/u);
+  assert.equal(crafts(), 4, "8 blocks away: it ran");
 });
 
 const HUNT = { step: { skill: "hunt", mob: "glow_squid", drop: "ink_sac", count: 8 } };
@@ -778,6 +837,48 @@ test("a step out to obtain items that gains none for the whole window is stopped
   await until(() => runtime.said.length === 2, 5_000);
   assert.equal(runtime.cancelled.length, 1, "the hunt was stopped");
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> failed: nothing gained in 0\.002 minutes: 0 of 8 ink_sac so far \(the rest is in your inventory\)/u);
+});
+
+/** A fetch for logs seen 900 blocks away: nothing near, so it walks there (the first `navigate` takes `duration` polls, later ones none) before gathering. */
+function farFetch(duration: number) {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.walkOnNavigate = true;
+  const submit = runtime.submit.bind(runtime);
+  let trips = 0;
+  runtime.submit = (tool, input) => {
+    if (tool === "navigate") runtime.durations.navigate = trips++ === 0 ? duration : 0;
+    return submit(tool, input);
+  };
+  runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either." };
+  runtime.seen = { oak_log: { dimension: "overworld", x: 900, z: 0 } };
+  return runtime;
+}
+const FETCH = { step: { skill: "get_items", items: [{ item: "oak_log", count: 2 }] } };
+
+test("a fetch travelling to the place it saw the block gets nearer: that is progress for the no-gain stop (live 2026-10-10 run 9: Kenji's boat trip)", async (t) => {
+  const runtime = farFetch(400);
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  // 20 blocks nearer every 30 ms against a 120 ms window: no item rises for 400 ms, yet it is not stopped.
+  const walking = setInterval(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
+  t.after(() => clearInterval(walking));
+  chat.reply({ say: "Okay!", route: "act", request: "get 2 oak_log" }, { say: "Got them!" });
+  action.reply(FETCH, { done: "got the logs" });
+  await agent.handle(say("Steve", "get me 2 oak logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 0, "getting nearer is progress");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2, "it arrived and gathered");
+});
+
+test("a fetch travelling that gets no nearer is stopped after the window, as before", async (t) => {
+  const runtime = farFetch(100_000);
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  chat.reply({ say: "Okay!", route: "act", request: "get 2 oak_log" }, { say: "Stuck, sorry!" });
+  action.reply(FETCH, { give_up: "stuck" });
+  await agent.handle(say("Steve", "get me 2 oak logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 1, "the walk was stopped");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /get 2 oak_log -> failed: nothing gained in 0\.002 minutes: 0 of 2 oak_log so far/u);
 });
 
 test("a step whose items keep increasing is not stopped, and one without target items is never sampled", async (t) => {

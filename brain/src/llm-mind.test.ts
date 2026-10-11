@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
-import type { ChatInput, GoalInput, WorkInput } from "./mind.ts";
+import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
 import { stepKey } from "./actions.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
@@ -636,7 +636,7 @@ test("a \"for\" outside the available activities is no purpose", async () => {
 test("a step that failed once is shown and runs when sent again; failed twice, it is refused every time", async () => {
   // Live 2026-10-10, run 6: sent back once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times.
   const craft = { skill: "craft_item", item: "cooked_beef", count: 6 } as const;
-  const once = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.", objective: "Cook some food", minutesAgo: 4, count: 1 };
+  const once = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.", objective: "Cook some food", minutesAgo: 4, count: 1, changed: false };
   const first = scriptedMind();
   first.action.reply({ thought: "Cook it.", step: craft });
   assert.deepEqual(await first.mind.next(workInput("Cook beef in the furnace", { earlierFailures: [once] }), signal), { kind: "step", step: craft, thought: "Cook it." });
@@ -645,9 +645,9 @@ test("a step that failed once is shown and runs when sent again; failed twice, i
   const twice = { ...once, count: 2 };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const refused = scriptedMind();
-    refused.action.reply({ thought: "Again.", step: craft }, { thought: "Again.", step: craft }, { thought: "Again.", step: craft });
-    await assert.rejects(refused.mind.next(workInput("Cook beef in the furnace", { earlierFailures: [twice] }), signal), /LLM_BAD_REPLY/u);
-    assert.equal(refused.action.requests.length, 3, "refused at every try, until the repair rounds run out");
+    refused.action.reply({ thought: "Again.", step: craft }, { thought: "Again.", step: craft }, { thought: "Again.", step: { skill: "collect_block", block: "oak_log", count: 1 } });
+    assert.equal((await refused.mind.next(workInput("Cook beef in the furnace", { earlierFailures: [twice] }), signal)).kind, "step");
+    assert.equal(refused.action.requests.length, 3, "refused at every try, until another step is chosen");
     assert.match(refused.action.requests[1]?.at(-1)?.content ?? "", /"craft 6 cooked_beef" failed 2 times in the last 30 minutes, the last 4 minutes ago.*Smelted in a furnace instead.*refused: choose a different step, or give this objective up/u);
   }
   const shown = scriptedMind();
@@ -656,9 +656,42 @@ test("a step that failed once is shown and runs when sent again; failed twice, i
   assert.match(shown.action.requests[0]?.[1]?.content ?? "", /- craft 3 cooked_beef, failed 2 times, the last 4 minutes ago, for "Cook some food" \(refused now\)/u);
 });
 
+test("a step that failed twice is allowed again once the inventory or the place changed since (rule 2)", async () => {
+  const craft = { skill: "craft_item", item: "cooked_beef", count: 6 } as const;
+  const twice = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] no recipe", objective: "Cook some food", minutesAgo: 4, count: 2, changed: true };
+  const allowed = scriptedMind();
+  allowed.action.reply({ thought: "Again.", step: craft });
+  assert.deepEqual(await allowed.mind.next(workInput("Cook beef", { earlierFailures: [twice] }), signal), { kind: "step", step: craft, thought: "Again." });
+  assert.equal(allowed.action.requests.length, 1, "accepted at once, not sent back");
+  const prompt = allowed.action.requests[0]?.[1]?.content ?? "";
+  assert.match(prompt, /- craft 3 cooked_beef, failed 2 times, the last 4 minutes ago, for "Cook some food" \(allowed again: your inventory or place changed since\)/u);
+  assert.doesNotMatch(prompt, /refused now/u);
+});
+
+test("a step refused three times without a run in between ends the objective, across repair rounds and calls; a run resets nothing here (the agent does)", async () => {
+  assert.equal(MAX_REFUSALS, 3);
+  const craft = { skill: "craft_item", item: "cooked_beef", count: 6 } as const;
+  const twice = { step: "craft 3 cooked_beef", key: stepKey({ ...craft, count: 3 }), detail: "[ITEMS_NOT_CRAFTABLE] no recipe", objective: "Cook some food", minutesAgo: 4, count: 2, changed: false };
+  const other = { skill: "collect_block", block: "oak_log", count: 1 } as const;
+  const stuck = scriptedMind();
+  stuck.action.reply({ thought: "Again.", step: craft }, { thought: "Again.", step: craft }, { thought: "Again.", step: craft });
+  const decision = await stuck.mind.next(workInput("Cook beef", { earlierFailures: [twice] }), signal);
+  assert.deepEqual(decision, { kind: "give_up", reason: '"craft 6 cooked_beef" was refused 3 times: it failed 2 times lately ([ITEMS_NOT_CRAFTABLE] no recipe) and nothing changed since' });
+  assert.equal(stuck.action.requests.length, 3);
+  // The count belongs to the agent's work, shared by separate calls; another step in between does not reset it.
+  const refused = new Map<string, number>();
+  const spread = scriptedMind();
+  spread.action.reply({ thought: "Again.", step: craft }, { thought: "Other.", step: other }, { thought: "Again.", step: craft }, { thought: "Again.", step: craft });
+  const input = workInput("Cook beef", { earlierFailures: [twice], refused });
+  assert.equal((await spread.mind.next(input, signal)).kind, "step");
+  assert.equal(refused.get(twice.key), 1);
+  assert.equal((await spread.mind.next(input, signal)).kind, "give_up");
+  assert.equal(refused.get(twice.key), 3);
+});
+
 test("a step unlike the ones that failed lately is not sent back; counts aside, the same thing is the same step", async () => {
   const { action, mind } = scriptedMind();
-  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), detail: "no recipe", objective: "Cook", minutesAgo: 2, count: 2 };
+  const earlier = { step: "craft 3 cooked_beef", key: stepKey({ skill: "craft_item", item: "cooked_beef", count: 3 }), detail: "no recipe", objective: "Cook", minutesAgo: 2, count: 2, changed: false };
   action.reply({ thought: "Furnace.", step: { skill: "get_items", items: [{ item: "cooked_beef", count: 3 }] } });
   assert.equal((await mind.next(workInput("Cook beef", { earlierFailures: [earlier] }), signal)).kind, "step");
   assert.equal(action.requests.length, 1);

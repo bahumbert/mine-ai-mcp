@@ -30,6 +30,8 @@ export interface GatherContext {
    * can say it (owner, 2026-10-02: under an order, she says what she does and why).
    */
   readonly progress?: (fact: string) => void;
+  /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
+  readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
 }
 
 export type GatherResult =
@@ -640,7 +642,9 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     context.progress?.(`going ${describeWay(here, seen)} to the ${block} seen there, for ${purpose}`);
     const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
     // Caves under the ground, trees over it: the walk is to the ground nearest her own height (as `explore` does).
+    context.heading?.({ x: seen.x, z: seen.z });
     const there = await act(context, "navigate", { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
+    context.heading?.(null);
     if (there !== null) {
       last = there;
       continue;

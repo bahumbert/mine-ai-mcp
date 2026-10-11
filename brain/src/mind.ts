@@ -115,6 +115,10 @@ export interface StepRecord {
 /** How long a failed step is remembered, and how many failures in that time refuse it (owner, 2026-10-10: one retry). */
 export const FAILED_STEP_MINUTES = 30;
 export const MAX_STEP_FAILURES = 2;
+/** Refusals of the same step (none of it run in between) that end the objective (owner, 2026-10-11, rule 2). */
+export const MAX_REFUSALS = 3;
+/** How far it must have moved since a step last failed for the step to be allowed again. */
+export const MOVED_BLOCKS = 8;
 
 /** A step that failed lately, for any objective (its key from `stepKey`); its second failure refuses it. */
 export interface EarlierFailure {
@@ -125,6 +129,8 @@ export interface EarlierFailure {
   readonly minutesAgo: number;
   /** How many times it failed in the last {@link FAILED_STEP_MINUTES} minutes (the latest is the one shown). */
   readonly count: number;
+  /** The inventory or the position differs from the state after its last failure: a refused step is then allowed again. */
+  readonly changed: boolean;
 }
 
 export interface WorkInput {
@@ -142,6 +148,8 @@ export interface WorkInput {
   readonly earlierFailures?: readonly EarlierFailure[];
   /** It owns a house with temporary parts: only then is `improve_house` offered in the skill list. */
   readonly ownsTemporaryHouse?: boolean;
+  /** Step key -> refusals since that step last ran; mutable, owned by the agent's work for this objective (counted here, reset there). */
+  readonly refused?: Map<string, number>;
 }
 
 /** The work tier's answer: the next step, or the objective is over. */

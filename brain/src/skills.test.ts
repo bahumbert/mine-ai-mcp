@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stepSchema } from "./actions.ts";
+import { describeStep, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -282,6 +282,18 @@ test("get_items with none near she may take goes to the nearest place she saw it
   const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(guarded));
   assert.match(told.status === "failed" ? told.detail : "", /^no oak_log within 64 blocks that you may take, and you know of none farther away outside protected areas: explore for it/u);
   assert.deepEqual(guarded.submitted.filter((call) => call.tool === "navigate"), []);
+});
+
+test("a fetch tells where it is travelling to before the walk and that it arrived after it", async () => {
+  const runtime = new FakeRuntime();
+  runtime.walkOnNavigate = true;
+  runtime.simulateInventory = true;
+  runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either." };
+  runtime.seen = { oak_log: { dimension: "overworld", x: 900, z: 0 } };
+  const headings: ({ x: number; z: number } | null)[] = [];
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime, { heading: (target) => headings.push(target) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(headings, [{ x: 900, z: 0 }, null]);
 });
 
 test("a fetch stays within 64 blocks and, finding nothing, says where she last saw some and which way", async () => {
@@ -1171,6 +1183,39 @@ test("a house built with other blocks sends them, checks the shortfall of that b
   const blocks = builds(runtime).flatMap((call) => call.blocks.map((cell) => cell.block_name));
   assert.ok(blocks.includes("dirt") && !blocks.includes("spruce_stairs") && !blocks.includes("spruce_slab") && !blocks.includes("glass_pane"));
   assert.deepEqual(places[0]!.house, { size: "small", style: "medieval", door: { x: 0, y: 64, z: 2 }, facing: "north", materials });
+});
+
+test("a house ordered for yourself is your own house: remembered as own, with no asker to face or name", async () => {
+  const places: KnownPlace[] = [];
+  const runtime = new FakeRuntime();
+  runtime.snapshot = {
+    ...runtime.snapshot,
+    position: { x: 0.5, y: 64, z: 0.5 },
+    inventory: SMALL_MEDIEVAL,
+    players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }],
+  };
+  const result = await runStep({ skill: "build", structure: "house", size: "small", own: true }, contextFor(runtime, { requester: "steve", style: "medieval", remember: (place) => places.push(place) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.equal(places[0]!.name, "the small medieval house you built");
+  assert.equal(places[0]!.own, true);
+  // Nobody to face: the site is chosen as for a goal of her own (door facing north), not toward Steve (east).
+  assert.equal(places[0]!.house?.facing, "north");
+});
+
+test("a house built for a requester without own stays theirs", async () => {
+  const places: KnownPlace[] = [];
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
+  await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { requester: "steve", style: "medieval", remember: (place) => places.push(place) }));
+  assert.equal(places[0]!.name, "the small medieval house you built for steve");
+  assert.equal("own" in places[0]!, false);
+});
+
+test('{"skill":"build","own":true} parses and is described as for yourself', () => {
+  const step = stepSchema.parse({ skill: "build", own: true });
+  assert.deepEqual(step, { skill: "build", structure: "house", size: "small", own: true });
+  assert.match(describeStep(step), /^build a small house for yourself$/u);
+  assert.doesNotMatch(describeStep(stepSchema.parse({ skill: "build" })), /yourself/u);
 });
 
 test("a house built as the style remembers an empty materials list", async () => {

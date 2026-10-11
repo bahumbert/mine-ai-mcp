@@ -101,6 +101,8 @@ export const stepSchema = z.discriminatedUnion("skill", [
     z: coordinate.optional(),
     /** Other blocks than the style's for some roles (a full block for each but window and door): the house is temporary. */
     materials: z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1)).optional(),
+    /** The house is the bot's own (it was asked to build itself one, or it is for its own goal), not the asker's. */
+    own: z.boolean().optional(),
   }),
   z.strictObject({ skill: z.literal("improve_house"), roles: z.array(z.enum(BUILD_ROLES)).min(1).optional() }),
 ]);
@@ -142,7 +144,7 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "farm": return `{"skill":"farm","crop":"<item to plant>","size":<3|5|7|9>}  make a crop farm like a player: a size x size plot right behind you (away from whoever asked; or add "x","y","z" for its middle, y at walking level), leveled, water poured in its middle, tilled and planted with the crop item (wheat_seeds, carrot, potato, beetroot_seeds); needs a hoe, some of the crop item and a bucket (or a water bucket) carried; farming one of your farms again (within ${FARM_RANGE} blocks of its middle) harvests what is ripe and replants it; crops take a while to ripen near the water`;
     case "build": {
       const bills = SIZES.map((size) => `${size} = ${describeMaterials(planHouse(style, size, chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ");
-      return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes); every block must be carried first (${bills}); add \"materials\":{\"<role>\":\"<block id>\"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window and door; window may be \"air\"); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for your style's`;
+      return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes); every block must be carried first (${bills}); add \"materials\":{\"<role>\":\"<block id>\"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window and door; window may be \"air\"); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for your style's; add \"own\":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
     }
     case "improve_house": return `{"skill":"improve_house","roles":["<role>", ...]}  swap the temporary parts of your own house (all of them, or the roles listed) for your style's blocks, in place; every block needed must be carried first`;
   }
@@ -195,7 +197,7 @@ export function describeStep(step: Step): string {
     case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;
     case "release_area": return `release area #${step.area}`;
     case "farm": return `farm ${step.crop ?? "the crop it has"} (${step.size}x${step.size})${step.x === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}`;
-    case "build": return `build a ${step.size} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}${describeMaterialChoice(step.materials)}`;
+    case "build": return `build a ${step.size} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}${describeMaterialChoice(step.materials)}${step.own === true ? " for yourself" : ""}`;
     case "improve_house": return `improve your house${step.roles === undefined ? "" : ` (${step.roles.join(", ")})`}`;
   }
 }

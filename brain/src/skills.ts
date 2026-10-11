@@ -62,6 +62,8 @@ export interface SkillContext {
   readonly self?: string;
   /** Told what it starts doing now and why, at a skill's phase changes (see {@link GatherContext.progress}). */
   readonly progress?: (fact: string) => void;
+  /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
+  readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
   /** Told that the step's work is another activity from now on (the house's site preparation is terraforming). */
   readonly phase?: (activity: Activity) => void;
   /** When the player who asked for this step last said anything (epoch ms); unset for her own goals. */
@@ -324,7 +326,9 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const at = step.x !== undefined && step.y !== undefined && step.z !== undefined ? { x: step.x, y: step.y, z: step.z } : null;
   const unfinished = context.building?.unfinished;
   const resumed = unfinished?.kind === kind && distanceBetween(at ?? snapshot.position, unfinished.site.door) <= RESUME_RANGE ? unfinished : null;
-  const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
+  // Her own house has no asker to face or to name (an ordered house is the asker's unless the step says `own`).
+  const own = step.own === true || context.requester === undefined;
+  const toward = own || context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   // A resumed house keeps the materials it was started with; the step's are ignored then.
   const materials = resumed === null ? step.materials ?? {} : resumed.materials ?? {};
   if (resumed === null && Object.keys(materials).length > 0) {
@@ -411,9 +415,9 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   const { door, facing } = plan.site;
   const roof = plan.roofTop;
   context.remember?.({
-    name: `the ${kind} you built${context.requester === undefined ? "" : ` for ${context.requester}`}`,
+    name: `the ${kind} you built${own ? "" : ` for ${context.requester}`}`,
     detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
-    ...(context.requester === undefined && { own: true }),
+    ...(own && { own: true }),
     house: { size: step.size, style: style.id, door, facing, materials: plan.materials },
   });
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };

@@ -3,7 +3,7 @@ import { describeStep, skillUsage, stepKey, stepSchema, type Step } from "./acti
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -211,6 +211,7 @@ export class LlmMind implements Mind {
   async next(input: WorkInput, signal: AbortSignal): Promise<WorkDecision> {
     const skills = personaSkills(input.persona);
     let signChecked = false;
+    const refused = input.refused ?? new Map<string, number>();
     return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), describeWork(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
       // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
@@ -234,8 +235,14 @@ export class LlmMind implements Mind {
         // A step that failed twice lately, for any objective, is refused every time (live 2026-10-10, run 6: sent back
         // once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times): one retry, then another step.
         const key = stepKey(step.data);
-        const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES);
+        const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);
         if (earlier !== undefined) {
+          // Rule 2 (owner, 2026-10-11): refused again and again with nothing changed, the objective is over.
+          const refusals = (refused.get(key) ?? 0) + 1;
+          refused.set(key, refusals);
+          if (refusals >= MAX_REFUSALS) {
+            return { kind: "give_up", reason: `"${describeStep(step.data)}" was refused ${MAX_REFUSALS} times: it failed ${earlier.count} times lately (${earlier.detail}) and nothing changed since` };
+          }
           throw new Error(`"${describeStep(step.data)}" failed ${earlier.count} times in the last ${FAILED_STEP_MINUTES} minutes, the last ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. It is refused: choose a different step, or give this objective up`);
         }
         return { kind: "step", step: step.data, thought: reply.thought };
@@ -513,7 +520,7 @@ function describeWork(input: WorkInput): string {
 /** Facts before, not corrections after (ADR-017): what already failed for its other objectives, and why. */
 function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
   if (failures.length === 0) return "";
-  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago, for ${JSON.stringify(failure.objective)}${failure.count >= MAX_STEP_FAILURES ? " (refused now)" : ""}: ${failure.detail}`);
+  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago, for ${JSON.stringify(failure.objective)}${failure.count >= MAX_STEP_FAILURES ? (failure.changed ? " (allowed again: your inventory or place changed since)" : " (refused now)") : ""}: ${failure.detail}`);
   return `Steps that failed lately in your objectives (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
 }
 

@@ -9,12 +9,12 @@ import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
 import { personaSkills, type Persona } from "./persona.ts";
-import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, ProtectedArea } from "./runtime-client.ts";
+import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
 
@@ -37,6 +37,8 @@ const OWN_MEMORY = 5;
 const FAILED_STEP_MEMORY = 8;
 /** A step out to obtain items is stopped when none of them increased in the inventory for this long (owner, 2026-10-10), looked at every {@link GAIN_SAMPLE_MS}. */
 const NO_GAIN_MINUTES = 5;
+/** A fetch travelling to a known source that gets this much nearer counts as progress for the no-gain stop (owner, 2026-10-11). */
+const NEARER_BLOCKS = 16;
 const GAIN_SAMPLE_MS = 30_000;
 /** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
 const NIGHT_CHECK_MS = 20_000;
@@ -97,10 +99,19 @@ interface Work {
   failing: { skill: string; count: number };
   /** Who the order came from by whisper: its progress and its end are whispered back to them (spec 2026-10-09, C). */
   whisperTo: string | null;
+  /** Step key -> refusals since that step last ran (rule 2: three end the objective); counted by the mind, reset here. */
+  readonly refused: Map<string, number>;
+}
+
+/** What is carried, as `name:count` sorted (totals per name): compared to tell whether the inventory changed. */
+function carriedOf(snapshot: BotSnapshot): string {
+  const totals = new Map<string, number>();
+  for (const { name, count } of snapshot.inventory) totals.set(name, (totals.get(name) ?? 0) + count);
+  return [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
 }
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map() };
 }
 
 /**
@@ -156,7 +167,7 @@ export class Agent {
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
   private lastFailed: { readonly objective: string; readonly reason: string } | null = null;
   /** Steps that failed lately, whatever the objective, newest last: shown to the work tier, which refuses a second repeat. */
-  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number; readonly failures: readonly number[] }[] = [];
+  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number; readonly failures: readonly number[]; readonly carried: string | null; readonly position: Position | null }[] = [];
   private restUntil = 0;
   private nextGoalCall = 0;
   private wake: (() => void) | null = null;
@@ -466,7 +477,7 @@ export class Agent {
     let decision: WorkDecision;
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(), ownsTemporaryHouse: this.temporaryHouse() !== null }, this.runSignal);
+      decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(snapshot), ownsTemporaryHouse: this.temporaryHouse() !== null, refused: work.refused }, this.runSignal);
       work.badReplies = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;
@@ -498,6 +509,8 @@ export class Agent {
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
     // travelling; a skill's phases (the house's site preparation) change the activity from then on.
     const actions: ActionTime[] = [];
+    // The step runs: its earlier refusals are forgotten (rule 2 counts refusals with no run in between).
+    work.refused.delete(stepKey(decision.step));
     const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
@@ -519,6 +532,7 @@ export class Agent {
         building: this.building,
         areas: this.areas,
         phase: (activity) => phases.push({ activity, at: Date.now() }),
+        heading: gain.heading,
         ...(work.objective.requester !== null && { heardFrom: () => this.lastHeard.get(work.objective.requester!.toLowerCase()) ?? started }),
         // Only an order is narrated (owner, 2026-10-02); its own goals show in the monitor.
         ...(work.objective.requester !== null && { progress: (fact: string) => this.progress(work, fact) }),
@@ -532,7 +546,7 @@ export class Agent {
     }
     const ended = Date.now();
     const ms = ended - started;
-    const { activity, spans, carried } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
+    const { activity, spans, carried, position } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
     const { purpose } = work.objective;
     for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
@@ -545,7 +559,7 @@ export class Agent {
         : { step: label, outcome: result.status, detail: result.detail };
     work.steps.push(record);
     work.carried.push(carried);
-    if (record.outcome === "failed") this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail);
+    if (record.outcome === "failed") this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     if (work.steps.length > STEP_MEMORY) {
@@ -592,9 +606,9 @@ export class Agent {
    * {@link NO_GAIN_MINUTES} minutes (live 2026-10-09: single steps ran 10-22 minutes, a squid hunt gained nothing for
    * 30). `view_status` only reads, so the inventory is looked at while the action runs. `stalled` says why it was stopped.
    */
-  private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null } {
+  private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null; readonly heading: (target: { readonly x: number; readonly z: number } | null) => void } {
     const targets = targetItems(step);
-    if (targets.length === 0) return { stop: () => undefined, stalled: () => null };
+    if (targets.length === 0) return { stop: () => undefined, stalled: () => null, heading: () => undefined };
     const { runtime, log } = this.options;
     const { minutes, sampleMs } = this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS };
     const carried = (snapshot: BotSnapshot, item: string) => snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
@@ -610,6 +624,9 @@ export class Agent {
     let lastGainAt = Date.now();
     let stalled: string | null = null;
     let sampling = false;
+    // A fetch walking or sailing to a place it saw the block gains no item on the way: getting nearer is progress.
+    let target: { readonly x: number; readonly z: number } | null = null;
+    let nearest: number | null = null;
     const timer = setInterval(() => {
       if (sampling || stalled !== null) return;
       sampling = true;
@@ -621,31 +638,53 @@ export class Agent {
             lastGainAt = now;
           }
         }
+        if (target !== null) {
+          const away = Math.hypot(snapshot.position.x - target.x, snapshot.position.z - target.z);
+          if (nearest === null) nearest = away;
+          else if (away <= nearest - NEARER_BLOCKS) {
+            nearest = away;
+            lastGainAt = now;
+          }
+        }
         if (stalled !== null || now - lastGainAt < minutes * 60_000) return;
         const progress = targets.map(({ item, count }) => `${Math.max(0, carried(snapshot, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ");
         stalled = `nothing gained in ${minutes} minutes: ${progress} so far (the rest is in your inventory)`;
         controller.abort(new Error(stalled));
       }).catch((error: unknown) => log(`could not look at the inventory during a step: ${String(error)}`)).finally(() => { sampling = false; });
     }, sampleMs);
-    return { stop: () => clearInterval(timer), stalled: () => stalled };
+    return {
+      stop: () => clearInterval(timer),
+      stalled: () => stalled,
+      heading: (next) => {
+        target = next;
+        nearest = null;
+      },
+    };
   }
 
   /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
-  private rememberFailedStep(objective: Objective, step: string, key: string, detail: string): void {
+  private rememberFailedStep(objective: Objective, step: string, key: string, detail: string, carried: string | null, position: Position | null): void {
     const now = Date.now();
     const before = this.failedSteps.find((failure) => failure.key === key)?.failures ?? [];
     const kept = this.failedSteps.filter((failure) => failure.key !== key);
-    kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now] });
+    kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now], carried, position });
     this.failedSteps.splice(0, this.failedSteps.length, ...kept.slice(-FAILED_STEP_MEMORY));
   }
 
-  /** The steps that failed lately for any objective, this one included, most recent first. */
-  private earlierFailures(): EarlierFailure[] {
+  /**
+   * The steps that failed lately for any objective, this one included, most recent first. `changed`: the inventory or
+   * the place in `snapshot` differs from the state after the step's last failure (unknown state: not changed).
+   */
+  private earlierFailures(snapshot: BotSnapshot): EarlierFailure[] {
+    const carried = carriedOf(snapshot);
     const now = Date.now();
     return this.failedSteps
       .filter((failure) => now - failure.at <= FAILED_STEP_MINUTES * 60_000)
       .reverse()
-      .map(({ step, key, detail, objective, at, failures }) => ({ step, key, detail, objective: objective.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)), count: failures.filter((failed) => now - failed <= FAILED_STEP_MINUTES * 60_000).length }));
+      .map(({ step, key, detail, objective, at, failures, carried: after, position }) => ({
+        step, key, detail, objective: objective.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)), count: failures.filter((failed) => now - failed <= FAILED_STEP_MINUTES * 60_000).length,
+        changed: (after !== null && after !== carried) || (position !== null && snapshot.position !== null && Math.hypot(position.x - snapshot.position.x, position.y - snapshot.position.y, position.z - snapshot.position.z) >= MOVED_BLOCKS),
+      }));
   }
 
   /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */
@@ -712,7 +751,7 @@ export class Agent {
    * The kind of work a finished step was, from game facts the runtime gives (block tags, hostile species, foods),
    * learnt once per name. Null for errands, or when the facts cannot be read (the step still happened).
    */
-  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null }> {
+  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null }> {
     try {
       const after = await this.options.runtime.status();
       for (const food of [...before.foods, ...after.foods]) this.foods.add(food.name);
@@ -720,13 +759,11 @@ export class Agent {
       const blocks = actions.flatMap((action) => action.tool === "collect_block" && typeof action.input.block_name === "string" ? [action.input.block_name] : []);
       if (step.skill === "collect_block") blocks.push(step.block);
       const facts = { tags: await this.tagsOf(blocks), hostile, foods: this.foods };
-      const totals = new Map<string, number>();
-      for (const { name, count } of after.inventory) totals.set(name, (totals.get(name) ?? 0) + count);
-      const carried = [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
-      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried };
+      const carried = carriedOf(after);
+      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried, position: after.position };
     } catch (error) {
       this.options.log(`could not tell what kind of work that was: ${String(error)}`);
-      return { activity: null, spans: [], carried: null };
+      return { activity: null, spans: [], carried: null, position: null };
     }
   }
 
