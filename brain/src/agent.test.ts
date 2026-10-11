@@ -1071,3 +1071,17 @@ test("a line naming nobody within 60 s of its speaker naming another character i
   assert.equal(await outcome(["Ayla"], 20_000), 1, "it names her");
   assert.equal(await outcome(["everyone"], 20_000), 1, "it names everyone");
 });
+
+test("a body that restarted under a step is one failed step: the objective goes on, no streak or repeat rule fires", async (t) => {
+  // Both limits at their smallest: an ordinary failure would end the objective after this one step.
+  const runtime = new FakeRuntime();
+  runtime.throwNext.collect_block = "[BODY_RESTARTED] the body restarted: collect_block was not done";
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, maxSameStepInARow: 1, maxSkillFailuresInARow: 1 } });
+  chat.reply({ say: "Okay!", route: "act", request: "collect 5 birch_log" }, { say: "Done!" });
+  const collect = { step: { skill: "collect_block", block: "birch_log", count: 5 } };
+  action.reply(collect, collect);
+  await agent.handle(say("Steve", "get me some birch"));
+  await until(() => action.requests.length === 2);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[BODY_RESTARTED\] the body restarted: collect_block was not done/u);
+});

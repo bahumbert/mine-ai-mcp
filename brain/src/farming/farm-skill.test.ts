@@ -14,6 +14,12 @@ function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): Sk
 function farmRuntime(inventory: { name: string; count: number }[]): FakeRuntime {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
+  // What view_block_drops answers for the crops used here: the planted block and the item it is planted from.
+  runtime.dropSources = {
+    wheat_seeds: [{ block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }],
+    wheat: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }],
+    carrot: [{ block: "carrots", chance: 1, planted: true, seed: "carrot" }],
+  };
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory };
   return runtime;
 }
@@ -166,4 +172,41 @@ test("a new farm whose plot overlaps a protected area names the nearest clear pl
   assert.match(result.status === "failed" ? result.detail : "", /overlaps protected area #4 'small medieval house' \(yours.*the nearest plot clear of them has its middle \d+ blocks .*, at -?\d+ 64 -?\d+: farm there/u);
   assert.equal(runtime.submitted.filter((call) => call.tool === "protect_region").length, 0);
   assert.deepEqual(calls(runtime), []);
+});
+
+test("a farm asked for the harvest plants its seed: wheat is fetched as wheat_seeds and says so", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "bucket", count: 1 }]);
+  const missing = await runStep({ skill: "farm", crop: "wheat", size: 5 }, contextFor(runtime));
+  assert.match(missing.status === "failed" ? missing.detail : "", /a 5x5 wheat_seeds farm needs 16 wheat_seeds .*get_items/u);
+  assert.deepEqual(calls(runtime), []);
+
+  const ready = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  const remembered: KnownFarm[] = [];
+  const result = await runStep({ skill: "farm", crop: "wheat", size: 5 }, contextFor(ready, { rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(ready.submitted.find((call) => call.tool === "tend_crops")!.input.plant, "wheat_seeds");
+  assert.equal(remembered[0]!.crop, "wheat_seeds");
+  assert.match(result.status === "done" ? result.detail : "", /wheat is the harvest: planted wheat_seeds/u);
+});
+
+test("a crop that is its own seed is planted as it is, with no note", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "carrot", count: 20 }, { name: "water_bucket", count: 1 }]);
+  const result = await runStep({ skill: "farm", crop: "carrot", size: 5 }, contextFor(runtime));
+  assert.equal(runtime.submitted.find((call) => call.tool === "tend_crops")!.input.plant, "carrot");
+  assert.doesNotMatch(result.status === "done" ? result.detail : "", /harvest/u);
+});
+
+test("an item no crop grows from is no farm: the failure says so and nothing is protected", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "oak_log", count: 20 }, { name: "bucket", count: 1 }]);
+  const result = await runStep({ skill: "farm", crop: "oak_log", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /oak_log grows on no crop: a farm is planted with what a crop drops whatever its age \(its seed\)/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("tending a known wheat farm asked for wheat plants wheat_seeds", async () => {
+  const runtime = farmRuntime([{ name: "wheat_seeds", count: 6 }]);
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 5, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 20, ripe: 0, empty: 4 } }];
+  const result = await runStep({ skill: "farm", crop: "wheat", size: 5 }, contextFor(runtime, { farms }));
+  assert.equal(runtime.submitted[0]!.input.plant, "wheat_seeds");
+  assert.match(result.status === "done" ? result.detail : "", /wheat is the harvest: planted wheat_seeds/u);
 });

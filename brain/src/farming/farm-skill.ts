@@ -36,6 +36,25 @@ function carried(snapshot: BotSnapshot, item: string): number {
   return snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
 }
 
+/**
+ * The item a farm of `crop` is planted from, read from the runtime's drop data (no list): an item that is the seed of
+ * one of its planted sources is planted as it is (wheat_seeds, carrot, potato); one that only grows on a planted
+ * source (wheat) is the harvest, and its source's seed is planted instead (2026-10-03: "bring me bread" farmed `wheat`
+ * and planted nothing that takes). An item with no planted source is no crop at all.
+ */
+export async function plantingItem(runtime: SkillContext["runtime"], crop: string): Promise<{ item: string; note: string } | { failure: string }> {
+  const planted = ((await runtime.blockSources([crop]))[crop] ?? []).filter((source) => source.planted);
+  if (planted.some((source) => source.seed === crop)) return { item: crop, note: "" };
+  const seed = planted.find((source) => source.seed !== undefined)?.seed;
+  if (seed !== undefined) return { item: seed, note: `${crop} is the harvest: planted ${seed}` };
+  return { failure: `${crop} grows on no crop: a farm is planted with what a crop drops whatever its age (its seed)` };
+}
+
+/** A done result with a note appended to its detail; other results as they are. */
+function withNote(result: SkillResult, note: string): SkillResult {
+  return result.status === "done" && note !== "" ? { ...result, detail: `${result.detail}; ${note}` } : result;
+}
+
 function horizontal(a: Position, b: Position): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
@@ -58,7 +77,10 @@ export async function farm(context: SkillContext, step: Extract<Step, { skill: "
   return makeFarm(context, snapshot, plot, crop);
 }
 
-async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, crop: string): Promise<SkillResult> {
+async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, asked: string): Promise<SkillResult> {
+  const planting = await plantingItem(context.runtime, asked);
+  if ("failure" in planting) return { status: "failed", detail: planting.failure };
+  const crop = planting.item;
   const what = `a ${plot.size}x${plot.size} ${crop} farm`;
   const { water } = plot;
   const waterKey = `${water.x},${water.y},${water.z}`;
@@ -107,7 +129,7 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
   let result: SkillResult = { status: "stopped" };
   try {
     result = await prepareAndPlant(context, plot, crop, what, protection.area.regionId);
-    return result;
+    return withNote(result, planting.note);
   } finally {
     if (result.status !== "done") await releaseArea(context, protection.area.regionId);
   }
@@ -155,11 +177,13 @@ async function prepareAndPlant(context: SkillContext, plot: FarmPlot, crop: stri
 
 async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: KnownFarm, asked: string | undefined): Promise<SkillResult> {
   const plot = farmPlot(known.centre, known.size as FarmPlot["size"]);
-  const wanted = asked ?? known.crop;
+  const planting = asked === undefined ? { item: known.crop, note: "" } : await plantingItem(context.runtime, asked);
+  if ("failure" in planting) return { status: "failed", detail: planting.failure };
+  const wanted = planting.item;
   // Planting is asked only with the item carried: without it the harvest still replants its own cells from the drops.
   const plant = carried(snapshot, wanted) > 0 ? wanted : null;
   context.progress?.(`tending your ${known.crop} farm: harvesting what is ripe and replanting`);
-  return tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`);
+  return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
 }
 
 /** One `tend_crops` over the plot, then the farm remembered as it stands. */

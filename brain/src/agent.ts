@@ -20,6 +20,8 @@ import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, Prote
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
 
+/** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
+const BODY_RESTARTED = "[BODY_RESTARTED]";
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
 const STARTUP_RETRY_MS = 10_000;
@@ -584,7 +586,9 @@ export class Agent {
     if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, this.neededFor(room, work))}` };
     work.steps.push(record);
     work.carried.push(carried);
-    if (record.outcome === "failed") this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
+    // The step was not wrong: the body restarted under it. It is shown as failed, but is no refusal, no repeat and no streak.
+    const restarted = record.outcome === "failed" && record.detail.includes(BODY_RESTARTED);
+    if (record.outcome === "failed" && !restarted) this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     if (work.steps.length > STEP_MEMORY) {
@@ -597,6 +601,7 @@ export class Agent {
       this.savedUnfinished = unfinished;
       this.memorize({ kind: "unfinished_house", house: this.building.unfinished });
     }
+    if (restarted) return;
     // A model that keeps choosing a step that ends the same way is stuck; the loop must not spin until the step cap.
     const same = persona.settings.maxSameStepInARow;
     // A step done each time but leaving the inventory different gained something (live 2026-10-09: three "collected 32

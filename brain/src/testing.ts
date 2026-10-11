@@ -45,6 +45,8 @@ export class FakeRuntime implements BotRuntime {
   durations: Partial<Record<ForegroundTool, number>> = {};
   /** Tools that settle as failed with this error. */
   failures: Partial<Record<ForegroundTool, string>> = {};
+  /** Tools whose next call throws this error, as the client does when the runtime restarted under it. */
+  throwNext: Partial<Record<ForegroundTool, string>> = {};
   /** The action result a failing tool settles with (e.g. a `build_structure` audit). */
   failureResults: Partial<Record<ForegroundTool, Readonly<Record<string, unknown>>>> = {};
   /** What each next `drop_item` settles with (the runtime's `drop.dropped` counts); none queued: a bare success. */
@@ -299,6 +301,11 @@ export class FakeRuntime implements BotRuntime {
       return refusal;
     }
     this.submitted.push({ tool, input });
+    const thrown = this.throwNext[tool];
+    if (thrown !== undefined) {
+      delete this.throwNext[tool];
+      throw new Error(thrown);
+    }
     if (tool === "note_save") this.notes.push({ note: String(input.note), context: String(input.context) });
     const actionId = `action-${this.nextId++}`;
     this.actions.set(actionId, { tool, input, remaining: this.durations[tool] ?? 0, cancelled: false });

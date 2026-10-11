@@ -147,6 +147,8 @@ export interface DropSource {
   readonly chance: number;
   /** A crop the item grows into (wheat for wheat seeds): breaking it takes from a farm. */
   readonly planted: boolean;
+  /** The item the crop is planted from, for a planted source. */
+  readonly seed?: string;
 }
 
 /** One mob an item drops from when killed (`view_block_drops`). */
