@@ -18,6 +18,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
+import { botFixture, type FakeBot } from "../../test-support/bot.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
+import { blockClass, observeMineflayerBlock } from "../mineflayer/world.js";
+import { createMovements } from "../runtime.js";
+import type { NavigationEvent } from "../telemetry/index.js";
+import { MemoryWorld } from "../world/memory-world.js";
+import { Vec3 } from "vec3";
 
 const walking = () => createMovementPolicy({ allowSprinting: false });
 /** Commit as soon as there is a segment worth walking, so a run is made of continuations rather than one route. */
@@ -1010,3 +1017,68 @@ for (const displacement of ["airborne", "different_cell"] as const) {
     assert.equal(displaced, true);
   });
 }
+
+/** A region over a one-cell cage at the origin: dirt walls two high on all eight sides, over a stone floor. */
+const CAGE: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: -1, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "house" };
+
+function cagedBot(regions: readonly ProtectedRegion[]): FakeBot {
+  const bot = botFixture({ username: "Theo", position: new Vec3(0.5, 63, 0.5), items: [{ name: "dirt", count: 16 }] });
+  setProtectedRegionsProvider(bot, () => regions);
+  return bot;
+}
+
+function cageWorld(bot: FakeBot): MemoryWorld {
+  const world = new MemoryWorld();
+  const Block = blockClass(bot);
+  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) for (let y = 62; y <= 66; y++) {
+    const name = y === 62 ? "stone" : Math.max(Math.abs(x), Math.abs(z)) === 1 && y <= 64 ? "dirt" : "air";
+    const block = observeMineflayerBlock(Block.fromStateId(bot.registry.blocksByName[name]!.defaultState, 0));
+    if (block.kind !== "loaded") throw new Error(name);
+    world.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
+  }
+  return world;
+}
+
+/** One run out of the cage. The fake bot cannot dig, so a route that is found still fails to be walked. */
+async function leaveCage(bot: FakeBot, policy = createMovements(bot)) {
+  const events: NavigationEvent[] = [];
+  const navigator = createNavigator({ world: cageWorld(bot), bot: new FakeNavigationBot(), telemetry: onEvent((event) => events.push(event)) });
+  const outcome = await settle(navigator, { goal: exactBlockGoal({ x: 4, y: 63, z: 0 }), policy });
+  const opened = events.findIndex((event) => event.kind === "own_regions_opened");
+  return {
+    outcome,
+    openings: events.filter((event) => event.kind === "own_regions_opened").length,
+    routeAfterOpening: events.slice(Math.max(0, opened)).some((event) => event.kind === "route_committed"),
+  };
+}
+
+test("a bot shut in inside its own protected region opens its own regions once, and a route follows", async () => {
+  const run = await leaveCage(cagedBot([CAGE]));
+  assert.equal(run.openings, 1);
+  assert.ok(run.routeAfterOpening);
+});
+
+test("a region another player owns is never opened: the run fails without a route", async () => {
+  const run = await leaveCage(cagedBot([{ ...CAGE, owner: "Tester" }]));
+  assert.equal(run.openings, 0);
+  assert.equal(run.routeAfterOpening, false);
+  assert.equal(run.outcome.kind, "failed");
+});
+
+test("a bot whose own regions lie elsewhere digs out without opening them", async () => {
+  const run = await leaveCage(cagedBot([{ ...CAGE, min: { x: 20, y: 62, z: 20 }, max: { x: 22, y: 66, z: 22 } }]));
+  assert.equal(run.openings, 0);
+  assert.ok(run.routeAfterOpening);
+});
+
+test("the opening lasts one run: the same policy refuses its own region again, and a second run opens it again", async () => {
+  const bot = cagedBot([CAGE]);
+  const policy = createMovements(bot);
+  const world = cageWorld(bot);
+  const wall = { x: 1, y: 63, z: 0 };
+  const refuses = () => policy.evaluateBreak(world.blockAt(wall.x, wall.y, wall.z), wall, world).decision.kind === "prohibited";
+  assert.ok(refuses(), "refused before");
+  assert.equal((await leaveCage(bot, policy)).openings, 1);
+  assert.ok(refuses(), "refused again after the run");
+  assert.equal((await leaveCage(bot, policy)).openings, 1, "opened again by the second run");
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
-import { admitsDive, holdSwimDepth, openWaterSurface, swimBreathPath, swimExitPath, swimTravelTicks } from "./swimming.js";
+import { admitsDive, holdSwimDepth, openWaterSurface, swimAscent, swimBreathPath, swimExitPath, swimTravelTicks } from "./swimming.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { WELL_FED, planningStart } from "../../test-support/navigation.js";
@@ -29,6 +29,19 @@ test("open-water admission accounts for the slow descent, work and escape; a roo
   world.load({ x: 0, y: 62, z: 0 }, { stateId: 3, traits: { empty: true, liquid: "water", liquidSource: false } });
   assert.equal(openWaterSurface(read, feet), null);
   assert.equal(openWaterSurface(read, { x: 12, y: 61, z: 0 }), null);
+});
+
+test("a body in a thin flowing stream with its head in air is no swim from a breath, and may still dive", () => {
+  // One cell of flowing water over a stone floor, air above: no source column to the surface, but the head is dry.
+  const world = new MemoryWorld();
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) for (let y = 60; y <= 64; y++)
+    world.load({ x, y, z }, y === 60 ? { stateId: 1 } : y === 61
+      ? { stateId: 3, traits: { empty: true, liquid: "water", liquidSource: false } }
+      : { stateId: 0 });
+  const read = (x: number, y: number, z: number) => world.blockAt(x, y, z);
+  const feet = { x: 0, y: 61, z: 0 };
+  assert.deepEqual(swimAscent(read, feet), { surface: feet, ticks: 0 });
+  assert.ok(admitsDive(read, feet, { origin: feet, airTicks: 300 }));
 });
 
 test("vertical water edges require scoped air admission and retain asymmetric travel cost", () => {

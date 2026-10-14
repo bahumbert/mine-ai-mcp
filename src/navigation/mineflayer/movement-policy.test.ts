@@ -298,6 +298,41 @@ test("routes never set off across deep open water, but a bot already out on it s
   assert.equal(policy.decideStep(25, 62, 0, oceanWorld).kind, "allowed", "out at sea, the way back is open");
 });
 
+type SeaCell = "stone" | "water" | "air";
+
+/** The step into deep open water at 10 61 0, from a body at `standing`, over a stone floor at y 58 with `fill` above it. */
+function stepIntoSea(standing: { x: number; y: number; z: number }, fill: (x: number, y: number, z: number) => SeaCell) {
+  const bot = botFixture();
+  bot.entity.position = new Vec3(standing.x + 0.5, standing.y, standing.z + 0.5);
+  const sea = new MemoryWorld();
+  for (let x = -3; x <= 24; x++) for (let z = -8; z <= 8; z++) for (let y = 58; y <= 64; y++) {
+    const block = observed(bot, y === 58 ? "stone" : fill(x, y, z));
+    if (block.kind !== "loaded") throw new Error("unloaded test block");
+    sea.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
+  }
+  return createMovements(bot).decideStep(10, 61, 0, sea);
+}
+
+/** A wading shelf (water at y 59 only) for x 0-4, deep open water (y 59-61) from x 5 east, and a one-wide roofed pocket at x 22. */
+const shelfAndSea = (x: number, y: number, z: number): SeaCell =>
+  x === 22 && ((Math.abs(z) === 1 && y >= 59) || (z === 0 && y === 62)) ? "stone"
+    : x >= 0 && (y === 59 || (x >= 5 && y <= 61)) ? "water" : "air";
+
+test("a bot dry on the bank or wading with its head dry is refused deep open water; one submerged in a roofed pocket is not", () => {
+  assert.equal(stepIntoSea({ x: -1, y: 59, z: 0 }, shelfAndSea).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 3, y: 59, z: 0 }, shelfAndSea).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 22, y: 60, z: 0 }, shelfAndSea).kind, "allowed");
+});
+
+/** A 2-deep channel (water y 59-60) at x 0-4 beside deep open water (y 59-61) from x 5 east; `roofAt` puts stone over the channel there. */
+const channelAndSea = (roofAt?: number) => (x: number, y: number, z: number): SeaCell =>
+  x === roofAt && z === 0 && y === 61 ? "stone" : x >= 0 && (y <= 60 || (x >= 5 && y <= 61)) ? "water" : "air";
+
+test("a bot swimming in an open channel is refused deep open water (a river mouth is not the sea), but not under a roof", () => {
+  assert.equal(stepIntoSea({ x: 4, y: 59, z: 0 }, channelAndSea()).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 4, y: 59, z: 0 }, channelAndSea(4)).kind, "allowed");
+});
+
 /** A bot carrying `items`, on the version whose block data the fallback reads. */
 const versioned = (items: FakeStack[]) => botFixture({ items }, { version: "1.21.4" });
 
