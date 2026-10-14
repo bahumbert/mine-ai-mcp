@@ -24,7 +24,7 @@ const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
 };
 
 /**
- * Survival facts every benchmarked model got wrong (2026-09-30, .agent/knowledge/05-testing-and-ops.md): mining
+ * Survival facts every benchmarked model got wrong (2026-09-30): mining
  * stone bare-handed, planning iron tools without a furnace skill (get_items smelts since 2026-10-02), and family names
  * instead of ids.
  */

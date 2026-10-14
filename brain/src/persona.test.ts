@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { STYLES } from "./building/styles.ts";
 import { loadPersona, personaSchema, personaSkills } from "./persona.ts";
 
-/** The characters live in the private part of the project (`personas/`): checked only where it is present. */
+/** The characters are not shipped with the code (`personas/`): checked only where they are present. */
 const PERSONAS = new URL("../../personas/", import.meta.url);
 const noPersonas = { skip: existsSync(PERSONAS) ? false : "no personas/ in this checkout" };
 

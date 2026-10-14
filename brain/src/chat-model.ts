@@ -36,6 +36,11 @@ export interface OpenAiCompatibleConfig {
    * loaded with, `OLLAMA_CONTEXT_LENGTH`), since Ollama's OpenAI API cannot set it and cuts a longer prompt silently.
    */
   readonly contextTokens: number | null;
+  /**
+   * Sent as `reasoning_effort` when set: how much a thinking model thinks before answering (`none` turns it off on
+   * Ollama and most providers). Unset: the model's default, which is ON for recent thinking models (qwen3.5+, gemma4).
+   */
+  readonly reasoningEffort?: string | null;
 }
 
 const completionSchema = z.object({
@@ -73,6 +78,7 @@ export class OpenAiCompatibleModel implements ChatModel {
         messages: turns,
         temperature: this.config.temperature,
         ...(this.config.jsonMode ? { response_format: { type: "json_object" } } : {}),
+        ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       }),
       signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]),
     });

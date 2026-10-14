@@ -34,7 +34,9 @@ LLM environment (Bun also reads a .env file in the working directory):
   MINE_AI_LLM_JSON_MODE         "false" if the provider rejects response_format json_object (default true)
   MINE_AI_LLM_TIMEOUT_MS        per request, default 30000
   MINE_AI_LLM_CONTEXT_TOKENS    the model's context window (also per tier), for the monitor's "context full" warning;
-                                unset: read from Ollama (its OpenAI API cuts a longer prompt silently)`;
+                                unset: read from Ollama (its OpenAI API cuts a longer prompt silently)
+  MINE_AI_LLM_REASONING_EFFORT  thinking models (also per tier): sent as reasoning_effort, "none" turns thinking off
+                                (much faster; recent Ollama models think by default); unset: the model's default`;
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
 // Chat routes as well as it speaks: at 0.7 the same line was read as for another player one time and as an order the
@@ -74,6 +76,7 @@ function createModel(persona: Persona, tier: Tier, override: string | undefined)
     timeoutMs: Number(env("MINE_AI_LLM_TIMEOUT_MS") ?? DEFAULT_LLM_TIMEOUT_MS),
     temperature: TIER_TEMPERATURE[tier],
     contextTokens: positiveInteger(env(`MINE_AI_LLM_${key}_CONTEXT_TOKENS`) ?? env("MINE_AI_LLM_CONTEXT_TOKENS")),
+    reasoningEffort: env(`MINE_AI_LLM_${key}_REASONING_EFFORT`) ?? env("MINE_AI_LLM_REASONING_EFFORT") ?? null,
   });
 }
 

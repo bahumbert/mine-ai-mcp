@@ -2,9 +2,8 @@
 
 Characters that play through mine-ai-mcp bots. Players talk to them in **plain language** — no command words, no
 syntax; voice input later — and LLMs work out what is meant and which basic functions (**skills**) to run with the
-bot's atomic actions. No runtime internals are imported: everything goes through MCP (ADR-002). The brain shape is
-ADR-008 and ADR-011 in `.agent/vision/decisions.md`; Rule #0 applies: code gives basic functions, settings and
-safety checks, the models decide.
+bot's atomic actions. No runtime internals are imported: everything goes through MCP (ADR-002). Rule #0 applies:
+code gives basic functions, settings and safety checks, the models decide.
 
 ## How it thinks
 
@@ -101,10 +100,11 @@ come back is the model's choice.
 Characters are not shipped with the code: write one per character as `personas/<id>.json` at the repository root
 (schema: `personaSchema` in `src/persona.ts`).
 
-WSL, with a server and one host per bot running (`.agent/scripts/start-server.sh`, `start-host.sh`):
+A Minecraft server and one host per bot running (see the main README), e.g.:
 
 ```bash
-BOT_NAME=Ayla LISTEN_PORT=25575 .agent/scripts/start-host.sh      # terminal 1 (per bot)
+bun src/server/host.ts --minecraft-host 127.0.0.1 --minecraft-port 25565 --version 1.21.4 \
+  --username Ayla --instance-id Ayla --listen-port 25575             # terminal 1 (per bot)
 bun run brain --agent personas/ayla.json=http://127.0.0.1:25575/mcp   # terminal 2
 # more agents, one process:  --agent personas/vex.json=http://127.0.0.1:25576/mcp
 ```
@@ -121,7 +121,8 @@ bun brain/src/try-skill.ts http://127.0.0.1:25575/mcp '{"skill":"build","size":"
 ## LLM configuration
 
 An LLM is required (there is no offline keyword mode). Any OpenAI-compatible endpoint works (OpenAI, OpenRouter,
-Groq, Mistral, Ollama, LM Studio...). Put the settings in a `.env` at the repo root (gitignored):
+Groq, Mistral, Ollama, LM Studio...). Put the settings in `.env` at the repo root (gitignored; Bun loads it); the main
+ones:
 
 ```bash
 MINE_AI_LLM_BASE_URL=https://openrouter.ai/api/v1   # or http://127.0.0.1:11434/v1 for Ollama
@@ -133,6 +134,7 @@ MINE_AI_LLM_PLANNER_MODEL=<stronger model>
 MINE_AI_LLM_CHAT_BASE_URL=...   MINE_AI_LLM_CHAT_API_KEY=...
 MINE_AI_LLM_JSON_MODE=true      # false if the provider rejects response_format json_object
 MINE_AI_LLM_TIMEOUT_MS=30000
+MINE_AI_LLM_REASONING_EFFORT=none   # thinking models: "none" turns thinking off, else every call thinks first
 ```
 
 A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`); `--chat-model`,
@@ -158,5 +160,4 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/runtime-client.ts` | Typed MCP client for one bot |
 | `src/chat-model.ts` | OpenAI-compatible `/chat/completions` client |
 
-Tests: `bun test ./brain` (scripted fake models and a fake runtime, no server, no LLM). Known limits and next
-steps: `.agent/vision/backlog.md`.
+Tests: `bun test ./brain` (scripted fake models and a fake runtime, no server, no LLM).
