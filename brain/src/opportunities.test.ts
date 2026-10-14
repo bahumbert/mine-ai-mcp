@@ -19,14 +19,14 @@ const farm = (overrides: Partial<KnownFarm> = {}): KnownFarm => ({
 /** A sword, a pickaxe and an axe: no tool missing. */
 const TOOLS = [{ name: "iron_sword", count: 1 }, { name: "iron_pickaxe", count: 1 }, { name: "iron_axe", count: 1 }];
 
-/** A character with everything in order: a home, a bed, food, tools, no farm, nothing worn out. */
+/** A character with everything in order: a home, a bed, food, tools, a farm tended just now, nothing worn out. */
 const settled = (overrides: Partial<OpportunityFacts> = {}): OpportunityFacts => ({
   now: NOW,
   snapshot: snapshot({
     inventory: [{ name: "bread", count: 8 }, { name: "red_bed", count: 1 }, ...TOOLS],
     foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }],
   }),
-  farms: [],
+  farms: [farm({ tendedAt: minutesAgo(5) })],
   unfinished: null,
   ownHome: true,
   houseShortfall: [],
@@ -69,12 +69,38 @@ test("a farm tended a while ago, or left with ripe crops, could be harvested; on
   assert.deepEqual(texts(settled({ farms: [farm({ tendedAt: minutesAgo(5) })] })), []);
 });
 
-test("empty farmland with no crop item carried is a foraging opportunity", () => {
+test("empty farmland with no crop item carried is a farming opportunity (the seeds are for the farm)", () => {
   const found = texts(settled({ farms: [farm({ tendedAt: minutesAgo(5), state: { planted: 60, ripe: 0, empty: 20 } })] }));
-  assert.deepEqual(found, ["(foraging) your wheat_seeds farm around 10 63 -5, 11 blocks away, has 20 empty farmland and you carry no wheat_seeds"]);
+  assert.deepEqual(found, ["(farming) your wheat_seeds farm around 10 63 -5, 11 blocks away, has 20 empty farmland and you carry no wheat_seeds"]);
 });
 
-test("an unfinished house comes before having no home; the materials a home needs are grouped by the work that gets them", () => {
+test("no farm yet says what a new one takes and which of the hoe and the bucket are not carried", () => {
+  const none = texts(settled({ farms: [] }));
+  assert.deepEqual(none, ["(farming) you have no farm yet: a new one takes a hoe, a bucket for its water and seeds to plant (wheat_seeds come from breaking grass); you carry no hoe, no bucket; get_items fetches what is missing, then farm"]);
+  const ready = settled({ farms: [] });
+  const inventory = [...ready.snapshot.inventory, { name: "stone_hoe", count: 1 }, { name: "water_bucket", count: 1 }];
+  assert.match(texts({ ...ready, snapshot: { ...ready.snapshot, inventory } })[0]!, /seeds to plant \(wheat_seeds come from breaking grass\); get_items/u);
+});
+
+test("the drawn activities keep their seats: a farming lover's no-farm line is not cut behind the house and bed lines", () => {
+  const facts = settled({
+    farms: [],
+    ownHome: false,
+    snapshot: snapshot({ food: 10, inventory: [{ name: "stone_pickaxe", count: 1, durability: { remaining: 3, maximum: 131 } }] }),
+    houseShortfall: [{ item: "oak_log", count: 22, activity: "woodcutting" }],
+    smallHouse: [{ role: "wall", count: 34 }],
+    temporaryHouse: { door: { x: 4, y: 64, z: 2 }, roles: [{ role: "wall", block: "dirt", style: "oak_planks" }], shortfall: [{ item: "oak_planks", count: 34, activity: "woodcutting" }] },
+  });
+  const undrawn = findOpportunities(facts);
+  assert.equal(undrawn.length, MAX_OPPORTUNITIES);
+  assert.ok(!undrawn.some((found) => found.text.startsWith("you have no farm yet")));
+  const drawn = findOpportunities(facts, ["farming"]);
+  // The pressing ones stay first (worn pickaxe, no tools, food), then the drawn activity's.
+  assert.deepEqual(drawn.slice(0, 4).map((found) => found.activities.join(",")), ["crafting", "crafting", "farming,hunting,cooking", "farming"]);
+  assert.match(drawn[3]!.text, /^you have no farm yet/u);
+});
+
+test("an unfinished house comes before having no home; a home's materials are one building line, by the work that gets them", () => {
   const unfinished = { kind: "small medieval house", site: { door: { x: 4, y: 64, z: 2 }, facing: "north" as const }, part: 3 };
   assert.deepEqual(texts(settled({ ownHome: false, unfinished })), ["(building) your unfinished small medieval house, door at 4 64 2"]);
   const shortfall = [
@@ -85,9 +111,7 @@ test("an unfinished house comes before having no home; the materials a home need
   ];
   assert.deepEqual(texts(settled({ ownHome: false, houseShortfall: shortfall })), [
     "(building) you have no house of your own yet",
-    "(woodcutting) a house of your own needs 22 more oak_log",
-    "(mining) a house of your own needs 16 more cobblestone",
-    "(crafting) a house of your own needs 42 more spruce_stairs, 3 more glass_pane",
+    "(building) a house of your own needs 22 more oak_log (cutting wood); 16 more cobblestone (mining); 42 more spruce_stairs, 3 more glass_pane (crafting)",
   ]);
 });
 
@@ -148,7 +172,7 @@ test("with no house, her style's cost and the full blocks she carries are said o
   const houseShortfall = [{ item: "oak_planks", count: 34, activity: "woodcutting" as const }];
   assert.deepEqual(texts(settled({ ownHome: false, smallHouse, carriedBlocks, houseShortfall })), [
     "(building) you have no house of your own yet; a small house takes 16 foundation, 25 floor, 34 wall blocks; build can use other blocks per role: you carry 150 dirt, 64 cobblestone",
-    "(woodcutting) a house of your own needs 34 more oak_planks",
+    "(building) a house of your own needs 34 more oak_planks (cutting wood)",
   ]);
   assert.deepEqual(texts(settled({ ownHome: false, smallHouse })), [
     "(building) you have no house of your own yet; a small house takes 16 foundation, 25 floor, 34 wall blocks",
@@ -163,8 +187,7 @@ test("a temporary house is a home: its temporary parts and what improving it nee
   };
   assert.deepEqual(texts(settled({ temporaryHouse })), [
     "(building) your house at door 4 64 2 is temporary: wall dirt, roof dirt (your style: oak_planks, spruce_planks)",
-    "(woodcutting) improving your house needs 34 more oak_planks",
-    "(crafting) improving your house needs 42 more spruce_stairs",
+    "(building) improving your house needs 34 more oak_planks (cutting wood); 42 more spruce_stairs (crafting)",
   ]);
   assert.deepEqual(texts(settled({ temporaryHouse: { ...temporaryHouse, roles: [] } })), []);
   assert.deepEqual(texts(settled()), []);

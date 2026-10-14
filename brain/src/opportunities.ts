@@ -102,9 +102,26 @@ function farmsToHarvest(facts: OpportunityFacts): Opportunity[] {
 
 function farmsToSow(facts: OpportunityFacts): Opportunity[] {
   const carries = (item: string) => facts.snapshot.inventory.some((stack) => stack.name === item);
+  // Seeds gathered for a farm are time for farming (run 11, 2026-10-14: what a thing is for is its activity).
   return facts.farms.flatMap((farm) => farm.state.empty === 0 || carries(farm.crop)
     ? []
-    : [{ activities: ["foraging"], text: `${where(farm, facts)} has ${farm.state.empty} empty farmland and you carry no ${farm.crop}` }]);
+    : [{ activities: ["farming"], text: `${where(farm, facts)} has ${farm.state.empty} empty farmland and you carry no ${farm.crop}` }]);
+}
+
+/**
+ * No farm yet, and what a new one takes that she does not carry (the `farm` skill's own needs: a hoe, a bucket for its
+ * water, something to plant). Run 11 (2026-10-14): the farming lovers never learnt what a farm needs until a `farm` step
+ * was refused, and some never tried one.
+ */
+function noFarm(facts: OpportunityFacts): Opportunity[] {
+  if (facts.farms.length > 0) return [];
+  const inventory = facts.snapshot.inventory;
+  const missing = [
+    ...(inventory.some((stack) => stack.name.endsWith("_hoe")) ? [] : ["no hoe"]),
+    ...(inventory.some((stack) => stack.name === "bucket" || stack.name === "water_bucket") ? [] : ["no bucket"]),
+  ];
+  const carried = missing.length === 0 ? "" : `; you carry ${missing.join(", ")}`;
+  return [{ activities: ["farming"], text: `you have no farm yet: a new one takes a hoe, a bucket for its water and seeds to plant (wheat_seeds come from breaking grass)${carried}; get_items fetches what is missing, then farm` }];
 }
 
 function unfinishedHouse(facts: OpportunityFacts): Opportunity[] {
@@ -114,14 +131,17 @@ function unfinishedHouse(facts: OpportunityFacts): Opportunity[] {
   return [{ activities: ["building"], text: `your unfinished ${house.kind}, door at ${x} ${y} ${z}` }];
 }
 
-/** The missing materials as one line per kind of work that gets them: `<what> needs 22 more oak_log`. */
+/**
+ * The missing materials of a house as one building line, grouped by the work that gets them: `<what> needs 22 more
+ * oak_log (cutting wood); 16 more cobblestone (mining)`. A house's materials are time *for* building, whatever work
+ * fetches them (run 11, 2026-10-14: tagged by that work, "a house needs 16 more cobblestone" was chosen as mining).
+ */
 function shortfallLines(what: string, missing: readonly Shortfall[]): Opportunity[] {
+  if (missing.length === 0) return [];
   const byActivity = new Map<Activity, Shortfall[]>();
   for (const entry of missing) byActivity.set(entry.activity, [...(byActivity.get(entry.activity) ?? []), entry]);
-  return [...byActivity].map(([activity, items]): Opportunity => ({
-    activities: [activity],
-    text: `${what} needs ${items.map((entry) => `${entry.count} more ${entry.item}`).join(", ")}`,
-  }));
+  const parts = [...byActivity].map(([activity, items]) => `${items.map((entry) => `${entry.count} more ${entry.item}`).join(", ")} (${describeActivity(activity)})`);
+  return [{ activities: ["building"], text: `${what} needs ${parts.join("; ")}` }];
 }
 
 function noHome(facts: OpportunityFacts): Opportunity[] {
@@ -188,11 +208,15 @@ function gear(facts: OpportunityFacts): Opportunity[] {
   }];
 }
 
-/** Every opportunity found, the most pressing first (a tool about to break, food), at most {@link MAX_OPPORTUNITIES}. */
-export function findOpportunities(facts: OpportunityFacts): Opportunity[] {
-  return [wornTools, missingTools, lowFood, farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noBed, gear]
-    .flatMap((finder) => finder(facts))
-    .slice(0, MAX_OPPORTUNITIES);
+/**
+ * Every opportunity found, at most {@link MAX_OPPORTUNITIES}: the pressing ones first (a tool about to break, no tools,
+ * food), then those of the drawn activities, then the rest. Cut before the drawn ones were picked, a farming lover's
+ * "no farm yet" never reached the prompt behind the house and bed lines (run 11, 2026-10-14).
+ */
+export function findOpportunities(facts: OpportunityFacts, drawn: readonly Activity[] = []): Opportunity[] {
+  const pressing = [wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
+  const rest = [farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noFarm, noBed, gear].flatMap((finder) => finder(facts));
+  return [...pressing, ...drawnFirst(rest, drawn)].slice(0, MAX_OPPORTUNITIES);
 }
 
 /** The opportunities for the drawn activities first, then the others, each group in its order: none is dropped. */

@@ -107,6 +107,11 @@ interface Work {
   readonly refused: Map<string, number>;
   /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
   readonly wanted: Set<string>;
+  /**
+   * What its time counts for: the objective's purpose, until one of its steps builds, improves a house or farms; from
+   * then on that (run 11, 2026-10-14: houses were labelled crafting, mining or woodcutting by the goal tier).
+   */
+  purpose: Activity | null;
 }
 
 /** What is carried, as `name:count` sorted (totals per name): compared to tell whether the inventory changed. */
@@ -119,8 +124,11 @@ function carriedOf(snapshot: BotSnapshot): string {
 /** The failures of a full inventory: a workstation without room, a pickup or a collect with no free slot. */
 const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot/u;
 
+/** Skills that are an end in themselves: an objective that runs one is for that work (its fetches included). */
+const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
+
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set() };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -471,7 +479,6 @@ export class Agent {
     if (persona.goal === undefined || Date.now() < this.restUntil) return false;
     if (!(await this.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
-    const opportunities = await this.opportunities(snapshot);
     const hour = lastOfPlay(this.times);
     const time = minutesByActivity(hour);
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
@@ -479,6 +486,7 @@ export class Agent {
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
     const chances = activityChances(availableActivities(personaSkills(persona), snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
+    const opportunities = await this.opportunities(snapshot, drawn);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
@@ -572,7 +580,10 @@ export class Agent {
     const ended = Date.now();
     const ms = ended - started;
     const { activity, spans, carried, position, room } = await this.activityOf(decision.step, actions, snapshot, started, ended, phases);
-    const { purpose } = work.objective;
+    // A house or a farm is what the objective turned out to be for, whatever its label said (the end decides).
+    const endPurpose = ENDS.get(decision.step.skill);
+    if (endPurpose !== undefined) work.purpose = endPurpose;
+    const { purpose } = work;
     for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
     // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
@@ -835,7 +846,7 @@ export class Agent {
   }
 
   /** Things that could use doing now (the tasks a character looks for); the goal tier decides what to make of them. */
-  private async opportunities(snapshot: BotSnapshot): Promise<Opportunity[]> {
+  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[]): Promise<Opportunity[]> {
     const ownHome = this.places.some((place) => place.own === true);
     const unfinished = this.building.unfinished;
     let houseShortfall: Shortfall[] = [];
@@ -852,7 +863,7 @@ export class Agent {
     } catch (error) {
       this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
-    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse });
+    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse }, drawn);
   }
 
   /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */

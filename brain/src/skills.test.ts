@@ -1381,6 +1381,22 @@ test("a drop of her own work keeps what the work needs (every tool, the house pl
   assert.deepEqual(ordered.submitted.map((call) => call.input.items), [[{ item_name: "wooden_axe" }, { item_name: "oak_planks" }, { item_name: "snowball" }]], "an order drops the planks and the spare axe (the best axe stays anyway)");
 });
 
+test("a drop that keeps everything names what may go; with only needed items carried, the needed ones go (run 11: Mira's dead end)", async () => {
+  const needed = (snapshot: Parameters<typeof neededItems>[0]) => neededItems(snapshot, { houseBill: ["cobblestone"] });
+  const kept = new FakeRuntime();
+  kept.snapshot = { ...kept.snapshot, inventory: [{ name: "cobblestone", count: 64 }, { name: "granite", count: 20 }] };
+  const refused = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(kept), needed });
+  assert.equal(refused.status, "failed");
+  assert.match(refused.status === "failed" ? refused.detail : "", /nothing dropped; kept all 64 cobblestone: your current work needs them; .*20 granite/u);
+  assert.deepEqual(kept.submitted, []);
+
+  const all = new FakeRuntime();
+  all.snapshot = { ...all.snapshot, inventory: [{ name: "cobblestone", count: 64 }] };
+  all.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 64 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(all), needed });
+  assert.deepEqual(all.submitted.map((call) => call.input.items), [[{ item_name: "cobblestone" }]]);
+});
+
 test("a far place whose walk failed is not walked to again by the next round, and one across the sea without a boat is not walked to", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;

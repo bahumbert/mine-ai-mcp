@@ -512,7 +512,7 @@ test("the goal tier sees what could use doing and how the last hour went, time r
     memoryNote({ kind: "activity_time", time: { activity: "farming", ended: minutesAgo(20), minutes: 12 } }),
     memoryNote({ kind: "activity_time", time: { activity: "building", ended: minutesAgo(5), minutes: 4 } }),
   ];
-  runtime.snapshot = { ...runtime.snapshot, food: 15, inventory: [{ name: "oak_log", count: 4 }, { name: "stone_pickaxe", count: 1, durability: { remaining: 5, maximum: 131 } }, { name: "wooden_sword", count: 1 }, { name: "wooden_axe", count: 1 }] };
+  runtime.snapshot = { ...runtime.snapshot, food: 15, inventory: [{ name: "oak_log", count: 4 }, { name: "stone_pickaxe", count: 1, durability: { remaining: 5, maximum: 131 } }, { name: "wooden_sword", count: 1 }, { name: "wooden_axe", count: 1 }, { name: "red_bed", count: 1 }] };
   runtime.recipes = { spruce_stairs: { makes: 4, needs: [{ item: "spruce_planks", count: 6 }] } };
   const { planner } = agentFor(t, runtime, { goal: "live well", style: "medieval", preferences: { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } });
   planner.reply({ objective: "rest a while" });
@@ -522,13 +522,14 @@ test("the goal tier sees what could use doing and how the last hour went, time r
   // The last hour of play, not of the clock: mining that ended 90 min ago is still in it (spec 2026-10-04).
   assert.match(request, /How you spent the last hour: mining 30 min, farming 12 min, building 4 min\./u);
   // The ones for the activities drawn come first (a random draw here), so the order is not asserted.
-  assert.match(request, /Things that could use doing, by the kind of work they are: \n- \(/u);
+  assert.match(request, /Things that could use doing, by what they are for: \n- \(/u);
   assert.match(request, /- \(crafting\) your stone_pickaxe has 5 uses left/u);
   assert.match(request, /- \(farming, hunting, cooking\) you carry no food; your hunger is 15\/20/u);
   assert.match(request, /- \(building\) you have no house of your own yet/u);
-  // Each missing material is tagged with the work get_items would do for it: logs are cut, crafted items crafted.
-  assert.match(request, /- \(cutting wood\) a house of your own needs 20 more oak_log/u);
-  assert.match(request, /- \(crafting\) a house of your own needs [^\n]*spruce_stairs/u);
+  // A house's materials are for building; each says the work get_items would do for it: logs are cut, stairs crafted.
+  assert.match(request, /- \(building\) a house of your own needs [^\n]*20 more oak_log \(cutting wood\)/u);
+  assert.match(request, /- \(building\) a house of your own needs [^\n]*spruce_stairs[^\n]*\(crafting\)/u);
+  assert.match(request, /- \(farming\) you have no farm yet/u);
 });
 
 test("each finished step counts towards its activity, for the next goal call", async (t) => {
@@ -565,6 +566,20 @@ test("an own objective carries the purpose the goal tier gave; every step under 
   assert.equal(own?.kind === "objective" ? own.purpose : "missing", "building");
   const step = events.find((event) => event.kind === "step");
   assert.ok(step?.kind === "step" && step.purpose === "building" && step.activity === "woodcutting", "cut for building");
+});
+
+test("an objective that runs a house or farm step is for that work from then on, whatever the goal tier labelled it (run 11)", async (t) => {
+  const runtime = new FakeRuntime();
+  const { events, planner, action } = journaledAgent(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "get stone for my house", for: "mining" }, { objective: "rest", for: "none" });
+  action.reply(
+    { step: { skill: "collect_block", block: "stone", count: 1 } },
+    { step: { skill: "improve_house" } },
+    { step: { skill: "collect_block", block: "stone", count: 2 } },
+    { done: "got stone" },
+  );
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  assert.deepEqual(events.flatMap((event) => event.kind === "step" ? [event.purpose] : []), ["mining", "building", "building"]);
 });
 
 test("a goal reply with no usable \"for\" has no purpose", async (t) => {

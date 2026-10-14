@@ -621,7 +621,7 @@ test("the goal prompt asks for what it feels like now, urgent things first, and 
   assert.match(system, /Pick an objective for what you feel like now \(the\s+first, else the second\)/u);
   assert.match(system, /something urgent comes first \(starving, no tools for\s+it, night\), and then say so/u);
   assert.match(system, /\{"objective": "<one sentence>", "for": "<kind of work>"\}/u);
-  assert.match(system, /"for" is the kind of work[\s\S]*one of building, fighting monsters/u);
+  assert.match(system, /"for" is what the objective\nserves in the end, not the work it takes on the way: stone, wood or anything fetched for a house is building[\s\S]*one of building, fighting monsters/u);
   assert.doesNotMatch(system, /follow your tastes, or vary/u);
 });
 

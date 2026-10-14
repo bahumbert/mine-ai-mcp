@@ -539,8 +539,9 @@ first, else the second), using the things that could use doing; something urgent
 it, night), and then say so:
 ${skillList(persona)}
 ${MINECRAFT_FACTS}
-Reply with only a JSON object: {"objective": "<one sentence>", "for": "<kind of work>"}. "for" is the kind of work the
-objective is for, the walking and gathering it takes included (a house is building): ${kinds}, or "none".`;
+Reply with only a JSON object: {"objective": "<one sentence>", "for": "<kind of work>"}. "for" is what the objective
+serves in the end, not the work it takes on the way: stone, wood or anything fetched for a house is building, seeds or a
+bucket for a farm is farming, wood for tools is crafting: ${kinds}, or "none".`;
 }
 
 /**
@@ -606,7 +607,7 @@ function describeGoal(input: GoalInput): string {
   return [
     describeSituation(input.snapshot, "nothing", input.places, input.areas),
     input.drawn.length === 0 ? "" : `Right now you feel most like ${input.drawn.map(describeActivity).join(", or else ")}.`,
-    `Things that could use doing, by the kind of work they are: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
+    `Things that could use doing, by what they are for: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
     `How you spent the last hour: ${describeTime(input.time)}.`,
     input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
   ].filter((part) => part !== "").join("\n\n");

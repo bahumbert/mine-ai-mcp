@@ -10,7 +10,7 @@ import type { Body } from "./body.ts";
 import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
-import { KEPT_KINDS, kindOf } from "./inventory-room.ts";
+import { junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
@@ -257,7 +257,10 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
 async function dropItems(context: SkillContext, step: Extract<Step, { skill: "drop_item" }>, why: string): Promise<SkillResult> {
   const before = await context.runtime.status();
   const own = keepLastOfKind(dropEntries(step), before.inventory);
-  const needed = context.needed?.(before) ?? new Set<string>();
+  // The work's items are spared only while something else could go: with everything needed, keeping them all made
+  // a full inventory a dead end (run 11, 2026-10-14: Mira, "nothing dropped; kept all 100 cobblestone" 16 times).
+  const workNeeds = context.needed?.(before) ?? new Set<string>();
+  const needed = before.inventory.some((stack) => !workNeeds.has(stack.name)) ? workNeeds : new Set<string>();
   const kept = [...own.kept];
   const entries = own.entries.filter((entry) => {
     if (!needed.has(entry.item)) return true;
@@ -265,7 +268,8 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
     kept.push(`kept all ${Math.min(entry.count ?? all, all)} ${entry.item}: your current work needs them`);
     return false;
   });
-  if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}` };
+  // What may go instead is said with the refusal, or the same drop came back (run 11: up to 7 times in a row).
+  if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}${needed.size === 0 ? "" : `; ${junkHint(before, needed)}`}` };
   const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
   const act = (input: Record<string, unknown>) => context.body.act("drop_item", { items, allow_equipped: true, ...input }, why, { signal: context.signal });
   // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
