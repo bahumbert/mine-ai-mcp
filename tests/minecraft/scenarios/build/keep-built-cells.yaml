@@ -1,0 +1,199 @@
+template: ../../templates/flat-single-action.yaml
+name: keep-built-cells
+tags: [acceptance]
+description: >-
+  A later part of a structure must not dig what an earlier part built (live 2026-10-01: routes to a house roof dug
+  out 11 cells of its walls). The actor stands in a closed room with eight-high cobblestone walls, an earlier part
+  kept whole (walls and floor) with `keep`, and carries no scaffold; the cell to build lies eight blocks
+  beyond the east wall. Digging through
+  a wall is the only way there: without `keep` the route does it (the control run fails the wall goal); with it the
+  build must give up, saying so, and every wall cell must still be cobblestone.
+
+geometry:
+  - fill: { block: stone, from: [-12, -60, -12], to: [16, -60, 12] }
+  # The room: walls eight high around x -2..2, z -2..2, closed, and no scaffold carried: the only way out is through a wall.
+  - fill: { block: cobblestone, from: [-2, -59, -2], to: [2, -52, 2] }
+  - fill: { block: air, from: [-1, -59, -1], to: [1, -52, 1] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+      - { item: oak_planks, count: 4 }
+
+params:
+  action: build_structure
+  input:
+    remove_wrong_blocks: true
+    blocks:
+      - { x: 10, y: -59, z: 0, block_name: oak_planks }
+    keep:
+      # The whole shell: every wall cell and the floor under the room and its walls.
+      - { x: -2, y: -59, z: -2 }
+      - { x: -2, y: -59, z: -1 }
+      - { x: -2, y: -59, z: 0 }
+      - { x: -2, y: -59, z: 1 }
+      - { x: -2, y: -59, z: 2 }
+      - { x: -1, y: -59, z: -2 }
+      - { x: -1, y: -59, z: 2 }
+      - { x: 0, y: -59, z: -2 }
+      - { x: 0, y: -59, z: 2 }
+      - { x: 1, y: -59, z: -2 }
+      - { x: 1, y: -59, z: 2 }
+      - { x: 2, y: -59, z: -2 }
+      - { x: 2, y: -59, z: -1 }
+      - { x: 2, y: -59, z: 0 }
+      - { x: 2, y: -59, z: 1 }
+      - { x: 2, y: -59, z: 2 }
+      - { x: -2, y: -58, z: -2 }
+      - { x: -2, y: -58, z: -1 }
+      - { x: -2, y: -58, z: 0 }
+      - { x: -2, y: -58, z: 1 }
+      - { x: -2, y: -58, z: 2 }
+      - { x: -1, y: -58, z: -2 }
+      - { x: -1, y: -58, z: 2 }
+      - { x: 0, y: -58, z: -2 }
+      - { x: 0, y: -58, z: 2 }
+      - { x: 1, y: -58, z: -2 }
+      - { x: 1, y: -58, z: 2 }
+      - { x: 2, y: -58, z: -2 }
+      - { x: 2, y: -58, z: -1 }
+      - { x: 2, y: -58, z: 0 }
+      - { x: 2, y: -58, z: 1 }
+      - { x: 2, y: -58, z: 2 }
+      - { x: -2, y: -57, z: -2 }
+      - { x: -2, y: -57, z: -1 }
+      - { x: -2, y: -57, z: 0 }
+      - { x: -2, y: -57, z: 1 }
+      - { x: -2, y: -57, z: 2 }
+      - { x: -1, y: -57, z: -2 }
+      - { x: -1, y: -57, z: 2 }
+      - { x: 0, y: -57, z: -2 }
+      - { x: 0, y: -57, z: 2 }
+      - { x: 1, y: -57, z: -2 }
+      - { x: 1, y: -57, z: 2 }
+      - { x: 2, y: -57, z: -2 }
+      - { x: 2, y: -57, z: -1 }
+      - { x: 2, y: -57, z: 0 }
+      - { x: 2, y: -57, z: 1 }
+      - { x: 2, y: -57, z: 2 }
+      - { x: -2, y: -56, z: -2 }
+      - { x: -2, y: -56, z: -1 }
+      - { x: -2, y: -56, z: 0 }
+      - { x: -2, y: -56, z: 1 }
+      - { x: -2, y: -56, z: 2 }
+      - { x: -1, y: -56, z: -2 }
+      - { x: -1, y: -56, z: 2 }
+      - { x: 0, y: -56, z: -2 }
+      - { x: 0, y: -56, z: 2 }
+      - { x: 1, y: -56, z: -2 }
+      - { x: 1, y: -56, z: 2 }
+      - { x: 2, y: -56, z: -2 }
+      - { x: 2, y: -56, z: -1 }
+      - { x: 2, y: -56, z: 0 }
+      - { x: 2, y: -56, z: 1 }
+      - { x: 2, y: -56, z: 2 }
+      - { x: -2, y: -55, z: -2 }
+      - { x: -2, y: -55, z: -1 }
+      - { x: -2, y: -55, z: 0 }
+      - { x: -2, y: -55, z: 1 }
+      - { x: -2, y: -55, z: 2 }
+      - { x: -1, y: -55, z: -2 }
+      - { x: -1, y: -55, z: 2 }
+      - { x: 0, y: -55, z: -2 }
+      - { x: 0, y: -55, z: 2 }
+      - { x: 1, y: -55, z: -2 }
+      - { x: 1, y: -55, z: 2 }
+      - { x: 2, y: -55, z: -2 }
+      - { x: 2, y: -55, z: -1 }
+      - { x: 2, y: -55, z: 0 }
+      - { x: 2, y: -55, z: 1 }
+      - { x: 2, y: -55, z: 2 }
+      - { x: -2, y: -54, z: -2 }
+      - { x: -2, y: -54, z: -1 }
+      - { x: -2, y: -54, z: 0 }
+      - { x: -2, y: -54, z: 1 }
+      - { x: -2, y: -54, z: 2 }
+      - { x: -1, y: -54, z: -2 }
+      - { x: -1, y: -54, z: 2 }
+      - { x: 0, y: -54, z: -2 }
+      - { x: 0, y: -54, z: 2 }
+      - { x: 1, y: -54, z: -2 }
+      - { x: 1, y: -54, z: 2 }
+      - { x: 2, y: -54, z: -2 }
+      - { x: 2, y: -54, z: -1 }
+      - { x: 2, y: -54, z: 0 }
+      - { x: 2, y: -54, z: 1 }
+      - { x: 2, y: -54, z: 2 }
+      - { x: -2, y: -53, z: -2 }
+      - { x: -2, y: -53, z: -1 }
+      - { x: -2, y: -53, z: 0 }
+      - { x: -2, y: -53, z: 1 }
+      - { x: -2, y: -53, z: 2 }
+      - { x: -1, y: -53, z: -2 }
+      - { x: -1, y: -53, z: 2 }
+      - { x: 0, y: -53, z: -2 }
+      - { x: 0, y: -53, z: 2 }
+      - { x: 1, y: -53, z: -2 }
+      - { x: 1, y: -53, z: 2 }
+      - { x: 2, y: -53, z: -2 }
+      - { x: 2, y: -53, z: -1 }
+      - { x: 2, y: -53, z: 0 }
+      - { x: 2, y: -53, z: 1 }
+      - { x: 2, y: -53, z: 2 }
+      - { x: -2, y: -52, z: -2 }
+      - { x: -2, y: -52, z: -1 }
+      - { x: -2, y: -52, z: 0 }
+      - { x: -2, y: -52, z: 1 }
+      - { x: -2, y: -52, z: 2 }
+      - { x: -1, y: -52, z: -2 }
+      - { x: -1, y: -52, z: 2 }
+      - { x: 0, y: -52, z: -2 }
+      - { x: 0, y: -52, z: 2 }
+      - { x: 1, y: -52, z: -2 }
+      - { x: 1, y: -52, z: 2 }
+      - { x: 2, y: -52, z: -2 }
+      - { x: 2, y: -52, z: -1 }
+      - { x: 2, y: -52, z: 0 }
+      - { x: 2, y: -52, z: 1 }
+      - { x: 2, y: -52, z: 2 }
+      - { x: -2, y: -60, z: -2 }
+      - { x: -2, y: -60, z: -1 }
+      - { x: -2, y: -60, z: 0 }
+      - { x: -2, y: -60, z: 1 }
+      - { x: -2, y: -60, z: 2 }
+      - { x: -1, y: -60, z: -2 }
+      - { x: -1, y: -60, z: -1 }
+      - { x: -1, y: -60, z: 0 }
+      - { x: -1, y: -60, z: 1 }
+      - { x: -1, y: -60, z: 2 }
+      - { x: 0, y: -60, z: -2 }
+      - { x: 0, y: -60, z: -1 }
+      - { x: 0, y: -60, z: 0 }
+      - { x: 0, y: -60, z: 1 }
+      - { x: 0, y: -60, z: 2 }
+      - { x: 1, y: -60, z: -2 }
+      - { x: 1, y: -60, z: -1 }
+      - { x: 1, y: -60, z: 0 }
+      - { x: 1, y: -60, z: 1 }
+      - { x: 1, y: -60, z: 2 }
+      - { x: 2, y: -60, z: -2 }
+      - { x: 2, y: -60, z: -1 }
+      - { x: 2, y: -60, z: 0 }
+      - { x: 2, y: -60, z: 1 }
+      - { x: 2, y: -60, z: 2 }
+  # The only way to the cell is through a kept wall, so the build must give up rather than dig it.
+  expect: { status: failed, errorContains: "[BUILD_" }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - kind: blocksAt
+      block: cobblestone
+      positions: [[-2, -59, -2], [-2, -59, -1], [-2, -59, 0], [-2, -59, 1], [-2, -59, 2], [-1, -59, -2], [-1, -59, 2], [0, -59, -2], [0, -59, 2], [1, -59, -2], [1, -59, 2], [2, -59, -2], [2, -59, -1], [2, -59, 0], [2, -59, 1], [2, -59, 2], [-2, -58, -2], [-2, -58, -1], [-2, -58, 0], [-2, -58, 1], [-2, -58, 2], [-1, -58, -2], [-1, -58, 2], [0, -58, -2], [0, -58, 2], [1, -58, -2], [1, -58, 2], [2, -58, -2], [2, -58, -1], [2, -58, 0], [2, -58, 1], [2, -58, 2]]
+    - kind: blocksAt
+      block: stone
+      positions: [[-2, -60, -2], [-2, -60, -1], [-2, -60, 0], [-2, -60, 1], [-2, -60, 2], [-1, -60, -2], [-1, -60, -1], [-1, -60, 0], [-1, -60, 1], [-1, -60, 2], [0, -60, -2], [0, -60, -1], [0, -60, 0], [0, -60, 1], [0, -60, 2], [1, -60, -2], [1, -60, -1], [1, -60, 0], [1, -60, 1], [1, -60, 2], [2, -60, -2], [2, -60, -1], [2, -60, 0], [2, -60, 1], [2, -60, 2]]

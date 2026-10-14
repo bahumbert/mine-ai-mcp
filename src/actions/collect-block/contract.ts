@@ -13,8 +13,10 @@ export const COLLECT_BLOCK = "collect_block" as const;
 export const COLLECT_BLOCK_DESCRIPTION =
   "Collect matching blocks by searching loaded columns, reaching, digging, and settling one target at a time. " +
   "Without x/y/z it mines the closest matching blocks it can reach, wherever they are, including blocks the bot placed itself; " +
+  "max_distance keeps the whole run within that many blocks (horizontally) of where it started: no farther target and no exploring, and with none left in range it stops naming the nearest farther one seen. " +
   "reposition with navigate first if you want blocks from a particular area. " +
   "The best carried tool for each block is equipped automatically, so equip is not needed first. " +
+  "A run that breaks and picks up nothing for 180 s stops with what it got and says how far it walked meanwhile. " +
   "By default a required tool-tier loss stops with partial progress; on_tool_loss=continue keeps mining with the remaining tool. " +
   "The response lists every cell broken and its distance from where the run started. " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
@@ -23,6 +25,8 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "For general collection tasks, prefer count greater than 1 without an exact x/y/z target; use exact coordinates only when that specific block matters. " +
   "With exact coordinates, omit count or set it to 1; larger counts are rejected.";
 export const MAX_COLLECT_BLOCKS = 32;
+/** The largest `max_distance`: a few loaded view distances. */
+export const MAX_COLLECT_DISTANCE = 1024;
 export const NON_MINEABLE_FLUIDS = new Set(["water", "lava", "bubble_column"]);
 /**
  * How many blocks past the request may be broken before the run gives up.
@@ -32,6 +36,13 @@ export const NON_MINEABLE_FLUIDS = new Set(["water", "lava", "bubble_column"]);
  * allowance covers a hazardous seam without licensing an unbounded dig.
  */
 export const MAX_EXTRA_BREAKS = 4;
+/**
+ * How long a run may go without breaking a matching block or gaining an item
+ * before it settles with what it got. A walk to the next stand of trees fits
+ * well inside it; the circling it ends (observed live 2026-10-02) lasted 15 to
+ * 27 minutes.
+ */
+export const COLLECT_STALL_MS = 180_000;
 
 export const HIGHLIGHT_COLOURS = {
   candidate: "#ffaa0d",
@@ -69,6 +80,9 @@ export const outcomes = {
   targetsUnreachable: (selector: string, reason: string) =>
     `[NO_REACHABLE_MATCHING_TARGETS] Every loaded ${selector} block was found but none could be reached. Last routing stop: ${reason}`,
   noLoadedTargets: (selector: string) => `[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded ${selector} blocks.`,
+  noTargetInRange: (selector: string, range: number, nearest: { readonly position: Position3; readonly distance: number } | null) =>
+    `[NO_TARGET_IN_RANGE] No ${selector} block left within ${range} blocks of where the run started; ` +
+    (nearest === null ? "none is loaded farther either." : `the nearest loaded one is at ${cellLabel(nearest.position)}, ${nearest.distance} blocks from the start.`),
   unmineable: (blockName: string, position: Position3, reason: string) =>
     `[TARGET_UNMINEABLE] ${blockName} at ${cellLabel(position)} cannot be broken: ${reason}.`,
   dropAttemptsExhausted: (mined: number, collected: number, requested: number) =>
@@ -76,6 +90,8 @@ export const outcomes = {
   inventoryFull: (totalSlots: number, itemNames: readonly string[]) =>
     `[INVENTORY_FULL] All ${totalSlots} inventory slots are occupied with no room in a stack of ${describeItems(itemNames)}; allow_full_inventory=false.`,
   incomplete: "[COLLECTION_INCOMPLETE] Collection stopped before the requested inventory gain was observed.",
+  stalled: (seconds: number, walked: number, fromStart: number) =>
+    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
   progress: (reason: string, gained: number, requested: number, blocksBroken: number) =>
     `${reason} Broke ${blocksBroken} matching block${blocksBroken === 1 ? "" : "s"}; inventory gained ${gained}/${requested} requested items.`,
 } as const;
@@ -121,6 +137,8 @@ export const collectBlockInputSchema = z
       ),
     on_tool_loss: z.enum(["stop", "continue"]).default("stop")
       .describe("Stop with partial progress when the best required tool tier drops, or continue the same collection with the remaining tool."),
+    max_distance: z.number().int().min(1).max(MAX_COLLECT_DISTANCE).optional()
+      .describe("Keep the run within this many blocks (horizontal) of where it starts: farther blocks are never targeted and it does not explore. Omit for no bound."),
   })
   .superRefine((value, context) => {
     const coordinates = [value.x, value.y, value.z].filter((coordinate) => coordinate !== undefined).length;
@@ -139,6 +157,14 @@ export interface CollectBlockRequest {
   scaffolding: boolean;
   allowFullInventory: boolean;
   onToolLoss: "stop" | "continue";
+  /** Horizontal blocks from the run's start beyond which nothing is targeted, and no exploring; null: unbounded. */
+  maxDistance: number | null;
+  /**
+   * Internal, never from the tool input: the bot's own protected regions do not refuse this collection. Only for
+   * picking a temporary workstation back up, set down a moment ago inside a region of its own (live 2026-10-02: a
+   * crafting table left in a zone she was leveling).
+   */
+  ignoreOwnRegions?: boolean;
 }
 
 export function parseCollectBlockRequest(input: unknown): CollectBlockRequest {
@@ -154,6 +180,7 @@ export function parseCollectBlockRequest(input: unknown): CollectBlockRequest {
     scaffolding: value.scaffold,
     allowFullInventory: value.allow_full_inventory,
     onToolLoss: value.on_tool_loss,
+    maxDistance: value.max_distance ?? null,
   };
 }
 

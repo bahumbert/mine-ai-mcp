@@ -4,7 +4,8 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import { attachSessionFrontier } from "./frontier.js";
+import minecraftData from "minecraft-data";
+import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, seenInWorld } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
   return SqlBotData.create({
@@ -299,6 +300,30 @@ test("does not scan an enriched chunk again when it reloads", async (t) => {
   ]);
 });
 
+test("a chunk loaded again after the rescan time is scanned again: its materials are what it holds now", async (t) => {
+  // Live 2026-10-04: materials kept from the first sight sent bots to logs long cut.
+  const { events, bot, column, data } = fixture();
+  const frontier = attachSessionFrontier(bot, data);
+  const recorded: unknown[] = [];
+  frontier.onRecorded((chunk) => recorded.push(chunk));
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+  const before = frontier.status().observedChunks;
+  recorded.length = 0;
+  data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
+  column.sections[0]!.data.palette!.push(7);
+  (bot.registry.blocksByStateId as Record<number, { name: string }>)[7] = { name: "birch_log" };
+  events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
+  await frontier.idle();
+
+  assert.ok(data.read("SELECT material FROM frontier_chunk_materials WHERE chunk_key = 'overworld|-2|4'").some((row) => row.material === "birch_log"));
+  assert.equal(frontier.status().observedChunks, before, "a rescan is no new chunk");
+  assert.deepEqual(recorded, []);
+});
+
 test("coalesces repeated chunk loads before scanning", async (t) => {
   const { events, bot, column, data } = fixture();
   let directPaletteReads = 0;
@@ -330,4 +355,47 @@ test("stops recording when the session frontier closes", (t) => {
   events.emit("chunkColumnLoad", new Vec3(16, 0, 16));
 
   assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count, 0);
+});
+
+test("counts the recorded chunks that hold a material; a material the scan leaves out counts none", async (t) => {
+  const { events, bot, data } = fixture();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  events.emit("chunkColumnLoad", new Vec3(48, 0, -32));
+  events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
+  await frontier.idle();
+
+  assert.equal(frontier.chunksWithMaterial("oak_log"), 2);
+  assert.equal(frontier.chunksWithMaterial("pale_oak_log"), 0);
+  // Stone is left out of the scan as everywhere: no chunk records it.
+  assert.equal(frontier.chunksWithMaterial("stone"), 0);
+});
+
+/** A bot whose loaded blocks within reach are `near` (block name -> count), asked as Mineflayer's findBlocks does. */
+function seeingBot(near: Record<string, number>): Bot {
+  const registry = minecraftData("1.21.4");
+  return {
+    version: "1.21.4",
+    registry,
+    findBlocks: ({ matching, count }: { matching: number; count: number }) => {
+      const name = registry.blocks[matching]?.name ?? "";
+      return Array.from({ length: Math.min(count, near[name] ?? 0) }, () => new Vec3(0, 0, 0));
+    },
+  } as unknown as Bot;
+}
+
+test("an item is as seen as the most-seen block it is gathered from: loaded blocks near the bot, or recorded chunks", () => {
+  const chunks: Record<string, number> = { oak_log: 12 };
+  const frontier = { chunksWithMaterial: (material: string) => chunks[material] ?? 0 };
+  const seen = seenInWorld(seeingBot({ stone: 500 }), frontier);
+  assert.equal(seen("oak_log"), 12);
+  // Near blocks are counted up to the cap.
+  assert.equal(seen("cobblestone"), SEEN_CAP);
+  assert.equal(seen("pale_oak_log"), 0);
+  // Deepslate is neither near nor recorded: cobbled_deepslate is unseen, though stone is common.
+  assert.equal(seen("cobbled_deepslate"), 0);
+  assert.equal(seenInWorld(seeingBot({ deepslate: 5 }), frontier)("cobbled_deepslate"), 5);
 });

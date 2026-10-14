@@ -1,0 +1,44 @@
+template: ../../templates/collect/single-action.yaml
+
+name: no-flood-under-sea
+tags: [regression]
+description: >-
+  Live 2026-10-10: Sana dug a pocket into the sea floor, and once her feet were in a still-water puddle the
+  flood rule stopped protecting her: the sea came in through the wall she mined. A pocket whose
+  dirt wall is the only dirt, one block from the sea, with a puddle on its floor, must keep the wall.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doMobSpawning: false, naturalRegeneration: false }
+reset: ["fill -9 -63 -9 9 -40 9 air"]
+geometry:
+  - fill: { block: stone, from: [-8, -63, -8], to: [8, -57, 8] }
+  # The sea, all around and above the dirt knoll.
+  - fill: { block: water, from: [-8, -56, -8], to: [8, -42, 8] }
+  # A stone knoll with a one-block dirt wall on its east face, the sea against it.
+  - fill: { block: stone, from: [-3, -56, -3], to: [0, -53, 3] }
+  - fill: { block: dirt, from: [1, -56, -3], to: [1, -53, 3] }
+  # The pocket she dug: two cells high, one puddle on its floor, a one-block dirt wall to the sea on the east.
+  - fill: { block: air, from: [0, -55, 0], to: [0, -54, 0] }
+  - setblock: { block: water, at: [0, -55, 0] }
+players:
+  - name: DrainMiner
+    pos: [0.5, -55, 0.5]
+    inventory: [{ item: stone_pickaxe, count: 1 }, { item: stone_shovel, count: 1 }, { item: cobblestone, count: 64 }]
+params:
+  action: collect_block
+  input:
+    block_name: dirt
+    count: 1
+    scaffold: true
+  expect: { status: failed, errorContains: "[NO_REACHABLE_MATCHING_TARGETS]" }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    # The wall between the pocket and the sea (east face at x 2) is never broken through.
+    - { kind: blocksAt, block: dirt, positions: [[1, -55, 0], [1, -54, 0]] }
+    - { kind: survive, who: DrainMiner, seconds: 1 }
+    - { kind: completion, who: DrainMiner }

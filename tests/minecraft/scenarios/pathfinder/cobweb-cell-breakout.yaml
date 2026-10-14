@@ -1,0 +1,60 @@
+template: ../../templates/flat-single-action.yaml
+
+name: cobweb-cell-breakout
+tags: [reliability]
+description: >-
+  Leave a one-block cell walled in by cobwebs at feet and head level and reach a point five blocks away. Webs
+  are no terrain to refuse nor free air to walk through: the route breaks the one in its way with the sword.
+
+# The owner's walled-in-by-cobwebs report (a bot in a mineshaft, webs at feet and head all round). The cell stands
+# on open floor with nothing else round it, so the webs are the only thing between the bot and the target.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The four walls of the cell, two webs high each.
+  - fill: { block: cobweb, from: [ 1, -60, 0 ], to: [ 1, -59, 0 ] }
+  - fill: { block: cobweb, from: [ -1, -60, 0 ], to: [ -1, -59, 0 ] }
+  - fill: { block: cobweb, from: [ 0, -60, 1 ], to: [ 0, -59, 1 ] }
+  - fill: { block: cobweb, from: [ 0, -60, -1 ], to: [ 0, -59, -1 ] }
+
+players:
+  - name: WebBot
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: wooden_sword
+        count: 1
+
+tick:
+  - "gamemode spectator @a[name=!WebBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 5
+    y: -60
+    z: 0
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: reach
+      who: WebBot
+      pos: [ 5.5, -60, 0.5 ]
+      radius: 2.0
+    - kind: completion
+      who: WebBot

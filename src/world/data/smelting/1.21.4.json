@@ -1,0 +1,631 @@
+{
+ "version": "1.21.4",
+ "recipes": [
+  {
+   "output": "baked_potato",
+   "count": 1,
+   "inputs": [
+    "potato"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "black_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "black_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "blue_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "blue_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "brick",
+   "count": 1,
+   "inputs": [
+    "clay_ball"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "brown_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "brown_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "charcoal",
+   "count": 1,
+   "inputs": [
+    "dark_oak_log",
+    "dark_oak_wood",
+    "stripped_dark_oak_log",
+    "stripped_dark_oak_wood",
+    "pale_oak_log",
+    "pale_oak_wood",
+    "stripped_pale_oak_log",
+    "stripped_pale_oak_wood",
+    "oak_log",
+    "oak_wood",
+    "stripped_oak_log",
+    "stripped_oak_wood",
+    "acacia_log",
+    "acacia_wood",
+    "stripped_acacia_log",
+    "stripped_acacia_wood",
+    "birch_log",
+    "birch_wood",
+    "stripped_birch_log",
+    "stripped_birch_wood",
+    "jungle_log",
+    "jungle_wood",
+    "stripped_jungle_log",
+    "stripped_jungle_wood",
+    "spruce_log",
+    "spruce_wood",
+    "stripped_spruce_log",
+    "stripped_spruce_wood",
+    "mangrove_log",
+    "mangrove_wood",
+    "stripped_mangrove_log",
+    "stripped_mangrove_wood",
+    "cherry_log",
+    "cherry_wood",
+    "stripped_cherry_log",
+    "stripped_cherry_wood"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "coal",
+   "count": 1,
+   "inputs": [
+    "coal_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "coal",
+   "count": 1,
+   "inputs": [
+    "deepslate_coal_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_beef",
+   "count": 1,
+   "inputs": [
+    "beef"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_chicken",
+   "count": 1,
+   "inputs": [
+    "chicken"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_cod",
+   "count": 1,
+   "inputs": [
+    "cod"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_mutton",
+   "count": 1,
+   "inputs": [
+    "mutton"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_porkchop",
+   "count": 1,
+   "inputs": [
+    "porkchop"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_rabbit",
+   "count": 1,
+   "inputs": [
+    "rabbit"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cooked_salmon",
+   "count": 1,
+   "inputs": [
+    "salmon"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "copper_ingot",
+   "count": 1,
+   "inputs": [
+    "copper_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "copper_ingot",
+   "count": 1,
+   "inputs": [
+    "deepslate_copper_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "copper_ingot",
+   "count": 1,
+   "inputs": [
+    "raw_copper"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cracked_deepslate_bricks",
+   "count": 1,
+   "inputs": [
+    "deepslate_bricks"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cracked_deepslate_tiles",
+   "count": 1,
+   "inputs": [
+    "deepslate_tiles"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cracked_nether_bricks",
+   "count": 1,
+   "inputs": [
+    "nether_bricks"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cracked_polished_blackstone_bricks",
+   "count": 1,
+   "inputs": [
+    "polished_blackstone_bricks"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cracked_stone_bricks",
+   "count": 1,
+   "inputs": [
+    "stone_bricks"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "cyan_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "cyan_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "deepslate",
+   "count": 1,
+   "inputs": [
+    "cobbled_deepslate"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "diamond",
+   "count": 1,
+   "inputs": [
+    "deepslate_diamond_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "diamond",
+   "count": 1,
+   "inputs": [
+    "diamond_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "dried_kelp",
+   "count": 1,
+   "inputs": [
+    "kelp"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "emerald",
+   "count": 1,
+   "inputs": [
+    "deepslate_emerald_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "emerald",
+   "count": 1,
+   "inputs": [
+    "emerald_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "glass",
+   "count": 1,
+   "inputs": [
+    "sand",
+    "red_sand"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gold_ingot",
+   "count": 1,
+   "inputs": [
+    "deepslate_gold_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gold_ingot",
+   "count": 1,
+   "inputs": [
+    "gold_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gold_ingot",
+   "count": 1,
+   "inputs": [
+    "nether_gold_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gold_ingot",
+   "count": 1,
+   "inputs": [
+    "raw_gold"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gold_nugget",
+   "count": 1,
+   "inputs": [
+    "golden_pickaxe",
+    "golden_shovel",
+    "golden_axe",
+    "golden_hoe",
+    "golden_sword",
+    "golden_helmet",
+    "golden_chestplate",
+    "golden_leggings",
+    "golden_boots",
+    "golden_horse_armor"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "gray_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "gray_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "green_dye",
+   "count": 1,
+   "inputs": [
+    "cactus"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "green_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "green_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "iron_ingot",
+   "count": 1,
+   "inputs": [
+    "deepslate_iron_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "iron_ingot",
+   "count": 1,
+   "inputs": [
+    "iron_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "iron_ingot",
+   "count": 1,
+   "inputs": [
+    "raw_iron"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "iron_nugget",
+   "count": 1,
+   "inputs": [
+    "iron_pickaxe",
+    "iron_shovel",
+    "iron_axe",
+    "iron_hoe",
+    "iron_sword",
+    "iron_helmet",
+    "iron_chestplate",
+    "iron_leggings",
+    "iron_boots",
+    "iron_horse_armor",
+    "chainmail_helmet",
+    "chainmail_chestplate",
+    "chainmail_leggings",
+    "chainmail_boots"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "lapis_lazuli",
+   "count": 1,
+   "inputs": [
+    "deepslate_lapis_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "lapis_lazuli",
+   "count": 1,
+   "inputs": [
+    "lapis_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "light_blue_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "light_blue_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "light_gray_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "light_gray_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "lime_dye",
+   "count": 1,
+   "inputs": [
+    "sea_pickle"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "lime_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "lime_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "magenta_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "magenta_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "nether_brick",
+   "count": 1,
+   "inputs": [
+    "netherrack"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "netherite_scrap",
+   "count": 1,
+   "inputs": [
+    "ancient_debris"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "orange_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "orange_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "pink_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "pink_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "popped_chorus_fruit",
+   "count": 1,
+   "inputs": [
+    "chorus_fruit"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "purple_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "purple_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "quartz",
+   "count": 1,
+   "inputs": [
+    "nether_quartz_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "red_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "red_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "redstone",
+   "count": 1,
+   "inputs": [
+    "deepslate_redstone_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "redstone",
+   "count": 1,
+   "inputs": [
+    "redstone_ore"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "resin_brick",
+   "count": 1,
+   "inputs": [
+    "resin_clump"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "smooth_basalt",
+   "count": 1,
+   "inputs": [
+    "basalt"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "smooth_quartz",
+   "count": 1,
+   "inputs": [
+    "quartz_block"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "smooth_red_sandstone",
+   "count": 1,
+   "inputs": [
+    "red_sandstone"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "smooth_sandstone",
+   "count": 1,
+   "inputs": [
+    "sandstone"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "smooth_stone",
+   "count": 1,
+   "inputs": [
+    "stone"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "sponge",
+   "count": 1,
+   "inputs": [
+    "wet_sponge"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "stone",
+   "count": 1,
+   "inputs": [
+    "cobblestone"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "terracotta",
+   "count": 1,
+   "inputs": [
+    "clay"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "white_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "white_terracotta"
+   ],
+   "cookingTicks": 200
+  },
+  {
+   "output": "yellow_glazed_terracotta",
+   "count": 1,
+   "inputs": [
+    "yellow_terracotta"
+   ],
+   "cookingTicks": 200
+  }
+ ]
+}

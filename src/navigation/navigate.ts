@@ -42,6 +42,10 @@ export type NavigationResult =
       readonly status: "stopped";
       readonly reason: string;
       readonly elapsedMs: number;
+      /** Set when the route ended because no path (or no usable partial route) was found, whatever was carried. */
+      readonly calculationFailed?: true;
+      /** With a calculation failure, the planned node nearest the goal: where the search got to. */
+      readonly closest?: BlockPosition;
       /** The block whose planned break failed and ended the route, when one did. */
       readonly failedBreak?: BlockPosition;
     };
@@ -78,6 +82,8 @@ export interface NavigateOptions {
    * threat avoidance while their goal chooses the required separation.
    */
   readonly stepField?: null;
+  /** Told of each block the route placed as scaffold, once the world confirmed it. */
+  readonly onPlacement?: (placement: { readonly position: BlockPosition; readonly stateId: number }) => void;
 }
 
 /** The operation navigation exists to offer: one goal in, one settled route out. */
@@ -120,6 +126,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     policy: options.movements,
     ...(options.onArrival && { onArrival: options.onArrival }),
     ...(options.onCalculationFailure && { onCalculationFailure: options.onCalculationFailure }),
+    ...(options.onPlacement && { onPlacement: options.onPlacement }),
     stepField: options.stepField,
     signal,
     // Commit a useful partial route instead of retaining an ever-growing A*
@@ -154,5 +161,9 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     reason: [outcomeReason(outcome), pending].filter(Boolean).join(" "),
     elapsedMs,
     ...(failedBreak && { failedBreak }),
+    ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && {
+      calculationFailed: true as const,
+      closest: outcome.failure.kind === "no_path" ? outcome.failure.closest.position : outcome.failure.limit.closest.position,
+    }),
   };
 }

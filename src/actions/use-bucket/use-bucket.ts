@@ -388,7 +388,7 @@ export function createUseBucketAction(
     inputSchema: useBucketInputSchema,
     resultSchema: useBucketResultSchema,
     formatResult: formatUseBucketResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: useBucketAnnotations,
     parse: parseUseBucketRequest,
     execute: (request, context) => useBucket(bot, request, context, dependencies),

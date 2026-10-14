@@ -40,6 +40,7 @@ import {
   BUILD_STRUCTURE_DESCRIPTION,
   buildStructureInputSchema,
 } from "./build-structure/contract.js";
+import { TEND_CROPS, TEND_CROPS_DESCRIPTION, tendCropsInputSchema } from "./tend-crops/contract.js";
 import {
   CANCEL_FOREGROUND_ACTION,
 } from "./cancel-foreground-action/contract.js";
@@ -125,13 +126,26 @@ import {
   viewCraftingRequirementsInputSchema,
 } from "./view-crafting-requirements/contract.js";
 import {
+  VIEW_SMELTING_RECIPES,
+  VIEW_SMELTING_RECIPES_DESCRIPTION,
+  viewSmeltingRecipesInputSchema,
+} from "./view-smelting-recipes/contract.js";
+import {
+  VIEW_BLOCK_DROPS,
+  VIEW_BLOCK_DROPS_DESCRIPTION,
+  viewBlockDropsInputSchema,
+} from "./view-block-drops/contract.js";
+import {
   VIEW_FRONTIER,
   VIEW_FRONTIER_DESCRIPTION,
   viewFrontierInputSchema,
 } from "./view-frontier/contract.js";
 import { VIEW_STATUS, VIEW_STATUS_DESCRIPTION, viewStatusInputSchema } from "./view-status/contract.js";
 
+import { NOTE_DELETE, NOTE_DELETE_DESCRIPTION, noteDeleteInputSchema } from "./note-delete/contract.js";
 import { NOTE_READ, NOTE_READ_DESCRIPTION, noteReadInputSchema } from "./note-read/contract.js";
+import { PROTECT_REGION, PROTECT_REGION_DESCRIPTION, protectRegionInputSchema } from "./protect-region/contract.js";
+import { UNPROTECT_REGION, UNPROTECT_REGION_DESCRIPTION, unprotectRegionInputSchema } from "./unprotect-region/contract.js";
 import { NOTE_SAVE, NOTE_SAVE_DESCRIPTION, noteSaveInputSchema } from "./note-save/contract.js";
 
 /** One published tool, as tool discovery describes it before MCP adds its metadata. */
@@ -158,6 +172,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     ),
     tool("wait_for_action", WAIT_FOR_ACTION_DESCRIPTION, waitForActionInputSchema, { foreground: false }),
     tool(BUILD_STRUCTURE, BUILD_STRUCTURE_DESCRIPTION, buildStructureInputSchema),
+    tool(TEND_CROPS, TEND_CROPS_DESCRIPTION, tendCropsInputSchema),
     tool(COLLECT_BLOCK, COLLECT_BLOCK_DESCRIPTION, collectBlockInputSchema),
     tool(CRAFT_ITEM, CRAFT_ITEM_DESCRIPTION, craftItemInputSchema),
     tool(SET_SURVIVAL_POLICY, SET_SURVIVAL_POLICY_DESCRIPTION, setSurvivalPolicyInputSchema, { foreground: false }),
@@ -173,6 +188,9 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     tool(NAVIGATE, NAVIGATE_DESCRIPTION, navigateInputSchema),
     tool(NOTE_SAVE, NOTE_SAVE_DESCRIPTION, noteSaveInputSchema),
     tool(NOTE_READ, NOTE_READ_DESCRIPTION, noteReadInputSchema, { foreground: false }),
+    tool(NOTE_DELETE, NOTE_DELETE_DESCRIPTION, noteDeleteInputSchema),
+    tool(PROTECT_REGION, PROTECT_REGION_DESCRIPTION, protectRegionInputSchema, { foreground: false }),
+    tool(UNPROTECT_REGION, UNPROTECT_REGION_DESCRIPTION, unprotectRegionInputSchema, { foreground: false }),
     tool(PLACE_BLOCK, PLACE_BLOCK_DESCRIPTION, placeBlockInputSchema),
     tool(PREPARE_DRAGON_PERCH, PREPARE_DRAGON_PERCH_DESCRIPTION, prepareDragonPerchInputSchema),
     tool(SHOOT_DRAGON, SHOOT_DRAGON_DESCRIPTION, shootDragonInputSchema),
@@ -180,7 +198,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     tool(RAW_ACTION, RAW_ACTION_DESCRIPTION, rawActionInputSchema),
     tool(QUERY_BOT_DATA, QUERY_BOT_DATA_DESCRIPTION, queryBotDataInputSchema, { foreground: false }),
     tool(READ_RECENT_EVENTS, READ_RECENT_EVENTS_DESCRIPTION, readRecentEventsInputSchema, { foreground: false }),
-    tool(SEND_MESSAGE, SEND_MESSAGE_DESCRIPTION, sendMessageInputSchema),
+    tool(SEND_MESSAGE, SEND_MESSAGE_DESCRIPTION, sendMessageInputSchema, { foreground: false }),
     tool(SLEEP, SLEEP_DESCRIPTION, sleepInputSchema),
     tool(SMELT_ITEM, SMELT_ITEM_DESCRIPTION, smeltItemInputSchema),
     tool(USE_BUCKET, USE_BUCKET_DESCRIPTION, useBucketInputSchema),
@@ -191,6 +209,8 @@ export function describeActionTools(): readonly ActionToolDescription[] {
       viewCraftingRequirementsInputSchema,
       { foreground: false },
     ),
+    tool(VIEW_SMELTING_RECIPES, VIEW_SMELTING_RECIPES_DESCRIPTION, viewSmeltingRecipesInputSchema, { foreground: false }),
+    tool(VIEW_BLOCK_DROPS, VIEW_BLOCK_DROPS_DESCRIPTION, viewBlockDropsInputSchema, { foreground: false }),
     tool(VIEW_FRONTIER, VIEW_FRONTIER_DESCRIPTION, viewFrontierInputSchema, { foreground: false }),
     tool(VIEW_BLOCKS, VIEW_BLOCKS_DESCRIPTION, viewBlocksInputSchema, { foreground: false }),
     tool(VIEW_STATUS, VIEW_STATUS_DESCRIPTION, viewStatusInputSchema, { foreground: false }),

@@ -6,7 +6,7 @@ import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import type { WorldView } from "./world/world.js";
-import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimTravelTicks } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
@@ -16,7 +16,13 @@ interface DiveSession {
   returning: boolean;
   stop: AbortController;
   completedWork: number;
+  /** The air metadata stayed absent through a submerged observation: the server sends it when it changes, so it is full. */
+  unchangedAir: boolean;
 }
+
+const FULL_AIR_TICKS = 300;
+/** How long a submerged bot with no air metadata is watched before the air is taken as unchanged. */
+const AIR_OBSERVATION_TICKS = 40;
 
 /** Scoped declaration shared with survival; never a switch that removes the reflex. */
 export class Diving {
@@ -36,16 +42,16 @@ export class Diving {
     if (!session?.owned) return null;
     if (this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "air") return DIVE_BACKSTOP_TICKS;
     const feet = this.bot.entity.position.floored();
-    const surface = openWaterSurface(this.#read, feet);
-    if (!surface) return 300; // The admission premise disappeared: request immediate rescue.
-    return swimTravelTicks(this.bot.entity.position, surface) + DIVE_BACKSTOP_TICKS;
+    const ascent = swimAscent(this.#read, feet);
+    if (!ascent) return 300; // The admission premise disappeared: request immediate rescue.
+    return ascent.ticks + DIVE_BACKSTOP_TICKS;
   }
 
   committed(plan: Pick<RoutePlan, "steps">): void {
     const session = this.#session;
     if (!session) return;
     if (plan.steps.some(({ to }) => this.world.blockAt(to.x, to.y + 1, to.z).kind === "loaded" &&
-      this.bot.blockAt(new Vec3(to.x, to.y + 1, to.z))?.name === "water" && openWaterSurface(this.#read, to))) {
+      this.bot.blockAt(new Vec3(to.x, to.y + 1, to.z))?.name === "water" && swimAscent(this.#read, to))) {
       session.owned = true;
     }
   }
@@ -70,7 +76,7 @@ export class Diving {
   async run(options: NavigateOptions, navigate: Navigate) {
     if (this.#session) throw new Error("Navigation already owns a dive session.");
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled: new AbortController(), completedWork: 0 };
+      cancelled: new AbortController(), completedWork: 0, unchangedAir: false };
     this.#session = session;
     const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
@@ -81,12 +87,12 @@ export class Diving {
     const tick = () => {
       if (!session.owned || session.returning || session.stop.signal.aborted) return;
       const feet = this.bot.entity.position.floored();
-      const surface = openWaterSurface(this.#read, feet);
-      const air = airSupplyTicks(this.bot);
+      const ascent = swimAscent(this.#read, feet);
+      const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
       // With a lost corridor the survival backstop must take over; do not call it a planned return.
-      if (!surface) return;
+      if (!ascent) return;
       if (this.bot.blockAt(feet.offset(0, 1, 0))?.name === "water" &&
-        (air === null || air <= swimTravelTicks(this.bot.entity.position, surface) + DIVE_RESERVE_TICKS))
+        (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
         session.stop.abort(BREATHING_STOP);
     };
     this.bot.on("physicsTick", tick);
@@ -106,14 +112,26 @@ export class Diving {
           }
         } finally { this.bot.setControlState("jump", false); }
       }
+      // Roofed, there is no surface to breathe at to make the server report the air (live 2026-10-10: a bot stuck on
+      // the sea floor under an overhang never got a dive budget, so no route out). The server sends the air whenever
+      // it changes, so a head kept under water for a moment with none sent means it is not running down.
+      if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface === null) {
+        for (let ticks = 0; ticks < AIR_OBSERVATION_TICKS && airSupplyTicks(this.bot) === null &&
+          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water"; ticks++) {
+          options.signal?.throwIfAborted();
+          await waitForPhysicsTicks(this.bot, 1, lifetime);
+        }
+        session.unchangedAir = airSupplyTicks(this.bot) === null &&
+          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
+      }
       for (;;) {
         options.signal?.throwIfAborted();
         if (options.stopSignal?.aborted) return { status: "stopped" as const,
           reason: String(options.stopSignal.reason), elapsedMs: Date.now() - started };
-        const air = airSupplyTicks(this.bot);
+        const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
-        session.owned = session.owned || (options.movements.allowSwimming && air !== null && openWaterSurface(this.#read, origin.floored()) !== null &&
+        session.owned = session.owned || (options.movements.allowSwimming && air !== null && swimAscent(this.#read, origin.floored()) !== null &&
           this.bot.blockAt(origin.offset(0, 1.62, 0))?.name === "water");
         const movements: MovementPolicy = { ...options.movements,
           get scaffold() { return options.movements.scaffold; },
@@ -128,7 +146,7 @@ export class Diving {
           this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
         if ((!continuingDive && !returnToProcess) || session.cancelled.signal.aborted || options.signal?.aborted ||
           (options.stopSignal?.aborted && !returnToProcess)) return result;
-        const surface = openWaterSurface(this.#read, this.bot.entity.position.floored());
+        const surface = swimAscent(this.#read, this.bot.entity.position.floored())?.surface;
         if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: Date.now() - started };
         const progress = `${this.bot.entity.position.floored()}:${session.completedWork}`;
         repeatedStops = progress === previousStop ? repeatedStops + 1 : 0;

@@ -165,6 +165,7 @@ exposes these tables and views:
 | `frontier_chunk_materials` | Table | Lists non-routine block materials detected within each vertical chunk column.     |
 | `frontier_chunk_biomes`    | Table | Stores sampled biome frequencies for each chunk column.                           |
 | `observed_containers`      | Table | Stores the last observed complete slot layout for opened containers.              |
+| `protected_regions`        | Table | Boxes this bot never digs or scaffolds in (ADR-012), from `protect_region`.       |
 | `observed_container_slots` | View  | Flattens container contents into individual slot rows with item names and counts. |
 | `observed_container_items` | View  | Aggregates item totals across container locations.                                |
 | `frontier_map_chunks`      | View  | Provides dominant biomes, all biomes, and material summaries per chunk.           |

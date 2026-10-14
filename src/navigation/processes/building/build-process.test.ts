@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
-import { build, enclosesBot, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
+import { build, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -199,6 +199,25 @@ test("a wrong block is reported by name when left, and dug first when asked", as
   assert.equal(replaced.placed, 1);
 });
 
+/**
+ * The live house of 30 September: its door was hung with whatever yaw the bot
+ * had, sideways in the wall, and its open panel lay across the doorway.
+ */
+test("an oriented block is placed looking its way, and the same block facing elsewhere is wrong", async () => {
+  const { bot, put, physics, looks } = structureWorld({ carried: { oak_door: 2 } });
+  const door: BuildCell = { position: { x: 2, y: 64, z: 0 }, blockName: "oak_door", facing: "south" };
+  const placed = await build(bot, { ...physics, cells: [door], removeWrongBlocks: false });
+  assert.equal(placed.status, "complete");
+  assert.deepEqual(looks, ["south"]);
+
+  put(new Vec3(2, 64, 0), "oak_door", { facing: "east" });
+  const left = await build(bot, { ...physics, cells: [door], removeWrongBlocks: false });
+  assert.deepEqual(left.cells[0]!.state, { kind: "blocked", holds: "oak_door facing east" });
+  const rehung = await build(bot, { ...physics, cells: [door], removeWrongBlocks: true });
+  assert.equal(rehung.status, "complete");
+  assert.deepEqual(looks, ["south", "south"]);
+});
+
 test("a hidden wrong block is approached from a visible stance instead of permanently refused", async () => {
   const { bot, put, physics, routes } = structureWorld({ feet: new Vec3(3, 64, 0) });
   put(new Vec3(2, 64, 0), "oak_leaves");
@@ -231,6 +250,38 @@ test("a hidden wrong block is approached from a visible stance instead of perman
   assert.equal(result.dug, 1);
   assert.equal(result.placed, 1);
   assert.equal(routes.length, 1);
+});
+
+/**
+ * The live house of 30 September: the bot stood off the centre of its cell, the
+ * dig was visible from that centre but not from where it stood, so the route
+ * arrived without moving and the in-reach work saw nothing, twice, and stopped.
+ */
+test("the bot's own cell is judged from where it stands, not from the cell's centre", async () => {
+  const { bot, put, physics } = structureWorld({ feet: new Vec3(3, 64, 0) });
+  put(new Vec3(2, 64, 0), "oak_leaves");
+  bot.entity.position = new Vec3(3.1, 64, 0.5);
+  const fromCentreOnly = (_target: unknown, standing: { x: number }) => standing.x >= 3.4 || standing.x < 1;
+  const result = await build(bot, {
+    ...physics,
+    canSeeDig: fromCentreOnly,
+    route: async (request) => {
+      const goal = request.goal.resolve({ ...observation(3, 64, 0), position: { x: 3.1, y: 64, z: 0.5 } });
+      assert.equal(goal.kind, "active");
+      if (goal.kind === "active") {
+        assert.equal(
+          goal.isSatisfied({ feet: { x: 3, y: 64, z: 0 }, remainingScaffolds: 0, overlayId: "" }, goalTestWorld),
+          false,
+          "the start cell cannot see the dig from where the bot stands",
+        );
+      }
+      return physics.route(request);
+    },
+    cells: cells([[2, 64, 0]]),
+    removeWrongBlocks: true,
+  });
+  assert.equal(result.status, "complete");
+  assert.equal(result.dug, 1);
 });
 
 /**
@@ -277,4 +328,137 @@ test("a route that cannot reach a cell refuses that cell and carries on with the
   assert.equal(placements.length, 1, "the other cell was still built");
   assert.ok(kinds(result).includes("refused"));
   assert.ok(kinds(result).includes("correct"));
+});
+
+test("a cell asking for block states holds only a block in those states: facing, half (or a slab's type) and axis", () => {
+  const block = (name: string, properties: Record<string, unknown>) =>
+    ({ name, getProperties: () => properties }) as unknown as Parameters<typeof holdsCell>[0];
+  const at = { x: 0, y: 64, z: 0 };
+  const stairs: BuildCell = { position: at, blockName: "spruce_stairs", facing: "north", half: "bottom" };
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "north", half: "bottom", shape: "outer_left" }), stairs), true, "shape is not asked");
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "north", half: "top" }), stairs), false);
+  assert.equal(holdsCell(block("spruce_stairs", { facing: "east", half: "bottom" }), stairs), false);
+  const slab: BuildCell = { position: at, blockName: "spruce_slab", half: "top" };
+  assert.equal(holdsCell(block("spruce_slab", { type: "top" }), slab), true);
+  assert.equal(holdsCell(block("spruce_slab", { type: "bottom" }), slab), false);
+  assert.equal(holdsCell(block("spruce_slab", { type: "double" }), slab), false);
+  const beam: BuildCell = { position: at, blockName: "oak_log", axis: "x" };
+  assert.equal(holdsCell(block("oak_log", { axis: "x" }), beam), true);
+  assert.equal(holdsCell(block("oak_log", { axis: "y" }), beam), false);
+  assert.equal(holdsCell(block("oak_log", { axis: "y" }), { position: at, blockName: "oak_log" }), true, "no state asked, any state");
+});
+
+test("a cell asking a state waits for a support that gives it: a beam beside its pillar, a top slab under or beside a block, never on the floor", async () => {
+  const { bot, put, physics } = structureWorld({ carried: { oak_log: 4, spruce_slab: 4, spruce_stairs: 4 } });
+  // Side neighbours for the top halves: nothing above them, only the floor below.
+  put(new Vec3(6, 64, 3), "stone");
+  put(new Vec3(6, 64, 6), "stone");
+  const structure: BuildCell[] = [
+    { position: { x: 3, y: 64, z: 0 }, blockName: "oak_log", axis: "x" },
+    { position: { x: 2, y: 64, z: 0 }, blockName: "oak_log", axis: "y" },
+    { position: { x: 5, y: 64, z: 3 }, blockName: "spruce_slab", half: "top" },
+    { position: { x: 5, y: 64, z: 6 }, blockName: "spruce_stairs", facing: "north", half: "top" },
+    { position: { x: 5, y: 65, z: 9 }, blockName: "spruce_slab", half: "bottom" },
+  ];
+  put(new Vec3(5, 64, 9), "stone");
+  const result = await build(bot, { ...physics, cells: structure, removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  const states = (x: number, y: number, z = 0) => bot.blockAt(new Vec3(x, y, z))!.getProperties();
+  assert.deepEqual(states(2, 64), { axis: "y" });
+  assert.deepEqual(states(3, 64), { axis: "x" }, "placed against the pillar, not the floor");
+  assert.deepEqual(states(5, 64, 3), { type: "top" });
+  assert.deepEqual(states(5, 64, 6), { facing: "north", half: "top" });
+  assert.deepEqual(states(5, 65, 9), { type: "bottom" });
+});
+
+/**
+ * Live 2026-10-03: Ayla stood on her farm's farmland (y 75.94) and leveling filled its water cell beside her. The
+ * floored position put her feet in the farmland block itself, every pass read the cell as sealing her in, and the
+ * step-out route, already satisfied, returned at once: the loop spun on promises without ever yielding, and the
+ * runtime was stopped as unresponsive after 5 s. Twice.
+ */
+test("standing on farmland, the feet are the cell above it: filling the water cell beside it seals nothing", async () => {
+  const { bot, put, physics } = structureWorld({ feet: new Vec3(1, 64, 0), carried: { dirt: 4 } });
+  for (let x = 0; x <= 2; x += 1) for (let z = -1; z <= 1; z += 1) put(new Vec3(x, 64, z), "farmland");
+  put(new Vec3(0, 64, 0), "water", { level: 0 });
+  Object.assign(bot.entity, { position: new Vec3(1.5, 64.9375, 0.5), onGround: true });
+  const result = await build(bot, { ...physics, cells: cells([[0, 64, 0]], "dirt"), removeWrongBlocks: true });
+  assert.equal(result.status, "complete");
+  assert.equal(result.placed, 1);
+});
+
+test("a step out of the structure that does not move the bot ends the run instead of spinning", async () => {
+  const feet = new Vec3(1, 64, 1);
+  const { bot, physics } = structureWorld({ feet });
+  let exits = 0;
+  // A route that reports arrival without moving, as one does whose goal is already met.
+  const stuck = {
+    ...physics,
+    route: async (request: Parameters<typeof physics.route>[0]) => {
+      if (request.onArrival === undefined) {
+        exits += 1;
+        return { status: "completed" as const, elapsedMs: 0 };
+      }
+      return physics.route(request);
+    },
+  };
+  const result = await build(bot, { ...stuck, cells: cells(hollowBox()), removeWrongBlocks: false });
+  assert.equal(result.status, "stopped");
+  assert.match(result.reason ?? "", /could not step out of the structure/u);
+  assert.ok(exits <= 3, `asked to step out ${exits} times`);
+});
+
+// Live 2026-10-11 (Theo): the routes of a house build pillared up in a ring round it with dirt and never took it down;
+// the ring shut him in. The routes now report what they place, and a complete build takes those blocks down.
+function scaffoldedWorld(scaffold: [number, number, number][], breakFails: string[] = [], reportOnly: [number, number, number][] = []) {
+  const world = structureWorld();
+  const broken: string[] = [];
+  const route = world.physics.route;
+  let placedScaffold = false;
+  const physics = {
+    ...world.physics,
+    route: async (options: Parameters<typeof route>[0]) => {
+      if (!placedScaffold) {
+        placedScaffold = true;
+        for (const [x, y, z] of reportOnly) options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
+        for (const [x, y, z] of scaffold) {
+          world.put(new Vec3(x, y, z), "dirt");
+          (world.blocks.get(`${x},${y},${z}`) as unknown as { stateId: number }).stateId = 10;
+          options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
+        }
+      }
+      return route(options);
+    },
+    breakInPlace: async (options: Parameters<typeof world.physics.breakInPlace>[0]) => {
+      const at = `${options.position.x},${options.position.y},${options.position.z}`;
+      if (breakFails.includes(at)) return { status: "failed", reason: "unreachable" } as never;
+      broken.push(at);
+      return world.physics.breakInPlace(options);
+    },
+  };
+  return { ...world, physics, broken };
+}
+
+test("a complete build takes the scaffold its routes placed down, highest first", async () => {
+  const { bot, physics, broken, blocks } = scaffoldedWorld([[9, 65, 2], [9, 67, 2], [9, 66, 2]]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 3, removed: 3, left: [] });
+  assert.deepEqual(broken, ["9,67,2", "9,66,2", "9,65,2"]);
+  assert.equal(blocks.get("9,66,2")!.name, "air");
+});
+
+test("a scaffold block that is also a cell of the structure is kept", async () => {
+  const { bot, physics, blocks } = scaffoldedWorld([], [], [[10, 64, 0]]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 1, removed: 0, left: [] });
+  assert.notEqual(blocks.get("10,64,0")!.name, "air");
+});
+
+test("scaffold that cannot be reached is reported and the build is still complete", async () => {
+  const { bot, physics } = scaffoldedWorld([[9, 66, 2], [9, 67, 2]], ["9,67,2"]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 9, y: 67, z: 2 }] });
 });

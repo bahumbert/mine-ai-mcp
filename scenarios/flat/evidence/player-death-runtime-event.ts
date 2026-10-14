@@ -6,8 +6,8 @@ import {
   createMinecraftMcpServer,
   createMinecraftRuntime,
   queryBotDataResultSchema,
+  rawActionResultSchema,
   readRecentEventsResultSchema,
-  sendMessageResultSchema,
 } from "@aibengineering/mine-ai-mcp";
 
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
@@ -123,14 +123,17 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
 
     await respawned;
     await bot.waitForTicks(2);
-    const resumed = sendMessageResultSchema.parse(
+    // send_message runs beside the foreground slot, so it cannot prove the slot was released.
+    const resumed = rawActionResultSchema.parse(
       resultFrom(
         await client.callTool({
-          name: "send_message",
+          name: "raw_action",
           arguments: {
             rationale: "Prove a new foreground action completes after respawn.",
             response_format: "json",
-            message: "Respawned and ready for new work.",
+            operation: "control",
+            state: "sneak",
+            ticks: 2,
           },
         }),
       ),

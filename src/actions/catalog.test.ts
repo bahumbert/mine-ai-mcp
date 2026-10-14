@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture } from "../test-support/bot.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import { createActions, type ActionCatalogOptions } from "./index.js";
 import { describeActionTools } from "./describe.js";
 
@@ -19,6 +20,7 @@ const PUBLISHED: ReadonlyArray<
   ["attack_dragon_perch", "resumable_task", false, true],
   ["shoot_dragon", "resumable_task", false, true],
   ["build_structure", "task", false, true],
+  ["tend_crops", "task", false, true],
   ["cancel_foreground_action", "control", false, true],
   ["collect_block", "resumable_task", false, true],
   ["craft_item", "task", false, true],
@@ -35,19 +37,24 @@ const PUBLISHED: ReadonlyArray<
   ["navigate", "resumable_task", false, true],
   ["note_save", "task", false, false],
   ["note_read", "information", true, false],
+  ["note_delete", "task", false, true],
+  ["protect_region", "concurrent", false, false],
+  ["unprotect_region", "concurrent", false, false],
   ["place_block", "task", false, true],
   ["prepare_dragon_perch", "resumable_task", false, true],
   ["pick_up_items", "resumable_task", false, false],
   ["raw_action", "task", false, true],
   ["query_bot_data", "information", true, null],
   ["read_recent_events", "information", true, false],
-  ["send_message", "task", false, false],
+  ["send_message", "concurrent", false, false],
   ["sleep", "task", false, null],
   ["smelt_item", "task", false, true],
   ["use_bucket", "task", false, true],
   ["use_container", "task", false, true],
   ["view_blocks", "information", true, null],
   ["view_crafting_requirements", "information", true, false],
+  ["view_smelting_recipes", "information", true, false],
+  ["view_block_drops", "information", true, false],
   ["view_frontier", "information", true, null],
   ["view_status", "information", true, null],
 ];
@@ -59,10 +66,12 @@ const DEBUG_ONLY = [
 
 function published(t: { after(fn: () => void): void }, options: ActionCatalogOptions = {}) {
   // Every factory only stores what it is given; nothing here is exercised.
+  const botData = temporaryBotData({ closeAfter: t });
   return createActions(
     {
       bot: botFixture(),
-      botData: temporaryBotData({ closeAfter: t }),
+      botData,
+      protectedRegions: new ProtectedRegionStore(botData),
       budgets: {} as never,
       frontier: {} as never,
       navigation: {} as never,

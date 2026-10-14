@@ -258,7 +258,7 @@ export function attachHostileReflex(
         let settlement: HostileSettlement;
         try {
           signal.throwIfAborted();
-          await prepareBotForMovement(bot, navigation);
+          await prepareBotForMovement(bot, navigation, signal);
           signal.throwIfAborted();
           const physical = await executeHostileResponse(
             bot,

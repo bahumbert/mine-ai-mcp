@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { RequestEvidence } from "./request.js";
 import type { Facts } from "../survival/state/answered.js";
+import { AnchorTravel } from "./anchor-travel.js";
 import { toolChanges, toolSnapshotSchema, type ToolSnapshot } from "../world/tool-tiers.js";
 
 export const progressPositionSchema = z.strictObject({
@@ -87,6 +88,7 @@ export class RequestProgress {
   readonly #start: ProgressPosition | null;
   #position: ProgressPosition | null;
   #travel = 0;
+  readonly #anchor: AnchorTravel;
   #reflexTravel = 0;
   #suspended = 0;
   #suspendedSince: number | null = null;
@@ -102,6 +104,7 @@ export class RequestProgress {
   constructor(position: ProgressPosition | null, tools: () => ToolSnapshot = () => ({ tools: [], armour: [] })) {
     this.#start = position ? { ...position } : null;
     this.#position = this.#start;
+    this.#anchor = new AnchorTravel(this.#start);
     this.#positionSampledAt = position ? new Date().toISOString() : null;
     if (!position) this.#discontinuities.add("initial_position_unavailable");
     this.#tools = tools;
@@ -118,7 +121,7 @@ export class RequestProgress {
     this.#state = state;
   }
 
-  sample(position: ProgressPosition | null, reflex: boolean, discontinuity?: string): void {
+  sample(position: ProgressPosition | null, reflex: boolean, discontinuity?: string, inWater = false): void {
     if (this.#finished) return;
     const now = performance.now();
     // Missing a second of physical samples makes straight-line reconstruction unreliable.
@@ -128,10 +131,11 @@ export class RequestProgress {
     if (!position) this.#discontinuities.add("position_unavailable");
     if (before && position && before.dimension !== position.dimension) this.#discontinuities.add("dimension_change");
     if (!gap && before && position && before.dimension === position.dimension) {
-      const travelled = distance(before, position);
+      const travelled = this.#anchor.add(position, inWater);
       this.#travel += travelled;
       if (reflex) this.#reflexTravel += travelled;
     }
+    if (gap || !position || (before && before.dimension !== position.dimension)) this.#anchor.reset();
     this.#position = position ? { ...position } : null;
     this.#positionSampledAt = position ? new Date().toISOString() : null;
     this.#lastSample = now;

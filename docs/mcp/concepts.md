@@ -100,6 +100,9 @@ specifies its execution kind:
   whose retained executor can continue after an autonomous reflex.
 - `control`: Out-of-band tools such as `cancel_foreground_action` that
   bypass the foreground lock to stop or observe active tasks.
+- `concurrent`: Tools such as `send_message` that act without the body (public
+  chat). They run beside whatever foreground action is running, are never refused
+  with `[ACTION_BUSY]`, and never cancel it. They are direct calls, not submissions.
 
 MCP foreground submissions return an action ID immediately unless `wait_timeout_ms`
 requests an initial bounded wait for a full result or pending progress. The bot runtime owns

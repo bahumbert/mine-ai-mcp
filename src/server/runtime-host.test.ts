@@ -10,9 +10,17 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { botFixture, type BotFixtureOptions } from "../test-support/bot.js";
 import { parseHostOptions } from "./config.js";
-import { startRuntimeHost } from "./runtime-host.js";
+import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
 const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
+
+test("a kick reason that is a text component is logged whole, a plain one as it is", () => {
+  assert.equal(kickReason("Server closed"), "Server closed");
+  assert.equal(
+    kickReason({ type: "compound", value: { translate: { type: "string", value: "multiplayer.disconnect.flying" } } }),
+    '{"type":"compound","value":{"translate":{"type":"string","value":"multiplayer.disconnect.flying"}}}',
+  );
+});
 
 async function configuration(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "host-lifetime-"));

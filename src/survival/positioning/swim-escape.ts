@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { type SwimCellReader, swimExitPath } from "../../navigation/index.js";
 
 /** Collision shapes touched by the whole body, excluding faces merely touching. */
 function obstruction(bot: Bot, position: Vec3): ReturnType<Bot["blockAt"]> {
@@ -52,16 +53,28 @@ function clearSwim(bot: Bot, target: Vec3): boolean {
   return feet?.name === "water" || (floor?.boundingBox === "block" && floor.name !== "magma_block");
 }
 
-/** Search only the immediately reachable two-block swim, never a blind push off a waterfall. */
+function swimCellOf(bot: Bot): SwimCellReader {
+  return (x, y, z) => {
+    const block = bot.blockAt(new Vec3(x, y, z));
+    if (!block) return "unknown";
+    if (["lava", "fire", "soul_fire", "magma_block"].includes(block.name)) return "solid";
+    if (block.name === "water" || block.name === "bubble_column") return "water";
+    return block.shapes.length > 0 ? "solid" : block.boundingBox === "empty" ? "air" : "solid";
+  };
+}
+
+/**
+ * The next swim toward the nearest open column, or the own column when it is open (the old recentre). A stroke is the
+ * farthest cell of the exit path a straight swim reaches; a path that first goes up or down gives its first sideways
+ * cell, and the loop asks again from where the stroke ended. Null when no open column lies in `SWIM_EXIT_RADIUS`.
+ */
 export function nearbySwimEscape(bot: Bot, blocked: readonly Vec3[] = []): Vec3 | null {
   const origin = bot.entity.position.floored();
-  const candidates: Vec3[] = [];
-  for (let dx = -2; dx <= 2; dx++)
-    for (let dz = -2; dz <= 2; dz++) {
-      const target = new Vec3(origin.x + dx + 0.5, bot.entity.position.y, origin.z + dz + 0.5);
-      if (blocked.some((point) => point.x === target.x && point.z === target.z)) continue;
-      if (obstruction(bot, target.offset(0, 0.5, 0)) || !clearSwim(bot, target)) continue;
-      candidates.push(target);
-    }
-  return candidates.sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))[0] ?? null;
+  const path = swimExitPath(swimCellOf(bot), origin, blocked.map((point) => ({ x: Math.floor(point.x), z: Math.floor(point.z) })));
+  if (path === null) return null;
+  const strokes = (path.length === 0 ? [origin] : path).map(
+    (cell) => new Vec3(cell.x + 0.5, bot.entity.position.y, cell.z + 0.5),
+  );
+  const clear = [...strokes].reverse().find((target) => !obstruction(bot, target.offset(0, 0.5, 0)) && clearSwim(bot, target));
+  return clear ?? strokes.find((target) => target.x !== origin.x + 0.5 || target.z !== origin.z + 0.5) ?? strokes[0]!;
 }

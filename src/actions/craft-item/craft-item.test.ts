@@ -97,6 +97,23 @@ test("crafts each requested target and reports the gain actually observed in inv
   }
 });
 
+test("an unknown name is answered with the registry names close to it", async () => {
+  const { bot, craftCalls } = craftingBot({ oak_planks: 2 }, false);
+  const result = await craftItem(bot, navigation, { items: [{ itemName: "sticks", count: 4 }, { itemName: "gizmo_xyz", count: 1 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[UNKNOWN_CRAFT_ITEMS\] Minecraft has no registry items named: sticks \(closest: stick\b[^)]*\), gizmo_xyz\.$/u);
+  assert.deepEqual(craftCalls, []);
+});
+
+test("an item made in a furnace is refused with what it is smelted from", async () => {
+  // Live 2026-10-10: Mira sent "craft cooked_beef" 18 times over six objectives, told only "no crafting recipe".
+  const { bot, craftCalls } = craftingBot({ beef: 3 }, false);
+  const result = await craftItem(bot, navigation, { items: [{ itemName: "cooked_beef", count: 3 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef. Smelted in a furnace instead: cooked_beef from beef.");
+  assert.deepEqual(craftCalls, []);
+});
+
 /** A plan short of any leaf material is refused whole: nothing is consumed and nothing is crafted. */
 const missingMaterialBatches = [
   {
@@ -192,6 +209,13 @@ test("a native crafting failure claims no output and still asks for the inventor
   assert.equal(result.craft.items[0].gained, 0);
   // These are close requests; server-side item return is asynchronous.
   assert.deepEqual(closed, [bot.inventory, bot.inventory]);
+  assert.doesNotMatch("error" in result ? result.error : "", /cannot read/);
+
+  // Live 2026-10-07 (NeoForge): carried modded items hid the crafting result; the failure names them.
+  const listed = bot.inventory.items.bind(bot.inventory);
+  Object.assign(bot.inventory, { items: () => [...listed(), { name: "unknown", count: 3 }] });
+  const modded = await craftItem(bot, navigation, { items: [{ itemName: "crafting_table", count: 1 }] }, {});
+  assert.match("error" in modded ? modded.error : "", /carries 3 item\(s\) this client cannot read \(named "unknown"\), a known cause of this: drop them \(drop_item unknown\), then craft again\.$/u);
 });
 
 test("caller cancellation stops a recursive plan between recipe effects", async () => {

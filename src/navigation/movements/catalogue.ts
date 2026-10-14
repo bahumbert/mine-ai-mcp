@@ -486,7 +486,8 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
   const from = context.state.node.feet;
   if (context.policy.dive && isWater(look(context, from.x, from.y, from.z))) return;
   const { x, y, z } = a;
-  for (let distance = 1; distance <= Math.max(context.policy.maximumDrop, context.policy.maximumBucketDrop ?? 0); distance += 1) {
+  const dryReach = Math.max(context.policy.maximumDrop, context.policy.maximumBucketDrop ?? 0);
+  for (let distance = 1; distance <= dryReach; distance += 1) {
     const landingY = y - distance;
     // A refused landing is where a fall stops looking deeper, so the lava
     // rule other families leave to `settle` is asked of a dug landing here,
@@ -513,6 +514,22 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
     // step's preconditions. Baritone's MovementFall refuses these landings.
     const ceiling = look(context, x, landingY + 2, z);
     const buried = isFalling(ceiling);
+    // Water at least `WATER_LANDING_DEPTH` deep takes the body in from any
+    // height, and Minecraft cancels the fall damage on entering it. Its cells
+    // are not support, so this landing is tested on its own.
+    if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && deepWaterLanding(context, x, landingY, z)) {
+      out
+        .open("drop", x, landingY, z)
+        .cell(a.feet)
+        .cell(a.head)
+        .cell(landingFeet)
+        .cell(landingHead)
+        .hazard(distance > context.policy.maximumDrop ? distance * 2 : distance)
+        .landsInWater()
+        .overshoot(a.dx, a.dz)
+        .offer();
+      return;
+    }
     const bucketDrop = distance > context.policy.maximumDrop;
     if (bucketDrop && (isSolid(landingBlock) || isLiquid(landingBlock))) return;
     if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && safeLanding) {
@@ -530,6 +547,52 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
     }
     if (landingFeet === NO_CELL) return;
   }
+  fallIntoDeepWater(context, a, y - dryReach - 1, out);
+}
+
+/**
+ * Past the dry reach only a landing in deep water is allowed: the open column is read on cheaply, as far as it goes,
+ * and cells are prepared only for the landing it ends in.
+ */
+function fallIntoDeepWater(context: MovementGenerationContext, a: Approach, startY: number, out: MovementCandidates): void {
+  const { x, y, z } = a;
+  let landingY = startY;
+  // A column under the world's floor reads as open air without end, so the read is bounded.
+  while (y - landingY <= MAXIMUM_WATER_LANDING_FALL) {
+    const block = look(context, x, landingY, z);
+    if (block.kind !== "loaded" || !block.traits.empty || block.traits.liquid !== null) break;
+    landingY -= 1;
+  }
+  if (!deepWaterLanding(context, x, landingY, z)) return;
+  const landingFeet = unlessLava(context, prepareCell(x, landingY, z, context), x, landingY, z);
+  const landingHead = unlessLava(context, prepareHeadCell(x, landingY + 1, z, context), x, landingY + 1, z);
+  if (landingFeet === NO_CELL || landingHead === NO_CELL || isFalling(look(context, x, landingY + 2, z))) return;
+  out
+    .open("drop", x, landingY, z)
+    .cell(a.feet)
+    .cell(a.head)
+    .cell(landingFeet)
+    .cell(landingHead)
+    .hazard((y - landingY) * 2)
+    .landsInWater()
+    .overshoot(a.dx, a.dz)
+    .offer();
+}
+
+/** The longest fall into deep water that is planned: a little over the height of the world's open column. */
+const MAXIMUM_WATER_LANDING_FALL = 320;
+
+/** Water blocks a column needs from the landing cell down for a fall of any height to end in it unharmed. */
+const WATER_LANDING_DEPTH = 2;
+
+/** Whether the landing cell and the ones under it hold enough water to break a fall. */
+function deepWaterLanding(context: MovementGenerationContext, x: number, landingY: number, z: number): boolean {
+  for (let depth = 0; depth < WATER_LANDING_DEPTH; depth += 1) {
+    const block = look(context, x, landingY - depth, z);
+    if (block.kind !== "loaded" || !isWater(block)) return false;
+    if (!block.traits.liquidSource && !canOccupyWater(context, x, landingY - depth, z)) return false;
+  }
+  return true;
 }
 
 /** The cell, or `NO_CELL` when it is one dig that would let lava in. */
@@ -818,11 +881,26 @@ function pillar(context: MovementGenerationContext, out: MovementCandidates): vo
   if (bridgePlacement(context, x, y, z, out)) out.offer();
 }
 
+/**
+ * Whether the block at this cell stands free in open air: nothing solid or liquid beside it at its own height.
+ * Digging straight down is switched off for fear of dropping into a cave, which starts where the ground does; a
+ * column with air on all four sides (a pillar top) is not ground, and without this rule it has no way down but a
+ * long placed staircase (live 2026-10-10: Tom, a 21 block pillar, no path for a whole run). Unloaded cells count
+ * as solid: nothing is known about them.
+ */
+function standsFree(context: MovementGenerationContext, x: number, y: number, z: number): boolean {
+  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    const side = look(context, x + dx, y, z + dz);
+    if (side.kind !== "loaded" || !isPassable(side) || side.traits.liquid !== null) return false;
+  }
+  return true;
+}
+
 /** Straight down through the block beneath the bot's feet onto whatever stands under it. */
 function directDownward(context: MovementGenerationContext, out: MovementCandidates): void {
-  if (!context.policy.allowDownward) return;
   const { x, z } = context.state.node.feet;
   const y = context.state.node.feet.y - 1;
+  if (!context.policy.allowDownward && !standsFree(context, x, y, z)) return;
   if (!isStandableTop(look(context, x, y - 1, z))) return;
   const destination = prepareCell(x, y, z, context);
   if (destination === NO_CELL || !context.cells.cellDug(destination)) return;

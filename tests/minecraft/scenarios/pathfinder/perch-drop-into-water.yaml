@@ -1,0 +1,64 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-drop-into-water
+tags: [reliability]
+description: >-
+  Leave a one-block pillar twenty blocks over a three-deep pool by dropping into the water, then
+  swim out to a point beside the pool. The fall is far beyond the dry maximum drop, so only the
+  deep-water landing rule can plan it, and untouched health proves the water took the fall.
+
+# The owner's stranded-perch report: a bot on a small perch over water, with no
+# block to bridge or pillar with, judged every route impossible because water
+# was never a landing. The pool is sealed by stone walls whose top is level with
+# the water, so the bot has to swim to the wall and climb out, then step down to
+# the ground beside the pool.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The sealed pool: walls round x 1..6, z -3..3, water three deep over the floor.
+  - fill: { block: stone, from: [ 0, -60, -4 ], to: [ 7, -58, 4 ] }
+  - fill: { block: water, from: [ 1, -60, -3 ], to: [ 6, -58, 3 ] }
+  # The perch, one block wide, twenty blocks above the water surface.
+  - fill: { block: stone, from: [ 0, -57, 0 ], to: [ 0, -39, 0 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 0.5, -38, 0.5 ]
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 9
+    y: -60
+    z: 0
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: PerchBot
+      pos: [ 9.5, -60, 0.5 ]
+      radius: 2.0
+    - kind: health
+      who: PerchBot
+      health: 20
+    - kind: completion
+      who: PerchBot

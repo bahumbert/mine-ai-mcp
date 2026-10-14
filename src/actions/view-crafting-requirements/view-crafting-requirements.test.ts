@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { craftingBot } from "../../test-support/crafting.js";
-import { formatViewCraftingRequirementsResult, viewCraftingRequirements } from "./index.js";
+import { craftingBot, craftingRecipe } from "../../test-support/crafting.js";
+import { formatViewCraftingRequirementsResult, parseViewCraftingRequirementsRequest, viewCraftingRequirements } from "./index.js";
 
 /**
  * Every requirements answer over the same planner, varying only what is carried
@@ -82,4 +82,29 @@ test("reports what a craft batch would need without crafting anything", async ()
         row.name,
       );
   }
+});
+
+test("prefer names the wood to plan with when none is carried; the parsed request keeps it", async () => {
+  const { bot } = craftingBot({}, true, [
+    craftingRecipe("oak_planks", 4, { oak_log: 1 }),
+    craftingRecipe("birch_planks", 4, { birch_log: 1 }),
+    craftingRecipe("stick", 4, { oak_planks: 2 }),
+    craftingRecipe("stick", 4, { birch_planks: 2 }),
+  ]);
+  const ask = (prefer?: string[]) => viewCraftingRequirements(bot, parseViewCraftingRequirementsRequest({ items: [{ item_name: "stick", count: 4 }], ...(prefer && { prefer }) }), {});
+  assert.deepEqual((await ask()).requirements.plan?.requiredMaterials, [{ item: "oak_log", count: 1 }]);
+  assert.deepEqual((await ask(["birch_log"])).requirements.plan?.requiredMaterials, [{ item: "birch_log", count: 1 }]);
+  assert.deepEqual(parseViewCraftingRequirementsRequest({ items: [{ item_name: "stick", count: 1 }] }).prefer, []);
+});
+
+test("with nothing carried, the plan names the wood the explored world has", async () => {
+  const { bot } = craftingBot({}, true, [
+    craftingRecipe("oak_planks", 4, { oak_log: 1 }),
+    craftingRecipe("birch_planks", 4, { birch_log: 1 }),
+    craftingRecipe("stick", 4, { oak_planks: 2 }),
+    craftingRecipe("stick", 4, { birch_planks: 2 }),
+  ]);
+  const request = parseViewCraftingRequirementsRequest({ items: [{ item_name: "stick", count: 4 }] });
+  const seen = (item: string) => (item === "birch_log" ? 7 : 0);
+  assert.deepEqual((await viewCraftingRequirements(bot, request, {}, seen)).requirements.plan?.requiredMaterials, [{ item: "birch_log", count: 1 }]);
 });

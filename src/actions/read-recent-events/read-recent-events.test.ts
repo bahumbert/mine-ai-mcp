@@ -155,3 +155,14 @@ test("returns and formats a player death lifecycle event through the existing ev
   assert.match(markdown, /Dimension: `overworld`/);
   assert.match(markdown, /Position: `12.5, 64, -3.25`/);
 });
+
+test("a status recorded before dig_straight_down existed reads back with its default", async () => {
+  // Live 2026-10-04: Tom's old survival receipts failed validation on his first read, and his brain stopped.
+  const { withNavigationDefaults } = await import("./read-recent-events.js");
+  const navigation = { scaffold_blocks: [], bucket_fall_save: true, bucket_drops: true, hostile_avoidance_multiplier: 1 };
+  const old = { kind: "outcome", status: { policy: { defaults: { navigation: { ...navigation } }, effective: { navigation: { ...navigation, dig_straight_down: false } } } } };
+  const read = withNavigationDefaults(old) as typeof old & { status: { policy: { defaults: { navigation: { dig_straight_down?: boolean } }; effective: { navigation: { dig_straight_down?: boolean } } } } };
+  assert.equal(read.status.policy.defaults.navigation.dig_straight_down, true);
+  assert.equal(read.status.policy.effective.navigation.dig_straight_down, false, "a recorded value is kept");
+  assert.deepEqual(withNavigationDefaults({ kind: "message" }), { kind: "message" });
+});

@@ -37,6 +37,7 @@ export const dropCheckpointSchema = z.strictObject({ phase, freeSlots: count,
 export const eatCheckpointSchema = z.strictObject({ phase, item: z.string(), inventory: count, hunger: count, saturation: count });
 export const containerCheckpointSchema = z.strictObject({ phase, inventory: z.record(z.string(), count), windowOpen: z.boolean(),
   requested: z.array(z.strictObject({ itemName: z.string(), count })) });
+export const tendCheckpointSchema = z.strictObject({ phase, cells: count, harvested: count, cleared: count, tilled: count, planted: count });
 export const placeCheckpointSchema = z.strictObject({ phase, inventory: count, target: position.nullable(), currentBlock: z.string().nullable() });
 export const bucketCheckpointSchema = z.strictObject({ phase, held: z.string().nullable(), target: position.nullable(),
   targetBlock: z.string().nullable(), used: z.boolean(), obsidianFormed: count, cobblestoneFormed: count });

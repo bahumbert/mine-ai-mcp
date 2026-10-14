@@ -10,11 +10,26 @@ import {
 
 export const VIEW_CRAFTING_REQUIREMENTS = "view_crafting_requirements" as const;
 export const VIEW_CRAFTING_REQUIREMENTS_DESCRIPTION =
-  "Inspect one shared recursive crafting plan for every requested item. Reports selected recipe trees, carried materials, missing leaf materials, and crafting-table requirements without crafting anything.";
+  "Inspect one shared recursive crafting plan for every requested item. Reports selected recipe trees, carried materials, missing leaf materials, and crafting-table requirements without crafting anything. " +
+  "Where recipes accept several materials (any wood's planks for sticks, a table or wooden tools) and none is carried, prefer names the ones to plan with, in order, e.g. the logs that grow nearby; otherwise the first in registry order is named.";
 
-export const viewCraftingRequirementsInputSchema = craftingRequestInputSchema;
-export type ViewCraftingRequirementsRequest = CraftingRequest;
-export const parseViewCraftingRequirementsRequest = parseCraftingRequest;
+/** Preferred materials one request may name: every wood and a few more. */
+export const MAX_PREFERRED_MATERIALS = 32;
+
+export const viewCraftingRequirementsInputSchema = craftingRequestInputSchema.extend({
+  prefer: z
+    .array(z.string().min(1))
+    .max(MAX_PREFERRED_MATERIALS)
+    .optional()
+    .describe("Materials to plan with, in order, where recipes accept several and none is carried (e.g. nearby logs)."),
+});
+export interface ViewCraftingRequirementsRequest extends CraftingRequest {
+  readonly prefer?: readonly string[];
+}
+export function parseViewCraftingRequirementsRequest(input: unknown): ViewCraftingRequirementsRequest {
+  const { prefer, ...rest } = viewCraftingRequirementsInputSchema.parse(input ?? {});
+  return { ...parseCraftingRequest(rest), prefer: prefer ?? [] };
+}
 
 const requestedItemSchema = z.strictObject({
   item: z.string(),

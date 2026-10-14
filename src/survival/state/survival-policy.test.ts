@@ -265,6 +265,62 @@ test("a standing override survives a tactical edit to another field, and clear r
   assert.equal(SURVIVAL_POLICY_PATHS.has("food.raw.health_below"), true);
 });
 
+test("straight-down digging is one navigation field: default on, set alone without disturbing others, and read by every route", async () => {
+  const { bot, policy, set } = fixture();
+  const routes = createMovements(bot);
+  assert.equal(DEFAULT_SURVIVAL_POLICY.navigation.dig_straight_down, true, "the default keeps today's routes");
+  assert.equal(routes.allowDownward, true);
+  assert.ok(SURVIVAL_POLICY_PATHS.has("navigation.dig_straight_down"));
+
+  await set({ combat: { hide: "never" }, navigation: { hostile_avoidance_multiplier: 2 } });
+  const reply = await new ActionRunner().run(createSetSurvivalPolicyAction(policy), {
+    operation: "set",
+    expected_revision: policy.snapshot().revision,
+    changes: { navigation: { dig_straight_down: false } },
+    lifetime: { kind: "session" },
+    reason: "a shaft can drop me into a cave I cannot climb out of",
+  });
+  assert.equal(reply.result.status, "succeeded");
+  const snapshot = reply.result.status === "succeeded" ? reply.result.policy : policy.snapshot();
+  assert.equal(snapshot.effective.navigation.dig_straight_down, false);
+  assert.equal(snapshot.defaults.navigation.dig_straight_down, true);
+  assert.equal(snapshot.effective.navigation.hostile_avoidance_multiplier, 2, "set merges; other overrides stay");
+  assert.equal(snapshot.effective.combat.hide, "never");
+  assert.deepEqual(
+    snapshot.overrides.map((override) => [override.path, override.value]),
+    [
+      ["combat.hide", "never"],
+      ["navigation.dig_straight_down", false],
+      ["navigation.hostile_avoidance_multiplier", 2],
+    ],
+  );
+  assert.equal(routes.allowDownward, false, "a policy built before the edit reads it live");
+  assert.equal(createMovements(bot, { allowDigging: true, breakPenalty: 1 }).allowDownward, false);
+  assert.equal(
+    policyEditSchema.safeParse({
+      operation: "set",
+      expected_revision: "x",
+      changes: { navigation: { dig_straight_down: "no" } },
+      lifetime: { kind: "session" },
+      reason: "wrong type",
+    }).success,
+    false,
+  );
+
+  await policy.edit({
+    operation: "clear",
+    expected_revision: policy.snapshot().revision,
+    paths: ["navigation.dig_straight_down"],
+    reason: "shafts are fine again",
+  });
+  assert.equal(routes.allowDownward, true);
+  assert.equal(policy.combat.hide, "never");
+
+  await set({ navigation: { dig_straight_down: false } });
+  await policy.reset("Death or dimension change; defaults restored.");
+  assert.equal(routes.allowDownward, true, "like every override, death and dimension change restore the default");
+});
+
 test("setting a field again replaces only that field's lifetime, and stale edits have no effect", async () => {
   const { policy, set } = fixture();
   const stale = policy.snapshot().revision;

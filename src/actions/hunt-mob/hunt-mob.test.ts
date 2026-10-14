@@ -1122,3 +1122,11 @@ test("the report rounds leftover drop positions and counts quarry beyond the nea
   assert.match(text, /#115 at 16,64,0 \(16 blocks\); \+4 more farther away/);
   assert.doesNotMatch(text, /#116 at/);
 });
+
+test("a drop named without its colour is answered with the item ids that carry it, white first", async () => {
+  // Live 2026-10-04: asked for "wool", the brain was told only that no such item exists.
+  const { similarItemNames } = await import("./hunt-mob.js");
+  const bot = { registry: { itemsByName: { white_wool: {}, black_wool: {}, red_wool: {}, wooden_hoe: {}, oak_log: {} } } } as unknown as Parameters<typeof similarItemNames>[0];
+  assert.deepEqual(similarItemNames(bot, "wool"), ["white_wool", "black_wool", "red_wool"]);
+  assert.deepEqual(similarItemNames(bot, "unobtanium"), []);
+});

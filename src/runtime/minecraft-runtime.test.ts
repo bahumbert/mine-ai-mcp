@@ -341,6 +341,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "attack_dragon_perch",
       "shoot_dragon",
       "build_structure",
+      "tend_crops",
       "cancel_foreground_action",
       "collect_block",
       "craft_item",
@@ -357,6 +358,9 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "navigate",
       "note_save",
       "note_read",
+      "note_delete",
+      "protect_region",
+      "unprotect_region",
       "place_block",
       "prepare_dragon_perch",
       "pick_up_items",
@@ -370,6 +374,8 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "use_container",
       "view_blocks",
       "view_crafting_requirements",
+      "view_smelting_recipes",
+      "view_block_drops",
       "view_frontier",
       "view_status",
     ],
@@ -494,7 +500,6 @@ test("runtime creation settles every acquired attachment before rejecting", asyn
 
 test("death cancels the foreground action, records one event, and permits work after respawn", async (t) => {
   const bot = runtimeBot();
-  bot.chat = () => undefined;
   const runtime = await createMinecraftRuntime(bot, {
     botData: {
       storage: { kind: "temporary" },
@@ -507,12 +512,13 @@ test("death cancels the foreground action, records one event, and permits work a
   });
   t.after(() => runtime.close());
 
-  const sendMessageAction = runtime.actions.find((action) => action.name === "send_message");
+  const rawAction = runtime.actions.find((action) => action.name === "raw_action");
   const readEventsAction = runtime.actions.find((action) => action.name === "read_recent_events");
-  assert.ok(sendMessageAction);
+  assert.ok(rawAction);
   assert.ok(readEventsAction);
 
-  const running = runtime.run(sendMessageAction, { message: "This will be interrupted" });
+  // Holding jump blocks here: the fixture emits no physics ticks.
+  const running = runtime.run(rawAction, { operation: "control", state: "jump", ticks: 40 });
   assert.equal(runtime.status().busy, true);
   Object.assign(bot.entity.position, { x: 12.5, y: 64, z: -3.25 });
   bot.emit("death");
@@ -534,11 +540,51 @@ test("death cancels the foreground action, records one event, and permits work a
     cause: null,
   });
 
-  bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
-  assert.deepEqual((await runtime.run(sendMessageAction, { message: "Work resumed" })).result, {
-    status: "succeeded",
-    message: "Work resumed",
+  const resumed = runtime.run(rawAction, { operation: "control", state: "jump", ticks: 1 });
+  assert.equal(runtime.status().activeAction?.action, "raw_action");
+  assert.equal((await settleWithPhysics(bot, resumed)).result.status, "succeeded");
+});
+
+/** Emit physics ticks until the run settles: the runtime fixture has no physics loop of its own. */
+async function settleWithPhysics<Output>(bot: Bot, running: Promise<Output>): Promise<Output> {
+  let settled = false;
+  void running.finally(() => { settled = true; });
+  while (!settled) {
+    bot.emit("physicsTick");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return running;
+}
+
+test("send_message runs beside the foreground action without refusing or cancelling it", async (t) => {
+  const bot = runtimeBot();
+  const sent: string[] = [];
+  bot.chat = (message) => {
+    sent.push(message);
+    bot.emit("chat", bot.username, message, null, {} as never, null);
+  };
+  const runtime = await createMinecraftRuntime(bot, {
+    botData: {
+      storage: { kind: "temporary" },
+      identity: { worldId: "concurrent-chat-test", scope: { kind: "bot", botId: "RuntimeBot" } },
+    },
+    createCombatController: () => combatController,
   });
+  t.after(() => runtime.close());
+  const rawAction = runtime.actions.find((action) => action.name === "raw_action");
+  const sendMessageAction = runtime.actions.find((action) => action.name === "send_message");
+  assert.ok(rawAction);
+  assert.ok(sendMessageAction);
+
+  const working = runtime.run(rawAction, { operation: "control", state: "jump", ticks: 3 });
+  assert.equal(runtime.status().activeAction?.action, "raw_action");
+
+  const chat = await runtime.run(sendMessageAction, { message: "Still working on it" });
+  assert.deepEqual(chat.result, { status: "succeeded", message: "Still working on it" });
+  assert.deepEqual(sent, ["Still working on it"]);
+  assert.equal(runtime.status().activeAction?.action, "raw_action", "chat must not take or release the body");
+
+  assert.equal((await settleWithPhysics(bot, working)).result.status, "succeeded");
 });
 
 test("adds unrestricted JavaScript execution only to an explicitly debug-enabled runtime", async () => {

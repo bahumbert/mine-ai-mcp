@@ -1,4 +1,3 @@
-import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot, BotEvents } from "mineflayer";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock } from "../markdown.js";
@@ -16,12 +15,19 @@ import {
 
 const MESSAGE_ECHO_TIMEOUT_MS = 5_000;
 
+/**
+ * The translation key of the line the server sends a whisperer, "You whisper to <name>: <text>" in the client's
+ * language. Matching the key, not the wording, makes the echo observable whatever language the server speaks.
+ */
+const OUTGOING_WHISPER_KEY = "commands.message.display.outgoing";
+
 type MessageDelivery =
   | { readonly kind: "observed" }
   | { readonly kind: "not_observed" }
   | { readonly kind: "send_failed"; readonly cause: unknown };
 
 type ChatListener = BotEvents["chat"];
+type MessageListener = BotEvents["message"];
 
 /** Send one message after arming observation so a synchronous echo cannot be missed. */
 export async function sendMessage(
@@ -30,32 +36,80 @@ export async function sendMessage(
   context: ActionContext,
 ): Promise<SendMessageResult> {
   context.signal?.throwIfAborted();
-  const delivery = await observePublicMessage(bot, request.message, context);
+  if (request.to !== undefined) return whisper(bot, request.message, request.to, context);
+  return resultOf(await observePublicMessage(bot, request.message, context), request.message);
+}
+
+function resultOf(delivery: MessageDelivery, message: string, to?: string): SendMessageResult {
+  const recipient = to === undefined ? {} : { to };
   switch (delivery.kind) {
     case "observed":
-      return { status: "succeeded", message: request.message };
+      return { status: "succeeded", message, ...recipient };
     case "not_observed":
       return {
         status: "failed",
         error: sendMessageOutcomes.notObserved(MESSAGE_ECHO_TIMEOUT_MS / 1_000),
-        message: request.message,
+        message,
+        ...recipient,
       };
     case "send_failed":
-      return {
-        status: "failed",
-        error: sendMessageOutcomes.sendFailed(delivery.cause),
-        message: request.message,
-      };
+      return { status: "failed", error: sendMessageOutcomes.sendFailed(delivery.cause), message, ...recipient };
   }
 }
 
+/** A whisper to a player online, spelled as the server knows them, confirmed by the server's own echo of it. */
+async function whisper(bot: Bot, message: string, to: string, context: ActionContext): Promise<SendMessageResult> {
+  const self = bot.username.toLowerCase();
+  const target = Object.keys(bot.players).find((name) => name.toLowerCase() === to.toLowerCase() && name.toLowerCase() !== self);
+  if (target === undefined) return { status: "failed", error: sendMessageOutcomes.playerNotOnline(to), message, to };
+  const delivery = await observeDelivery(
+    context,
+    (finish) => {
+      const onMessage: MessageListener = (jsonMsg) => {
+        // The echo carries its text as the last argument of the translation; another whisper has another text.
+        const { translate, with: args } = jsonMsg as unknown as { translate?: string; with?: readonly { toString(): string }[] };
+        if (translate === OUTGOING_WHISPER_KEY && args?.at(-1)?.toString() === message) finish({ kind: "observed" });
+      };
+      bot.on("message", onMessage);
+      return () => bot.off("message", onMessage);
+    },
+    () => bot.whisper(target, message),
+  );
+  return resultOf(delivery, message, target);
+}
+
 function observePublicMessage(bot: Bot, message: string, context: ActionContext): Promise<MessageDelivery> {
+  return observeDelivery(
+    context,
+    (finish) => {
+      const onChat: ChatListener = (username, observedMessage) => {
+        if (username.toLowerCase() === bot.username.toLowerCase() && observedMessage === message) {
+          finish({ kind: "observed" });
+        }
+      };
+      bot.on("chat", onChat);
+      return () => bot.off("chat", onChat);
+    },
+    () => bot.chat(message),
+  );
+}
+
+/**
+ * Arms `observe` (returns its own cleanup), then `send`s, and waits for `finish({ kind: "observed" })`, a send failure,
+ * the timeout or the caller's cancellation, whichever comes first.
+ */
+function observeDelivery(
+  context: ActionContext,
+  observe: (finish: (delivery: MessageDelivery) => void) => () => void,
+  send: () => void,
+): Promise<MessageDelivery> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: NodeJS.Timeout | null = null;
+    let stopObserving = () => {};
 
     const cleanup = () => {
-      bot.off("chat", onChat);
+      stopObserving();
       context.signal?.removeEventListener("abort", onAbort);
       if (timer) clearTimeout(timer);
     };
@@ -65,11 +119,6 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
       cleanup();
       resolve(delivery);
     };
-    const onChat: ChatListener = (username, observedMessage) => {
-      if (username.toLowerCase() === bot.username.toLowerCase() && observedMessage === message) {
-        finish({ kind: "observed" });
-      }
-    };
     const onAbort = () => {
       if (settled) return;
       settled = true;
@@ -77,7 +126,7 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
       reject(context.signal?.reason ?? new Error("Message action cancelled."));
     };
 
-    bot.on("chat", onChat);
+    stopObserving = observe(finish);
     context.signal?.addEventListener("abort", onAbort, { once: true });
     if (context.signal?.aborted) {
       onAbort();
@@ -85,10 +134,10 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
     }
 
     // Mineflayer chat() has no acknowledgement. Without this observation
-    // window, a muted or suppressing server could hold the foreground lock forever.
+    // window, a muted or suppressing server could leave the call pending forever.
     timer = setTimeout(() => finish({ kind: "not_observed" }), MESSAGE_ECHO_TIMEOUT_MS);
     try {
-      bot.chat(message);
+      send();
     } catch (cause) {
       finish({ kind: "send_failed", cause });
     }
@@ -96,20 +145,19 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
 }
 
 export function formatSendMessageResult(result: SendMessageResult): string {
-  const observation =
-    result.status === "succeeded" ? "Public chat echo observed." : `**Observed stop:** ${result.error}`;
+  const channel = result.to === undefined ? "Public chat" : `Whisper to ${result.to}`;
+  const observation = result.status === "succeeded" ? `${channel}: echo observed.` : `**Observed stop:** ${result.error}`;
   return `${observation}\n\n${markdownCodeBlock(result.message)}`;
 }
 
 export function createSendMessageAction(bot: Bot) {
   return defineAction({
-    checkpointSchema: executionCheckpointSchema,
     name: SEND_MESSAGE,
     description: SEND_MESSAGE_DESCRIPTION,
     inputSchema: sendMessageInputSchema,
     resultSchema: sendMessageResultSchema,
     formatResult: formatSendMessageResult,
-    execution: { kind: "task" },
+    execution: { kind: "concurrent" },
     annotations: sendMessageAnnotations,
     parse: parseSendMessageRequest,
     execute: (request, context) => sendMessage(bot, request, context),

@@ -2,13 +2,17 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
+import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
+import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
 
 export const BUILD_STRUCTURE = "build_structure" as const;
 export const BUILD_STRUCTURE_DESCRIPTION =
-  "Build a structure given as cells, each an absolute x, y, z and a carried block name, or air for a cell to dig clear, or as a nether portal frame using 10 obsidian and 4 cobblestone corner supports at an interior corner with its interior kept clear. Places every cell it can reach from where the bot stands, walks within reach of the rest lowest first, never builds itself in, and reports what was placed, dug, and short, and why each cell still wrong was left: holding another block, nothing to place against, its block not carried, would seal the bot in, or refused. Required tool-tier loss stops with partial progress by default; on_tool_loss=continue keeps the same build running. Sending the same structure again resumes or audits it.";
+  "Build a structure given as cells, each an absolute x, y, z and a carried block name, or air for a cell to dig clear, or as a nether portal frame using 10 obsidian and 4 cobblestone corner supports at an interior corner with its interior kept clear. Places every cell it can reach from where the bot stands, walks within reach of the rest lowest first, never builds itself in, and reports what was placed, dug, and short, and why each cell still wrong was left: holding another block, nothing to place against, its block not carried, would seal the bot in, or refused. Required tool-tier loss stops with partial progress by default; on_tool_loss=continue keeps the same build running. Sending the same structure again resumes or audits it. Works inside protected regions this bot owns; a request with a cell in anyone else's protected region is refused before any block is touched.";
 
 /** How many cells one build may describe; a portal preset is twenty and a small shelter under a hundred. */
 export const MAX_STRUCTURE_CELLS = 256;
+/** Cells one call may keep intact besides its own: the earlier parts of a structure built in several calls. */
+export const MAX_KEEP_CELLS = 2048;
 
 const coordinate = (axis: string) => z.number().int().safe().describe(`Absolute ${axis} coordinate.`);
 
@@ -19,6 +23,24 @@ export const structureCellSchema = z.strictObject({
   block_name: registryNameSchema.describe(
     "Block registry name carried as an item, such as cobblestone; air asks for the cell to be dug clear.",
   ),
+  facing: z
+    .enum(HORIZONTAL_FACINGS)
+    .optional()
+    .describe(
+      "For a block Minecraft orients by the player's facing (a door, stairs): the facing it must have. The bot faces that way while placing it, and the same block facing elsewhere counts as wrong.",
+    ),
+  half: z
+    .enum(BLOCK_HALVES)
+    .optional()
+    .describe(
+      "For stairs, slabs and trapdoors: the upper or lower half it must take (a slab's type). The bot clicks above or below the middle of a side face, or places against the block above or below, as a player would; the other half counts as wrong.",
+    ),
+  axis: z
+    .enum(BLOCK_AXES)
+    .optional()
+    .describe(
+      "For logs and other blocks with an axis: the axis it must lie along. The bot places it against a neighbour on that axis (a horizontal beam needs one beside it); another axis counts as wrong.",
+    ),
 });
 
 export const portalFrameRequestSchema = z.strictObject({
@@ -45,6 +67,11 @@ export const buildStructureInputSchema = z.strictObject({
     .describe("Dig a cell holding the wrong block before placing. Off, such cells are reported as wrong."),
   on_tool_loss: z.enum(["stop", "continue"]).default("stop")
     .describe("Stop with a partial structure when the best required digging tool tier drops, or continue with the remaining tool."),
+  keep: z
+    .array(z.strictObject({ x: coordinate("X"), y: coordinate("Y"), z: coordinate("Z") }))
+    .max(MAX_KEEP_CELLS)
+    .optional()
+    .describe("Cells routes must not dig while this call works: what earlier calls of the same structure already built. The structure's own correct cells are always kept."),
 });
 
 export interface StructureCell {
@@ -52,12 +79,24 @@ export interface StructureCell {
   readonly y: number;
   readonly z: number;
   readonly blockName: string;
+  readonly facing?: HorizontalFacing;
+  readonly half?: BlockHalf;
+  readonly axis?: BlockAxis;
+}
+
+/** How a cell reads in messages: its block and every state it asks for. */
+export function describeStructureCell(cell: Pick<StructureCell, "blockName" | "facing" | "half" | "axis">): string {
+  return [cell.blockName, cell.facing && `facing ${cell.facing}`, cell.half, cell.axis && `along ${cell.axis}`]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export interface BuildStructureRequest {
   readonly cells: readonly StructureCell[];
   readonly removeWrongBlocks: boolean;
   readonly onToolLoss?: "stop" | "continue";
+  /** Cells routes must not dig: earlier parts of the structure. */
+  readonly keep?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
 /**
@@ -87,7 +126,15 @@ export function portalFrameCells(frame: z.output<typeof portalFrameRequestSchema
 export function parseBuildStructureRequest(input: unknown): BuildStructureRequest {
   const value = buildStructureInputSchema.parse(input ?? {});
   const cells: StructureCell[] = [
-    ...(value.blocks ?? []).map((cell) => ({ x: cell.x, y: cell.y, z: cell.z, blockName: cell.block_name })),
+    ...(value.blocks ?? []).map((cell) => ({
+      x: cell.x,
+      y: cell.y,
+      z: cell.z,
+      blockName: cell.block_name,
+      ...(cell.facing !== undefined && { facing: cell.facing }),
+      ...(cell.half !== undefined && { half: cell.half }),
+      ...(cell.axis !== undefined && { axis: cell.axis }),
+    })),
     ...(value.portal_frame ? portalFrameCells(value.portal_frame) : []),
   ];
   if (cells.length === 0) throw new Error("A structure needs blocks or a portal_frame.");
@@ -98,12 +145,17 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
   for (const cell of cells) {
     const key = `${cell.x},${cell.y},${cell.z}`;
     const existing = byCell.get(key);
-    if (existing && existing.blockName !== cell.blockName) {
-      throw new Error(`Cell ${key} is asked to be both ${existing.blockName} and ${cell.blockName}.`);
+    if (existing && describeStructureCell(existing) !== describeStructureCell(cell)) {
+      throw new Error(`Cell ${key} is asked to be both ${describeStructureCell(existing)} and ${describeStructureCell(cell)}.`);
     }
     byCell.set(key, cell);
   }
-  return { cells: [...byCell.values()], removeWrongBlocks: value.remove_wrong_blocks, onToolLoss: value.on_tool_loss };
+  return {
+    cells: [...byCell.values()],
+    removeWrongBlocks: value.remove_wrong_blocks,
+    onToolLoss: value.on_tool_loss,
+    ...(value.keep !== undefined && value.keep.length > 0 && { keep: value.keep }),
+  };
 }
 
 /** Why a wrong cell was left, in the words of what was observed there. */
@@ -156,6 +208,15 @@ export const structureAuditSchema = z.strictObject({
   missing: z.array(z.strictObject({ block: z.string(), count: z.number().int().positive() })),
   passes: z.number().int().nonnegative(),
   complete: z.boolean(),
+  /** Present when the routes placed scaffold: how many blocks, how many were taken down, and where the rest still stands. */
+  scaffold: z
+    .strictObject({
+      placed: z.number().int().positive(),
+      removed: z.number().int().nonnegative(),
+      left: z.array(z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })).max(NAMED_CELLS_PER_REASON),
+      leftCount: z.number().int().nonnegative(),
+    })
+    .optional(),
 });
 
 export const buildStructureResultSchema = z.discriminatedUnion("status", [
@@ -181,4 +242,6 @@ export const buildStructureOutcomes = {
     (missing ? `; short of ${missing}` : "") +
     ".",
   stopped: (reason: string) => `[BUILD_STOPPED] The build stopped: ${reason}.`,
+  protectedRegion: (cells: number, region: string) =>
+    `[BUILD_PROTECTED_REGION] ${cells} cell${cells === 1 ? " lies" : "s lie"} inside ${region}, which this bot does not own; unprotect it or build elsewhere.`,
 } as const;

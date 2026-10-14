@@ -23,18 +23,23 @@ import {
 } from "../../navigation/processes/mining/mine-process.js";
 import { evaluateMineTarget, type MineTargetDecision } from "../../navigation/processes/mining/target-safety.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { isInWater } from "../../survival/perception/body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
+import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
+import { findLoadedBlockPositions } from "../../world/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
+import { watchForStall } from "../stall-watch.js";
 import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains } from "./collection-facts.js";
 import { createCollectionMovements } from "./collection-movements.js";
 import {
   cellLabel,
+  COLLECT_STALL_MS,
   decimal,
   HIGHLIGHT_COLOURS,
   MAX_EXTRA_BREAKS,
@@ -61,6 +66,8 @@ const sumValues = (record: Record<string, number>): number => Object.values(reco
 interface CollectionTarget {
   readonly itemNames: ReadonlySet<string>;
   readonly blockStateIds: ReadonlySet<number>;
+  /** How often one break yields a collectable item (`collectionChance`). */
+  readonly chance: number;
 }
 
 function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTarget {
@@ -76,7 +83,31 @@ function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTar
     const block = bot.registry.blocksByName[name]!;
     for (let stateId = block.minStateId; stateId <= block.maxStateId; stateId += 1) blockStateIds.add(stateId);
   }
-  return { itemNames, blockStateIds };
+  return { itemNames, blockStateIds, chance: collectionChance(bot, names, itemNames) };
+}
+
+/**
+ * How often one break yields a collectable item, at best among the matching blocks: grass gives wheat seeds one time
+ * in eight (its loot table, `src/world/block-drops.ts`). A block without shipped drops counts as a sure drop, which is
+ * what the break budget assumed before.
+ */
+export function collectionChance(bot: Bot, blockNames: readonly string[], collectable: ReadonlySet<string>): number {
+  const version = bot.version;
+  let best = 0;
+  for (const name of blockNames) {
+    if (blockDropsData(version)?.blocks[name] === undefined) return 1;
+    for (const drop of ordinaryDrops(name, version)) if (collectable.has(drop.item)) best = Math.max(best, drop.chance);
+  }
+  return best > 0 ? best : 1;
+}
+
+/**
+ * Breaks a run may make: a sure drop gets the requested count plus the allowance for lost ones; an uncertain one twice
+ * the breaks expected at its chance, so bad luck rarely cuts the run short (the expected count alone fell short about
+ * one run in three for 4 seeds from grass).
+ */
+export function breakBudget(requested: number, chance: number): number {
+  return (chance >= 1 ? requested : Math.ceil((2 * requested) / chance)) + MAX_EXTRA_BREAKS;
 }
 
 function collectionMovements(bot: Bot, request: CollectBlockRequest, target: CollectionTarget) {
@@ -92,6 +123,7 @@ function collectionMovements(bot: Bot, request: CollectBlockRequest, target: Col
     matchingStateIds: target.blockStateIds,
     exactTarget: request.exactTarget,
     scaffolding: request.scaffolding,
+    ...(request.ignoreOwnRegions === true && { ignoreRegionsOwnedBy: bot.username }),
   });
 }
 
@@ -230,6 +262,16 @@ function beginCollectBlock(
       if (capacityReason !== null) capacity.abort(new Error(capacityReason));
     };
     bot.on("physicsTick", checkCapacity);
+    // Whatever inner loop keeps the run alive, no break and no gain for this
+    // long means it is going nowhere: settle with what it got.
+    const stall = watchForStall({
+      work: () => `${broken.length}:${gained()}`,
+      position: () => bot.entity.position,
+      inWater: () => isInWater(bot),
+      stallMs: COLLECT_STALL_MS,
+      describe: ({ seconds, walked }) =>
+        outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(start))),
+    });
     // Target highlights are live state, retained until replaced or this attempt ends.
     const highlights = new AbortController();
     // The viewer reads this lazily: no polling viewer means no display work.
@@ -254,7 +296,9 @@ function beginCollectBlock(
         // a lava source. The process makes pools targets only when it has nothing
         // to mine and water in the bucket.
         cast: blockMatchesSelector("obsidian", request.selector) ? useItemAt : null,
-        matches: (block: MinecraftBlock) => blockMatchesSelector(block.name, request.selector),
+        // Under max_distance a block beyond the range is no target (one with no position is a palette entry).
+        matches: (block: MinecraftBlock) =>
+          blockMatchesSelector(block.name, request.selector) && (block.position == null || withinRange(request, start, block.position)),
         canMine,
         matchingStateIds: target.blockStateIds,
         ...(exactCell !== null && { exactTarget: exactCell }),
@@ -263,9 +307,10 @@ function beginCollectBlock(
         observedInventoryGain: gained,
         movements,
         castSearchRadius: LOADED_SEARCH_RADIUS,
-        explore: exactCell === null,
-        maximumBreaks: Math.max(0, request.requested + MAX_EXTRA_BREAKS - broken.length),
-        signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal]),
+        // Exploring for a block is what walks a run across the map: never under max_distance.
+        explore: exactCell === null && request.maxDistance === null,
+        maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance) - broken.length),
+        signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
         ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
         onTargets: (targets) => {
           pursued = targets;
@@ -273,15 +318,21 @@ function beginCollectBlock(
         onBroken: (position) => broken.push(position),
       });
 
+      const stopped = capacityReason ?? stall.reason();
       return settle(
         bot, request, inventoryBefore, collectable, start,
-        capacityReason === null ? { ...result, broken } : { status: "stopped", broken, reason: capacityReason },
+        stopped === null ? { ...result, broken } : { status: "stopped", broken, reason: stopped },
       );
     } catch (error) {
       context.signal?.throwIfAborted();
-      if (capacityReason === null || error !== capacity.signal.reason) throw error;
-      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: capacityReason });
+      const stopped =
+        capacityReason !== null && error === capacity.signal.reason ? capacityReason
+        : error === stall.signal.reason ? stall.reason()
+        : null;
+      if (stopped === null) throw error;
+      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: stopped });
     } finally {
+      stall.close();
       highlights.abort();
       bot.off("physicsTick", checkCapacity);
     }
@@ -305,12 +356,26 @@ function targetHighlights(targets: readonly MineTarget[]): HighlightFrame {
 
 // ── Result settlement ─────────────────────────────────────────────────────────────────────
 
+/** Whether a cell is within the request's `max_distance` of where the run started, horizontally; always when unbounded. */
+function withinRange(request: CollectBlockRequest, start: Vec3, position: { readonly x: number; readonly z: number }): boolean {
+  return request.maxDistance === null || Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z) <= request.maxDistance;
+}
+
+/** The nearest loaded matching block beyond the range, and its horizontal distance from the start. */
+function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3) {
+  const positions = findLoadedBlockPositions(bot, { center: start, stateIds: collectionTarget(bot, request).blockStateIds, limit: 256 });
+  const beyond = positions.find((position) => !withinRange(request, start, position));
+  if (beyond === undefined) return null;
+  return { position: { x: beyond.x, y: beyond.y, z: beyond.z }, distance: Math.round(Math.hypot(beyond.x + 0.5 - start.x, beyond.z + 0.5 - start.z)) };
+}
+
 /** Why the mine process stopped, in the words of the request that asked for it. */
-function stopReason(request: CollectBlockRequest, result: MineResult, gained: number): string | null {
+function stopReason(bot: Bot, request: CollectBlockRequest, start: Vec3, result: MineResult, gained: number): string | null {
   switch (result.status) {
     case "satisfied":
       return null;
     case "no_targets":
+      if (request.maxDistance !== null) return outcomes.noTargetInRange(request.selector, request.maxDistance, nearestBeyondRange(bot, request, start));
       return outcomes.noLoadedTargets(request.selector);
     case "unreachable":
       return outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
@@ -356,7 +421,7 @@ export function settle(
     error: outcomes.progress(
       missingBucket
         ? `[CASTING_BUCKET_MISSING] Carried buckets decreased from ${bucketsBefore} to ${bucketsAfter}; the missing bucket was not recovered.`
-        : (stopReason(request, result, gained) ?? outcomes.incomplete),
+        : (stopReason(bot, request, start, result, gained) ?? outcomes.incomplete),
       gained,
       request.requested,
       brokenAt.length,
@@ -400,7 +465,7 @@ export function createCollectBlockAction(
     inputSchema: collectBlockInputSchema,
     resultSchema: collectBlockResultSchema,
     formatResult: formatCollectBlockResult,
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: COLLECT_BLOCK,
       destructiveHint: true,

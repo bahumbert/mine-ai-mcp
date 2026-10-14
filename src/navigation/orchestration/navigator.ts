@@ -12,7 +12,7 @@ import type { MovementPolicy } from "../movements/policy.js";
 import type { SearchLimits } from "../search/search-result.js";
 import type { StepFieldProvider } from "../step-field.js";
 import { silentTelemetry, type TelemetrySink } from "../telemetry/index.js";
-import type { WorldView } from "../world/world.js";
+import type { BlockPosition, WorldView } from "../world/world.js";
 import { NavigationRun, type RunContext } from "./navigation-run.js";
 import type { NavigationOutcome, NavigationStatus } from "./outcome.js";
 import type {
@@ -60,6 +60,8 @@ export interface NavigationRequest {
    * say so here.
    */
   readonly stepField?: null | undefined;
+  /** Told of each block this run's route placed (scaffold) once the world confirmed it, with its block state. */
+  readonly onPlacement?: (placement: { readonly position: BlockPosition; readonly stateId: number }) => void;
 }
 
 export interface NavigationHandle {

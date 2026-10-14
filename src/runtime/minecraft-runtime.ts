@@ -1,3 +1,5 @@
+import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
+import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
 import { randomUUID } from "node:crypto";
@@ -41,6 +43,7 @@ import { attachEndermanGazeControl } from "../survival/guards/enderman-gaze.js";
 import { createCombatController, createHostileStepFieldProvider, type CombatController } from "../survival/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
+import { isInWater } from "../survival/perception/body.js";
 import { attachDragonReflex } from "../survival/reflexes/dragon.js";
 import { attachFireReflex } from "../survival/reflexes/fire.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
@@ -50,6 +53,7 @@ import { attachHungerReflex } from "../survival/reflexes/hunger.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus } from "./frontier.js";
 import { observeEquipmentEvents } from "./equipment-events.js";
+import { observeNavigationEvents } from "./navigation-events.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { observeReflexActivity } from "./reflex-activity.js";
 import { observeBotStatus } from "./bot-status.js";
@@ -299,8 +303,11 @@ export async function createMinecraftRuntime(
 ): Promise<MinecraftRuntime> {
   await using resources = new AsyncDisposableStack();
   const botData = resources.use(SqlBotData.create(options.botData));
+  // One list per bot: routes read it through the provider, the region tools write it (ADR-012).
+  const protectedRegions = new ProtectedRegionStore(botData);
+  setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
-  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), position: () => bot.entity?.position ? {
+  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), inWater: () => isInWater(bot), position: () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null });
   const sampleProgress = () => runner.samplePosition();
@@ -416,6 +423,7 @@ export async function createMinecraftRuntime(
   });
   resources.defer(observePlayerEvents(bot, botData, (reason) => runner.cancelActive(reason, { kind: "death" })));
   resources.defer(observeEquipmentEvents(bot, botData));
+  resources.defer(observeNavigationEvents(navigation, bot.username, botData));
   resources.defer(observeBotStatus(bot, botData));
   let bodyDimension = bot.game.dimension;
   const retireWorld = () => {
@@ -433,6 +441,7 @@ export async function createMinecraftRuntime(
       budgets: reflexes.budgets,
       bot,
       botData,
+      protectedRegions,
       frontier,
       navigation,
       strongholdEyeFlights,

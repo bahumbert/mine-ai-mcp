@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { dropCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -55,6 +56,9 @@ import {
  */
 const TOSS_SETTLE_MS = 1_500;
 
+/** Items a bot stands over are picked up again within a couple of seconds; wait this long to see it happen. */
+const PICKUP_WAIT_MS = 3_000;
+
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
 const HANDOVER_RANGE = 2;
 
@@ -77,6 +81,8 @@ export interface DropItemDependencies {
   readonly createMovements: (bot: Bot) => ReturnType<typeof createMovements>;
   /** How long the server gets to show a toss in the inventory and, for a hole, on the ground. */
   readonly settleMs?: number;
+  /** How long after the toss the carried count is read again to catch items picked straight back up. */
+  readonly pickupWaitMs?: number;
 }
 
 function productionDependencies(navigation: NavigationRuntime): DropItemDependencies {
@@ -154,7 +160,8 @@ async function tossItem(
     };
   }
 
-  const expected = requested ?? carriedBefore;
+  // A count above what is carried drops all of it: that is done, not a toss the server swallowed (live 2026-10-09).
+  const expected = Math.min(requested ?? carriedBefore, carriedBefore);
   const settled = await settleInventoryCount(bot, itemName, Math.max(0, carriedBefore - expected), {
     timeoutMs: settleMs,
     signal: context.signal,
@@ -232,6 +239,69 @@ function rememberDiscards(bot: Bot, baseline: ReadonlySet<number>, discarded: Di
     .filter((entity) => droppedItemName(entity) !== null || entity.name === "item")
     .map((entity) => entity.id);
   discarded.remember(ids);
+}
+
+/** Walk to the feet cell of a stance chosen for the pit; the failure reason, or nothing once there. */
+async function walkToStance(
+  bot: Bot,
+  stance: Vec3,
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<string | undefined> {
+  const goal = customGoal(
+    `pit-stance:${stance.x},${stance.y},${stance.z}`,
+    (node) => node.feet.x === stance.x && node.feet.y === stance.y && node.feet.z === stance.z,
+    (node) =>
+      (Math.abs(node.feet.x - stance.x) + Math.abs(node.feet.z - stance.z) + Math.abs(node.feet.y - stance.y)) *
+      HORIZONTAL_TICKS_PER_BLOCK,
+  );
+  try {
+    const route = await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal });
+    const here = bot.entity.position.floored();
+    return here.equals(stance) ? undefined : describeNavigation(route);
+  } catch (cause) {
+    context.signal?.throwIfAborted();
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+/** How far from where the items landed a ground drop walks before the pickup check. */
+const GROUND_CLEARANCE = 4;
+
+/**
+ * Walk at least `GROUND_CLEARANCE` blocks from a ground toss: first the way opposite to where the bot faced when
+ * tossing, then the sides, then ahead. A route that does not get there is not an error here: the check that follows
+ * reports whatever came back.
+ */
+async function walkAwayFromToss(
+  bot: Bot,
+  from: { x: number; z: number },
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<void> {
+  const yaw = bot.entity.yaw ?? 0;
+  // Mineflayer's yaw 0 faces -z, and a positive yaw turns toward -x.
+  const ahead = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+  const sides = [
+    { x: -ahead.x, z: -ahead.z },
+    { x: -ahead.z, z: ahead.x },
+    { x: ahead.z, z: -ahead.x },
+    ahead,
+  ];
+  for (const [index, side] of sides.entries()) {
+    const reach = (node: { feet: { x: number; z: number } }) => (node.feet.x + 0.5 - from.x) * side.x + (node.feet.z + 0.5 - from.z) * side.z;
+    const goal = customGoal(
+      `clear-of-toss:${index}:${from.x.toFixed(1)},${from.z.toFixed(1)}`,
+      (node) => reach(node) >= GROUND_CLEARANCE,
+      (node) => Math.max(0, GROUND_CLEARANCE - reach(node)) * HORIZONTAL_TICKS_PER_BLOCK,
+    );
+    try {
+      await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal });
+    } catch {
+      context.signal?.throwIfAborted();
+    }
+    if (Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z) >= GROUND_CLEARANCE) return;
+  }
 }
 
 /** Walk clear of the hole so the next request's route does not start beside, or in, the pit. */
@@ -323,7 +393,13 @@ export async function dropItem(
       if (request.destination.kind === "player") {
         recipient = await approachPlayer(bot, request.destination.name, dependencies, context);
       } else {
-        hole = await prepareDisposalHole(bot, dependencies.createMovements(bot), dependencies.breakInPlace, context);
+        hole = await prepareDisposalHole(
+          bot,
+          dependencies.createMovements(bot),
+          dependencies.breakInPlace,
+          context,
+          (stance) => walkToStance(bot, stance, dependencies, context),
+        );
       }
     } catch (cause) {
       context.signal?.throwIfAborted();
@@ -379,10 +455,37 @@ export async function dropItem(
   // Claim what this toss put on the ground so the hunt's sweep leaves it alone.
   if (dropped.some((entry) => entry.dropped > 0)) rememberDiscards(bot, entityBaseline, discarded);
 
-  // Free slots and the toss position are read now: plugging the hole spends a
-  // block and stepping back moves the body, and neither is part of the drop.
-  const freeSlotsAfter = bot.inventory.emptySlotCount();
+  const tossedAt = Date.now();
   const droppedAt = { ...bot.entity.position };
+  const anyDropped = dropped.some((entry) => entry.dropped > 0 && !entry.error);
+  // A ground toss lands at the bot's feet and is picked up again once its pickup delay ends (live 2026-10-10 run 9: a
+  // cave with no pit in reach, all four items "picked up again", twice): walk off before that, away from where the
+  // items landed, and only then wait out the check.
+  if (anyDropped && request.destination.kind === "ground") await walkAwayFromToss(bot, droppedAt, dependencies, context);
+
+  // Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
+  // times over): read the carried count again after a short wait and report only the net drop.
+  if (request.destination.kind !== "player" && anyDropped) {
+    await delay(Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - (Date.now() - tossedAt)), undefined, { signal: context.signal });
+    for (const [index, entry] of dropped.entries()) {
+      if (entry.dropped <= 0 || entry.error) continue;
+      const now = carriedCount(bot, entry.item);
+      if (now <= entry.carriedAfter) continue;
+      const net = Math.max(0, entry.carriedBefore - now);
+      dropped[index] = {
+        ...entry,
+        carriedAfter: now,
+        dropped: net,
+        ...(net === 0 && {
+          error: hole ? dropItemOutcomes.notObserved(entry.item, now) : dropItemOutcomes.pickedUp(entry.item),
+        }),
+      };
+    }
+  }
+
+  // Free slots are read now: plugging the hole spends a block and stepping back moves the body, and neither is part of
+  // the drop.
+  const freeSlotsAfter = bot.inventory.emptySlotCount();
   let landed = true;
   let holeClosure: HoleClosure | null = null;
   if (hole) {
@@ -411,11 +514,20 @@ export async function dropItem(
       drop: evidence,
     };
   }
-  const failed = dropped.filter((entry) => entry.error).length;
+  // In a list, an item not carried is reported but is no failure once something else was carried: the inventory is
+  // already as asked for it (live 2026-10-09: drops listing tools she did not carry "failed 9 of 9" after freeing
+  // slots, and were sent again, tossing more). Nothing carried at all still fails (a wrong id).
+  const carriedAny = dropped.some((entry) => entry.carriedBefore > 0);
+  const failures = dropped.filter((entry) => entry.error && !(carriedAny && entry.carriedBefore === 0 && entry.error.startsWith("[DROP_NOT_CARRIED]")));
+  const failed = failures.length;
   if (failed === 0) return { status: "succeeded", drop: evidence };
   return {
     status: failed === dropped.length ? "failed" : "partial",
-    error: dropItemOutcomes.incomplete(failed, dropped.length),
+    error: dropItemOutcomes.incomplete(
+      failed,
+      dropped.length,
+      failures.map((entry) => `${entry.item}: ${entry.error?.startsWith("[DROP_NOT_CARRIED]") ? "not carried" : entry.error}`),
+    ),
     drop: evidence,
   };
 }
@@ -467,7 +579,7 @@ export function createDropItemAction(
     inputSchema: dropItemInputSchema,
     resultSchema: dropItemResultSchema,
     formatResult: formatDropItemResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: dropItemAnnotations,
     parse: parseDropItemRequest,
     execute: (request, context) => dropItem(bot, request, context, dependencies, discarded),

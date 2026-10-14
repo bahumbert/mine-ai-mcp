@@ -1,0 +1,72 @@
+template: ../../templates/flat-single-action.yaml
+name: block-states
+tags: [acceptance]
+description: >-
+  Build one structure whose cells ask for block states (ADR-013): standing pillars and
+  horizontal log beams along x and z between them, bottom stairs facing north and east,
+  top stairs facing south against a side block, and bottom and top slabs. The server
+  checks every state, so a beam placed on the floor (standing) or a slab placed on the
+  block below when a top one is asked fails the run.
+
+geometry:
+  - fill: { block: stone, from: [-6, -60, -10], to: [14, -60, 10] }
+  # Side supports for the top halves: nothing above them, only the floor below.
+  - fill: { block: cobblestone, from: [2, -59, -6], to: [2, -58, -6] }
+  - fill: { block: cobblestone, from: [8, -59, -6], to: [8, -58, -6] }
+  # A wall under the x beam, as under a house's trim: the beam must still lie along x, not stand on it.
+  - fill: { block: cobblestone, from: [4, -59, 2], to: [6, -59, 2] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: oak_log, count: 16 }
+      - { item: spruce_stairs, count: 8 }
+      - { item: spruce_slab, count: 8 }
+      - { item: dirt, count: 32 }
+
+params:
+  action: build_structure
+  input:
+    blocks:
+      # A frame along x: two pillars and a beam between them, one block above the floor.
+      - { x: 3, y: -59, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 3, y: -58, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 7, y: -59, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 7, y: -58, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 4, y: -58, z: 2, block_name: oak_log, axis: "x" }
+      - { x: 5, y: -58, z: 2, block_name: oak_log, axis: "x" }
+      - { x: 6, y: -58, z: 2, block_name: oak_log, axis: "x" }
+      # A frame along z.
+      - { x: 10, y: -59, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 10, y: -58, z: 2, block_name: oak_log, axis: "y" }
+      - { x: 10, y: -59, z: 6, block_name: oak_log, axis: "y" }
+      - { x: 10, y: -58, z: 6, block_name: oak_log, axis: "y" }
+      - { x: 10, y: -58, z: 3, block_name: oak_log, axis: "z" }
+      - { x: 10, y: -58, z: 4, block_name: oak_log, axis: "z" }
+      - { x: 10, y: -58, z: 5, block_name: oak_log, axis: "z" }
+      # Bottom stairs on the floor.
+      - { x: 3, y: -59, z: -3, block_name: spruce_stairs, facing: north, half: bottom }
+      - { x: 4, y: -59, z: -3, block_name: spruce_stairs, facing: north, half: bottom }
+      - { x: 6, y: -59, z: -3, block_name: spruce_stairs, facing: east, half: bottom }
+      # A top stair hung from the side of the block beside it.
+      - { x: 3, y: -58, z: -6, block_name: spruce_stairs, facing: south, half: top }
+      # Slabs: bottom on the floor, top against the side block.
+      - { x: 5, y: -59, z: -6, block_name: spruce_slab, half: bottom }
+      - { x: 7, y: -58, z: -6, block_name: spruce_slab, half: top }
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - { kind: completion, who: Actor }
+    - kind: blocksAt
+      block: "oak_log[axis=y]"
+      positions: [[3, -59, 2], [3, -58, 2], [7, -59, 2], [7, -58, 2], [10, -59, 2], [10, -58, 2], [10, -59, 6], [10, -58, 6]]
+    - { kind: blocksAt, block: "oak_log[axis=x]", positions: [[4, -58, 2], [5, -58, 2], [6, -58, 2]] }
+    - { kind: blocksAt, block: "oak_log[axis=z]", positions: [[10, -58, 3], [10, -58, 4], [10, -58, 5]] }
+    - { kind: blocksAt, block: "spruce_stairs[facing=north,half=bottom]", positions: [[3, -59, -3], [4, -59, -3]] }
+    - { kind: blockAt, block: "spruce_stairs[facing=east,half=bottom]", pos: [6, -59, -3] }
+    - { kind: blockAt, block: "spruce_stairs[facing=south,half=top]", pos: [3, -58, -6] }
+    - { kind: blockAt, block: "spruce_slab[type=bottom]", pos: [5, -59, -6] }
+    - { kind: blockAt, block: "spruce_slab[type=top]", pos: [7, -58, -6] }

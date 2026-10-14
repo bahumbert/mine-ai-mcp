@@ -11,7 +11,7 @@ import { buildCheckpointSchema } from "../checkpoint-schemas.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { createMovements, type NavigationRuntime } from "../../navigation/index.js";
+import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { DIG_REACH } from "../../navigation/movements/excavation.js";
 import {
@@ -27,6 +27,7 @@ import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibili
 import { placeBlock } from "../../world/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 import {
   buildStructureAnnotations,
   buildStructureOutcomes,
@@ -56,6 +57,8 @@ function productionPhysics(
     movements: (protectedCells) =>
       createMovements(bot, {
         protectedCells,
+        // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
+        ignoreRegionsOwnedBy: bot.username,
         protectedScaffoldNames: [...new Set(request.cells.map((cell) => cell.blockName))].filter(
           (name) => name !== "air",
         ),
@@ -73,7 +76,13 @@ function productionPhysics(
 }
 
 function toBuildCell(cell: StructureCell): BuildCell {
-  return { position: { x: cell.x, y: cell.y, z: cell.z }, blockName: cell.blockName };
+  return {
+    position: { x: cell.x, y: cell.y, z: cell.z },
+    blockName: cell.blockName,
+    ...(cell.facing !== undefined && { facing: cell.facing }),
+    ...(cell.half !== undefined && { half: cell.half }),
+    ...(cell.axis !== undefined && { axis: cell.axis }),
+  };
 }
 
 // ── Result settlement ─────────────────────────────────────────────────────────────────────
@@ -145,6 +154,14 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
     missing: shortfall(bot, result),
     passes: result.passes,
     complete: wrong === 0,
+    ...(result.scaffold.placed > 0 && {
+      scaffold: {
+        placed: result.scaffold.placed,
+        removed: result.scaffold.removed,
+        left: result.scaffold.left.slice(0, NAMED_CELLS_PER_REASON).map(({ x, y, z }) => ({ x, y, z })),
+        leftCount: result.scaffold.left.length,
+      },
+    }),
   };
 }
 
@@ -197,11 +214,28 @@ export async function buildStructure(
       };
     }
   }
+  // Someone else's protected build is not this bot's to change, whoever asked (ADR-012).
+  const regions = readProtectedRegions(bot);
+  const foreign = request.cells.flatMap((cell) => {
+    const region = protectedRegionAt(regions, dimension, cell.x, cell.y, cell.z, bot.username);
+    return region === null ? [] : [region];
+  });
+  if (foreign[0] !== undefined) {
+    return {
+      status: "failed",
+      error: buildStructureOutcomes.protectedRegion(foreign.length, describeProtectedRegion(foreign[0])),
+      structure: null,
+    };
+  }
+  const kept = new Set((request.keep ?? []).map((cell) => packKey(cell.x, cell.y, cell.z)));
   const toolLoss = request.removeWrongBlocks ? observeToolTierLoss(bot) : null;
   let result: BuildResult;
   try {
     result = await build(bot, {
       ...physics,
+      // Its own correct cells, and what earlier calls of the same structure built (`keep`): a route to the roof must
+      // not dig through the walls (live 2026-10-01: 11 cells of a finished house dug out).
+      movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : new Set([...protectedCells, ...kept])),
       route: (options) => physics.route({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
       breakInPlace: (options) => physics.breakInPlace({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
       place: async (placement) => {
@@ -244,6 +278,13 @@ export function formatBuildStructureResult(result: BuildStructureResult): string
     `- Missing: ${structure.missing.map((entry) => `${entry.count} ${entry.block}`).join(", ") || "nothing"}`,
     `- Passes: ${structure.passes}`,
   ];
+  if (structure.scaffold !== undefined) {
+    const { placed, removed, left, leftCount } = structure.scaffold;
+    lines.push(
+      `- Scaffold: ${placed} placed by the routes, ${removed} taken down` +
+        (leftCount > 0 ? `, ${leftCount} still standing (${left.map(({ x, y, z }) => `${x} ${y} ${z}`).join("; ")}${leftCount > left.length ? "; ..." : ""})` : ""),
+    );
+  }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");
 }
@@ -260,7 +301,7 @@ export function createBuildStructureAction(
     inputSchema: buildStructureInputSchema,
     resultSchema: buildStructureResultSchema,
     formatResult: formatBuildStructureResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: buildStructureAnnotations,
     parse: parseBuildStructureRequest,
     execute: (request, context) =>

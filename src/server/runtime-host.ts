@@ -17,8 +17,18 @@ import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecr
 import type { HostOptions } from "./config.js";
 import { registerIncidentCaptureRoute } from "./incident-route.js";
 import { createMinecraftMcpServer } from "./mcp.js";
+import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * A kick reason is a text component, an object since 1.20.3: logged whole (live 2026-10-07 on a real server, the
+ * only trace of a kick was "[object Object]").
+ */
+export function kickReason(reason: unknown): string {
+  if (typeof reason === "string") return reason;
+  return JSON.stringify(reason, (_key, value: unknown) => (typeof value === "bigint" ? String(value) : value));
+}
 
 interface ConnectedBot extends Disposable {
   readonly bot: Bot;
@@ -38,6 +48,8 @@ type ConnectionSettlement =
 
 async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
   using resources = new DisposableStack();
+  const neoforgeComponents =
+    configuration.neoforgeComponents === null ? null : readNeoForgeComponents(configuration.neoforgeComponents);
   const bot = mineflayer.createBot({
     host: configuration.minecraftHost,
     port: configuration.minecraftPort,
@@ -46,6 +58,7 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
     version: configuration.version,
     ...BOT_PHYSICS_OPTIONS,
   });
+  if (neoforgeComponents !== null) joinAsNeoForgeClient(bot, neoforgeComponents);
   // Survival perception, navigation, and diagnostics each keep a permanent
   // respawn and physicsTick listener; the steady-state count sits just past
   // Node's default cap of ten, so raise it while keeping a finite ceiling
@@ -83,7 +96,7 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
     const kicked = (reason: unknown) =>
       finish({
         kind: "failed",
-        error: new Error(`Minecraft kicked ${configuration.username}: ${String(reason)}`),
+        error: new Error(`Minecraft kicked ${configuration.username}: ${kickReason(reason)}`),
       });
     const timer = setTimeout(
       () =>
@@ -156,7 +169,7 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
     runtime ? runtime.disconnect(failure.message) : connectionEnded(failure);
   bot.on("error", failedConnection);
   const kicked = (reason: unknown) =>
-    failedConnection(new Error(`Minecraft kicked ${configuration.username}: ${String(reason)}`));
+    failedConnection(new Error(`Minecraft kicked ${configuration.username}: ${kickReason(reason)}`));
   bot.on("kicked", kicked);
   resources.defer(() => {
     bot.off("error", failedConnection);

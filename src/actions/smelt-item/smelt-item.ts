@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { carriedCount, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
+import { fuelCapacity } from "../../world/smelting.js";
 import { waitForSignal } from "../../utils/signals.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -62,16 +63,6 @@ function productionDependencies(navigate: Navigate): SmeltItemDependencies {
     now: () => performance.now(),
     pause: abortablePause,
   };
-}
-
-function fuelCapacity(name: string): number {
-  if (name === "coal" || name === "charcoal") return 8;
-  if (name === "coal_block") return 80;
-  if (name === "dried_kelp_block") return 20;
-  if (name === "blaze_rod") return 12;
-  if (name.endsWith("_planks") || name.endsWith("_log") || name.endsWith("_wood")) return 1.5;
-  if (name === "stick") return 0.5;
-  return 0;
 }
 
 function evidence(
@@ -527,7 +518,7 @@ export function createSmeltItemAction(
     inputSchema: smeltItemInputSchema,
     resultSchema: smeltItemResultSchema,
     formatResult: formatSmeltItemResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: smeltItemAnnotations,
     parse: parseSmeltItemRequest,
     execute: (request, context) => smeltItem(bot, navigation, request, context, dependencies),

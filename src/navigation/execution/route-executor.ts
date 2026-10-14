@@ -31,6 +31,7 @@ import { canReleaseOnObservedGround, safeSupportingCell } from "../world/block-g
 import { type BlockPosition, type WorldView, activationGroupAt, samePosition } from "../world/world.js";
 import type { MovementController, MovementExecution, MovementSnapshot } from "./movement-controller.js";
 import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "./mutations.js";
+import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
 import type { OpenedPassages } from "./opened-passages.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
@@ -66,6 +67,8 @@ export interface RouteContext {
 export interface RouteExecutionRequest {
   readonly context: RouteContext;
   readonly passages: OpenedPassages;
+  /** The route's policy lets it open doors and gates, including one the body stands in when a step starts. */
+  readonly allowDoors: boolean;
   readonly plan: RoutePlan;
   readonly stepStarted: (step: PlannedStep) => void;
   readonly phase: (step: PlannedStep, phase: MovementPhase) => void;
@@ -217,6 +220,19 @@ export class RouteExecutor {
       }
     }
     const token = { runId: this.request.context.runId, planId: this.request.plan.id, stepId: step.id, attempt: 1 };
+    const doorway = this.request.allowDoors ? this.request.passages.occupiedClosed(step.from) : null;
+    if (doorway) {
+      this.request.context.bot.clearOwnedControls();
+      const opening = this.request.passages.openingStep(doorway, step);
+      const opened = await this.#executeMutation(
+        stepIndex,
+        0,
+        opening,
+        { ...token, stepId: opening.id },
+        opening.operations[0],
+      );
+      if (opened) return opened;
+    }
     let mutationNeedsSettlement = false;
     let mutationControlsReleased = false;
     for (let operationIndex = 0; operationIndex < step.operations.length; operationIndex += 1) {
@@ -480,6 +496,8 @@ export class RouteExecutor {
     const snapshot = this.request.context.bot.movementSnapshot();
     this.#latestMovementSnapshot = snapshot;
     if (this.#state.kind !== "moving") return;
+    const running = this.request.plan.steps[this.#state.stepIndex];
+    markPhase(`physicsTick: ${running?.kind} ${running?.id}`);
     if (!snapshot.onGround) this.#state.airborneObserved = true;
     if (this.#invalidated) {
       this.#settleMovement({ kind: "invalidated" });

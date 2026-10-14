@@ -161,27 +161,59 @@ export class OpenedPassages {
   ): PlannedStep & {
     readonly operations: readonly [Extract<PlannedOperation, { kind: "activate" }>];
   } {
+    return this.#activationStep(passage, step, "close");
+  }
+
+  /**
+   * A closed door or gate in a cell the body stands in, or null. Search plans
+   * only the cells a movement enters, so a body that starts inside a closed
+   * doorway — its own house's, a door shut on it — would walk into the door's
+   * thin closed plane and never arrive. The executor opens it first, and the
+   * passage is remembered and closed again once the body has cleared it.
+   */
+  occupiedClosed(feet: BlockPosition): OpenedPassage | null {
+    return this.closedAt(feet) ?? this.closedAt({ x: feet.x, y: feet.y + 1, z: feet.z });
+  }
+
+  /** The activation that opens a doorway the body stands in before a step walks out of it. */
+  openingStep(
+    passage: OpenedPassage,
+    step: PlannedStep,
+  ): PlannedStep & {
+    readonly operations: readonly [Extract<PlannedOperation, { kind: "activate" }>];
+  } {
+    return this.#activationStep(passage, step, "open");
+  }
+
+  #activationStep(
+    passage: OpenedPassage,
+    step: PlannedStep,
+    to: "open" | "close",
+  ): PlannedStep & {
+    readonly operations: readonly [Extract<PlannedOperation, { kind: "activate" }>];
+  } {
+    const opening = to === "open";
     return {
       ...step,
-      id: `${step.id}:close:${passage.group}`,
+      id: `${step.id}:${to}:${passage.group}`,
       cost: { expectedTicks: 1, breakPenalty: 0, placementPenalty: 0, hazardPenalty: 0, total: 1 },
       operations: [
         {
           kind: "activate",
           position: passage.position,
           before: {
-            description: "open passage",
-            matches: (block) => block.kind === "loaded" && block.traits.openable && block.traits.open,
+            description: opening ? "closed passage" : "open passage",
+            matches: (block) => block.kind === "loaded" && block.traits.openable && block.traits.open !== opening,
           },
           after: {
-            description: "closed passage",
-            matches: (block) => block.kind === "loaded" && block.traits.openable && !block.traits.open,
+            description: opening ? "open passage" : "closed passage",
+            matches: (block) => block.kind === "loaded" && block.traits.openable && block.traits.open === opening,
           },
         },
       ],
       effects: passage.cells.map((position) => {
         const block = this.world.blockAt(position.x, position.y, position.z);
-        if (block.kind !== "loaded") throw new Error("Restoration target became unloaded.");
+        if (block.kind !== "loaded") throw new Error("Activation target became unloaded.");
         return { kind: "activate", position, stateId: block.stateId };
       }),
     };

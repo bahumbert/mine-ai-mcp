@@ -50,7 +50,11 @@ import {
   type Navigate,
   type NavigationResult,
 } from "../../index.js";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { navigationFeet } from "../../world/block-geometry.js";
 import type { Position3 } from "../../world/world.js";
+import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
+import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
 
 /**
  * How far a cell may be from the feet to be worked without moving, measured
@@ -95,6 +99,57 @@ const NEIGHBOURS = [
 export interface BuildCell {
   readonly position: BlockPosition;
   readonly blockName: string;
+  /**
+   * The facing an oriented block must have. Minecraft gives a door or stairs the
+   * placing player's facing, so the bot looks that way while placing it; the
+   * same block facing elsewhere is a wrong block. A door hung sideways in a
+   * wall swings its open panel across the doorway, and navigation, which
+   * passes an open door from any side, walked into it for good.
+   */
+  readonly facing?: HorizontalFacing;
+  /** The upper or lower half of stairs, a slab (its `type`) or a trapdoor, set by where the side face is clicked. */
+  readonly half?: BlockHalf;
+  /** The axis of a log or pillar, set by the face it is placed against. */
+  readonly axis?: BlockAxis;
+}
+
+/**
+ * Whether placing against this face (pointing from the support into the cell) can give the cell its asked states
+ * (ADR-013): an axis comes from the face's own axis; a top half never rests on the block below, a bottom half never
+ * hangs from the block above, and a side face takes either half from where it is clicked.
+ */
+export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: BuildCell): boolean {
+  if (cell.axis !== undefined && (cell.axis === "x" ? face.x : cell.axis === "y" ? face.y : face.z) === 0) return false;
+  if (cell.half === "top" && face.y > 0) return false;
+  if (cell.half === "bottom" && face.y < 0) return false;
+  return true;
+}
+
+/** The states a block has, in the cell's terms: a slab's `type` is its half. */
+function statesOf(block: WorldBlock): { readonly facing: unknown; readonly half: unknown; readonly axis: unknown } {
+  const properties = block.getProperties() as Readonly<Record<string, unknown>>;
+  return { facing: properties.facing, half: properties.half ?? properties.type, axis: properties.axis };
+}
+
+/** Whether `block` is what `cell` asks for: its block, in every state the cell asks (ADR-013), any other state free. */
+export function holdsCell(block: WorldBlock, cell: BuildCell): boolean {
+  if (block.name !== cell.blockName) return false;
+  if (cell.facing === undefined && cell.half === undefined && cell.axis === undefined) return true;
+  const states = statesOf(block);
+  return (cell.facing === undefined || states.facing === cell.facing) &&
+    (cell.half === undefined || states.half === cell.half) &&
+    (cell.axis === undefined || states.axis === cell.axis);
+}
+
+/** A block for the audit: its name, and the states the cell asks about, as they are. */
+function described(block: WorldBlock, cell: BuildCell): string {
+  const states = statesOf(block);
+  const shown = [
+    cell.facing !== undefined && typeof states.facing === "string" ? `facing ${states.facing}` : null,
+    cell.half !== undefined && typeof states.half === "string" ? states.half : null,
+    cell.axis !== undefined && typeof states.axis === "string" ? `along ${states.axis}` : null,
+  ].filter((part): part is string => part !== null);
+  return [block.name, ...shown].join(" ");
 }
 
 /** What one cell of the structure is, as of the last look at the world. */
@@ -145,13 +200,25 @@ export interface BuildResult {
   readonly dug: number;
   readonly passes: number;
   readonly cells: readonly { readonly cell: BuildCell; readonly state: BuildCellState }[];
+  /** The blocks the build's own routes placed to get about (not cells of the structure), and what became of them. */
+  readonly scaffold: { readonly placed: number; readonly removed: number; readonly left: readonly BlockPosition[] };
+}
+
+interface PlacedScaffold {
+  readonly position: BlockPosition;
+  readonly stateId: number;
 }
 
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
 const isSolid = (block: WorldBlock | null): boolean => block?.boundingBox === "block";
 
+/**
+ * The cell the bot's feet are in, as navigation counts it: standing on a floor lower than a full block (farmland,
+ * soul sand, mud), the floored position is the floor block itself (live 2026-10-03: on farmland at y 75.94, a water
+ * cell beside her read as sealing her in).
+ */
 function feetOf(bot: Bot): Vec3 {
-  return bot.entity.position.floored();
+  return asVec3(navigationFeet(bot.entity.position, bot.entity.onGround === true));
 }
 
 function withinReach(bot: Bot, position: BlockPosition): boolean {
@@ -228,6 +295,8 @@ class BuildTargeting {
   constructor(
     private readonly bot: Bot,
     private readonly request: BuildRequest,
+    /** Taking scaffold down: the highest cell first, as a pillar is taken down from its top. */
+    private readonly highestFirst = false,
   ) {
     this.#bounds = boundsOf(request.cells);
   }
@@ -276,7 +345,7 @@ class BuildTargeting {
     for (const cell of this.request.cells) {
       if (cell.blockName === "air") continue;
       const block = bot.blockAt(asVec3(cell.position));
-      if (block?.name === cell.blockName) this.protectedCells.add(keyOf(cell.position));
+      if (block !== null && holdsCell(block, cell)) this.protectedCells.add(keyOf(cell.position));
     }
     for (const cell of this.request.cells) {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
@@ -289,18 +358,18 @@ class BuildTargeting {
     const position = asVec3(cell.position);
     const block = this.bot.blockAt(position);
     if (block === null) return { kind: "unloaded" };
-    if (block.name === cell.blockName || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
+    if (holdsCell(block, cell) || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
     const refused = this.#refused.get(keyOf(cell.position));
     if (refused !== undefined) return { kind: "refused", reason: refused };
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
     if (!isReplaceableForPlacement(block)) {
       return this.request.removeWrongBlocks
-        ? { kind: "diggable", holds: block.name }
-        : { kind: "blocked", holds: block.name };
+        ? { kind: "diggable", holds: described(block, cell) }
+        : { kind: "blocked", holds: described(block, cell) };
     }
     if (position.equals(feet) || position.equals(head)) return { kind: "occupied" };
-    const placement = findPlacementSupport(this.bot, position);
+    const placement = findPlacementSupport(this.bot, position, undefined, (face) => faceFits(face, cell));
     if (!placement) return { kind: "unsupported" };
     if ((carried.get(cell.blockName) ?? 0) === 0) return { kind: "not_carried" };
     const after = new Set(this.protectedCells);
@@ -335,7 +404,7 @@ class BuildTargeting {
       })
       .sort(
         (left, right) =>
-          left.position.y - right.position.y ||
+          (this.highestFirst ? right.position.y - left.position.y : left.position.y - right.position.y) ||
           asVec3(left.position).distanceTo(from) - asVec3(right.position).distanceTo(from),
       );
   }
@@ -364,16 +433,22 @@ class BuildTargeting {
       resolve: (observation) => {
         const spatial = approach.resolve(observation);
         if (spatial.kind === "invalid" || this.stateOf(target).kind !== "diggable") return spatial;
+        // The bot's own cell is judged from where it really stands, as the
+        // in-reach work will aim from there; the centre of that cell is not
+        // where an off-centre bot is. The live house of 30 September idled out
+        // on that disagreement: the route arrived at once, nothing was seen.
+        const here = observation.position;
         return {
           ...spatial,
           revision: `visible-dig:${spatial.revision}`,
           isSatisfied: (node, world) =>
             spatial.isSatisfied(node, world) &&
-            this.canWorkFrom(target, {
-              x: node.feet.x + 0.5,
-              y: node.feet.y,
-              z: node.feet.z + 0.5,
-            }),
+            this.canWorkFrom(
+              target,
+              node.feet.x === Math.floor(here.x) && node.feet.y === Math.floor(here.y) && node.feet.z === Math.floor(here.z)
+                ? here
+                : { x: node.feet.x + 0.5, y: node.feet.y, z: node.feet.z + 0.5 },
+            ),
         };
       },
     };
@@ -409,6 +484,7 @@ class BuildTargeting {
       dug: this.dug,
       passes: this.passes,
       cells: this.request.cells.map((cell) => ({ cell, state: this.stateOf(cell) })),
+      scaffold: { placed: 0, removed: 0, left: [] },
     };
   }
 }
@@ -448,7 +524,9 @@ async function workInReach(
         support: state.support,
         face: state.face,
         expectedCells: [target.position],
-        matches: (block) => block.name === target.blockName,
+        matches: (block) => holdsCell(block, target),
+        ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
+        ...(target.half !== undefined && { half: target.half }),
         signal,
       });
       if (placed.kind === "placed") targeting.placed += 1;
@@ -462,26 +540,39 @@ async function workInReach(
   }
 }
 
-export async function build(bot: Bot, request: BuildRequest): Promise<BuildResult> {
-  const targeting = new BuildTargeting(bot, request);
+export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown = false): Promise<BuildResult> {
+  const targeting = new BuildTargeting(bot, request, takingScaffoldDown);
   const movements = request.movements(targeting.protectedCells);
+  // Every block the routes of this run placed (live 2026-10-11, Theo: a ring of dirt at head height round his new house
+  // shut him in): taken down once the structure is complete.
+  const scaffold = new Map<number, PlacedScaffold>();
+  const onPlacement = takingScaffoldDown ? undefined : (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
   let idlePasses = 0;
 
   for (;;) {
+    // Each pass gives the event loop a turn: a pass whose route and work resolve at once (nothing to walk, nothing in
+    // reach) otherwise runs on promises alone and starves every timer, the runtime's heartbeat included.
+    await nextTurn();
     request.signal?.throwIfAborted();
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
     targeting.passes += 1;
     targeting.refresh();
-    if (targeting.wrong().length === 0) return targeting.result("complete", null);
+    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), scaffold);
     const progressBefore = targeting.progress;
 
     // Standing in a cell the structure needs means every placement around it
     // would either be refused or wall the bot into a pit, so step out first;
     // likewise when every remaining placement would seal the bot in.
     if (targeting.standingInStructure() || targeting.onlyEnclosing()) {
-      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal });
+      const before = feetOf(bot);
+      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal, ...(onPlacement && { onPlacement }) });
       if (exit.status === "stopped") {
         return targeting.result("stopped", `could not step out of the structure: ${exit.reason}`);
+      }
+      // An exit that left the bot where it was changes nothing the next pass would see.
+      idlePasses = feetOf(bot).equals(before) ? idlePasses + 1 : 0;
+      if (idlePasses >= IDLE_PASSES) {
+        return targeting.result("stopped", "could not step out of the structure: the way out leaves it where it stands");
       }
       continue;
     }
@@ -493,7 +584,7 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
     if (targeting.targets().length === 0) return targeting.result("stopped", null);
 
     const routed = targeting.identity();
-    const route = await runRoute(bot, request, targeting, movements);
+    const route = await runRoute(bot, request, targeting, movements, onPlacement);
     if (route.status === "stopped") {
       targeting.refresh();
       if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
@@ -517,9 +608,11 @@ async function runRoute(
   request: BuildRequest,
   targeting: BuildTargeting,
   movements: MovementPolicy,
+  onPlacement?: (placed: PlacedScaffold) => void,
 ): Promise<NavigationResult> {
   return request.route({
     movements,
+    ...(onPlacement && { onPlacement }),
     goal: targeting.goal(),
     onArrival: async ({ signal }) => {
       // An arrival that works nothing ends the route: continuing would ask the
@@ -538,4 +631,37 @@ async function runRoute(
     signal: request.signal,
     stopSignal: request.stopSignal,
   });
+}
+
+/** Whether the scaffold block placed at a cell still stands there. */
+const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(asVec3(placed.position))?.stateId === placed.stateId;
+
+/**
+ * Takes the scaffold down after a complete build: every block the routes placed that is no cell of the structure and
+ * still stands, highest first, through the build's own loop with those cells as air (the structure's cells stay as
+ * they are, so they stay protected). One pass: scaffold this pass places itself, or cannot reach, stays and is
+ * reported. A failure here never fails the build.
+ */
+async function takeScaffoldDown(
+  bot: Bot,
+  request: BuildRequest,
+  built: BuildResult,
+  scaffold: ReadonlyMap<number, PlacedScaffold>,
+): Promise<BuildResult> {
+  if (scaffold.size === 0) return built;
+  const structure = new Set(request.cells.map((cell) => keyOf(cell.position)));
+  const standing = [...scaffold.entries()]
+    .filter(([key, placed]) => !structure.has(key) && standsStill(bot, placed))
+    .map(([, placed]) => placed)
+    .sort((a, b) => b.position.y - a.position.y);
+  if (standing.length > 0) {
+    try {
+      await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...standing.map(({ position }) => ({ position, blockName: "air" }))] }, true);
+    } catch (error) {
+      request.signal?.throwIfAborted();
+      void error;
+    }
+  }
+  const left = standing.filter((placed) => standsStill(bot, placed)).map(({ position }) => position);
+  return { ...built, scaffold: { placed: scaffold.size, removed: standing.length - left.length, left } };
 }

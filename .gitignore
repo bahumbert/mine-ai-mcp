@@ -22,3 +22,20 @@ private/
 # Editor and OS files
 .DS_Store
 Thumbs.db
+
+# Claude Code machine-local settings
+.claude/settings.local.json
+
+# Private part of the project: the .agent submodule (a private repository). These are links and stubs into it,
+# made by .agent/tooling/private.sh setup
+/personas
+/monitor
+/brain/bench
+/.claude/skills
+/.claude/agents
+CLAUDE.md
+CLAUDE.local.md
+.worktreeinclude
+.mcp.json
+.superpowers/
+.serena/

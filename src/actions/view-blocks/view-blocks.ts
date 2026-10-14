@@ -10,7 +10,10 @@
  * a glance where a list of eighty-one does not.
  */
 import type { Bot } from "mineflayer";
+import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
+import { observeMineflayerBlock } from "../../navigation/index.js";
+import { tagsOf } from "../../world/block-tags.js";
 import { findLoadedBlockPositions, isLiquid } from "../../world/index.js";
 import { defineAction } from "../action.js";
 import { blockMatchesSelector } from "../collect-block/collection-facts.js";
@@ -18,10 +21,13 @@ import {
   parseViewBlocksRequest,
   VIEW_BLOCKS,
   VIEW_BLOCKS_DESCRIPTION,
+  FIND_COUNT_CAP,
   viewBlocksInputSchema,
   viewBlocksResultSchema,
   viewBlocksAnnotations,
   viewBlocksOutcomes,
+  type BlockKind,
+  type NamedBlockKind,
   type FoundBlock,
   type ObservedBlock,
   type ViewBlocksRequest,
@@ -69,18 +75,36 @@ function find(
   for (const name of request.blockNames) {
     const stateIds = selectedStateIds(bot, name);
     if (stateIds.size === 0) return { unknown: name };
-    // The scan is nearest first and cheap: it reads packed state IDs, so the
-    // count of everything loaded costs no more than the few that are listed.
-    const positions = findLoadedBlockPositions(bot, { center: feet, stateIds, limit: Number.POSITIVE_INFINITY });
+    // The scan is nearest first and stops once the cap's worth of nearer hits
+    // is held; one past the cap tells "more" from "exactly the cap".
+    const positions = findLoadedBlockPositions(bot, { center: feet, stateIds, limit: FIND_COUNT_CAP + 1 });
     const listed: FoundBlock[] = positions.slice(0, request.limit).map((position) => ({
       ...observe(bot, position),
       distance: Math.round(position.distanceTo(feet) * 10) / 10,
       above: nameAt(bot, position.offset(0, 1, 0)),
       below: nameAt(bot, position.offset(0, -1, 0)),
     }));
-    found.push({ name, found: positions.length, listed });
+    found.push({ name, found: Math.min(positions.length, FIND_COUNT_CAP), more: positions.length > FIND_COUNT_CAP, listed });
   }
   return { found };
+}
+
+/** The tool class a block is mined with, from its game-data material (`mineable/shovel`...); null when none helps. */
+export function toolClassOf(bot: Pick<Bot, "registry">, name: string): "pickaxe" | "shovel" | "axe" | "hoe" | null {
+  const material = bot.registry.blocksByName[name]?.material ?? "";
+  const tool = /mineable\/(pickaxe|shovel|axe|hoe)/u.exec(material)?.[1];
+  return (tool as "pickaxe" | "shovel" | "axe" | "hoe" | undefined) ?? null;
+}
+
+/** A block name's game data; null when Minecraft has no such block. */
+export function kindOf(bot: Pick<Bot, "registry">, name: string): BlockKind | null {
+  const block = bot.registry.blocksByName[name];
+  if (block === undefined) return null;
+  // Item ids follow the game's tier order (wooden, stone, golden, iron, diamond, netherite): the lowest is the cheapest.
+  const ids = Object.keys(block.harvestTools ?? {}).map(Number).sort((a, b) => a - b);
+  const harvest = ids.map((id) => bot.registry.items[id]?.name).filter((item): item is string => item !== undefined);
+  const fullCube = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(block.defaultState, 0)).geometry.fullCube;
+  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", full_cube: fullCube, harvest: harvest.length > 0 ? harvest : null };
 }
 
 function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNullable<ViewBlocksReport["box"]> {
@@ -101,6 +125,12 @@ function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNulla
     halfWidth: request.halfWidth,
     halfHeight: request.halfHeight,
     layers,
+    kinds: Object.fromEntries(
+      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => [
+        name,
+        kindOf(bot, name) ?? { tool: null, solid: false, full_cube: false, harvest: null },
+      ]),
+    ),
   };
 }
 
@@ -114,6 +144,15 @@ export function viewBlocks(bot: Bot, request: ViewBlocksRequest): ViewBlocksResu
     box: request.box ? box(bot, request.box) : null,
     cells: request.cells.map((cell) => observe(bot, new Vec3(cell.x, cell.y, cell.z))),
   };
+  if (request.kinds !== undefined && request.kinds.length > 0) {
+    const kinds: Record<string, NamedBlockKind> = {};
+    for (const name of request.kinds) {
+      const kind = kindOf(bot, name);
+      if (kind === null) return { status: "failed", error: viewBlocksOutcomes.unknownBlock(name), blocks: report };
+      kinds[name] = { ...kind, tags: [...tagsOf(name, bot.version)] };
+    }
+    report.kinds = kinds;
+  }
   if (request.find) {
     const result = find(bot, feet, request.find);
     if ("unknown" in result) {
@@ -178,7 +217,7 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     `Bot feet at ${blocks.feet.x}, ${blocks.feet.y}, ${blocks.feet.z} in \`${blocks.dimension}\`; ${blocks.loadedChunks} chunks loaded.`,
   ];
   for (const entry of blocks.find ?? []) {
-    const heading = `### ${entry.name}: ${entry.found} loaded`;
+    const heading = `### ${entry.name}: ${entry.found}${entry.more ? "+" : ""} loaded`;
     lines.push("", entry.found > entry.listed.length ? `${heading}, nearest ${entry.listed.length} listed` : heading);
     for (const hit of entry.listed) {
       lines.push(
@@ -192,6 +231,14 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     lines.push("", "### Cells");
     for (const cell of blocks.cells)
       lines.push(`- ${cell.x}, ${cell.y}, ${cell.z}: ${cell.name} (${shapeWords(cell)})`);
+  }
+  if (blocks.kinds !== undefined) {
+    lines.push("", "### Kinds");
+    for (const [name, kind] of Object.entries(blocks.kinds)) {
+      const harvest = kind.harvest === null ? "drops by hand" : `drops only with ${kind.harvest.join(" or ")}`;
+      const tags = kind.tags.length === 0 ? "" : `; tags: ${kind.tags.join(", ")}`;
+      lines.push(`- ${name}: ${kind.solid ? "solid" : "not solid"}, ${kind.full_cube ? "full cube" : "not a full cube"}, ${kind.tool === null ? "no tool helps" : `mined fast with a ${kind.tool}`}, ${harvest}${tags}`);
+    }
   }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");

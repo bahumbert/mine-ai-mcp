@@ -3,7 +3,8 @@ import { createMovements } from "../runtime.js";
 import { BREAK_OPENS_INTO_LIQUID } from "../movements/policy.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
-import { TERRAIN_BREAK_PENALTY } from "./movement-policy.js";
+import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY, fallbackScaffoldItem } from "./movement-policy.js";
+import { Vec3 } from "vec3";
 import { blockClass, observeMineflayerBlock } from "./world.js";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
@@ -11,6 +12,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture, type FakeBot, type FakeStack } from "../../test-support/bot.js";
 import { flatWorld } from "../../test-support/navigation.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 
 /** Air around the origin: no liquid beside any cell these tests break. */
 const world = flatWorld();
@@ -250,4 +252,127 @@ test("scaffold admission follows other mobs moving into and out of a placement c
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "allowed");
   mob.position.x = 1.1;
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "prohibited");
+});
+
+test("a protected region refuses route digging and scaffolding in it, but not walking, other dimensions or its owner's build", () => {
+  const bot = botFixture({ username: "Ayla" });
+  let regions: readonly ProtectedRegion[] = [];
+  setProtectedRegionsProvider(bot, () => regions);
+  const policy = createMovements(bot);
+  const stone = observed(bot, "stone");
+  const inside = { x: 1, y: 64, z: 1 };
+  assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "nothing protected yet");
+
+  // Read live: a region added after the policy was made applies to its next check.
+  regions = [{ regionId: 1, dimension: "overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 66, z: 2 }, owner: "Ayla", label: "small medieval house" }];
+  const refusal = { kind: "prohibited", reason: "inside protected region #1 'small medieval house' (owner Ayla)" };
+  assert.deepEqual(policy.evaluateBreak(stone, inside, world).decision, refusal);
+  assert.deepEqual(policy.confirmBreak(stone, { x: 2, y: 66, z: 2 }, world), refusal);
+  assert.equal(policy.evaluateBreak(stone, { x: 3, y: 64, z: 1 }, world).decision.kind, "penalized", "just outside");
+  assert.deepEqual(policy.decidePlace(1, 65, 1, world), refusal);
+  assert.equal(policy.decideStep(1, 65, 1, world).kind, "allowed", "walking through stays allowed");
+
+  const ownBuild = createMovements(bot, { ignoreRegionsOwnedBy: "ayla" });
+  assert.equal(ownBuild.evaluateBreak(stone, inside, world).decision.kind, "penalized");
+  assert.equal(ownBuild.decidePlace(1, 65, 1, world).kind, "allowed");
+
+  bot.game.dimension = "the_nether";
+  assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "an overworld region stays in the overworld");
+});
+
+test("routes never set off across deep open water, but a bot already out on it swims back", () => {
+  const bot = botFixture();
+  const water = loadedBlock(bot.registry.blocksByName.water.defaultState);
+  const observation = { ...water, traits: { ...water.traits, empty: true, liquid: "water" as const, liquidSource: true } };
+  const air = loadedBlock(bot.registry.blocksByName.air.defaultState);
+  // An ocean from x 10 to 60, z -30 to 30, down to y 50; land elsewhere.
+  const inOcean = (x: number, y: number, z: number) => x >= 10 && x <= 60 && z >= -30 && z <= 30 && y >= 50 && y <= 62;
+  const oceanWorld = { blockAt: (x: number, y: number, z: number) => (inOcean(x, y, z) ? observation : air), subscribe: () => () => {}, revision: 0 };
+  const policy = createMovements(bot);
+
+  bot.entity.position = new Vec3(0.5, 64, 0.5);
+  assert.deepEqual(policy.decideStep(30, 62, 0, oceanWorld), { kind: "prohibited", reason: DEEP_WATER_REASON });
+  assert.equal(policy.decideStep(0, 64, 0, oceanWorld).kind, "allowed", "land stays open");
+
+  bot.entity.position = new Vec3(30.5, 62.2, 0.5);
+  assert.equal(policy.decideStep(25, 62, 0, oceanWorld).kind, "allowed", "out at sea, the way back is open");
+});
+
+type SeaCell = "stone" | "water" | "air";
+
+/** The step into deep open water at 10 61 0, from a body at `standing`, over a stone floor at y 58 with `fill` above it. */
+function stepIntoSea(standing: { x: number; y: number; z: number }, fill: (x: number, y: number, z: number) => SeaCell) {
+  const bot = botFixture();
+  bot.entity.position = new Vec3(standing.x + 0.5, standing.y, standing.z + 0.5);
+  const sea = new MemoryWorld();
+  for (let x = -3; x <= 24; x++) for (let z = -8; z <= 8; z++) for (let y = 58; y <= 64; y++) {
+    const block = observed(bot, y === 58 ? "stone" : fill(x, y, z));
+    if (block.kind !== "loaded") throw new Error("unloaded test block");
+    sea.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
+  }
+  return createMovements(bot).decideStep(10, 61, 0, sea);
+}
+
+/** A wading shelf (water at y 59 only) for x 0-4, deep open water (y 59-61) from x 5 east, and a one-wide roofed pocket at x 22. */
+const shelfAndSea = (x: number, y: number, z: number): SeaCell =>
+  x === 22 && ((Math.abs(z) === 1 && y >= 59) || (z === 0 && y === 62)) ? "stone"
+    : x >= 0 && (y === 59 || (x >= 5 && y <= 61)) ? "water" : "air";
+
+test("a bot dry on the bank or wading with its head dry is refused deep open water; one submerged in a roofed pocket is not", () => {
+  assert.equal(stepIntoSea({ x: -1, y: 59, z: 0 }, shelfAndSea).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 3, y: 59, z: 0 }, shelfAndSea).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 22, y: 60, z: 0 }, shelfAndSea).kind, "allowed");
+});
+
+/** A 2-deep channel (water y 59-60) at x 0-4 beside deep open water (y 59-61) from x 5 east; `roofAt` puts stone over the channel there. */
+const channelAndSea = (roofAt?: number) => (x: number, y: number, z: number): SeaCell =>
+  x === roofAt && z === 0 && y === 61 ? "stone" : x >= 0 && (y <= 60 || (x >= 5 && y <= 61)) ? "water" : "air";
+
+test("a bot swimming in an open channel is refused deep open water (a river mouth is not the sea), but not under a roof", () => {
+  assert.equal(stepIntoSea({ x: 4, y: 59, z: 0 }, channelAndSea()).kind, "prohibited");
+  assert.equal(stepIntoSea({ x: 4, y: 59, z: 0 }, channelAndSea(4)).kind, "allowed");
+});
+
+/** A bot carrying `items`, on the version whose block data the fallback reads. */
+const versioned = (items: FakeStack[]) => botFixture({ items }, { version: "1.21.4" });
+
+test("the scaffold fallback spends the plentiful common block it carries, never a valuable, a workstation or a falling block", () => {
+  const stack = (name: string, count: number) => ({ name, count });
+  const choice = (...items: Array<[string, number]>) =>
+    fallbackScaffoldItem(versioned(items.map(([name, count]) => stack(name, count))))?.name ?? null;
+  assert.equal(choice(["stone", 80]), "stone");
+  assert.equal(choice(["oak_planks", 74]), "oak_planks");
+  assert.equal(choice(["furnace", 1]), null, "a workstation answers a right-click");
+  assert.equal(choice(["sand", 64]), null, "a falling block buries the cell it is placed in");
+  assert.equal(choice(["oak_log", 64]), null);
+  assert.equal(choice(["diamond_block", 9]), null);
+  assert.equal(choice(["stone", 5], ["oak_planks", 40], ["furnace", 1], ["diamond_block", 99]), "oak_planks", "the one carried most of");
+  assert.equal(fallbackScaffoldItem(versioned([stack("stone", 80)]), new Set(["stone"])), null, "a fetched material stays");
+});
+
+test("only a bot asked for the fallback may scaffold with a block outside the survival policy's list", () => {
+  const bot = versioned([{ name: "stone", count: 80 }]);
+  assert.equal(createMovements(bot).scaffold, null);
+  assert.equal(createMovements(bot, { scaffoldFallback: true }).scaffold?.itemType, bot.registry.itemsByName.stone!.id);
+  const withCobble = versioned([{ name: "stone", count: 80 }, { name: "cobblestone", count: 2 }]);
+  assert.equal(createMovements(withCobble, { scaffoldFallback: true }).scaffold?.itemType, withCobble.registry.itemsByName.cobblestone!.id);
+});
+
+test("a cobweb is a block to break at the best carried tool's time, no longer a wall", () => {
+  const registry = minecraftData("1.21.4");
+  const web = observed(botFixture(), "cobweb");
+  assert.equal(web.traits.entangling, true);
+  assert.equal(web.geometry.passable, false);
+  const ticksWith = (...items: string[]) => {
+    const bot = botFixture({ items: items.map((name) => ({ name, count: 1, type: registry.itemsByName[name]!.id })) });
+    const policy = createMovements(bot);
+    const verdict = policy.evaluateBreak(web, { x: 1, y: 64, z: 0 }, world);
+    assert.equal(verdict.decision.kind, "allowed", "webs are not terrain to preserve");
+    assert.equal(policy.decideStep(1, 64, 0, { ...world, blockAt: () => web } as never).kind, "allowed");
+    return verdict.tool.expectedTicks;
+  };
+  const byHand = ticksWith();
+  const withSword = ticksWith("wooden_sword");
+  assert.ok(withSword < byHand, `a sword (${withSword} ticks) is faster than a hand (${byHand})`);
+  assert.equal(ticksWith("wooden_sword", "stick"), withSword);
 });

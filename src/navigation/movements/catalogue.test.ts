@@ -535,6 +535,41 @@ test("A star chooses direct downward excavation for an aligned deep goal", () =>
   );
 });
 
+test("with direct downward excavation disabled, A star reaches the same deep goal by a staircase", () => {
+  const world = new MemoryWorld();
+  for (let x = -6; x <= 6; x += 1)
+    for (let z = -6; z <= 6; z += 1) {
+      for (let y = 55; y <= 63; y += 1) world.load({ x, y, z }, SOLID);
+      for (let y = 64; y <= 66; y += 1) world.load({ x, y, z }, AIR);
+    }
+  const goal = exactBlockGoal({ x: 0, y: 61, z: 0 }).resolve(observation(0, 64, 0));
+  assert.equal(goal.kind, "active");
+  if (goal.kind !== "active") return;
+  const search = new IncrementalSearch({
+    id: "no-direct-downward",
+    start: planningStart({ x: 0, y: 64, z: 0 }),
+    goal,
+    now: () => 0,
+    context: {
+      world,
+      policy: createMovementPolicy({ allowDownward: false }),
+      player: WELL_FED,
+      catalogue: createMovementCatalogue(),
+    },
+  });
+  const result = search.advance({ maximumExpansions: 20_000 });
+
+  assert.equal(result.kind, "complete");
+  if (result.kind !== "complete") return;
+  assert.deepEqual(result.plan.steps.at(-1)?.to, { x: 0, y: 61, z: 0 });
+  assert.equal(result.plan.steps.some((step) => step.kind === "downward"), false);
+  for (const step of result.plan.steps)
+    assert.ok(
+      step.to.y >= step.from.y || step.to.x !== step.from.x || step.to.z !== step.from.z,
+      `no step descends in its own column: ${step.kind} ${JSON.stringify(step.from)} -> ${JSON.stringify(step.to)}`,
+    );
+});
+
 test("a step up clears the takeoff headroom needed to jump", () => {
   const world = flat([{ x: 1, y: 63, z: 0 }, SOLID], [{ x: 0, y: 65, z: 0 }, SOLID], [{ x: 0, y: 66, z: 0 }, AIR]);
   const ascending = generateFrom(world, ORIGIN, {
@@ -893,4 +928,20 @@ test("a supplied step field is charged on the cell it prices", () => {
     (movement) => movement.step.to.z === 1 && movement.step.to.x === 0,
   );
   assert.equal(north?.step.cost.hazardPenalty, 0);
+});
+
+test("a cobweb in the next cell is planned as a block to break, never walked through", () => {
+  const web = { stateId: 20, collisionShapes: [], traits: { empty: true, entangling: true, safeToBreak: true } };
+  const world = flat([{ x: 1, y: 63, z: 0 }, web], [{ x: 1, y: 64, z: 0 }, web]);
+  const policy = {
+    allowDigging: true,
+    priceBreak: () => ({ decision: { kind: "allowed" as const }, tool: { itemType: null, expectedTicks: 7 } }),
+  };
+  const toward = generateFrom(world, ORIGIN, { policy }).filter((m) => m.step.to.x === 1 && m.step.to.y === 63 && m.step.to.z === 0);
+  assert.ok(toward.length > 0, "the corridor is offered");
+  for (const movement of toward) {
+    assert.ok(breaksAt(movement, 1, 63) && breaksAt(movement, 1, 64), `${movement.step.kind} breaks both webs`);
+    assert.ok(movement.cost >= 14, "priced at the webs' break time");
+  }
+  assert.equal(generateFrom(world, ORIGIN, { policy: { allowDigging: false } }).filter(to(1, 63, 0)).length, 0, "no digging, no way through");
 });

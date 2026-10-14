@@ -74,6 +74,28 @@ decisions stay unchanged; deliberate combat approaches remain exempt. Each
 route search reads the current value; an edit does not force an existing route
 to replan. Use the usual lifetimes to make caution temporary.
 
+`navigation.dig_straight_down` (default `true`) lets a route dig the block
+beneath the bot's own feet and descend in its own column. Set it to `false` and
+every route the bot plans (`navigate`, `collect_block`, `build_structure`,
+automatic responses) descends only by digging a staircase, so the bot never
+opens a shaft it could fall through into a cave. It does not change which
+target blocks an action breaks. Setting only this field leaves every other
+override in place:
+
+```json
+{
+  "operation": "set",
+  "expected_revision": "<current survivalPolicy.revision>",
+  "changes": { "navigation": { "dig_straight_down": false } },
+  "lifetime": { "kind": "session" },
+  "reason": "Never dig straight down"
+}
+```
+
+Like every override it ends on death, dimension change or disconnect; read it
+back from `survivalPolicy.effective.navigation` in any reply or from
+`view_status` `mobility.digStraightDown`.
+
 `navigation.scaffold_blocks` is an ordered list of at most 16 registered block
 item names used by automatic navigation, footing, fire escape, blast barriers,
 and disposal-hole closure. The first carried name is preferred. The default is
@@ -97,12 +119,13 @@ affected.
 Use `view_status` to obtain an instantaneous snapshot of the bot's live
 state before planning or after physical execution. It accepts no tool-specific
 arguments. Success proves the bot sampled its vitals, world time, exact
-position, compass heading, carried items, best tool/armour tiers, and nearby entities, while refreshing
+position, compass heading, carried items (each carried food with the hunger points and saturation one
+restores, from game data), best tool/armour tiers, and nearby entities, while refreshing
 the `bot_status`, `bot_inventory`, and `bot_tools` tables in SQLite. Nearby entities are the
 players online, the hostiles the combat policy counts within sixteen blocks, every
 loaded dropped item nearest first (up to sixteen), and a summary of every loaded mob
-species with its count and the nearest one's entity ID, distance and position, at any
-distance. Defined in
+species with its count, whether it is in the game's hostile category (the one `collect_mob_drop` refuses without
+a shield), and the nearest one's entity ID, distance and position, at any distance. Defined in
 [src/actions/view-status/contract.ts](../../src/actions/view-status/contract.ts).
 
 The `mobility` section answers what the carried inventory unlocks, which the
@@ -116,7 +139,9 @@ The rendered section is deliberately two lines, because it renders on every
 status read: an available movement costs only its count, and the consequence
 is spelled out just where something is lost — `no_water_bucket`, or
 `water_evaporates_here` in the Nether, or `policy_disabled` when `bucket_drops`
-or `bucket_fall_save` is switched off in the survival policy. The structured
+or `bucket_fall_save` is switched off in the survival policy. A third line
+appears only when `dig_straight_down` is switched off, saying routes descend by
+staircase. The structured
 `mobility` field carries the full detail either way. These are the planner's
 standing limits, not a claim about the terrain: an available drop still needs
 a safe landing under it.
@@ -138,9 +163,14 @@ dragon or crystals have been killed.
 Use `view_blocks` to read blocks without moving. `find` names up to
 eight block kinds and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
-reported whatever the `limit`, which defaults to twelve per name. `box` reads every cell
+reported whatever the `limit`, which defaults to twelve per name, up to a thousand (`more` says there are
+more: counting every stone loaded once stalled the runtime). `box` reads every cell
 of a small box around a point, drawn as one grid per layer with a legend, up to
-nine across and seven high. `cells` reads exact cells. Every block is reported
+nine across and seven high, with `kinds`: for each block name in the box, the tool class it is mined with
+(its game-data `mineable/<tool>` material: pickaxe, shovel, axe, hoe, or none) and whether it is solid. `cells`
+reads exact cells. `kinds` describes named blocks from game data alone: tool class, solidity, the tools without
+which they drop nothing, and the game's block tags they belong to (`logs`, `crops`, `mineable/axe`...), extracted
+from the server jar per version (`src/world/data/block-tags/`). Every block is reported
 with its name and whether it is solid, open, or liquid, and a liquid's source or
 flowing level. Success proves the report came from the live loaded world; a
 name Minecraft has no block for fails the read. Defined in
@@ -190,6 +220,47 @@ checked whether a crafting table is needed, without modifying inventory. Defined
 in
 [src/actions/view-crafting-requirements/contract.ts](../../src/actions/view-crafting-requirements/contract.ts).
 
+### `view_smelting_recipes`
+
+Use `view_smelting_recipes` to learn what a furnace makes before smelting with
+`smelt_item`. The argument is `items`, 1 to 16 item names looked up as furnace
+outputs. Success reports, per item, the recipes that make it (any one of their
+`inputs` cooks into `count` of the item, in `cookingTicks`; none when no furnace
+makes it) and every furnace fuel with how many items one of it smelts. Recipes
+come from the game's own data: `src/world/data/smelting/<version>.json`,
+generated from the vanilla server jar by `src/world/smelting-extract.ts` (tags
+resolved); a server newer than every shipped file uses the nearest older one
+(`dataVersion` says which). Fuel values are the game's hard-coded burn times.
+`[UNKNOWN_SMELT_ITEMS]` names items Minecraft does not have;
+`[SMELTING_DATA_UNAVAILABLE]` means no data ships for this version or any older
+one. Reads nothing in the world. Defined in
+[src/actions/view-smelting-recipes/contract.ts](../../src/actions/view-smelting-recipes/contract.ts).
+
+### `view_block_drops`
+
+Use `view_block_drops` to learn where an item comes from before gathering it,
+or what a block drops. The arguments are `items` and `blocks`, up to 16 names
+each, at least one name in all. Success reports, per item, the blocks an
+ordinary break by hand gathers it from, each with `chance` (how often one break
+yields it, at no fortune) and `planted` (the block is a crop the item grows
+into, such as wheat for wheat seeds, listed after the wild sources), and the
+`mobs` that drop it when killed, each with `chance` and `hostile` (the game's
+hostile category: a fight, not a hunt), from the entity loot tables
+(`src/world/data/mob-drops/<version>.json`, `src/world/mob-drops-extract.ts`;
+conditions on the kill, such as a player kill or a fire, are left out); and per
+block, every drop in loot order with the `tool` it needs (`silk_touch`,
+`shears`, `shears or silk_touch`, or an item) and the block `state` it needs
+(a crop's ripe `age`). Drops come from the game's own loot tables:
+`src/world/data/block-drops/<version>.json`, generated from the vanilla server
+jar by `src/world/block-drops-extract.ts`; a server newer than every shipped
+file uses the nearest older one, an older patch of the same minor version the
+nearest newer one (`dataVersion` says which). `collect_block`
+reads the same data for the item a break yields and how many breaks a request
+may take. `[UNKNOWN_DROP_NAMES]` names what Minecraft does not have;
+`[DROP_DATA_UNAVAILABLE]` means no data ships for this version or any older
+one. Reads nothing in the world. Defined in
+[src/actions/view-block-drops/contract.ts](../../src/actions/view-block-drops/contract.ts).
+
 ## Notes
 
 ### `note_save`
@@ -215,6 +286,35 @@ no automatic expiry. For older notes or different filters, query `main.notes` wi
 `query_bot_data`. Defined in
 [src/actions/note-read/contract.ts](../../src/actions/note-read/contract.ts).
 
+### `note_delete`
+
+Delete this bot's own notes by id (`note_ids`, 1 to 500 positive integers, from
+`note_read` or `main.notes`). Another bot's notes are never deleted: ids that are not
+this bot's, or no longer exist, come back in `notDeleted`, the rest in `deleted`.
+Deleting cannot be undone and uses the foreground task slot. Defined in
+[src/actions/note-delete/contract.ts](../../src/actions/note-delete/contract.ts).
+
+### `protect_region`
+
+Protect a box of blocks in the current dimension from this bot's own digging and
+scaffolding: every route refuses to break or place a block inside it, `collect_block`
+never takes a block inside it (the refusal reason names the region), and walking
+through and opening doors stay allowed. Give `corner_a` and `corner_b`, or `center`
+and `radius` (0-31); each side is at most 64 blocks and at most 64 regions exist.
+`owner` is whose build it is (a player's name; omitted, the bot's own).
+`build_structure` still works inside regions its own bot owns and refuses a request
+with cells in anyone else's (`[BUILD_PROTECTED_REGION]`). The same box for the same
+owner returns the existing region with `created: false`. Errors: `[REGION_TOO_LARGE]`,
+`[REGION_LIMIT_REACHED]`. Regions persist in `main.protected_regions`. Runs beside the
+foreground action. Defined in
+[src/actions/protect-region/contract.ts](../../src/actions/protect-region/contract.ts).
+
+### `unprotect_region`
+
+Remove one protected region by `region_id`, so routes may dig and place there again.
+Error: `[REGION_NOT_FOUND]`. Runs beside the foreground action. Defined in
+[src/actions/unprotect-region/contract.ts](../../src/actions/unprotect-region/contract.ts).
+
 ## Tools that move the bot across terrain
 
 ### `navigate`
@@ -228,6 +328,16 @@ When digging is enabled, loss of the starting best pickaxe, shovel, or axe
 harvest capability stops at Pathfinder's safe cancellation point and returns
 `partial` with `[TOOL_TIER_LOST]`. Reissue the same request to continue with the
 remaining tool; `navigate` has no continuation flag.
+
+Routes never set off across deep open water (water at least three deep, nine or more blocks across both ways: the
+sea, wide lakes; rivers and coasts are swum), for every action that moves the bot; a bot already out on it swims
+back. When a `navigate` route stops short and the straight way on crosses deep open water, it fails with
+`[NAVIGATION_DEEP_WATER]` naming where the water starts, or, with a boat carried, walks to the water's edge at the
+water's level, puts the boat in, rides it straight across, gets off at the far shore, takes the boat back and goes on
+(`boatBlocks` in the evidence; `[NAVIGATION_BOAT_FAILED]` when the crossing could not be made). With a boat carried and
+24 or more blocks of deep open water on the straight way, the boat is taken at once instead of a way round. At the far
+shore the boat goes along to a bank at most one block above the water, or a step is cut into the bank from the boat.
+Kelp, seagrass and waterlogged blocks count as water.
 
 Active portal cells are not navigation destinations. Use `enter_nether_portal`
 or `enter_end_portal` with the active portal block's explicit `x`, `y`, `z`.
@@ -324,7 +434,22 @@ axis, which expands to 10 obsidian, four cobblestone corner supports, and six in
 cells that must be air. The supports remain in place and do not prevent activation.
 Use explicit `blocks` for custom designs, including different corner materials.
 A cell whose block is `air` is dug clear rather than placed, whatever
-`remove_wrong_blocks` says. The action is
+`remove_wrong_blocks` says. A cell may add `facing` (`north`, `south`, `east`,
+`west`) for a block Minecraft orients by the player's facing, such as a door:
+the bot looks that way while placing it, and the same block facing elsewhere
+counts as a wrong block. A house door should face along its doorway, or its
+open panel lies across the way through. A cell may also add `half` (`top`,
+`bottom`) for stairs, slabs (their `type`) and trapdoors, and `axis` (`x`, `y`,
+`z`) for logs and other blocks with an axis. The bot gets them as a player
+would (ADR-013): an axis from the face it places against (a horizontal beam
+waits for a neighbour on its axis), a half from placing against the block above
+or below, or from clicking a side face above or below its middle. A block in
+another state counts as wrong, and the audit names its state. Stair corner
+shapes, door hinges and double slabs are left to Minecraft. `keep` lists up to
+2048 more cells routes may not dig while the call works: what earlier calls of
+the same structure built (a house built part by part passes its finished parts,
+so a route to the roof never digs through a wall). The call's own correct cells
+are always kept. The action is
 a thin contract over the navigation library's build process, which is
 Baritone's builder loop: it places and digs what is in reach from where the
 bot stands, lowest first, and otherwise routes under one goal of every
@@ -377,7 +502,10 @@ best required harvest tier drops. `continue` lets the same request use its
 remaining tool; losing the last usable tool still reports the physical stop.
 Without coordinates it mines the closest matching blocks it can reach, wherever
 they are, including blocks the bot placed itself; navigate to the area first
-when a particular deposit matters. The best carried tool for each block is
+when a particular deposit matters. `max_distance` keeps the whole run within that
+many blocks (horizontally) of where it started: no farther target, no exploring;
+with none left in range it stops `[NO_TARGET_IN_RANGE]`, naming the nearest
+loaded one beyond the range and its distance. The best carried tool for each block is
 equipped automatically. The response lists every cell broken with its distance
 from where the run started, so the model can see which deposit was mined.
 
@@ -650,6 +778,29 @@ carrying a water bucket — casting is part of mining, not of the bucket.
 Defined in
 [src/actions/use-bucket/contract.ts](../../src/actions/use-bucket/contract.ts).
 
+### `tend_crops`
+
+Use `tend_crops` to farm a rectangle of soil the way a player does. The
+arguments are two corners `x1`, `z1`, `x2`, `z2` (at most 16 x 16 cells) and
+`y`, the soil level (the dirt or farmland; crops grow at `y + 1`); `plant` is
+the item to plant on empty farmland; `harvest` and `till` default to true.
+The bot first walks the plot breaking ripe crops (ripe in the state the game's
+loot tables drop the crop in: wheat at age 7, beetroots at age 3) and grass or
+flowers standing on the soil, picks up what they dropped, then tills each soil
+cell with the best carried hoe (right-click on the top face, confirmed by the
+cell changing; coarse dirt takes two) and plants it with `plant`, or, without
+`plant`, a cell harvested in this call with that crop's own seed (its unripe
+drop) when carried. Unripe crops are left growing. Water, leveling and fences
+are the caller's: a cell that is not soil is reported, not changed. Its routes
+never dig farmland or crops and place no scaffold. Success means no cell was
+left for a reason other than growing crops or water; the result counts what was
+harvested, cleared, tilled and planted, the items gained, the cells skipped by
+reason, and the plot afterwards (crops by block and age, empty farmland,
+farmland not hydrated, water). `[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
+refuse before any work; `[TEND_STALLED]` ends a run where no cell changed for
+180 s. Defined in
+[src/actions/tend-crops/contract.ts](../../src/actions/tend-crops/contract.ts).
+
 ## Tools that craft and smelt items
 
 ### `craft_item`
@@ -815,8 +966,17 @@ defined in [src/server/async-tools.ts](../../src/server/async-tools.ts).
 
 Use `send_message` to communicate with other players via in-game public
 chat. The argument is `message`, containing the text string to broadcast.
+The optional `to` (a Minecraft username, 1 to 16 letters, digits or underscores)
+whispers the message to that one player instead, with at most 233 characters so
+it fits one `/tell` command. The player must be online (matched without regard
+to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
+and the result's `to` repeats the name asked for (on success, the name as the
+server spells it).
 Success proves the message was sent and the bot observed its own chat echo
-returned by the server. Defined in
+returned by the server (for a whisper, the server's
+`commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground
+action without being refused or cancelling it, and is a direct call (no
+`submission_id` or `wait_timeout_ms`). Defined in
 [src/actions/send-message/contract.ts](../../src/actions/send-message/contract.ts).
 
 ## Diagnostic tools available only in debug mode

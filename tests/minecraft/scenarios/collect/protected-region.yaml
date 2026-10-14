@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+name: protected-region
+tags: [regression]
+description: >-
+  Protect a dirt patch beside the actor and a dirt wall across its way, then collect four
+  dirt and walk to the far side of the wall. The patch is nearer, but only the open dirt
+  farther away may be taken, and the route walks around the wall instead of digging
+  through it. Guards the 2026-10-01 live failure where gathering dug under the bot's own
+  unfinished house (ADR-012).
+
+reset:
+  - "fill -16 -59 -32 20 -40 32 air"
+
+geometry:
+  # Hide the flat world's dirt layers so only the placed dirt can be collected.
+  - fill: { block: bedrock, from: [-14, -63, -14], to: [16, -61, 14] }
+  - fill: { block: stone, from: [-14, -60, -14], to: [16, -60, 14] }
+  # The protected patch, right beside the actor.
+  - fill: { block: dirt, from: [2, -59, -1], to: [4, -59, 1] }
+  # Open dirt, farther away.
+  - fill: { block: dirt, from: [10, -59, 4], to: [11, -59, 5] }
+  # The protected wall: three high, so it cannot be jumped; around it is a long walk.
+  - fill: { block: dirt, from: [-4, -59, -30], to: [-4, -57, 30] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - action: protect_region
+      input: { corner_a: { x: 1, y: -59, z: -2 }, corner_b: { x: 5, y: -58, z: 2 }, label: "the patch", reason: "Keep it whole." }
+    - action: protect_region
+      input: { corner_a: { x: -4, y: -59, z: -30 }, corner_b: { x: -4, y: -57, z: 30 }, owner: "Builder", label: "the wall", reason: "Someone else's wall." }
+    - action: collect_block
+      input: { block_name: dirt, count: 4, scaffold: false }
+    - action: navigate
+      input: { x: -8, y: -59, z: 0, range: 0, scaffold: false }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: hasItem, who: Actor, item: dirt, count: 4 }
+    - { kind: blocksAt, block: dirt, positions: [[2, -59, -1], [3, -59, 0], [4, -59, 1], [2, -59, 1], [4, -59, -1]] }
+    - { kind: blocksAt, block: dirt, positions: [[-4, -59, 0], [-4, -58, 0], [-4, -57, 0], [-4, -59, 1], [-4, -58, -1]] }
+    - { kind: blocksAt, block: air, positions: [[10, -59, 4], [11, -59, 5]] }
+    - { kind: reach, who: Actor, pos: [-8, -59, 0.5], radius: 1.5 }
+    - { kind: completion, who: Actor }

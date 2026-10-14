@@ -82,6 +82,7 @@ import type {
   SearchReason,
 } from "./outcome.js";
 import type { NavigationCalculationFailure } from "./process-events.js";
+import { markPhase } from "../../diagnostics/freeze-watch.js";
 
 /** The evidence fields the run counts as it goes: mutable here, copied into every outcome. */
 interface Counters {
@@ -279,6 +280,8 @@ export class NavigationRun {
    * taken here, where the scaffold count is read, and held for the search.
    */
   #policy: MovementPolicy;
+  /** Whether the bot's own protected regions were opened to this run after a search found no route. */
+  #ownRegionsOpened = false;
   constructor(dependencies: NavigationRunDependencies) {
     this.context = dependencies.context;
     this.request = dependencies.request;
@@ -339,6 +342,8 @@ export class NavigationRun {
     // speculative search, then release admission. One failed release must not
     // skip the others, and admission must stay held while a search can still run.
     resources.defer(this.release);
+    // The opening of the bot's own regions lasts for this run: its action reuses the policy for other routes and checks.
+    resources.defer(() => this.request.policy.ownRegionEscape?.close());
     resources.defer(() => this.status(null));
     resources.defer(async () => {
       if (this.#pending) {
@@ -464,18 +469,28 @@ export class NavigationRun {
   /** Start the plan-ahead search from where a partial segment will end, stoppable on its own. */
   #startContinuation(goal: ActiveGoal, plan: RoutePlan, observation: NavigationObservation): PendingContinuation {
     const control = new AbortController();
+    const result = this.#plan(
+      goal,
+      plan.endNode,
+      observation,
+      "segment_continuation",
+      AbortSignal.any([this.context.signal, control.signal]),
+      { effects: plan.steps.flatMap((step) => step.effects) },
+    ).catch((cause: unknown): PlanningResult => {
+      // The search can reach the arrival while the segment is still walked, and
+      // the process's callback then throws the caller's abort reason (a bare
+      // string). That is the run being stopped, as it is for the foreground.
+      if (this.context.signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
+      throw cause;
+    });
+    // Nothing awaits this promise while the segment is walked, and a runtime
+    // exits on a rejection nobody handles. Whoever awaits it later still sees it.
+    result.catch(() => undefined);
     return {
       from: plan.endNode,
       scaffold: this.#policy.scaffold,
-      result: this.#plan(
-        goal,
-        plan.endNode,
-        observation,
-        "segment_continuation",
-        AbortSignal.any([this.context.signal, control.signal]),
-        { effects: plan.steps.flatMap((step) => step.effects) },
-      ),
-      abandon: () => control.abort("continuation abandoned"),
+      result,
+      abandon: () => control.abort(new Error("continuation abandoned")),
     };
   }
   /**
@@ -603,7 +618,7 @@ export class NavigationRun {
     const field = this.context.stepField?.() ?? null;
     const identity =
       `${goal.revision}|${blockKey(node.feet)}|${observation.worldRevision}|${observation.resourceRevision}` +
-      `|movement-failures:${this.#movementFailures.size}|field:${field?.fingerprint ?? "none"}`;
+      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|field:${field?.fingerprint ?? "none"}`;
     if (this.#searchIdentities.has(identity))
       return {
         kind: "outcome",
@@ -823,12 +838,16 @@ export class NavigationRun {
     const executor = new RouteExecutor({
       context: this.context,
       passages: this.#passages,
+      allowDoors: this.#policy.allowDoors,
       plan,
       stepStarted: (step) => this.#onStepStarted(plan, step),
       phase: (step, phase) => this.#onStepPhase(goal, plan, step, phase),
       effectConfirmed: (operation) => {
         if (operation.kind === "break") this.#counters.breaks += 1;
-        else if (operation.kind === "place") this.#counters.placements += 1;
+        else if (operation.kind === "place") {
+          this.#counters.placements += 1;
+          this.request.onPlacement?.({ position: operation.placement.position, stateId: operation.placement.stateId });
+        }
         else this.#counters.activations += 1;
       },
       stepCompleted: (step, arrival) => this.#onStepCompleted(goal, plan, step, arrival),
@@ -1000,6 +1019,7 @@ export class NavigationRun {
       };
       let ticks = 0;
       resources.defer(bot.subscribePhysicsTick(() => {
+        markPhase("physicsTick: pin release");
         if (clear() || ++ticks >= PIN_RELEASE_TICKS) finish();
       }));
       signal.addEventListener("abort", finish, { once: true });
@@ -1029,6 +1049,16 @@ export class NavigationRun {
     failure: NavigationCalculationFailure,
     observation: NavigationObservation,
   ): Promise<PlanningResult> {
+    // Shut in by blocks inside a region of its own (live 2026-10-11, Theo in his house's scaffold): one more search
+    // with the bot's own regions open, once per run. Other owners' regions stay forbidden.
+    const escape = this.#policy.ownRegionEscape;
+    const feet = navigationFeet(observation.position, observation.stance === "supported");
+    if (failure.kind === "no_path" && !this.#ownRegionsOpened && escape?.inside(feet.x, feet.y, feet.z)) {
+      this.#ownRegionsOpened = true;
+      escape.open();
+      this.#events.emit({ kind: "own_regions_opened", start: { x: feet.x, y: feet.y, z: feet.z } });
+      return { kind: "retry", reason: "calculation_failure" };
+    }
     if (!this.request.onCalculationFailure) {
       return { kind: "outcome", outcome: this.#failed(failure) };
     }

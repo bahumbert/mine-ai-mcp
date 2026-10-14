@@ -94,12 +94,14 @@ test("close cancels roof digging and waits for its controls to settle", async (t
   });
   let stops = 0;
   Object.assign(fixture.entity, { isInWater: true, position: new Vec3(0.5, -59, 0.5) });
-  const roof = { boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]] };
+  const roof = { boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]], digTime: () => 1000 };
   Object.assign(fixture.bot, {
     oxygenLevel: 8,
     health: 20,
     username: "Diver",
     blockAt: () => roof,
+    game: { gameMode: "survival" },
+    inventory: { items: () => [] },
     targetDigBlock: roof,
     dig: () => {
       announceDig();
@@ -180,4 +182,98 @@ test("claims the body at half air and records the surfacing", async (t) => {
   );
 
   await control[Symbol.asyncDispose]();
+});
+
+/** A sealed pocket: every cell around the bot is the roof block, so no swim reaches open air. */
+function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean) {
+  const digs: string[] = [];
+  const equipped: string[] = [];
+  const pickaxe = { name: "stone_pickaxe", type: 1, count: 1 };
+  const roof = {
+    boundingBox: "block",
+    diggable: true,
+    shapes: [[0, 0, 0, 1, 1, 1]],
+    // Only the pickaxe breaks it fast; a bare hand is slow.
+    digTime: (item: number | null) => (item === pickaxe.type ? 300 : 3000),
+  };
+  Object.assign(fixture.entity, { isInWater: inWater, position: new Vec3(0.5, -59, 0.5) });
+  Object.assign(fixture.bot, {
+    oxygenLevel: 8,
+    health: 20,
+    username: "Diver",
+    blockAt: () => roof,
+    heldItem: null,
+    game: { gameMode: "survival" },
+    inventory: { items: () => [pickaxe] },
+    equip: async (item: { name: string }) => {
+      equipped.push(item.name);
+    },
+    dig: async () => {
+      digs.push("roof");
+      Object.assign(fixture.bot, { oxygenLevel: 20 });
+    },
+  });
+  return { digs, equipped };
+}
+
+test("a swimmer sealed under a roof digs it with the best tool it carries", async (t) => {
+  const fixture = waterFixture(t);
+  const { digs, equipped } = sealedPocket(fixture, true);
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  for (let tick = 0; tick < 6; tick += 1) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(digs, ["roof"]);
+  assert.deepEqual(equipped, ["stone_pickaxe"]);
+  await control[Symbol.asyncDispose]();
+});
+
+test("a dry bot under the same roof is left alone by the breath reflex", async (t) => {
+  const fixture = waterFixture(t);
+  const { digs } = sealedPocket(fixture, false);
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  for (let tick = 0; tick < 6; tick += 1) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(digs, []);
+  await control[Symbol.asyncDispose]();
+});
+
+/** The reflex's continuation after a full-air surfacing, driven at chosen positions and times. */
+function breathContinuations(t: Parameters<typeof waterFixture>[0]) {
+  const fixture = waterFixture(t);
+  let definition: { continuation: (outcome: unknown) => { kind: string; reason?: string } } | undefined;
+  let clock = 0;
+  const driver = { register: (captured: typeof definition) => { definition = captured; return { [Symbol.asyncDispose]: async () => {} }; } };
+  attachBreathReflex(fixture.bot, driver as never, () => null, () => clock);
+  return {
+    surfaceAt: (x: number, atMs: number) => {
+      clock = atMs;
+      Object.assign(fixture.entity, { position: new Vec3(x + 0.5, 50, 0.5) });
+      return definition!.continuation({ kind: "air_full", ownedDive: false });
+    },
+  };
+}
+
+const MINUTE = 60_000;
+
+test("the third breath reflex at the same place within three minutes ends the action instead of resuming it", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000).kind, "resume");
+  const third = surfaceAt(2, 38_000);
+  assert.equal(third.kind, "return");
+  assert.match(third.reason ?? "", /Out of air three times here/);
+});
+
+test("three breath reflexes ten blocks apart all resume", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(10, 19_000).kind, "resume");
+  assert.equal(surfaceAt(20, 38_000).kind, "resume");
+});
+
+test("a third breath reflex after three minutes starts the count again and resumes", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0).kind, "resume");
+  assert.equal(surfaceAt(0, 19_000).kind, "resume");
+  assert.equal(surfaceAt(0, 3 * MINUTE + 1).kind, "resume");
 });

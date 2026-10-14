@@ -224,6 +224,16 @@ const strongholdLocatedEventInputSchema = z.strictObject({
   }),
 });
 
+const navigationOwnRegionsOpenedEventInputSchema = z.strictObject({
+  type: z.literal("navigation_own_regions_opened"),
+  observedAt: z.string().min(1),
+  summary: z.string().min(1),
+  payload: z.strictObject({
+    runId: z.string(),
+    start: z.strictObject({ x: z.number().finite(), y: z.number().finite(), z: z.number().finite() }),
+  }),
+});
+
 const equipmentEventInputSchema = z.strictObject({
   type: z.enum(["equipment_low_durability", "equipment_broken"]),
   observedAt: z.string().min(1),
@@ -239,6 +249,7 @@ const equipmentEventInputSchema = z.strictObject({
 
 export const botEventInputSchema = z.discriminatedUnion("type", [
   equipmentEventInputSchema,
+  navigationOwnRegionsOpenedEventInputSchema,
   survivalEventInputSchema,
   strongholdLocatedEventInputSchema,
   playerMessageEventInputSchema,
@@ -302,6 +313,7 @@ export const botEventSchema = z.discriminatedUnion("type", [
   survivalPolicyEventInputSchema.extend({ eventId: z.number().int().positive(), botId: z.string().min(1) }),
   dragonReflexEventInputSchema.extend({ eventId: z.number().int().positive(), botId: z.string().min(1) }),
   strongholdLocatedEventInputSchema.extend({ eventId: z.number().int().positive(), botId: z.string().min(1) }),
+  navigationOwnRegionsOpenedEventInputSchema.extend({ eventId: z.number().int().positive(), botId: z.string().min(1) }),
   fireReflexEventInputSchema.extend({ eventId: z.number().int().positive(), botId: z.string().min(1) }),
   playerMessageEventSchema,
   playerDeathEventSchema,

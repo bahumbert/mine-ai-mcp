@@ -9,6 +9,24 @@ export type WorldEffectResult =
   | { readonly kind: "cancelled" }
   | { readonly kind: "invalidated" };
 
+/**
+ * How long a cancelled effect may take to settle. Live 2026-10-11 (orders test, Vex): a dig whose block update never came
+ * (the bot was teleported mid-dig) cannot be stopped once mineflayer's dig timer has fired, so its completion never
+ * settled and every cancel above it waited for ever. Past this the effect is abandoned, not awaited.
+ */
+export const EFFECT_DRAIN_MS = 2_000;
+
+/** Waits for a cancelled effect to settle, but no longer than {@link EFFECT_DRAIN_MS}; the abandoned promise is left to settle alone. */
+async function drained(completion: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abandoned = new Promise<void>((resolve) => { timer = setTimeout(resolve, EFFECT_DRAIN_MS); });
+  try {
+    await Promise.race([completion.then(() => undefined, () => undefined), abandoned]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Own an interaction until both its physical work and world confirmation settle. */
 export async function executeWorldEffect(options: {
   readonly bot: NavigationBot;
@@ -73,7 +91,7 @@ export async function executeWorldEffect(options: {
       // requests release; the completion promise establishes physical release.
       stopped.abort(result.kind);
       effect.cancel();
-      await completion;
+      await drained(completion);
     }
     return { result, issued: effect.issued };
   } finally {

@@ -5,8 +5,10 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { planCraftingFromInventory, type CraftPreparation, type CraftTarget } from "../../utils/craft-plan.js";
 import type { Position3 } from "../../utils/index.js";
 import { executeCraftPlan } from "../../world/crafting.js";
+import { recipesFor } from "../../world/smelting.js";
 import { carriedCount, settledNow, settleInventoryMinimum, type SettledInventoryCount } from "../../world/index.js";
 import type { WorldBlock } from "../../world/placement.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock, unconfirmedCount } from "../markdown.js";
 import { formatWorkstation, useTemporaryWorkstation, workstationOperations } from "../temporary-workstation.js";
@@ -79,13 +81,20 @@ function craftEvidence({
 function preparationFailureResult(
   preparation: FailedCraftPreparation,
   evidence: CraftEvidenceInput,
+  version: string,
 ): Extract<CraftItemResult, { status: "failed" }> {
   let error: string;
 
   switch (preparation.kind) {
-    case "uncraftable":
-      error = craftItemOutcomes.uncraftable(preparation.items);
+    case "uncraftable": {
+      // What a furnace makes is said, from the game's recipes (live 2026-10-10: "craft cooked_beef" sent 18 times).
+      const smelted = preparation.items.flatMap((item) => {
+        const from = [...new Set(recipesFor(item, version).flatMap((recipe) => recipe.inputs))];
+        return from.length === 0 ? [] : [{ item, from: from.slice(0, 3) }];
+      });
+      error = craftItemOutcomes.uncraftable(preparation.items, smelted);
       break;
+    }
     case "missing_materials":
       error = craftItemOutcomes.missingMaterials(preparation.plan.missingMaterials);
       break;
@@ -107,16 +116,17 @@ export async function craftItem(
   navigation: NavigationRuntime,
   request: CraftItemRequest,
   context: ActionContext,
+  seen?: (item: string) => number,
 ): Promise<CraftItemResult> {
   observeInventoryProgress(context, bot, request.items, () => "crafting", "All requested net item gains are still carried after crafting and workstation cleanup.");
-  if (!request.temporaryWorkstation) return craftBatch(bot, request, context);
+  if (!request.temporaryWorkstation) return craftBatch(bot, request, context, undefined, seen);
   const tablesBefore = carriedCount(bot, "crafting_table");
   const result = await useTemporaryWorkstation(
     bot,
     "crafting_table",
     context,
     workstationOperations(bot, navigation),
-    (table) => craftBatch(bot, request, context, table),
+    (table) => craftBatch(bot, request, context, table, seen),
     (error) => ({
       status: "failed",
       error,
@@ -148,6 +158,7 @@ async function craftBatch(
   request: CraftItemRequest,
   context: ActionContext,
   providedTable?: WorldBlock,
+  seen?: (item: string) => number,
 ): Promise<CraftItemResult> {
   context.signal?.throwIfAborted();
   const items: ResolvedCraftItem[] = [];
@@ -157,7 +168,7 @@ async function craftBatch(
   for (const requested of request.items) {
     const target = bot.registry.itemsByName[requested.itemName];
     if (!target) {
-      unknownItems.push(requested.itemName);
+      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
       requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0 });
       continue;
     }
@@ -179,13 +190,14 @@ async function craftBatch(
     };
   }
 
-  const initialPlan = planCraftingFromInventory(bot, items);
-  if (initialPlan.kind !== "ready") return preparationFailureResult(initialPlan, { items: requestedItems });
+  const planOptions = seen ? { seen } : {};
+  const initialPlan = planCraftingFromInventory(bot, items, planOptions);
+  if (initialPlan.kind !== "ready") return preparationFailureResult(initialPlan, { items: requestedItems }, bot.version);
   const station = providedTable
     ? { kind: "ready" as const, craftingTable: providedTable, usedCarriedTable: 0, craftingTablePlaced: undefined }
-    : await prepareCraftingStation(bot, items, initialPlan.plan.requiresCraftingTable, context.signal);
+    : await prepareCraftingStation(bot, items, initialPlan.plan.requiresCraftingTable, context.signal, planOptions);
   if (station.kind === "plan_failed") {
-    const failure = preparationFailureResult(station.preparation, { items: requestedItems });
+    const failure = preparationFailureResult(station.preparation, { items: requestedItems }, bot.version);
     return {
       ...failure,
       error: `No crafting table is in reach or carried. Preparing one for this batch: ${failure.error}`,
@@ -207,7 +219,7 @@ async function craftBatch(
     };
   }
   // Workstation preparation can consume materials; plan the batch against what remains.
-  const preparation = planCraftingFromInventory(bot, items);
+  const preparation = planCraftingFromInventory(bot, items, planOptions);
   const { craftingTable, craftingTablePlaced, usedCarriedTable } = station;
   if (preparation.kind !== "ready") {
     return preparationFailureResult(preparation, {
@@ -219,7 +231,7 @@ async function craftBatch(
         after: settledNow(bot, name),
         usedForWorkstation: name === "crafting_table" ? usedCarriedTable : 0,
       })),
-    });
+    }, bot.version);
   }
   const execution = await executeCraftPlan(bot, preparation.applications, craftingTable, context.signal);
   // Wait for each requested gain after the server corrects optimistic clicks.
@@ -247,7 +259,7 @@ async function craftBatch(
   if (execution.kind === "failed") {
     return {
       status: execution.completedSteps > 0 ? "partial" : "failed",
-      error: craftItemOutcomes.executionFailed(execution.cause),
+      error: craftItemOutcomes.executionFailed(execution.cause, carriedCount(bot, "unknown")),
       craft: observed,
     };
   }
@@ -299,7 +311,7 @@ export function formatCraftItemResult(result: CraftItemResult): string {
   return lines.join("\n");
 }
 
-export function createCraftItemAction(bot: Bot, navigation: NavigationRuntime) {
+export function createCraftItemAction(bot: Bot, navigation: NavigationRuntime, seen?: (item: string) => number) {
   return defineAction({
     checkpointSchema: craftCheckpointSchema,
     name: CRAFT_ITEM,
@@ -310,6 +322,6 @@ export function createCraftItemAction(bot: Bot, navigation: NavigationRuntime) {
     execution: { kind: "task" },
     annotations: craftItemAnnotations,
     parse: parseCraftItemRequest,
-    execute: (request, context) => craftItem(bot, navigation, request, context),
+    execute: (request, context) => craftItem(bot, navigation, request, context, seen),
   });
 }

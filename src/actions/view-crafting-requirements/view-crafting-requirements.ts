@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { planCraftingFromInventory, type CraftTarget } from "../../utils/craft-plan.js";
+import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock } from "../markdown.js";
 import {
@@ -29,6 +30,7 @@ export async function viewCraftingRequirements(
   bot: Bot,
   request: ViewCraftingRequirementsRequest,
   context: ActionContext,
+  seen?: (item: string) => number,
 ): Promise<ViewCraftingRequirementsResult> {
   context.signal?.throwIfAborted();
   const targets: CraftTarget[] = [];
@@ -37,7 +39,7 @@ export async function viewCraftingRequirements(
   for (const requested of request.items) {
     const item = bot.registry.itemsByName[requested.itemName];
     if (!item) {
-      unknownItems.push(requested.itemName);
+      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
       continue;
     }
     targets.push({ id: item.id, name: item.name, count: requested.count });
@@ -52,7 +54,7 @@ export async function viewCraftingRequirements(
     };
   }
 
-  const preparation = planCraftingFromInventory(bot, targets);
+  const preparation = planCraftingFromInventory(bot, targets, { prefer: request.prefer, ...(seen && { seen }) });
   if (preparation.kind === "planner_failed") {
     return {
       status: "failed",
@@ -83,7 +85,7 @@ export function formatViewCraftingRequirementsResult(result: ViewCraftingRequire
   return lines.join("\n");
 }
 
-export function createViewCraftingRequirementsAction(bot: Bot) {
+export function createViewCraftingRequirementsAction(bot: Bot, seen?: (item: string) => number) {
   return defineAction({
     name: VIEW_CRAFTING_REQUIREMENTS,
     description: VIEW_CRAFTING_REQUIREMENTS_DESCRIPTION,
@@ -93,6 +95,6 @@ export function createViewCraftingRequirementsAction(bot: Bot) {
     execution: { kind: "information" },
     annotations: viewCraftingRequirementsAnnotations,
     parse: parseViewCraftingRequirementsRequest,
-    execute: (request, context) => viewCraftingRequirements(bot, request, context),
+    execute: (request, context) => viewCraftingRequirements(bot, request, context, seen),
   });
 }

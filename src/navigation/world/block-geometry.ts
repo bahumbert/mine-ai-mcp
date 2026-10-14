@@ -141,6 +141,7 @@ export function describeBlockGeometry(traits: BlockTraits, shapes: readonly Coll
   const passable =
     traits.liquid !== "lava" &&
     !traits.damaging &&
+    !traits.entangling &&
     ((traits.empty && traits.liquid === null) ||
       (traits.liquid === "water" && traits.liquidSource) ||
       traits.climbable ||

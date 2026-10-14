@@ -113,6 +113,13 @@ export type NavigationEvent =
       readonly result: "completed" | "continue";
       readonly atMs: number;
     }
+  | {
+      /** A search found no route from inside a region the bot owns: its own regions are open to it for the next search. */
+      readonly kind: "own_regions_opened";
+      readonly runId: string;
+      readonly atMs: number;
+      readonly start: { readonly x: number; readonly y: number; readonly z: number };
+    }
   | { readonly kind: "cleanup_completed"; readonly runId: string; readonly atMs: number }
   | {
       readonly kind: "run_settled";

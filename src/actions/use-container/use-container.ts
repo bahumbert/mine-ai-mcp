@@ -669,7 +669,7 @@ export function createUseContainerAction(
     formatResult: formatUseContainerResult,
     execution: {
       kind: "task",
-      prepare: () => prepareBotForMovement(bot, navigation),
+      prepare: (signal) => prepareBotForMovement(bot, navigation, signal),
     },
     annotations: useContainerAnnotations,
     parse: parseUseContainerRequest,

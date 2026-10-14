@@ -366,7 +366,7 @@ export function createPlaceBlockAction(
     inputSchema: placeBlockInputSchema,
     resultSchema: placeBlockResultSchema,
     formatResult: formatPlaceBlockResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: placeBlockAnnotations,
     parse: parsePlaceBlockRequest,
     execute: (request, context) => executePlaceBlock(bot, request, context, dependencies),

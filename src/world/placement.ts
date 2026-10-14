@@ -6,6 +6,7 @@ import { asVec3, cellIntersectsBody, type Position3 } from "../utils/index.js";
 import { isReplaceableForPlacement } from "./block-classification.js";
 import { carriedCount, settleInventoryCount } from "./inventory-count.js";
 import { recordCombatResourceReceipt } from "../runtime/combat-resource-receipts.js";
+import type { BlockHalf } from "./block-states.js";
 
 export type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 export type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
@@ -14,7 +15,7 @@ interface PlacementOptionsBot extends Bot {
   _placeBlockWithOptions?: (
     support: WorldBlock,
     face: Vec3,
-    options: { forceLook: "ignore"; swingArm: "right" },
+    options: { forceLook: "ignore"; swingArm: "right"; half?: BlockHalf },
   ) => Promise<void>;
 }
 
@@ -25,10 +26,12 @@ interface PlacementOptionsBot extends Bot {
  * the head turns toward it over several ticks. For a face directly beneath the
  * feet that yaw is arbitrary, which spun the bot on every pillar block.
  */
-export function placeWithoutLooking(bot: Bot, support: WorldBlock, face: Vec3): Promise<void> {
+export function placeWithoutLooking(bot: Bot, support: WorldBlock, face: Vec3, half?: BlockHalf): Promise<void> {
   const placementBot = bot as PlacementOptionsBot;
+  // A side face clicked above or below its middle gives stairs and slabs their half (ADR-013); mineflayer turns
+  // `half` into that click position and ignores it on a top or bottom face.
   return placementBot._placeBlockWithOptions
-    ? placementBot._placeBlockWithOptions(support, face, { forceLook: "ignore", swingArm: "right" })
+    ? placementBot._placeBlockWithOptions(support, face, { forceLook: "ignore", swingArm: "right", ...(half !== undefined && { half }) })
     : bot.placeBlock(support, face);
 }
 
@@ -40,6 +43,8 @@ export interface BlockPlacement {
   readonly matches: (block: WorldBlock) => boolean;
   /** The horizontal direction the player must face while placing an oriented block. */
   readonly lookDirection?: Position3;
+  /** For stairs and slabs: the half a side-face click must give (ADR-013). */
+  readonly half?: BlockHalf;
   readonly signal?: AbortSignal;
 }
 
@@ -126,7 +131,7 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     const currentBlocker = occupiedCell(bot, cubeCell);
     if (currentBlocker) return { kind: "failed", error: currentBlocker };
     setSneaking(bot, true);
-    await placeWithoutLooking(bot, placement.support, face);
+    await placeWithoutLooking(bot, placement.support, face, placement.half);
   } catch (cause) {
     if (placement.signal?.aborted) throw cause;
     if (!isBlockUpdateTimeout(cause)) return { kind: "failed", error: message(cause) };
@@ -204,16 +209,22 @@ export interface PlacementSupport {
   readonly face: Vec3;
 }
 
-/** Find a supporting neighbour, preferring the floor. Material selection belongs to the caller. */
+/**
+ * Find a supporting neighbour, preferring the floor. Material selection belongs to the caller; `fits` lets it refuse
+ * faces that would give the block the wrong state (a horizontal log against the floor stands up).
+ */
 export function findPlacementSupport(
   bot: Bot,
   cell: Position3,
   accepts: (block: WorldBlock) => boolean = isSolid,
+  fits: (face: Vec3) => boolean = () => true,
 ): PlacementSupport | null {
   const position = asVec3(cell);
   for (const offset of SEAL_SUPPORTS) {
+    const face = offset.scaled(-1);
+    if (!fits(face)) continue;
     const support = bot.blockAt(position.plus(offset));
-    if (support && accepts(support)) return { support, face: offset.scaled(-1) };
+    if (support && accepts(support)) return { support, face };
   }
   return null;
 }

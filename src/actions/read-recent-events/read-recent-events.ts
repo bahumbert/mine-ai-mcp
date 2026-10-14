@@ -1,3 +1,4 @@
+import { DEFAULT_NAVIGATION_POLICY } from "../../survival/policy/contract.js";
 import {
   allSqlQuery,
   botEventSchema,
@@ -40,7 +41,7 @@ export const unreadEventsPageQuery = defineSqlQuery({
     LIMIT ?
   `,
   parseRow: (row) => {
-    const payload: unknown = JSON.parse(String(row.payload_json));
+    const payload: unknown = withNavigationDefaults(JSON.parse(String(row.payload_json)));
     return botEventSchema.parse({
       eventId: row.event_id,
       botId: row.bot_id,
@@ -57,6 +58,22 @@ export const unreadEventsPageQuery = defineSqlQuery({
     });
   },
 });
+
+/**
+ * A status recorded before `dig_straight_down` existed reads back with its default (live 2026-10-04: Tom's old events
+ * failed validation on his first read, and his brain stopped).
+ */
+export function withNavigationDefaults(payload: unknown): unknown {
+  const policy = (payload as { status?: { policy?: Record<string, unknown> } } | null)?.status?.policy;
+  if (policy === undefined || policy === null || typeof policy !== "object") return payload;
+  for (const key of ["defaults", "effective"]) {
+    const navigation = (policy[key] as { navigation?: Record<string, unknown> } | undefined)?.navigation;
+    if (navigation !== undefined && navigation !== null && typeof navigation === "object" && !("dig_straight_down" in navigation)) {
+      navigation.dig_straight_down = DEFAULT_NAVIGATION_POLICY.dig_straight_down;
+    }
+  }
+  return payload;
+}
 
 export const remainingEventsQuery = defineSqlQuery({
   id: "remaining-events-count",
@@ -173,6 +190,11 @@ Overrides: ${JSON.stringify(event.payload.overrides)}
 Constraint: ${event.payload.constraint ?? "none"}`;
     case "dragon_reflex":
       return `### Event ${event.eventId}: dragon escape\n- Observed: ${event.observedAt}\n- Outcome: ${event.payload.outcome}\n- Health: ${event.payload.healthBefore} → ${event.payload.healthAfter}\n- Interrupted: ${event.payload.interrupted?.action ?? "nothing; the bot was idle"}\n- Reason: ${event.payload.reason ?? "clear of the observed hazard"}`;
+    case "navigation_own_regions_opened":
+      return `### Event ${event.eventId}: own regions opened to navigation
+- Observed: ${event.observedAt}
+- ${event.summary}
+- Search: ${event.payload.runId}`;
     case "stronghold_located":
       return `### Event ${event.eventId}: stronghold located\n- Observed: ${event.observedAt}\n- Search: ${event.payload.searchId}\n- Dimension: ${event.payload.dimension}\n- Portal frame: ${event.payload.confirmation.position.x}, ${event.payload.confirmation.position.y}, ${event.payload.confirmation.position.z}\n- Saved throws: ${event.payload.throwIds.join(", ") || "none; frame already loaded"}`;
     case "fire_reflex":

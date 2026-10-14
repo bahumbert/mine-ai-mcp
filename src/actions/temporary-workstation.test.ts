@@ -17,6 +17,10 @@ function fixture() {
       calls.push("place");
       return { kind: "placed", block, position };
     },
+    moveToOpenGround: async () => {
+      calls.push("move");
+      return true;
+    },
     collect: async (_name, target) => {
       assert.deepEqual(target, position);
       calls.push("collect");
@@ -64,6 +68,94 @@ test("missing carried workstation refuses before placement or crafting", async (
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /WORKSTATION_NOT_CARRIED/);
   assert.deepEqual(f.calls, []);
+});
+
+test("a full inventory refuses before placement: the workstation could not be picked back up", async () => {
+  const f = fixture();
+  (f.bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async () => {
+      throw new Error("must not execute");
+    },
+    f.failure,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_NO_ROOM/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("no_cell walks to open ground and places again once", async () => {
+  const f = fixture();
+  let tries = 0;
+  f.operations.place = async () => {
+    f.calls.push("place");
+    tries += 1;
+    return tries === 1 ? { kind: "no_cell" } : { kind: "placed", block: f.block, position: f.position };
+  };
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async () => {
+      f.calls.push("craft batch");
+      return { status: "succeeded" };
+    },
+    f.failure,
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.workstation?.recovered, true);
+  assert.deepEqual(f.calls, ["place", "move", "place", "craft batch", "collect"]);
+});
+
+test("no_cell after the walk fails with the whole story and does not walk again", async () => {
+  const f = fixture();
+  f.operations.place = async () => {
+    f.calls.push("place");
+    return { kind: "no_cell" };
+  };
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async () => {
+      throw new Error("must not execute");
+    },
+    f.failure,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_PLACEMENT_FAILED.*no_cell \(no dry, clear cell within 8 blocks: in water, a tunnel or a crowded spot\); move to open dry ground first/u);
+  assert.deepEqual(f.calls, ["place", "move", "place"]);
+});
+
+test("no_cell with no standing spot found fails without a second placement", async () => {
+  const f = fixture();
+  f.operations.place = async () => {
+    f.calls.push("place");
+    return { kind: "no_cell" };
+  };
+  f.operations.moveToOpenGround = async () => {
+    f.calls.push("move");
+    return false;
+  };
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async () => {
+      throw new Error("must not execute");
+    },
+    f.failure,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /no_cell/u);
+  assert.deepEqual(f.calls, ["place", "move"]);
 });
 
 test("unconfirmed placement cannot start crafting and recovers an observed placed block", async () => {

@@ -44,6 +44,20 @@ export type CraftPreparation =
   | { readonly kind: "uncraftable"; readonly plan: CraftPlanEvidence; readonly items: readonly string[] }
   | { readonly kind: "planner_failed"; readonly plan: CraftPlanEvidence; readonly items: readonly string[] };
 
+export interface CraftPlanOptions {
+  /**
+   * Materials to choose, in this order, where recipes accept several and none is carried: the logs that grow nearby
+   * rather than the first wood in registry order. Unknown names are ignored.
+   */
+  readonly prefer?: readonly string[];
+  /**
+   * How much of an item the explored world has (chunks holding its sources; 0 when none seen). Among plans equally
+   * short of what is carried, the one whose missing materials are seen most wins, and a material seen nowhere comes
+   * last (run 10: a stone pickaxe planned cobbled_deepslate, which nobody had seen, over cobblestone).
+   */
+  readonly seen?: (item: string) => number;
+}
+
 interface PlanningState {
   readonly available: Map<number, number>;
   readonly craftedSurplus: Map<number, number>;
@@ -51,6 +65,10 @@ interface PlanningState {
   readonly carried: Map<number, number>;
   readonly missing: Map<number, number>;
   readonly applications: CraftApplication[];
+  /** Item id -> rank among the caller's preferred materials (0 first); shared, never copied. */
+  readonly prefer: ReadonlyMap<number, number>;
+  /** Item id -> how much of it the explored world has, when the caller knows; shared, never copied. */
+  readonly seen: ((itemId: number) => number) | null;
 }
 
 type ItemSource =
@@ -69,6 +87,11 @@ interface PlannedCandidate {
   readonly item: PlannedItem;
 }
 
+/** A requirement no recipe path can make without needing one of these items, already being planned above it. */
+interface PlanCycle {
+  readonly cycle: ReadonlySet<number>;
+}
+
 interface PlannedTarget {
   readonly target: CraftTarget;
   readonly root?: PlannedItem;
@@ -82,6 +105,8 @@ function copyState(state: PlanningState): PlanningState {
     carried: new Map(state.carried),
     missing: new Map(state.missing),
     applications: [...state.applications],
+    prefer: state.prefer,
+    seen: state.seen,
   };
 }
 
@@ -97,9 +122,31 @@ function recipeInputs(recipe: MineflayerRecipe): readonly { id: number; count: n
   return recipe.delta.filter((item) => item.count < 0);
 }
 
-function missingScore(state: PlanningState): readonly [number, number, number] {
-  const missingUnits = [...state.missing.values()].reduce((total, count) => total + count, 0);
-  return [missingUnits, state.missing.size, state.applications.length];
+/**
+ * Lower is better: units missing, then units missing of materials the plan does
+ * not already take from the inventory, then kinds missing, then crafts. The
+ * second term breaks the tie between wood families: two oak logs short of a
+ * table and a pickaxe were reported as one missing pale_oak_log, the first
+ * planks recipe in registry order, and a gatherer then looked for pale oak in
+ * an oak forest. A material it already carries is the one it can find again. Carrying none of them, the caller's
+ * explored world has the most of comes next (items seen nowhere last), then the caller's preferred materials, in its order (live 3 October: carrying nothing, a stone pickaxe was still "3
+ * pale_oak_log", and the gatherer walked 900 blocks for them past oak and birch).
+ */
+function missingScore(state: PlanningState): readonly [number, number, number, number, number, number, number] {
+  let missingUnits = 0;
+  let unfamiliarUnits = 0;
+  let unseenUnits = 0;
+  let seenTotal = 0;
+  let unpreferred = 0;
+  for (const [itemId, count] of state.missing) {
+    missingUnits += count;
+    if (!state.carried.has(itemId)) unfamiliarUnits += count;
+    const seen = state.seen?.(itemId) ?? 1;
+    if (seen === 0) unseenUnits += count;
+    seenTotal += state.seen === null ? 0 : seen;
+    unpreferred += count * (state.prefer.get(itemId) ?? state.prefer.size);
+  }
+  return [missingUnits, unfamiliarUnits, unseenUnits, -seenTotal, unpreferred, state.missing.size, state.applications.length];
 }
 
 function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidate | null): boolean {
@@ -112,7 +159,12 @@ function isBetterCandidate(candidate: PlannedCandidate, current: PlannedCandidat
   return false;
 }
 
-/** Plan one requirement against a simulated inventory and retain its selected recipe tree. */
+/**
+ * Plan one requirement against a simulated inventory and retain its selected recipe tree. A recipe path that needs an
+ * item already being planned above it is a loop and is skipped; when every recipe of an ingredient loops back to that
+ * ingredient itself (iron ingots only craft out of nuggets and blocks made of ingots), it is a missing material, as an
+ * item without any recipe is. A requested item itself never is (coal only crafts out of coal: it is not craftable).
+ */
 function planNeededItem(
   bot: Bot,
   initial: PlanningState,
@@ -120,7 +172,10 @@ function planNeededItem(
   count: number,
   ancestors: ReadonlySet<number>,
   useInventory: boolean,
-): PlannedCandidate | null {
+): PlannedCandidate | PlanCycle {
+  // Needing an item already being planned above is a loop, carried or not: carried wheat spent on a hay block to
+  // craft wheat back is a round trip (live 2026-10-03).
+  if (ancestors.has(itemId)) return { cycle: new Set([itemId]) };
   const state = copyState(initial);
   const sources: ItemSource[] = [];
   let remaining = count;
@@ -144,18 +199,23 @@ function planNeededItem(
   }
 
   if (remaining === 0) return { state, item: { id: itemId, count, sources } };
-  if (ancestors.has(itemId)) return null;
 
-  const recipes = bot.recipesAll(itemId, null, true);
-  if (recipes.length === 0) {
+  const missingLeaf = (): PlannedCandidate => {
     addCount(state.required, itemId, remaining);
     addCount(state.missing, itemId, remaining);
     sources.push({ kind: "missing", count: remaining });
     return { state, item: { id: itemId, count, sources } };
-  }
+  };
+  // A recolouring recipe (a bed or wool dyed into another colour) makes nothing new: planned, it sent a bot after
+  // black wool and lily of the valley for its first white bed (live 2026-10-04). Kept only when it is the sole recipe.
+  const allRecipes = bot.recipesAll(itemId, null, true);
+  const fresh = allRecipes.filter((recipe) => !isRecolouring(bot, itemId, recipe));
+  const recipes = fresh.length > 0 ? fresh : allRecipes;
+  if (recipes.length === 0) return missingLeaf();
 
   const nextAncestors = new Set(ancestors).add(itemId);
   let best: PlannedCandidate | null = null;
+  const loopsTo = new Set<number>();
 
   for (const recipe of recipes) {
     const applications = Math.ceil(remaining / recipe.result.count);
@@ -172,7 +232,8 @@ function planNeededItem(
         nextAncestors,
         true,
       );
-      if (!planned) {
+      if ("cycle" in planned) {
+        for (const id of planned.cycle) loopsTo.add(id);
         cyclic = true;
         break;
       }
@@ -195,7 +256,10 @@ function planNeededItem(
     if (isBetterCandidate(candidate, best)) best = candidate;
   }
 
-  return best;
+  if (best !== null) return best;
+  loopsTo.delete(itemId);
+  if (loopsTo.size === 0 && ancestors.size > 0) return missingLeaf();
+  return { cycle: loopsTo.size > 0 ? loopsTo : new Set([itemId]) };
 }
 
 function materials(bot: Bot, counts: ReadonlyMap<number, number>): CraftMaterial[] {
@@ -265,10 +329,23 @@ function evidence(
  * Earlier targets reserve their requested output while intermediate surplus
  * remains available to later targets.
  */
-export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarget[]): CraftPreparation {
+export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarget[], options: CraftPlanOptions = {}): CraftPreparation {
   const available = new Map<number, number>();
   for (const item of bot.inventory.items()) addCount(available, item.type, item.count);
+  const prefer = new Map<number, number>();
+  for (const name of options.prefer ?? []) {
+    const id = bot.registry.itemsByName[name]?.id;
+    if (id !== undefined && !prefer.has(id)) prefer.set(id, prefer.size);
+  }
+  const seenBy = new Map<number, number>();
+  const seen = options.seen === undefined ? null : (itemId: number): number => {
+    let chunks = seenBy.get(itemId);
+    if (chunks === undefined) seenBy.set(itemId, (chunks = options.seen!(itemName(bot, itemId))));
+    return chunks;
+  };
   let state: PlanningState = {
+    prefer,
+    seen,
     available,
     craftedSurplus: new Map(),
     required: new Map(),
@@ -288,7 +365,7 @@ export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarge
     }
 
     const planned = planNeededItem(bot, state, target.id, target.count, new Set(), false);
-    if (!planned) {
+    if ("cycle" in planned) {
       plannerFailures.push(target.name);
       plannedTargets.push({ target });
       continue;
@@ -319,4 +396,21 @@ export function planCraftingFromInventory(bot: Bot, targets: readonly CraftTarge
     plan: evidence(bot, "ready", state, plannedTargets),
     applications: state.applications,
   };
+}
+
+/** The family of an item named with its colour: "bed" for white_bed, "wool" for red_wool; null for others. */
+const COLOURS = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
+function colouredFamily(name: string): string | null {
+  const colour = [...COLOURS].sort((a, b) => b.length - a.length).find((candidate) => name.startsWith(`${candidate}_`));
+  return colour === undefined ? null : name.slice(colour.length + 1);
+}
+
+/** Whether a recipe for a coloured item takes another of the same family (a black bed dyed white). */
+function isRecolouring(bot: Bot, itemId: number, recipe: Parameters<typeof recipeInputs>[0]): boolean {
+  const family = colouredFamily(bot.registry.items[itemId]?.name ?? "");
+  if (family === null) return false;
+  return recipeInputs(recipe).some((ingredient) => {
+    const name = bot.registry.items[ingredient.id]?.name ?? "";
+    return name !== "" && (name === family || colouredFamily(name) === family);
+  });
 }

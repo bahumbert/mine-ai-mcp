@@ -10,8 +10,9 @@ import { createSetSurvivalPolicyAction } from "./set-survival-policy/index.js";
  */
 import type { Bot } from "mineflayer";
 import { snapshotBotStatus, updateBotStatus, type SqlBotData } from "../bot-data/index.js";
+import type { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import type { NavigationRuntime } from "../navigation/index.js";
-import type { SessionFrontier } from "../runtime/frontier.js";
+import { seenInWorld, type SessionFrontier } from "../runtime/frontier.js";
 import type { ForegroundCancellation } from "../session/action-runner.js";
 import type { CombatController } from "../survival/index.js";
 import { createDiscardedItems } from "../world/discarded-items.js";
@@ -20,6 +21,7 @@ import { createActivatePortalAction } from "./activate-portal/index.js";
 import { createAttackDragonPerchAction } from "./attack-dragon-perch/index.js";
 import { createBarterAction } from "./barter/index.js";
 import { createBuildStructureAction } from "./build-structure/index.js";
+import { createTendCropsAction } from "./tend-crops/index.js";
 import { createCancelForegroundAction } from "./cancel-foreground-action/index.js";
 import { createCollectBlockAction } from "./collect-block/index.js";
 import { createCraftItemAction } from "./craft-item/index.js";
@@ -33,8 +35,11 @@ import { createExploreFrontierAction } from "./explore-frontier/index.js";
 import { createCollectMobDropAction } from "./hunt-mob/index.js";
 import { createLocateStrongholdAction, type StrongholdEyeFlights } from "./locate-stronghold/index.js";
 import { createNavigateAction } from "./navigate/index.js";
+import { createNoteDeleteAction } from "./note-delete/index.js";
 import { createNoteReadAction } from "./note-read/index.js";
 import { createNoteSaveAction } from "./note-save/index.js";
+import { createProtectRegionAction } from "./protect-region/index.js";
+import { createUnprotectRegionAction } from "./unprotect-region/index.js";
 import { createPlaceBlockAction } from "./place-block/index.js";
 import { createPrepareDragonPerchAction } from "./prepare-dragon-perch/index.js";
 import { createPickUpItemsAction } from "./pick-up-items/index.js";
@@ -50,6 +55,8 @@ import { createUseBucketAction } from "./use-bucket/index.js";
 import { createUseContainerAction } from "./use-container/index.js";
 import { createViewBlocksAction } from "./view-blocks/index.js";
 import { createViewCraftingRequirementsAction } from "./view-crafting-requirements/index.js";
+import { createViewSmeltingRecipesAction } from "./view-smelting-recipes/index.js";
+import { createViewBlockDropsAction } from "./view-block-drops/index.js";
 import { createViewFrontierAction } from "./view-frontier/index.js";
 import { createViewStatusAction, type ObserveStatusActivity } from "./view-status/index.js";
 
@@ -64,6 +71,8 @@ export interface ActionDependencies {
   readonly combat: CombatController;
   readonly cancelForegroundAction: (reason: string) => ForegroundCancellation;
   readonly observeStatusActivity: ObserveStatusActivity;
+  /** The bot's protected regions (ADR-012); routes read them through the provider, these tools write them. */
+  readonly protectedRegions: ProtectedRegionStore;
 }
 
 export interface ActionCatalogOptions {
@@ -81,6 +90,7 @@ export function createActions(
     combat,
     cancelForegroundAction,
     observeStatusActivity,
+    protectedRegions,
   }: ActionDependencies,
   options: ActionCatalogOptions = {},
 ) {
@@ -93,9 +103,11 @@ export function createActions(
     createAttackDragonPerchAction(bot, combat),
     createShootDragonAction(bot, combat),
     createBuildStructureAction(bot, navigation),
+    createTendCropsAction(bot, navigation),
     createCancelForegroundAction(cancelForegroundAction),
     createCollectBlockAction(bot, navigation, discarded),
-    createCraftItemAction(bot, navigation),
+    // A new measure per question: what is near the bot changes as it moves.
+    createCraftItemAction(bot, navigation, (item) => seenInWorld(bot, frontier)(item)),
     createDropItemAction(bot, navigation, discarded),
     createBarterAction(bot, navigation),
     createEatFoodAction(bot),
@@ -109,6 +121,9 @@ export function createActions(
     createNavigateAction(bot, navigation),
     createNoteSaveAction(bot, botData),
     createNoteReadAction(botData, bot.username),
+    createNoteDeleteAction(botData, bot.username),
+    createProtectRegionAction(bot, protectedRegions),
+    createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation),
     createPrepareDragonPerchAction(bot, combat),
     createPickUpItemsAction(bot, navigation, botData, discarded),
@@ -121,7 +136,9 @@ export function createActions(
     createUseBucketAction(bot, navigation),
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
-    createViewCraftingRequirementsAction(bot),
+    createViewCraftingRequirementsAction(bot, (item) => seenInWorld(bot, frontier)(item)),
+    createViewSmeltingRecipesAction(bot),
+    createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
     createViewStatusAction(bot, botData, observeStatusActivity),
   ];
@@ -153,6 +170,9 @@ export * from "./markdown.js";
 export * from "./navigate/index.js";
 export * from "./note-read/index.js";
 export * from "./note-save/index.js";
+export * from "./note-delete/index.js";
+export * from "./protect-region/index.js";
+export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";
 export * from "./prepare-dragon-perch/index.js";
 export * from "./pick-up-items/index.js";
@@ -168,5 +188,8 @@ export * from "./use-bucket/index.js";
 export * from "./use-container/index.js";
 export * from "./view-blocks/index.js";
 export * from "./view-crafting-requirements/index.js";
+export * from "./view-smelting-recipes/index.js";
+export * from "./view-block-drops/index.js";
+export * from "./tend-crops/index.js";
 export * from "./view-frontier/index.js";
 export * from "./view-status/index.js";

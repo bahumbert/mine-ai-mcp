@@ -12,6 +12,8 @@ import { startMcpSupervisor } from "./runtime-supervisor.js";
 export interface RuntimeBootstrap {
   readonly source: SourceIdentity;
   readonly configuration: HostOptions;
+  /** Where the runtime's watch worker writes freeze-*.json when its main thread stalls: the supervisor's incident directory. */
+  readonly freezeDirectory: string;
 }
 
 export interface Host extends AsyncDisposable {
@@ -23,7 +25,14 @@ export async function startHost(
   source: SourceIdentity = { kind: "unavailable", reason: "No source identity supplied by the host caller." },
   configuration = parseHostOptions(),
 ): Promise<Host> {
-  const bootstrap: RuntimeBootstrap = { source, configuration };
+  const incidentDirectory = path.join(
+    configuration.botData.storage.kind === "persistent"
+      ? configuration.botData.storage.root
+      : path.join(os.tmpdir(), "mine-ai"),
+    "host-incidents",
+    encodeURIComponent(configuration.instanceId),
+  );
+  const bootstrap: RuntimeBootstrap = { source, configuration, freezeDirectory: incidentDirectory };
   // Use the sibling in this installation, both from TypeScript and built JS.
   const runtimeFile = new URL(
     import.meta.url.endsWith(".ts") ? "./runtime-process.ts" : "./runtime-process.js",
@@ -37,13 +46,7 @@ export async function startHost(
     instanceId: configuration.instanceId,
     source,
     incidents: {
-      directory: path.join(
-        configuration.botData.storage.kind === "persistent"
-          ? configuration.botData.storage.root
-          : path.join(os.tmpdir(), "mine-ai"),
-        "host-incidents",
-        encodeURIComponent(configuration.instanceId),
-      ),
+      directory: incidentDirectory,
       retention: configuration.incidentRetention,
     },
   });

@@ -4,6 +4,7 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
+import { sourcesOf } from "../world/block-drops.js";
 import { CHUNK_WIDTH, chunkPosition } from "../world/chunks.js";
 
 export interface SessionFrontierStatus {
@@ -22,6 +23,11 @@ export interface SessionFrontier extends Disposable {
   status(): SessionFrontierStatus;
   idle(): Promise<void>;
   boundary(dimension: string, direction: { readonly x: number; readonly z: number }): number | null;
+  /**
+   * How many recorded chunks of the bot's dimension hold this block. The scan leaves out the blocks found nearly
+   * everywhere (stone, dirt, water...): none are recorded, so they count 0.
+   */
+  chunksWithMaterial(material: string): number;
   onRecorded(listener: (chunk: FrontierChunk) => void): () => void;
   close(): void;
 }
@@ -40,7 +46,15 @@ interface LoadedColumn {
 interface PendingChunk extends FrontierChunk {
   firstObservedAt: string;
   column: LoadedColumn;
+  /** Already recorded: its materials, biomes and water are scanned again and replace the old ones. */
+  rescan?: boolean;
 }
+
+/**
+ * A recorded chunk loaded again after this long is scanned again: the world changes (trees cut, houses built), and a
+ * material list kept from the first sight sent bots to logs long gone (live 2026-10-04).
+ */
+export const RESCAN_AFTER_MS = 10 * 60_000;
 
 type SurfaceKind = "air" | "water" | "other";
 
@@ -81,6 +95,32 @@ const ROUTINE_MATERIALS = new Set([
   "deepslate_diamond_ore",
 ]);
 
+/** How far around the bot loaded blocks count as seen for the crafting planner (run 10: Mira, at the surface). */
+export const SEEN_RADIUS = 32;
+/** Loaded blocks of one kind counted at most: enough to tell near from none, cheap to ask. */
+export const SEEN_CAP = 64;
+
+/**
+ * How much of an item the explored world has, for the crafting planner's ties: over the blocks it is gathered from,
+ * the most of the loaded blocks of that kind within {@link SEEN_RADIUS} of the bot (up to {@link SEEN_CAP}) or the
+ * recorded chunks that hold it (the frontier leaves out stone, deepslate and the like, so those count by what is
+ * near). Run 10: a stone pickaxe planned cobbled_deepslate at the surface, Mira dug toward it for 18 minutes, with
+ * stone underfoot. Each block kind is asked once per call.
+ */
+export function seenInWorld(bot: Bot, frontier: Pick<SessionFrontier, "chunksWithMaterial">): (item: string) => number {
+  const byBlock = new Map<string, number>();
+  const blockSeen = (block: string): number => {
+    let seen = byBlock.get(block);
+    if (seen === undefined) {
+      const id = bot.registry.blocksByName[block]?.id;
+      const near = id === undefined ? 0 : bot.findBlocks({ matching: id, maxDistance: SEEN_RADIUS, count: SEEN_CAP }).length;
+      byBlock.set(block, (seen = Math.max(near, frontier.chunksWithMaterial(block))));
+    }
+    return seen;
+  };
+  return (item) => Math.max(0, ...sourcesOf(item, bot.version).map(({ block }) => blockSeen(block)));
+}
+
 /**
  * Records loaded chunks, useful material sets, and counted biome samples.
  * Work is queued so packet delivery never performs a scan.
@@ -97,9 +137,11 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
   const remember = (chunk: FrontierChunk, column: LoadedColumn | undefined) => {
     if (closed || !column) return;
     try {
-      const alreadyRecorded =
-        data.read("SELECT 1 FROM frontier_chunks WHERE chunk_key = ?", chunkKey(chunk)).length > 0;
-      if (!alreadyRecorded) queueChunk({ ...chunk, firstObservedAt: new Date().toISOString(), column });
+      const recorded = data.read("SELECT scanned_at FROM frontier_chunks WHERE chunk_key = ?", chunkKey(chunk))[0];
+      if (recorded === undefined) queueChunk({ ...chunk, firstObservedAt: new Date().toISOString(), column });
+      else if (Date.now() - Date.parse(String(recorded.scanned_at)) >= RESCAN_AFTER_MS) {
+        queueChunk({ ...chunk, firstObservedAt: new Date().toISOString(), column, rescan: true });
+      }
       storageError = null;
     } catch (cause) {
       storageError = message(cause);
@@ -177,6 +219,16 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
       error: storageError ?? scanErrors.values().next().value ?? null,
     }),
     idle: () => processingPromise ?? Promise.resolve(),
+    chunksWithMaterial: (material): number => {
+      const dimension = bot.game.dimension;
+      const row = data.read(
+        `SELECT COUNT(*) AS count FROM frontier_chunk_materials AS m JOIN frontier_chunks AS c USING (chunk_key)
+         WHERE m.material = ? AND c.dimension = ?`,
+        material,
+        dimension,
+      )[0];
+      return Number(row?.count ?? 0);
+    },
     boundary: (dimension, direction): number | null => {
       const row = data.read(
         `
@@ -206,6 +258,20 @@ function scanAndRecord(bot: Bot, data: SqlBotData, chunk: PendingChunk): boolean
   const biomes = countNamesFromPalettes(chunk.column.biomes, 64, (biomeId) => bot.registry.biomes[biomeId]?.name);
   const surfaceWaterFraction = measureSurfaceWaterFraction(chunk.column.sections, blockNameFor);
   const scannedAt = new Date().toISOString();
+
+  if (chunk.rescan) {
+    data.transaction((database) => {
+      database.prepare("UPDATE frontier_chunks SET scanned_at = ?, surface_water_fraction = ? WHERE chunk_key = ?").run(scannedAt, surfaceWaterFraction, key);
+      database.prepare("DELETE FROM frontier_chunk_materials WHERE chunk_key = ?").run(key);
+      database.prepare("DELETE FROM frontier_chunk_biomes WHERE chunk_key = ?").run(key);
+      const insertMaterial = database.prepare("INSERT INTO frontier_chunk_materials (chunk_key, material) VALUES (?, ?)");
+      for (const material of materials) insertMaterial.run(key, material);
+      const insertBiome = database.prepare("INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count) VALUES (?, ?, ?)");
+      for (const [biome, sampleCount] of biomes) insertBiome.run(key, biome, sampleCount);
+    }, { name: "rescanChunk" });
+    // Not a new chunk: no count, no frontier change, no listener.
+    return false;
+  }
 
   return data.transaction((database) => {
     const inserted = database

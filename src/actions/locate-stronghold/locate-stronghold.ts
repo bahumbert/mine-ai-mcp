@@ -68,7 +68,7 @@ export function createLocateStrongholdAction(
     inputSchema: locateStrongholdInputSchema,
     resultSchema: locateStrongholdResultSchema,
     parse: (input) => locateStrongholdInputSchema.parse(input ?? {}),
-    execution: { kind: "resumable_task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: { title: LOCATE_STRONGHOLD, destructiveHint: true, openWorldHint: true },
     formatResult: (result) => {
       const confirmed = result.confirmation;

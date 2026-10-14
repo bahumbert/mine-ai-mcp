@@ -1,0 +1,261 @@
+/**
+ * The farming of one plot, cell by cell, as a player does it: first everything that comes off the soil (ripe crops,
+ * grass and flowers), then the drops picked up (the seeds to replant are among them), then every cell tilled and
+ * planted. The physical gestures belong to a `FarmBody`; this file decides which gesture each cell gets and keeps
+ * the evidence, so it is the same whether the body is a live bot or a test's fake.
+ */
+import { tendCropsOutcomes, type TendCell, type TendCropsRequest, type TendEvidence } from "./contract.js";
+
+/** One block as the decisions need it. */
+export interface CellBlock {
+  readonly name: string;
+  readonly properties: Readonly<Record<string, string | number | boolean>>;
+  readonly liquid: boolean;
+  /** No collision box: air, grass, flowers, crops. */
+  readonly empty: boolean;
+  /** A hand can break it (minecraft-data `diggable`): false for air, water, bedrock. */
+  readonly breakable: boolean;
+}
+
+/** What the game data says of crops (`src/world/block-drops.ts`). */
+export interface CropFacts {
+  /** Whether the crop is ripe; null when the block is not a crop. */
+  isRipe(block: CellBlock): boolean | null;
+  /** The item a crop is planted from (an unripe crop's drop); null when not a crop. */
+  seedOf(blockName: string): string | null;
+}
+
+export interface FarmCell {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+}
+
+/** The physical gestures; each answers null when done, else why not. */
+export interface FarmBody {
+  read(x: number, y: number, z: number): CellBlock | null;
+  /** Walk until the cell is within reach. */
+  reach(cell: FarmCell): Promise<string | null>;
+  /** Break the block in that cell (a crop, grass) by hand. */
+  breakBlock(cell: FarmCell): Promise<string | null>;
+  /** Use the best carried hoe on the soil's top face; done when the soil changed. */
+  till(soil: FarmCell): Promise<string | null>;
+  /** Use one `item` on the farmland's top face; done when something grows above it. */
+  plant(soil: FarmCell, item: string): Promise<string | null>;
+  /** Pick up what the breaks dropped on and around the plot; `left`: the names of the drops it could not get. */
+  collectDrops(): Promise<{ readonly left: readonly string[] }>;
+  carried(item: string): number;
+  hasHoe(): boolean;
+}
+
+export type CellDecision = "harvest" | "clear" | "till" | "plant" | { readonly skip: string };
+
+/** What the cell needs, from its soil (at the plot's level) and what stands on it. */
+export function decideCell(soil: CellBlock | null, above: CellBlock | null, crops: CropFacts): CellDecision {
+  if (soil === null || above === null) return { skip: "unloaded" };
+  if (soil.liquid) return { skip: "water" };
+  if (above.liquid) return { skip: "under water" };
+  const ripe = crops.isRipe(above);
+  if (ripe === true) return "harvest";
+  if (ripe === false) return { skip: "growing" };
+  if (above.breakable) return above.empty ? "clear" : { skip: `occupied by ${above.name}` };
+  return soil.name === "farmland" ? "plant" : "till";
+}
+
+/** Where a run is, for the action's progress checkpoint. */
+export interface TendProgress {
+  readonly phase: "clearing" | "collecting drops" | "planting";
+  readonly harvested: number;
+  readonly cleared: number;
+  readonly tilled: number;
+  readonly planted: number;
+}
+
+export interface TendOutcome {
+  readonly evidence: TendEvidence;
+  /** Why the run stopped before the end (a stall), else null. */
+  readonly stop: string | null;
+  /** Why no work was started at all, else null. */
+  readonly refused: string | null;
+}
+
+/** The plot's cells, row by row, every other row backwards, so the walk never crosses the plot to begin a row. */
+function serpentine(request: TendCropsRequest): TendCell[] {
+  const cells: TendCell[] = [];
+  for (let z = request.min.z; z <= request.max.z; z += 1) {
+    const row: TendCell[] = [];
+    for (let x = request.min.x; x <= request.max.x; x += 1) row.push({ x, z });
+    cells.push(...((z - request.min.z) % 2 === 0 ? row : row.reverse()));
+  }
+  return cells;
+}
+
+/**
+ * Farm the plot. `stop` is asked before each cell's gestures: a reason ends the run there, with what was done (the
+ * caller's stall watch).
+ */
+export async function tendPlot(
+  request: TendCropsRequest,
+  body: FarmBody,
+  crops: CropFacts,
+  stop: () => string | null = () => null,
+  observe: (progress: TendProgress) => void = () => {},
+): Promise<TendOutcome> {
+  const cells = serpentine(request);
+  const soilOf = (cell: TendCell): FarmCell => ({ x: cell.x, y: request.y, z: cell.z });
+  const aboveOf = (cell: TendCell): FarmCell => ({ x: cell.x, y: request.y + 1, z: cell.z });
+  const decide = (cell: TendCell) => decideCell(body.read(cell.x, request.y, cell.z), body.read(cell.x, request.y + 1, cell.z), crops);
+  const counts = { harvested: 0, cleared: 0, tilled: 0, planted: 0 };
+  let dropsLeft: readonly string[] = [];
+  let phase: TendProgress["phase"] = "clearing";
+  const report = (next: TendProgress["phase"] = phase) => {
+    phase = next;
+    observe({ phase, ...counts });
+  };
+  const skipped: Record<string, TendCell[]> = {};
+  const skip = (cell: TendCell, reason: string) => (skipped[reason] ??= []).push({ x: cell.x, z: cell.z });
+  const inventoryBefore = new Map<string, number>();
+  const remember = (item: string) => {
+    if (!inventoryBefore.has(item)) inventoryBefore.set(item, body.carried(item));
+  };
+  const evidence = (): TendEvidence => ({
+    cells: cells.length,
+    ...counts,
+    gained: Object.fromEntries([...inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
+    skipped,
+    dropsLeft: [...dropsLeft],
+    after: plotAfter(request, cells, body, crops),
+  });
+
+  const decisions = cells.map(decide);
+  const tilling = decisions.filter((decision) => decision === "till").length;
+  if (request.till && tilling > 0 && !body.hasHoe()) return { evidence: evidence(), stop: null, refused: tendCropsOutcomes.noHoe(tilling) };
+  const plantable = decisions.filter((decision) => decision === "till" || decision === "plant").length;
+  if (request.plant !== null && plantable > 0 && body.carried(request.plant) === 0) {
+    return { evidence: evidence(), stop: null, refused: tendCropsOutcomes.plantMissing(request.plant) };
+  }
+  if (request.plant !== null) remember(request.plant);
+
+  // First what comes off the soil, so its drops (a harvest's seeds) are in hand before planting.
+  const seedFor = new Map<string, string>();
+  /** Cells already reported skipped in the first pass. */
+  const settled = new Set<string>();
+  let broke = false;
+  report("clearing");
+  for (const cell of cells) {
+    const decision = decide(cell);
+    if (!(decision === "clear" || (decision === "harvest" && request.harvest))) continue;
+    const reason = stop();
+    if (reason !== null) return { evidence: evidence(), stop: reason, refused: null };
+    const crop = body.read(cell.x, request.y + 1, cell.z)!.name;
+    const unreachable = await body.reach(aboveOf(cell));
+    const failed = unreachable === null ? await body.breakBlock(aboveOf(cell)) : null;
+    if (unreachable !== null || failed !== null) {
+      skip(cell, unreachable !== null ? `unreachable: ${unreachable}` : `could not break ${crop}: ${failed}`);
+      settled.add(`${cell.x},${cell.z}`);
+      continue;
+    }
+    broke = true;
+    if (decision === "clear") counts.cleared += 1;
+    else {
+      counts.harvested += 1;
+      const seed = crops.seedOf(crop);
+      if (seed !== null) {
+        seedFor.set(`${cell.x},${cell.z}`, seed);
+        remember(seed);
+      }
+      for (const item of [crop, ...(seed === null ? [] : [seed])]) remember(item);
+    }
+    report();
+  }
+  if (broke) {
+    report("collecting drops");
+    dropsLeft = (await body.collectDrops()).left;
+  }
+  report("planting");
+
+  // Then every cell tilled and planted: with the item asked for, else (a cell harvested here) the crop's own seed. An
+  // item that does not take is not tried again (live 2026-10-03: asked to plant "wheat", the harvest, not the seed,
+  // all 13 harvested cells stayed empty).
+  const unplantable = new Set<string>();
+  const choices = (cell: TendCell): string[] =>
+    [...new Set([request.plant, seedFor.get(`${cell.x},${cell.z}`) ?? null])].filter((item): item is string => item !== null && !unplantable.has(item));
+  for (const cell of cells) {
+    if (settled.has(`${cell.x},${cell.z}`)) continue;
+    let decision = decide(cell);
+    if (decision === "harvest") {
+      skip(cell, "ripe, not harvested");
+      continue;
+    }
+    if (typeof decision === "object") {
+      skip(cell, decision.skip);
+      continue;
+    }
+    if (decision === "clear") continue;
+    if (decision === "till" && !request.till) {
+      skip(cell, "not farmland");
+      continue;
+    }
+    if (decision === "plant" && choices(cell).length === 0) {
+      if (request.plant !== null) skip(cell, `${request.plant} cannot be planted`);
+      continue;
+    }
+    const reason = stop();
+    if (reason !== null) return { evidence: evidence(), stop: reason, refused: null };
+    const unreachable = await body.reach(soilOf(cell));
+    if (unreachable !== null) {
+      skip(cell, `unreachable: ${unreachable}`);
+      continue;
+    }
+    if (decision === "till") {
+      const soil = body.read(cell.x, request.y, cell.z)!.name;
+      // Coarse dirt takes two uses: the first makes it dirt.
+      for (let use = 0; use < 2 && decide(cell) === "till"; use += 1) if ((await body.till(soilOf(cell))) !== null) break;
+      decision = decide(cell);
+      if (decision !== "plant") {
+        skip(cell, `not tillable (${soil})`);
+        continue;
+      }
+      counts.tilled += 1;
+      report();
+    }
+    let why: string | null = null;
+    for (const item of choices(cell)) {
+      if (body.carried(item) === 0) {
+        why = `no ${item} left`;
+        continue;
+      }
+      if ((await body.plant(soilOf(cell), item)) === null) {
+        counts.planted += 1;
+        report();
+        why = null;
+        break;
+      }
+      unplantable.add(item);
+      why = `${item} cannot be planted`;
+    }
+    if (why !== null) skip(cell, why);
+  }
+  return { evidence: evidence(), stop: null, refused: null };
+}
+
+/** The plot as it stands now: crops by block and age, empty and dry farmland, water. */
+function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, crops: CropFacts): TendEvidence["after"] {
+  const after = { crops: {} as Record<string, number>, emptyFarmland: 0, dryFarmland: 0, water: 0 };
+  for (const cell of cells) {
+    const soil = body.read(cell.x, request.y, cell.z);
+    const above = body.read(cell.x, request.y + 1, cell.z);
+    if (soil === null || above === null) continue;
+    if (soil.liquid) after.water += 1;
+    if (soil.name !== "farmland") continue;
+    if (Number(soil.properties.moisture ?? 7) < 7) after.dryFarmland += 1;
+    const ripe = crops.isRipe(above);
+    if (ripe === null) {
+      if (!above.breakable) after.emptyFarmland += 1;
+      continue;
+    }
+    const key = `${above.name} age ${String(above.properties.age)}${ripe ? " ripe" : ""}`;
+    after.crops[key] = (after.crops[key] ?? 0) + 1;
+  }
+  return after;
+}

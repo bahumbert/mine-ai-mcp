@@ -71,3 +71,11 @@ test("reflex activity counts entries, accrues time in state, and yields waiter-l
   progress.reflexActivity({ kind: "entered", state: fight });
   assert.equal(progress.snapshot().reflexActivity.find((state) => state.name === "fight")?.entries, 2, "finished progress ignores later activity");
 });
+
+test("a swimmer bobbing at one x/z adds no travel; a walk adds its length", () => {
+  const progress = new RequestProgress({ dimension: "overworld", x: 0.5, y: 56, z: 0.5 });
+  for (let i = 0; i < 50; i++) progress.sample({ dimension: "overworld", x: 0.5, y: i % 2 === 0 ? 62 : 56, z: 0.5 }, false, undefined, true);
+  assert.equal(progress.snapshot().distanceTravelledBlocks, 0);
+  for (let i = 1; i <= 10; i++) progress.sample({ dimension: "overworld", x: 0.5 + i, y: 56, z: 0.5 }, false, undefined, false);
+  assert.ok(Math.abs(progress.snapshot().distanceTravelledBlocks - 10) < 1.1);
+});
