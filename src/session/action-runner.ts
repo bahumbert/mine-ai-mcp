@@ -44,6 +44,8 @@ export interface ActionRunnerOptions {
   /** Publishes an action's highlights, and decides whether any are built. */
   readonly highlighter?: BlockHighlighter;
   readonly position?: () => ProgressPosition | null;
+  /** Whether the bot is in water now: bobbing there is not travel. */
+  readonly inWater?: () => boolean;
   readonly tools?: () => ToolSnapshot;
 }
 
@@ -172,13 +174,16 @@ function measured<Name extends string, Result extends ActionResult>(
   result: Result | RuntimeFailure,
   interruptions: readonly string[] = [],
 ): ActionOutput<Name, Result> {
-  const output: ActionOutput<Name, Result> = { action, durationMs: Date.now() - startedAtMs, result };
+  // The wall clock can step back (WSL resyncing its clock, live 2026-10-07): a negative duration failed the output
+  // schema and every view_status call with it.
+  const output: ActionOutput<Name, Result> = { action, durationMs: Math.max(0, Date.now() - startedAtMs), result };
   return interruptions.length > 0 ? { ...output, interruptions: [...interruptions] } : output;
 }
 
 export class ActionRunner {
   readonly #highlighter: BlockHighlighter | undefined;
   readonly #position: () => ProgressPosition | null;
+  readonly #inWater: () => boolean;
   readonly #tools: () => ToolSnapshot;
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
@@ -190,6 +195,7 @@ export class ActionRunner {
   constructor(options: ActionRunnerOptions = {}) {
     this.#highlighter = options.highlighter;
     this.#position = options.position ?? (() => null);
+    this.#inWater = options.inWater ?? (() => false);
     this.#tools = options.tools ?? (() => ({ tools: [], armour: [] }));
   }
 
@@ -405,7 +411,7 @@ export class ActionRunner {
 
   samplePosition(discontinuity?: string): void {
     const owner = this.ownership().current;
-    this.#admittedRequest?.progress.sample(this.#position(), owner !== null && owner !== this.#admittedRequest.action, discontinuity);
+    this.#admittedRequest?.progress.sample(this.#position(), owner !== null && owner !== this.#admittedRequest.action, discontinuity, this.#inWater());
   }
 
   /** Attribute a native combat resource observation only to the request active at that instant. */
@@ -437,7 +443,7 @@ export class ActionRunner {
     if (cancellation instanceof BodyAbort && cancellation.detail.kind === "cancelled" && "kind" in output.result && output.result.kind === "runtime_failure") {
       output = { ...output, result: { kind: "runtime_failure", status: "cancelled", error: cancellation.message } };
     }
-    request.progress.sample(this.#position(), false);
+    request.progress.sample(this.#position(), false, undefined, this.#inWater());
     const progress = request.progress.finish();
     const snapshot = this.#requestSnapshot(request, { kind: "returned" });
     // A successful executor result confirms its event contract. Current-state
@@ -677,7 +683,7 @@ export class ActionRunner {
     try {
       context.signal?.throwIfAborted();
       const execute = async () => {
-        if (execution.kind === "task" || execution.kind === "resumable_task") await execution.prepare?.();
+        if (execution.kind === "task" || execution.kind === "resumable_task") await execution.prepare?.(context.signal);
         context.signal.throwIfAborted();
         return runWithHighlighter(this.#highlighter?.scope(context.signal) ?? { enabled: false, signal: context.signal }, () =>
           run(context),

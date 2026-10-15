@@ -407,3 +407,58 @@ test("a step out of the structure that does not move the bot ends the run instea
   assert.match(result.reason ?? "", /could not step out of the structure/u);
   assert.ok(exits <= 3, `asked to step out ${exits} times`);
 });
+
+// Live 2026-10-11 (Theo): the routes of a house build pillared up in a ring round it with dirt and never took it down;
+// the ring shut him in. The routes now report what they place, and a complete build takes those blocks down.
+function scaffoldedWorld(scaffold: [number, number, number][], breakFails: string[] = [], reportOnly: [number, number, number][] = []) {
+  const world = structureWorld();
+  const broken: string[] = [];
+  const route = world.physics.route;
+  let placedScaffold = false;
+  const physics = {
+    ...world.physics,
+    route: async (options: Parameters<typeof route>[0]) => {
+      if (!placedScaffold) {
+        placedScaffold = true;
+        for (const [x, y, z] of reportOnly) options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
+        for (const [x, y, z] of scaffold) {
+          world.put(new Vec3(x, y, z), "dirt");
+          (world.blocks.get(`${x},${y},${z}`) as unknown as { stateId: number }).stateId = 10;
+          options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
+        }
+      }
+      return route(options);
+    },
+    breakInPlace: async (options: Parameters<typeof world.physics.breakInPlace>[0]) => {
+      const at = `${options.position.x},${options.position.y},${options.position.z}`;
+      if (breakFails.includes(at)) return { status: "failed", reason: "unreachable" } as never;
+      broken.push(at);
+      return world.physics.breakInPlace(options);
+    },
+  };
+  return { ...world, physics, broken };
+}
+
+test("a complete build takes the scaffold its routes placed down, highest first", async () => {
+  const { bot, physics, broken, blocks } = scaffoldedWorld([[9, 65, 2], [9, 67, 2], [9, 66, 2]]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 3, removed: 3, left: [] });
+  assert.deepEqual(broken, ["9,67,2", "9,66,2", "9,65,2"]);
+  assert.equal(blocks.get("9,66,2")!.name, "air");
+});
+
+test("a scaffold block that is also a cell of the structure is kept", async () => {
+  const { bot, physics, blocks } = scaffoldedWorld([], [], [[10, 64, 0]]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 1, removed: 0, left: [] });
+  assert.notEqual(blocks.get("10,64,0")!.name, "air");
+});
+
+test("scaffold that cannot be reached is reported and the build is still complete", async () => {
+  const { bot, physics } = scaffoldedWorld([[9, 66, 2], [9, 67, 2]], ["9,67,2"]);
+  const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 9, y: 67, z: 2 }] });
+});

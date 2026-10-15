@@ -311,13 +311,22 @@ function observeDroppedItems(bot: Bot, origin: Position3): LiveNearby["droppedIt
   return Object.values(bot.entities ?? {})
     .filter((entity) => entity.name === "item" && entity.position)
     .flatMap((entity) => {
-      const item = entity.getDroppedItem();
+      const item = readableDroppedItem(entity);
       if (!item) return [];
       const distance = distanceBetween(origin, entity.position);
       return [{ name: item.name, count: item.count, distance, position: roundedPosition(entity.position) }];
     })
     .sort((left, right) => left.distance - right.distance || left.name.localeCompare(right.name))
     .slice(0, DROPPED_ITEM_LIMIT);
+}
+
+/** A modded stack whose metadata could not be read must not fail the whole report. */
+function readableDroppedItem(entity: Bot["entity"]) {
+  try {
+    return entity.getDroppedItem();
+  } catch {
+    return null;
+  }
 }
 
 function distanceBetween(origin: Position3, target: Position3): number {
