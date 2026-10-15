@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { craftingBot, craftingRecipe, craftingRegistry as registry } from "../test-support/crafting.js";
+import { Vec3 } from "vec3";
+import { seenInWorld } from "../runtime/frontier.js";
 import { planCraftingFromInventory } from "./craft-plan.js";
 
 test("turns Mineflayer recipes into stable recursive steps and readable trees", () => {
@@ -164,4 +166,83 @@ test("reserves one shared inventory before declaring a batch ready", () => {
 
   assert.equal(preparation.kind, "missing_materials");
   assert.deepEqual(preparation.plan.missingMaterials, [{ item: "oak_log", count: 1 }]);
+});
+
+test("a first white bed is planned from wool and planks, never by dyeing a bed of another colour", () => {
+  // Live 2026-10-04: the plan for Tom's first bed was "3 black_wool, 1 lily_of_the_valley" (a black bed dyed white).
+  // The game's recipes: a white bed from white wool, or any bed dyed white; a black bed from black wool.
+  const beds = [
+    craftingRecipe("white_bed", 1, { black_bed: 1, white_dye: 1 }),
+    craftingRecipe("black_bed", 1, { black_wool: 3, oak_planks: 3 }, true),
+    craftingRecipe("white_dye", 1, { lily_of_the_valley: 1 }),
+    craftingRecipe("white_bed", 1, { white_wool: 3, oak_planks: 3 }, true),
+    // Wool from string too: counted as 12 missing string, it made the dyed bed look cheaper (4 missing).
+    craftingRecipe("white_wool", 1, { string: 4 }),
+  ];
+  const { bot } = craftingBot({ oak_planks: 3 }, true, beds);
+  const preparation = planCraftingFromInventory(bot, [{ ...registry.itemsByName.white_bed, count: 1 }]);
+  assert.equal(preparation.kind, "missing_materials");
+  const missing = preparation.plan.missingMaterials.map((material) => material.item);
+  assert.ok(!missing.some((item) => /black|lily|dye/u.test(item)), missing.join(", "));
+  assert.ok(missing.some((item) => item === "white_wool" || item === "string"), missing.join(", "));
+});
+
+/** What the explored world has: chunks that hold each item's sources, by item name (absent = none seen). */
+const seenIn = (chunks: Readonly<Record<string, number>>) => (item: string) => chunks[item] ?? 0;
+
+test("carrying nothing, a tie goes to the material the explored world has most of", () => {
+  // Run 10: a stone pickaxe planned cobbled_deepslate x3, a block nobody had seen, and Mira dug toward it for 18 minutes.
+  const alternatives = [
+    craftingRecipe("stone_pickaxe", 1, { cobbled_deepslate: 3, stick: 2 }, true),
+    craftingRecipe("stone_pickaxe", 1, { cobblestone: 3, stick: 2 }, true),
+  ];
+  const { bot } = craftingBot({ oak_planks: 2 }, true, alternatives);
+  const pickaxe = [{ ...registry.itemsByName.stone_pickaxe, count: 1 }];
+  assert.deepEqual(planCraftingFromInventory(bot, pickaxe).plan.missingMaterials, [{ item: "cobbled_deepslate", count: 3 }]);
+  const seen = seenIn({ cobblestone: 40, cobbled_deepslate: 2 });
+  assert.deepEqual(planCraftingFromInventory(bot, pickaxe, { seen }).plan.missingMaterials, [{ item: "cobblestone", count: 3 }]);
+  // Seen nowhere comes last, even against a material seen in a single chunk.
+  const nowhere = seenIn({ cobblestone: 1 });
+  assert.deepEqual(planCraftingFromInventory(bot, pickaxe, { seen: nowhere }).plan.missingMaterials, [{ item: "cobblestone", count: 3 }]);
+});
+
+test("sticks name a log the explored world has, not the first wood in registry order", () => {
+  const { bot } = craftingBot({}, false, TWO_WOODS);
+  const sticks = [{ ...registry.itemsByName.stick, count: 1 }];
+  assert.deepEqual(planCraftingFromInventory(bot, sticks).plan.missingMaterials, [{ item: "pale_oak_log", count: 1 }]);
+  assert.deepEqual(planCraftingFromInventory(bot, sticks, { seen: seenIn({ birch_log: 6 }) }).plan.missingMaterials, [{ item: "birch_log", count: 1 }]);
+});
+
+test("what is carried still wins over what the explored world has", () => {
+  const { bot } = craftingBot({ pale_oak_log: 1 }, true, TWO_WOODS);
+  const table = [{ ...registry.itemsByName.crafting_table, count: 1 }];
+  assert.equal(planCraftingFromInventory(bot, table, { seen: seenIn({ birch_log: 50 }) }).kind, "ready");
+});
+
+test("the planner follows what is near the bot: stone at the surface, deepslate underground, recorded logs", () => {
+  const alternatives = [
+    craftingRecipe("stone_pickaxe", 1, { cobbled_deepslate: 3, stick: 2 }, true),
+    craftingRecipe("stone_pickaxe", 1, { cobblestone: 3, stick: 2 }, true),
+  ];
+  const { bot } = craftingBot({ oak_planks: 2 }, true, alternatives);
+  const pickaxe = [{ ...registry.itemsByName.stone_pickaxe, count: 1 }];
+  const near = (blocks: Record<string, number>) => {
+    Object.assign(bot, {
+      findBlocks: ({ matching, count }: { matching: number; count: number }) =>
+        Array.from({ length: Math.min(count, blocks[registry.blocks[matching]?.name ?? ""] ?? 0) }, () => new Vec3(0, 0, 0)),
+    });
+    return { seen: seenInWorld(bot, { chunksWithMaterial: () => 0 }) };
+  };
+  assert.deepEqual(planCraftingFromInventory(bot, pickaxe, near({ stone: 200 })).plan.missingMaterials, [{ item: "cobblestone", count: 3 }]);
+  assert.deepEqual(planCraftingFromInventory(bot, pickaxe, near({ deepslate: 200 })).plan.missingMaterials, [{ item: "cobbled_deepslate", count: 3 }]);
+
+  const woods = craftingBot({}, false, TWO_WOODS).bot;
+  const sticks = [{ ...registry.itemsByName.stick, count: 1 }];
+  Object.assign(woods, { findBlocks: () => [] });
+  const recorded = seenInWorld(woods, { chunksWithMaterial: (block) => (block === "birch_log" ? 9 : 0) });
+  assert.deepEqual(planCraftingFromInventory(woods, sticks, { seen: recorded }).plan.missingMaterials, [{ item: "birch_log", count: 1 }]);
+
+  const carrying = craftingBot({ cobbled_deepslate: 3, oak_planks: 2 }, true, alternatives);
+  Object.assign(carrying.bot, { findBlocks: () => Array.from({ length: 64 }, () => new Vec3(0, 0, 0)) });
+  assert.equal(planCraftingFromInventory(carrying.bot, pickaxe, { seen: seenInWorld(carrying.bot, { chunksWithMaterial: () => 0 }) }).kind, "ready");
 });

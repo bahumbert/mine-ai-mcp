@@ -200,6 +200,13 @@ export interface BuildResult {
   readonly dug: number;
   readonly passes: number;
   readonly cells: readonly { readonly cell: BuildCell; readonly state: BuildCellState }[];
+  /** The blocks the build's own routes placed to get about (not cells of the structure), and what became of them. */
+  readonly scaffold: { readonly placed: number; readonly removed: number; readonly left: readonly BlockPosition[] };
+}
+
+interface PlacedScaffold {
+  readonly position: BlockPosition;
+  readonly stateId: number;
 }
 
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
@@ -288,6 +295,8 @@ class BuildTargeting {
   constructor(
     private readonly bot: Bot,
     private readonly request: BuildRequest,
+    /** Taking scaffold down: the highest cell first, as a pillar is taken down from its top. */
+    private readonly highestFirst = false,
   ) {
     this.#bounds = boundsOf(request.cells);
   }
@@ -395,7 +404,7 @@ class BuildTargeting {
       })
       .sort(
         (left, right) =>
-          left.position.y - right.position.y ||
+          (this.highestFirst ? right.position.y - left.position.y : left.position.y - right.position.y) ||
           asVec3(left.position).distanceTo(from) - asVec3(right.position).distanceTo(from),
       );
   }
@@ -475,6 +484,7 @@ class BuildTargeting {
       dug: this.dug,
       passes: this.passes,
       cells: this.request.cells.map((cell) => ({ cell, state: this.stateOf(cell) })),
+      scaffold: { placed: 0, removed: 0, left: [] },
     };
   }
 }
@@ -530,9 +540,13 @@ async function workInReach(
   }
 }
 
-export async function build(bot: Bot, request: BuildRequest): Promise<BuildResult> {
-  const targeting = new BuildTargeting(bot, request);
+export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown = false): Promise<BuildResult> {
+  const targeting = new BuildTargeting(bot, request, takingScaffoldDown);
   const movements = request.movements(targeting.protectedCells);
+  // Every block the routes of this run placed (live 2026-10-11, Theo: a ring of dirt at head height round his new house
+  // shut him in): taken down once the structure is complete.
+  const scaffold = new Map<number, PlacedScaffold>();
+  const onPlacement = takingScaffoldDown ? undefined : (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
   let idlePasses = 0;
 
   for (;;) {
@@ -543,7 +557,7 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
     targeting.passes += 1;
     targeting.refresh();
-    if (targeting.wrong().length === 0) return targeting.result("complete", null);
+    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), scaffold);
     const progressBefore = targeting.progress;
 
     // Standing in a cell the structure needs means every placement around it
@@ -551,7 +565,7 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
     // likewise when every remaining placement would seal the bot in.
     if (targeting.standingInStructure() || targeting.onlyEnclosing()) {
       const before = feetOf(bot);
-      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal });
+      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal, ...(onPlacement && { onPlacement }) });
       if (exit.status === "stopped") {
         return targeting.result("stopped", `could not step out of the structure: ${exit.reason}`);
       }
@@ -570,7 +584,7 @@ export async function build(bot: Bot, request: BuildRequest): Promise<BuildResul
     if (targeting.targets().length === 0) return targeting.result("stopped", null);
 
     const routed = targeting.identity();
-    const route = await runRoute(bot, request, targeting, movements);
+    const route = await runRoute(bot, request, targeting, movements, onPlacement);
     if (route.status === "stopped") {
       targeting.refresh();
       if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
@@ -594,9 +608,11 @@ async function runRoute(
   request: BuildRequest,
   targeting: BuildTargeting,
   movements: MovementPolicy,
+  onPlacement?: (placed: PlacedScaffold) => void,
 ): Promise<NavigationResult> {
   return request.route({
     movements,
+    ...(onPlacement && { onPlacement }),
     goal: targeting.goal(),
     onArrival: async ({ signal }) => {
       // An arrival that works nothing ends the route: continuing would ask the
@@ -615,4 +631,37 @@ async function runRoute(
     signal: request.signal,
     stopSignal: request.stopSignal,
   });
+}
+
+/** Whether the scaffold block placed at a cell still stands there. */
+const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(asVec3(placed.position))?.stateId === placed.stateId;
+
+/**
+ * Takes the scaffold down after a complete build: every block the routes placed that is no cell of the structure and
+ * still stands, highest first, through the build's own loop with those cells as air (the structure's cells stay as
+ * they are, so they stay protected). One pass: scaffold this pass places itself, or cannot reach, stays and is
+ * reported. A failure here never fails the build.
+ */
+async function takeScaffoldDown(
+  bot: Bot,
+  request: BuildRequest,
+  built: BuildResult,
+  scaffold: ReadonlyMap<number, PlacedScaffold>,
+): Promise<BuildResult> {
+  if (scaffold.size === 0) return built;
+  const structure = new Set(request.cells.map((cell) => keyOf(cell.position)));
+  const standing = [...scaffold.entries()]
+    .filter(([key, placed]) => !structure.has(key) && standsStill(bot, placed))
+    .map(([, placed]) => placed)
+    .sort((a, b) => b.position.y - a.position.y);
+  if (standing.length > 0) {
+    try {
+      await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...standing.map(({ position }) => ({ position, blockName: "air" }))] }, true);
+    } catch (error) {
+      request.signal?.throwIfAborted();
+      void error;
+    }
+  }
+  const left = standing.filter((placed) => standsStill(bot, placed)).map(({ position }) => position);
+  return { ...built, scaffold: { placed: scaffold.size, removed: standing.length - left.length, left } };
 }

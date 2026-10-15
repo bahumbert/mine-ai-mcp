@@ -358,6 +358,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "navigate",
       "note_save",
       "note_read",
+      "note_delete",
       "protect_region",
       "unprotect_region",
       "place_block",

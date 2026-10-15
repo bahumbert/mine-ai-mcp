@@ -154,6 +154,14 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
     missing: shortfall(bot, result),
     passes: result.passes,
     complete: wrong === 0,
+    ...(result.scaffold.placed > 0 && {
+      scaffold: {
+        placed: result.scaffold.placed,
+        removed: result.scaffold.removed,
+        left: result.scaffold.left.slice(0, NAMED_CELLS_PER_REASON).map(({ x, y, z }) => ({ x, y, z })),
+        leftCount: result.scaffold.left.length,
+      },
+    }),
   };
 }
 
@@ -270,6 +278,13 @@ export function formatBuildStructureResult(result: BuildStructureResult): string
     `- Missing: ${structure.missing.map((entry) => `${entry.count} ${entry.block}`).join(", ") || "nothing"}`,
     `- Passes: ${structure.passes}`,
   ];
+  if (structure.scaffold !== undefined) {
+    const { placed, removed, left, leftCount } = structure.scaffold;
+    lines.push(
+      `- Scaffold: ${placed} placed by the routes, ${removed} taken down` +
+        (leftCount > 0 ? `, ${leftCount} still standing (${left.map(({ x, y, z }) => `${x} ${y} ${z}`).join("; ")}${leftCount > left.length ? "; ..." : ""})` : ""),
+    );
+  }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");
 }
@@ -286,7 +301,7 @@ export function createBuildStructureAction(
     inputSchema: buildStructureInputSchema,
     resultSchema: buildStructureResultSchema,
     formatResult: formatBuildStructureResult,
-    execution: { kind: "task", prepare: () => prepareBotForMovement(bot, navigation) },
+    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: buildStructureAnnotations,
     parse: parseBuildStructureRequest,
     execute: (request, context) =>
