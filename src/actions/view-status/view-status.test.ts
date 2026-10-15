@@ -71,13 +71,6 @@ function liveBot(): Bot {
         9: loaded(9, "rabbit", new Vec3(30, 99, 18.68)),
         10: loaded(10, "slime", new Vec3(-9.5, 99, 78.68)),
         11: loaded(11, "player", new Vec3(-12, 99, 14)),
-        // A modded stack whose metadata never parsed: skipped, not a failed report.
-        12: {
-          ...loaded(12, "item", new Vec3(-9, 99, 20)),
-          getDroppedItem: () => {
-            throw new TypeError("undefined is not an object (evaluating 'networkItem.present')");
-          },
-        },
       },
     },
   );

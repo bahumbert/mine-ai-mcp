@@ -203,12 +203,3 @@ test("cells kept from earlier parts are never dug by the routes of this one", as
   assert.equal(parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: [] }).keep, undefined);
   assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: Array.from({ length: 2049 }, (_, x) => ({ x, y: 64, z: 0 })) }));
 });
-
-test("the result says how much scaffold the routes placed, took down and left", () => {
-  const structure = {
-    dimension: "overworld", cells: 2, correct: 2, placed: 2, dug: 0, wrong: 0, left: [], missing: [], passes: 2, complete: true,
-    scaffold: { placed: 5, removed: 4, left: [{ x: 9, y: 67, z: 2 }], leftCount: 1 },
-  };
-  const markdown = formatBuildStructureResult({ status: "succeeded", structure } as never);
-  assert.match(markdown, /Scaffold: 5 placed by the routes, 4 taken down, 1 still standing \(9 67 2\)/);
-});

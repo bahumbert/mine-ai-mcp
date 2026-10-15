@@ -1,6 +1,6 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
-import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
+import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
  * and what each costs, answered with Mineflayer's own knowledge of blocks,
@@ -16,11 +16,9 @@ import type { Bot } from "mineflayer";
 import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
-import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
+import type { BreakEvaluation, MovementPolicy, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
-import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
-import { OPEN_COLUMN_REACH } from "../world/swimming.js";
 import {
   packKey,
   type BlockObservation,
@@ -29,31 +27,6 @@ import {
   type WorldView,
 } from "../world/world.js";
 import { blockClass, observeMineflayerBlock } from "./world.js";
-import { tagsOf } from "../../world/block-tags.js";
-
-/**
- * Whether a bot with its feet in this cell is out on deep open water. The sea above counts as much as the sea under
- * the feet: a bot on the sea floor stands in water too shallow to be "deep" by its own cell alone (live 2026-10-10:
- * stranded on the floor, every way up refused as a swim across deep water). So the whole water column over the feet is
- * asked. Already swimming (feet and head in water) under a roof is at sea too: a 1-wide roofed pocket fails the
- * open-water span test (live 2026-10-10), and refusing the sea there leaves no way out. With open air over the water
- * (a river mouth, a shore) it is not: run 7 swam ~130 blocks out to sea that way. `solidAt` says whether a cell holds
- * something solid (false when not loaded).
- */
-export function feetAtSea(water: WaterAt, feet: BlockPosition, solidAt: (x: number, y: number, z: number) => boolean): boolean {
-  const roofed = (): boolean => {
-    for (let y = feet.y; y <= feet.y + OPEN_COLUMN_REACH; y++) {
-      if (water(feet.x, y, feet.z)) continue;
-      return solidAt(feet.x, y, feet.z);
-    }
-    return false;
-  };
-  let answer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z) ||
-    (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z) && roofed());
-  for (let y = feet.y; !answer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
-    answer = isDeepOpenWater(water, feet.x, y, feet.z);
-  return answer;
-}
 
 /** The only carried blocks standard navigation may spend to create a route: the cheap, plentiful block of each terrain. */
 export const STANDARD_SCAFFOLD_ITEMS = DEFAULT_SCAFFOLD_BLOCKS;
@@ -77,33 +50,6 @@ export function preferredScaffoldItem(bot: Bot, protectedNames: ReadonlySet<stri
   }
   return null;
 }
-/**
- * The block tags that mark the game's own common terrain and building stock: the
- * stones, dirts, planks, bricks and terracotta a player builds with freely. A
- * valuable (a metal or gem block), a log, a wool or a workstation is in none of them.
- */
-const FALLBACK_SCAFFOLD_TAGS = ["base_stone_overworld", "base_stone_nether", "dirt", "planks", "stone_bricks", "terracotta"] as const;
-
-/**
- * The carried block a route may bridge with when the bot has none of the survival
- * policy's `scaffold_blocks` and no route exists without one (a bot stranded on a
- * perch). Among the carried blocks that are a full solid cube to stand on, not
- * falling, not interactive and in a common-stock tag, the one carried most of; the
- * policy's own list is never consulted here, `preferredScaffoldItem` owns that.
- */
-export function fallbackScaffoldItem(bot: Bot, protectedNames: ReadonlySet<string> = new Set()) {
-  let best: InventoryItem | null = null;
-  for (const item of bot.inventory.items()) {
-    if (protectedNames.has(item.name) || (best !== null && best.count >= item.count)) continue;
-    const block = bot.registry.blocksByName[item.name];
-    if (!block) continue;
-    if (!tagsOf(item.name, bot.version).some((tag) => (FALLBACK_SCAFFOLD_TAGS as readonly string[]).includes(tag))) continue;
-    const { geometry, traits } = observeMineflayerBlock(blockClass(bot).fromStateId(block.defaultState, 0));
-    if (geometry.fullCube && geometry.safeSupport && !traits.interactive && !traits.falling && traits.liquid === null)
-      best = item;
-  }
-  return best;
-}
 const ROUTE_PROTECTED_CROPS = [
   "wheat",
   "carrots",
@@ -119,7 +65,7 @@ const ROUTE_PROTECTED_CROPS = [
   "nether_wart",
   "cocoa",
 ] as const;
-const AVOID_BLOCKS = ["fire", "soul_fire", "lava", "bubble_column"] as const;
+const AVOID_BLOCKS = ["fire", "soul_fire", "cobweb", "lava", "bubble_column"] as const;
 
 type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
@@ -128,8 +74,6 @@ export interface MineflayerMovementPolicyOptions {
   readonly protectedBlockNames?: readonly string[];
   readonly protectedScaffoldNames?: readonly string[];
   readonly scaffolding?: boolean;
-  /** Also bridge with a common block the bot carries when it has none of the policy's scaffold blocks (`fallbackScaffoldItem`). */
-  readonly scaffoldFallback?: boolean;
   /** Additional route cost per placed block. Standard navigation uses 20. */
   readonly placementPenalty?: number;
   readonly allowDigging?: boolean;
@@ -153,15 +97,7 @@ export interface MineflayerMovementPolicyOptions {
    * Every other region refuses both.
    */
   readonly ignoreRegionsOwnedBy?: string;
-  /** Lets routes swim deep open water (`deep-water.ts`); off by default: it is crossed by boat (`navigate`). */
-  readonly allowDeepWater?: boolean;
 }
-
-/**
- * A route never sets off across deep open water (owner, 2026-10-02 and 2026-10-04: never cross deep ocean without a
- * boat; `navigate` crosses it by boat). The bot already out on it may swim anywhere, so the way back is never closed.
- */
-export const DEEP_WATER_REASON = "deep open water: crossed by boat, never swum";
 
 /** Whether the cell holds water or lava, and whether as a source; null when it holds neither or is not loaded. */
 function liquidAt(world: WorldView, x: number, y: number, z: number): "source" | "flowing" | null {
@@ -351,9 +287,9 @@ function stateCount(registry: Bot["registry"]): number {
   return highest + 1;
 }
 
-function scaffoldSelection(bot: Bot, protectedNames: ReadonlySet<string>, enabled: boolean, fallback: boolean): ScaffoldSelection | null {
+function scaffoldSelection(bot: Bot, protectedNames: ReadonlySet<string>, enabled: boolean): ScaffoldSelection | null {
   if (!enabled) return null;
-  const item = preferredScaffoldItem(bot, protectedNames) ?? (fallback ? fallbackScaffoldItem(bot, protectedNames) : null);
+  const item = preferredScaffoldItem(bot, protectedNames);
   if (!item) return null;
   const block = bot.registry.blocksByName[item.name]!;
   if (!block.states?.some((state) => state.name === "axis"))
@@ -398,7 +334,6 @@ export const MAXIMUM_BUCKET_DROP = 80;
 
 /** The step decisions, shared: search asks about every cell it could stand in, and the answer names no cell. */
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };
-const DEEP_WATER_STEP: PolicyDecision = { kind: "prohibited", reason: DEEP_WATER_REASON };
 const AVOIDED_STEP: PolicyDecision = { kind: "prohibited", reason: "movement policy avoids this block" };
 const OPENS_INTO_LIQUID: PolicyDecision = {
   kind: "prohibited",
@@ -476,8 +411,6 @@ export function createMineflayerMovementPolicy(
       return breakByState.remember(observation, prohibited);
     }
     if (options.requireHarvestTool && !plan.harvestable) return breakByState.remember(observation, unharvestable);
-    // A web is no terrain to preserve: breaking it is the only way through, priced by the best carried tool's time.
-    if (observation.traits.entangling) return breakByState.remember(observation, { decision: ALLOWED_STEP, tool: plan.tool });
     return breakByState.remember(observation, { decision: terrainBreak, tool: plan.tool });
   };
 
@@ -490,19 +423,10 @@ export function createMineflayerMovementPolicy(
 
   // Read at each check rather than when the policy is made, like the navigation policy: a region protected while a
   // long action runs applies to its next search.
-  let ownRegionsOpen = false;
-  const ownRegionEscape: OwnRegionEscape | undefined = options.ignoreRegionsOwnedBy === undefined
-    ? {
-        inside: (x, y, z) => readProtectedRegions(bot).some((region) =>
-          sameOwner(region.owner, bot.username) && protectedRegionAt([region], bot.game.dimension, x, y, z) !== null),
-        open: () => { ownRegionsOpen = true; },
-        close: () => { ownRegionsOpen = false; },
-      }
-    : undefined;
   const regionRefusal = (x: number, y: number, z: number): PolicyDecision | null => {
     const regions = readProtectedRegions(bot);
     if (regions.length === 0) return null;
-    const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy ?? (ownRegionsOpen ? bot.username : undefined));
+    const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy);
     return region === null ? null : { kind: "prohibited", reason: `inside ${describeProtectedRegion(region)}` };
   };
 
@@ -512,27 +436,6 @@ export function createMineflayerMovementPolicy(
   const avoids = (observation: BlockObservation): boolean =>
     (observation.bits & AVOIDED_BITS) !== 0 ||
     (observation.kind === "loaded" && avoidedStates[observation.stateId] === 1);
-
-  const allowDeepWater = options.allowDeepWater ?? false;
-  const waterIn = (world: WorldView): WaterAt => (x, y, z) => {
-    const block = world.blockAt(x, y, z);
-    return block.kind === "loaded" && (block.traits.liquid === "water" || block.traits.waterlogged);
-  };
-  // Whether the bot itself is out on deep water, read once per cell it stands in (search asks of every step).
-  let seaCell = "";
-  let seaAnswer = false;
-  const atSea = (world: WorldView): boolean => {
-    const feet = bot.entity.position.floored();
-    const key = `${feet.x},${feet.y},${feet.z}`;
-    if (key !== seaCell) {
-      seaCell = key;
-      seaAnswer = feetAtSea(waterIn(world), feet, (x, y, z) => {
-        const block = world.blockAt(x, y, z);
-        return block.kind === "loaded" && block.collisionShapes.length > 0;
-      });
-    }
-    return seaAnswer;
-  };
 
   const policy = createMovementPolicy({
     allowDigging: options.allowDigging ?? true,
@@ -585,7 +488,6 @@ export function createMineflayerMovementPolicy(
         const observation = world.blockAt(x, y + dy, z);
         if (avoids(observation)) return AVOIDED_STEP;
       }
-      if (!allowDeepWater && isDeepOpenWater(waterIn(world), x, y, z) && !atSea(world)) return DEEP_WATER_STEP;
       return ALLOWED_STEP;
     },
   });
@@ -601,7 +503,6 @@ export function createMineflayerMovementPolicy(
   // the setting as it stands when the planner asks.
   return Object.freeze({
     ...policy,
-    ...(ownRegionEscape !== undefined && { ownRegionEscape }),
     get allowDownward() {
       return readNavigationPolicy(bot).dig_straight_down;
     },
@@ -609,7 +510,7 @@ export function createMineflayerMovementPolicy(
       return readNavigationPolicy(bot).bucket_drops && bucketAvailable(bot) ? MAXIMUM_BUCKET_DROP : 0;
     },
     get scaffold() {
-      return scaffoldSelection(bot, protectedScaffolds, scaffolding, options.scaffoldFallback ?? false);
+      return scaffoldSelection(bot, protectedScaffolds, scaffolding);
     },
   });
 }

@@ -929,19 +929,3 @@ test("a supplied step field is charged on the cell it prices", () => {
   );
   assert.equal(north?.step.cost.hazardPenalty, 0);
 });
-
-test("a cobweb in the next cell is planned as a block to break, never walked through", () => {
-  const web = { stateId: 20, collisionShapes: [], traits: { empty: true, entangling: true, safeToBreak: true } };
-  const world = flat([{ x: 1, y: 63, z: 0 }, web], [{ x: 1, y: 64, z: 0 }, web]);
-  const policy = {
-    allowDigging: true,
-    priceBreak: () => ({ decision: { kind: "allowed" as const }, tool: { itemType: null, expectedTicks: 7 } }),
-  };
-  const toward = generateFrom(world, ORIGIN, { policy }).filter((m) => m.step.to.x === 1 && m.step.to.y === 63 && m.step.to.z === 0);
-  assert.ok(toward.length > 0, "the corridor is offered");
-  for (const movement of toward) {
-    assert.ok(breaksAt(movement, 1, 63) && breaksAt(movement, 1, 64), `${movement.step.kind} breaks both webs`);
-    assert.ok(movement.cost >= 14, "priced at the webs' break time");
-  }
-  assert.equal(generateFrom(world, ORIGIN, { policy: { allowDigging: false } }).filter(to(1, 63, 0)).length, 0, "no digging, no way through");
-});

@@ -83,9 +83,9 @@ export type ActionExecution =
   | { readonly kind: "information" }
   | {
       readonly kind: "task";
-      readonly prepare?: (signal: AbortSignal) => Promise<void> | void;
+      readonly prepare?: () => Promise<void> | void;
     }
-  | { readonly kind: "resumable_task"; readonly prepare?: (signal: AbortSignal) => Promise<void> | void }
+  | { readonly kind: "resumable_task"; readonly prepare?: () => Promise<void> | void }
   | { readonly kind: "control" }
   | { readonly kind: "concurrent" };
 
