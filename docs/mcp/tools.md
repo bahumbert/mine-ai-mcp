@@ -163,8 +163,7 @@ dragon or crystals have been killed.
 Use `view_blocks` to read blocks without moving. `find` names up to
 eight block kinds and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
-reported whatever the `limit`, which defaults to twelve per name, up to a thousand (`more` says there are
-more: counting every stone loaded once stalled the runtime). `box` reads every cell
+reported whatever the `limit`, which defaults to twelve per name. `box` reads every cell
 of a small box around a point, drawn as one grid per layer with a legend, up to
 nine across and seven high, with `kinds`: for each block name in the box, the tool class it is mined with
 (its game-data `mineable/<tool>` material: pickaxe, shovel, axe, hoe, or none) and whether it is solid. `cells`
@@ -243,18 +242,13 @@ or what a block drops. The arguments are `items` and `blocks`, up to 16 names
 each, at least one name in all. Success reports, per item, the blocks an
 ordinary break by hand gathers it from, each with `chance` (how often one break
 yields it, at no fortune) and `planted` (the block is a crop the item grows
-into, such as wheat for wheat seeds, listed after the wild sources), and the
-`mobs` that drop it when killed, each with `chance` and `hostile` (the game's
-hostile category: a fight, not a hunt), from the entity loot tables
-(`src/world/data/mob-drops/<version>.json`, `src/world/mob-drops-extract.ts`;
-conditions on the kill, such as a player kill or a fire, are left out); and per
+into, such as wheat for wheat seeds, listed after the wild sources); and per
 block, every drop in loot order with the `tool` it needs (`silk_touch`,
 `shears`, `shears or silk_touch`, or an item) and the block `state` it needs
 (a crop's ripe `age`). Drops come from the game's own loot tables:
 `src/world/data/block-drops/<version>.json`, generated from the vanilla server
 jar by `src/world/block-drops-extract.ts`; a server newer than every shipped
-file uses the nearest older one, an older patch of the same minor version the
-nearest newer one (`dataVersion` says which). `collect_block`
+file uses the nearest older one (`dataVersion` says which). `collect_block`
 reads the same data for the item a break yields and how many breaks a request
 may take. `[UNKNOWN_DROP_NAMES]` names what Minecraft does not have;
 `[DROP_DATA_UNAVAILABLE]` means no data ships for this version or any older
@@ -285,14 +279,6 @@ available during another action and do not mark, change, or delete notes. There 
 no automatic expiry. For older notes or different filters, query `main.notes` with
 `query_bot_data`. Defined in
 [src/actions/note-read/contract.ts](../../src/actions/note-read/contract.ts).
-
-### `note_delete`
-
-Delete this bot's own notes by id (`note_ids`, 1 to 500 positive integers, from
-`note_read` or `main.notes`). Another bot's notes are never deleted: ids that are not
-this bot's, or no longer exist, come back in `notDeleted`, the rest in `deleted`.
-Deleting cannot be undone and uses the foreground task slot. Defined in
-[src/actions/note-delete/contract.ts](../../src/actions/note-delete/contract.ts).
 
 ### `protect_region`
 
@@ -328,16 +314,6 @@ When digging is enabled, loss of the starting best pickaxe, shovel, or axe
 harvest capability stops at Pathfinder's safe cancellation point and returns
 `partial` with `[TOOL_TIER_LOST]`. Reissue the same request to continue with the
 remaining tool; `navigate` has no continuation flag.
-
-Routes never set off across deep open water (water at least three deep, nine or more blocks across both ways: the
-sea, wide lakes; rivers and coasts are swum), for every action that moves the bot; a bot already out on it swims
-back. When a `navigate` route stops short and the straight way on crosses deep open water, it fails with
-`[NAVIGATION_DEEP_WATER]` naming where the water starts, or, with a boat carried, walks to the water's edge at the
-water's level, puts the boat in, rides it straight across, gets off at the far shore, takes the boat back and goes on
-(`boatBlocks` in the evidence; `[NAVIGATION_BOAT_FAILED]` when the crossing could not be made). With a boat carried and
-24 or more blocks of deep open water on the straight way, the boat is taken at once instead of a way round. At the far
-shore the boat goes along to a bank at most one block above the water, or a step is cut into the bank from the boat.
-Kelp, seagrass and waterlogged blocks count as water.
 
 Active portal cells are not navigation destinations. Use `enter_nether_portal`
 or `enter_end_portal` with the active portal block's explicit `x`, `y`, `z`.
@@ -966,15 +942,8 @@ defined in [src/server/async-tools.ts](../../src/server/async-tools.ts).
 
 Use `send_message` to communicate with other players via in-game public
 chat. The argument is `message`, containing the text string to broadcast.
-The optional `to` (a Minecraft username, 1 to 16 letters, digits or underscores)
-whispers the message to that one player instead, with at most 233 characters so
-it fits one `/tell` command. The player must be online (matched without regard
-to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
-and the result's `to` repeats the name asked for (on success, the name as the
-server spells it).
 Success proves the message was sent and the bot observed its own chat echo
-returned by the server (for a whisper, the server's
-`commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground
+returned by the server. It does not use the body: it runs beside any foreground
 action without being refused or cancelling it, and is a direct call (no
 `submission_id` or `wait_timeout_ms`). Defined in
 [src/actions/send-message/contract.ts](../../src/actions/send-message/contract.ts).

@@ -208,15 +208,6 @@ export const structureAuditSchema = z.strictObject({
   missing: z.array(z.strictObject({ block: z.string(), count: z.number().int().positive() })),
   passes: z.number().int().nonnegative(),
   complete: z.boolean(),
-  /** Present when the routes placed scaffold: how many blocks, how many were taken down, and where the rest still stands. */
-  scaffold: z
-    .strictObject({
-      placed: z.number().int().positive(),
-      removed: z.number().int().nonnegative(),
-      left: z.array(z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })).max(NAMED_CELLS_PER_REASON),
-      leftCount: z.number().int().nonnegative(),
-    })
-    .optional(),
 });
 
 export const buildStructureResultSchema = z.discriminatedUnion("status", [

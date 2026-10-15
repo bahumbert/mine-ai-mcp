@@ -37,7 +37,6 @@ const PUBLISHED: ReadonlyArray<
   ["navigate", "resumable_task", false, true],
   ["note_save", "task", false, false],
   ["note_read", "information", true, false],
-  ["note_delete", "task", false, true],
   ["protect_region", "concurrent", false, false],
   ["unprotect_region", "concurrent", false, false],
   ["place_block", "task", false, true],

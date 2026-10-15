@@ -31,7 +31,6 @@ import { canReleaseOnObservedGround, safeSupportingCell } from "../world/block-g
 import { type BlockPosition, type WorldView, activationGroupAt, samePosition } from "../world/world.js";
 import type { MovementController, MovementExecution, MovementSnapshot } from "./movement-controller.js";
 import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "./mutations.js";
-import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
 import type { OpenedPassages } from "./opened-passages.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
@@ -496,8 +495,6 @@ export class RouteExecutor {
     const snapshot = this.request.context.bot.movementSnapshot();
     this.#latestMovementSnapshot = snapshot;
     if (this.#state.kind !== "moving") return;
-    const running = this.request.plan.steps[this.#state.stepIndex];
-    markPhase(`physicsTick: ${running?.kind} ${running?.id}`);
     if (!snapshot.onGround) this.#state.airborneObserved = true;
     if (this.#invalidated) {
       this.#settleMovement({ kind: "invalidated" });
