@@ -18,6 +18,7 @@ import {
   formatHuntMobResult,
   gatherLoadedDrops,
   huntMob,
+  HUNT_FRUITLESS_KILLS,
   huntMobDependencies,
   type HuntMobDependencies,
   type TargetEngagement,
@@ -570,6 +571,28 @@ test(`a ${missed} drop retires its kill and the hunt continues to the next loade
   assert.equal(result.hunt.gained, 1);
   assert.equal(result.hunt.targetDeathsObserved, 2);
   assert.equal(pickups, 2);
+});
+
+test("a hunt stops after the fruitless-kill limit and says the drop needs the mob to burn, or cooking the raw drop", async () => {
+  const inventory = { count: 0 };
+  const registry = minecraftData("1.21.4");
+  const sheep = Array.from({ length: HUNT_FRUITLESS_KILLS + 3 }, (_, i) => mob(7 + i, registry.entitiesByName.sheep.id, "sheep", 3 + i));
+  const bot = huntBot(sheep, inventory);
+  const result = await huntMob(
+    bot,
+    { campSpawner: false, allowWithoutShield: false, observeForMs: 0, mobName: "sheep", dropName: "cooked_mutton", count: 5 },
+    {},
+    {
+      ...dependencies(bot, inventory, sheep.map((s) => died(2, s.position.x))),
+      collectDropAfterDeath: async () => ({ kind: "item_gone" }),
+    },
+  );
+  if (result.status === "succeeded") throw new Error("expected the hunt to stop");
+  assert.equal(result.hunt.targetDeathsObserved, HUNT_FRUITLESS_KILLS);
+  assert.match(result.error, /HUNT_DROP_NOT_GIVEN/);
+  assert.match(result.error, new RegExp(`${HUNT_FRUITLESS_KILLS} sheep`));
+  assert.match(result.error, /burn/);
+  assert.match(result.error, /cook/);
 });
 
 test("fails truthfully when no matching mob is loaded", async () => {

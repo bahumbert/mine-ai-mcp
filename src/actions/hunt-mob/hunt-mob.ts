@@ -51,6 +51,8 @@ type Entity = Parameters<Bot["attack"]>[0];
 
 /** A normal entity drop appears immediately; this allows ordinary server delay and late metadata. */
 const HUNT_DROP_OBSERVATION_MS = 1_000;
+/** Kills that never gave the wanted drop after which a hunt stops: the drop is conditional (cooked meat only when the mob burns), not unlucky. */
+export const HUNT_FRUITLESS_KILLS = 8;
 /** How far from the death the sweep looks for the kill's other drops; knockback leaves them within a few blocks. */
 const HUNT_SWEEP_RADIUS = 4;
 /** How many items besides the requested drop one kill is worth walking for. */
@@ -720,6 +722,10 @@ function beginHuntMob(
         if (settled()) return { kind: "defeated" };
         const unshielded = checkShield();
         if (unshielded) return { kind: "stopped", reason: unshielded };
+        if (observation.targetDeathsObserved >= HUNT_FRUITLESS_KILLS && observation.inventoryAfter <= inventoryBefore) {
+          observation.stopReason = "drop_not_given";
+          return { kind: "stopped", reason: huntMobOutcomes.dropNotGiven(request.mobName, request.dropName, observation.targetDeathsObserved) };
+        }
         const full = inventoryStop();
         if (full) observation.stopReason = "inventory_full";
         return full ? { kind: "stopped", reason: full } : fightAndCollect(fight, targetId);
