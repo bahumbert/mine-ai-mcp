@@ -853,3 +853,38 @@ test("the chat prompt gives examples for the routes and places the 2026-10-11 re
   assert.match(prompt, /"come here", "follow me", "get me 5 logs"\s+are "act" even though your line answers them/u);
   assert.match(prompt, /"protect the area around you" are "you", never "speaker"; "come here", "build me a house here", "around me" are "speaker"/u);
 });
+
+test("the around-you send-back is once per step, not once per objective (live L7: step 1 spent it, step 2 'protect Tester's area' went through)", async () => {
+  const input = workInput("protect the area around you", { objective: { text: "protect the area around you", requester: "Steve", purpose: null, place: "you" } });
+  const level = { skill: "level_area", around: "Steve", radius: 5 } as const;
+  const protect = { skill: "protect_area", player: "Steve", radius: 5, label: "my place" } as const;
+  const fixed = { skill: "protect_area", radius: 5, label: "my place" } as const;
+  const { action, mind } = scriptedMind();
+  action.reply({ thought: "Level.", step: level }, { thought: "Level.", step: level });
+  assert.equal((await mind.next(input, signal)).kind, "step");
+  assert.equal(action.requests.length, 2, "step 1 sent back once, then it stands");
+  action.reply({ thought: "Protect.", step: protect }, { thought: "Protect.", step: fixed });
+  assert.deepEqual(await mind.next(input, signal), { kind: "step", step: fixed, thought: "Protect." });
+  assert.equal(action.requests.length, 4, "step 2 is sent back too");
+  assert.match(action.requests[3]?.at(-1)?.content ?? "", /the order is around you/u);
+});
+
+test("content checks have their own budget: two send-backs and a malformed reply are not a bad reply (C21)", async () => {
+  const input = workInput("protect the area around you", { objective: { text: "protect the area around you", requester: "Steve", purpose: null, place: "you" } });
+  const protect = { skill: "protect_area", player: "Steve", radius: 5, label: "my place" } as const;
+  const fixed = { skill: "protect_area", radius: 5, label: "my place" } as const;
+  const give = { skill: "give_item", player: "Steve", item: "oak_log", count: 4 } as const;
+  const { action, mind } = scriptedMind();
+  // Sent back as a repeat of the step that just succeeded, then around-you, with one reply that is not JSON between.
+  action.reply({ thought: "a", step: give }, { thought: "b", step: protect }, "not json at all", { thought: "c", step: fixed });
+  const withSteps = { ...input, steps: [{ step: describeStep(give), outcome: "done" as const, detail: "gave 4 oak_log" }] };
+  assert.deepEqual(await mind.next(withSteps, signal), { kind: "step", step: fixed, thought: "c" });
+  assert.equal(action.requests.length, 4);
+});
+
+test("a check that keeps sending back ends in a send-back error, not a bad reply, after its own budget", async () => {
+  const { action, mind } = scriptedMind();
+  const explore = { thought: "x", step: { skill: "explore", toward: "north", for: "air" } };
+  action.reply(explore, explore, explore, explore, explore, explore);
+  await assert.rejects(mind.next(workInput("find a site"), signal), (error: Error) => /\[LLM_SENT_BACK\]/u.test(error.message) && !/LLM_BAD_REPLY/u.test(error.message));
+});

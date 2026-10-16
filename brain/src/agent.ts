@@ -54,6 +54,8 @@ const KNOWN_FARMS = 4;
 const TOP_CHANCES = 5;
 /** Unusable model replies in a row before an objective is dropped. */
 const MAX_BAD_REPLIES = 2;
+/** Decisions in a row that a content check kept sending back (not a format failure: those are bad replies). */
+const MAX_SENT_BACKS = 4;
 /** Activity records read back at start: more than an hour of steps. */
 const ACTIVITY_MEMORY = 200;
 /** A step shorter than this is not worth a memory note (it still counts until the brain stops). */
@@ -94,6 +96,7 @@ interface Work {
   readonly carried: (string | null)[];
   taken: number;
   badReplies: number;
+  sentBacks: number;
   /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
   step: AbortController | null;
   /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
@@ -128,7 +131,7 @@ const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slo
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), purpose: objective.purpose };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -515,11 +518,14 @@ export class Agent {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
       decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(snapshot), ownsTemporaryHouse: this.temporaryHouse() !== null, refused: work.refused }, this.runSignal);
       work.badReplies = 0;
+      work.sentBacks = 0;
     } catch (error) {
       if (this.runSignal.aborted) return;
-      work.badReplies += 1;
+      const sentBack = String(error).includes("[LLM_SENT_BACK]");
+      if (sentBack) work.sentBacks += 1;
+      else work.badReplies += 1;
       log(`work tier failed on ${JSON.stringify(work.objective.text)}: ${String(error)}`);
-      if (work.badReplies >= MAX_BAD_REPLIES) {
+      if (work.badReplies >= MAX_BAD_REPLIES || work.sentBacks >= MAX_SENT_BACKS) {
         // What the last step ran into is the cause the players hear; without it the narration made one up (live
         // 2026-10-03: "how do I build a house exactly around you without stepping on your feet?" when the logs she
         // needed were all inside her own protected houses).

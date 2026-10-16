@@ -238,15 +238,16 @@ export class LlmMind implements Mind {
         const flipped = signChecked ? null : signFlipped(step.data, input.snapshot.position);
         if (flipped !== null) {
           signChecked = true;
-          throw new Error(`${flipped}: if you meant that, send the same step again`);
+          throw new SendBack(`${flipped}: if you meant that, send the same step again`);
         }
         // An area order "around you" is the bot's own area (live 2026-10-11, L7: place "you" was read right, then the
-        // step named the requester): sent back once per objective with where it stands.
+        // step named the requester): sent back once per step with where it stands.
         const aroundRequester = step.data.skill === "protect_area" ? step.data.player : step.data.skill === "level_area" ? step.data.around : undefined;
-        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has("around you")) {
-          this.resent(input.objective).add("around you");
+        const aroundKey = `around you: ${describeStep(step.data)}`;
+        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has(aroundKey)) {
+          this.resent(input.objective).add(aroundKey);
           const { x, y, z } = input.snapshot.position;
-          throw new Error(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
+          throw new SendBack(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
         }
         // A step that failed twice lately, for any objective, is refused every time (live 2026-10-10, run 6: sent back
         // once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times): one retry, then another step.
@@ -257,13 +258,13 @@ export class LlmMind implements Mind {
           const wanted = step.data.for;
           const player = input.snapshot.players.find((entry) => entry.username.toLowerCase() === wanted.toLowerCase());
           if (player !== undefined || wanted === "player") {
-            throw new Error(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
+            throw new SendBack(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
           }
-          if (wanted === "air") throw new Error("air is everywhere: to find a clear site, use the coordinates the last failure gave");
+          if (wanted === "air") throw new SendBack("air is everywhere: to find a clear site, use the coordinates the last failure gave");
           // A block the last explore already found known is fetched, not explored for again (live 2026-10-11 run 10: Kenji and
           // Theo, "explore for oak_log" over and over, each result naming one 2-6 blocks away). Every time, from the records only.
           const known = knownByEarlierExplore(input.steps, wanted);
-          if (known !== null) throw new Error(`your explore for ${wanted} found one known ${known}: get_items ${wanted} gathers it`);
+          if (known !== null) throw new SendBack(`your explore for ${wanted} found one known ${known}: get_items ${wanted} gathers it`);
         }
         // A step that just succeeded, sent again identically, goes back once per objective (live 2026-10-11, orders test:
         // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
@@ -271,7 +272,7 @@ export class LlmMind implements Mind {
         const last = input.steps.at(-1);
         if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input.objective).has(label)) {
           this.resent(input.objective).add(label);
-          throw new Error(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
+          throw new SendBack(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
         }
         const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);
         if (earlier !== undefined) {
@@ -281,7 +282,7 @@ export class LlmMind implements Mind {
           if (refusals >= MAX_REFUSALS) {
             return { kind: "give_up", reason: `"${describeStep(step.data)}" was refused ${MAX_REFUSALS} times: it failed ${earlier.count} times lately (${earlier.detail}) and nothing changed since` };
           }
-          throw new Error(`"${describeStep(step.data)}" failed ${earlier.count} times in the last ${FAILED_STEP_MINUTES} minutes, the last ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. It is refused: choose a different step, or give this objective up`);
+          throw new SendBack(`"${describeStep(step.data)}" failed ${earlier.count} times in the last ${FAILED_STEP_MINUTES} minutes, the last ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. It is refused: choose a different step, or give this objective up`);
         }
         return { kind: "step", step: step.data, thought: reply.thought };
       }
@@ -303,7 +304,7 @@ export class LlmMind implements Mind {
       const failed = input.lastFailed;
       if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
         sentBack = true;
-        throw new Error(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
+        throw new SendBack(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
       }
       // Only a kind of work it could take on now is a purpose (none known: any of ours).
       const named = parseActivity(purpose);
@@ -326,10 +327,14 @@ export class LlmMind implements Mind {
 }
 
 /**
- * One model call, plus up to {@link REPAIR_ROUNDS} repair rounds when the answer is not the JSON we asked for or a check
- * sends it back (two checks may each send one reply back once, live 2026-10-04).
+ * One model call, plus up to {@link REPAIR_ROUNDS} repair rounds when the answer is not the JSON we asked for, and up to
+ * {@link SEND_BACK_ROUNDS} more when a content check sends it back ({@link SendBack}): the checks do not eat the format budget (C21).
  */
 const REPAIR_ROUNDS = 2;
+const SEND_BACK_ROUNDS = 4;
+
+/** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
+class SendBack extends Error {}
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
@@ -338,7 +343,9 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
   let contextTokens: number | null = null;
   const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
   let problem = "";
-  for (let attempt = 0; attempt <= REPAIR_ROUNDS; attempt += 1) {
+  let formatFailures = 0;
+  let sendBacks = 0;
+  for (;;) {
     let text: string;
     try {
       const reply = await model.complete(turns, signal);
@@ -356,12 +363,16 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
       return result;
     } catch (error) {
       problem = error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error);
+      if (error instanceof SendBack) sendBacks += 1;
+      else formatFailures += 1;
+      if (formatFailures > REPAIR_ROUNDS || sendBacks > SEND_BACK_ROUNDS) {
+        const failure = `[${formatFailures > REPAIR_ROUNDS ? "LLM_BAD_REPLY" : "LLM_SENT_BACK"}] ${model.name}: ${problem}`;
+        done({ error: failure });
+        throw new Error(failure);
+      }
       turns.push({ role: "assistant", content: text }, { role: "user", content: `That was not valid (${problem}). Reply with only the corrected JSON object.` });
     }
   }
-  const error = `[LLM_BAD_REPLY] ${model.name}: ${problem}`;
-  done({ error });
-  throw new Error(error);
 }
 
 function describeAuthority(persona: Persona): string {
