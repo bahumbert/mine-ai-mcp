@@ -54,7 +54,7 @@ export class FakeRuntime implements BotRuntime {
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   /** The next call of that tool fails once with this error, after `effect` (what it got done before failing). */
-  failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void }>> = {};
+  failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void; readonly result?: Readonly<Record<string, unknown>> }>> = {};
   /** Recipes known to the fake crafting planner; items without one are uncraftable. */
   recipes: Readonly<Record<string, FakeRecipe>> = {};
   /** Items whose recipes the fake planner cannot plan (Minecraft: coal, iron ingots, made back from their blocks). */
@@ -422,7 +422,7 @@ export class FakeRuntime implements BotRuntime {
     if (once !== undefined) {
       delete this.failNext[action.tool];
       once.effect?.();
-      return { state: "settled", actionId, status: "failed", error: once.error };
+      return { state: "settled", actionId, status: "failed", error: once.error, ...(once.result !== undefined && { result: once.result }) };
     }
     const failure = this.failures[action.tool];
     if (failure !== undefined) {

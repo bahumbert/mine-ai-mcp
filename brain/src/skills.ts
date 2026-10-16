@@ -86,6 +86,12 @@ export interface UnfinishedHouse {
   readonly prepared?: boolean;
   /** The roles built with other blocks than the style's (an older note has none: as the style). */
   readonly materials?: Materials;
+  /**
+   * The cells the runtime refused in the last run that stopped on them (an older note has none). A refusal is often
+   * transient (an animal in the cell, a route that timed out), so the house is kept; it is given up only when a
+   * resume is refused at one of these cells again.
+   */
+  readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
 export type SkillResult =
@@ -456,8 +462,8 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
   noteArea(context, protection.area);
-  const leaveUnfinished = (part: number, prepared = true) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials };
+  const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => {
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...(refused !== undefined && refused.length > 0 && { refused }) };
   };
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
@@ -493,7 +499,8 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   }
   const stopped = await buildParts(context, plan, what, {
     reserved: plan.bill,
-    leave: (part) => leaveUnfinished(part),
+    leave: (part, refused) => leaveUnfinished(part, true, refused),
+    refusedBefore: resumed?.refused,
     again: context.building === undefined ? "" : "; building it again resumes it there",
     abandon: () => { if (context.building !== undefined) context.building.unfinished = null; },
   });
@@ -573,11 +580,13 @@ async function improveOnSite(context: SkillContext, { place, house, style, roles
 interface PartsOptions {
   /** Blocks a remade tool must not use up: the house's bill. */
   readonly reserved: readonly MaterialCount[];
-  /** Told the part (batch index) to start again from when the work stops before the end. */
-  readonly leave: (part: number) => void;
+  /** Told the part (batch index) to start again from when the work stops before the end, and the cells the runtime refused (none given: the stop was not a refusal). */
+  readonly leave: (part: number, refused?: readonly Cell[]) => void;
+  /** The cells refused when the house was last left: refused again, the house is given up. */
+  readonly refusedBefore?: readonly Cell[];
   /** Ends the failure sentence: how the house is asked again. */
   readonly again: string;
-  /** Forgets the unfinished house, when resuming it cannot get further. */
+  /** Forgets the unfinished house, when resuming it keeps meeting the same refused cell. */
   readonly abandon?: () => void;
 }
 
@@ -633,15 +642,38 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
         return { status: "stopped" };
       }
       const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
-      options.leave(Math.min(index, plan.batches.length - 1));
-      // Resuming would meet the same refused cell, so the site is given up instead of offered again.
-      const onlyRefused = options.again !== "" && /^\[BUILD_INCOMPLETE\] (\d+) cells? still wrong: \1 were refused/u.test(outcome.error ?? "");
-      if (onlyRefused) options.abandon?.();
-      const again = onlyRefused ? "; building here again would be refused at the same cell: build somewhere else, or clear that cell first" : options.again;
+      // A refusal is read from the audit's structured groups, not from the error text. One refusal may be transient
+      // (an animal in the cell, a route that timed out): the house is kept with the refused cells; the same cell
+      // refused again on a resume is the one that would be refused for good, so the site is given up.
+      const refused = refusedCells(outcome.result);
+      options.leave(Math.min(index, plan.batches.length - 1), refused);
+      const repeated = options.again !== "" && refused.some((cell) => options.refusedBefore?.some((before) => sameCell(before, cell)) === true);
+      if (repeated) options.abandon?.();
+      const again = repeated ? "; building here again would be refused at the same cell: build somewhere else, or clear that cell first" : options.again;
       return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${again}` };
     }
   }
   return null;
+}
+
+type Cell = { readonly x: number; readonly y: number; readonly z: number };
+
+function sameCell(left: Cell, right: Cell): boolean {
+  return left.x === right.x && left.y === right.y && left.z === right.z;
+}
+
+/** The part of `build_structure`'s audit that names the cells it left refused (src/actions/build-structure/contract.ts `left`). */
+const refusedAuditSchema = z.object({
+  structure: z.object({
+    left: z.array(z.object({ reason: z.string(), named: z.array(z.object({ x: z.number(), y: z.number(), z: z.number() })) })),
+  }),
+});
+
+/** The cells a `build_structure` audit says were refused (named ones only: the runtime names a few per reason). */
+function refusedCells(result: Readonly<Record<string, unknown>> | undefined): Cell[] {
+  const parsed = refusedAuditSchema.safeParse(result);
+  if (!parsed.success) return [];
+  return parsed.data.structure.left.filter((group) => group.reason === "refused").flatMap((group) => group.named.map(({ x, y, z }) => ({ x, y, z })));
 }
 
 /** The non-air cells of the parts before `index`: what a later part's routes must keep. */

@@ -551,16 +551,83 @@ test("building again resumes an unfinished house at the same site and part, with
   assert.equal(building.unfinished, null);
 });
 
-test("a build stopped only by refused cells does not offer to resume at the same site (live 2026-10-14: Oskar, four times)", async () => {
+/** A failed `build_structure` whose audit names these cells as refused (the runtime's structured `left` groups). */
+function refusedBuild(cells: readonly { x: number; y: number; z: number; detail: string }[]): { readonly error: string; readonly result: Record<string, unknown> } {
+  return {
+    error: `[BUILD_INCOMPLETE] ${cells.length} cell still wrong: ${cells.length} were refused.`,
+    result: {
+      status: "failed",
+      error: "refused",
+      structure: { placed: 0, dug: 0, wrong: cells.length, left: [{ reason: "refused", count: cells.length, named: cells }], missing: [] },
+    },
+  };
+}
+
+test("one refused cell keeps the unfinished house and records the cell (run 13 review R1: a transient refusal forgot the house)", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
-  const building = { unfinished: null };
-  runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong: 1 were refused (1,64,1: crafting_table there could not be cleared: movement policy prohibits breaking this block)." };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  runtime.failNext.build_structure = refusedBuild([{ x: 1, y: 64, z: 1, detail: "route timed out" }]);
   const first = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", building }));
   const detail = first.status === "failed" ? first.detail : "";
+  assert.match(detail, /resumes it there$/u);
+  assert.doesNotMatch(detail, /build somewhere else/u);
+  assert.ok(building.unfinished !== null, "the house is kept");
+  assert.deepEqual(building.unfinished.refused, [{ x: 1, y: 64, z: 1 }], "with the cell that was refused");
+  // Resumed, the cell is built this time: the house is done.
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_door", count: 1 }] };
+  assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", building }))).status, "done");
+  assert.equal(building.unfinished, null);
+});
+
+test("a cell refused again on the resume gives the house up (live 2026-10-14: Oskar, four times)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const refusal = refusedBuild([{ x: 1, y: 64, z: 1, detail: "crafting_table there could not be cleared: movement policy prohibits breaking this block" }]);
+  runtime.failNext.build_structure = refusal;
+  const context = contextFor(runtime, { style: "medieval", building });
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.ok(building.unfinished !== null);
+  runtime.failNext.build_structure = refusal;
+  const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  const detail = second.status === "failed" ? second.detail : "";
   assert.doesNotMatch(detail, /resumes it there/u);
   assert.match(detail, /would be refused at the same cell: build somewhere else/u);
   assert.equal(building.unfinished, null, "the site is given up, so the next build picks another");
+});
+
+test("a different cell refused on the resume keeps the house, and remembers only the latest refusals", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const context = contextFor(runtime, { style: "medieval", building });
+  runtime.failNext.build_structure = refusedBuild([{ x: 1, y: 64, z: 1, detail: "no route" }]);
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  runtime.failNext.build_structure = refusedBuild([{ x: 2, y: 64, z: 1, detail: "no route" }]);
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.deepEqual(building.unfinished?.refused, [{ x: 2, y: 64, z: 1 }]);
+});
+
+test("an entity standing in the cell does not give the house up", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const context = contextFor(runtime, { style: "medieval", building });
+  runtime.failNext.build_structure = {
+    error: "[BUILD_INCOMPLETE] 1 cell still wrong: 1 were refused (1,64,1: cow stands in the cell).",
+    result: refusedBuild([{ x: 1, y: 64, z: 1, detail: "cow stands in the cell" }]).result,
+  };
+  const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.match(first.status === "failed" ? first.detail : "", /resumes it there$/u);
+  assert.ok(building.unfinished !== null);
+  // The bot itself in the cell is not a refusal at all.
+  runtime.failNext.build_structure = {
+    error: "[BUILD_INCOMPLETE] 1 cell still wrong: 1 are where the bot stands (1,64,1).",
+    result: { status: "failed", error: "x", structure: { placed: 0, dug: 0, wrong: 1, left: [{ reason: "bot_stands_in_it", count: 1, named: [{ x: 1, y: 64, z: 1 }] }], missing: [] } },
+  };
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.ok(building.unfinished !== null);
 });
 
 test("asked to build far from an unfinished house, she starts a new one where she stands", async () => {
