@@ -35,6 +35,8 @@ export interface ClosestNodeEvidence {
   readonly heuristic: number;
   readonly routeCost: number;
   readonly basis: "best_heuristic_search_node";
+  /** Set when the nearest node to the goal is where the search began: the bot already stands at the closest point it can reach. */
+  readonly atStart?: true;
 }
 
 export interface SearchLimitEvidence {

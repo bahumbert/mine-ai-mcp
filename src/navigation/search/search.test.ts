@@ -505,3 +505,20 @@ test("the shipped limits are Baritone's inline and plan-ahead search timeouts", 
   assert.deepEqual(DEFAULT_SEARCH_LIMITS, { primaryTimeoutMs: 500, failureTimeoutMs: 2_000 });
   assert.deepEqual(DEFAULT_CONTINUATION_SEARCH_LIMITS, { primaryTimeoutMs: 4_000, failureTimeoutMs: 5_000 });
 });
+
+test("a timeout whose nearest node is the start reports it, so a bot already at its closest point is not told it ran out of time (run 12 Y4)", () => {
+  // Everything reachable lies east while the goal lies west: no node ever beats the start.
+  const clock = perExpansionClock(
+    stubCatalogue((state) => (state.node.feet.x < 30 ? [graphMovement(state, state.node.feet.x + 1, 0, 1)] : [])),
+  );
+  const search = searchOver(
+    goalOf("west", (node) => Math.abs(node.feet.x + 100) * 4),
+    clock.catalogue,
+    { id: "dead-end", limits: { failureTimeoutMs: clock.atExpansion(10) }, now: clock.now },
+  );
+  const update = search.advance({ maximumExpansions: 20, maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "limit");
+  if (update.kind !== "limit") return;
+  assert.equal(update.limit.closest.atStart, true);
+  assert.deepEqual(update.limit.closest.position, { x: 0, y: 63, z: 0 });
+});

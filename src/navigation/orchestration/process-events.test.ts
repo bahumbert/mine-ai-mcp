@@ -26,6 +26,15 @@ test("a calculation failure names what ran out and how close the search got", ()
   );
 });
 
+test("a failure whose nearest node is the start says the bot already stands at the closest reachable point (run 12 Y4)", () => {
+  const text = describeCalculationFailure({
+    kind: "search_limit",
+    search,
+    limit: { kind: "search_time", limit: 2000, observed: 2001, closest: { ...closest, atStart: true } },
+  });
+  assert.match(text, /closest node was 295,32,-314; no reachable node is nearer the goal than where the bot already stands/);
+});
+
 test("a calculation failure that followed a movement failure says what it was replanning around", () => {
   const after = {
     kind: "operation_failed" as const,
