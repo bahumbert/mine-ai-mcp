@@ -753,6 +753,9 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       .filter((tool) => !stacks.some((stack) => stack.name.endsWith(`_${tool}`)))
       .map((tool) => ({ item: has("cobblestone") >= (TOOL_COBBLESTONE[tool] ?? 3) ? `stone_${tool}` : `wooden_${tool}`, count: 1 }));
   };
+  // The tool classes (game data: what each block is mined with) of the cells these batches dig clear.
+  const toolsDug = (batches: readonly (readonly TerrainCell[])[]) =>
+    new Set(batches.flat().filter((cell) => cell.block === "air").map((cell) => area.kinds[area.blocks.get(areaKey(cell.x, cell.y, cell.z)) ?? ""]?.tool).filter((tool) => tool !== null && tool !== undefined));
   const needs = toolsMissing(inventory);
   const first = cells(plan.phases.fillFirst);
   const firstFill = plan.phases.fillFirst[0]?.[0]?.block;
@@ -778,7 +781,9 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       // 2026-10-02: a worn stone axe, then the shovel, each ended the whole job).
       if (errorCode(outcome.error) === "TOOL_TIER_LOST" && toolsLost < MAX_TOOLS_LOST) {
         toolsLost += 1;
-        const replace = toolsMissing((await context.runtime.status()).inventory);
+        // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
+        const digging = toolsDug(batches.slice(index));
+        const replace = toolsMissing((await context.runtime.status()).inventory).filter(({ item }) => [...digging].some((kind) => item.endsWith(`_${kind}`)));
         if (replace.length > 0) {
           const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
           if (got.status !== "done") return got;

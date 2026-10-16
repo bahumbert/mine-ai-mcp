@@ -18,7 +18,7 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "The best carried tool for each block is equipped automatically, so equip is not needed first. " +
   "A run that breaks and picks up nothing for 180 s stops with what it got and says how far it walked meanwhile. " +
   "By default a required tool-tier loss stops with partial progress; on_tool_loss=continue keeps mining with the remaining tool. " +
-  "The response lists every cell broken and its distance from where the run started. " +
+  "The response lists every cell broken and its distance from where the run started, and names a tool that broke during the run (collected.toolLost). " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
   "Obsidian is the one block the bot makes rather than finds: ask for it while carrying a water bucket and, with no obsidian loaded, the process walks to lava, pours, scoops the water back, and mines what formed. " +
   "Name the block to break, not the item wanted: cobblestone and cobbled_deepslate are the no-silk-touch drops of stone and deepslate, which are almost everywhere underground, while naturally placed cobblestone is structure-bound and most often the walls of a dungeon around a spawner. " +
@@ -198,6 +198,8 @@ const collectionEvidenceSchema = z.strictObject({
   gainedByItem: z.record(z.string(), z.number().int().nonnegative()),
   blocksBroken: z.number().int().nonnegative(),
   brokenAt: z.array(brokenCellSchema),
+  /** The tool (carried item and its class) that broke or wore down to a lower tier during the run; absent when none did. */
+  toolLost: z.strictObject({ item: z.string(), class: z.string() }).optional(),
 });
 
 export type BrokenCell = z.output<typeof brokenCellSchema>;

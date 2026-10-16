@@ -99,6 +99,73 @@ test("a pickaxe that breaks while digging is a setback, not a failure: another o
   assert.deepEqual(runtime.submitted.map(describeCall), ["collect stone", "craft wooden_pickaxe at table", "collect stone"]);
 });
 
+/** Run 13: Brea's shovel broke while digging dirt; dirt drops by hand, so the fetch went on bare-handed and never asked for another. */
+const SHOVEL_RECIPES = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+const shovelLost = (runtime: FakeRuntime, dirt: number) => ({
+  error: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains. Broke 6 matching blocks; inventory gained 6/16 requested items.",
+  result: { collected: { requested: 16, gained: dirt, gainedByItem: { dirt }, blocksBroken: dirt, brokenAt: [], toolLost: { item: "wooden_shovel", class: "shovel" } } },
+  effect: () => {
+    runtime.addItem("dirt", dirt);
+    runtime.addItem("wooden_shovel", -1);
+  },
+});
+
+test("a shovel that breaks mid-fetch is made again for the dirt still to dig, though dirt drops by hand", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = SHOVEL_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
+  runtime.failNext.collect_block = shovelLost(runtime, 6);
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect dirt", "craft wooden_shovel at table", "collect dirt"]);
+  // The setback is told, with the tool that broke.
+  assert.match(result.status === "done" ? result.detail : "", /setback \(\[TOOL_TIER_LOST\] wooden_shovel was lost/u);
+});
+
+test("a tool that breaks with nothing left to dig for its class is not made again", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = SHOVEL_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
+  // It broke on the last block: all 16 are carried.
+  runtime.failNext.collect_block = shovelLost(runtime, 16);
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect dirt"]);
+});
+
+test("a fetch that broke its shovel and cannot make another goes on by hand: dirt needs no tool", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = SHOVEL_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
+  // The replacement cannot be made.
+  runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
+  runtime.failNext.collect_block = shovelLost(runtime, 6);
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2);
+});
+
+test("a pickaxe that breaks with stone still to dig is made again from the structured loss, even when the stop reason names nothing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
+  runtime.failNext.collect_block = {
+    error: "[SOMETHING_ODD] stopped after 15 matching blocks",
+    result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: "wooden_pickaxe", class: "pickaxe" } } },
+    effect: () => {
+      runtime.addItem("cobblestone", 15);
+      runtime.addItem("wooden_pickaxe", -1);
+    },
+  };
+  const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect stone", "craft wooden_pickaxe at table", "collect stone"]);
+});
+
 test("the harvest tool comes from game data and climbs the tiers: a wooden pickaxe for the stone of a stone one for iron ore", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = { ...HOUSE_RECIPES, stone_pickaxe: { makes: 1, needs: [{ item: "cobblestone", count: 3 }, { item: "stick", count: 2 }] } };
@@ -932,6 +999,28 @@ test("a tool worn out while leveling is made again and the batch done again, not
   const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
   assert.deepEqual(result, { status: "done", detail: "leveled 5x4 at y 64: dug 1, filled 0" });
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft wooden_shovel at table", "build_structure"]);
+});
+
+test("a shovel that breaks with no digging left in the level is not made again, the filling goes on", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_planks", count: 8 }, { name: "crafting_table", count: 1 }, { name: "dirt", count: 4 }] };
+  runtime.world.set("2,64,2", "gold_block");
+  runtime.world.set("6,64,5", "gold_block");
+  runtime.world.set("4,64,3", "grass_block");
+  runtime.world.set("5,63,4", "air");
+  const submit = runtime.submit.bind(runtime);
+  // The shovel goes with the last batch (the hole), after every block to dig is dug.
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && builds(runtime).length === 1) {
+      runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 5,64,4; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
+    }
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "build_structure", "build_structure"]);
 });
 
 test("level_area lays a one-block floor over a hole, of the block asked for", async () => {

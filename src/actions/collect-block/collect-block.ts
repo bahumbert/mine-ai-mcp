@@ -31,7 +31,7 @@ import { findLoadedBlockPositions } from "../../world/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
-import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { observeToolTierLoss, type ToolTierLoss } from "../../world/tool-loss.js";
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { watchForStall } from "../stall-watch.js";
@@ -224,7 +224,7 @@ function beginCollectBlock(
       owes: `Net inventory gain of ${request.requested} collectible items still carried at settlement.`,
     },
   }));
-  return async (context: ActionContext): Promise<CollectBlockResult> => {
+  const run = async (context: ActionContext): Promise<CollectBlockResult> => {
     context.signal?.throwIfAborted();
     const gained = () => sumValues(inventoryGains(bot, inventoryBefore, collectable));
     if (gained() >= request.requested) {
@@ -337,6 +337,13 @@ function beginCollectBlock(
       bot.off("physicsTick", checkCapacity);
     }
   };
+  return async (context: ActionContext): Promise<CollectBlockResult> => reportToolLoss(await run(context), toolLoss.loss());
+}
+
+/** `result`, with the tool that broke during the run (if one did) as a field, so a caller need not read the stop reason. */
+export function reportToolLoss(result: CollectBlockResult, loss: ToolTierLoss | null): CollectBlockResult {
+  if (loss === null || loss.before.item === null) return result;
+  return { ...result, collected: { ...result.collected, toolLost: { item: loss.before.item, class: loss.class } } };
 }
 
 /** Blocks are work sites; live drops are entities whose bounds the viewer follows. */
