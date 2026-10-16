@@ -169,7 +169,17 @@ async function gatherRounds(
     const inventory = (await context.runtime.status()).inventory;
     const missing = shortfall(wanted, inventory);
     if (missing.length === 0) return finish(actions.length === 0 ? "had everything" : actions.join(", "));
-    const plan = await planRound(context.runtime, missing, inventory, knowledge);
+    // A full bucket is no drop and no craft: a bucket (made like any item) filled at the liquid.
+    const filling = missing.find((entry) => bucketLiquid(entry.item) !== null);
+    if (filling !== undefined && carried(inventory, "bucket") > 0) {
+      const liquid = bucketLiquid(filling.item)!;
+      context.progress?.(`filling a bucket with ${liquid}, for ${purpose}`);
+      const filled = await act(context, "use_bucket", { action: "fill", liquid }, `Fill a bucket with ${liquid}, for ${purpose}.`);
+      if (filled !== null) return filled.status === "failed" && actions.length > 0 ? { status: "failed", detail: `got ${actions.join(", ")} so far; ${filled.detail}` } : filled;
+      actions.push(`filled a bucket with ${liquid}`);
+      continue;
+    }
+    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
     const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
@@ -310,6 +320,12 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
     knowledge.smelted.set(item, recipes);
   }
   return recipes.length > 0 ? "smelt" : "gather";
+}
+
+/** The liquid a full bucket `item` holds, which a `use_bucket` fill scoops (water, lava); null for any other item. */
+function bucketLiquid(item: string): "water" | "lava" | null {
+  const liquid = /^(water|lava)_bucket$/u.exec(item)?.[1];
+  return liquid === "water" || liquid === "lava" ? liquid : null;
 }
 
 /** Why `item` is no item id, in the runtime's words: they name the registry ids close to it ("sticks": stick). */
@@ -675,7 +691,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
       tried.add(`${seen.x},${seen.z}`);
       last = there;
       // The same water lies between her and the next far place: not walked to (live 2026-10-10 run 10: ~1500 blocks swum).
-      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: acrossWaterHint(block, failed) };
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
       continue;
     }
     const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
@@ -684,13 +700,38 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
     tried.add(`${seen.x},${seen.z}`);
   }
-  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: acrossWaterHint(block, failed) };
+  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
   return last;
 }
 
 /** What a fetch tells when the places it knows lie across deep water and no boat is carried. */
-function acrossWaterHint(block: string, failed: GatherResult): string {
-  return `the ${block} you know of is across the water: take a boat (get_items oak_boat) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
+async function acrossWaterHint(runtime: BotRuntime, block: string, failed: GatherResult): Promise<string> {
+  return `the ${block} you know of is across the water: take a boat (get_items ${await boatToMake(runtime)}) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
+}
+
+/** The boat a fetch names when nothing carried says otherwise. */
+const DEFAULT_BOAT = "oak_boat";
+
+/**
+ * The boat she can make from the wood she carries: each carried planks or log names its wood (the item id up to its last
+ * word), and the game's craft planner says whether that wood has a boat (or raft) and whether what she carries fits its
+ * recipe. A boat she can craft now comes first, then one with a recipe, then {@link DEFAULT_BOAT} (live 2026-10-15
+ * run 12: Ayla, on an island with birch, was told oak_boat over and over).
+ */
+async function boatToMake(runtime: BotRuntime): Promise<string> {
+  const woods = [...new Set((await runtime.status()).inventory.flatMap((stack) => {
+    const wood = /^(.+)_(?:planks|log|wood|stem|block)$/u.exec(stack.name)?.[1];
+    return wood === undefined ? [] : [wood];
+  }))];
+  let possible: string | null = null;
+  for (const wood of woods) {
+    for (const boat of [`${wood}_boat`, `${wood}_raft`]) {
+      const status = (await runtime.craftingNeeds([{ item: boat, count: 1 }])).status;
+      if (status === "ready") return boat;
+      if (status === "missing_materials") possible ??= boat;
+    }
+  }
+  return possible ?? DEFAULT_BOAT;
 }
 
 /** The eight compass directions, by the angle from east going south (Minecraft's +z is south). */
@@ -716,7 +757,7 @@ export async function notNear(context: Pick<GatherContext, "runtime">, block: st
   const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
   if (water !== null && water.share > 0.5) {
     const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
-    const trip = boat ? "go_to there crosses by boat (you carry one)" : "take a boat (get_items oak_boat) and go_to there";
+    const trip = boat ? "go_to there crosses by boat (you carry one)" : `take a boat (get_items ${await boatToMake(context.runtime)}) and go_to there`;
     return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
   }
   return `${near}; you saw some ${describeWay(here, seen)}, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: go_to there yourself if it is worth the trip, use another material, or say so (${detail})`;
@@ -852,7 +893,7 @@ async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { read
 }
 
 /** Runs one action; null when it succeeded. */
-async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate", input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
+async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
   const outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return null;

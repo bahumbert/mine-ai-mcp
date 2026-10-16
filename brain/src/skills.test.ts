@@ -225,10 +225,55 @@ test("a drop that dropped nothing fails with the action's reason, and a water-lo
 test("an item no block drops, and nothing crafts or smelts, ends get_items saying so", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
-  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass_pane", count: 1 }] }, contextFor(runtime));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /no block or mob drops water_bucket, and it is not crafted or smelted/u);
+  assert.match(result.status === "failed" ? result.detail : "", /no block or mob drops glass_pane, and it is not crafted or smelted/u);
   assert.deepEqual(runtime.submitted, []);
+});
+
+test("a water bucket is a carried bucket filled at water", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "bucket", count: 1 }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input]), [["use_bucket", { action: "fill", liquid: "water" }]]);
+  assert.ok(runtime.snapshot.inventory.some((stack) => stack.name === "water_bucket"));
+});
+
+test("a water bucket without a bucket crafts one from iron first, then fills it", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "iron_ingot", count: 3 }] };
+  runtime.recipes = { bucket: { makes: 1, needs: [{ item: "iron_ingot", count: 3 }] } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["craft_item", "use_bucket"]);
+});
+
+test("a fill that finds no water ends get_items with the runtime's words", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "bucket", count: 1 }] };
+  runtime.failures.use_bucket = "[BUCKET_NO_SOURCE] No water source in any loaded column.";
+  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  assert.match(result.status === "failed" ? result.detail : "", /BUCKET_NO_SOURCE/u);
+});
+
+test("the boat named across water is the one her carried wood makes, oak_boat when it says nothing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { birch_boat: { makes: 1, needs: [{ item: "birch_planks", count: 5 }] }, oak_boat: { makes: 1, needs: [{ item: "oak_planks", count: 5 }] } };
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "birch_planks", count: 5 }] };
+  const birch = await runStep({ skill: "collect_block", block: "oak_log", count: 3 }, contextFor(runtime));
+  assert.match(birch.status === "failed" ? birch.detail : "", /take a boat \(get_items birch_boat\) and go_to there/u);
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "birch_planks", count: 2 }] };
+  const short = await runStep({ skill: "collect_block", block: "oak_log", count: 3 }, contextFor(runtime));
+  assert.match(short.status === "failed" ? short.detail : "", /get_items birch_boat\)/u, "a recipe the wood has, short of planks");
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 2 }] };
+  const none = await runStep({ skill: "collect_block", block: "oak_log", count: 3 }, contextFor(runtime));
+  assert.match(none.status === "failed" ? none.detail : "", /get_items oak_boat\)/u);
 });
 
 test("get_items hunts what an animal gives instead of crafting it the long way: wool from sheep, not from string", async () => {
