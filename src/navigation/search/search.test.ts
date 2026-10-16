@@ -506,7 +506,7 @@ test("the shipped limits are Baritone's inline and plan-ahead search timeouts", 
   assert.deepEqual(DEFAULT_CONTINUATION_SEARCH_LIMITS, { primaryTimeoutMs: 4_000, failureTimeoutMs: 5_000 });
 });
 
-test("a timeout whose nearest node is the start reports it, so a bot already at its closest point is not told it ran out of time (run 12 Y4)", () => {
+test("a timeout whose nearest node is within the minimum route distance of the start reports that distance (run 12 Y4, run 13 R10)", () => {
   // Everything reachable lies east while the goal lies west: no node ever beats the start.
   const clock = perExpansionClock(
     stubCatalogue((state) => (state.node.feet.x < 30 ? [graphMovement(state, state.node.feet.x + 1, 0, 1)] : [])),
@@ -519,6 +519,28 @@ test("a timeout whose nearest node is the start reports it, so a bot already at 
   const update = search.advance({ maximumExpansions: 20, maximumMilliseconds: Infinity });
   assert.equal(update.kind, "limit");
   if (update.kind !== "limit") return;
-  assert.equal(update.limit.closest.atStart, true);
+  assert.equal(update.limit.closest.withinStartBlocks, 5);
   assert.deepEqual(update.limit.closest.position, { x: 0, y: 63, z: 0 });
+});
+
+test("a closest node 3 blocks from the start is within the minimum route distance, one 6 blocks away is not (run 13 R10)", () => {
+  const run = (reach: number) => {
+    const clock = perExpansionClock(
+      stubCatalogue((state) => (state.node.feet.x < reach ? [graphMovement(state, state.node.feet.x + 1, 0, 1)] : [])),
+    );
+    const search = searchOver(
+      goalOf("east", (node) => Math.abs(node.feet.x - 100) * 4),
+      clock.catalogue,
+      { id: `reach-${reach}`, limits: { failureTimeoutMs: clock.atExpansion(30) }, now: clock.now },
+    );
+    return search.advance({ maximumExpansions: 50, maximumMilliseconds: Infinity });
+  };
+  const near = run(3);
+  assert.ok(near.kind === "no_path");
+  assert.deepEqual(near.closest.position, { x: 3, y: 63, z: 0 });
+  assert.equal(near.closest.withinStartBlocks, 5);
+  const far = run(6);
+  assert.ok(far.kind === "no_path");
+  assert.deepEqual(far.closest.position, { x: 6, y: 63, z: 0 });
+  assert.equal(far.closest.withinStartBlocks, undefined);
 });

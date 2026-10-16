@@ -666,7 +666,7 @@ export class IncrementalSearch {
       heuristic: this.#store.heuristic[this.#closest]!,
       routeCost: this.#store.cost[this.#closest]!,
       basis: "best_heuristic_search_node",
-      ...(!this.#candidates.travelled(this.#closest) && { atStart: true as const }),
+      ...(!this.#candidates.travelled(this.#closest) && { withinStartBlocks: MINIMUM_PARTIAL_ROUTE_BLOCKS }),
     };
   }
 }
