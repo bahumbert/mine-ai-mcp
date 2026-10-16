@@ -5,7 +5,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
 import minecraftData from "minecraft-data";
-import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, seenInWorld } from "./frontier.js";
+import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, SEEN_MOVED, SEEN_TTL_MS, seenInWorld } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
   return SqlBotData.create({
@@ -375,14 +375,29 @@ test("counts the recorded chunks that hold a material; a material the scan leave
 });
 
 /** A bot whose loaded blocks within reach are `near` (block name -> count), asked as Mineflayer's findBlocks does. */
-function seeingBot(near: Record<string, number>): Bot {
+/** A bot standing in one loaded section whose first `near[name]` cells (x, then z, then y) hold that block. */
+function seeingBot(near: Record<string, number>, scans = { count: 0 }): Bot {
   const registry = minecraftData("1.21.4");
+  const cells = new Map<number, number>();
+  let cell = 0;
+  for (const [name, count] of Object.entries(near)) {
+    for (let index = 0; index < count; index += 1) cells.set(cell++, registry.blocksByName[name]!.minStateId!);
+  }
+  const section = {
+    solidBlockCount: 4_096,
+    palette: [0, ...new Set(cells.values())],
+    data: {},
+    get: ({ x, y, z }: { x: number; y: number; z: number }) => cells.get(y * 256 + z * 16 + x) ?? 0,
+  };
   return {
     version: "1.21.4",
     registry,
-    findBlocks: ({ matching, count }: { matching: number; count: number }) => {
-      const name = registry.blocks[matching]?.name ?? "";
-      return Array.from({ length: Math.min(count, near[name] ?? 0) }, () => new Vec3(0, 0, 0));
+    entity: { position: new Vec3(8, 8, 8) },
+    world: {
+      getColumns: () => {
+        scans.count += 1;
+        return [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections: [section] } }];
+      },
     },
   } as unknown as Bot;
 }
@@ -398,4 +413,30 @@ test("an item is as seen as the most-seen block it is gathered from: loaded bloc
   // Deepslate is neither near nor recorded: cobbled_deepslate is unseen, though stone is common.
   assert.equal(seen("cobbled_deepslate"), 0);
   assert.equal(seenInWorld(seeingBot({ deepslate: 5 }), frontier)("cobbled_deepslate"), 5);
+});
+
+test("the planner's repeated questions scan the loaded blocks once while the bot stays put, and again after the TTL or a move", () => {
+  const scans = { count: 0 };
+  const bot = seeingBot({ oak_log: 3 }, scans);
+  let clock = 1_000;
+  const seen = seenInWorld(bot, { chunksWithMaterial: () => 0 }, () => clock);
+  assert.equal(seen("oak_log"), 3);
+  const afterFirst = scans.count;
+  assert.ok(afterFirst > 0);
+  for (let call = 0; call < 20; call += 1) assert.equal(seen("oak_log"), 3);
+  assert.equal(scans.count, afterFirst, "answers are kept");
+
+  clock += SEEN_TTL_MS + 1;
+  seen("oak_log");
+  assert.ok(scans.count > afterFirst, "scanned again after the TTL");
+
+  const afterTtl = scans.count;
+  (bot.entity.position as Vec3).x += SEEN_MOVED + 1;
+  seen("oak_log");
+  assert.ok(scans.count > afterTtl, "scanned again after a move");
+});
+
+test("a scan for a block kind absent from every loaded section reads no block", () => {
+  const bot = seeingBot({ oak_log: 3 });
+  assert.equal(seenInWorld(bot, { chunksWithMaterial: () => 0 })("pale_oak_log"), 0);
 });

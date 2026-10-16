@@ -97,6 +97,9 @@ export function createActions(
   // One registry, shared: the dropper records what it threw away and the hunt's
   // sweep reads the same set, so a deliberate discard is not picked back up.
   const discarded = createDiscardedItems();
+  // One measure for the crafting planner's questions: it keeps its answers while the bot stays put, since each scan
+  // of the loaded blocks blocks the event loop.
+  const seen = seenInWorld(bot, frontier);
   const actions: Action[] = [
     createSetSurvivalPolicyAction(combat.policy),
     createDestroyEndCrystalAction(bot, combat),
@@ -106,8 +109,7 @@ export function createActions(
     createTendCropsAction(bot, navigation),
     createCancelForegroundAction(cancelForegroundAction),
     createCollectBlockAction(bot, navigation, discarded),
-    // A new measure per question: what is near the bot changes as it moves.
-    createCraftItemAction(bot, navigation, (item) => seenInWorld(bot, frontier)(item)),
+    createCraftItemAction(bot, navigation, seen),
     createDropItemAction(bot, navigation, discarded),
     createBarterAction(bot, navigation),
     createEatFoodAction(bot),
@@ -136,7 +138,7 @@ export function createActions(
     createUseBucketAction(bot, navigation),
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
-    createViewCraftingRequirementsAction(bot, (item) => seenInWorld(bot, frontier)(item)),
+    createViewCraftingRequirementsAction(bot, seen),
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
