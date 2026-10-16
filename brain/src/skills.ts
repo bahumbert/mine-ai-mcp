@@ -94,6 +94,9 @@ export type SkillResult =
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
 
+/** The food bar's size (`food N/20` in the prompt): at this value Minecraft refuses to eat. */
+const MAX_FOOD = 20;
+
 /**
  * Brain-level skills: short programs over atomic actions, one per step the model chooses (ADR-011). Following is done
  * here with repeated `navigate` rather than a new runtime action; if that proves too jerky it becomes a
@@ -118,9 +121,20 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "craft_item":
         // A table close by is used where it stands; else the runtime sets a carried one down.
         await walkToStation(context, "crafting_table");
-        return await once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+      {
+        const crafted = await once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+        // Run 12: 16 crafts lacked raw materials; get_items gathers them and crafts (one clear next step).
+        return crafted.status === "failed" && crafted.detail.includes("CRAFT_MATERIALS_MISSING")
+          ? { status: "failed", detail: `${crafted.detail} craft only uses what you carry: \`get_items ${step.item} ${step.count}\` gathers the missing materials and crafts it.` }
+          : crafted;
+      }
       case "get_items": return await getItems(context, step.items);
-      case "eat": return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
+      case "eat": {
+        // Run 12: six EAT_REJECTED "Food is full"; the bar is known from the status, so the runtime is not called.
+        const { food } = await context.runtime.status();
+        if (food >= MAX_FOOD) return { status: "failed", detail: `not hungry: food ${food}/${MAX_FOOD}; nothing eaten, eat when the bar is lower` };
+        return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
+      }
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
       case "sleep": return await once(context, "sleep", {}, why, "slept");
       case "hunt":

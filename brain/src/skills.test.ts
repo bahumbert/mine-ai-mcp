@@ -1621,3 +1621,39 @@ test("get_items stops after a bounded number of blocks broken for a rare drop th
   const broken = runtime.submitted.filter((call) => call.tool === "collect_block").reduce((sum, call) => sum + Number(call.input.count), 0);
   assert.equal(broken, RARE_DROP_BREAKS);
 });
+
+test("an eat step with the food bar full is answered without calling the runtime", async () => {
+  // Run 12: six `[EAT_REJECTED] ... Food is full` from the runtime.
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, food: 20, foods: [{ name: "bread", hunger: 5, count: 2 } as never] };
+  const result = await runStep({ skill: "eat", food: "bread" }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match("detail" in result ? result.detail : "", /not hungry: food 20\/20/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("an eat step with the food bar not full still eats", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, food: 14 };
+  const result = await runStep({ skill: "eat", food: "bread" }, contextFor(runtime));
+  assert.equal(result.status, "done");
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["eat_food"]);
+});
+
+test("a craft step that lacks raw materials says get_items gathers and crafts them", async () => {
+  // Run 12: 16 `[CRAFT_MATERIALS_MISSING] Missing leaf materials: birch_log x1 / iron_ingot x3`.
+  const runtime = new FakeRuntime();
+  runtime.failures.craft_item = "[CRAFT_MATERIALS_MISSING] Missing leaf materials: birch_log x1, oak_log x1.";
+  const result = await runStep({ skill: "craft_item", item: "wooden_axe", count: 1 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = "detail" in result ? result.detail : "";
+  assert.match(detail, /CRAFT_MATERIALS_MISSING/u);
+  assert.match(detail, /get_items wooden_axe 1/u);
+});
+
+test("a craft step failing for another reason gets no get_items hint", async () => {
+  const runtime = new FakeRuntime();
+  runtime.failures.craft_item = "[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: oak_wooden_axe.";
+  const result = await runStep({ skill: "craft_item", item: "oak_wooden_axe", count: 1 }, contextFor(runtime));
+  assert.doesNotMatch("detail" in result ? result.detail : "", /get_items/u);
+});
