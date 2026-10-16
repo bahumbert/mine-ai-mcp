@@ -11,11 +11,13 @@ import type { CombatController, CombatOutcome } from "../../survival/index.js";
 import { Budgets } from "../../survival/state/budgets.js";
 import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
-import { parseHuntMobRequest, type HuntMobRequest } from "./contract.js";
+import { mobSourcesOf } from "../../world/mob-drops.js";
+import { huntMobOutcomes, parseHuntMobRequest, type HuntMobRequest } from "./contract.js";
 import {
   createCollectMobDropAction,
   engageTarget,
   formatHuntMobResult,
+  fruitlessKillLimit,
   gatherLoadedDrops,
   huntMob,
   HUNT_FRUITLESS_KILLS,
@@ -111,6 +113,7 @@ function huntBot(targets: readonly Entity[], inventory: { count: number }, healt
   const registry = minecraftData("1.21.4");
   return Object.assign(new EventEmitter(), {
     registry,
+    version: "1.21.4",
     health,
     blockAt: () => null,
     world: { raycast: () => null },
@@ -593,6 +596,44 @@ test("a hunt stops after the fruitless-kill limit and says the drop needs the mo
   assert.match(result.error, new RegExp(`${HUNT_FRUITLESS_KILLS} sheep`));
   assert.match(result.error, /burn/);
   assert.match(result.error, /cook/);
+});
+
+test("the fruitless-kill limit is the kills after which getting nothing has under 1 % chance, 8 when the chance is unknown", () => {
+  assert.equal(fruitlessKillLimit(0.5), 7);
+  assert.equal(fruitlessKillLimit(0.025), 182);
+  assert.equal(fruitlessKillLimit(0.1), 44);
+  assert.equal(fruitlessKillLimit(1), HUNT_FRUITLESS_KILLS);
+  assert.equal(fruitlessKillLimit(null), HUNT_FRUITLESS_KILLS);
+  assert.equal(fruitlessKillLimit(0), HUNT_FRUITLESS_KILLS);
+});
+
+test("a drop with a known chance stops the hunt at that chance's limit and the message names the kills and the chance", async () => {
+  const inventory = { count: 0 };
+  const registry = minecraftData("1.21.4");
+  const chance = mobSourcesOf("rabbit_foot", "1.21.4").find((source) => source.mob === "rabbit")?.chance;
+  assert.ok(chance !== undefined && chance < 1, "rabbit drops rabbit_foot at a chance in the shipped data");
+  const limit = fruitlessKillLimit(chance);
+  const rabbits = Array.from({ length: limit + 3 }, (_, i) => mob(7 + i, registry.entitiesByName.rabbit.id, "rabbit", 3 + i));
+  const bot = huntBot(rabbits, inventory);
+  const result = await huntMob(
+    bot,
+    { campSpawner: false, allowWithoutShield: false, observeForMs: 0, mobName: "rabbit", dropName: "rabbit_foot", count: 1 },
+    {},
+    {
+      ...dependencies(bot, inventory, rabbits.map((r) => died(2, r.position.x))),
+      collectDropAfterDeath: async () => ({ kind: "item_gone" }),
+    },
+  );
+  if (result.status === "succeeded") throw new Error("expected the hunt to stop");
+  assert.equal(result.hunt.targetDeathsObserved, limit);
+  assert.match(result.error, /HUNT_DROP_NOT_GIVEN/);
+  assert.match(result.error, new RegExp(`${limit} rabbit killed`));
+  assert.match(result.error, new RegExp(`chance of ${chance * 100} % per kill`));
+});
+
+test("the fruitless-kill message of an unknown chance does not state one", () => {
+  assert.doesNotMatch(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8), /chance/);
+  assert.match(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8, 0.025), /2\.5 % per kill/);
 });
 
 test("fails truthfully when no matching mob is loaded", async () => {
