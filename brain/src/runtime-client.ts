@@ -301,6 +301,11 @@ export interface BotRuntime {
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
   /** The blocks routes may place as scaffolding (runtime survival policy `navigation.scaffold_blocks`). */
   setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean>;
+  /**
+   * The values the runtime's contract lets input `property` of `tool` take (its schema's enum: the liquids `use_bucket`
+   * fills); none when the tool or property is unknown or has no enum.
+   */
+  toolEnum(tool: string, property: string): Promise<readonly string[]>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
@@ -316,6 +321,9 @@ export interface BotRuntime {
   protectedRegions(): Promise<readonly ProtectedArea[]>;
   close(): Promise<void>;
 }
+
+/** The part of a tool's JSON input schema that tells the values a property accepts. */
+const toolSchemaSchema = z.object({ properties: z.record(z.string(), z.object({ enum: z.array(z.string()).optional() })).optional() });
 
 const positionSchema = z.object({ x: z.number(), y: z.number(), z: z.number() });
 
@@ -493,6 +501,8 @@ export function errorCode(error: string | null | undefined): string | null {
 /** The part of the MCP client the runtime client uses; tests give a fake. */
 export interface ToolClient {
   callTool(call: { name: string; arguments: Record<string, unknown> }): Promise<Record<string, unknown>>;
+  /** The runtime's tools with their input schemas (JSON Schema); a client that cannot list them leaves this out. */
+  listTools?(): Promise<{ readonly tools: readonly { readonly name: string; readonly inputSchema: unknown }[] }>;
   close(): Promise<void>;
 }
 
@@ -501,6 +511,9 @@ export class McpBotRuntime implements BotRuntime {
   private lost: Error | null = null;
 
   private constructor(private client: ToolClient, private readonly reopen: () => Promise<ToolClient>) {}
+
+  /** The tools' input schemas, listed once (the runtime's contract does not change while it runs). */
+  private toolSchemas: Map<string, unknown> | null = null;
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
     const open = async (): Promise<ToolClient> => {
@@ -668,6 +681,16 @@ export class McpBotRuntime implements BotRuntime {
     );
     const row = rows[0];
     return row === undefined ? null : { x: Number(row[0]), z: Number(row[1]) };
+  }
+
+  async toolEnum(tool: string, property: string): Promise<readonly string[]> {
+    if (this.toolSchemas === null) {
+      const listed = await this.client.listTools?.().catch(() => undefined);
+      if (listed === undefined) return [];
+      this.toolSchemas = new Map(listed.tools.map((entry) => [entry.name, entry.inputSchema]));
+    }
+    const read = toolSchemaSchema.safeParse(this.toolSchemas.get(tool));
+    return read.data?.properties?.[property]?.enum ?? [];
   }
 
   async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {

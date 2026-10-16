@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { toolToMake } from "./building/tool-loss.ts";
-import type { Body } from "./body.ts";
+import type { ActOutcome, Body } from "./body.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
@@ -217,9 +217,10 @@ async function gatherRounds(
     const missing = shortfall(wanted, inventory);
     if (missing.length === 0) return finish(actions.length === 0 ? "had everything" : actions.join(", "));
     // A full bucket is no drop and no craft: a bucket (made like any item) filled at the liquid.
-    const filling = missing.find((entry) => bucketLiquid(entry.item) !== null);
+    const liquids = await context.runtime.toolEnum("use_bucket", "liquid");
+    const filling = missing.find((entry) => bucketLiquid(entry.item, liquids) !== null);
     if (filling !== undefined && carried(inventory, "bucket") > 0) {
-      const liquid = bucketLiquid(filling.item)!;
+      const liquid = bucketLiquid(filling.item, liquids)!;
       context.progress?.(`filling a bucket with ${liquid}, for ${purpose}`);
       const filled = await act(context, "use_bucket", { action: "fill", liquid }, `Fill a bucket with ${liquid}, for ${purpose}.`);
       if (filled !== null) return filled.status === "failed" && actions.length > 0 ? { status: "failed", detail: `got ${actions.join(", ")} so far; ${filled.detail}` } : filled;
@@ -377,10 +378,12 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
   return recipes.length > 0 ? "smelt" : "gather";
 }
 
-/** The liquid a full bucket `item` holds, which a `use_bucket` fill scoops (water, lava); null for any other item. */
-function bucketLiquid(item: string): "water" | "lava" | null {
-  const liquid = /^(water|lava)_bucket$/u.exec(item)?.[1];
-  return liquid === "water" || liquid === "lava" ? liquid : null;
+/**
+ * The liquid a full bucket `item` holds, among the `liquids` a `use_bucket` fill scoops (the contract's enum, read from
+ * the runtime: a full bucket is named for its liquid); null for any other item (milk, powder snow, a fish...).
+ */
+function bucketLiquid(item: string, liquids: readonly string[]): string | null {
+  return liquids.find((liquid) => item === `${liquid}_bucket`) ?? null;
 }
 
 /** Why `item` is no item id, in the runtime's words: they name the registry ids close to it ("sticks": stick). */
@@ -458,7 +461,9 @@ async function sourceBlock(runtime: BotRuntime, item: string, knowledge: Knowled
   knowledge.source.set(item, block);
   const chosen = pool.find((source) => source.block === block);
   if (block !== null && block !== item && chosen !== undefined && chosen.chance < RARE_DROP_CHANCE) {
-    knowledge.rare.set(block, { item, chance: chosen.chance, blocks: pool.filter((source) => source.chance === chosen.chance).map((source) => source.block), broken: 0, had: -1 });
+    // `had` starts at what she carries now, so the first check already sees a gain.
+    const had = carried((await runtime.status()).inventory, item);
+    knowledge.rare.set(block, { item, chance: chosen.chance, blocks: pool.filter((source) => source.chance === chosen.chance).map((source) => source.block), broken: 0, had });
   }
   return block;
 }
@@ -670,9 +675,12 @@ async function collectAll(context: GatherContext, targets: readonly (readonly [s
     for (let left = total; left > 0; left -= MAX_COLLECT) {
       // A rare drop is asked for only as many blocks as its bound still allows.
       const count = Math.max(1, Math.min(left, MAX_COLLECT, rare === undefined ? MAX_COLLECT : RARE_DROP_BREAKS - rare.broken));
-      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`, knowledge.lost);
-      if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step);
-      if (rare !== undefined) rare.broken += Number(/Broke (\d+) matching block/u.exec(step !== null && "detail" in step ? step.detail : "")?.[1] ?? count);
+      let broken = 0;
+      const countBroken = (outcome: ActOutcome) => { broken += blocksBroken(outcome.result); };
+      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`, knowledge.lost, countBroken);
+      if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step, countBroken);
+      // The blocks broken, as the runtime counts them, not the drops that came (a rare drop comes from few of them).
+      if (rare !== undefined) rare.broken += broken;
       if (step !== null) return step.status === "failed" ? { status: "failed", detail: await notNear(context, block, step.detail) } : step;
     }
     done.push(`collected ${total} ${block}`);
@@ -738,7 +746,7 @@ async function forgetEmptyNear(runtime: BotRuntime, block: string, here: Positio
  * needs a boat, and `navigate` says so). Null when collected, else what went wrong; with no place known, she is told to
  * explore.
  */
-async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult): Promise<GatherResult | null> {
+async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult, observe?: (outcome: ActOutcome) => void): Promise<GatherResult | null> {
   const tried = triedSet(context.runtime);
   const start = (await context.runtime.status()).position;
   const code = failed.status === "failed" ? errorCode(failed.detail) : null;
@@ -779,7 +787,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
       if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
       continue;
     }
-    const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
+    const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`, undefined, observe);
     if (step === null) return null;
     last = step;
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
@@ -797,20 +805,40 @@ async function acrossWaterHint(runtime: BotRuntime, block: string, failed: Gathe
 /** The boat a fetch names when nothing carried says otherwise. */
 const DEFAULT_BOAT = "oak_boat";
 
+/** The game's block tags of a wood: the logs (stems and wood blocks included) and the planks of every tree. */
+const WOOD_TAGS = ["logs", "planks"];
+
+/** Per bot, whether each carried name is a wood in the game's data (its block tags, asked once per name). */
+const woodNames = new WeakMap<BotRuntime, Map<string, boolean>>();
+
+/** Whether `name` is a wood (a log, a stem, a plank), by the game's block tags; an item that is no block is not. */
+async function isWood(runtime: BotRuntime, name: string): Promise<boolean> {
+  const known = woodNames.get(runtime) ?? new Map<string, boolean>();
+  woodNames.set(runtime, known);
+  let wood = known.get(name);
+  if (wood === undefined) {
+    const tags = (await runtime.blockKinds([name]))[name]?.tags ?? [];
+    wood = WOOD_TAGS.some((tag) => tags.includes(tag));
+    known.set(name, wood);
+  }
+  return wood;
+}
+
 /**
- * The boat she can make from the wood she carries: each carried planks or log names its wood (the item id up to its last
- * word), and the game's craft planner says whether that wood has a boat (or raft) and whether what she carries fits its
- * recipe. A boat she can craft now comes first, then one with a recipe, then {@link DEFAULT_BOAT} (live 2026-10-15
- * run 12: Ayla, on an island with birch, was told oak_boat over and over).
+ * The boat she can make from the wood she carries: each carried wood (a log, stem or planks by the game's block tags;
+ * an iron block is none) names its tree (the item id up to its last word), and the game's craft planner says whether
+ * that tree has a boat (or raft) and whether what she carries fits its recipe. A boat she can craft now comes first,
+ * then one with a recipe, then {@link DEFAULT_BOAT} (live 2026-10-15 run 12: Ayla, on an island with birch, was told
+ * oak_boat over and over).
  */
 async function boatToMake(runtime: BotRuntime): Promise<string> {
-  const woods = [...new Set((await runtime.status()).inventory.flatMap((stack) => {
-    const wood = /^(.+)_(?:planks|log|wood|stem|block)$/u.exec(stack.name)?.[1];
-    return wood === undefined ? [] : [wood];
-  }))];
+  const trees = new Set<string>();
+  for (const stack of (await runtime.status()).inventory) {
+    if (await isWood(runtime, stack.name)) trees.add(stack.name.slice(0, stack.name.lastIndexOf("_")));
+  }
   let possible: string | null = null;
-  for (const wood of woods) {
-    for (const boat of [`${wood}_boat`, `${wood}_raft`]) {
+  for (const tree of trees) {
+    for (const boat of [`${tree}_boat`, `${tree}_raft`]) {
       const status = (await runtime.craftingNeeds([{ item: boat, count: 1 }])).status;
       if (status === "ready") return boat;
       if (status === "missing_materials") possible ??= boat;
@@ -987,9 +1015,9 @@ const toolLostSchema = z.object({ collected: z.object({ toolLost: z.object({ cla
 
 /**
  * Runs one action; null when it succeeded. A tool the runtime says broke during it (`toolLost`, succeeded or not) is
- * added to `lost`.
+ * added to `lost`; `observe` sees each outcome.
  */
-async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string, lost?: Set<string>): Promise<GatherResult | null> {
+async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string, lost?: Set<string>, observe?: (outcome: ActOutcome) => void): Promise<GatherResult | null> {
   let outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
   const broke = toolLostSchema.safeParse(outcome.result);
   if (broke.success) lost?.add(broke.data.collected.toolLost.class);
@@ -999,6 +1027,15 @@ async function act(context: GatherContext, tool: "collect_block" | "collect_mob_
     outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
   }
+  observe?.(outcome);
   if (outcome.status === "succeeded") return null;
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
+}
+
+/** What a `collect_block` result reports (src/actions/collect-block/contract.ts `collected`), on success and on failure. */
+const collectedSchema = z.object({ collected: z.object({ blocksBroken: z.number() }) });
+
+/** The matching blocks a `collect_block` result reports broken; 0 when it reports none. */
+function blocksBroken(result: ActOutcome["result"]): number {
+  return collectedSchema.safeParse(result).data?.collected.blocksBroken ?? 0;
 }

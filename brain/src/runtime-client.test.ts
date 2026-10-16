@@ -121,3 +121,26 @@ test("a rationale longer than the contract's 200 characters is cut before it is 
   await runtime.submit("craft_item", {}, "short", 1000).catch(() => undefined); // the empty reply is not a state; only what was sent counts
   assert.equal(sent[1]?.["rationale"], "short");
 });
+
+test("the values a tool's input property accepts are read from the tool's schema, once", async () => {
+  let listed = 0;
+  const client: ToolClient = {
+    callTool: async () => ({}),
+    listTools: async () => {
+      listed += 1;
+      return { tools: [{ name: "use_bucket", inputSchema: { type: "object", properties: { liquid: { type: "string", enum: ["water", "lava"], default: "water" }, action: { type: "string" } } } }] };
+    },
+    close: async () => {},
+  };
+  const runtime = McpBotRuntime.over(client);
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), ["water", "lava"]);
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "action"), [], "a property with no enum");
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "nothing"), [], "an unknown property");
+  assert.deepEqual(await runtime.toolEnum("nothing", "liquid"), [], "an unknown tool");
+  assert.equal(listed, 1);
+});
+
+test("a client that cannot list its tools gives no values", async () => {
+  const runtime = McpBotRuntime.over({ callTool: async () => ({}), close: async () => {} });
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+});

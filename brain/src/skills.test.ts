@@ -309,6 +309,25 @@ test("a water bucket is a carried bucket filled at water", async () => {
   assert.ok(runtime.snapshot.inventory.some((stack) => stack.name === "water_bucket"));
 });
 
+test("a full bucket is filled only with a liquid the use_bucket contract lists: others get the generic refusal", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "bucket", count: 1 }] };
+  runtime.notDropped = new Set(["milk_bucket", "lava_bucket"]);
+  const milk = await runStep({ skill: "get_items", items: [{ item: "milk_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(milk.status, "failed");
+  assert.ok(!runtime.submitted.some((call) => call.tool === "use_bucket"), "no fill for milk");
+  // The liquids come from the contract: with only water listed, a lava bucket is no fill either.
+  runtime.toolEnums = { "use_bucket.liquid": ["water"] };
+  const lava = await runStep({ skill: "get_items", items: [{ item: "lava_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(lava.status, "failed");
+  assert.ok(!runtime.submitted.some((call) => call.tool === "use_bucket"), "no fill for a liquid the contract does not list");
+  runtime.toolEnums = { "use_bucket.liquid": ["water", "lava"] };
+  const listed = await runStep({ skill: "get_items", items: [{ item: "lava_bucket", count: 1 }] }, contextFor(runtime));
+  assert.equal(listed.status, "done", JSON.stringify(listed));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "use_bucket").map((call) => call.input), [{ action: "fill", liquid: "lava" }]);
+});
+
 test("a water bucket without a bucket crafts one from iron first, then fills it", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
@@ -1871,6 +1890,47 @@ test("an eat step with the food bar full is tried and the game's answer is repor
   const ate = await runStep({ skill: "eat", food: "golden_apple" }, contextFor(accepted));
   assert.equal(ate.status, "done");
   assert.deepEqual(accepted.submitted.map((call) => call.tool), ["eat_food"]);
+});
+
+test("a boat is looked up only for carried woods: iron_block costs no recipe lookup", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { birch_boat: { makes: 1, needs: [{ item: "birch_planks", count: 5 }] }, oak_boat: { makes: 1, needs: [{ item: "oak_planks", count: 5 }] } };
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "iron_block", count: 4 }, { name: "hay_block", count: 2 }, { name: "birch_planks", count: 5 }] };
+  const asked: string[] = [];
+  const lookup = runtime.craftingNeeds.bind(runtime);
+  runtime.craftingNeeds = async (items, prefer) => {
+    asked.push(...items.map((entry) => entry.item));
+    return lookup(items, prefer);
+  };
+  const result = await runStep({ skill: "collect_block", block: "oak_log", count: 3 }, contextFor(runtime));
+  assert.match(result.status === "failed" ? result.detail : "", /get_items birch_boat\)/u);
+  assert.deepEqual(asked.filter((item) => /^(iron|hay)_/u.test(item)), [], "no recipe was asked for a block that is no wood");
+});
+
+test("the rare-drop bound counts blocks the runtime reports broken, whatever drops came", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
+  // Each call breaks fewer blocks than asked: only the structured count may stop the fetch.
+  runtime.collectBroken = () => 8;
+  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, RARE_DROP_BREAKS / 8);
+});
+
+test("a rare drop already carried when the fetch starts is not taken for a gain", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "apple", count: 2 }] };
+  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
+  runtime.collectBroken = () => 16;
+  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
 });
 
 test("an eat step with the food bar not full still eats", async () => {

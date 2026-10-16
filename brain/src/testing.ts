@@ -115,6 +115,13 @@ export class FakeRuntime implements BotRuntime {
     return true;
   }
 
+  /** The values the fake's contract lets a tool's input property take, by "tool.property" (`toolEnum`); the runtime's own schema in real life. */
+  toolEnums: Readonly<Record<string, readonly string[]>> = { "use_bucket.liquid": ["water", "lava"] };
+
+  async toolEnum(tool: string, property: string): Promise<readonly string[]> {
+    return this.toolEnums[`${tool}.${property}`] ?? [];
+  }
+
   /** The `prefer` lists `craftingNeeds` was given, in order (the fake planner does not use them). */
   readonly preferences: (readonly string[])[] = [];
   /** Names that are no item id at all (`craftingNeeds` answers unknown). */
@@ -189,12 +196,16 @@ export class FakeRuntime implements BotRuntime {
     dirt: ["dirt", "mineable/shovel"], grass_block: ["dirt", "mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
     stone: ["mineable/pickaxe"], cobblestone: ["mineable/pickaxe"], iron_ore: ["mineable/pickaxe"], coal_ore: ["mineable/pickaxe"],
     oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"], oak_door: ["doors"], spruce_door: ["doors"],
+    oak_planks: ["planks"], birch_planks: ["planks"], spruce_planks: ["planks"], birch_log: ["logs", "mineable/axe"],
   };
 
   /** Where blocks were seen, by name, as the bot data's frontier map would answer (others: never seen). */
   seen: Readonly<Record<string, SeenBlock>> = {};
   /** Further places for a block, after the one in {@link seen} (farther away, as the frontier map lists nearest first). */
   alsoSeen: Readonly<Record<string, readonly SeenBlock[]>> = {};
+
+  /** How many blocks each successful `collect_block` reports broken, whatever it was asked for (default: the count asked). */
+  collectBroken: ((input: Readonly<Record<string, unknown>>) => number) | null = null;
 
   /** A successful `navigate` moves the bot to its target (off by default: most tests keep the bot where it is). */
   walkOnNavigate = false;
@@ -368,6 +379,11 @@ export class FakeRuntime implements BotRuntime {
   /** How such a tend settles: partial, or failed when no cell changed. */
   tendSkippedStatus: "partial" | "failed" = "partial";
 
+  private collectResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    const requested = Number(input.count ?? 1);
+    return { status: "succeeded", collected: { requested, gained: requested, gainedByItem: {}, blocksBroken: this.collectBroken?.(input) ?? requested, brokenAt: [] } };
+  }
+
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     const skipped = this.tendSkipped ?? {};
     if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped } };
@@ -386,7 +402,8 @@ export class FakeRuntime implements BotRuntime {
     }
     if (tool === "collect_mob_drop") this.addItem(String(input.drop_name), Number(input.count ?? 1));
     if (tool === "use_bucket") {
-      const [from, to] = input.action === "fill" ? ["bucket", "water_bucket"] : ["water_bucket", "bucket"];
+      const full = `${String(input.liquid ?? "water")}_bucket`;
+      const [from, to] = input.action === "fill" ? ["bucket", full] : [full, "bucket"];
       this.addItem(from, -1);
       this.addItem(to, 1);
       if (input.action === "pour") this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "water");
@@ -444,7 +461,7 @@ export class FakeRuntime implements BotRuntime {
       // It reaches the ground asked for, at the height it stands.
       this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
     }
-    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : undefined;
+    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : undefined;
     if (action.tool === "tend_crops" && this.tendSkipped !== null) {
       const cells = Object.values(this.tendSkipped).reduce((sum, list) => sum + list.length, 0);
       return { state: "settled", actionId, status: this.tendSkippedStatus, error: `[TEND_INCOMPLETE] ${cells} cells could not be farmed; see skipped.`, result };
