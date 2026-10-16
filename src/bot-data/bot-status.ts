@@ -27,6 +27,8 @@ export interface BotStatusSnapshot {
   readonly botId: string;
   readonly dimension: string;
   readonly gameMode: string;
+  /** The server difficulty (`peaceful`, `easy`, `normal`, `hard`); `unknown` before the server said. */
+  readonly difficulty: string;
   readonly x: number;
   readonly y: number;
   readonly z: number;
@@ -55,6 +57,7 @@ export function snapshotBotStatus(bot: Bot): BotStatusSnapshot {
     botId: bot.username || "bot",
     dimension: bot.game?.dimension || "minecraft:overworld",
     gameMode: bot.game?.gameMode || "unknown",
+    difficulty: bot.game?.difficulty || "unknown",
     x: position.x,
     y: position.y,
     z: position.z,

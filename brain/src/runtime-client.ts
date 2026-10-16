@@ -68,6 +68,8 @@ export interface BotSnapshot {
   readonly position: Position;
   readonly health: number;
   readonly food: number;
+  /** The server difficulty (`peaceful`...); `unknown` or unset when the runtime did not say. */
+  readonly difficulty?: string;
   readonly inventory: readonly CarriedStack[];
   /** Carried foods, most filling first; empty when it carries none. */
   readonly foods: readonly CarriedFood[];
@@ -319,6 +321,7 @@ const viewStatusSchema = z.object({
   result: z.object({
     situation: z.object({
       position: positionSchema,
+      difficulty: z.string().optional(),
       vitals: z.object({ health: z.number(), food: z.number() }),
       inventory: z.object({
         stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null) })),
@@ -516,6 +519,7 @@ export class McpBotRuntime implements BotRuntime {
       position: situation.position,
       health: situation.vitals.health,
       food: situation.vitals.food,
+      difficulty: situation.difficulty,
       inventory: situation.inventory.stacks.map(({ name, count, durability }) => ({ name, count, durability })),
       foods: situation.inventory.foods,
       mobs: mobSpecies(situation.nearby.mobs),

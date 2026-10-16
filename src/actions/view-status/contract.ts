@@ -138,6 +138,7 @@ export const liveSituationSchema = z.strictObject({
   observedAt: z.string(),
   dimension: z.string(),
   gameMode: z.string(),
+  difficulty: z.string().describe("Server difficulty: peaceful (hostile mobs never spawn), easy, normal or hard; unknown before the server said."),
   lastDeath: z.strictObject({
     dimension: z.string(),
     position: positionSchema,

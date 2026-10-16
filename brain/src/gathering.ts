@@ -229,7 +229,7 @@ async function gatherRounds(
     };
     let step: GatherResult;
     if (ungated.length > 0) step = await collectAll(context, ungated, purpose, knowledge);
-    else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose);
+    else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose, knowledge);
     else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
     else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
     else if (gated.length > 0) step = await collectAll(context, gated, purpose, knowledge);
@@ -944,8 +944,13 @@ async function craft(context: GatherContext, items: readonly ItemCount[], purpos
 }
 
 /** Hunts each item from its mob (`collect_mob_drop`: it finds, fights and picks up), one after the other. */
-async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { readonly mob: string; readonly count: number }>, purpose: string): Promise<GatherResult> {
+async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { readonly mob: string; readonly count: number }>, purpose: string, knowledge: Knowledge): Promise<GatherResult> {
   const done: string[] = [];
+  // No hostile mob spawns on a peaceful server (run 12: rotten_flesh and bone hunts ended in HUNT_TARGET_NOT_LOADED): refuse before walking.
+  const hostile = [...hunts].find(([item]) => knowledge.mob.get(item)?.hostile === true);
+  if (hostile !== undefined && (await context.runtime.status()).difficulty === "peaceful") {
+    return { status: "failed", detail: `no ${hostile[1].mob} spawns on this peaceful server: ${hostile[0]} cannot be hunted here` };
+  }
   for (const [item, { mob, count }] of hunts) {
     context.progress?.(`hunting ${mob} for ${count} ${item}, for ${purpose}`);
     const step = await act(context, "collect_mob_drop", { mob_name: mob, drop_name: item, count }, `Hunt ${mob} for ${count} ${item}, for ${purpose}.`);

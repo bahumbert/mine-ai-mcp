@@ -298,6 +298,28 @@ test("get_items hunts what an animal gives instead of crafting it the long way: 
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_mob_drop" && call.input.mob_name === "skeleton").length, 0);
 });
 
+test("get_items refuses a drop only hostile mobs give on a peaceful server, before walking; an animal's drop is still hunted", async () => {
+  // Run 12: HUNT_TARGET_NOT_LOADED for rotten_flesh and bone, the server being peaceful (no zombie ever spawns).
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.mobDrops = {
+    rotten_flesh: [{ mob: "zombie", chance: 1, hostile: true }],
+    beef: [{ mob: "cow", chance: 1, hostile: false }],
+  };
+  runtime.snapshot = { ...runtime.snapshot, difficulty: "peaceful" };
+  const flesh = await runStep({ skill: "get_items", items: [{ item: "rotten_flesh", count: 2 }] }, contextFor(runtime));
+  assert.equal(flesh.status, "failed");
+  assert.match(flesh.status === "failed" ? flesh.detail : "", /no zombie spawns on this peaceful server: rotten_flesh cannot be hunted here/u);
+  assert.equal(runtime.submitted.length, 0, "refused before any action");
+
+  const beef = await runStep({ skill: "get_items", items: [{ item: "beef", count: 2 }] }, contextFor(runtime));
+  assert.equal(beef.status, "done", JSON.stringify(beef));
+
+  runtime.snapshot = { ...runtime.snapshot, difficulty: "normal" };
+  const normal = await runStep({ skill: "get_items", items: [{ item: "rotten_flesh", count: 2 }] }, contextFor(runtime));
+  assert.equal(normal.status, "done", JSON.stringify(normal));
+});
+
 test("items that cannot be found end get_items, saying why", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
