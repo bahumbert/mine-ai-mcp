@@ -516,7 +516,7 @@ async function workInReach(
     if (state.kind === "diggable") {
       const dug = await request.breakInPlace({ movements, position: target.position, signal });
       if (dug.status === "broken") targeting.dug += 1;
-      else targeting.refuse(target, dug.reason);
+      else targeting.refuse(target, `${state.holds} there could not be cleared: ${dug.reason}`);
     } else if (state.kind === "placeable") {
       const item = bot.inventory.items().find((candidate) => candidate.name === target.blockName)!;
       const placed = await request.place({

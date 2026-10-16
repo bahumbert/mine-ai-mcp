@@ -443,6 +443,7 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
     reserved: plan.bill,
     leave: (part) => leaveUnfinished(part),
     again: context.building === undefined ? "" : "; building it again resumes it there",
+    abandon: () => { if (context.building !== undefined) context.building.unfinished = null; },
   });
   if (stopped !== null) return stopped;
   if (context.building !== undefined) context.building.unfinished = null;
@@ -524,6 +525,8 @@ interface PartsOptions {
   readonly leave: (part: number) => void;
   /** Ends the failure sentence: how the house is asked again. */
   readonly again: string;
+  /** Forgets the unfinished house, when resuming it cannot get further. */
+  readonly abandon?: () => void;
 }
 
 /**
@@ -579,7 +582,11 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
       }
       const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
       options.leave(Math.min(index, plan.batches.length - 1));
-      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${options.again}` };
+      // Resuming would meet the same refused cell, so the site is given up instead of offered again.
+      const onlyRefused = options.again !== "" && /^\[BUILD_INCOMPLETE\] (\d+) cells? still wrong: \1 were refused/u.test(outcome.error ?? "");
+      if (onlyRefused) options.abandon?.();
+      const again = onlyRefused ? "; building here again would be refused at the same cell: build somewhere else, or clear that cell first" : options.again;
+      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${again}` };
     }
   }
   return null;

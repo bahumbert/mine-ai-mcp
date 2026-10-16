@@ -47,6 +47,17 @@ import {
 /** The physical side of a build, injectable so the contract can be exercised without a server. */
 export type BuildStructurePhysics = Pick<BuildRequest, "movements" | "route" | "breakInPlace" | "canSeeDig" | "place">;
 
+/**
+ * The cells of the site are asked for by the build itself: a wrong block standing in one (a crafting table set down
+ * where the house goes, live 2026-10-14: Oskar's house stopped at part 1/9 four times) is cleared when the build
+ * removes wrong blocks, though a route elsewhere keeps every workstation.
+ */
+export function siteBreakRequest(request: Pick<BuildStructureRequest, "cells" | "removeWrongBlocks">): (block: unknown, position: { x: number; y: number; z: number }) => boolean {
+  if (!request.removeWrongBlocks) return () => false;
+  const site = new Set(request.cells.map((cell) => packKey(cell.x, cell.y, cell.z)));
+  return (_block, position) => site.has(packKey(position.x, position.y, position.z));
+}
+
 function productionPhysics(
   bot: Bot,
   navigation: NavigationRuntime,
@@ -57,6 +68,7 @@ function productionPhysics(
     movements: (protectedCells) =>
       createMovements(bot, {
         protectedCells,
+        isRequestedBreak: siteBreakRequest(request),
         // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
         ignoreRegionsOwnedBy: bot.username,
         protectedScaffoldNames: [...new Set(request.cells.map((cell) => cell.blockName))].filter(
