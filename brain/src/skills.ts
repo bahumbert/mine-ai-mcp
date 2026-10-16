@@ -7,7 +7,7 @@ import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
-import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
+import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, PIT_DEPTH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import { junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
@@ -655,6 +655,15 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const cells = (batches: readonly (readonly TerrainCell[])[]) => batches.reduce((sum, batch) => sum + batch.length, 0);
   const plan = levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
   if (plan.batches.length === 0) return { status: "done", detail: `${what} is already level` };
+  const moved = plan.dug + plan.filled;
+  if (options.budget !== undefined && moved > options.budget) {
+    // Counted before the first block goes (run 12: a 25x25 level dug 1324 blocks; a cellar dug by repeated levels).
+    const perColumn = new Map<string, number>();
+    for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
+    const deepest = Math.max(0, ...perColumn.values());
+    const pit = deepest >= PIT_DEPTH ? ` (this digs a pit of ${plan.dug} blocks)` : "";
+    return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pit}; at most ${options.budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
+  }
   // The tool of each class the dig needs and it does not carry: stone when it has the cobblestone, else wood.
   const toolsMissing = (stacks: typeof inventory) => {
     const has = spareIn(stacks);
@@ -799,7 +808,7 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
   if (width > LEVEL_LIMITS.side || depth > LEVEL_LIMITS.side) return { status: "failed", detail: `the zone is ${width} by ${depth}: at most ${LEVEL_LIMITS.side} by ${LEVEL_LIMITS.side} at a time` };
   // One layer under the level: a flat floor, bridged over a pond or a ravine, not columns hanging into it (owner,
   // 2026-10-02: "a flat platform of 1 level").
-  return levelZone(context, zone, level, `${width}x${depth} at y ${level}`, { keep, below: 1, ...(step.fill !== undefined && { fillWith: step.fill }) });
+  return levelZone(context, zone, level, `${width}x${depth} at y ${level}`, { keep, below: 1, budget: LEVEL_BLOCK_BUDGET, ...(step.fill !== undefined && { fillWith: step.fill }) });
 }
 
 /** Keeps the character's own digging and scaffolding out of an area (ADR-012); its own choice, e.g. when asked. */

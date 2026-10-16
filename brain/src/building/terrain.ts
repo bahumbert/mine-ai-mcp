@@ -19,6 +19,12 @@ export interface TerrainCell {
 /** Limits of one leveling job (owner-approved spec, 2026-10-02). */
 export const LEVEL_LIMITS = { side: 32, above: 16, below: 4 } as const;
 
+/** Blocks a levelling step may move in one go (run 12: 1324 dug for "level 12" cost 68 failed minutes). */
+export const LEVEL_BLOCK_BUDGET = 256;
+
+/** A dig this deep (blocks) is told to the model as a pit. */
+export const PIT_DEPTH = 4;
+
 /** The runtime's `build_structure` limit per call. */
 const MAX_BATCH = 256;
 
@@ -69,6 +75,8 @@ export interface LevelOptions {
   readonly below?: number;
   /** Cells never filled: what a house places there itself (its floor and foundation, even into water). */
   readonly placedLater?: ReadonlySet<string>;
+  /** The most blocks (dug and filled) the job may move; above it the caller refuses (none: no limit). */
+  readonly budget?: number;
 }
 
 export function levelPlan(zone: Zone, level: number, area: BlockArea, fill: string, options: LevelOptions = {}): LevelPlan {

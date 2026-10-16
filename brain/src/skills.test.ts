@@ -1201,6 +1201,26 @@ test("leveling goes on around a cell it may not dig, and says so", async () => {
   assert.equal(builds(runtime).length, 2, "the batch after the refused one still ran");
 });
 
+test("level_area refuses above its block budget, says how many blocks and how deep, and digs nothing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
+  for (let x = 0; x < 10; x += 1) for (let z = 0; z < 10; z += 1) for (let y = 64; y <= 66; y += 1) runtime.world.set(`${x},${y},${z}`, "dirt");
+  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 9, z2: 9, y: 64 }), contextFor(runtime, { areas: [] }));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /^leveling 10x10 at y 64 means moving 300 blocks \(300 to dig, 0 to fill\), up to 3 deep; at most 256 blocks are moved at a time: ask for a smaller area or a nearer height/u);
+  assert.doesNotMatch(detail, /pit/u);
+  assert.equal(builds(runtime).length, 0);
+});
+
+test("level_area names a deep dig as a pit of its size when it is refused", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
+  for (let x = 0; x < 5; x += 1) for (let z = 0; z < 5; z += 1) for (let y = 64; y <= 74; y += 1) runtime.world.set(`${x},${y},${z}`, "dirt");
+  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 4, z2: 4, y: 64 }), contextFor(runtime, { areas: [] }));
+  assert.match(result.status === "failed" ? result.detail : "", /means moving 275 blocks .*up to 11 deep \(this digs a pit of 275 blocks\)/u);
+});
+
 test("her own name in a step is where she stands: protecting the area around herself works", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 10.5, y: 64, z: -3.5 } };
