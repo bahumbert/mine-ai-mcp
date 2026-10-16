@@ -459,9 +459,9 @@ const foregroundDataSchema = z.discriminatedUnion("state", [
 
 const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"), data: z.unknown() }) });
 
-/** Largest page `read_recent_events` accepts. */
 /** The runtime contract's longest rationale (`rationaleSchema` in src/server/mcp.ts); a longer one fails the whole call. */
 const MAX_RATIONALE = 200;
+/** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
 /** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
