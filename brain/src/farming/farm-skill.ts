@@ -56,6 +56,17 @@ function withNote(result: SkillResult, note: string): SkillResult {
   return result.status === "done" && note !== "" ? { ...result, detail: `${result.detail}; ${note}` } : result;
 }
 
+/**
+ * The first of these remembered farms whose ground is still soil. One whose ground is no soil any more (a plot made
+ * on stone) is skipped: it is not tended again and does not shadow a farm made since (run 13 review).
+ */
+async function farmOnSoil(context: SkillContext, candidates: readonly KnownFarm[]): Promise<KnownFarm | undefined> {
+  for (const candidate of candidates) {
+    if (await farmStandsOnSoil(context.runtime, farmPlot(candidate.centre, candidate.size as FarmSize))) return candidate;
+  }
+  return undefined;
+}
+
 function horizontal(a: Position, b: Position): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
@@ -69,9 +80,9 @@ function horizontal(a: Position, b: Position): number {
 export async function farm(context: SkillContext, step: Extract<Step, { skill: "farm" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const at = step.x !== undefined && step.y !== undefined && step.z !== undefined ? { x: step.x, y: step.y, z: step.z } : null;
-  const known = context.farms?.find((candidate) => horizontal(candidate.centre, at ?? snapshot.position) <= FARM_RANGE);
-  // A remembered farm whose ground is no soil any more (a plot made on stone) is not tended again: a new site is chosen.
-  if (known !== undefined && (await farmStandsOnSoil(context.runtime, farmPlot(known.centre, known.size as FarmSize)))) return tendKnown(context, snapshot, known, step.crop);
+  const centre = at ?? snapshot.position;
+  const known = await farmOnSoil(context, (context.farms ?? []).filter((candidate) => horizontal(candidate.centre, centre) <= FARM_RANGE));
+  if (known !== undefined) return tendKnown(context, snapshot, known, step.crop);
   const crop = step.crop;
   if (crop === undefined) return { status: "failed", detail: "a new farm needs a crop to plant: say which item (wheat_seeds, carrot, potato, beetroot_seeds)" };
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;

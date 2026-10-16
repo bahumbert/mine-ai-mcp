@@ -249,3 +249,24 @@ test("a remembered farm standing on stone is not tended again", async () => {
   assert.match(result.status === "failed" ? result.detail : "", /no ground to farm/u);
   assert.deepEqual(calls(runtime), []);
 });
+
+test("a remembered farm on stone does not shadow the farm made since: the one on soil is tended (run 13 review)", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }]);
+  for (let x = -6; x <= 2; x += 1) for (let z = -2; z <= 10; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const made = { crop: "wheat_seeds", size: 5, madeAt: "2026-10-14T00:00:00Z", tendedAt: "2026-10-14T00:00:00Z", state: { planted: 0, ripe: 0, empty: 0 } };
+  const stale: KnownFarm = { ...made, centre: { x: 0, y: 63, z: 4 } };
+  const good: KnownFarm = { ...made, centre: { x: 5, y: 63, z: -3 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [stale, good] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+  assert.deepEqual(runtime.submitted.find((call) => call.tool === "tend_crops")!.input, { x1: 3, z1: -5, x2: 7, z2: -1, y: 63, plant: "wheat_seeds" });
+});
+
+test("a remembered farm in chunks that are not loaded is kept, not replaced by a new farm", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }]);
+  for (let x = -6; x <= 6; x += 1) for (let z = -2; z <= 10; z += 1) runtime.world.set(`${x},63,${z}`, "unloaded");
+  const known: KnownFarm = { crop: "wheat_seeds", size: 5, centre: { x: 0, y: 63, z: 4 }, madeAt: "t0", tendedAt: "t0", state: { planted: 20, ripe: 0, empty: 0 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [known] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+});
