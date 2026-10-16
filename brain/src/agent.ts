@@ -626,11 +626,11 @@ export class Agent {
       this.finish(work, "failed", `${record.step} ${record.outcome === "done" ? "changed nothing" : "failed the same way"} ${same} times in a row: ${record.detail}`);
       return;
     }
-    // The same step done `same` times in a row ends the objective as done, gaining or not (live 2026-10-11 run 10: "collect
+    // The same step done `same` times in a row ends the objective as failed, gaining or not (a requester must not be told done) (live 2026-10-11 run 10: "collect
     // 16 dirt" 60+ times, "get 1 oak_boat" 13): a gain that never ends the objective is no progress for it. A failed or
     // another step in between resets the count.
     if (record.outcome === "done" && last.length === same && last.every((step) => step.step === record.step && step.outcome === "done")) {
-      this.finish(work, "done", `${record.step} done ${same} times in a row`);
+      this.finish(work, "failed", `the same step was done ${same} times in a row and the objective is not reached`);
       return;
     }
     // The same failure between other steps is the same loop (live 2026-10-09: Ayla's farm in a cave failed "25 not

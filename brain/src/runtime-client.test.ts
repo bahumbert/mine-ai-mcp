@@ -104,3 +104,20 @@ test("a refused connection whose reconnect also fails throws the original error,
   await assert.rejects(runtime.blockSources(["wheat"]), /fetch failed/u);
   assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
 });
+
+test("a rationale longer than the contract's 200 characters is cut before it is sent", async () => {
+  // Run 12: `[MCP_CALL_FAILED] craft_item: ... Too big: expected string to have <=200 characters at rationale`.
+  const sent: Record<string, unknown>[] = [];
+  const client: ToolClient = {
+    callTool: async (call) => {
+      sent.push(call.arguments as Record<string, unknown>);
+      return { structuredContent: { response: { format: "json", data: { result: {} } } } };
+    },
+    close: async () => {},
+  };
+  const runtime = McpBotRuntime.over(client);
+  await runtime.submit("craft_item", {}, "x".repeat(300), 1000).catch(() => undefined); // the empty reply is not a state; only what was sent counts
+  assert.equal((sent[0]?.["rationale"] as string).length, 200);
+  await runtime.submit("craft_item", {}, "short", 1000).catch(() => undefined); // the empty reply is not a state; only what was sent counts
+  assert.equal(sent[1]?.["rationale"], "short");
+});

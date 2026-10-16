@@ -125,7 +125,7 @@ test("the same step done again and again ends the objective as changing nothing 
     // 4 calls: the second identical step goes back once ("just succeeded") and is sent again.
     assert.equal(action.requests.length, 4, "the objective ended after the third identical step that gained");
     assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
-    assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 32 cobblestone done 3 times in a row/u);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step was done 3 times in a row and the objective is not reached/u);
   }
   {
     const runtime = new FakeRuntime();
@@ -139,7 +139,7 @@ test("the same step done again and again ends the objective as changing nothing 
   }
 });
 
-test("the same successful step three times in a row ends the objective as done; a failure or another step in between resets the count", async (t) => {
+test("the same successful step three times in a row ends the objective as failed (not reached); a failure or another step in between resets the count", async (t) => {
   // Live 2026-10-11 run 10: "collect 16 dirt" 60+ times under one own objective, each gaining.
   const dirt = { step: { skill: "collect_block", block: "dirt", count: 16 } };
   const sand = { step: { skill: "collect_block", block: "sand", count: 16 } };
@@ -152,7 +152,8 @@ test("the same successful step three times in a row ends the objective as done; 
     await agent.handle(say("Steve", "dig dirt"));
     await until(() => runtime.said.length === 2);
     assert.equal(action.requests.length, 4, "the model was not asked after the third step (the second went back once as just succeeded)");
-    assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 16 dirt done 3 times in a row/u);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step was done 3 times in a row and the objective is not reached/u);
+    assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
   }
   {
     const runtime = new FakeRuntime();

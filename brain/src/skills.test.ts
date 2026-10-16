@@ -171,6 +171,16 @@ test("what get_items fetches is not scaffolding meanwhile; the scaffold list is 
   assert.deepEqual(runtime.scaffoldSettings, [["cobblestone"], ["dirt", "cobblestone"]]);
 });
 
+test("what get_items carries is not struck off the scaffold list: only the bill and the crafted keep are", async () => {
+  // Review B7: every carried scaffold block (dirt, cobblestone) came off the list for the whole fetch.
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 20 }], policy: { revision: "r1", digStraightDown: false, scaffoldBlocks: ["dirt", "cobblestone"] } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_planks", count: 4 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.scaffoldSettings, []);
+});
+
 test("drop_item drops several items in one step, and the single-item form still reads", async () => {
   // Live 2026-10-04: a full inventory took Tom 20 steps of dropping one item each.
   const runtime = new FakeRuntime();

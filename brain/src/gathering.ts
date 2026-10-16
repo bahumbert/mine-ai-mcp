@@ -109,8 +109,10 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const items = [...bill, ...keep].map((entry) => entry.item);
-  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, keep));
+  const knowledge = newKnowledge();
+  const kept = await madeItems(context.runtime, keep, knowledge);
+  const items = [...bill, ...kept].map((entry) => entry.item);
+  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, kept, knowledge));
 }
 
 /**
@@ -133,25 +135,28 @@ export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly 
   }
 }
 
+// Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
+// is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
+// gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
+// game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
+// not a Minecraft item id").
+async function madeItems(runtime: BotRuntime, keep: readonly ItemCount[], knowledge: Knowledge): Promise<ItemCount[]> {
+  return (await Promise.all(keep.map(async (entry) => {
+    const how = await howToGet(runtime, entry.item, knowledge);
+    return how === null || how === "gather" ? null : entry;
+  })))
+    .filter((entry): entry is ItemCount => entry !== null);
+}
+
 async function gatherRounds(
   context: GatherContext,
   bill: readonly ItemCount[],
   purpose: string,
   home: Position,
   keep: readonly ItemCount[],
+  knowledge: Knowledge,
 ): Promise<GatherResult> {
-  const knowledge = newKnowledge();
   const site: Site = { home };
-  // Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
-  // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
-  // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
-  // game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
-  // not a Minecraft item id").
-  keep = (await Promise.all(keep.map(async (entry) => {
-    const how = await howToGet(context.runtime, entry.item, knowledge);
-    return how === null || how === "gather" ? null : entry;
-  })))
-    .filter((entry): entry is ItemCount => entry !== null);
   const actions: string[] = [];
   /** Her own items a craft used and that were not replaced, none being near. */
   const usedOwn: ItemCount[] = [];

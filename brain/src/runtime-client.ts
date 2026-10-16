@@ -460,6 +460,8 @@ const foregroundDataSchema = z.discriminatedUnion("state", [
 const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"), data: z.unknown() }) });
 
 /** Largest page `read_recent_events` accepts. */
+/** The runtime contract's longest rationale (`rationaleSchema` in src/server/mcp.ts); a longer one fails the whole call. */
+const MAX_RATIONALE = 200;
 const EVENT_PAGE = 100;
 
 /** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
@@ -772,7 +774,7 @@ export class McpBotRuntime implements BotRuntime {
   private async callOnce(name: string, args: Readonly<Record<string, unknown>>, rationale: string): Promise<unknown> {
     let reply: Awaited<ReturnType<ToolClient["callTool"]>>;
     try {
-      reply = await this.client.callTool({ name, arguments: { ...args, rationale, response_format: "json" } });
+      reply = await this.client.callTool({ name, arguments: { ...args, rationale: rationale.slice(0, MAX_RATIONALE), response_format: "json" } });
     } catch (error) {
       if (error instanceof Error && isLostSession(error)) throw new LostSession(error);
       throw error;
