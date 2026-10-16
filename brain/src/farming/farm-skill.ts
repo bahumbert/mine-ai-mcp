@@ -5,7 +5,8 @@ import type { KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { describeWay } from "../gathering.ts";
 import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, overlapsOf, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
-import { farmPlot, plotBehind, type FarmPlot } from "./plot.ts";
+import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
+import { chooseSite, farmStandsOnSoil } from "./site.ts";
 
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
 const WALK_RANGE = 8;
@@ -69,12 +70,16 @@ export async function farm(context: SkillContext, step: Extract<Step, { skill: "
   const snapshot = await context.runtime.status();
   const at = step.x !== undefined && step.y !== undefined && step.z !== undefined ? { x: step.x, y: step.y, z: step.z } : null;
   const known = context.farms?.find((candidate) => horizontal(candidate.centre, at ?? snapshot.position) <= FARM_RANGE);
-  if (known !== undefined) return tendKnown(context, snapshot, known, step.crop);
+  // A remembered farm whose ground is no soil any more (a plot made on stone) is not tended again: a new site is chosen.
+  if (known !== undefined && (await farmStandsOnSoil(context.runtime, farmPlot(known.centre, known.size as FarmSize)))) return tendKnown(context, snapshot, known, step.crop);
   const crop = step.crop;
   if (crop === undefined) return { status: "failed", detail: "a new farm needs a crop to plant: say which item (wheat_seeds, carrot, potato, beetroot_seeds)" };
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plot = at === null ? plotBehind(snapshot.position, toward, step.size) : farmPlot({ x: at.x, y: at.y - 1, z: at.z }, step.size);
-  return makeFarm(context, snapshot, plot, crop);
+  // The ground there must be tillable under the open sky; if not, the nearest plot that is, else a refusal that says why.
+  const site = await chooseSite(context.runtime, plot);
+  if ("refusal" in site) return { status: "failed", detail: site.refusal };
+  return makeFarm(context, snapshot, site.plot, crop);
 }
 
 async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, asked: string): Promise<SkillResult> {

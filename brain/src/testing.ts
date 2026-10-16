@@ -184,7 +184,7 @@ export class FakeRuntime implements BotRuntime {
 
   /** The game's block tags the fake reports per block name, on a `blockKinds` lookup only, like the runtime (others: none). */
   blockTags: Readonly<Record<string, readonly string[]>> = {
-    dirt: ["mineable/shovel"], grass_block: ["mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
+    dirt: ["dirt", "mineable/shovel"], grass_block: ["dirt", "mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
     stone: ["mineable/pickaxe"], cobblestone: ["mineable/pickaxe"], iron_ore: ["mineable/pickaxe"], coal_ore: ["mineable/pickaxe"],
     oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"], oak_door: ["doors"], spruce_door: ["doors"],
   };

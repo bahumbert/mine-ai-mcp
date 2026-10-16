@@ -150,6 +150,7 @@ test("cells a tend left as they were are counted by reason, not left as a list s
 test("a plot whose ground is air says it is in a cave or over a pit, and to farm under the open sky", async () => {
   // Live 2026-10-09: Ayla, in a cave at y 10, farmed there 20 times, each "25 not tillable (air)".
   const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  runtime.groundTop = 9;
   runtime.tendSkipped = { "not tillable (air)": Array.from({ length: 25 }, (_, index) => ({ x: index % 5, z: Math.floor(index / 5) })) };
   runtime.tendSkippedStatus = "failed";
   const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5, x: 4, y: 10, z: 6 }, contextFor(runtime));
@@ -209,4 +210,42 @@ test("tending a known wheat farm asked for wheat plants wheat_seeds", async () =
   const result = await runStep({ skill: "farm", crop: "wheat", size: 5 }, contextFor(runtime, { farms }));
   assert.equal(runtime.submitted[0]!.input.plant, "wheat_seeds");
   assert.match(result.status === "done" ? result.detail : "", /wheat is the harvest: planted wheat_seeds/u);
+});
+
+test("a new farm is not made on stone: the plot behind her is stone, so the nearest grass patch is used instead", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  // Soil level 63 is stone everywhere in reach, except a grass patch 6 blocks east of the plot behind her.
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, x >= 4 && x <= 14 && z >= -1 && z <= 9 ? "grass_block" : "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const tend = runtime.submitted.find((call) => call.tool === "tend_crops")!.input;
+  assert.ok(Number(tend.x1) >= 4 && Number(tend.x2) <= 14, JSON.stringify(tend));
+});
+
+test("a new farm on stone with no tillable ground near is refused with the reason, nothing protected or tended", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /no ground to farm within .*25 stone.*open sky/u);
+  assert.deepEqual(calls(runtime), []);
+  assert.deepEqual(runtime.areas, []);
+});
+
+test("a new farm under a roof is refused: a cave floor of dirt is not open to the sky", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},66,${z}`, "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /roofed/u);
+});
+
+test("a remembered farm standing on stone is not tended again", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const known: KnownFarm = { crop: "wheat_seeds", size: 5, centre: { x: 0, y: 63, z: 4 }, madeAt: "2026-10-14T00:00:00Z", tendedAt: "2026-10-14T00:00:00Z", state: { planted: 0, ripe: 0, empty: 0 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [known] }));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /no ground to farm/u);
+  assert.deepEqual(calls(runtime), []);
 });
