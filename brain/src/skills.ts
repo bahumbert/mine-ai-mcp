@@ -743,10 +743,12 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     options.fillWith ?? (has("cobblestone") >= count && has("cobblestone") > has("dirt") ? "cobblestone" : "dirt");
   const cells = (batches: readonly (readonly TerrainCell[])[]) => batches.reduce((sum, batch) => sum + batch.length, 0);
   const planFor = (area: Awaited<ReturnType<typeof read>>) => levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
-  let plan = planFor(await read(0));
+  let area = await read(0);
+  let plan = planFor(area);
   if (plan.floating) {
     // A platform in the air: the ground to build its support column from is further down than the zone's own layers.
-    plan = planFor(await read(SUPPORT_REACH));
+    area = await read(SUPPORT_REACH);
+    plan = planFor(area);
     if (plan.floating) return { status: "failed", detail: `leveling ${what} would build a platform in the air with no solid ground within ${SUPPORT_REACH} blocks under it: choose a nearer height` };
   }
   if (plan.batches.length === 0) return { status: "done", detail: `${what} is already level` };
