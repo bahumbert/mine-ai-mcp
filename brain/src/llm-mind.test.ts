@@ -901,3 +901,28 @@ test("a check that keeps sending back ends in a send-back error, not a bad reply
   action.reply(explore, explore, explore, explore, explore, explore);
   await assert.rejects(mind.next(workInput("find a site"), signal), (error: Error) => /\[LLM_SENT_BACK\]/u.test(error.message) && !/LLM_BAD_REPLY/u.test(error.message));
 });
+
+test("chat-tier content checks have the send-back budget too, not the format budget: they never end as a bad reply (review R19)", async () => {
+  const later = { say: "Later!", route: "later", request: "build a house" };
+  const act = { say: "On it.", route: "act", request: "build a house" };
+  const input = { ...chatInput("build me a house"), canWait: false };
+  {
+    // Three content refusals in a row (the format budget is two repairs) and the fourth reply is taken.
+    const { chat, mind } = scriptedMind();
+    chat.reply(later, later, later, act);
+    const decision = await mind.chat(input, signal);
+    assert.equal(decision.route, "act");
+    assert.equal(chat.requests.length, 4);
+  }
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply(later, later, later, later, later, later);
+    await assert.rejects(mind.chat(input, signal), (error: Error) => /\[LLM_SENT_BACK\]/u.test(error.message) && !/LLM_BAD_REPLY/u.test(error.message));
+  }
+  {
+    // A reply that is not JSON still takes the format budget alone.
+    const { chat, mind } = scriptedMind();
+    chat.reply("nope", "still nope", "nope again");
+    await assert.rejects(mind.chat(input, signal), /\[LLM_BAD_REPLY\]/u);
+  }
+});

@@ -24,3 +24,9 @@ test("a wrong material is still matched to the items of the same kind, a bare ki
   assert.deepEqual(similarNames("water", TOOLS), ["water_bucket"]);
   assert.deepEqual(similarNames("sticks", TOOLS), ["stick"]);
 });
+
+test("a name more than two letters longer or shorter than the asked one is no near spelling, a name two off still is", () => {
+  assert.deepEqual(similarNames("stik", ["stick", "stickyy", "sticks_and_more", "x".repeat(5000)]), ["stick"]);
+  assert.deepEqual(similarNames("stk", ["stick", "stickyy"]), ["stick"]);
+  assert.deepEqual(similarNames("sticks", ["stick", "x".repeat(5000)]), ["stick"]);
+});

@@ -19,7 +19,11 @@ export function similarNames(name: string, names: Iterable<string>, limit = 5): 
     let score: number | null;
     if (words.every((word) => parts.includes(word))) score = 0;
     else if (parts[parts.length - 1] === kind) score = 1 + editCount(name, candidate);
-    else score = editCount(name, candidate) <= MAX_EDITS ? NEAR_BASE + editCount(name, candidate) : null;
+    else if (Math.abs(name.length - candidate.length) > MAX_EDITS) score = null;
+    else {
+      const edits = editCount(name, candidate);
+      score = edits <= MAX_EDITS ? NEAR_BASE + edits : null;
+    }
     if (score !== null) close.push({ name: candidate, score });
   }
   return close

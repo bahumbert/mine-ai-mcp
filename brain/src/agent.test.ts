@@ -125,7 +125,7 @@ test("the same step done again and again ends the objective as changing nothing 
     // 4 calls: the second identical step goes back once ("just succeeded") and is sent again.
     assert.equal(action.requests.length, 4, "the objective ended after the third identical step that gained");
     assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
-    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step was done 3 times in a row and the objective is not reached/u);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step \(collect 32 cobblestone\) was done 3 times in a row and the objective is not reached/u);
   }
   {
     const runtime = new FakeRuntime();
@@ -152,7 +152,7 @@ test("the same successful step three times in a row ends the objective as failed
     await agent.handle(say("Steve", "dig dirt"));
     await until(() => runtime.said.length === 2);
     assert.equal(action.requests.length, 4, "the model was not asked after the third step (the second went back once as just succeeded)");
-    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step was done 3 times in a row and the objective is not reached/u);
+    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step \(collect 16 dirt\) was done 3 times in a row and the objective is not reached/u);
     assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
   }
   {
@@ -1125,6 +1125,44 @@ test("a chat poll that fails (the runtime restarting) is logged and retried at t
   await until(() => spokenTo(runtime).length > 0);
   assert.ok(logs.some((line) => /runtime restarting/u.test(line)));
   assert.equal(agent.activity, "idle");
+});
+
+test("a chat poll that keeps failing is logged once, and again only after a read worked (review R17)", async (t) => {
+  const runtime = new FakeRuntime();
+  const read = runtime.readMessages.bind(runtime);
+  let calls = 0;
+  runtime.readMessages = async () => {
+    calls += 1;
+    if ((calls >= 2 && calls <= 6) || (calls >= 9 && calls <= 12)) throw new Error("runtime down");
+    return read();
+  };
+  const logs: string[] = [];
+  agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
+  await until(() => calls >= 14);
+  assert.equal(logs.filter((line) => /chat unreadable/u.test(line)).length, 2, "one line per outage, not one per poll");
+});
+
+test("a stop with a request ends the speaker's orders and the character's own goals, the other players' queued orders stay (review R18)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply(
+    { say: "Okay.", route: "act", request: "collect 16 oak_log" },
+    { say: "Later.", route: "later", request: "mine stone" },
+    { say: "Stopped.", route: "stop", request: "release that area" },
+  );
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "released" });
+  await agent.handle(say("Steve", "collect logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Alex", "mine stone"));
+  await agent.handle(say("Steve", "release that area"));
+  await until(() => action.requests.some((request) => /Objective \(asked by Steve\): "release that area"/u.test(request[1]?.content ?? "")));
+  const stacks = events.flatMap((event) => event.kind === "state" ? [event.stack.map((work) => work.text)] : []);
+  assert.deepEqual(stacks.filter((stack) => stack.length > 0 && !stack.includes("collect 16 oak_log")).at(0), ["mine stone"], "Steve's logs ended, Alex's queued order stayed");
+  assert.ok(stacks.some((stack) => stack.join("|") === "mine stone|release that area"), "and the new request went on top of it");
+  assert.equal(runtime.cancelled.length, 1);
 });
 
 test("a line naming nobody within 60 s of its speaker naming another character is ignored, unless the model says it speaks to her or everyone (A5, live 2026-10-11, L6)", async (t) => {

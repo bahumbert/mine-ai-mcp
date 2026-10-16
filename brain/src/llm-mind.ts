@@ -167,7 +167,7 @@ export class LlmMind implements Mind {
       if (firstReading !== null && reply.route !== "ignore") return { to: firstReading, say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
       if (reply.route !== "ignore" && !speaksTo(to, input.persona.username)) {
         firstReading ??= to;
-        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
+        throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
       }
       // Answering a line it reads as spoken to her by name ("everyone"/"unclear" do not count): held to the facts below.
       const answersAsHers = reply.route !== "ignore" && to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase());
@@ -175,26 +175,26 @@ export class LlmMind implements Mind {
       // the misreading the facts were given against (bench 2026-10-09, French). Taking an order on is not held to it:
       // "Ayla, get wood and Vex mine stone" gives Vex an order with no comma after his name (bench: Vex 0/3 when held).
       if (answersAsHers && reply.route !== "act" && reply.route !== "later" && called.length > 0) {
-        throw new Error(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
+        throw new SendBack(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
       }
       // The line answers someone else who just spoke to its speaker, and names nobody: a reply that speaks to her and
       // answers it ignores the fact given in the prompt (bench 2026-10-09, "ok j'arrive").
       if (answersAsHers && answering !== null) {
-        throw new Error(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
+        throw new SendBack(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
       }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
       // to let pass (the bench: held to them too, she answered every line to "Opus").
       const named = to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase()) || (given.length > 0 && listeners.length === 0);
       if (reply.route === "ignore" && named) {
-        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
+        throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
       }
-      if (reply.route === "later" && !canWait) throw new Error(`"later" is not a route now: you work for nobody else, so a request is "act"`);
+      if (reply.route === "later" && !canWait) throw new SendBack(`"later" is not a route now: you work for nobody else, so a request is "act"`);
       // Taken on, the order starts at once (live 2026-10-04: "Just let me finish this little project first", again,
       // though the rule says so). The model judges its own line, in the language it wrote it.
       if (reply.route === "act" && reply.starts_now === false) {
-        throw new Error(`"starts_now" is false, but "act" stops what you were doing and starts at once: write a "say" that starts now${canWait ? `, or use "later" if it must wait` : ""}, or answer "talk" if you cannot`);
+        throw new SendBack(`"starts_now" is false, but "act" stops what you were doing and starts at once: write a "say" that starts now${canWait ? `, or use "later" if it must wait` : ""}, or answer "talk" if you cannot`);
       }
-      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new Error(`"request" is required when "route" is "${reply.route}"`);
+      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new SendBack(`"request" is required when "route" is "${reply.route}"`);
       const acts = reply.route === "act" || reply.route === "later";
       return {
         ...(to.length > 0 && { to }),

@@ -1711,14 +1711,21 @@ test("get_items stops after a bounded number of blocks broken for a rare drop th
   assert.equal(broken, RARE_DROP_BREAKS);
 });
 
-test("an eat step with the food bar full is answered without calling the runtime", async () => {
-  // Run 12: six `[EAT_REJECTED] ... Food is full` from the runtime.
-  const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, food: 20, foods: [{ name: "bread", hunger: 5, count: 2 } as never] };
-  const result = await runStep({ skill: "eat", food: "bread" }, contextFor(runtime));
-  assert.equal(result.status, "failed");
-  assert.match("detail" in result ? result.detail : "", /not hungry: food 20\/20/u);
-  assert.deepEqual(runtime.submitted, []);
+test("an eat step with the food bar full is tried and the game's answer is reported (golden apples are edible when full)", async () => {
+  // Run 12: `[EAT_REJECTED] ... Food is full` for bread; golden_apple / chorus_fruit are accepted by the game when full.
+  const rejected = new FakeRuntime();
+  rejected.snapshot = { ...rejected.snapshot, food: 20, foods: [{ name: "bread", hunger: 5, count: 2 } as never] };
+  rejected.failures.eat_food = "[EAT_REJECTED] Mineflayer could not consume the selected food: Food is full";
+  const refused = await runStep({ skill: "eat", food: "bread" }, contextFor(rejected));
+  assert.equal(refused.status, "failed");
+  assert.match("detail" in refused ? refused.detail : "", /Food is full/u);
+  assert.deepEqual(rejected.submitted.map((call) => call.tool), ["eat_food"]);
+
+  const accepted = new FakeRuntime();
+  accepted.snapshot = { ...accepted.snapshot, food: 20 };
+  const ate = await runStep({ skill: "eat", food: "golden_apple" }, contextFor(accepted));
+  assert.equal(ate.status, "done");
+  assert.deepEqual(accepted.submitted.map((call) => call.tool), ["eat_food"]);
 });
 
 test("an eat step with the food bar not full still eats", async () => {

@@ -238,6 +238,8 @@ export class Agent {
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
     const working = this.workLoop(signal);
     const chatting = this.chatLoop(signal);
+    // Logged once while the runtime stays down, and again only after a read worked (review R17).
+    let unreadable = false;
     try {
       while (!signal.aborted) {
         // Reading never waits for the chat tier: lines that come while it thinks are heard at once (and may supersede
@@ -249,8 +251,10 @@ export class Agent {
             this.inbox.push(message);
             this.wakeChat?.();
           }
+          unreadable = false;
         } catch (error) {
-          this.options.log(`chat unreadable, retrying at the next poll: ${String(error)}`);
+          if (!unreadable) this.options.log(`chat unreadable, retrying at the next poll (not logged again until a read works): ${String(error)}`);
+          unreadable = true;
         }
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
@@ -340,7 +344,10 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo);
-    if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest();
+    // A plain stop ends everything; a stop that carries a request ends the speaker's work and her own goals only, the
+    // other players' queued orders stay (owner, 2026-10-16, review R18).
+    if (routed === "stop") this.stopAndRest();
+    else if (carriesRequest && this.stack.length > 0) this.stopAndRest(message.username);
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
@@ -639,7 +646,7 @@ export class Agent {
     // 16 dirt" 60+ times, "get 1 oak_boat" 13): a gain that never ends the objective is no progress for it. A failed or
     // another step in between resets the count.
     if (record.outcome === "done" && last.length === same && last.every((step) => step.step === record.step && step.outcome === "done")) {
-      this.finish(work, "failed", `the same step was done ${same} times in a row and the objective is not reached`);
+      this.finish(work, "failed", `the same step (${record.step}) was done ${same} times in a row and the objective is not reached`);
       return;
     }
     // The same failure between other steps is the same loop (live 2026-10-09: Ayla's farm in a cave failed "25 not
@@ -1054,9 +1061,27 @@ export class Agent {
     this.wake?.();
   }
 
-  /** A player's "stop": everything ends, and no goal of its own starts for the persona's rest time. */
-  private stopAndRest(): void {
-    this.stopAll();
+  /**
+   * "stop" from someone with a request: the orders that player gave and the character's own goals end, the orders of
+   * other players stay on the stack (review R18).
+   */
+  private stopWorkOf(speaker: string): void {
+    const name = speaker.toLowerCase();
+    const ends = ({ objective }: Work) => objective.requester === null || objective.requester.toLowerCase() === name;
+    for (const work of this.stack.filter(ends)) work.step?.abort();
+    const kept = this.stack.filter((work) => !ends(work));
+    this.stack.splice(0, this.stack.length, ...kept);
+    this.journalState(null);
+    this.wake?.();
+  }
+
+  /**
+   * A player's "stop": everything ends (only `speaker`'s work and the character's own goals when given), and no goal
+   * of its own starts for the persona's rest time.
+   */
+  private stopAndRest(speaker?: string): void {
+    if (speaker === undefined) this.stopAll();
+    else this.stopWorkOf(speaker);
     this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 

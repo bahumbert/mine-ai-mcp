@@ -100,9 +100,6 @@ export type SkillResult =
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
 
-/** The food bar's size (`food N/20` in the prompt): at this value Minecraft refuses to eat. */
-const MAX_FOOD = 20;
-
 /**
  * Brain-level skills: short programs over atomic actions, one per step the model chooses (ADR-011). Following is done
  * here with repeated `navigate` rather than a new runtime action; if that proves too jerky it becomes a
@@ -126,12 +123,8 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "drop_item": return await dropItems(context, step, why);
       case "craft_item": return await craftItem(context, step, why);
       case "get_items": return await getItems(context, step.items);
-      case "eat": {
-        // Run 12: six EAT_REJECTED "Food is full"; the bar is known from the status, so the runtime is not called.
-        const { food } = await context.runtime.status();
-        if (food >= MAX_FOOD) return { status: "failed", detail: `not hungry: food ${food}/${MAX_FOOD}; nothing eaten, eat when the bar is lower` };
-        return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
-      }
+      // No refusal from the bar here: golden apples and chorus fruit are edible when it is full, so the game answers.
+      case "eat": return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
       case "sleep": return await once(context, "sleep", {}, why, "slept");
       case "hunt":
