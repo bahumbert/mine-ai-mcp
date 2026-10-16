@@ -141,6 +141,8 @@ export interface CrossingResult {
   /** Blocks ridden. */
   readonly blocks: number;
   readonly detail: string;
+  /** Still in the boat, out at sea where the ride stopped for want of land: no get-off, no ride back (owner, run 13). */
+  readonly atSea?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,10 +151,13 @@ function boatsCarried(bot: Bot): number {
   return bot.inventory.items().filter((item) => item.name.endsWith("_boat") || item.name.endsWith("_raft")).reduce((sum, item) => sum + item.count, 0);
 }
 
+/** Whether this entity is a boat or a raft of any wood (or the old plain `boat`). */
+export const isBoatEntity = (entity: Entity | null | undefined): boolean =>
+  entity?.name !== undefined && (entity.name.endsWith("_boat") || entity.name.endsWith("_raft") || entity.name === "boat");
+
 function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: Entity) => boolean = () => true): Entity | null {
   const boats = Object.values(bot.entities).filter((entity) =>
-    entity !== bot.entity && (entity.name?.endsWith("_boat") || entity.name?.endsWith("_raft") || entity.name === "boat") &&
-    entity.position.distanceTo(around) <= within && accept(entity));
+    entity !== bot.entity && isBoatEntity(entity) && entity.position.distanceTo(around) <= within && accept(entity));
   boats.sort((a, b) => a.position.distanceTo(around) - b.position.distanceTo(around));
   return boats[0] ?? null;
 }
@@ -245,11 +250,13 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   };
   let ridden = 0;
   let stoppedBy = "";
+  let noLand = false;
   while (true) {
-    // No land by then past where it was going: never out on open sea with no end (live 2026-10-04: Vex, exploring
-    // 64 blocks, rode 518 blocks of ocean and was stranded at its far side).
+    // No land by the distance asked for: never out on open sea with no end (live 2026-10-04: Vex, exploring 64 blocks,
+    // rode 518 blocks of ocean and was stranded at its far side).
     if (ridden >= Math.min(maxBlocks, MAX_CROSSING)) {
       stoppedBy = `no land within ${Math.round(ridden)} blocks that way`;
+      noLand = true;
       break;
     }
     if (signal?.aborted) {
@@ -294,8 +301,12 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
       if (cut !== "" && deepUnder()) stoppedBy = cut;
     }
   }
-  // Not ashore and out on deep water: back the way it came, to where the boat went in, rather than stranded there.
-  if (stoppedBy !== "" && stoppedBy !== "stopped" && deepUnder()) {
+  // No land by the distance asked for, on deep water: she stays there, in her boat (owner, run 13: bots rode back to their
+  // start; the target is where the model's next order starts from). Any other stop that is not ashore and is out on deep
+  // water (the water ahead not loaded, a bank step that could not be cut) goes back the way it came, to where the boat
+  // went in, rather than stranded there.
+  const staysAtSea = noLand && deepUnder();
+  if (!staysAtSea && stoppedBy !== "" && stoppedBy !== "stopped" && deepUnder()) {
     const back = { x: -heading.x, z: -heading.z };
     const backYaw = (Math.atan2(-back.x, back.z) * 180) / Math.PI;
     corrected = false;
@@ -315,13 +326,30 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     bot._client.write("vehicle_move", { x, y, z, yaw, pitch: 0, onGround: false });
     await sleep(50);
   }
+  if (staysAtSea) {
+    return { status: "failed", blocks: Math.round(ridden), atSea: true, detail: `rode ${Math.round(ridden)} blocks by boat and stays at sea in its boat at ${Math.floor(x)} ${Math.floor(z)} (${stoppedBy})` };
+  }
   // Off: press and release shift (1.21.4), then clear the vehicle Mineflayer kept.
   bot._client.write("entity_action", { entityId: bot.entity.id, actionId: 0, jumpBoost: 0 });
   await sleep(400);
   bot._client.write("entity_action", { entityId: bot.entity.id, actionId: 1, jumpBoost: 0 });
   await sleep(600);
-  // Mineflayer keeps `vehicle` on the bot and on its entity (its type omits the first); both are cleared, or the next
-  // movement's preparation sees the entity still riding and fails "dismount: not mounted" (live 2026-10-04).
+  forgetVehicle(bot);
+
+  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), 6), signal);
+  const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
+  const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
+  const detail = `rode ${Math.round(ridden)} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}`;
+  return { status: stoppedBy === "" ? "crossed" : "failed", blocks: Math.round(ridden), detail };
+}
+
+
+/**
+ * Mineflayer keeps `vehicle` on the bot and on its entity (its type omits the first) after the server let her off; both
+ * are cleared, or the next movement's preparation sees the entity still riding and fails "dismount: not mounted" (live
+ * 2026-10-04). Returns the vehicle she was in.
+ */
+function forgetVehicle(bot: Bot): Entity | null {
   const riding = bot as unknown as { vehicle: Entity | null };
   const vehicle = riding.vehicle ?? bot.entity.vehicle ?? null;
   riding.vehicle = null;
@@ -332,14 +360,29 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     (bot.entity as unknown as { vehicle: Entity | null }).vehicle = null;
   }
   if (vehicle !== null) bot.emit("dismount", vehicle);
-
-  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), 6), signal);
-  const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
-  const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
-  const detail = `rode ${Math.round(ridden)} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}`;
-  return { status: stoppedBy === "" ? "crossed" : "failed", blocks: Math.round(ridden), detail };
+  return vehicle;
 }
 
+/** How long a get-off from a boat waits for the server's answer before the vehicle is forgotten. */
+const DISMOUNT_WAIT_MS = 800;
+
+/**
+ * Gets off the boat she rides (the next movement after a ride that stayed at sea starts here) and returns it. Mineflayer
+ * 1.21 hears no "dismount" for a passenger list that no longer names her, so the wait is bounded and the vehicle is then
+ * forgotten as {@link crossByBoat} does.
+ */
+export async function leaveBoat(bot: Bot): Promise<Entity | null> {
+  const gone = new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, DISMOUNT_WAIT_MS);
+    bot.once("dismount", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  bot.dismount();
+  await gone;
+  return forgetVehicle(bot);
+}
 
 /**
  * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when a boat is carried
@@ -366,10 +409,11 @@ export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: Abort
  * a boat at sea a whole run (got off it at a login or a stop), every way refused "no boat is carried" and no
  * crafting table could be set on the water to make one: taken back, it is the way off the sea.
  */
-export function boatUnderFeetAtSea(bot: Bot): Entity | null {
+export function boatUnderFeetAtSea(bot: Bot, justLeft?: Entity | null): Entity | null {
   if (bot.entity.vehicle || bot.entities === undefined) return null;
   const feet = bot.entity.position;
-  const boat = nearestBoat(bot, feet, 1.5, (entity) => feet.y >= entity.position.y && feet.y - entity.position.y < 1.2);
+  // The boat she has just got off is hers whatever the server set her down on.
+  const boat = nearestBoat(bot, feet, 1.5, (entity) => entity === justLeft || (feet.y >= entity.position.y && feet.y - entity.position.y < 1.2));
   if (boat === null || carriesBoat(bot)) return null;
   const [x, z] = [Math.floor(boat.position.x), Math.floor(boat.position.z)];
   const surface = waterSurface(bot, x, z, Math.floor(feet.y));

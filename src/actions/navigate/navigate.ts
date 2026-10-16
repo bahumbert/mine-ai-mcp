@@ -29,8 +29,6 @@ import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-
 const MAX_CROSSINGS = 2;
 /** Deep open water in a row on the straight way that a bot with a boat crosses by boat before trying a way round. */
 const BOAT_FIRST_LENGTH = 24;
-/** How far past its target a boat ride may go looking for land before it turns back. */
-const BOAT_OVERSHOOT = 32;
 import {
   navigateOutcomes,
   parseNavigateRequest,
@@ -428,8 +426,8 @@ function beginNavigate(
       }
       const from = bot.entity.position;
       const length = Math.hypot(request.x - from.x, request.z - from.z);
-      // At most a little past the target: across to it, not on over open sea.
-      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length + BOAT_OVERSHOOT);
+      // At most to the target: across to it, not on over open sea; with no land by then she stays there, in her boat.
+      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length);
       if (context.signal?.aborted) return stopped;
       if (crossed.status !== "crossed") {
         // Where the ride left her, not where the route had stopped before it.

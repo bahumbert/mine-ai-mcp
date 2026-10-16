@@ -1023,7 +1023,7 @@ test("a way sailed without finding land is not sailed again from near there", as
   // Live 2026-10-04: Vex rode 450 blocks of sea out and back nine times from the same base.
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
-  runtime.failNext.navigate = { error: "[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: rode 400 blocks by boat (no land within 200 blocks that way; rode back to where the boat went in)." };
+  runtime.failNext.navigate = { error: "[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: rode 200 blocks by boat and stays at sea in its boat at 0 -200 (no land within 200 blocks that way)." };
   const first = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
   assert.equal(first.status, "failed");
   const again = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
