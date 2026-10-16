@@ -134,6 +134,8 @@ export interface CraftingNeeds {
   readonly missing: readonly ItemCount[];
   /** Why there is no plan, in the runtime's words (an unknown name comes with the registry names close to it). */
   readonly error?: string;
+  /** Every item the plan consumes, carried or not: the raw leaves and what the intermediate steps take (what a craft must never drop to make room). */
+  readonly inputs?: readonly string[];
 }
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
@@ -354,6 +356,8 @@ const craftingRequirementsSchema = z.object({
       plan: z.object({
         status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
         missingMaterials: z.array(z.object({ item: z.string(), count: z.number() })),
+        requiredMaterials: z.array(z.object({ item: z.string() })).default([]),
+        steps: z.array(z.object({ ingredients: z.array(z.object({ item: z.string() })).default([]) })).default([]),
       }).optional(),
     }).optional(),
   }),
@@ -556,7 +560,8 @@ export class McpBotRuntime implements BotRuntime {
     // Only an item Minecraft does not have fails without a plan.
     const plan = result.requirements?.plan;
     if (plan === undefined) return { status: "unknown", missing: [], ...(result.error !== undefined && { error: result.error }) };
-    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
+    const inputs = new Set([...plan.requiredMaterials, ...plan.steps.flatMap(({ ingredients }) => ingredients)].map(({ item }) => item));
+    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })), inputs: [...inputs] };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {

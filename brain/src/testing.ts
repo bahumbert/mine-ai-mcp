@@ -131,7 +131,9 @@ export class FakeRuntime implements BotRuntime {
     const missing = [...leaves]
       .map(([item, count]) => ({ item, count: count - this.carried(item) }))
       .filter((entry) => entry.count > 0);
-    return { status: missing.length === 0 ? "ready" : "missing_materials", missing };
+    const inputs = new Set<string>();
+    for (const { item } of items) this.inputsOf(item, inputs);
+    return { status: missing.length === 0 ? "ready" : "missing_materials", missing, inputs: [...inputs] };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
@@ -331,6 +333,14 @@ export class FakeRuntime implements BotRuntime {
 
   private carried(item: string): number {
     return this.snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  }
+
+  /** Every item the recipe tree of `item` takes, the intermediate ones included. */
+  private inputsOf(item: string, into: Set<string>): void {
+    for (const need of this.recipes[item]?.needs ?? []) {
+      into.add(need.item);
+      this.inputsOf(need.item, into);
+    }
   }
 
   private leaves(item: string, count: number, into: Map<string, number>): void {

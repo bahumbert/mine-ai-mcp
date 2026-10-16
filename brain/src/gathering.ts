@@ -1,6 +1,6 @@
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
-import { FULL_INVENTORY } from "./inventory-room.ts";
+import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
@@ -40,8 +40,8 @@ export interface GatherContext {
   readonly progress?: (fact: string) => void;
   /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
   readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
-  /** Drops what the work does not need to free a slot; true when a slot is free now (unset: nothing is dropped unasked). */
-  readonly makeRoom?: () => Promise<boolean>;
+  /** Drops what the work does not need to free a slot, never the `inputs` of the craft or smelt in hand; true when a slot is free now (unset: nothing is dropped unasked). */
+  readonly makeRoom?: (inputs: ReadonlySet<string>) => Promise<boolean>;
 }
 
 export type GatherResult =
@@ -965,7 +965,7 @@ async function act(context: GatherContext, tool: "collect_block" | "collect_mob_
   let outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   // A craft or a smelt with no room for its result or its workstation: room is made once, then it runs again (run 12).
-  if (outcome.status !== "succeeded" && (tool === "craft_item" || tool === "smelt_item") && FULL_INVENTORY.test(outcome.error ?? "") && context.makeRoom !== undefined && (await context.makeRoom())) {
+  if (outcome.status !== "succeeded" && (tool === "craft_item" || tool === "smelt_item") && FULL_INVENTORY.test(outcome.error ?? "") && context.makeRoom !== undefined && (await context.makeRoom(await consumedBy(context.runtime, tool, input)))) {
     outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
   }

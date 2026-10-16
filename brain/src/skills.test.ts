@@ -1760,7 +1760,24 @@ test("a craft step that finds no inventory room drops what the work does not nee
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
   const dropped = runtime.submitted.find((call) => call.tool === "drop_item")!.input.items as { item_name: string }[];
-  assert.deepEqual(dropped.map((entry) => entry.item_name).sort(), ["dirt"], "one kind at a time, the biggest first, only until a slot is free");
+  assert.deepEqual(dropped.map((entry) => entry.item_name).sort(), ["gravel"], "one stack, the one losing least, only until a slot is free");
+});
+
+test("a craft of stone tools with a full inventory keeps its cobblestone and drops one stack of junk (run 13 review R8)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, stone_shovel: { makes: 1, needs: [{ item: "cobblestone", count: 1 }, { item: "stick", count: 2 }] } };
+  const filler = Array.from({ length: 29 }, (_, index) => ({ name: `junk_${index}`, count: 50 }));
+  const full = [{ name: "wooden_pickaxe", count: 1 }, { name: "cobblestone", count: 64 }, { name: "cobblestone", count: 64 }, { name: "stick", count: 8 }, { name: "dirt", count: 30 }, { name: "gravel", count: 40 }, { name: "dirt", count: 5 }, ...filler];
+  assert.equal(full.length, 36);
+  runtime.snapshot = { ...runtime.snapshot, inventory: full };
+  runtime.failNext.craft_item = { error: NO_ROOM_CRAFT };
+  // The drop frees the first stack of dirt.
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 30 }], effect: () => { runtime.snapshot = { ...runtime.snapshot, inventory: runtime.snapshot.inventory.filter((stack) => !(stack.name === "dirt" && stack.count === 30)) }; } });
+  const result = await runStep({ skill: "craft_item", item: "stone_shovel", count: 1 }, { ...contextFor(runtime), needed: needsOnlyTools });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const drops = runtime.submitted.filter((call) => call.tool === "drop_item");
+  assert.equal(drops.length, 1, "one stack is enough for one free slot");
+  assert.deepEqual(drops[0]!.input.items, [{ item_name: "dirt", count: 30 }], "the first dirt stack: the stack losing least, never the cobblestone or sticks the shovel takes");
 });
 
 test("a craft step with nothing to spare fails with the original reason (the agent names what to drop)", async () => {
