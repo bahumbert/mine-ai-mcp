@@ -4,6 +4,9 @@ import type { BotSnapshot } from "./runtime-client.ts";
 export const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
 export const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
 
+/** The failures of a full inventory: a workstation or a craft without room, a pickup or a collect with no free slot. */
+export const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot|needs inventory room/u;
+
 const ARMOUR = ["helmet", "chestplate", "leggings", "boots"];
 const STATIONS = ["crafting_table", "furnace"];
 

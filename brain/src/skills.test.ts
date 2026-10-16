@@ -1657,3 +1657,53 @@ test("a craft step failing for another reason gets no get_items hint", async () 
   const result = await runStep({ skill: "craft_item", item: "oak_wooden_axe", count: 1 }, contextFor(runtime));
   assert.doesNotMatch("detail" in result ? result.detail : "", /get_items/u);
 });
+
+const NO_ROOM_CRAFT = "[CRAFT_EXECUTION_FAILED] Mineflayer stopped while executing the selected recipe batch: This crafting execution needs inventory room to store 1 stone_shovel before the next recipe application.";
+const needsOnlyTools = (snapshot: BotSnapshot) => neededItems(snapshot, {});
+
+test("a craft step that finds no inventory room drops what the work does not need, then crafts again (run 12: bruno, oskar)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1 }, { name: "oak_planks", count: 8 }, { name: "dirt", count: 64 }, { name: "gravel", count: 16 }] };
+  runtime.failNext.craft_item = { error: NO_ROOM_CRAFT };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 64 }] });
+  const result = await runStep({ skill: "craft_item", item: "stick", count: 4 }, { ...contextFor(runtime), needed: needsOnlyTools });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
+  const dropped = runtime.submitted.find((call) => call.tool === "drop_item")!.input.items as { item_name: string }[];
+  assert.deepEqual(dropped.map((entry) => entry.item_name).sort(), ["dirt"], "one kind at a time, the biggest first, only until a slot is free");
+});
+
+test("a craft step with nothing to spare fails with the original reason (the agent names what to drop)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1 }, { name: "oak_planks", count: 8 }] };
+  runtime.failNext.craft_item = { error: NO_ROOM_CRAFT };
+  const result = await runStep({ skill: "craft_item", item: "stick", count: 4 }, { ...contextFor(runtime), needed: (snapshot) => neededItems(snapshot, { wanted: new Set(["oak_planks"]) }) });
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /needs inventory room/u);
+  assert.equal(runtime.submitted.some((call) => call.tool === "drop_item"), false);
+});
+
+test("a fetch whose craft finds no room makes room and crafts again once", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 8 }, { name: "stick", count: 4 }, { name: "crafting_table", count: 1 }, { name: "dirt", count: 64 }] };
+  runtime.failNext.craft_item = { error: "[WORKSTATION_NO_ROOM] crafting_table: no free inventory slot to pick it back up afterwards; make room first." };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 64 }] });
+  const result = await runStep({ skill: "get_items", items: [{ item: "wooden_pickaxe", count: 1 }] }, { ...contextFor(runtime), needed: needsOnlyTools });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
+});
+
+test("a craft step with no crafting table carried makes one first, then crafts (run 12: bruno's bed, oskar)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 8 }] };
+  runtime.failNext.craft_item = { error: "[WORKSTATION_NOT_CARRIED] No crafting_table is carried for temporary use." };
+  const result = await runStep({ skill: "craft_item", item: "oak_door", count: 3 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item").map(describeCall), ["craft oak_door", "craft crafting_table", "craft oak_door"]);
+});

@@ -8,7 +8,7 @@ import { improvement, temporaryRoles } from "./building/materials.ts";
 import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { Inbox, type Heard } from "./inbox.ts";
-import { junkHint, neededItems } from "./inventory-room.ts";
+import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
@@ -123,9 +123,6 @@ function carriedOf(snapshot: BotSnapshot): string {
   for (const { name, count } of snapshot.inventory) totals.set(name, (totals.get(name) ?? 0) + count);
   return [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
 }
-
-/** The failures of a full inventory: a workstation without room, a pickup or a collect with no free slot. */
-const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot/u;
 
 /** Skills that are an end in themselves: an objective that runs one is for that work (its fetches included). */
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);

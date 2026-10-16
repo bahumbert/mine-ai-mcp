@@ -10,7 +10,7 @@ import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, PIT_DEPTH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
-import { junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
+import { FULL_INVENTORY, junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
@@ -118,16 +118,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       }
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "drop_item": return await dropItems(context, step, why);
-      case "craft_item":
-        // A table close by is used where it stands; else the runtime sets a carried one down.
-        await walkToStation(context, "crafting_table");
-      {
-        const crafted = await once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
-        // Run 12: 16 crafts lacked raw materials; get_items gathers them and crafts (one clear next step).
-        return crafted.status === "failed" && crafted.detail.includes("CRAFT_MATERIALS_MISSING")
-          ? { status: "failed", detail: `${crafted.detail} craft only uses what you carry: \`get_items ${step.item} ${step.count}\` gathers the missing materials and crafts it.` }
-          : crafted;
-      }
+      case "craft_item": return await craftItem(context, step, why);
       case "get_items": return await getItems(context, step.items);
       case "eat": {
         // Run 12: six EAT_REJECTED "Food is full"; the bar is known from the status, so the runtime is not called.
@@ -229,6 +220,53 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
 }
 
+/**
+ * Crafts one item. A table close by is used where it stands; else the runtime sets a carried one down. With no room for
+ * the result or the table, room is made from what the work does not need and the craft runs again; with no table
+ * carried, one is made first (run 12: "needs inventory room to store 1 stone_shovel", "No crafting_table is carried").
+ */
+async function craftItem(context: SkillContext, step: Extract<Step, { skill: "craft_item" }>, why: string): Promise<SkillResult> {
+  await walkToStation(context, "crafting_table");
+  const run = () => once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+  const first = await run();
+  if (first.status !== "failed") return first;
+  if (FULL_INVENTORY.test(first.detail) && (await makeRoom(context))) return run();
+  if (/WORKSTATION_NOT_CARRIED/u.test(first.detail)) {
+    const table = await getItems(context, [{ item: "crafting_table", count: 1 }], `crafting ${step.item}`);
+    if (table.status === "stopped") return table;
+    return table.status === "done" ? run() : { status: "failed", detail: `${first.detail}; making a crafting table failed: ${table.detail}` };
+  }
+  // Run 12: 16 crafts lacked raw materials; get_items gathers them and crafts (one clear next step).
+  return first.detail.includes("CRAFT_MATERIALS_MISSING")
+    ? { status: "failed", detail: `${first.detail} craft only uses what you carry: \`get_items ${step.item} ${step.count}\` gathers the missing materials and crafts it.` }
+    : first;
+}
+
+/**
+ * Frees a slot for a craft or a smelt from the carried items its own work does not need (the same sparing as
+ * {@link dropItems}): one kind at a time, the one taking most stacks first, until a slot is free, so a stack a craft
+ * uses is lost only when nothing else would do (the fetch gathers it again). False for an order (no `needed`), when
+ * everything carried is needed, or when no slot came free: the failure then names what to drop.
+ */
+async function makeRoom(context: SkillContext): Promise<boolean> {
+  if (context.needed === undefined) return false;
+  const before = await context.runtime.status();
+  const needed = context.needed(before);
+  const stacks = new Map<string, { count: number; slots: number }>();
+  for (const { name, count } of before.inventory) {
+    if (needed.has(name)) continue;
+    const entry = stacks.get(name) ?? { count: 0, slots: 0 };
+    stacks.set(name, { count: entry.count + count, slots: entry.slots + 1 });
+  }
+  const junk = [...stacks].sort((x, y) => y[1].slots - x[1].slots || y[1].count - x[1].count || x[0].localeCompare(y[0]));
+  for (const [item] of junk) {
+    const dropped = await dropItems(context, { skill: "drop_item", items: [{ item }] }, "Make room in the inventory for what I am crafting.");
+    if (dropped.status !== "done") return false;
+    if ((await context.runtime.status()).inventory.length < INVENTORY_SLOTS) return true;
+  }
+  return false;
+}
+
 /** What the action says it really dropped (its `drop.dropped` counts); null when the result carries none. */
 function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): { item: string; count: number }[] | null {
   const dropped = (result?.drop as { dropped?: unknown } | undefined)?.dropped;
@@ -326,7 +364,7 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
-  const gathered = await gatherMaterials(context, targets, purpose, start, keep);
+  const gathered = await gatherMaterials({ ...context, makeRoom: () => makeRoom(context) }, targets, purpose, start, keep);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
