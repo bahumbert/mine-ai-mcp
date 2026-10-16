@@ -7,7 +7,7 @@ import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
-import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, PIT_DEPTH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
+import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import { consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
@@ -75,6 +75,12 @@ export interface SkillContext {
   readonly rememberFarm?: (farm: KnownFarm) => void;
   /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
   readonly needed?: (snapshot: BotSnapshot) => ReadonlySet<string>;
+  /**
+   * The place a `level_area` around a player was first aimed at in this objective, by the player's lower-case name: later
+   * steps around the same player level the same place, wherever the player has gone since (run 13: Brea's second level
+   * followed the owner, flying, 4 blocks up and 20 away). Kept for the objective's life by the agent.
+   */
+  readonly levelSites?: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
 }
 
 export interface UnfinishedHouse {
@@ -723,7 +729,8 @@ export async function levelZone(context: SkillContext, zone: Zone, level: number
 
 /** {@link levelZone}'s work, once the zone and its margin are set aside. */
 async function levelInside(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string }, reserved: readonly { readonly item: string; readonly count: number }[], { min, max }: ReturnType<typeof levelBox>): Promise<SkillResult> {
-  const area = await context.runtime.blocksIn(min, max);
+  // One column past the zone on every side: what a layer can be placed against, and the ground around it (a pit's walls).
+  const read = (below: number) => context.runtime.blocksIn({ x: min.x - 1, y: min.y - below, z: min.z - 1 }, { x: max.x + 1, y: max.y, z: max.z + 1 });
   const inventory = (await context.runtime.status()).inventory;
   // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone).
   const spareIn = (stacks: typeof inventory) => (item: string) =>
@@ -735,16 +742,23 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const fillFor = (count: number, has: (item: string) => number) =>
     options.fillWith ?? (has("cobblestone") >= count && has("cobblestone") > has("dirt") ? "cobblestone" : "dirt");
   const cells = (batches: readonly (readonly TerrainCell[])[]) => batches.reduce((sum, batch) => sum + batch.length, 0);
-  const plan = levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
+  const planFor = (area: Awaited<ReturnType<typeof read>>) => levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
+  let plan = planFor(await read(0));
+  if (plan.floating) {
+    // A platform in the air: the ground to build its support column from is further down than the zone's own layers.
+    plan = planFor(await read(SUPPORT_REACH));
+    if (plan.floating) return { status: "failed", detail: `leveling ${what} would build a platform in the air with no solid ground within ${SUPPORT_REACH} blocks under it: choose a nearer height` };
+  }
   if (plan.batches.length === 0) return { status: "done", detail: `${what} is already level` };
   const moved = plan.dug + plan.filled;
+  // A pit is told whatever the count (run 13: a cellar dug by repeated small levels passed silently under the budget).
+  const pitNote = plan.pit > 0 ? ` (this digs a pit ${plan.pit} deep)` : "";
   if (options.budget !== undefined && moved > options.budget) {
     // Counted before the first block goes (run 12: a 25x25 level dug 1324 blocks; a cellar dug by repeated levels).
     const perColumn = new Map<string, number>();
     for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
     const deepest = Math.max(0, ...perColumn.values());
-    const pit = deepest >= PIT_DEPTH ? ` (this digs a pit of ${plan.dug} blocks)` : "";
-    return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pit}; at most ${options.budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
+    return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pitNote}; at most ${options.budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
   }
   // The tool of each class the dig needs and it does not carry: stone when it has the cobblestone, else wood.
   const toolsMissing = (stacks: typeof inventory) => {
@@ -818,7 +832,8 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     if (filled !== null) return filled;
   }
   const around = left === 0 ? "" : ` (left ${left} cell${left === 1 ? "" : "s"} it may not dig, leveled around)`;
-  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${around}` };
+  const column = plan.support === 0 ? "" : ` (${plan.support} of them a support column up from the ground)`;
+  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${column}${around}${pitNote}` };
 }
 
 /** The part of `build_structure`'s audit the skill reports (src/actions/build-structure/contract.ts). */
@@ -880,11 +895,14 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
     for (const at of found) keep.add(`${at.x},${at.y},${at.z}`);
     level ??= Math.min(...found.map((at) => at.y));
   } else if (step.around !== undefined) {
-    const seen = whereIs(snapshot, step.around, context.self);
+    // The first look fixes the place for the whole objective (the player may walk or fly away between two steps).
+    const fixed = context.levelSites?.get(step.around.toLowerCase());
+    const seen = fixed ?? whereIs(snapshot, step.around, context.self);
     if (seen === null) return { status: "failed", detail: `cannot see ${step.around} to level the ground around them` };
-    const [x, z] = [Math.floor(seen.x), Math.floor(seen.z)];
-    zone = { minX: x - step.radius, maxX: x + step.radius, minZ: z - step.radius, maxZ: z + step.radius };
-    level ??= Math.floor(seen.y);
+    const site = { x: Math.floor(seen.x), y: Math.floor(seen.y), z: Math.floor(seen.z) };
+    if (fixed === undefined) context.levelSites?.set(step.around.toLowerCase(), site);
+    zone = { minX: site.x - step.radius, maxX: site.x + step.radius, minZ: site.z - step.radius, maxZ: site.z + step.radius };
+    level ??= site.y;
   } else if (step.x1 !== undefined && step.z1 !== undefined && step.x2 !== undefined && step.z2 !== undefined) {
     zone = { minX: Math.min(step.x1, step.x2), maxX: Math.max(step.x1, step.x2), minZ: Math.min(step.z1, step.z2), maxZ: Math.max(step.z1, step.z2) };
   } else {

@@ -110,6 +110,8 @@ interface Work {
   readonly refused: Map<string, number>;
   /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
   readonly wanted: Set<string>;
+  /** Where a level_area around each player (lower-case name) was first aimed in this objective: later steps reuse it (run 13). */
+  readonly levelSites: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
   /**
    * What its time counts for: the objective's purpose, until one of its steps builds, improves a house or farms; from
    * then on that (run 11, 2026-10-14: houses were labelled crafting, mining or woodcutting by the goal tier).
@@ -128,7 +130,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), purpose: objective.purpose };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), purpose: objective.purpose };
 }
 
 /**
@@ -579,6 +581,7 @@ export class Agent {
         rememberFarm: (farm) => this.learnFarm(farm),
         building: this.building,
         areas: this.areas,
+        levelSites: work.levelSites,
         ...(work.objective.requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
         phase: (activity) => phases.push({ activity, at: Date.now() }),
         heading: gain.heading,

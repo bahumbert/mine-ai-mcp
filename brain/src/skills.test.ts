@@ -1404,12 +1404,68 @@ test("level_area refuses above its block budget, says how many blocks and how de
   assert.equal(builds(runtime).length, 0);
 });
 
-test("level_area names a deep dig as a pit of its size when it is refused", async () => {
+test("level_area names a deep dig as a pit of its depth when it is refused, and no tower or hill as one", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
-  for (let x = 0; x < 5; x += 1) for (let z = 0; z < 5; z += 1) for (let y = 64; y <= 74; y += 1) runtime.world.set(`${x},${y},${z}`, "dirt");
+  // A hole: the ground stands at 74 all round and the level is 64.
+  runtime.groundTop = 74;
   const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 4, z2: 4, y: 64 }), contextFor(runtime, { areas: [] }));
-  assert.match(result.status === "failed" ? result.detail : "", /means moving 275 blocks .*up to 11 deep \(this digs a pit of 275 blocks\)/u);
+  assert.match(result.status === "failed" ? result.detail : "", /means moving 275 blocks .*up to 11 deep \(this digs a pit 11 deep\)/u);
+  // A tower of the same height in flat ground is cut, not dug into.
+  const flat = new FakeRuntime();
+  flat.snapshot = { ...flat.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
+  for (let x = 0; x < 5; x += 1) for (let z = 0; z < 5; z += 1) for (let y = 64; y <= 74; y += 1) flat.world.set(`${x},${y},${z}`, "dirt");
+  const tower = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 4, z2: 4, y: 64 }), contextFor(flat, { areas: [] }));
+  assert.doesNotMatch(tower.status === "failed" ? tower.detail : "", /pit/u);
+});
+
+test("level_area tells a pit whatever the count of blocks, when it is done", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
+  runtime.groundTop = 67;
+  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 2, z2: 2, y: 64 }), contextFor(runtime, { areas: [] }));
+  assert.deepEqual(result, { status: "done", detail: "leveled 3x3 at y 64: dug 36, filled 0 (this digs a pit 4 deep)" });
+});
+
+test("level_area around a player levels the same place for the whole objective, wherever the player goes", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "dirt", count: 40 }], players: [{ username: "Tom", position: { x: 10.4, y: 64, z: -3.6 } }] };
+  runtime.world.set("12,64,-2", "dirt");
+  const levelSites = new Map<string, { x: number; y: number; z: number }>();
+  const step = stepSchema.parse({ skill: "level_area", around: "Tom", radius: 2 });
+  assert.equal((await runStep(step, contextFor(runtime, { levelSites }))).status, "done");
+  const first = builds(runtime).flatMap((call) => call.blocks);
+  // Tom flies off, 4 up and 20 away.
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 30.5, y: 68, z: 20.5 } }] };
+  const again = await runStep(step, contextFor(runtime, { levelSites }));
+  assert.equal(again.status, "done");
+  assert.match(again.status === "done" ? again.detail : "", /^leveled 5x5 at y 64: /u);
+  assert.deepEqual(builds(runtime).flatMap((call) => call.blocks).slice(first.length), first, "the first zone, at the first level");
+  // Another objective (no shared record) goes where Tom is now.
+  const moved = await runStep(step, contextFor(runtime, { levelSites: new Map() }));
+  assert.match(moved.status === "done" ? moved.detail : "", /^leveled 5x5 at y 68: /u);
+});
+
+test("level_area builds one support column under a platform in the air, then fills the layer outward from it", async () => {
+  const runtime = new FakeRuntime();
+  // The ground is at 118; the level asked is 123: the layer to fill is y 122, over air all the way down.
+  runtime.groundTop = 118;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 40 }], players: [{ username: "Tom", position: { x: 10.5, y: 123, z: 10.5 } }] };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", around: "Tom", radius: 2 }), contextFor(runtime, { levelSites: new Map() }));
+  assert.deepEqual(result, { status: "done", detail: "leveled 5x5 at y 123: dug 0, filled 28 (3 of them a support column up from the ground)" });
+  const batches = builds(runtime).map((call) => call.blocks.map(({ x, y, z }) => `${x},${y},${z}`));
+  assert.deepEqual(batches[0], ["10,119,10", "10,120,10", "10,121,10"], "the column first, bottom up");
+  assert.equal(batches[1]!.length, 25);
+  assert.equal(batches[1]![0], "10,122,10", "the layer starts on the column");
+});
+
+test("level_area refuses a platform in the air with no ground within reach, before placing anything", async () => {
+  const runtime = new FakeRuntime();
+  runtime.groundTop = 20;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "dirt", count: 40 }] };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 4, z2: 4, y: 123 }), contextFor(runtime, { areas: [] }));
+  assert.deepEqual(result, { status: "failed", detail: "leveling 5x5 at y 123 would build a platform in the air with no solid ground within 16 blocks under it: choose a nearer height" });
+  assert.deepEqual(builds(runtime), []);
 });
 
 test("her own name in a step is where she stands: protecting the area around herself works", async () => {
