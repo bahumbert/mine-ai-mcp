@@ -67,6 +67,19 @@ test("the work tier may end the objective: done, or given up with a reason", asy
   assert.deepEqual(await mind.next(workInput("build a tower"), signal), { kind: "give_up", reason: "I do not know how to build a tower." });
 });
 
+test("a step with fields its skill does not have is sent back naming the fields the skill does accept", async () => {
+  const { action, mind } = scriptedMind();
+  const bad = { step: { skill: "improve_house", x: 1, y: 64, z: 2 } };
+  action.reply(bad, { step: { skill: "improve_house" } });
+  assert.deepEqual((await mind.next(workInput("improve my house"), signal)).kind, "step");
+  const sent = action.requests[1]?.at(-1)?.content ?? "";
+  assert.match(sent, /"x", "y", "z"/u);
+  assert.match(sent, /improve_house takes only: "roles"/u);
+  action.reply({ step: { skill: "go_to_player", player: "Steve", distance: 2 } }, { step: { skill: "go_to_player", player: "Steve" } });
+  await mind.next(workInput("go to Steve"), signal);
+  assert.match(action.requests[3]?.at(-1)?.content ?? "", /go_to_player takes only: "player"/u);
+});
+
 test("a skill outside the catalog, or one this character cannot use, is rejected after the repair round", async () => {
   const { action, mind } = scriptedMind();
   const bad = { step: { skill: "op_player", player: "Steve" } };

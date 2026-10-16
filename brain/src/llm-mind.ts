@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { describeStep, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
+import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
@@ -231,7 +231,7 @@ export class LlmMind implements Mind {
       }
       if (reply.step !== undefined && reply.step !== null) {
         const step = stepSchema.safeParse(reply.step);
-        if (!step.success) throw new Error(`step: ${z.prettifyError(step.error)}`);
+        if (!step.success) throw new Error(`step: ${describeStepError(reply.step, step.error)}`);
         if (!skills.includes(step.data.skill)) throw new Error(`you cannot use ${step.data.skill}: pick one of the listed skills`);
         // A sign dropped from a coordinate (live 2026-10-04: "go to 499 76 109" for a log at -499 76 109 walked Ayla
         // 750 blocks east, over the ocean): far away, yet close once a sign is turned, it goes back once.
