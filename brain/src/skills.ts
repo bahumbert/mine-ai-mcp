@@ -8,7 +8,7 @@ import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, PIT_DEPTH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
+import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
 import { junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -922,7 +922,8 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   const notBlock = step.for !== undefined && kinds !== null && kinds[step.for] === undefined;
   const creature = notBlock && step.for !== undefined && isCreature(step.for) ? step.for : undefined;
   if (notBlock && creature === undefined) {
-    return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
+    const from = step.for === undefined ? null : await dropSourcesNote(context.runtime, step.for);
+    return { status: "failed", detail: `${step.for} is not a block${from === null ? "" : ` (${from}: get_items ${step.for} breaks them)`}: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
   }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).

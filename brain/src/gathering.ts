@@ -16,6 +16,13 @@ const MAX_SMELT = 64;
  * replacing what crafting used up of the kept items (fences eat planks, planks eat logs) a few more, and glass panes
  * about ten (sand, logs, table, pickaxe, stone, furnace and fuel, glass, panes). */
 const MAX_ROUNDS = 24;
+/** A drop this unlikely per break (apple from leaves, 0.5%) is rare: a fetch of it is bounded, and says the drop is rare. */
+export const RARE_DROP_CHANCE = 0.1;
+/**
+ * Blocks one fetch breaks for a rare drop without gaining it before it stops (live run 12, 2026-10-14: apples from
+ * leaves took Sana 23 and 21 minutes, Mira 15). The brain decides what to do instead.
+ */
+export const RARE_DROP_BREAKS = 64;
 /** Farther than this from home, the bot walks back before setting its crafting table or furnace down. */
 const HOME_RANGE = 3;
 /** Fuel made when none is carried: planks of the wood it carries, else these. */
@@ -82,6 +89,34 @@ interface Knowledge {
   readonly cropOnly: Set<string>;
   /** The woods growing nearby, nearest first, looked up once: recipes that take any wood are planned with them. */
   woods: readonly string[] | null;
+  /** Per block fetched for a rare drop, what it is fetched for and the breaks so far without gaining it. */
+  readonly rare: Map<string, RareFetch>;
+}
+
+interface RareFetch {
+  readonly item: string;
+  readonly chance: number;
+  readonly blocks: readonly string[];
+  /** Blocks broken for it since it was last gained. */
+  broken: number;
+  /** How many of the item were carried when `broken` started (-1: not looked yet). */
+  had: number;
+}
+
+/** "rare (0.5% of breaks)": how a rare drop is told. */
+export function rareNote(chance: number): string {
+  return `rare (${Math.round(chance * 1000) / 10}% of breaks)`;
+}
+
+/**
+ * Where a block-only item comes from, in words, for a refusal that sends the model to get_items: "apple drops from
+ * oak_leaves, dark_oak_leaves, and the drop is rare (0.5% of breaks)"; null when no block drops it.
+ */
+export async function dropSourcesNote(runtime: BotRuntime, item: string): Promise<string | null> {
+  const sources = ((await runtime.blockSources([item]).catch(() => ({})))[item] ?? []).filter((source) => !source.planted && source.block !== item);
+  if (sources.length === 0) return null;
+  const rare = sources[0]!.chance < RARE_DROP_CHANCE ? `, and the drop is ${rareNote(sources[0]!.chance)}` : "";
+  return `${item} drops from ${sources.map((source) => source.block).join(", ")}${rare}`;
 }
 
 /**
@@ -190,11 +225,11 @@ async function gatherRounds(
       wanted = keepWhatCraftingUsed(wanted, keep, before, after);
     };
     let step: GatherResult;
-    if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
+    if (ungated.length > 0) step = await collectAll(context, ungated, purpose, knowledge);
     else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose);
     else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
     else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
-    else if (gated.length > 0) step = await collectAll(context, gated, purpose);
+    else if (gated.length > 0) step = await collectAll(context, gated, purpose, knowledge);
     else {
       const ready = await readyCrafts(context.runtime, plan.craft);
       const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
@@ -203,6 +238,8 @@ async function gatherRounds(
       else return { status: "failed", detail: `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt` };
     }
     if (step.status === "stopped") return step;
+    const fruitless = rareFruitless(knowledge, (await context.runtime.status()).inventory);
+    if (fruitless !== null) return { status: "failed", detail: fruitless };
     // What a craft took from her own items is replaced only from what is near: when the replacement is out of range,
     // she goes on with what was asked for and says what she used (live 2026-10-03: a wooden pickaxe used one of Vex's
     // own dark oak logs, and replacing it walked 700 blocks; with the range, it ended the fetch instead).
@@ -264,7 +301,7 @@ function units(items: readonly ItemCount[]): number {
 }
 
 function newKnowledge(): Knowledge {
-  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null };
+  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null, rare: new Map() };
 }
 
 /** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, broken from `block`, or hunted. */
@@ -401,6 +438,10 @@ async function sourceBlock(runtime: BotRuntime, item: string, knowledge: Knowled
     }
   }
   knowledge.source.set(item, block);
+  const chosen = pool.find((source) => source.block === block);
+  if (block !== null && block !== item && chosen !== undefined && chosen.chance < RARE_DROP_CHANCE) {
+    knowledge.rare.set(block, { item, chance: chosen.chance, blocks: pool.filter((source) => source.chance === chosen.chance).map((source) => source.block), broken: 0, had: -1 });
+  }
   return block;
 }
 
@@ -580,14 +621,33 @@ function withTools(batch: readonly ItemCount[], tools: readonly string[], invent
   return [...(table ? [TABLE] : []), ...tools.map((item) => ({ item, count: 1 })), ...batch];
 }
 
-async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string): Promise<GatherResult> {
+/**
+ * Says so once a rare drop has cost {@link RARE_DROP_BREAKS} blocks without being gained; null while it is still worth
+ * trying. A gain starts the count again.
+ */
+function rareFruitless(knowledge: Knowledge, inventory: Stacks): string | null {
+  for (const [block, fetch] of knowledge.rare) {
+    const now = carried(inventory, fetch.item);
+    if (now > fetch.had && fetch.had >= 0) fetch.broken = 0;
+    fetch.had = now;
+    if (fetch.broken >= RARE_DROP_BREAKS) {
+      return `broke ${fetch.broken} ${block} without gaining ${fetch.item}: it drops from ${fetch.blocks.join(", ")} but the drop is ${rareNote(fetch.chance)}, so this fetch stops here; decide whether more of it is worth the time, or do something else`;
+    }
+  }
+  return null;
+}
+
+async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string, knowledge: Knowledge): Promise<GatherResult> {
   const done: string[] = [];
   for (const [block, total] of targets) {
     context.progress?.(`gathering ${total} ${block} for ${purpose}`);
+    const rare = knowledge.rare.get(block);
     for (let left = total; left > 0; left -= MAX_COLLECT) {
-      const count = Math.min(left, MAX_COLLECT);
+      // A rare drop is asked for only as many blocks as its bound still allows.
+      const count = Math.max(1, Math.min(left, MAX_COLLECT, rare === undefined ? MAX_COLLECT : RARE_DROP_BREAKS - rare.broken));
       let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
       if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step);
+      if (rare !== undefined) rare.broken += Number(/Broke (\d+) matching block/u.exec(step !== null && "detail" in step ? step.detail : "")?.[1] ?? count);
       if (step !== null) return step.status === "failed" ? { status: "failed", detail: await notNear(context, block, step.detail) } : step;
     }
     done.push(`collected ${total} ${block}`);

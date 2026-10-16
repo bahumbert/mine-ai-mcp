@@ -3,6 +3,7 @@ import test from "node:test";
 import { describeStep, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
+import { RARE_DROP_BREAKS } from "./gathering.ts";
 import { neededItems } from "./inventory-room.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -1580,4 +1581,31 @@ test("the nearest clear site is named at the walking level of its column, not at
   assert.equal(flat[2], "64");
   const lowered = /at (-?\d+) (-?\d+) (-?\d+): build there/u.exec(await ask({ x: Number(flat[1]), z: Number(flat[3]) }))!;
   assert.deepEqual([lowered[1], lowered[2], lowered[3]], [flat[1], "61", flat[3]], "the column's ground is 4 lower: the door stands on it");
+});
+
+test("explore for an item that only drops from blocks names those blocks and says the drop is rare", async () => {
+  // Run 12: Sana and Mira explored "for apple" and were only told it is not a block, then spent 15-23 minutes on leaves.
+  const runtime = new FakeRuntime();
+  runtime.notBlocks = new Set(["apple"]);
+  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }, { block: "dark_oak_leaves", chance: 0.005, planted: false }] };
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "apple" }), contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /^apple is not a block/u);
+  assert.match(detail, /apple drops from oak_leaves, dark_oak_leaves/u);
+  assert.match(detail, /rare \(0\.5% of breaks\)/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("get_items stops after a bounded number of blocks broken for a rare drop that never came, and says so", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
+  assert.match(detail, /rare \(0\.5% of breaks\)/u);
+  const broken = runtime.submitted.filter((call) => call.tool === "collect_block").reduce((sum, call) => sum + Number(call.input.count), 0);
+  assert.equal(broken, RARE_DROP_BREAKS);
 });
