@@ -134,7 +134,7 @@ async function main(): Promise<void> {
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
-  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE) });
+  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: (line) => console.log(`${new Date().toISOString()} [queue] ${line}`) });
   const minds = personas.map((persona, index) => {
     const models = {
       chat: queue.track(createModel(persona, "chat", values["chat-model"]), persona.id),

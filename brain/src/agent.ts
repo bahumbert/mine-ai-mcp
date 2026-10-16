@@ -242,10 +242,15 @@ export class Agent {
       while (!signal.aborted) {
         // Reading never waits for the chat tier: lines that come while it thinks are heard at once (and may supersede
         // its reply), so a "stop" is not stuck behind a queue of calls.
-        for (const message of await this.options.runtime.readMessages()) {
-          this.lastHeard.set(message.username.toLowerCase(), Date.now());
-          this.inbox.push(message);
-          this.wakeChat?.();
+        // A runtime restarting under a poll fails the read: the next poll tries again (review B5).
+        try {
+          for (const message of await this.options.runtime.readMessages()) {
+            this.lastHeard.set(message.username.toLowerCase(), Date.now());
+            this.inbox.push(message);
+            this.wakeChat?.();
+          }
+        } catch (error) {
+          this.options.log(`chat unreadable, retrying at the next poll: ${String(error)}`);
         }
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
@@ -327,14 +332,15 @@ export class Agent {
       log(`  ignored: ${message.username} was talking to ${talkedTo.name} ${talkedTo.secondsAgo} s ago, the line names nobody and is not read as spoken to ${persona.username} or everyone`);
       return;
     }
-    // A "stop" with a request while nothing runs has nothing to stop: the request is the order (live 2026-10-11, L7:
-    // "release that area" routed stop while idle, and the area stayed).
-    const routed = decision.route === "stop" && this.stack.length === 0 && decision.request.trim() !== "" ? "act" : decision.route;
+    // A "stop" that carries a request stops what runs (if anything), then the request is the order (live 2026-10-11, L7:
+    // "release that area" routed stop while idle, and the area stayed; a busy agent dropped it the same way).
+    const carriesRequest = decision.route === "stop" && decision.request.trim() !== "";
+    const routed = carriesRequest ? "act" : decision.route;
     if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo);
-    if (routed === "stop") this.stopAndRest();
+    if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest();
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.

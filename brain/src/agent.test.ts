@@ -1083,7 +1083,7 @@ test("the junk hint never lists what the objective gathers (live 2026-10-11: cob
   assert.doesNotMatch(prompt, /nothing you are doing needs[^"]*cobblestone/u);
 });
 
-test("a \"stop\" with a request while nothing runs is an order (live 2026-10-11, L7: \"release that area\" routed stop while idle); while busy it stops as before", async (t) => {
+test("a \"stop\" with a request while nothing runs is an order (live 2026-10-11, L7: \"release that area\" routed stop while idle); while busy it stops the work, then takes the request", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
   const { agent, chat, action } = agentFor(t, runtime);
@@ -1099,12 +1099,32 @@ test("a \"stop\" with a request while nothing runs is an order (live 2026-10-11,
   busy.durations.collect_block = 100_000;
   const second = agentFor(t, busy);
   second.chat.reply({ say: "Okay.", route: "act", request: "collect 16 oak_log" }, { say: "Stopped.", route: "stop", request: "release that area" });
-  second.action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  second.action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "released" });
   await second.agent.handle(say("Steve", "collect logs"));
   await until(() => busy.submitted.some((call) => call.tool === "collect_block"));
   await second.agent.handle(say("Steve", "release that area"));
   await until(() => busy.cancelled.length === 1);
-  assert.equal(second.agent.activity, "idle", "busy: it stops, the request is not taken");
+  await until(() => second.action.requests.some((request) => /Objective \(asked by Steve\): "release that area"/u.test(request[1]?.content ?? "")));
+  assert.equal(busy.cancelled.length, 1, "busy: the current work is stopped, then the request is the order (live 2026-10-11, L7)");
+});
+
+test("a chat poll that fails (the runtime restarting) is logged and retried at the next poll, the agent keeps listening (review B5)", async (t) => {
+  const runtime = new FakeRuntime();
+  const read = runtime.readMessages.bind(runtime);
+  let calls = 0;
+  runtime.readMessages = async () => {
+    calls += 1;
+    if (calls === 2) throw new Error("runtime restarting");
+    return read();
+  };
+  const logs: string[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
+  chat.reply({ say: "Hello!", route: "talk", request: "" });
+  await until(() => calls >= 3);
+  runtime.inbox.push(say("Steve", "hello"));
+  await until(() => spokenTo(runtime).length > 0);
+  assert.ok(logs.some((line) => /runtime restarting/u.test(line)));
+  assert.equal(agent.activity, "idle");
 });
 
 test("a line naming nobody within 60 s of its speaker naming another character is ignored, unless the model says it speaks to her or everyone (A5, live 2026-10-11, L6)", async (t) => {
