@@ -333,7 +333,7 @@ export class Agent {
     if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
-    this.speak(decision.say, heardAt, [message.username], whisperTo);
+    this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
     if (routed === "stop") this.stopAndRest();
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
@@ -1070,11 +1070,11 @@ export class Agent {
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
-  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null): void {
+  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null, shout = false): void {
     if (text.trim() === "") return;
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);
-    this.body.say(text, since, whisperTo ?? undefined).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    this.body.say(text, since, whisperTo ?? undefined, shout).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
   }
 
   private remember(speaker: string, text: string): ChatLine {

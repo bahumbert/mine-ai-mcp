@@ -25,6 +25,8 @@ const MAX_CHAT_LENGTH = 256;
 
 /** A whisper is one `/tell <name> ` command: the longest header leaves this much (src/actions/send-message/contract.ts). */
 const MAX_WHISPER_LENGTH = 233;
+/** `/shout ` takes seven of the 256 characters (`send_message`). */
+const MAX_SHOUT_LENGTH = 249;
 
 export interface ActOutcome {
   readonly status: ActionStatus | "refused";
@@ -85,15 +87,17 @@ export class Body {
    * counted from `since` (when the message it answers was heard); with `to`, as a whisper to that player. Empty text
    * says nothing. Resolves once the runtime settled the last line.
    */
-  say(text: string, since = Date.now(), to?: string): Promise<void> {
-    const messages = toChatLines(text, to === undefined ? MAX_CHAT_LENGTH : MAX_WHISPER_LENGTH);
+  say(text: string, since = Date.now(), to?: string, shout = false): Promise<void> {
+    // A whisper is private: with a target, a shout is a plain whisper.
+    const shouted = shout && to === undefined;
+    const messages = toChatLines(text, to !== undefined ? MAX_WHISPER_LENGTH : shouted ? MAX_SHOUT_LENGTH : MAX_CHAT_LENGTH);
     if (messages.length === 0) return Promise.resolve();
     const line = this.speech.then(async () => {
       let from = since;
       for (const message of messages) {
         const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (Date.now() - from);
         if (wait > 0) await sleep(wait);
-        const outcome = await this.runtime.say(message, to);
+        const outcome = await this.runtime.say(message, to, shouted);
         if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
         from = Date.now();
       }

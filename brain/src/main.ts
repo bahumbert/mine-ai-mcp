@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { Agent } from "./agent.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
+import { readLocalizedChat } from "./chat-range.ts";
 import { LlmMind } from "./llm-mind.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
@@ -36,7 +37,13 @@ LLM environment (Bun also reads a .env file in the working directory):
   MINE_AI_LLM_CONTEXT_TOKENS    the model's context window (also per tier), for the monitor's "context full" warning;
                                 unset: read from Ollama (its OpenAI API cuts a longer prompt silently)
   MINE_AI_LLM_REASONING_EFFORT  thinking models (also per tier): sent as reasoning_effort, "none" turns thinking off
-                                (much faster; recent Ollama models think by default); unset: the model's default`;
+                                (much faster; recent Ollama models think by default); unset: the model's default
+
+Chat range (the server's Localized Chat mod):
+  MC_LOCALIZED_CHAT             "true" when the server limits how far talk carries (default false): the chat tier is told,
+                                and may shout
+  MC_CHAT_RANGE                 blocks talk carries (Manhattan; default 64)
+  MC_SHOUT_FOOD_COST            hunger a shout costs, told to the chat tier (optional)`;
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
 // Chat routes as well as it speaks: at 0.7 the same line was read as for another player one time and as an order the
@@ -135,6 +142,8 @@ async function main(): Promise<void> {
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
   const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE) });
+  const localizedChat = readLocalizedChat(env);
+  if (localizedChat !== undefined) console.log(`localized chat: talk carries ${localizedChat.range} blocks`);
   const minds = personas.map((persona, index) => {
     const models = {
       chat: queue.track(createModel(persona, "chat", values["chat-model"]), persona.id),
@@ -144,7 +153,7 @@ async function main(): Promise<void> {
     console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
     const brainLog = brainLogs[index];
     console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
-    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }));
+    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
   });
   const runtimes = await Promise.all(specs.map((spec, index) => McpBotRuntime.connect(spec.url, `agent-${personas[index]!.id}`)));
 

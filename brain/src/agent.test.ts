@@ -1145,3 +1145,27 @@ test("a body that restarted under a step is one failed step: the objective goes 
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2);
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[BODY_RESTARTED\] the body restarted: collect_block was not done/u);
 });
+
+test("a reply that shouts is sent as a shout in public chat, and as a plain whisper to a whisperer", async (t) => {
+  const runtime = new FakeRuntime();
+  const tiers = scriptedMind({ range: 64 });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  tiers.chat.reply(
+    { spoken_to: ["Ayla"], say: "Coming!", shout: true, route: "talk", request: "" },
+    { spoken_to: ["Ayla"], say: "Psst!", shout: true, route: "talk", request: "" },
+  );
+  runtime.inbox.push(say("Steve", "Ayla, are you there?"));
+  await until(() => runtime.said.length === 1);
+  runtime.inbox.push({ ...say("Steve", "Ayla, are you there?"), channel: "whisper" });
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input), [
+    { message: "Coming!", shout: true },
+    { message: "Psst!", to: "Steve" },
+  ]);
+});

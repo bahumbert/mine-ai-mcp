@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
-import { LlmMind } from "./llm-mind.ts";
+import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
@@ -90,8 +90,8 @@ export class FakeRuntime implements BotRuntime {
     return this.snapshot;
   }
 
-  async say(message: string, to?: string): Promise<{ readonly status: "succeeded"; readonly error: null }> {
-    this.submitted.push({ tool: "send_message", input: { message, ...(to !== undefined && { to }) } });
+  async say(message: string, to?: string, shout?: boolean): Promise<{ readonly status: "succeeded"; readonly error: null }> {
+    this.submitted.push({ tool: "send_message", input: { message, ...(to !== undefined && { to }), ...(shout === true && to === undefined && { shout: true }) } });
     return { status: "succeeded", error: null };
   }
 
@@ -492,9 +492,9 @@ export class ScriptedModel implements ChatModel {
 }
 
 /** One scripted model per tier, plus the mind using them. */
-export function scriptedMind() {
+export function scriptedMind(localizedChat?: LocalizedChat) {
   const models = { chat: new ScriptedModel("chat"), action: new ScriptedModel("action"), planner: new ScriptedModel("planner") };
-  return { ...models, mind: new LlmMind(models) };
+  return { ...models, mind: new LlmMind(models, undefined, localizedChat) };
 }
 
 /** Polls until the condition holds; fails the test after `timeoutMs`. */
