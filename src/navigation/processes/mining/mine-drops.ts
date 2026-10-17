@@ -82,9 +82,8 @@ export class MineDropTracker {
     return touching !== undefined && now - touching.since >= DROP_PICKUP_TIMEOUT_MS;
   }
 
-  update(targets: readonly MineTarget[]): MineTarget[] {
+  update(targets: readonly MineTarget[], observedAt: number): MineTarget[] {
     const found = [...targets];
-    const observedAt = Date.now();
     // Baritone keeps a just-broken location in `anticipatedDrops` while the
     // server is between its block-change and item-spawn packets. Without that
     // bridge, removing the final requested block briefly invalidates the goal
