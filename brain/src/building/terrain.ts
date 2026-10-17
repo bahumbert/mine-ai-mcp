@@ -137,7 +137,7 @@ export function levelPlan(zone: Zone, level: number, area: BlockArea, fill: stri
     phases,
     filled: fills.length + liquidFills.length + filling.support,
     dug: digs.length,
-    pit: pitDepth(zone, level, at),
+    pit: pitDepth(zone, level, area, at, solid),
     support: filling.support,
     floating: filling.floating,
     tools: [...tools].sort(),
@@ -146,15 +146,16 @@ export function levelPlan(zone: Zone, level: number, area: BlockArea, fill: stri
 
 /**
  * The ground standing around the zone above the level, when that is a pit wall (see {@link LevelPlan.pit}): the fewest
- * non-empty cells above the level in the columns just outside each of its four sides (the area read reaches one column
+ * cells of the solid ground run up from the level (it ends at the first open cell or at wood, a tree) in the columns just outside each of its four sides (the area read reaches one column
  * past the zone); a side that is not read, or open, makes it 0.
  */
-function pitDepth(zone: Zone, level: number, at: (x: number, y: number, z: number) => string | undefined): number {
+function pitDepth(zone: Zone, level: number, area: BlockArea, at: (x: number, y: number, z: number) => string | undefined, solid: (name: string) => boolean): number {
   const wall = (x: number, z: number) => {
     let height = 0;
     for (let y = level; y < level + LEVEL_LIMITS.above; y += 1) {
       const name = at(x, y, z);
-      if (name !== undefined && !EMPTY.has(name)) height += 1;
+      if (name === undefined || !solid(name) || area.kinds[name]?.tool === "axe") break;
+      height += 1;
     }
     return height;
   };

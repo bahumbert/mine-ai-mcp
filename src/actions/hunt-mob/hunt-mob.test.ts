@@ -631,6 +631,12 @@ test("a drop with a known chance stops the hunt at that chance's limit and the m
   assert.match(result.error, new RegExp(`chance of ${chance * 100} % per kill`));
 });
 
+test("the fruitless-kill message of a sure drop calls it not picked up, not luck", () => {
+  const text = huntMobOutcomes.dropNotGiven("cow", "leather", 8, 1);
+  assert.doesNotMatch(text, /luck|chance|smelt/);
+  assert.match(text, /not picked up/);
+});
+
 test("the fruitless-kill message of an unknown chance does not state one", () => {
   assert.doesNotMatch(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8), /chance/);
   assert.match(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8, 0.025), /2\.5 % per kill/);

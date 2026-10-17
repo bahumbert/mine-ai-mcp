@@ -115,6 +115,23 @@ test("cutting a hill is no pit; a hole four deep all around is, and the pit note
   assert.equal(levelPlan(FIVE, 61, area(FIVE, 61), "dirt").pit, 0);
 });
 
+test("a tree beside the zone is no pit wall: only the ground run up from the level counts", () => {
+  // A flat level 64 ringed by trunks 5 high (a grove all around the zone): no pit.
+  const grove: Record<string, string> = {};
+  for (let x = -1; x <= 5; x += 1) for (let z = -1; z <= 5; z += 1) {
+    if (x >= 0 && x <= 4 && z >= 0 && z <= 4) continue;
+    for (let y = 64; y <= 68; y += 1) grove[`${x},${y},${z}`] = "oak_log";
+  }
+  assert.equal(levelPlan(FIVE, 64, area(FIVE, 64, grove), "dirt").pit, 0);
+  // A 4-deep hole whose rim carries trunks: the pit is the ground, 4 deep, not the trunk on top.
+  const rim: Record<string, string> = {};
+  for (let x = -1; x <= 5; x += 1) for (let z = -1; z <= 5; z += 1) {
+    if (x >= 0 && x <= 4 && z >= 0 && z <= 4) continue;
+    for (let y = 64; y <= 68; y += 1) rim[`${x},${y},${z}`] = "oak_log";
+  }
+  assert.equal(levelPlan(FIVE, 60, area(FIVE, 60, rim), "dirt").pit, 4);
+});
+
 test("a platform in the air gets one support column from the ground under the cell nearest the middle, then fills outward from it", () => {
   // Ground at 59; the layer to fill (below 1 under the level 64) is y 63, air from 60 up, nothing solid beside it.
   const plan = levelPlan(FIVE, 64, sky(FIVE, 64), "dirt", { below: 1 });
