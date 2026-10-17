@@ -13,6 +13,7 @@ import type { WorldBlock } from "../world/placement.js";
 import { collectBlock } from "./collect-block/collect-block.js";
 import { parseCollectBlockRequest } from "./collect-block/contract.js";
 import type { ActionContext, ActionResult } from "./action.js";
+import { recoverWorkstationDrop, type DropClock } from "./workstation-drop.js";
 
 export const temporaryWorkstationInputSchema = z
   .boolean()
@@ -41,7 +42,11 @@ export interface WorkstationOperations {
   ): Promise<ActionResult>;
 }
 
-export function workstationOperations(bot: Bot, navigation: NavigationRuntime): WorkstationOperations {
+export function workstationOperations(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  dropClock?: DropClock,
+): WorkstationOperations {
   return {
     place: (name, signal) => placeCarriedBlockNearby(bot, name, { signal }),
     moveToOpenGround: async (name, context) => {
@@ -65,13 +70,21 @@ export function workstationOperations(bot: Bot, navigation: NavigationRuntime): 
           }
         }
       }
-      return collectBlock(
+      const carriedBefore = carriedCount(bot, name);
+      const collected = await collectBlock(
         bot,
         navigation,
         // It set the workstation down itself a moment ago, possibly inside a region of its own: pick it up regardless.
         { ...parseCollectBlockRequest({ block_name: name, ...position, scaffold: false }), ignoreOwnRegions: true },
         context,
       );
+      if (collected.status === "succeeded") return collected;
+      // Broken but not picked up (run 14b: the drop spawned after the mining wait ended, on a server far behind):
+      // wait for the drop and walk onto it. A block still standing is a different failure and keeps its message.
+      if (bot.blockAt(new Vec3(position.x, position.y, position.z))?.name === name) return collected;
+      context.signal?.throwIfAborted();
+      const drop = await recoverWorkstationDrop(bot, navigation, name, position, carriedBefore, context, { clock: dropClock });
+      return drop.status === "succeeded" ? drop : { ...drop, error: `${drop.error} (${collected.error})` };
     },
   };
 }
