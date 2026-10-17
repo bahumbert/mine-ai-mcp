@@ -432,6 +432,11 @@ function beginNavigate(
       if (crossed.status !== "crossed") {
         // Where the ride left her, not where the route had stopped before it.
         const navigation = { ...stopped.navigation, end: position(bot.entity.position), boatBlocks: crossed.blocks };
+        // A target on open water is reached by the ride itself: she floats there in her boat, which is where she was sent.
+        const left = Math.hypot(request.x - bot.entity.position.x, request.z - bot.entity.position.z);
+        if (crossed.atSea && left <= Math.max(request.range, 1)) {
+          return { status: "succeeded", navigation: { ...navigation, remainingDistance: left, afloat: true } };
+        }
         return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
       }
       const onward = await beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
@@ -634,6 +639,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Target: \`${navigation.target.x}, ${navigation.target.y ?? "ground"}, ${navigation.target.z}\``,
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
+    ...(navigation.afloat ? ["- Arrived, afloat in its boat at " + Math.round(navigation.end.x) + " " + Math.round(navigation.end.z)] : []),
     ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,
     "- Scaffold stocks:",

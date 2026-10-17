@@ -141,8 +141,9 @@ function openSeaBot() {
     closeWindow: () => undefined,
     currentWindow: null,
     isSleeping: false,
+    supportFeature: (feature: string) => feature === "newPlayerInputPacket",
   });
-  return { bot: bot as unknown as Bot, raw: bot, written, attacks, entities };
+  return { bot: bot as unknown as Bot, raw: bot, written, attacks, entities, client };
 }
 
 test("a ride over open sea with no land stops at the distance asked for and stays mounted there: no ride back, the boat not broken", async () => {
@@ -161,14 +162,21 @@ test("a ride over open sea with no land stops at the distance asked for and stay
   assert.deepEqual(attacks, []);
   const moves = written.filter((entry) => entry.name === "vehicle_move");
   const last = moves[moves.length - 1]!.packet;
-  assert.ok(Number(last.z) > 12, `the boat ended ${String(last.z)} blocks south of where it started, not back at 3.5`);
+  // The distance is counted from where she stood (z 0.5), not from where the boat went in (3.5).
+  assert.ok(Number(last.z) > 10 && Number(last.z) < 11.5, `the boat ended ${String(last.z)}: ten blocks from where she stood, not back at 3.5`);
 });
 
 test("the next movement from a bot mounted at sea takes the boat back, so the route goes in where she floats", { timeout: 30_000 }, async () => {
-  const { bot, raw, attacks } = openSeaBot();
+  const { bot, raw, attacks, written, client } = openSeaBot();
   await crossByBoat(bot, { x: 0, z: 1 }, undefined, 10);
   assert.equal(carriesBoat(bot), false);
+  // The server never answers the shift (run 14): Mineflayer's physics, off since the mount, is switched on by a position.
+  const positions: unknown[] = [];
+  client.on("position", (packet: unknown) => positions.push(packet));
   await prepareBotForMovement(bot, { cancel: () => undefined } as unknown as NavigationRuntime);
+  const inputs = written.filter((entry) => entry.name === "player_input").map((entry) => (entry.packet.inputs as { shift: boolean }).shift);
+  assert.deepEqual(inputs, [true, false], "shift is pressed then released to get off a boat; a jump input does not");
+  assert.equal(positions.length, 1, "physics is switched back on where she stands");
   assert.deepEqual(attacks, [7], "the boat she rode is broken by hand");
   assert.equal(carriesBoat(bot), true);
   assert.equal(raw.vehicle, null);

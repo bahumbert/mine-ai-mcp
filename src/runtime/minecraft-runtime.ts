@@ -125,6 +125,8 @@ export interface MinecraftRuntime extends AsyncDisposable {
  * whatever is on screen; a session's full history belongs to the call log.
  */
 const RECENT_CALL_LIMIT = 8;
+/** An action that owns the body with no physics tick for this long fails RUNTIME_PHYSICS_STALLED (ticks come 20 times a second). */
+const PHYSICS_STALL_MS = 30_000;
 
 export interface ActionCall {
   readonly requestId: number;
@@ -307,10 +309,13 @@ export async function createMinecraftRuntime(
   const protectedRegions = new ProtectedRegionStore(botData);
   setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
-  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), inWater: () => isInWater(bot), position: () => bot.entity?.position ? {
+  const runner = new ActionRunner({ highlighter: options.highlighter, physicsStallMs: PHYSICS_STALL_MS, physicsExpected: () => !bot.entity?.vehicle, tools: () => snapshotTools(bot), inWater: () => isInWater(bot), position: () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null });
-  const sampleProgress = () => runner.samplePosition();
+  const sampleProgress = () => {
+    runner.observePhysicsTick();
+    runner.samplePosition();
+  };
   const resetProgress = () => runner.samplePosition("server_reposition");
   resources.defer(observeCombatResourceEvents(bot, runner));
   bot.on("physicsTick", sampleProgress);

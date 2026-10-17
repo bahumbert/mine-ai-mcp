@@ -169,6 +169,7 @@ function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: En
 export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING): Promise<CrossingResult> {
   const item = bot.inventory.items().find((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
   if (item === undefined) return { status: "failed", blocks: 0, detail: "no boat is carried" };
+  const origin = bot.entity.position.clone();
   await bot.equip(item, "hand");
   // A plant at the feet or the head stops the server's look ray: cleared first.
   for (const dy of [0, 1]) {
@@ -248,7 +249,8 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     if (bot.blockAt(new Vec3(ahead.x, surfaceLevel, ahead.z)) === null) return null;
     return waterSurface(bot, ahead.x, ahead.z, surfaceLevel) !== null;
   };
-  let ridden = 0;
+  // The distance asked for is counted from where she stood, not from where the boat went in (2.5 to 4 blocks out).
+  let ridden = Math.hypot(boat.position.x - origin.x, boat.position.z - origin.z);
   let stoppedBy = "";
   let noLand = false;
   while (true) {
@@ -329,10 +331,10 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   if (staysAtSea) {
     return { status: "failed", blocks: Math.round(ridden), atSea: true, detail: `rode ${Math.round(ridden)} blocks by boat and stays at sea in its boat at ${Math.floor(x)} ${Math.floor(z)} (${stoppedBy})` };
   }
-  // Off: press and release shift (1.21.4), then clear the vehicle Mineflayer kept.
-  bot._client.write("entity_action", { entityId: bot.entity.id, actionId: 0, jumpBoost: 0 });
+  // Off: press and release shift, then clear the vehicle Mineflayer kept.
+  pressShift(bot, true);
   await sleep(400);
-  bot._client.write("entity_action", { entityId: bot.entity.id, actionId: 1, jumpBoost: 0 });
+  pressShift(bot, false);
   await sleep(600);
   forgetVehicle(bot);
 
@@ -364,7 +366,17 @@ function forgetVehicle(bot: Bot): Entity | null {
 }
 
 /** How long a get-off from a boat waits for the server's answer before the vehicle is forgotten. */
-const DISMOUNT_WAIT_MS = 800;
+const DISMOUNT_WAIT_MS = 1500;
+
+/**
+ * Shift down or up, which is what lets a passenger off a boat. Mineflayer's `dismount` sends the jump input instead,
+ * which only a horse reads: the server kept the bot in its boat (run 14) while the client forgot the vehicle, and
+ * Mineflayer, which switches physics off at a mount and back on only at a server position, never ticked again.
+ */
+function pressShift(bot: Bot, down: boolean): void {
+  if (bot.supportFeature("newPlayerInputPacket")) bot._client.write("player_input", { inputs: { shift: down } });
+  else bot._client.write("entity_action", { entityId: bot.entity.id, actionId: down ? 0 : 1, jumpBoost: 0 });
+}
 
 /**
  * Gets off the boat she rides (the next movement after a ride that stayed at sea starts here) and returns it. Mineflayer
@@ -372,16 +384,51 @@ const DISMOUNT_WAIT_MS = 800;
  * forgotten as {@link crossByBoat} does.
  */
 export async function leaveBoat(bot: Bot): Promise<Entity | null> {
+  // The server's answer to a dismount is a position (a teleport to where she is put down), which is also what switches
+  // Mineflayer's physics back on.
+  let repositioned = false;
+  const onReposition = () => {
+    repositioned = true;
+  };
+  bot.once("forcedMove", onReposition);
   const gone = new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, DISMOUNT_WAIT_MS);
-    bot.once("dismount", () => {
+    const done = () => {
       clearTimeout(timer);
+      bot.off("dismount", done);
+      bot.off("forcedMove", done);
       resolve();
-    });
+    };
+    const timer = setTimeout(done, DISMOUNT_WAIT_MS);
+    bot.once("dismount", done);
+    bot.once("forcedMove", done);
   });
-  bot.dismount();
+  pressShift(bot, true);
   await gone;
-  return forgetVehicle(bot);
+  pressShift(bot, false);
+  bot.off("forcedMove", onReposition);
+  const vehicle = forgetVehicle(bot);
+  // The server never put her down (live run 14, and in Mine Labs: no packet answers the shift after a ride that stayed at
+  // sea): Mineflayer's physics stays off for good, so she is re-placed where she is, as a server position would.
+  if (!repositioned) resumePhysics(bot);
+  return vehicle;
+}
+
+/** Marks of a teleport id the server never sent: it ignores the confirmation. */
+const NO_TELEPORT = 2_147_483_647;
+
+/**
+ * Switches Mineflayer's physics back on where the bot stands. Physics is off from a mount until the server sends a
+ * position, and Mineflayer has no other way to turn it on, so the client's own position handler is given one.
+ */
+function resumePhysics(bot: Bot): void {
+  const { x, y, z } = bot.entity.position;
+  bot._client.emit("position", {
+    x, y, z,
+    yaw: 180 - (bot.entity.yaw * 180) / Math.PI,
+    pitch: -(bot.entity.pitch * 180) / Math.PI,
+    flags: { x: false, y: false, z: false, yaw: false, pitch: false },
+    teleportId: NO_TELEPORT,
+  });
 }
 
 /**

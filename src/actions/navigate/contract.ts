@@ -121,6 +121,10 @@ export const navigationEvidenceSchema = z.strictObject({
     .nonnegative()
     .optional()
     .describe("Blocks of deep open water crossed by boat on the way; absent when none."),
+  afloat: z
+    .boolean()
+    .optional()
+    .describe("The bot ended in its boat on the water at the target's x z (a target on open water); absent when not."),
   landLeg: z
     .strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })
     .optional()

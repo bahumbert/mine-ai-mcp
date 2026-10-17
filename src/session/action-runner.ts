@@ -47,6 +47,15 @@ export interface ActionRunnerOptions {
   /** Whether the bot is in water now: bobbing there is not travel. */
   readonly inWater?: () => boolean;
   readonly tools?: () => ToolSnapshot;
+  /**
+   * How long an action that owns the body may go without a physics tick before it fails `RUNTIME_PHYSICS_STALLED` and
+   * releases the body (ticks come 20 times a second whether the bot moves or waits). Unset: no watch.
+   */
+  readonly physicsStallMs?: number;
+  /** How long a cancelled action may go on without a tick before it is given up on (default 5 s). */
+  readonly cancelGraceMs?: number;
+  /** False while the bot is a passenger: Mineflayer turns physics off for the ride, so no tick is owed. */
+  readonly physicsExpected?: () => boolean;
 }
 
 // ── Reported outcomes ────────────────────────────────────────────────────────
@@ -56,6 +65,10 @@ const outcomes = {
     `[ACTION_BUSY] ${activeAction.action} has been running since ${activeAction.startedAt}; no new action started.`,
   invalidArguments: (cause: unknown) => `[INVALID_ARGUMENTS] ${message(cause)}`,
   executionError: message,
+  physicsStalled: (action: string, stalledMs: number) =>
+    `[RUNTIME_PHYSICS_STALLED] ${action} owned the body for ${Math.round(stalledMs / 1000)} s with no physics tick; it was given up on and the body released.`,
+  cancelledWithoutTicks: (action: string, reason: string) =>
+    `${reason} (${action} did not stop: no physics tick since the cancel; the body was released)`,
 } as const;
 
 function message(cause: unknown): string {
@@ -185,6 +198,10 @@ export class ActionRunner {
   readonly #position: () => ProgressPosition | null;
   readonly #inWater: () => boolean;
   readonly #tools: () => ToolSnapshot;
+  readonly #physicsStallMs: number | undefined;
+  readonly #cancelGraceMs: number;
+  readonly #physicsExpected: () => boolean;
+  #lastPhysicsTickAt = Date.now();
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
   #admittedRequest: AdmittedRequest | null = null;
@@ -197,6 +214,42 @@ export class ActionRunner {
     this.#position = options.position ?? (() => null);
     this.#inWater = options.inWater ?? (() => false);
     this.#tools = options.tools ?? (() => ({ tools: [], armour: [] }));
+    this.#physicsStallMs = options.physicsStallMs;
+    this.#cancelGraceMs = options.cancelGraceMs ?? 5_000;
+    this.#physicsExpected = options.physicsExpected ?? (() => true);
+  }
+
+  /** A physics tick happened now: the clock the stall watch reads. */
+  observePhysicsTick(): void {
+    this.#lastPhysicsTickAt = Date.now();
+  }
+
+  /**
+   * Settles with `run`, or earlier when the action owns the body and no physics tick comes: a cancelled action is given
+   * up on after the grace, any action after the stall limit (live run 14: twelve bots left mounted at sea never ticked
+   * again, their navigate never returned and ignored its cancel). Wall clock only: every limit that waits for a tick
+   * is blind in exactly this case.
+   */
+  #watchPhysics<Value>(action: string, signal: AbortSignal, run: Promise<Value | RuntimeFailure>): Promise<Value | RuntimeFailure> {
+    const stallMs = this.#physicsStallMs;
+    if (stallMs === undefined) return run;
+    const startedAt = Date.now();
+    let cancelledAt: number | null = null;
+    return new Promise((resolve, reject) => {
+      const timer = setInterval(() => {
+        const now = Date.now();
+        if (signal.aborted && cancelledAt === null) cancelledAt = now;
+        const lastTick = Math.max(this.#lastPhysicsTickAt, startedAt);
+        if (cancelledAt !== null && now - Math.max(lastTick, cancelledAt) >= this.#cancelGraceMs) {
+          const reason = signal.reason instanceof Error ? signal.reason.message : "cancelled";
+          resolve({ kind: "runtime_failure", status: "cancelled", error: outcomes.cancelledWithoutTicks(action, reason) });
+        } else if (now - lastTick >= stallMs && this.#physicsExpected()) {
+          resolve({ kind: "runtime_failure", status: "failed", error: outcomes.physicsStalled(action, now - lastTick) });
+        } else return;
+        clearInterval(timer);
+      }, Math.max(10, Math.min(250, Math.floor(stallMs / 4))));
+      run.then(resolve, reject).finally(() => clearInterval(timer));
+    });
   }
 
   #currentAction(): ActiveAction | null {
@@ -324,7 +377,7 @@ export class ActionRunner {
       const actionSignal = signal ? AbortSignal.any([signal, running.controller.signal]) : running.controller.signal;
       let result: Result | RuntimeFailure;
       try {
-        result = await this.#execute(
+        result = await this.#watchPhysics(definition.name, actionSignal, this.#execute(
           definition.execution,
           (context) => {
             if (execute === null) {
@@ -338,7 +391,7 @@ export class ActionRunner {
             return execute({ ...context, observeProgress });
           },
           actionSignal,
-        );
+        ));
       } finally {
         if (this.#state.kind === "foreground" && this.#state.action === running) this.#state = { kind: "idle" };
         running.settle();
