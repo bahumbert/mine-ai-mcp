@@ -926,3 +926,34 @@ test("chat-tier content checks have the send-back budget too, not the format bud
     await assert.rejects(mind.chat(input, signal), /\[LLM_BAD_REPLY\]/u);
   }
 });
+
+test("the chat range is told, and a shout offered, only when the server limits talk", () => {
+  const off = chatSystemPrompt(testPersona());
+  assert.doesNotMatch(off, /shout|blocks: nobody farther/iu);
+  const on = chatSystemPrompt(testPersona(), true, { range: 64, foodCost: 1 });
+  assert.match(on, /Talk carries about 64 blocks: nobody farther away hears it, and you are not told/u);
+  assert.match(on, /A shout reaches everyone and costs a little hunger/u);
+  assert.match(on, /"say": "...", "shout": false, "starts_now"/u);
+  assert.doesNotMatch(off, /"shout": false/u);
+});
+
+test("a shout in the reply reaches the decision only when the server limits talk", async () => {
+  const reply = { say: "Hello far away!", shout: true, route: "talk", request: "" };
+  const local = scriptedMind();
+  local.chat.reply(reply);
+  const localMind = new LlmMind({ chat: local.chat, action: local.action, planner: local.planner }, undefined, { range: 64 });
+  assert.deepEqual(await localMind.chat(chatInput("anyone there?"), signal), { say: "Hello far away!", route: "talk", request: "", shout: true });
+  const { mind, chat } = scriptedMind();
+  chat.reply(reply);
+  assert.deepEqual(await mind.chat(chatInput("anyone there?"), signal), { say: "Hello far away!", route: "talk", request: "" });
+});
+
+test("a heard line shows how far its speaker is when the server said so", async () => {
+  const { mind, chat } = scriptedMind();
+  chat.reply({ say: "Hi", route: "talk", request: "" }, { say: "Hi", route: "talk", request: "" });
+  const input = chatInput("Ayla, can you hear me?");
+  await mind.chat({ ...input, message: { ...input.message, distance: 41.6 } }, signal);
+  assert.match(chat.requests[0]?.at(-1)?.content ?? "", /Steve says in chat, naming you from 42 blocks away: /u);
+  await mind.chat(input, signal);
+  assert.doesNotMatch(chat.requests[1]?.at(-1)?.content ?? "", /blocks away/u);
+});

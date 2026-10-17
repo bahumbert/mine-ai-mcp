@@ -94,6 +94,8 @@ export interface ChatDecision {
   readonly place?: Place;
   /** With `act`: the chat tier's judgment that its own line starts the work right now. */
   readonly startsNow?: boolean;
+  /** Only on a server with localized chat: the line is shouted, so everyone hears it. */
+  readonly shout?: boolean;
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */

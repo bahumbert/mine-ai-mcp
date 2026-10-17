@@ -359,7 +359,7 @@ export class Agent {
     if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
-    this.speak(decision.say, heardAt, [message.username], whisperTo);
+    this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
@@ -1141,11 +1141,11 @@ export class Agent {
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
-  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null): void {
+  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null, shout = false): void {
     if (text.trim() === "") return;
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);
-    this.body.say(text, since, whisperTo ?? undefined).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    this.body.say(text, since, whisperTo ?? undefined, shout).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
   }
 
   private remember(speaker: string, text: string): ChatLine {

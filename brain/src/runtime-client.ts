@@ -96,6 +96,8 @@ export interface PlayerMessage {
   readonly message: string;
   /** The runtime's own check: the message names the bot's username as a word. */
   readonly addressed: boolean;
+  /** Blocks between the speaker and the bot, when the server's Localized Chat mod says so. */
+  readonly distance?: number;
 }
 
 export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
@@ -312,8 +314,8 @@ export interface BotRuntime {
   /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
   blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
-  /** Public chat, or with `to` a whisper to that player online (`send_message`). */
-  say(message: string, to?: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
+  /** Public chat, or with `to` a whisper to that player online (`send_message`); `shout` reaches everyone (localized chat only). */
+  say(message: string, to?: string, shout?: boolean): Promise<{ readonly status: ActionStatus; readonly error: string | null }>;
   /**
    * Whether routes may dig the block under the bot (a survival-policy setting, merged with the others). The runtime
    * resets every override on death and dimension change, so the brain checks it again from each snapshot.
@@ -479,6 +481,7 @@ const playerMessagePayloadSchema = z.object({
   direction: z.enum(["incoming", "outgoing"]),
   message: z.string(),
   addressed: z.boolean(),
+  distance: z.number().optional(),
 });
 
 const actionOutputSchema = z.object({
@@ -717,8 +720,8 @@ export class McpBotRuntime implements BotRuntime {
     return kinds;
   }
 
-  async say(message: string, to?: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
-    const { result } = sayResultSchema.parse(await this.call("send_message", { message, ...(to !== undefined && { to }) }, "Speak in character."));
+  async say(message: string, to?: string, shout?: boolean): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
+    const { result } = sayResultSchema.parse(await this.call("send_message", { message, ...(to !== undefined && { to }), ...(shout === true && to === undefined && { shout: true }) }, "Speak in character."));
     return { status: result.status, error: result.error ?? null };
   }
 
@@ -774,7 +777,7 @@ export class McpBotRuntime implements BotRuntime {
         if (event.type !== "player_message") continue;
         const payload = playerMessagePayloadSchema.parse(event.payload);
         if (payload.direction !== "incoming") continue;
-        messages.push({ username: payload.username, channel: payload.channel, message: payload.message, addressed: payload.addressed });
+        messages.push({ username: payload.username, channel: payload.channel, message: payload.message, addressed: payload.addressed, ...(payload.distance !== undefined && { distance: payload.distance }) });
       }
       if (result.remainingEventCount === 0) return messages;
     }

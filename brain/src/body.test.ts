@@ -121,3 +121,16 @@ test("every foreground action is reported once it ends, with how long it ran, fa
   assert.deepEqual(seen.map(([tool, input]) => [tool, input]), [["collect_block", { block_name: "stone", count: 1 }], ["craft_item", { items: [] }]]);
   assert.ok(seen.every(([, , ms]) => ms >= 0));
 });
+
+test("a shout is sent with shout; with a whisper target it is a plain whisper", async () => {
+  const runtime = new FakeRuntime();
+  const body = new Body(runtime, () => undefined, INSTANT_TYPING);
+  await body.say("hello world", Date.now(), undefined, true);
+  await body.say("psst", Date.now(), "Tom", true);
+  await body.say("plain");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input), [
+    { message: "hello world", shout: true },
+    { message: "psst", to: "Tom" },
+    { message: "plain" },
+  ]);
+});

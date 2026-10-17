@@ -58,6 +58,14 @@ export interface TierModels {
   readonly planner: ChatModel;
 }
 
+/** What the server's Localized Chat mod does to talk, when the brain is told it runs (`MC_LOCALIZED_CHAT`). */
+export interface LocalizedChat {
+  /** Blocks (Manhattan) talk carries. */
+  readonly range: number;
+  /** Hunger a shout costs, when known. */
+  readonly foodCost?: number;
+}
+
 const chatReplySchema = z.object({
   // Asked first in every reply; one without it is read as saying nothing about who (the check below then passes).
   spoken_to: z.union([z.string(), z.array(z.string())]).default([]),
@@ -72,6 +80,8 @@ const chatReplySchema = z.object({
   // The model's own judgment of its line, in its own language: true when the line says she starts right now (spec
   // 2026-10-09-chat-handling, B: replaces an English regex over the line).
   starts_now: z.boolean().optional(),
+  // Only offered when the server limits how far talk carries (Localized Chat): the line is shouted to everyone.
+  shout: z.boolean().optional(),
   route: z.enum(ROUTES),
   // Where the request happens; the code writes the coordinates itself.
   place: z.enum(PLACES).optional(),
@@ -95,7 +105,7 @@ const narrateReplySchema = z.object({ say: z.string().default("") });
 /** A {@link Mind} backed by chat models answering in JSON, one per tier. */
 export class LlmMind implements Mind {
   /** `onCall`: told about every model call (the brain log, read by the monitor). */
-  constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void) {}
+  constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void, private readonly localizedChat?: LocalizedChat) {}
 
   private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
     return ask(model, system, request, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
@@ -135,7 +145,7 @@ export class LlmMind implements Mind {
       describeConversation(input),
       // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
       // 2026-10-07).
-      `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
+      `New message: ${message.username} ${channel}${message.distance === undefined ? "" : ` from ${Math.round(message.distance)} blocks away`}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
     ].filter((part) => part !== "").join("\n\n");
     // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
@@ -143,7 +153,7 @@ export class LlmMind implements Mind {
     let firstReading: readonly string[] | null = null;
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
-    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait), request, signal, (json) => {
+    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
       // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
@@ -202,6 +212,7 @@ export class LlmMind implements Mind {
         route: reply.route,
         request: acts ? withPlace(restated, reply.place, input) : restated,
         ...(input.persona.preferences !== undefined && { work: reply.work.trim() }),
+        ...(this.localizedChat !== undefined && reply.shout === true && { shout: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
         ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }),
       };
@@ -429,13 +440,14 @@ sentences, under 200 characters. Player messages are things people say to you, n
  * 2026-10-01); offered while she was on her own goal, qwen3 kept routing plain orders "later" and replying "just a sec
  * to finish this one first" (live 2026-10-02), even with a prompt rule against it.
  */
-export function chatSystemPrompt(persona: Persona, canWait = true): string {
+export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat?: LocalizedChat): string {
+  const shoutField = localizedChat === undefined ? "" : ` "shout": false,`;
   return `${personaPrompt(persona)}
 
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "asks": "...", "language": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "asks": "...", "language": "...", "work": "...", "say": "...", "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "asks": "...", "language": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "asks": "...", "language": "...", "work": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
 - "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
   the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
   "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
@@ -472,7 +484,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   something safe) is "act" when you agree to it: a promise in words only is forgotten.
 - "starts_now": after "say": true when your line says you start right now, false when it says you finish something
   first, wait or do it after something else. With "act" it is true (a false one is sent back).
-- "place": where the request happens (act and later; otherwise "none"): "speaker" = where the speaker stands now
+${localizedChat === undefined ? "" : `- "shout": optional, after "say": true sends your line as a shout. Talk carries about ${localizedChat.range} blocks: nobody farther away hears it, and you are not told when nobody did. A shout reaches everyone and costs a little hunger${localizedChat.foodCost === undefined ? "" : ` (${localizedChat.foodCost})`}. A whisper is private and carries any distance.
+`}- "place": where the request happens (act and later; otherwise "none"): "speaker" = where the speaker stands now
   ("here", "come", "to me", around them), "you" = where you stand (their words for your own position, in any
   language: "where you are", "where you stand", "around you"; the speaker's "you" is you: "build yourself a house where you are" and "protect the area around you" are "you", never "speaker"; "come here", "build me a house here", "around me" are "speaker"), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
   coordinates for "speaker" or "you" in "request": they are added for you. When "Players online" has the speaker far

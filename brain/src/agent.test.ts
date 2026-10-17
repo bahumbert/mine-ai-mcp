@@ -1445,3 +1445,27 @@ test("two bad replies in a row still end the order with \"could not work out wha
   assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
   assert.equal(agent.activity, "idle");
 });
+
+test("a reply that shouts is sent as a shout in public chat, and as a plain whisper to a whisperer", async (t) => {
+  const runtime = new FakeRuntime();
+  const tiers = scriptedMind({ range: 64 });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  tiers.chat.reply(
+    { spoken_to: ["Ayla"], say: "Coming!", shout: true, route: "talk", request: "" },
+    { spoken_to: ["Ayla"], say: "Psst!", shout: true, route: "talk", request: "" },
+  );
+  runtime.inbox.push(say("Steve", "Ayla, are you there?"));
+  await until(() => runtime.said.length === 1);
+  runtime.inbox.push({ ...say("Steve", "Ayla, are you there?"), channel: "whisper" });
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input), [
+    { message: "Coming!", shout: true },
+    { message: "Psst!", to: "Steve" },
+  ]);
+});
