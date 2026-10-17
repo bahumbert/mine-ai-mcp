@@ -64,6 +64,12 @@ import {
  * over five away and the server refuses it before anything else is asked.
  */
 const POUR_APPROACH_RANGE = 2;
+/**
+ * The ranges a pour steps to, one after the other, while no face is in reach of where it stands: a rim, a wall or a
+ * route that ended short hides the faces from a distance that a step closer sees over. Run 13: a farm's water hole,
+ * `[BUCKET_NO_FACE]` four times in a row for one bot.
+ */
+const POUR_CLOSER_RANGES = [1, 0] as const;
 export interface UseBucketDependencies {
   readonly createMovements: typeof createMovements;
   readonly navigate: Navigate;
@@ -333,7 +339,20 @@ export async function useBucket(
     }
     // The same question the cast asks: where would a pour from here land? The
     // named cell is the only answer this action accepts.
-    const aim = pourAim(bot, (landing) => (landing.equals(target) ? 1 : null));
+    const aimAtTarget = () => pourAim(bot, (landing) => (landing.equals(target) ? 1 : null));
+    let aim = aimAtTarget();
+    for (const range of POUR_CLOSER_RANGES) {
+      if (aim) break;
+      let route: NavigationResult | null;
+      try {
+        route = await approach(bot, target, context, dependencies, range);
+      } catch (cause) {
+        context.signal?.throwIfAborted();
+        return failure(bot, placed, useBucketOutcomes.routeStopped(cause instanceof Error ? cause.message : String(cause)));
+      }
+      if (route?.status === "stopped") break;
+      aim = aimAtTarget();
+    }
     if (!aim) return failure(bot, placed, useBucketOutcomes.noFace);
     placed.aimedAt = aim.surface;
     const before = countFormations(bot, target);
