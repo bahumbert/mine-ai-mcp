@@ -54,3 +54,22 @@ test("a new action meeting a blocker that will not stop is refused, not waited f
   assert.equal((outcome as { status: string }).status, "refused");
   assert.ok(runtime.cancels.length >= 2);
 });
+
+/** A runtime whose wait never answers at all (a stopped clock on its side). */
+class SilentRuntime extends StuckRuntime {
+  override async wait(): Promise<never> {
+    return new Promise<never>(() => undefined);
+  }
+}
+
+test("a wait that never answers does not hold the step: the abort still cancels it and the give-up still ends it", async () => {
+  const runtime = new SilentRuntime();
+  const body = new Body(runtime, () => undefined, undefined, { recancelMs: 40, giveUpMs: 200 });
+  const controller = new AbortController();
+  const act = body.act("collect_block", { block_name: "stone", count: 10 }, "test", { signal: controller.signal });
+  setTimeout(() => controller.abort(), 20);
+  const outcome = await Promise.race([act, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+  assert.notEqual(outcome, "hung");
+  assert.equal((outcome as { status: string }).status, "failed");
+  assert.ok(runtime.cancels.length >= 1, "the cancel went out");
+});

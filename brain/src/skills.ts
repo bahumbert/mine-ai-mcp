@@ -65,6 +65,8 @@ export interface SkillContext {
   readonly progress?: (fact: string) => void;
   /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
   readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
+  /** Told that the step is alive without doing anything the brain can see (a follower holding beside a player who stands still): resets the silence limit. */
+  readonly alive?: () => void;
   /** Told that the step's work is another activity from now on (the house's site preparation is terraforming). */
   readonly phase?: (activity: Activity) => void;
   /** When the player who asked for this step last said anything (epoch ms); unset for her own goals. */
@@ -162,12 +164,13 @@ export function planFollowStep(snapshot: BotSnapshot, player: string, distance: 
 }
 
 async function follow(context: SkillContext, player: string, distance: number, minutes?: number): Promise<SkillResult> {
-  const { runtime, body, signal, heardFrom } = context;
+  const { runtime, body, signal, heardFrom, alive } = context;
   const started = Date.now();
   const until = started + (minutes ?? FOLLOW_OWN_MINUTES) * 60_000;
   let unseen = 0;
   let failures = 0;
   while (!signal.aborted) {
+    alive?.();
     // Asked for by a player: it lasts while they keep talking (any line restarts the count). On her own goal: its minutes.
     if (heardFrom !== undefined && minutes === undefined) {
       if (Date.now() - heardFrom() >= FOLLOW_QUIET_MS) {

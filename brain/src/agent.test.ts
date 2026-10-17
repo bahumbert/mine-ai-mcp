@@ -942,7 +942,7 @@ test("a fetch travelling that gets no nearer is stopped after the window, as bef
   assert.match(action.requests[1]?.[1]?.content ?? "", /get 2 oak_log -> failed: nothing gained in 0\.002 minutes: 0 of 2 oak_log so far/u);
 });
 
-test("a step whose items keep increasing is not stopped, and one without target items is never sampled", async (t) => {
+test("a step whose items keep increasing is not stopped, and a collect step is looked at too (any step has the silence limit)", async (t) => {
   const runtime = new FakeRuntime();
   runtime.durations.collect_mob_drop = 300;
   runtime.durations.collect_block = 300;
@@ -963,11 +963,12 @@ test("a step whose items keep increasing is not stopped, and one without target 
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> done/u);
   clearInterval(gains);
   const sampled = statuses.calls;
+  runtime.durations.collect_block = 50;
   chat.reply({ say: "Okay!", route: "act", request: "collect 1 dirt" }, { say: "Done!" });
   action.reply({ step: { skill: "collect_block", block: "dirt", count: 1 } }, { done: "dirt" });
   await agent.handle(say("Steve", "get me a dirt"));
   await until(() => runtime.said.length === 4, 5_000);
-  assert.ok(statuses.calls - sampled < 8, `a collect step (about 300 ms) looks at the inventory only before and after, not every 10 ms (${statuses.calls - sampled} calls; the hunt: ${sampled})`);
+  assert.equal(runtime.cancelled.length, 0, "the collect step (about 300 ms, moving or not) is not cancelled");
   assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
 });
 
@@ -1203,4 +1204,65 @@ test("a body that restarted under a step is one failed step: the objective goes 
   await until(() => action.requests.length === 2);
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2);
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 5 birch_log -> failed: \[BODY_RESTARTED\] the body restarted: collect_block was not done/u);
+});
+
+const COLLECT = { step: { skill: "collect_block", block: "oak_log", count: 16 } };
+
+test("a step with no item target and no sign of life for the whole window is cancelled and fails, saying so (run 14: a step waited for ever)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Stuck, sorry!" });
+  action.reply(COLLECT, { give_up: "stuck" });
+  await agent.handle(say("Steve", "collect logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 1, "the action was cancelled as by the agent");
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log -> failed: the action gave no sign of life for 0\.002 minutes/u);
+});
+
+test("a step with no item target that keeps moving is alive: a sign of life resets the clock", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 400;
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  const walking = setInterval(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
+  t.after(() => clearInterval(walking));
+  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Got them!" });
+  action.reply(COLLECT, { done: "got the logs" });
+  await agent.handle(say("Steve", "collect logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 0);
+});
+
+test("the silence limit holds when the inventory read never answers (the clock is the wall clock, not an event)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const status = runtime.status.bind(runtime);
+  runtime.status = () => (runtime.submitted.some((call) => call.tool === "collect_block") && runtime.cancelled.length === 0 ? new Promise(() => undefined) : status());
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Stuck, sorry!" });
+  action.reply(COLLECT, { give_up: "stuck" });
+  await agent.handle(say("Steve", "collect logs"));
+  await until(() => runtime.said.length === 2, 5_000);
+  assert.equal(runtime.cancelled.length, 1);
+});
+
+test("a plain stop from one player ends her work and the character's own goals, not another player's queued order (SF4)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply(
+    { say: "Okay.", route: "act", request: "collect 16 oak_log" },
+    { say: "Later.", route: "later", request: "mine stone" },
+    { say: "Stopped.", route: "stop", request: "" },
+  );
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "x" });
+  await agent.handle(say("Steve", "collect logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Alex", "mine stone"));
+  await agent.handle(say("Steve", "stop"));
+  await until(() => runtime.cancelled.length === 1);
+  const stacks = events.flatMap((event) => event.kind === "state" ? [event.stack.map((work) => work.text)] : []);
+  assert.deepEqual(stacks.filter((stack) => stack.length > 0 && !stack.includes("collect 16 oak_log")).at(0), ["mine stone"], "Steve's logs ended, Alex's queued order stayed");
 });

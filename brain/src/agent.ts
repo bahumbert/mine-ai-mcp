@@ -325,7 +325,7 @@ export class Agent {
       // (read next) does not take it back.
       if (route === "stop") {
         log("  superseded: its speaker said something since; the line is dropped but the stop is kept");
-        this.stopAndRest();
+        this.stopAndRest(message.username);
       } else {
         log("  superseded: its speaker said something since, the reply is dropped");
       }
@@ -346,10 +346,9 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo);
-    // A plain stop ends everything; a stop that carries a request ends the speaker's work and her own goals only, the
-    // other players' queued orders stay (owner, 2026-10-16, review R18).
-    if (routed === "stop") this.stopAndRest();
-    else if (carriesRequest && this.stack.length > 0) this.stopAndRest(message.username);
+    // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
+    // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
+    if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
@@ -563,6 +562,7 @@ export class Agent {
     if (decision.step.skill === "collect_block") work.wanted.add(decision.step.block);
     const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
+      gain.alive();
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
     };
     const phases: ActivityPhase[] = [];
@@ -583,11 +583,18 @@ export class Agent {
         areas: this.areas,
         levelSites: work.levelSites,
         ...(work.objective.requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
-        phase: (activity) => phases.push({ activity, at: Date.now() }),
+        phase: (activity) => {
+          gain.alive();
+          phases.push({ activity, at: Date.now() });
+        },
         heading: gain.heading,
+        alive: gain.alive,
         ...(work.objective.requester !== null && { heardFrom: () => this.lastHeard.get(work.objective.requester!.toLowerCase()) ?? started }),
         // Only an order is narrated (owner, 2026-10-02); its own goals show in the monitor.
-        ...(work.objective.requester !== null && { progress: (fact: string) => this.progress(work, fact) }),
+        ...(work.objective.requester !== null && { progress: (fact: string) => {
+          gain.alive();
+          this.progress(work, fact);
+        } }),
       });
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -669,13 +676,16 @@ export class Agent {
   }
 
   /**
-   * A step out to obtain items (see `targetItems`) is aborted when none of them increased in the inventory for
-   * {@link NO_GAIN_MINUTES} minutes (live 2026-10-09: single steps ran 10-22 minutes, a squid hunt gained nothing for
-   * 30). `view_status` only reads, so the inventory is looked at while the action runs. `stalled` says why it was stopped.
+   * A step is aborted when it shows no result and no progress for {@link NO_GAIN_MINUTES} minutes (live 2026-10-09:
+   * single steps ran 10-22 minutes, a squid hunt gained nothing for 30; run 14: a step with no item target waited for
+   * ever). A step out to obtain items (see `targetItems`) progresses when an item rises in the inventory or a fetch
+   * gets nearer to the place it travels to; any other step, on any sign of life: an action ending, a phase or a
+   * progress fact from the skill, a changed inventory, or the bot moving. The deadline is checked on every tick by the
+   * wall clock, whether or not the inventory read answers. `view_status` only reads, so the inventory is looked at while
+   * the action runs. `stalled` says why it was stopped.
    */
-  private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null; readonly heading: (target: { readonly x: number; readonly z: number } | null) => void } {
+  private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null; readonly heading: (target: { readonly x: number; readonly z: number } | null) => void; readonly alive: () => void } {
     const targets = targetItems(step);
-    if (targets.length === 0) return { stop: () => undefined, stalled: () => null, heading: () => undefined };
     const { runtime, log } = this.options;
     const { minutes, sampleMs } = this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS };
     const carried = (snapshot: BotSnapshot, item: string) => snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
@@ -691,14 +701,28 @@ export class Agent {
     let lastGainAt = Date.now();
     let stalled: string | null = null;
     let sampling = false;
+    let latest = before;
     // A fetch walking or sailing to a place it saw the block gains no item on the way: getting nearer is progress.
     let target: { readonly x: number; readonly z: number } | null = null;
     let nearest: number | null = null;
+    // Any other step: the inventory as last seen and the place last counted as moved from.
+    const signature = (snapshot: BotSnapshot) => JSON.stringify([...totals(snapshot)].sort());
+    let seen = signature(before);
+    let anchor = before.position;
+    const stall = () => {
+      if (stalled !== null || Date.now() - lastGainAt < minutes * 60_000) return;
+      stalled = targets.length === 0
+        ? `the action gave no sign of life for ${minutes} minutes`
+        : `nothing gained in ${minutes} minutes: ${targets.map(({ item, count }) => `${Math.max(0, carried(latest, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ")} so far (the rest is in your inventory)`;
+      controller.abort(new Error(stalled));
+    };
     const timer = setInterval(() => {
+      stall();
       if (sampling || stalled !== null) return;
       sampling = true;
       runtime.status().then((snapshot) => {
         const now = Date.now();
+        latest = snapshot;
         for (const [item, have] of totals(snapshot)) {
           if (have > (best.get(item) ?? 0)) {
             best.set(item, have);
@@ -713,10 +737,15 @@ export class Agent {
             lastGainAt = now;
           }
         }
-        if (stalled !== null || now - lastGainAt < minutes * 60_000) return;
-        const progress = targets.map(({ item, count }) => `${Math.max(0, carried(snapshot, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ");
-        stalled = `nothing gained in ${minutes} minutes: ${progress} so far (the rest is in your inventory)`;
-        controller.abort(new Error(stalled));
+        if (targets.length === 0) {
+          const inventory = signature(snapshot);
+          if (inventory !== seen || Math.hypot(snapshot.position.x - anchor.x, snapshot.position.y - anchor.y, snapshot.position.z - anchor.z) >= NEARER_BLOCKS) {
+            seen = inventory;
+            anchor = snapshot.position;
+            lastGainAt = now;
+          }
+        }
+        stall();
       }).catch((error: unknown) => log(`could not look at the inventory during a step: ${String(error)}`)).finally(() => { sampling = false; });
     }, sampleMs);
     return {
@@ -725,6 +754,10 @@ export class Agent {
       heading: (next) => {
         target = next;
         nearest = null;
+      },
+      // A sign of life from the skill itself; a step out for items answers to its inventory and its way only.
+      alive: () => {
+        if (targets.length === 0) lastGainAt = Date.now();
       },
     };
   }
@@ -1065,7 +1098,7 @@ export class Agent {
   }
 
   /**
-   * "stop" from someone with a request: the orders that player gave and the character's own goals end, the orders of
+   * "stop" from a player: the orders that player gave and the character's own goals end, the orders of
    * other players stay on the stack (review R18).
    */
   private stopWorkOf(speaker: string): void {

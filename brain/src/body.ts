@@ -20,6 +20,9 @@ export interface StopPace {
   readonly giveUpMs: number;
 }
 
+const GAVE_UP = Symbol("gave up");
+const WOKEN = Symbol("woken");
+
 /** `send_message` refuses longer lines. */
 const MAX_CHAT_LENGTH = 256;
 
@@ -135,10 +138,39 @@ export class Body {
           await this.runtime.cancel(state.actionId, "Stopped by the agent.");
         }
       }
-      state = await this.runtime.wait(state.actionId, WAIT_SLICE_MS);
+      const slice = await this.waitSlice(state.actionId, cancelled ? cancelledAt + this.pace.giveUpMs : null, options.signal);
+      if (slice === WOKEN) continue;
+      if (slice === GAVE_UP) {
+        const waited = Date.now() - cancelledAt;
+        this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
+        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+      }
+      state = slice;
     }
     if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, preempted: false };
     return { status: state.status, error: state.error, preempted, ...(state.result !== undefined && { result: state.result }) };
+  }
+
+  /**
+   * One wait. A runtime that does not answer must not hold the step: before a cancel, an abort of `signal` ends the
+   * wait ({@link WOKEN}) so the cancel goes out; after it, the give-up deadline does ({@link GAVE_UP}).
+   */
+  private async waitSlice(actionId: string, deadline: number | null, signal: AbortSignal | undefined): Promise<ForegroundState | typeof GAVE_UP | typeof WOKEN> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<typeof GAVE_UP | typeof WOKEN>((resolve) => {
+      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - Date.now()) + WAIT_SLICE_MS);
+      else if (signal !== undefined) {
+        onAbort = () => resolve(WOKEN);
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    try {
+      return await Promise.race([this.runtime.wait(actionId, WAIT_SLICE_MS), stopped]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
