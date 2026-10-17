@@ -67,13 +67,16 @@ async function whisper(bot: Bot, message: string, to: string, context: ActionCon
   const self = bot.username.toLowerCase();
   const target = Object.keys(bot.players).find((name) => name.toLowerCase() === to.toLowerCase() && name.toLowerCase() !== self);
   if (target === undefined) return { status: "failed", error: sendMessageOutcomes.playerNotOnline(to), message, to };
+  // Mineflayer hands the echo over with the key already resolved through its own language table ("You whisper to %s:
+  // %s", live 2026-10-18), whatever language the server speaks: accept the key and its resolved format.
+  const echoFormats = new Set([OUTGOING_WHISPER_KEY, bot.registry?.language?.[OUTGOING_WHISPER_KEY]].filter((f) => f !== undefined));
   const delivery = await observeDelivery(
     context,
     (finish) => {
       const onMessage: MessageListener = (jsonMsg) => {
         // The echo carries its text as the last argument of the translation; another whisper has another text.
         const { translate, with: args } = jsonMsg as unknown as { translate?: string; with?: readonly { toString(): string }[] };
-        if (translate === OUTGOING_WHISPER_KEY && args?.at(-1)?.toString() === message) finish({ kind: "observed" });
+        if (translate !== undefined && echoFormats.has(translate) && args?.at(-1)?.toString() === message) finish({ kind: "observed" });
       };
       bot.on("message", onMessage);
       return () => bot.off("message", onMessage);
