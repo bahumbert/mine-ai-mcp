@@ -10,7 +10,10 @@ const KINDS: BlockArea["kinds"] = {
   dirt: { tool: "shovel", solid: true, harvest: null },
   grass_block: { tool: "shovel", solid: true, harvest: null },
   stone: { tool: "pickaxe", solid: true, harvest: null },
-  oak_log: { tool: "axe", solid: true, harvest: null },
+  oak_log: { tool: "axe", solid: true, harvest: null, tags: ["logs"] },
+  crimson_stem: { tool: "axe", solid: true, harvest: null, tags: ["logs"] },
+  oak_planks: { tool: "axe", solid: true, harvest: null, tags: ["planks"] },
+  oak_leaves: { tool: null, solid: true, harvest: null, tags: ["leaves"] },
   gold_block: { tool: "pickaxe", solid: true, harvest: null },
 };
 
@@ -130,6 +133,22 @@ test("a tree beside the zone is no pit wall: only the ground run up from the lev
     for (let y = 64; y <= 68; y += 1) rim[`${x},${y},${z}`] = "oak_log";
   }
   assert.equal(levelPlan(FIVE, 60, area(FIVE, 60, rim), "dirt").pit, 4);
+});
+
+test("a pit beside a wooden house wall (planks) is told: only logs and leaves are a tree", () => {
+  // A 4-deep hole whose west side is a planks wall (a house) and whose other sides are ground: still a pit, 4 deep.
+  const house: Record<string, string> = {};
+  for (let z = 0; z <= 4; z += 1) for (let y = 60; y <= 66; y += 1) house[`-1,${y},${z}`] = "oak_planks";
+  assert.equal(levelPlan(FIVE, 60, area(FIVE, 60, house), "dirt").pit, 4);
+});
+
+test("a wall of logs, of nether stems or of leaves is a tree (by the game's tags), not a pit wall", () => {
+  // West side only: logs up from the level (7 high) but the ground run on the other sides is 4: the run on the west ends at once, so no pit.
+  for (const block of ["oak_log", "crimson_stem", "oak_leaves"]) {
+    const wall: Record<string, string> = {};
+    for (let z = 0; z <= 4; z += 1) for (let y = 60; y <= 66; y += 1) wall[`-1,${y},${z}`] = block;
+    assert.equal(levelPlan(FIVE, 60, area(FIVE, 60, wall), "dirt").pit, 0, block);
+  }
 });
 
 test("a platform in the air gets one support column from the ground under the cell nearest the middle, then fills outward from it", () => {

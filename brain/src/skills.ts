@@ -747,7 +747,12 @@ export async function levelZone(context: SkillContext, zone: Zone, level: number
 /** {@link levelZone}'s work, once the zone and its margin are set aside. */
 async function levelInside(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string }, reserved: readonly { readonly item: string; readonly count: number }[], { min, max }: ReturnType<typeof levelBox>): Promise<SkillResult> {
   // One column past the zone on every side: what a layer can be placed against, and the ground around it (a pit's walls).
-  const read = (below: number) => context.runtime.blocksIn({ x: min.x - 1, y: min.y - below, z: min.z - 1 }, { x: max.x + 1, y: max.y, z: max.z + 1 });
+  const read = async (below: number) => {
+    const area = await context.runtime.blocksIn({ x: min.x - 1, y: min.y - below, z: min.z - 1 }, { x: max.x + 1, y: max.y, z: max.z + 1 });
+    // A box read names no block tags; the game's tags tell a tree (a pit wall stops at it) from planks or a chest. A lookup that fails leaves them untagged.
+    const tagged = await context.runtime.blockKinds(Object.keys(area.kinds)).catch(() => ({}) as Awaited<ReturnType<BotRuntime["blockKinds"]>>);
+    return { ...area, kinds: Object.fromEntries(Object.entries(area.kinds).map(([name, kind]) => [name, { ...kind, tags: tagged[name]?.tags ?? [] }])) };
+  };
   const inventory = (await context.runtime.status()).inventory;
   // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone).
   const spareIn = (stacks: typeof inventory) => (item: string) =>

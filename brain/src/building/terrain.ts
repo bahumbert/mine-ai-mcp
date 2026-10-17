@@ -144,9 +144,12 @@ export function levelPlan(zone: Zone, level: number, area: BlockArea, fill: stri
   };
 }
 
+/** The game's block tags of a tree (overworld logs and leaves, nether stems are `logs` too); planks, a chest or a pumpkin are built or grown things. */
+const TREE_TAGS = ["logs", "leaves"];
+
 /**
  * The ground standing around the zone above the level, when that is a pit wall (see {@link LevelPlan.pit}): the fewest
- * cells of the solid ground run up from the level (it ends at the first open cell or at wood, a tree) in the columns just outside each of its four sides (the area read reaches one column
+ * cells of the solid ground run up from the level (it ends at the first open cell or at a block the game tags a tree (logs, leaves)) in the columns just outside each of its four sides (the area read reaches one column
  * past the zone); a side that is not read, or open, makes it 0.
  */
 function pitDepth(zone: Zone, level: number, area: BlockArea, at: (x: number, y: number, z: number) => string | undefined, solid: (name: string) => boolean): number {
@@ -154,7 +157,7 @@ function pitDepth(zone: Zone, level: number, area: BlockArea, at: (x: number, y:
     let height = 0;
     for (let y = level; y < level + LEVEL_LIMITS.above; y += 1) {
       const name = at(x, y, z);
-      if (name === undefined || !solid(name) || area.kinds[name]?.tool === "axe") break;
+      if (name === undefined || !solid(name) || area.kinds[name]?.tags?.some((tag) => TREE_TAGS.includes(tag)) === true) break;
       height += 1;
     }
     return height;

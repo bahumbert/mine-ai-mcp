@@ -196,6 +196,31 @@ async function madeItems(runtime: BotRuntime, keep: readonly ItemCount[], knowle
     .filter((entry): entry is ItemCount => entry !== null);
 }
 
+/** The one step of a round (or why there is none): collect, hunt, make a table or tool, craft or smelt, whichever the plan puts first. */
+async function roundStep(
+  context: GatherContext,
+  plan: Round,
+  inventory: Stacks,
+  missing: readonly ItemCount[],
+  purpose: string,
+  site: Site,
+  knowledge: Knowledge,
+  spent: Spent,
+): Promise<GatherResult | string> {
+  const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
+  const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
+  if (ungated.length > 0) return collectAll(context, ungated, purpose, knowledge);
+  if (plan.hunt.size > 0) return huntAll(context, plan.hunt, purpose, knowledge);
+  if (plan.tableFirst) return craft(context, [TABLE], purpose, false, spent);
+  if (plan.toolFirst !== null) return craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
+  if (gated.length > 0) return collectAll(context, gated, purpose, knowledge);
+  const ready = await readyCrafts(context.runtime, plan.craft);
+  const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
+  if (ready.length > 0) return craftAtHome(context, ready, purpose, site, spent);
+  if (job !== undefined) return smeltAtHome(context, job, purpose, site);
+  return `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt`;
+}
+
 async function gatherRounds(
   context: GatherContext,
   bill: readonly ItemCount[],
@@ -231,26 +256,14 @@ async function gatherRounds(
     const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
-    const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
-    const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
     // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
     // is not fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
     const spent: Spent = (before, after) => {
       wanted = keepWhatCraftingUsed(wanted, keep, before, after);
     };
-    let step: GatherResult;
-    if (ungated.length > 0) step = await collectAll(context, ungated, purpose, knowledge);
-    else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose, knowledge);
-    else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
-    else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
-    else if (gated.length > 0) step = await collectAll(context, gated, purpose, knowledge);
-    else {
-      const ready = await readyCrafts(context.runtime, plan.craft);
-      const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
-      if (ready.length > 0) step = await craftAtHome(context, ready, purpose, site, spent);
-      else if (job !== undefined) step = await smeltAtHome(context, job, purpose, site);
-      else return { status: "failed", detail: `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt` };
-    }
+    const stepped = await roundStep(context, plan, inventory, missing, purpose, site, knowledge, spent);
+    if (typeof stepped === "string") return { status: "failed", detail: stepped };
+    const step = stepped;
     if (step.status === "stopped") return step;
     // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
     const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
@@ -415,9 +428,8 @@ async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledg
   // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
   if (knowledge.cropOnly.has(item)) {
     const first = await firstOfOwnSeed(runtime, item);
-    if (first !== null) return `${item} grows as a crop: ${first}`;
+    return `${item} grows as a crop: ${first ?? "farm it (harvest a farm of yours, or make one), then use it"}`;
   }
-  if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
   // A block that drops something else is asked for by its drop (live 2026-10-07: Vex asked for iron_ore, which drops
   // raw_iron without silk touch).
   const known: Readonly<Record<string, readonly string[]>> = await runtime.blockDrops([item]).catch(() => ({}));
