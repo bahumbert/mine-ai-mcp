@@ -6,8 +6,22 @@ import { readRecentEvents } from "../actions/read-recent-events/read-recent-even
 import { botEventInputSchema, readLastDeath, readNotificationSummary, SqlBotData } from "../bot-data/index.js";
 import { observePlayerEvents } from "./player-events.js";
 
+/**
+ * Like Mineflayer's chat patterns: a system line that matches a registered pattern is emitted as `chat:<name>` with the
+ * parsed groups (`hear`), and removing the pattern forgets it.
+ */
 function playerBot(username = "MineAI"): Bot {
+  const patterns = new Map<string, RegExp>();
   return Object.assign(new EventEmitter(), {
+    addChatPattern: (name: string, pattern: RegExp) => patterns.set(name, pattern),
+    removeChatPattern: (name: string) => patterns.delete(name),
+    hear(line: string) {
+      for (const [name, pattern] of patterns) {
+        const match = pattern.exec(line);
+        if (match) (this as unknown as EventEmitter).emit(`chat:${name}`, [match.slice(1)]);
+      }
+    },
+    patterns,
     username,
     game: { dimension: "overworld" },
     entities: {},
@@ -188,4 +202,31 @@ test("a respawn into another dimension records one event; a respawn in the same 
   assert.equal(bot.listenerCount("respawn"), 0);
   assert.equal(bot.listenerCount("forcedMove"), 0);
   data.close();
+});
+
+test("records talk heard through Localized Chat once, as incoming chat with its distance", (t) => {
+  const bot = playerBot("Theo");
+  const data = SqlBotData.create({
+    storage: { kind: "temporary" },
+    identity: { worldId: "player-events-local-chat-test", scope: { kind: "bot", botId: bot.username } },
+  });
+  const stopObserving = observePlayerEvents(bot, data, () => undefined);
+  t.after(() => data.close());
+  const hearer = bot as unknown as { hear(line: string): void; patterns: Map<string, RegExp> };
+
+  hearer.hear("[From 12.0 blocks away] <Ayla> hi Theo");
+  hearer.hear("<Theo> my own echo");
+  hearer.hear("[From x blocks away] <Ayla> not a distance");
+  // Vanilla talk arrives as `chat` only; the pattern must not record it a second time.
+  bot.emit("chat", "Ayla", "hi", null, {} as never, null);
+
+  const events = readRecentEvents(data, bot.username, 50).events.map(({ payload }) => payload);
+  assert.deepEqual(events, [
+    { username: "Ayla", channel: "chat", direction: "incoming", message: "hi Theo", addressed: true, distance: 12 },
+    { username: "Ayla", channel: "chat", direction: "incoming", message: "hi", addressed: false },
+  ]);
+
+  stopObserving();
+  assert.equal(hearer.patterns.size, 0);
+  assert.equal((bot as unknown as EventEmitter).listenerCount("chat:localChat"), 0);
 });

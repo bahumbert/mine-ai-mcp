@@ -80,6 +80,8 @@ export function botFixture(options: BotFixtureOptions = {}, overrides: Record<st
   const { x, y, z } = options.position ?? { x: 0.5, y: 64, z: 0.5 };
   return Object.assign(new EventEmitter(), {
     username: options.username ?? "TestBot",
+    addChatPattern: () => 0,
+    removeChatPattern: () => undefined,
     registry,
     inventory,
     entity: {

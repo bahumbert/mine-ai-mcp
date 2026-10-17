@@ -146,3 +146,48 @@ test("a cancelled whisper releases its echo listener", async () => {
   assert.equal((await pending).result.status, "cancelled");
   assert.equal(bot.listenerCount("message"), 0);
 });
+
+test("a shout is sent as /shout and confirmed by the same chat echo as public talk", async () => {
+  const sent: string[] = [];
+  const bot = chatBot((chatBot, message) => {
+    sent.push(message);
+    chatBot.emit("chat", chatBot.username, message.replace("/shout ", ""), null, {} as never, null);
+  });
+  const output = await new ActionRunner().run(createSendMessageAction(bot), { message: "Anyone near the village?", shout: true });
+  assert.deepEqual(sent, ["/shout Anyone near the village?"]);
+  assert.deepEqual(output.result, { status: "succeeded", message: "Anyone near the village?" });
+  assert.equal(bot.listenerCount("chat"), 0);
+  assert.equal(bot.listenerCount("message"), 0);
+});
+
+test("a shout cannot be a whisper and must fit one /shout command", () => {
+  assert.throws(() => parseSendMessageRequest({ message: "hi", shout: true, to: "Alex" }), /cannot be combined with `to`/);
+  assert.throws(() => parseSendMessageRequest({ message: "x".repeat(250), shout: true }), /at most 249/);
+  assert.deepEqual(parseSendMessageRequest({ message: "x".repeat(249), shout: true }), { message: "x".repeat(249), shout: true });
+  assert.doesNotThrow(() => parseSendMessageRequest({ message: "x".repeat(256) }));
+  assert.doesNotThrow(() => parseSendMessageRequest({ message: "hi", shout: false, to: "Alex" }));
+});
+
+test("a server without /shout answers unknown command: SHOUT_UNAVAILABLE at once, not a timeout", async () => {
+  const bot = chatBot((chatBot) => {
+    // As seen on a vanilla server: red text whose `extra` carries the translation.
+    (chatBot as unknown as { emit(event: string, ...args: unknown[]): boolean }).emit("message", {
+      color: "red",
+      extra: [{ translate: "command.unknown.command" }],
+      text: "",
+    });
+  });
+  const output = await new ActionRunner().run(createSendMessageAction(bot), { message: "hello", shout: true });
+  assert.equal(output.result.status, "failed");
+  assert.match("error" in output.result ? output.result.error : "", /^\[SHOUT_UNAVAILABLE\]/);
+  assert.equal(bot.listenerCount("chat"), 0);
+  assert.equal(bot.listenerCount("message"), 0);
+
+  // The same reply to plain talk is not a shout problem.
+  const quiet = chatBot(() => {});
+  const controller = new AbortController();
+  const pending = new ActionRunner().run(createSendMessageAction(quiet), { message: "hello" }, controller.signal);
+  (quiet as unknown as { emit(event: string, ...args: unknown[]): boolean }).emit("message", { translate: "command.unknown.command" });
+  controller.abort(new Error("done"));
+  assert.equal((await pending).result.status, "cancelled");
+});

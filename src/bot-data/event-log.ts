@@ -44,6 +44,8 @@ const playerMessagePayloadSchema = z.strictObject({
   direction: z.enum(["incoming", "outgoing"]),
   message: z.string(),
   addressed: z.boolean(),
+  /** Blocks between speaker and listener, when the server says (Localized Chat's `[From N blocks away]`). */
+  distance: z.number().nonnegative().optional(),
 });
 
 const playerMessageEventInputSchema = z.strictObject({

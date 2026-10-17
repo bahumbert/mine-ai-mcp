@@ -51,6 +51,8 @@ function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): B
   const botEvents = new EventEmitter();
   const bot = Object.assign(botEvents, {
     username: "RuntimeBot",
+    addChatPattern: () => 0,
+    removeChatPattern: () => undefined,
     _client: new EventEmitter(),
     getControlState: () => false,
     game: { dimension: "overworld" },
