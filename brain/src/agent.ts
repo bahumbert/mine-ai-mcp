@@ -687,7 +687,8 @@ export class Agent {
    * ever). A step out to obtain items (see `targetItems`) progresses when an item rises in the inventory or a fetch
    * gets nearer to the place it travels to; any other step, on any sign of life: an action ending, a phase or a
    * progress fact from the skill, a changed inventory, or the bot moving. The deadline is checked on every tick by the
-   * wall clock, whether or not the inventory read answers. `view_status` only reads, so the inventory is looked at while
+   * monotonic clock (a wall clock that steps, as WSL's does after the host wakes, would cut the window: review V3),
+   * whether or not the inventory read answers. `view_status` only reads, so the inventory is looked at while
    * the action runs. `stalled` says why it was stopped.
    */
   private watchGain(step: Step, before: BotSnapshot, controller: AbortController): { readonly stop: () => void; readonly stalled: () => string | null; readonly heading: (target: { readonly x: number; readonly z: number } | null) => void; readonly alive: () => void } {
@@ -704,7 +705,7 @@ export class Agent {
     // Any item rising above its best counts, not only the targets: a chain still gathering the logs for the planks for
     // the stairs is progressing (live 2026-10-10 run 8: "get 48 dark_oak_stairs" was stopped with 20 logs gathered).
     const best = totals(before);
-    let lastGainAt = Date.now();
+    let lastGainAt = performance.now();
     let stalled: string | null = null;
     let sampling = false;
     let latest = before;
@@ -716,7 +717,7 @@ export class Agent {
     let seen = signature(before);
     let anchor = before.position;
     const stall = () => {
-      if (stalled !== null || Date.now() - lastGainAt < minutes * 60_000) return;
+      if (stalled !== null || performance.now() - lastGainAt < minutes * 60_000) return;
       stalled = targets.length === 0
         ? `the action gave no sign of life for ${minutes} minutes`
         : `nothing gained in ${minutes} minutes: ${targets.map(({ item, count }) => `${Math.max(0, carried(latest, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ")} so far (the rest is in your inventory)`;
@@ -727,7 +728,7 @@ export class Agent {
       if (sampling || stalled !== null) return;
       sampling = true;
       runtime.status().then((snapshot) => {
-        const now = Date.now();
+        const now = performance.now();
         latest = snapshot;
         for (const [item, have] of totals(snapshot)) {
           if (have > (best.get(item) ?? 0)) {
@@ -763,7 +764,7 @@ export class Agent {
       },
       // A sign of life from the skill itself; a step out for items answers to its inventory and its way only.
       alive: () => {
-        if (targets.length === 0) lastGainAt = Date.now();
+        if (targets.length === 0) lastGainAt = performance.now();
       },
     };
   }

@@ -34,6 +34,7 @@ function fakeNavigator(
     active: null,
     cancelActive: () => undefined,
     terminateActive: () => undefined,
+    abandonActive: () => undefined,
   } satisfies Navigator;
   return { navigator, requests };
 }

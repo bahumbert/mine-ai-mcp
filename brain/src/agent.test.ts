@@ -900,6 +900,28 @@ test("a step out to obtain items that gains none for the whole window is stopped
   assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> failed: nothing gained in 0\.002 minutes: 0 of 8 ink_sac so far \(the rest is in your inventory\)/u);
 });
 
+// Review V3: WSL resyncs its wall clock forward after the host wakes; the no-gain window must not read that as minutes.
+test("a 60 s wall clock step does not stop a step that keeps gaining", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_mob_drop = 300;
+  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
+  const realNow = Date.now;
+  const stepAt = realNow() + 100;
+  Date.now = () => realNow() + (realNow() >= stepAt ? 60_000 : 0);
+  t.after(() => {
+    Date.now = realNow;
+    clearInterval(gains);
+  });
+  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+  action.reply(HUNT, { done: "got the ink" });
+  await agent.handle(say("Steve", "get me 8 ink sacs"));
+  // Waited on the monotonic clock: `until` reads the stepped one.
+  const deadline = performance.now() + 5_000;
+  while (runtime.said.length < 2 && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms: a clock step is not 60 s without a gain");
+});
+
 /** A fetch for logs seen 900 blocks away: nothing near, so it walks there (the first `navigate` takes `duration` polls, later ones none) before gathering. */
 function farFetch(duration: number) {
   const runtime = new FakeRuntime();

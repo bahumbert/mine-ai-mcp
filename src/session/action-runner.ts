@@ -4,6 +4,7 @@ import { BodyAbort, type BodyAbortCause, type Continuation } from "./abort.js";
 import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.js";
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
 import type { ToolSnapshot } from "../world/tool-tiers.js";
+import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -56,6 +57,13 @@ export interface ActionRunnerOptions {
   readonly cancelGraceMs?: number;
   /** False while the bot is a passenger: Mineflayer turns physics off for the ride, so no tick is owed. */
   readonly physicsExpected?: () => boolean;
+  /**
+   * Called once when an action fails `RUNTIME_PHYSICS_STALLED`, after its signal is aborted: the runtime records it and
+   * turns physics back on where the bot is, so the stopped action can settle before the body is released.
+   */
+  readonly onPhysicsStall?: (action: string) => void;
+  /** The stall watch's clock (default monotonic); tests step it by hand. */
+  readonly clock?: StallClock;
 }
 
 // ── Reported outcomes ────────────────────────────────────────────────────────
@@ -66,9 +74,9 @@ const outcomes = {
   invalidArguments: (cause: unknown) => `[INVALID_ARGUMENTS] ${message(cause)}`,
   executionError: message,
   physicsStalled: (action: string, stalledMs: number) =>
-    `[RUNTIME_PHYSICS_STALLED] ${action} owned the body for ${Math.round(stalledMs / 1000)} s with no physics tick; it was given up on and the body released.`,
+    `[RUNTIME_PHYSICS_STALLED] ${action} owned the body for ${Math.round(stalledMs / 1000)} s with no physics tick; it was stopped, physics restarted where it stands, and the body released.`,
   cancelledWithoutTicks: (action: string, reason: string) =>
-    `${reason} (${action} did not stop: no physics tick since the cancel; the body was released)`,
+    `${reason} (${action} did not stop: no physics tick since the cancel; the body was released and the next action may start)`,
 } as const;
 
 function message(cause: unknown): string {
@@ -201,7 +209,9 @@ export class ActionRunner {
   readonly #physicsStallMs: number | undefined;
   readonly #cancelGraceMs: number;
   readonly #physicsExpected: () => boolean;
-  #lastPhysicsTickAt = Date.now();
+  readonly #onPhysicsStall: (action: string) => void;
+  readonly #clock: StallClock;
+  #lastPhysicsTickAt: number;
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
   #admittedRequest: AdmittedRequest | null = null;
@@ -217,38 +227,64 @@ export class ActionRunner {
     this.#physicsStallMs = options.physicsStallMs;
     this.#cancelGraceMs = options.cancelGraceMs ?? 5_000;
     this.#physicsExpected = options.physicsExpected ?? (() => true);
+    this.#onPhysicsStall = options.onPhysicsStall ?? (() => {});
+    this.#clock = options.clock ?? MONOTONIC_CLOCK;
+    this.#lastPhysicsTickAt = this.#clock.now();
   }
 
   /** A physics tick happened now: the clock the stall watch reads. */
   observePhysicsTick(): void {
-    this.#lastPhysicsTickAt = Date.now();
+    this.#lastPhysicsTickAt = this.#clock.now();
   }
 
   /**
    * Settles with `run`, or earlier when the action owns the body and no physics tick comes: a cancelled action is given
    * up on after the grace, any action after the stall limit (live run 14: twelve bots left mounted at sea never ticked
-   * again, their navigate never returned and ignored its cancel). Wall clock only: every limit that waits for a tick
-   * is blind in exactly this case.
+   * again, their navigate never returned and ignored its cancel). A stalled action is stopped (its controller aborted)
+   * and physics is restarted through `onPhysicsStall`; it then has the cancel grace to settle on the returning ticks
+   * before the body is released (run 14b: left running, the old navigate held the navigation for good). Clock only,
+   * monotonic: every limit that waits for a tick is blind in exactly this case.
    */
-  #watchPhysics<Value>(action: string, signal: AbortSignal, run: Promise<Value | RuntimeFailure>): Promise<Value | RuntimeFailure> {
+  #watchPhysics<Value>(action: string, signal: AbortSignal, controller: AbortController, run: Promise<Value | RuntimeFailure>): Promise<Value | RuntimeFailure> {
     const stallMs = this.#physicsStallMs;
     if (stallMs === undefined) return run;
-    const startedAt = Date.now();
+    const clock = this.#clock;
+    const startedAt = clock.now();
     let cancelledAt: number | null = null;
+    let stalled: { readonly failure: RuntimeFailure; readonly at: number } | null = null;
     return new Promise((resolve, reject) => {
-      const timer = setInterval(() => {
-        const now = Date.now();
+      const settle = (value: Value | RuntimeFailure) => {
+        stop();
+        resolve(value);
+      };
+      const stop = clock.every(() => {
+        const now = clock.now();
+        if (stalled !== null) {
+          if (now - stalled.at >= this.#cancelGraceMs) settle(stalled.failure);
+          return;
+        }
         if (signal.aborted && cancelledAt === null) cancelledAt = now;
         const lastTick = Math.max(this.#lastPhysicsTickAt, startedAt);
         if (cancelledAt !== null && now - Math.max(lastTick, cancelledAt) >= this.#cancelGraceMs) {
           const reason = signal.reason instanceof Error ? signal.reason.message : "cancelled";
-          resolve({ kind: "runtime_failure", status: "cancelled", error: outcomes.cancelledWithoutTicks(action, reason) });
+          settle({ kind: "runtime_failure", status: "cancelled", error: outcomes.cancelledWithoutTicks(action, reason) });
         } else if (now - lastTick >= stallMs && this.#physicsExpected()) {
-          resolve({ kind: "runtime_failure", status: "failed", error: outcomes.physicsStalled(action, now - lastTick) });
-        } else return;
-        clearInterval(timer);
+          const error = outcomes.physicsStalled(action, now - lastTick);
+          stalled = { failure: { kind: "runtime_failure", status: "failed", error }, at: now };
+          controller.abort(new BodyAbort({ kind: "cancelled", by: "runtime" }, error));
+          this.#onPhysicsStall(action);
+        }
       }, Math.max(10, Math.min(250, Math.floor(stallMs / 4))));
-      run.then(resolve, reject).finally(() => clearInterval(timer));
+      run.then(
+        (value) => settle(stalled?.failure ?? value),
+        (cause: unknown) => {
+          if (stalled !== null) settle(stalled.failure);
+          else {
+            stop();
+            reject(cause);
+          }
+        },
+      );
     });
   }
 
@@ -377,7 +413,7 @@ export class ActionRunner {
       const actionSignal = signal ? AbortSignal.any([signal, running.controller.signal]) : running.controller.signal;
       let result: Result | RuntimeFailure;
       try {
-        result = await this.#watchPhysics(definition.name, actionSignal, this.#execute(
+        result = await this.#watchPhysics(definition.name, actionSignal, running.controller, this.#execute(
           definition.execution,
           (context) => {
             if (execute === null) {
@@ -493,7 +529,10 @@ export class ActionRunner {
 
   #finishedOutput<Name extends string, Result extends ActionResult>(output: ActionOutput<Name, Result>, request: AdmittedRequest): ActionOutput<Name, Result> {
     const cancellation = request.lifetime.signal.reason;
-    if (cancellation instanceof BodyAbort && cancellation.detail.kind === "cancelled" && "kind" in output.result && output.result.kind === "runtime_failure") {
+    // A runner cancel text already names the reason and what happened to the body (review V5): kept.
+    const runnerCancel = cancellation instanceof Error && output.result.status === "cancelled" && "error" in output.result
+      && (output.result.error ?? "").startsWith(`${cancellation.message} (`);
+    if (cancellation instanceof BodyAbort && cancellation.detail.kind === "cancelled" && "kind" in output.result && output.result.kind === "runtime_failure" && !runnerCancel) {
       output = { ...output, result: { kind: "runtime_failure", status: "cancelled", error: cancellation.message } };
     }
     request.progress.sample(this.#position(), false, undefined, this.#inWater());

@@ -30,7 +30,7 @@ export interface StallClock {
 }
 
 /** Monotonic: a wall clock that steps (NTP, WSL host sync) must not stretch or cut the stall window. */
-const REAL_CLOCK: StallClock = {
+export const MONOTONIC_CLOCK: StallClock = {
   now: () => performance.now(),
   every: (tick, ms) => {
     const timer = setInterval(tick, ms);
@@ -63,7 +63,7 @@ export function watchForStall(options: StallWatchOptions): StallWatch {
   const controller = new AbortController();
   let reason: string | null = null;
   let lastWork = options.work();
-  const clock = options.clock ?? REAL_CLOCK;
+  const clock = options.clock ?? MONOTONIC_CLOCK;
   let lastChange = clock.now();
   const travel = new AnchorTravel();
   travel.add(options.position(), false);

@@ -124,24 +124,24 @@ export class Body {
         if (stop || (options.interruptWhen !== undefined && await options.interruptWhen())) {
           cancelled = true;
           preempted = !stop;
-          cancelledAt = lastCancel = Date.now();
+          cancelledAt = lastCancel = performance.now();
           await this.runtime.cancel(state.actionId, stop ? "Stopped by the agent." : "Re-planning.");
         }
       } else {
-        const waited = Date.now() - cancelledAt;
+        const waited = performance.now() - cancelledAt;
         if (waited >= this.pace.giveUpMs) {
           this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
           return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
         }
-        if (Date.now() - lastCancel >= this.pace.recancelMs) {
-          lastCancel = Date.now();
+        if (performance.now() - lastCancel >= this.pace.recancelMs) {
+          lastCancel = performance.now();
           await this.runtime.cancel(state.actionId, "Stopped by the agent.");
         }
       }
       const slice = await this.waitSlice(state.actionId, cancelled ? cancelledAt + this.pace.giveUpMs : null, options.signal);
       if (slice === WOKEN) continue;
       if (slice === GAVE_UP) {
-        const waited = Date.now() - cancelledAt;
+        const waited = performance.now() - cancelledAt;
         this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
         return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
       }
@@ -159,7 +159,7 @@ export class Body {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const stopped = new Promise<typeof GAVE_UP | typeof WOKEN>((resolve) => {
-      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - Date.now()) + WAIT_SLICE_MS);
+      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - performance.now()) + WAIT_SLICE_MS);
       else if (signal !== undefined) {
         onAbort = () => resolve(WOKEN);
         signal.addEventListener("abort", onAbort, { once: true });

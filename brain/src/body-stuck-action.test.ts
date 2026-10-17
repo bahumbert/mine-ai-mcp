@@ -73,3 +73,24 @@ test("a wait that never answers does not hold the step: the abort still cancels 
   assert.equal((outcome as { status: string }).status, "failed");
   assert.ok(runtime.cancels.length >= 1, "the cancel went out");
 });
+
+// Review V3: a wall clock stepped back after the cancel stretched the give-up by the step (here 60 s).
+test("a wall clock stepped back after a cancel does not hold the step past its give-up", async () => {
+  const runtime = new StuckRuntime();
+  const body = new Body(runtime, () => undefined, undefined, { recancelMs: 40, giveUpMs: 200 });
+  const controller = new AbortController();
+  const realNow = Date.now;
+  const act = body.act("collect_block", { block_name: "stone", count: 10 }, "test", { signal: controller.signal });
+  setTimeout(() => controller.abort(), 20);
+  setTimeout(() => {
+
+    Date.now = () => realNow() - 60_000;
+  }, 60);
+  try {
+    const outcome = await Promise.race([act, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+    assert.notEqual(outcome, "hung");
+    assert.equal((outcome as { status: string }).status, "failed");
+  } finally {
+    Date.now = realNow;
+  }
+});
