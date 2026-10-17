@@ -278,12 +278,13 @@ test("a till that failed on two cells of a block name is remembered, and a later
   const soil = new TillFacts();
   // One failed cell on dirt (a block on top, lag) and one on podzol: nothing is refused.
   const once = farmRuntime(have);
+  once.tendUntillable = { dirt: [{ x: 1, z: 1 }], podzol: [{ x: 1, z: 2 }] };
   once.tendSkipped = { "not tillable (dirt)": [{ x: 1, z: 1 }], "not tillable (podzol)": [{ x: 1, z: 2 }], "unreachable: no path": [{ x: 3, z: 3 }] };
   await farm(once, soil);
   assert.deepEqual([soil.refuses("dirt"), soil.refuses("podzol"), soil.refuses("unreachable: no path")], [false, false, false]);
   // Podzol failing on a second cell is refused; dirt stays soil.
   const twice = farmRuntime(have);
-  twice.tendSkipped = { "not tillable (podzol)": [{ x: 2, z: 2 }] };
+  twice.tendUntillable = { podzol: [{ x: 2, z: 2 }] };
   await farm(twice, soil);
   assert.deepEqual([soil.refuses("podzol"), soil.refuses("dirt")], [true, false]);
   // A till that worked on podzol later forgets the failures.
@@ -291,6 +292,29 @@ test("a till that failed on two cells of a block name is remembered, and a later
   worked.tendTilledSoil = { podzol: 3 };
   await farm(worked, soil);
   assert.equal(soil.refuses("podzol"), false);
+});
+
+test("a hoe that broke mid-plot teaches nothing: dirt stays soil and the next farm on dirt is made (V1)", async () => {
+  const have = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+  const soil = new TillFacts();
+  const broke = farmRuntime(have);
+  broke.tendSkipped = { "no hoe left": [{ x: 1, z: 1 }, { x: 2, z: 1 }, { x: 3, z: 1 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(broke, { soil }));
+  assert.equal(soil.refuses("dirt"), false);
+  // A use that timed out on three dirt cells, and the old reason text, teach nothing either.
+  const timedOut = farmRuntime(have);
+  timedOut.tendSkipped = { "till failed: not confirmed": [{ x: 1, z: 1 }, { x: 2, z: 1 }, { x: 3, z: 1 }], "not tillable (dirt)": [{ x: 1, z: 2 }, { x: 2, z: 2 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(timedOut, { soil }));
+  assert.equal(soil.refuses("dirt"), false);
+  const next = farmRuntime(have);
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(next, { soil }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.ok(calls(next).includes("tend_crops"));
+  // Cells a hoe really was used on without a change still refuse the name (T5 behaviour kept).
+  const real = farmRuntime(have);
+  real.tendUntillable = { dirt: [{ x: 1, z: 1 }, { x: 2, z: 1 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(real, { soil }));
+  assert.equal(soil.refuses("dirt"), true);
 });
 
 test("farm carrot with 3 carried plants 3 cells: one carried carrot plants one cell (N1)", async () => {

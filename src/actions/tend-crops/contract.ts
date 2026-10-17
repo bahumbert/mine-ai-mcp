@@ -58,6 +58,8 @@ export const tendEvidenceSchema = z.strictObject({
   tilled: z.number().int().nonnegative(),
   /** Cells tilled, by the block name the soil had before (dirt, coarse_dirt...): which soils a hoe really turned. */
   tilledSoil: z.record(z.string(), z.number().int().positive()),
+  /** Cells a hoe was used on and the block did not change, by block name: the only failures that say a block is not soil. */
+  untillable: z.record(z.string(), z.array(cellSchema)),
   planted: z.number().int().nonnegative(),
   /** Items the inventory gained during the call (harvest drops picked up), less what was planted. */
   gained: z.record(z.string(), z.number().int()),

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
-import { cropFacts } from "./farm-body.js";
+import { cropFacts, tillFailure } from "./farm-body.js";
 import { formatTendCropsResult, settleTend } from "./tend-crops.js";
 import type { CellBlock } from "./tend-plot.js";
-import type { TendEvidence } from "./contract.js";
+import { tendEvidenceSchema, type TendEvidence } from "./contract.js";
 
 const bot = { version: "1.21.4", registry: minecraftData("1.21.4") } as unknown as Pick<Bot, "registry" | "version">;
 const crop = (name: string, age: number): CellBlock => ({ name, properties: { age }, liquid: false, empty: true, breakable: true });
@@ -25,7 +25,7 @@ test("a crop is ripe in the state its loot table drops the crop in, and planted 
 });
 
 const evidence = (overrides: Partial<TendEvidence> = {}): TendEvidence => ({
-  cells: 4, harvested: 0, cleared: 0, tilled: 0, tilledSoil: {}, planted: 0, gained: {}, skipped: {}, dropsLeft: [],
+  cells: 4, harvested: 0, cleared: 0, tilled: 0, tilledSoil: {}, untillable: {}, planted: 0, gained: {}, skipped: {}, dropsLeft: [],
   after: { crops: {}, emptyFarmland: 0, dryFarmland: 0, water: 0 }, ...overrides,
 });
 
@@ -51,4 +51,20 @@ test("tend_crops presents what each cell became and what was left, with why", ()
   assert.match(text, /After: 3 wheat age 0; empty farmland 1/u);
   assert.match(text, /Skipped \(no wheat_seeds left\): 3,0/u);
   assert.match(text, /Observed stop:.*TEND_INCOMPLETE/su);
+});
+
+test("the tend result schema carries the untillable cells by block name", () => {
+  const parsed = tendEvidenceSchema.parse(evidence({ untillable: { podzol: [{ x: 2, z: 3 }] } }));
+  assert.deepEqual(parsed.untillable, { podzol: [{ x: 2, z: 3 }] });
+  assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: { podzol: [{ x: 2 }] } }));
+  assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: undefined }));
+});
+
+test("a failed hoe use is unchanged only when the server clock moved 20 ticks and the hoe is still carried", () => {
+  const failed = (serverTicksWaited: number | null) => ({ error: "not confirmed", serverTicksWaited });
+  assert.deepEqual(tillFailure(failed(20), true), { kind: "unchanged" });
+  assert.deepEqual(tillFailure(failed(19), true), { kind: "unconfirmed" });
+  assert.deepEqual(tillFailure(failed(0), true), { kind: "unconfirmed" });
+  assert.deepEqual(tillFailure(failed(40), false), { kind: "error", error: "not confirmed" });
+  assert.deepEqual(tillFailure(failed(null), true), { kind: "error", error: "not confirmed" });
 });

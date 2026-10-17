@@ -31,6 +31,9 @@ export interface FarmCell {
   readonly z: number;
 }
 
+/** Why a till did not change the soil: no hoe in hand, the use failed, it went out but the server was not seen to answer, or it was answered and the block stayed. */
+export type TillFailure = { readonly kind: "no hoe" } | { readonly kind: "error"; readonly error: string } | { readonly kind: "unchanged" } | { readonly kind: "unconfirmed" };
+
 /** The physical gestures; each answers null when done, else why not. */
 export interface FarmBody {
   read(x: number, y: number, z: number): CellBlock | null;
@@ -38,8 +41,8 @@ export interface FarmBody {
   reach(cell: FarmCell): Promise<string | null>;
   /** Break the block in that cell (a crop, grass) by hand. */
   breakBlock(cell: FarmCell): Promise<string | null>;
-  /** Use the best carried hoe on the soil's top face; done when the soil changed. */
-  till(soil: FarmCell): Promise<string | null>;
+  /** Use the best carried hoe on the soil's top face; null when the soil changed, else why not. */
+  till(soil: FarmCell): Promise<TillFailure | null>;
   /** Use one `item` on the farmland's top face; done when something grows above it. */
   plant(soil: FarmCell, item: string): Promise<string | null>;
   /** Pick up what the breaks dropped on and around the plot; `left`: the names of the drops it could not get. */
@@ -113,6 +116,7 @@ export async function tendPlot(
     observe({ phase, ...counts });
   };
   const tilledSoil: Record<string, number> = {};
+  const till = { hoeGone: false, untillable: {} as Record<string, TendCell[]> };
   const skipped: Record<string, TendCell[]> = {};
   const skip = (cell: TendCell, reason: string) => (skipped[reason] ??= []).push({ x: cell.x, z: cell.z });
   const inventoryBefore = new Map<string, number>();
@@ -123,6 +127,7 @@ export async function tendPlot(
     cells: cells.length,
     ...counts,
     tilledSoil,
+    untillable: till.untillable,
     gained: Object.fromEntries([...inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
     skipped,
     dropsLeft: [...dropsLeft],
@@ -194,8 +199,8 @@ export async function tendPlot(
       continue;
     }
     if (decision === "clear") continue;
-    if (decision === "till" && !request.till) {
-      skip(cell, "not farmland");
+    if (decision === "till" && (!request.till || till.hoeGone)) {
+      skip(cell, request.till ? NO_HOE_LEFT : "not farmland");
       continue;
     }
     if (decision === "plant" && choices(cell).length === 0) {
@@ -211,11 +216,9 @@ export async function tendPlot(
     }
     if (decision === "till") {
       const soil = body.read(cell.x, request.y, cell.z)!.name;
-      // Coarse dirt takes two uses: the first makes it dirt.
-      for (let use = 0; use < 2 && decide(cell) === "till"; use += 1) if ((await body.till(soilOf(cell))) !== null) break;
-      decision = decide(cell);
-      if (decision !== "plant") {
-        skip(cell, `not tillable (${soil})`);
+      const failure = await tillCell(body, soilOf(cell), () => decide(cell) === "till");
+      if (failure !== null) {
+        skip(cell, noteTillFailure(till, failure, soil, cell));
         continue;
       }
       counts.tilled += 1;
@@ -240,6 +243,26 @@ export async function tendPlot(
     if (why !== null) skip(cell, why);
   }
   return { evidence: evidence(), stop: null, refused: null };
+}
+
+const NO_HOE_LEFT = "no hoe left";
+const TILL_NOT_CONFIRMED = "till not confirmed (server behind)";
+
+/** What a failed till teaches: no hoe ends the tilling, an unchanged block is untillable, an error is neither. Returns the skip reason. */
+function noteTillFailure(till: { hoeGone: boolean; untillable: Record<string, TendCell[]> }, failure: TillFailure, soil: string, cell: TendCell): string {
+  if (failure.kind === "no hoe") till.hoeGone = true;
+  if (failure.kind === "unchanged") (till.untillable[soil] ??= []).push({ x: cell.x, z: cell.z });
+  return failure.kind === "no hoe" ? NO_HOE_LEFT : failure.kind === "error" ? `till failed: ${failure.error}` : failure.kind === "unconfirmed" ? TILL_NOT_CONFIRMED : `not tillable (${soil})`;
+}
+
+/** Till one cell: coarse dirt takes two uses, the first makes it dirt. Null when the cell is farmland now, else why not. */
+async function tillCell(body: FarmBody, soil: FarmCell, needsTill: () => boolean): Promise<TillFailure | null> {
+  let failure: TillFailure | null = null;
+  for (let use = 0; use < 2 && needsTill(); use += 1) {
+    failure = await body.till(soil);
+    if (failure !== null) break;
+  }
+  return needsTill() ? (failure ?? { kind: "unchanged" }) : null;
 }
 
 /** The plot as it stands now: crops by block and age, empty and dry farmland, water. */

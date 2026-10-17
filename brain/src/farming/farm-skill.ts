@@ -8,9 +8,6 @@ import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpo
 import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
-/** The block a "not tillable (dirt)" reason names: what a till failed on. */
-const NOT_TILLABLE = /^not tillable \((.+)\)$/u;
-
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
 const WALK_RANGE = 8;
 /** Seeds suggested when she carries none: enough to start, the farm grows from its own harvests. */
@@ -22,6 +19,7 @@ const tendedSchema = z.object({
     after: z.object({ crops: z.record(z.string(), z.number()), emptyFarmland: z.number() }),
     skipped: z.record(z.string(), z.array(z.unknown())).optional(),
     tilledSoil: z.record(z.string(), z.number()).optional(),
+    untillable: z.record(z.string(), z.array(z.unknown())).optional(),
   }),
 });
 
@@ -214,15 +212,14 @@ async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: Kn
 const cellSchema = z.object({ x: z.number(), z: z.number() });
 
 /**
- * What a tend says of the ground (SF2): each cell a till failed on counts against its block name, then each soil a
- * till worked on clears its name, so one call with both leaves the name usable. The facts refuse a name only on
- * repeated failures at different cells (see {@link TillFacts}).
+ * What a tend says of the ground (SF2): each cell a hoe was used on without the block changing (`untillable`) counts
+ * against its block name, then each soil a till worked on clears its name, so one call with both leaves the name
+ * usable. Skip reasons teach nothing: a hoe that broke or a use that timed out says nothing of the block (run 14b).
+ * The facts refuse a name only on repeated failures at different cells (see {@link TillFacts}).
  */
-function learnSoil(soil: TillFacts | undefined, tended: { readonly skipped?: Readonly<Record<string, readonly unknown[]>> | undefined; readonly tilledSoil?: Readonly<Record<string, number>> | undefined } | undefined): void {
+function learnSoil(soil: TillFacts | undefined, tended: { readonly untillable?: Readonly<Record<string, readonly unknown[]>> | undefined; readonly tilledSoil?: Readonly<Record<string, number>> | undefined } | undefined): void {
   if (soil === undefined) return;
-  for (const [reason, cells] of Object.entries(tended?.skipped ?? {})) {
-    const block = NOT_TILLABLE.exec(reason)?.[1];
-    if (block === undefined) continue;
+  for (const [block, cells] of Object.entries(tended?.untillable ?? {})) {
     for (const cell of cells) {
       const at = cellSchema.safeParse(cell).data;
       if (at !== undefined) soil.failed(block, at);

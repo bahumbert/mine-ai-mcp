@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseTendCropsRequest } from "./contract.js";
-import { decideCell, tendPlot, type CellBlock, type CropFacts, type FarmBody } from "./tend-plot.js";
+import { decideCell, tendPlot, type CellBlock, type CropFacts, type FarmBody, type TillFailure } from "./tend-plot.js";
 
 const block = (name: string, properties: CellBlock["properties"] = {}, traits: Partial<Pick<CellBlock, "liquid" | "empty">> = {}): CellBlock => ({
   name,
@@ -48,6 +48,13 @@ class FakeFarm implements FarmBody {
   readonly ground: string[] = [];
   unreachable = new Set<string>();
   tillable = new Set(["dirt", "grass_block"]);
+  /** The hoe breaks once it has tilled this many cells. */
+  hoeLasts = Infinity;
+  /** Every use fails with this instead of reaching the world (a timeout, a thrown error). */
+  useFails: string | null = null;
+  /** Cells (x,z) where the use went out and the server was not seen to answer in time. */
+  unconfirmed = new Set<string>();
+  private tilledCells = 0;
 
   set(x: number, z: number, soil: string, above = "air", age?: number): void {
     this.world.set(`${x},63,${z}`, block(soil, soil === "farmland" ? { moisture: 7 } : {}, { liquid: soil === "water", empty: soil === "water" }));
@@ -70,11 +77,15 @@ class FakeFarm implements FarmBody {
     return null;
   }
 
-  async till(cell: { x: number; y: number; z: number }): Promise<string | null> {
+  async till(cell: { x: number; y: number; z: number }): Promise<TillFailure | null> {
     const soil = this.read(cell.x, cell.y, cell.z)!;
+    if (!this.hasHoe()) return { kind: "no hoe" };
     this.calls.push(`till ${cell.x},${cell.z}`);
-    if (!this.tillable.has(soil.name)) return "nothing changed";
+    if (this.useFails !== null) return { kind: "error", error: this.useFails };
+    if (this.unconfirmed.has(`${cell.x},${cell.z}`)) return { kind: "unconfirmed" };
+    if (!this.tillable.has(soil.name)) return { kind: "unchanged" };
     this.world.set(`${cell.x},${cell.y},${cell.z}`, block("farmland", { moisture: 7 }));
+    this.tilledCells += 1;
     return null;
   }
 
@@ -98,7 +109,7 @@ class FakeFarm implements FarmBody {
   }
 
   hasHoe(): boolean {
-    return this.hoe;
+    return this.hoe && this.tilledCells < this.hoeLasts;
   }
 }
 
@@ -150,6 +161,8 @@ test("a mixed plot farms what it can and says why it left the rest", async () =>
     "unreachable: no route": [{ x: 5, z: 0 }],
   });
   assert.deepEqual([evidence.tilled, evidence.planted], [1, 1]);
+  // Only the stone, which a hoe was used on and did not change, is untillable; the unreachable cell is not.
+  assert.deepEqual(evidence.untillable, { stone: [{ x: 0, z: 0 }] });
   assert.deepEqual(evidence.after, { crops: { "wheat age 4": 1, "wheat age 0": 1 }, emptyFarmland: 0, dryFarmland: 0, water: 1 });
 });
 
@@ -228,4 +241,45 @@ test("a stop asked between cells ends the run with what was done so far", async 
   const { evidence, stop } = await tendPlot(plot({}), farm, CROPS, () => (++calls > 1 ? "[TEND_STALLED] stalled" : null));
   assert.equal(stop, "[TEND_STALLED] stalled");
   assert.equal(evidence.harvested, 1);
+});
+
+test("a hoe that breaks mid-plot stops the tilling under its own reason, and no soil is untillable (V1)", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "dirt");
+  farm.hoeLasts = 1;
+  farm.inventory.set("wheat_seeds", 9);
+  const { evidence, stop, refused } = await tendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, CROPS);
+  assert.deepEqual([stop, refused], [null, null]);
+  assert.equal(evidence.tilled, 1);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), ["till 0,0"]);
+  assert.deepEqual(evidence.skipped, { "no hoe left": [{ x: 1, z: 0 }, { x: 2, z: 0 }, { x: 3, z: 0 }] });
+  assert.deepEqual(evidence.untillable, {});
+});
+
+test("a use that fails or times out is its own reason, never untillable (V4)", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2]) farm.set(x, 0, "dirt");
+  farm.useFails = "The use of stone_hoe was not confirmed within 40 ticks";
+  const { evidence } = await tendPlot(plot({ x2: 2 }), farm, CROPS);
+  assert.deepEqual(evidence.untillable, {});
+  assert.deepEqual(Object.keys(evidence.skipped), ["till failed: The use of stone_hoe was not confirmed within 40 ticks"]);
+  assert.equal(Object.values(evidence.skipped)[0]!.length, 3);
+});
+
+test("a block the hoe was used on and did not change is untillable, by name, with its cells (V4)", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "podzol");
+  farm.set(1, 0, "podzol");
+  const { evidence } = await tendPlot(plot({}), farm, CROPS);
+  assert.deepEqual(evidence.untillable, { podzol: [{ x: 0, z: 0 }, { x: 1, z: 0 }] });
+});
+
+test("a use the server was not seen to answer teaches nothing, beside one it did answer, in one call (server behind)", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2]) farm.set(x, 0, "dirt");
+  farm.set(3, 0, "podzol");
+  farm.unconfirmed = new Set(["0,0", "1,0", "2,0"]);
+  const { evidence } = await tendPlot(plot({ x2: 3 }), farm, CROPS);
+  assert.deepEqual(evidence.untillable, { podzol: [{ x: 3, z: 0 }] });
+  assert.equal(evidence.skipped["till not confirmed (server behind)"]?.length, 3);
 });

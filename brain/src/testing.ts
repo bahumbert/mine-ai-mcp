@@ -378,6 +378,8 @@ export class FakeRuntime implements BotRuntime {
   tendSkipped: Readonly<Record<string, readonly { x: number; z: number }[]>> | null = null;
   /** The soils `tend_crops` reports tilled, by block name and cells. */
   tendTilledSoil: Readonly<Record<string, number>> = {};
+  /** The blocks a hoe was used on without changing them, by block name and cells (`untillable`). */
+  tendUntillable: Readonly<Record<string, readonly { x: number; z: number }[]>> = {};
   /** How such a tend settles: partial, or failed when no cell changed. */
   tendSkippedStatus: "partial" | "failed" = "partial";
 
@@ -388,9 +390,9 @@ export class FakeRuntime implements BotRuntime {
 
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     const skipped = this.tendSkipped ?? {};
-    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped, tilledSoil: this.tendTilledSoil } };
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
     const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
-    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped, tilledSoil: this.tendTilledSoil } };
+    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
   }
 
   /** What a successful action does to the inventory (leaves only: the fake crafts in one go). */
