@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { McpBotRuntime, type ToolClient } from "./runtime-client.js";
@@ -143,4 +143,29 @@ test("the values a tool's input property accepts are read from the tool's schema
 test("a client that cannot list its tools gives no values", async () => {
   const runtime = McpBotRuntime.over({ callTool: async () => ({}), close: async () => {} });
   assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+});
+
+test("an unreadable tool listing is asked for once and logged once, not on every call", async () => {
+  // Run 14 review N12: gathering asks toolEnum every round; a failing listTools was retried each time, silently.
+  let listed = 0;
+  const client: ToolClient = {
+    callTool: async () => ({}),
+    listTools: async () => {
+      listed += 1;
+      throw new Error("tools/list is not supported");
+    },
+    close: async () => {},
+  };
+  const warnings: string[] = [];
+  const warn = mock.method(console, "warn", (line: string) => { warnings.push(line); });
+  try {
+    const runtime = McpBotRuntime.over(client);
+    assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+    assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+    assert.equal(listed, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /tools\/list is not supported/u);
+  } finally {
+    warn.mock.restore();
+  }
 });

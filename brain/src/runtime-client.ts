@@ -512,7 +512,7 @@ export class McpBotRuntime implements BotRuntime {
 
   private constructor(private client: ToolClient, private readonly reopen: () => Promise<ToolClient>) {}
 
-  /** The tools' input schemas, listed once (the runtime's contract does not change while it runs). */
+  /** The tools' input schemas, listed once per session (empty when the listing cannot be read). */
   private toolSchemas: Map<string, unknown> | null = null;
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
@@ -685,9 +685,12 @@ export class McpBotRuntime implements BotRuntime {
 
   async toolEnum(tool: string, property: string): Promise<readonly string[]> {
     if (this.toolSchemas === null) {
-      const listed = await this.client.listTools?.().catch(() => undefined);
-      if (listed === undefined) return [];
-      this.toolSchemas = new Map(listed.tools.map((entry) => [entry.name, entry.inputSchema]));
+      // An unreadable listing is remembered as an empty one: gathering asks every round, and says why only once.
+      const listed = await this.client.listTools?.().catch((error: unknown) => {
+        console.warn(`[runtime] the tool listing cannot be read, so no tool's allowed values are known: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      });
+      this.toolSchemas = new Map(listed?.tools.map((entry) => [entry.name, entry.inputSchema]));
     }
     const read = toolSchemaSchema.safeParse(this.toolSchemas.get(tool));
     return read.data?.properties?.[property]?.enum ?? [];
@@ -796,6 +799,7 @@ export class McpBotRuntime implements BotRuntime {
       const fresh = await this.reopen();
       await this.client.close().catch(() => undefined);
       this.client = fresh;
+      this.toolSchemas = null;
       this.lost = null;
       return true;
     } catch {

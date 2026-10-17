@@ -2101,3 +2101,75 @@ test("a craft step with no crafting table carried makes one first, then crafts (
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item").map(describeCall), ["craft oak_door", "craft crafting_table", "craft oak_door"]);
 });
+
+test("a rare fetch tells the runtime how many blocks it may still break: max_breaks is what is left of the bound", async () => {
+  // Run 14 review SF7: one `collect_block oak_leaves count 5` could break 204 leaves before the bound was looked at.
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
+  runtime.collectBroken = () => 8;
+  await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
+  const caps = runtime.submitted.filter((call) => call.tool === "collect_block").map((call) => call.input.max_breaks);
+  assert.deepEqual(caps, Array.from({ length: RARE_DROP_BREAKS / 8 }, (_unused, call) => RARE_DROP_BREAKS - call * 8));
+});
+
+test("a sure drop is given no break cap", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 3 }] }, contextFor(runtime));
+  const calls = runtime.submitted.filter((call) => call.tool === "collect_block");
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((call) => !("max_breaks" in call.input)));
+});
+
+test("a pickaxe that broke and cannot be made again ends a fetch of stone at once: stone needs it", async () => {
+  // Run 14 review N9: "going on without it" also applied to a harvest-required tool, so one more round tried the same remake.
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
+  runtime.failNext.collect_block = {
+    error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains.",
+    result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: "wooden_pickaxe", class: "pickaxe" } } },
+    effect: () => {
+      runtime.addItem("cobblestone", 15);
+      runtime.addItem("wooden_pickaxe", -1);
+    },
+  };
+  runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
+  const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 1, runtime.submitted.map(describeCall).join(" | "));
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1);
+});
+
+/** Run 14 review N13: the boat of a wood is found from the recipe data, not by cutting the wood's name at its last word. */
+const BOAT_ASKS = async (wood: string, tags: Record<string, readonly string[]>) => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { oak_boat: { makes: 1, needs: [{ item: "oak_planks", count: 5 }] }, birch_boat: { makes: 1, needs: [{ item: "birch_planks", count: 5 }] } };
+  runtime.blockTags = { ...runtime.blockTags, oak_log: ["logs", "oak_logs"], birch_log: ["logs", "birch_logs"], spruce_log: ["logs", "spruce_logs"], ...tags };
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: wood, count: 5 }] };
+  const asked: string[] = [];
+  const lookup = runtime.craftingNeeds.bind(runtime);
+  runtime.craftingNeeds = async (items, prefer) => {
+    asked.push(...items.map((entry) => entry.item));
+    return lookup(items, prefer);
+  };
+  const result = await runStep({ skill: "collect_block", block: "oak_log", count: 3 }, contextFor(runtime));
+  return { asked, detail: result.status === "failed" ? result.detail : "" };
+};
+
+test("a stripped log makes its tree's boat with one planner call, none for another tree's boat", async () => {
+  const { asked, detail } = await BOAT_ASKS("stripped_oak_log", { stripped_oak_log: ["logs", "oak_logs"] });
+  assert.match(detail, /get_items oak_boat\)/u);
+  assert.deepEqual(asked.filter((item) => /boat|raft/u.test(item)), ["oak_boat"]);
+});
+
+test("a stem of a tree with no boat recipe costs no planner call and names the default boat", async () => {
+  const { asked, detail } = await BOAT_ASKS("crimson_stem", { crimson_stem: ["logs", "crimson_stems"] });
+  assert.match(detail, /get_items oak_boat\)/u);
+  assert.deepEqual(asked.filter((item) => /boat|raft/u.test(item)), []);
+});

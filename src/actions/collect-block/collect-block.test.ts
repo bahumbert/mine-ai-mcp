@@ -140,6 +140,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
       allowFullInventory: true,
       onToolLoss: "stop",
       maxDistance: null,
+      maxBreaks: null,
     },
   );
   assert.deepEqual(parseCollectBlockRequest({ block_name: "oak_log", x: 8, y: 64, z: -3 }), {
@@ -150,6 +151,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
     allowFullInventory: false,
     onToolLoss: "stop",
     maxDistance: null,
+    maxBreaks: null,
   });
   assert.throws(() => parseCollectBlockRequest({ block_name: "minecraft:" }), /must identify a block/);
   assert.throws(
@@ -208,4 +210,14 @@ test("a tool that broke during the run is reported as a field of the result, not
   assert.deepEqual(reportToolLoss(stopped, lost).collected.toolLost, { item: "wooden_shovel", class: "shovel" });
   // No loss, no field.
   assert.equal("toolLost" in reportToolLoss(stopped, null).collected, false);
+});
+
+/** Run 14 review SF7: `get_items apple 5` asked for 5 drops at 0.5%, a budget of 2004 breaks, while the brain bounds a rare fetch at 64 blocks. */
+test("max_breaks caps the break budget whatever the drop chance asks for", () => {
+  assert.equal(parseCollectBlockRequest({ block_name: "oak_leaves", count: 5, max_breaks: 12 }).maxBreaks, 12);
+  assert.equal(parseCollectBlockRequest({ block_name: "oak_leaves" }).maxBreaks, null);
+  assert.throws(() => parseCollectBlockRequest({ block_name: "oak_leaves", max_breaks: 0 }));
+  assert.equal(breakBudget(5, 0.005), 2004, "no cap: twice the expected breaks");
+  assert.equal(breakBudget(5, 0.005, 12), 12);
+  assert.equal(breakBudget(5, 1, 12), 9, "a sure drop needs fewer breaks than the cap: the cap does not raise it");
 });

@@ -25,6 +25,8 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "For general collection tasks, prefer count greater than 1 without an exact x/y/z target; use exact coordinates only when that specific block matters. " +
   "With exact coordinates, omit count or set it to 1; larger counts are rejected.";
 export const MAX_COLLECT_BLOCKS = 32;
+/** The most `max_breaks` may ask for. */
+export const MAX_COLLECT_BREAKS = 4096;
 /** The largest `max_distance`: a few loaded view distances. */
 export const MAX_COLLECT_DISTANCE = 1024;
 export const NON_MINEABLE_FLUIDS = new Set(["water", "lava", "bubble_column"]);
@@ -139,6 +141,8 @@ export const collectBlockInputSchema = z
       .describe("Stop with partial progress when the best required tool tier drops, or continue the same collection with the remaining tool."),
     max_distance: z.number().int().min(1).max(MAX_COLLECT_DISTANCE).optional()
       .describe("Keep the run within this many blocks (horizontal) of where it starts: farther blocks are never targeted and it does not explore. Omit for no bound."),
+    max_breaks: z.number().int().min(1).max(MAX_COLLECT_BREAKS).optional()
+      .describe("Break at most this many blocks, however rare the drop: the run then stops with what it gained. Omit to let the drop chance set the budget."),
   })
   .superRefine((value, context) => {
     const coordinates = [value.x, value.y, value.z].filter((coordinate) => coordinate !== undefined).length;
@@ -159,6 +163,8 @@ export interface CollectBlockRequest {
   onToolLoss: "stop" | "continue";
   /** Horizontal blocks from the run's start beyond which nothing is targeted, and no exploring; null: unbounded. */
   maxDistance: number | null;
+  /** Most blocks the run may break, whatever the drop chance would allow; null: the budget of the drop chance. */
+  maxBreaks: number | null;
   /**
    * Internal, never from the tool input: the bot's own protected regions do not refuse this collection. Only for
    * picking a temporary workstation back up, set down a moment ago inside a region of its own (live 2026-10-02: a
@@ -181,6 +187,7 @@ export function parseCollectBlockRequest(input: unknown): CollectBlockRequest {
     allowFullInventory: value.allow_full_inventory,
     onToolLoss: value.on_tool_loss,
     maxDistance: value.max_distance ?? null,
+    maxBreaks: value.max_breaks ?? null,
   };
 }
 
