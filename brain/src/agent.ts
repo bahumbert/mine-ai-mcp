@@ -17,6 +17,7 @@ import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortf
 import { shelterForNight, underCover } from "./night-shelter.ts";
 import { personaSkills, type Persona } from "./persona.ts";
 import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
+import { TillFacts } from "./farming/site.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
 
@@ -75,6 +76,8 @@ export interface AgentOptions {
    */
   readonly otherAgents: readonly string[];
   readonly log: (line: string) => void;
+  /** The block names a till failed on, shared by the agents of one process (each agent has its own when none is given). */
+  readonly soil?: TillFacts;
   readonly pollMs?: number;
   /** Chat typing pace; tests use instant typing. */
   readonly typing?: TypingPace;
@@ -150,6 +153,7 @@ export class Agent {
   private readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
   private readonly farms: KnownFarm[] = [];
+  private readonly soil: TillFacts;
 
   /**
    * The places shown to the models: the known ones, and the unfinished house with where to stand to resume it (live
@@ -203,6 +207,7 @@ export class Agent {
   private wakeChat: (() => void) | null = null;
 
   constructor(private readonly options: AgentOptions) {
+    this.soil = options.soil ?? new TillFacts();
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
   }
@@ -579,6 +584,7 @@ export class Agent {
         ownHouse: () => this.temporaryHouse(),
         farms: this.farms,
         rememberFarm: (farm) => this.learnFarm(farm),
+        soil: this.soil,
         building: this.building,
         areas: this.areas,
         levelSites: work.levelSites,

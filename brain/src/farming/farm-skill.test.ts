@@ -4,6 +4,7 @@ import { stepSchema } from "../actions.ts";
 import { Body } from "../body.ts";
 import type { KnownFarm } from "../memory.ts";
 import { runStep, type SkillContext } from "../skills.ts";
+import { TillFacts } from "./site.ts";
 import { FakeRuntime } from "../testing.ts";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
@@ -16,7 +17,7 @@ function farmRuntime(inventory: { name: string; count: number }[]): FakeRuntime 
   runtime.simulateInventory = true;
   // What view_block_drops answers for the crops used here: the planted block and the item it is planted from.
   runtime.dropSources = {
-    wheat_seeds: [{ block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }],
+    wheat_seeds: [{ block: "short_grass", chance: 0.125, planted: false }, { block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }],
     wheat: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }],
     carrot: [{ block: "carrots", chance: 1, planted: true, seed: "carrot" }],
   };
@@ -269,4 +270,48 @@ test("a remembered farm in chunks that are not loaded is kept, not replaced by a
   const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [known] }));
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(calls(runtime), ["tend_crops"]);
+});
+
+test("a till that failed on two cells of a block name is remembered, and a later success forgets it (SF2)", async () => {
+  const farm = async (runtime: FakeRuntime, soil: TillFacts) => runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { soil }));
+  const have = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+  const soil = new TillFacts();
+  // One failed cell on dirt (a block on top, lag) and one on podzol: nothing is refused.
+  const once = farmRuntime(have);
+  once.tendSkipped = { "not tillable (dirt)": [{ x: 1, z: 1 }], "not tillable (podzol)": [{ x: 1, z: 2 }], "unreachable: no path": [{ x: 3, z: 3 }] };
+  await farm(once, soil);
+  assert.deepEqual([soil.refuses("dirt"), soil.refuses("podzol"), soil.refuses("unreachable: no path")], [false, false, false]);
+  // Podzol failing on a second cell is refused; dirt stays soil.
+  const twice = farmRuntime(have);
+  twice.tendSkipped = { "not tillable (podzol)": [{ x: 2, z: 2 }] };
+  await farm(twice, soil);
+  assert.deepEqual([soil.refuses("podzol"), soil.refuses("dirt")], [true, false]);
+  // A till that worked on podzol later forgets the failures.
+  const worked = farmRuntime(have);
+  worked.tendTilledSoil = { podzol: 3 };
+  await farm(worked, soil);
+  assert.equal(soil.refuses("podzol"), false);
+});
+
+test("farm carrot with 3 carried plants 3 cells: one carried carrot plants one cell (N1)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "carrot", count: 3 }, { name: "water_bucket", count: 1 }]);
+  const result = await runStep({ skill: "farm", crop: "carrot", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.equal(runtime.submitted.find((call) => call.tool === "tend_crops")!.input.plant, "carrot");
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "carrot"), undefined);
+});
+
+test("farm carrot with none carried names where a first one comes from, not get_items (N1)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "water_bucket", count: 1 }]);
+  runtime.mobDrops = { carrot: [{ mob: "zombie", chance: 0.025, hostile: true }] };
+  const result = await runStep({ skill: "farm", crop: "carrot", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /zombie/u);
+  assert.doesNotMatch(detail, /fetch exactly those with get_items/u);
+  assert.deepEqual(calls(runtime), []);
+  // A crop with a wild source (seeds from grass) still says to fetch it with get_items: that works.
+  runtime.dropSources = { ...runtime.dropSources, wheat_seeds: [{ block: "short_grass", chance: 0.125, planted: false }, { block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }] };
+  const seeds = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.match(seeds.status === "failed" ? seeds.detail : "", /get_items/u);
 });

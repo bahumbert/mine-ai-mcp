@@ -125,6 +125,8 @@ test("bare soil is cleared, tilled and planted with the item asked for", async (
   const { evidence } = await tendPlot(plot({ plant: "carrot" }), farm, CROPS);
   assert.deepEqual(farm.calls, ["break short_grass 0,0", "collect drops", "till 0,0", "plant carrot 0,0", "till 1,0", "plant carrot 1,0"]);
   assert.deepEqual([evidence.cleared, evidence.tilled, evidence.planted], [1, 2, 2]);
+  // The soil each till worked on, so the brain learns which blocks a hoe really turns (SF2).
+  assert.deepEqual(evidence.tilledSoil, { grass_block: 1, dirt: 1 });
   assert.deepEqual(evidence.after.crops, { "carrots age 0": 2 });
 });
 

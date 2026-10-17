@@ -395,8 +395,28 @@ async function unknownItem(runtime: BotRuntime, item: string): Promise<string> {
   return (await runtime.craftingNeeds([{ item, count: 1 }])).error ?? `${item} is not a Minecraft item id`;
 }
 
+/**
+ * Where the first one of a crop that is its own seed (carrot, potato) comes from, in the game's data: no wild block
+ * drops it, a farm plants the ones carried, so a mob's drop or a find starts the farm. Null for any other item (a
+ * crop with a seed of its own, or a wild source, is fetched or farmed as usual).
+ */
+export async function firstOfOwnSeed(runtime: BotRuntime, item: string): Promise<string | null> {
+  const sources = (await runtime.blockSources([item]).catch(() => ({})))[item] ?? [];
+  if (sources.some((source) => !source.planted) || !sources.some((source) => source.planted && source.seed === item)) return null;
+  const mobs = ((await runtime.mobSources([item]).catch(() => ({})))[item] ?? []).slice().sort((a, b) => Number(a.hostile) - Number(b.hostile) || b.chance - a.chance);
+  const first = mobs[0];
+  const from = first === undefined
+    ? "no mob drops it"
+    : `a ${first.mob} drops it ${(first.chance * 100).toFixed(1)}% of the time (hunt ${first.mob} for ${item}${mobs.length > 1 ? `; others: ${mobs.slice(1).map((mob) => mob.mob).join(", ")}` : ""})`;
+  return `${item} is its own seed, so no block gives it and a farm plants the ones you carry (one per cell): a first one comes from ${from}, or a chest, a village or another player; with one in hand, farm ${item}`;
+}
+
 async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
   // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
+  if (knowledge.cropOnly.has(item)) {
+    const first = await firstOfOwnSeed(runtime, item);
+    if (first !== null) return `${item} grows as a crop: ${first}`;
+  }
   if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
   // A block that drops something else is asked for by its drop (live 2026-10-07: Vex asked for iron_ore, which drops
   // raw_iron without silk touch).

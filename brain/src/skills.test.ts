@@ -2173,3 +2173,17 @@ test("a stem of a tree with no boat recipe costs no planner call and names the d
   assert.match(detail, /get_items oak_boat\)/u);
   assert.deepEqual(asked.filter((item) => /boat|raft/u.test(item)), []);
 });
+
+test("a crop that is its own seed: get_items names where a first one comes from, not 'farm it' (N1)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { ...runtime.dropSources, carrot: [{ block: "carrots", chance: 1, planted: true, seed: "carrot" }] };
+  runtime.mobDrops = { carrot: [{ mob: "zombie", chance: 0.025, hostile: true }] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "carrot", count: 16 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /carrot grows as a crop/u);
+  assert.match(detail, /zombie/u);
+  assert.doesNotMatch(detail, /farm it/u);
+  assert.deepEqual(runtime.submitted, []);
+});

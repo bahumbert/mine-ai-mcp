@@ -25,7 +25,7 @@ test("a crop is ripe in the state its loot table drops the crop in, and planted 
 });
 
 const evidence = (overrides: Partial<TendEvidence> = {}): TendEvidence => ({
-  cells: 4, harvested: 0, cleared: 0, tilled: 0, planted: 0, gained: {}, skipped: {}, dropsLeft: [],
+  cells: 4, harvested: 0, cleared: 0, tilled: 0, tilledSoil: {}, planted: 0, gained: {}, skipped: {}, dropsLeft: [],
   after: { crops: {}, emptyFarmland: 0, dryFarmland: 0, water: 0 }, ...overrides,
 });
 

@@ -3,7 +3,7 @@ import test from "node:test";
 import type { BlockArea, Position } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
 import { farmPlot } from "./plot.ts";
-import { chooseSite, farmStandsOnSoil } from "./site.ts";
+import { chooseSite, farmStandsOnSoil, TillFacts } from "./site.ts";
 
 /** A fake runtime on flat dirt up to y 63 that counts its area reads and kind lookups. */
 class CountingRuntime extends FakeRuntime {
@@ -105,4 +105,42 @@ test("a farm whose cells are not loaded still stands; one on stone does not (R22
   const stone = new CountingRuntime();
   fill(stone, { x: -2, y: 63, z: 2 }, { x: 2, y: 63, z: 6 }, "stone");
   assert.equal(await farmStandsOnSoil(stone, asked), false);
+});
+
+test("a block name a till failed on is skipped by the next site search, nothing is listed by name (SF2)", async () => {
+  // Podzol carries the game's `dirt` tag, but a hoe does not till it (run 14: a plot on podzol failed "not tillable").
+  const runtime = new CountingRuntime();
+  runtime.blockTags = { ...runtime.blockTags, podzol: ["dirt"] };
+  layer(runtime, 63, "podzol");
+  fill(runtime, { x: 6, y: 63, z: -2 }, { x: 16, y: 63, z: 10 }, "dirt");
+  const facts = new TillFacts();
+  assert.deepEqual(siteOf(await chooseSite(runtime, asked, facts)), asked);
+  // One failure proves nothing; the same name failing on a second cell does.
+  facts.failed("podzol", { x: 1, z: 1 });
+  assert.equal(facts.refuses("podzol"), false);
+  facts.failed("podzol", { x: 2, z: 1 });
+  const moved = siteOf(await chooseSite(runtime, asked, facts));
+  assert.ok(moved !== null && moved.min.x >= 6, JSON.stringify(moved));
+  // Next action from the new end state: all ground is that name, so the refusal says what is wrong with the plot.
+  const all = new CountingRuntime();
+  all.blockTags = { ...all.blockTags, podzol: ["dirt"] };
+  layer(all, 63, "podzol");
+  assert.match(refusalOf(await chooseSite(all, asked, facts)), /25 podzol/u);
+  assert.equal(await farmStandsOnSoil(all, asked, facts), false);
+  // A fact is per name: dirt is still soil.
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, facts)), asked);
+});
+
+test("a block that failed once, or whose till later worked, is still soil: one failure never ends every farm (SF2 review)", async () => {
+  const facts = new TillFacts();
+  facts.failed("dirt", { x: 1, z: 1 });
+  facts.failed("dirt", { x: 1, z: 1 });
+  assert.equal(facts.refuses("dirt"), false);
+  // Next action from that state: the site search still picks a dirt plot.
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, facts)), asked);
+  facts.failed("dirt", { x: 2, z: 1 });
+  assert.equal(facts.refuses("dirt"), true);
+  facts.tilled("dirt");
+  assert.equal(facts.refuses("dirt"), false);
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, facts)), asked);
 });

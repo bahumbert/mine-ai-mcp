@@ -13,6 +13,34 @@ const SOIL_TAG = "dirt";
 /** What the runtime reports for a cell of a chunk that is not loaded. */
 const UNLOADED = "unloaded";
 
+/** Different cells a till must fail on, with no success in between, before a block name is taken for untillable. */
+const REFUSED_AFTER_CELLS = 2;
+
+/**
+ * Block names a till failed on, learned from play and shared by every character of the process: the `dirt` tag lists
+ * what a hoe may turn into soil only roughly (podzol, mud, moss carry it), so the game's answer to an actual till is
+ * what counts. A single failure proves nothing (a block on top, an animal, lag): a name is refused only once it failed
+ * on {@link REFUSED_AFTER_CELLS} different cells, and any till that works on it forgets the failures. No name is
+ * listed in code.
+ */
+export class TillFacts {
+  /** Per block name, the cells ("x,z") a till failed on since the last one that worked. */
+  readonly #failed = new Map<string, Set<string>>();
+  /** A till failed on this block at this cell. */
+  failed(block: string, cell: { readonly x: number; readonly z: number }): void {
+    const cells = this.#failed.get(block) ?? new Set<string>();
+    cells.add(`${cell.x},${cell.z}`);
+    this.#failed.set(block, cells);
+  }
+  /** A till worked on this block: it is soil, whatever failed before. */
+  tilled(block: string): void {
+    this.#failed.delete(block);
+  }
+  refuses(block: string): boolean {
+    return (this.#failed.get(block)?.size ?? 0) >= REFUSED_AFTER_CELLS;
+  }
+}
+
 type Tags = ReadonlyMap<string, readonly string[]>;
 type Ground = { readonly y: number; readonly block: string } | "unknown" | null;
 
@@ -29,8 +57,9 @@ async function tagsOf(runtime: BotRuntime, names: Iterable<string>): Promise<Tag
 }
 
 /** Whether a cell's block is ground a farm can have: farmland, tillable soil, or water in the middle cell only. Air never is. */
-function isSoil(block: string, tags: Tags, middle: boolean): boolean {
-  return block === "farmland" || (middle && block === "water") || (tags.get(block) ?? []).includes(SOIL_TAG);
+function isSoil(block: string, tags: Tags, middle: boolean, facts: TillFacts | undefined): boolean {
+  if (block === "farmland" || (middle && block === "water")) return true;
+  return facts?.refuses(block) !== true && (tags.get(block) ?? []).includes(SOIL_TAG);
 }
 
 /** Whether nothing solid (and no water) stands within {@link SKY_HEIGHT} above the cell. */
@@ -60,7 +89,7 @@ interface Problems {
 }
 
 /** What is wrong with the plot's cells at soil level: nothing wrong and nothing unknown when the plot is fit. */
-function problems(plot: FarmPlot, area: BlockArea, tags: Tags, newSite: boolean): Problems {
+function problems(plot: FarmPlot, area: BlockArea, tags: Tags, newSite: boolean, facts: TillFacts | undefined): Problems {
   const counts = new Map<string, number>();
   let unknown = 0;
   const y = plot.water.y;
@@ -82,7 +111,7 @@ function problems(plot: FarmPlot, area: BlockArea, tags: Tags, newSite: boolean)
       else if (!isOpen(area, x, y, z)) counts.set("roofed", (counts.get("roofed") ?? 0) + 1);
       continue;
     }
-    const reason = !isSoil(block, tags, middle) ? block : newSite && !isOpen(area, x, y, z) ? "roofed" : null;
+    const reason = !isSoil(block, tags, middle, facts) ? block : newSite && !isOpen(area, x, y, z) ? "roofed" : null;
     if (reason !== null) counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
   return { wrong: [...counts].map(([reason, count]) => `${count} ${reason}`), unknown };
@@ -109,13 +138,13 @@ function soilNames(area: BlockArea, plot: FarmPlot): string[] {
 /**
  * Where a new farm of this size can go: the asked plot when its ground is tillable under the open sky, else the
  * nearest plot within {@link SITE_RADIUS} that is, each at its own column's ground height (a slope is not "no
- * ground"); otherwise why none is. The asked plot is one small read; the wide box is read once, only when that fails.
+ * ground"); otherwise why none is. A block name `facts` knows a till failed on is not soil. The asked plot is one small read; the wide box is read once, only when that fails.
  * A cell not loaded is unknown, never air or soil: a plot with one is not chosen.
  */
-export async function chooseSite(runtime: BotRuntime, plot: FarmPlot): Promise<{ readonly plot: FarmPlot } | { readonly refusal: string }> {
+export async function chooseSite(runtime: BotRuntime, plot: FarmPlot, facts?: TillFacts): Promise<{ readonly plot: FarmPlot } | { readonly refusal: string }> {
   const near = plotBox(plot, 0, -1, SKY_HEIGHT);
   const nearArea = await runtime.blocksIn(near.min, near.max);
-  const asked = problems(plot, nearArea, await tagsOf(runtime, soilNames(nearArea, plot)), true);
+  const asked = problems(plot, nearArea, await tagsOf(runtime, soilNames(nearArea, plot)), true, facts);
   if (fit(asked)) return { plot };
 
   const wide = plotBox(plot, SITE_RADIUS, -SITE_RISE - 1, SITE_RISE + SKY_HEIGHT);
@@ -133,7 +162,7 @@ export async function chooseSite(runtime: BotRuntime, plot: FarmPlot): Promise<{
     const ground = grounds.get(`${x},${z}`);
     if (ground === undefined || ground === null || ground === "unknown") continue;
     const moved = farmPlot({ x, y: ground.y, z }, plot.size);
-    if (fit(problems(moved, area, tags, true))) best = { plot: moved, distance };
+    if (fit(problems(moved, area, tags, true, facts))) best = { plot: moved, distance };
   }
   if (best !== null) return { plot: best.plot };
   const why = [...asked.wrong, ...(asked.unknown > 0 ? [`${asked.unknown} not loaded`] : [])].join(", ");
@@ -144,10 +173,10 @@ export async function chooseSite(runtime: BotRuntime, plot: FarmPlot): Promise<{
  * Whether a remembered farm still stands on soil: most of its cells farmland or tillable (else it is not tended
  * again). A cell not loaded is not known to be wrong, so a farm out of reach is kept, not replaced.
  */
-export async function farmStandsOnSoil(runtime: BotRuntime, plot: FarmPlot): Promise<boolean> {
+export async function farmStandsOnSoil(runtime: BotRuntime, plot: FarmPlot, facts?: TillFacts): Promise<boolean> {
   const box = plotBox(plot, 0, 0, 0);
   const area = await runtime.blocksIn(box.min, box.max);
   const tags = await tagsOf(runtime, soilNames(area, plot));
-  const wrong = problems(plot, area, tags, false).wrong.reduce((sum, entry) => sum + Number.parseInt(entry, 10), 0);
+  const wrong = problems(plot, area, tags, false, facts).wrong.reduce((sum, entry) => sum + Number.parseInt(entry, 10), 0);
   return wrong * 2 < plot.size * plot.size;
 }

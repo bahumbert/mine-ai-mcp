@@ -112,6 +112,7 @@ export async function tendPlot(
     phase = next;
     observe({ phase, ...counts });
   };
+  const tilledSoil: Record<string, number> = {};
   const skipped: Record<string, TendCell[]> = {};
   const skip = (cell: TendCell, reason: string) => (skipped[reason] ??= []).push({ x: cell.x, z: cell.z });
   const inventoryBefore = new Map<string, number>();
@@ -121,6 +122,7 @@ export async function tendPlot(
   const evidence = (): TendEvidence => ({
     cells: cells.length,
     ...counts,
+    tilledSoil,
     gained: Object.fromEntries([...inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
     skipped,
     dropsLeft: [...dropsLeft],
@@ -217,6 +219,7 @@ export async function tendPlot(
         continue;
       }
       counts.tilled += 1;
+      tilledSoil[soil] = (tilledSoil[soil] ?? 0) + 1;
       report();
     }
     let why: string | null = null;

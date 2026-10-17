@@ -14,6 +14,7 @@ import { consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } 
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
+import type { TillFacts } from "./farming/site.ts";
 import { ToolLosses } from "./building/tool-loss.ts";
 import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
@@ -75,6 +76,8 @@ export interface SkillContext {
   readonly farms?: readonly KnownFarm[];
   /** Told about a farm made or tended, to remember it. */
   readonly rememberFarm?: (farm: KnownFarm) => void;
+  /** The block names a till failed on, shared by every character: a farm site never has them as soil. */
+  readonly soil?: TillFacts;
   /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
   readonly needed?: (snapshot: BotSnapshot) => ReadonlySet<string>;
   /**
