@@ -48,7 +48,17 @@ export interface BlockPlacement {
   readonly signal?: AbortSignal;
 }
 
-export type BlockPlacementResult = { kind: "placed"; block: WorldBlock } | { kind: "failed"; error: string };
+/**
+ * What refused a cell a build gave up on, so a caller can tell a refusal that asking again can change from one that
+ * it cannot: a movement policy prohibits the dig (policy), a body stands in the cell (entity), no route reaches it
+ * (route), or the placement itself did not take (placement).
+ */
+export const REFUSAL_CAUSES = ["policy", "entity", "route", "placement"] as const;
+export type RefusalCause = (typeof REFUSAL_CAUSES)[number];
+
+export type BlockPlacementResult =
+  | { kind: "placed"; block: WorldBlock }
+  | { kind: "failed"; error: string; /** Set when a body stood in the cell; any other failure is a placement one. */ cause?: "entity" };
 
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -119,7 +129,7 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
   try {
     placement.signal?.throwIfAborted();
     const initialBlocker = occupiedCell(bot, cubeCell);
-    if (initialBlocker) return { kind: "failed", error: initialBlocker };
+    if (initialBlocker) return { kind: "failed", error: initialBlocker, cause: "entity" };
     await bot.equip(placement.item, "hand");
 
     if (placement.lookDirection) {
@@ -133,7 +143,7 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
 
     placement.signal?.throwIfAborted();
     const currentBlocker = occupiedCell(bot, cubeCell);
-    if (currentBlocker) return { kind: "failed", error: currentBlocker };
+    if (currentBlocker) return { kind: "failed", error: currentBlocker, cause: "entity" };
     setSneaking(bot, true);
     await placeWithoutLooking(bot, placement.support, face, placement.half);
   } catch (cause) {

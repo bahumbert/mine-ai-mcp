@@ -638,13 +638,13 @@ test("building again resumes an unfinished house at the same site and part, with
 });
 
 /** A failed `build_structure` whose audit names these cells as refused (the runtime's structured `left` groups). */
-function refusedBuild(cells: readonly { x: number; y: number; z: number; detail: string }[]): { readonly error: string; readonly result: Record<string, unknown> } {
+function refusedBuild(cells: readonly { x: number; y: number; z: number; detail: string; cause?: string }[]): { readonly error: string; readonly result: Record<string, unknown> } {
   return {
     error: `[BUILD_INCOMPLETE] ${cells.length} cell still wrong: ${cells.length} were refused.`,
     result: {
       status: "failed",
       error: "refused",
-      structure: { placed: 0, dug: 0, wrong: cells.length, left: [{ reason: "refused", count: cells.length, named: cells }], missing: [] },
+      structure: { placed: 0, dug: 0, wrong: cells.length, left: [{ reason: "refused", count: cells.length, named: cells.map((cell) => ({ cause: "policy", ...cell })) }], missing: [] },
     },
   };
 }
@@ -702,7 +702,7 @@ test("an entity standing in the cell does not give the house up", async () => {
   const context = contextFor(runtime, { style: "medieval", building });
   runtime.failNext.build_structure = {
     error: "[BUILD_INCOMPLETE] 1 cell still wrong: 1 were refused (1,64,1: cow stands in the cell).",
-    result: refusedBuild([{ x: 1, y: 64, z: 1, detail: "cow stands in the cell" }]).result,
+    result: refusedBuild([{ x: 1, y: 64, z: 1, detail: "cow stands in the cell", cause: "entity" }]).result,
   };
   const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.match(first.status === "failed" ? first.detail : "", /resumes it there$/u);
@@ -714,6 +714,51 @@ test("an entity standing in the cell does not give the house up", async () => {
   };
   await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.ok(building.unfinished !== null);
+});
+
+test("the same entity in the cell twice keeps the house; the same policy refusal twice gives it up (run 14 review SF1)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const context = contextFor(runtime, { style: "medieval", building });
+  const cow = refusedBuild([{ x: 1, y: 64, z: 1, detail: "cow stands in the cell", cause: "entity" }]);
+  for (const _ of [1, 2]) {
+    runtime.failNext.build_structure = cow;
+    const detail = await runStep({ skill: "build", structure: "house", size: "small" }, context).then((result) => (result.status === "failed" ? result.detail : ""));
+    assert.match(detail, /resumes it there$/u);
+    assert.ok(building.unfinished !== null, "kept after the entity refusal");
+  }
+  for (const cause of ["route", "placement"]) {
+    runtime.failNext.build_structure = refusedBuild([{ x: 1, y: 64, z: 1, detail: "x", cause }]);
+    await runStep({ skill: "build", structure: "house", size: "small" }, context);
+    runtime.failNext.build_structure = refusedBuild([{ x: 1, y: 64, z: 1, detail: "x", cause }]);
+    await runStep({ skill: "build", structure: "house", size: "small" }, context);
+    assert.ok(building.unfinished !== null, `${cause} twice keeps the house`);
+  }
+  const policy = refusedBuild([{ x: 1, y: 64, z: 1, detail: "movement policy prohibits breaking this block", cause: "policy" }]);
+  runtime.failNext.build_structure = policy;
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  runtime.failNext.build_structure = policy;
+  const last = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.match(last.status === "failed" ? last.detail : "", /build somewhere else/u);
+  assert.equal(building.unfinished, null);
+});
+
+test("a stop that is not a refusal keeps the earlier refused cells: refusal A, a tool failure, refusal A again is a repeat (run 14 review SF6)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  const building = { unfinished: null as UnfinishedHouse | null };
+  const context = contextFor(runtime, { style: "medieval", building });
+  const policy = refusedBuild([{ x: 1, y: 64, z: 1, detail: "movement policy prohibits breaking this block", cause: "policy" }]);
+  runtime.failNext.build_structure = policy;
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong" };
+  await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.deepEqual(building.unfinished?.refused, [{ x: 1, y: 64, z: 1 }], "the tool failure did not forget the refusal");
+  runtime.failNext.build_structure = policy;
+  const third = await runStep({ skill: "build", structure: "house", size: "small" }, context);
+  assert.match(third.status === "failed" ? third.detail : "", /build somewhere else/u);
+  assert.equal(building.unfinished, null);
 });
 
 test("asked to build far from an unfinished house, she starts a new one where she stands", async () => {
@@ -1131,15 +1176,29 @@ test("a way sailed without finding land is not sailed again from near there", as
   // Live 2026-10-04: Vex rode 450 blocks of sea out and back nine times from the same base.
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
-  runtime.failNext.navigate = { error: "[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: rode 200 blocks by boat and stays at sea in its boat at 0 -200 (no land within 200 blocks that way)." };
+  const endsAtSea = (blocks: number) => ({ error: `[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: rode ${blocks} blocks by boat and stays at sea in its boat at 0 -${blocks} (no land within ${blocks} blocks that way).`, effect: () => { runtime.snapshot = { ...runtime.snapshot, position: { x: 0, y: 63, z: 8 - blocks } }; } });
+  runtime.failNext.navigate = endsAtSea(200);
   const first = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
   assert.equal(first.status, "failed");
+  // Back at the base, where the ride went past her.
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
   const again = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
   assert.match(again.status === "failed" ? again.detail : "", /^north from here is open sea: you sailed it and found no land within 200 blocks: explore another way/u);
   assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1);
   // Another way is still open.
   const east = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
   assert.doesNotMatch(east.status === "failed" ? east.detail : "", /open sea/u);
+});
+
+test("from the boat where a ride ended at sea, going on the same way is not refused: no one has sailed past it (run 14 review SF5)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 } };
+  runtime.failNext.navigate = { error: "[NAVIGATION_BOAT_FAILED] Crossing deep water by boat failed: rode 158 blocks by boat and stays at sea in its boat at 8 -150 (no land within 158 blocks that way).", effect: () => { runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 63, z: -150 } }; } };
+  await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
+  const before = runtime.submitted.filter((call) => call.tool === "navigate").length;
+  const onward = await runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
+  assert.doesNotMatch(onward.status === "failed" ? onward.detail : "", /open sea/u);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, before + 1, "the ride goes on from the boat");
 });
 
 test("explore walks one compass way from where she stands, in legs, and says where it ended and where a known block is", async () => {
@@ -1405,7 +1464,8 @@ test("leveling goes on around a cell it may not dig, and says so", async () => {
   runtime.world.set("1,64,1", "crafting_table");
   runtime.world.set("2,64,1", "dirt");
   runtime.world.set("2,65,1", "dirt");
-  runtime.failNext.build_structure = { error: "[BUILD_INCOMPLETE] 1 cell still wrong: 1 were refused (1,64,1: movement policy prohibits breaking this block)." };
+  // The structured audit says it, not the wording of the error (run 14 review N10).
+  runtime.failNext.build_structure = { ...refusedBuild([{ x: 1, y: 64, z: 1, detail: "movement policy prohibits breaking this block" }]), error: "[BUILD_INCOMPLETE] one cell was turned down" };
   const result = await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 3, z2: 3, y: 64 }), contextFor(runtime));
   assert.deepEqual(result, { status: "done", detail: "leveled 4x4 at y 64: dug 2, filled 0 (left 1 cell it may not dig, leveled around)" });
   assert.equal(builds(runtime).length, 2, "the batch after the refused one still ran");
@@ -1972,7 +2032,7 @@ test("a craft step that finds no inventory room drops what the work does not nee
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
   const dropped = runtime.submitted.find((call) => call.tool === "drop_item")!.input.items as { item_name: string }[];
-  assert.deepEqual(dropped.map((entry) => entry.item_name).sort(), ["gravel"], "one stack, the one losing least, only until a slot is free");
+  assert.deepEqual(dropped.map((entry) => entry.item_name).sort(), ["dirt"], "one stack, of the kind junkStacks lists first (equal stacks: the biggest count), only until a slot is free");
 });
 
 test("a craft of stone tools with a full inventory keeps its cobblestone and drops one stack of junk (run 13 review R8)", async () => {
@@ -1990,6 +2050,22 @@ test("a craft of stone tools with a full inventory keeps its cobblestone and dro
   const drops = runtime.submitted.filter((call) => call.tool === "drop_item");
   assert.equal(drops.length, 1, "one stack is enough for one free slot");
   assert.deepEqual(drops[0]!.input.items, [{ item_name: "dirt", count: 30 }], "the first dirt stack: the stack losing least, never the cobblestone or sticks the shovel takes");
+});
+
+test("a craft with a full inventory of one bucket and five dirt stacks drops a dirt stack, never the bucket (run 14 review SF3)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, stone_shovel: { makes: 1, needs: [{ item: "cobblestone", count: 1 }, { item: "stick", count: 2 }] } };
+  const filler = Array.from({ length: 28 }, (_, index) => ({ name: `junk_${index}`, count: 50 }));
+  const full = [{ name: "wooden_pickaxe", count: 1 }, { name: "bucket", count: 1 }, ...[30, 10, 20, 5, 40].map((count) => ({ name: "dirt", count })), ...filler, { name: "stick", count: 8 }];
+  assert.equal(full.length, 36);
+  runtime.snapshot = { ...runtime.snapshot, inventory: full };
+  runtime.failNext.craft_item = { error: NO_ROOM_CRAFT };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 30 }], effect: () => { runtime.snapshot = { ...runtime.snapshot, inventory: runtime.snapshot.inventory.filter((stack) => !(stack.name === "dirt" && stack.count === 30)) }; } });
+  const result = await runStep({ skill: "craft_item", item: "stone_shovel", count: 1 }, { ...contextFor(runtime), needed: needsOnlyTools });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const drops = runtime.submitted.filter((call) => call.tool === "drop_item");
+  assert.equal(drops.length, 1);
+  assert.deepEqual(drops[0]!.input.items, [{ item_name: "dirt", count: 30 }], "the kind with most stacks, its first stack (a count drops stacks in inventory order); the lone bucket stays");
 });
 
 test("a craft step with nothing to spare fails with the original reason (the agent names what to drop)", async () => {

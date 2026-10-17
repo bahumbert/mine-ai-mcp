@@ -149,7 +149,7 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
       group.named.push({
         ...cell.position,
         ...("holds" in state && { holds: state.holds }),
-        ...(state.kind === "refused" && { detail: state.reason }),
+        ...(state.kind === "refused" && { detail: state.reason, cause: state.cause }),
       });
     }
     left.set(reason, group);

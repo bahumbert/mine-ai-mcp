@@ -252,7 +252,7 @@ async function craftItem(context: SkillContext, step: Extract<Step, { skill: "cr
 
 /**
  * Frees a slot for a craft or a smelt from the carried items neither its own work nor the objective needs (the same
- * sparing as {@link dropItems}): one stack at a time, the one losing least, until a slot is free. `inputs` are what the
+ * sparing as {@link dropItems}): one stack at a time, the kind with most stacks first (`junkStacks`' order), until a slot is free. `inputs` are what the
  * craft or the smelt consumes: never dropped, whatever the objective says (run 13: a full inventory of cobblestone lost
  * all of it to a stone shovel craft). False for an order (no `needed`), when everything carried is needed, or when no
  * slot came free: the failure then names what to drop.
@@ -261,12 +261,11 @@ async function makeRoom(context: SkillContext, inputs: ReadonlySet<string>): Pro
   if (context.needed === undefined) return false;
   for (let attempt = 0; attempt < INVENTORY_SLOTS; attempt++) {
     const before = await context.runtime.status();
-    // A count drops the kind's stacks in inventory order: the first stack's count frees exactly the first stack.
-    const [stack] = junkStacks(before, new Set([...context.needed(before), ...inputs]))
-      .map(({ name, stacks }) => ({ name, count: stacks[0]! }))
-      .sort((x, y) => x.count - y.count || x.name.localeCompare(y.name));
-    if (stack === undefined) return false;
-    const dropped = await dropItems(context, { skill: "drop_item", items: [{ item: stack.name, count: stack.count }] }, "Make room in the inventory for what I am crafting.");
+    // The kind junkStacks lists first (most stacks: a lone bucket or pair of shears is never first), and a count drops
+    // the kind's stacks in inventory order: the first stack's count frees exactly the first stack.
+    const [kind] = junkStacks(before, new Set([...context.needed(before), ...inputs]));
+    if (kind === undefined) return false;
+    const dropped = await dropItems(context, { skill: "drop_item", items: [{ item: kind.name, count: kind.stacks[0]! }] }, "Make room in the inventory for what I am crafting.");
     if (dropped.status !== "done") return false;
     if ((await context.runtime.status()).inventory.length < INVENTORY_SLOTS) return true;
   }
@@ -645,8 +644,9 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
       // A refusal is read from the audit's structured groups, not from the error text. One refusal may be transient
       // (an animal in the cell, a route that timed out): the house is kept with the refused cells; the same cell
       // refused again on a resume is the one that would be refused for good, so the site is given up.
+      // A stop that is no refusal keeps the cells an earlier one named (refusal A, a tool failure, refusal A again is a repeat).
       const refused = refusedCells(outcome.result);
-      options.leave(Math.min(index, plan.batches.length - 1), refused);
+      options.leave(Math.min(index, plan.batches.length - 1), refused.length > 0 ? refused : undefined);
       const repeated = options.again !== "" && refused.some((cell) => options.refusedBefore?.some((before) => sameCell(before, cell)) === true);
       if (repeated) options.abandon?.();
       const again = repeated ? "; building here again would be refused at the same cell: build somewhere else, or clear that cell first" : options.again;
@@ -665,15 +665,26 @@ function sameCell(left: Cell, right: Cell): boolean {
 /** The part of `build_structure`'s audit that names the cells it left refused (src/actions/build-structure/contract.ts `left`). */
 const refusedAuditSchema = z.object({
   structure: z.object({
-    left: z.array(z.object({ reason: z.string(), named: z.array(z.object({ x: z.number(), y: z.number(), z: z.number() })) })),
+    left: z.array(z.object({ reason: z.string(), count: z.number(), named: z.array(z.object({ x: z.number(), y: z.number(), z: z.number(), cause: z.string().optional() })) })),
   }),
 });
 
-/** The cells a `build_structure` audit says were refused (named ones only: the runtime names a few per reason). */
+/**
+ * The cells a `build_structure` audit says were refused for good: by policy (named ones only: the runtime names a few
+ * per reason). A body in the cell, a route that failed or a placement that did not take may pass on the next try, so
+ * they do not count toward giving the house up.
+ */
 function refusedCells(result: Readonly<Record<string, unknown>> | undefined): Cell[] {
   const parsed = refusedAuditSchema.safeParse(result);
   if (!parsed.success) return [];
-  return parsed.data.structure.left.filter((group) => group.reason === "refused").flatMap((group) => group.named.map(({ x, y, z }) => ({ x, y, z })));
+  return parsed.data.structure.left.filter((group) => group.reason === "refused").flatMap((group) => group.named.filter((cell) => cell.cause === "policy").map(({ x, y, z }) => ({ x, y, z })));
+}
+
+/** How many cells a `build_structure` audit left, when every one of them was refused (0 when some other reason is in it). */
+function onlyRefused(result: Readonly<Record<string, unknown>> | undefined): number {
+  const parsed = refusedAuditSchema.safeParse(result);
+  if (!parsed.success || !parsed.data.structure.left.every((group) => group.reason === "refused")) return 0;
+  return parsed.data.structure.left.reduce((sum, group) => sum + group.count, 0);
 }
 
 /** The non-air cells of the parts before `index`: what a later part's routes must keep. */
@@ -758,13 +769,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const moved = plan.dug + plan.filled;
   // A pit is told whatever the count (run 13: a cellar dug by repeated small levels passed silently under the budget).
   const pitNote = plan.pit > 0 ? ` (this digs a pit ${plan.pit} deep)` : "";
-  if (options.budget !== undefined && moved > options.budget) {
-    // Counted before the first block goes (run 12: a 25x25 level dug 1324 blocks; a cellar dug by repeated levels).
-    const perColumn = new Map<string, number>();
-    for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
-    const deepest = Math.max(0, ...perColumn.values());
-    return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pitNote}; at most ${options.budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
-  }
+  if (options.budget !== undefined && moved > options.budget) return overBudget(what, plan, pitNote, moved, options.budget);
   // The tool of each class the dig needs and it does not carry: stone when it has the cobblestone, else wood.
   const toolsMissing = (stacks: typeof inventory) => {
     const has = spareIn(stacks);
@@ -801,19 +806,15 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       if (errorCode(outcome.error) === "TOOL_TIER_LOST" && toolsLost < MAX_TOOLS_LOST) {
         toolsLost += 1;
         // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
-        const digging = toolsDug(batches.slice(index));
-        const replace = toolsMissing((await context.runtime.status()).inventory).filter(({ item }) => [...digging].some((kind) => item.endsWith(`_${kind}`)));
-        if (replace.length > 0) {
-          const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
-          if (got.status !== "done") return got;
-        }
+        const replaced = await replaceWornTool(context, what, toolsMissing, toolsDug(batches.slice(index)));
+        if (replaced !== null) return replaced;
         done -= 1;
         index -= 1;
         continue;
       }
-      const refused = /^\[BUILD_INCOMPLETE\] (\d+) cells? still wrong: \1 were refused/u.exec(outcome.error ?? "");
-      if (refused !== null) {
-        left += Number(refused[1]);
+      const refused = errorCode(outcome.error) === "BUILD_INCOMPLETE" ? onlyRefused(outcome.result) : 0;
+      if (refused > 0) {
+        left += refused;
         continue;
       }
       return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
@@ -823,22 +824,50 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   context.progress?.(`leveling ${what}: ${plan.dug > 0 ? "digging what stands above it" : "filling it"}`);
   const dug = await run([...plan.phases.fillFirst, ...plan.phases.dig]);
   if (dug !== null) return dug;
-  // The holes, with what the dig brought; only the rest is fetched.
   const holes = cells(plan.phases.fillAfter);
   if (holes > 0) {
-    const has = spareIn((await context.runtime.status()).inventory);
-    const fill = fillFor(holes, has);
-    if (has(fill) < holes) {
-      const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
-      if (got.status !== "done") return got;
-    }
-    context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
-    const filled = await run(plan.phases.fillAfter.map((batch) => batch.map((cell) => ({ ...cell, block: fill }))));
+    const filled = await fillHoles(context, what, plan.phases.fillAfter, holes, spareIn, fillFor, run);
     if (filled !== null) return filled;
   }
   const around = left === 0 ? "" : ` (left ${left} cell${left === 1 ? "" : "s"} it may not dig, leveled around)`;
   const column = plan.support === 0 ? "" : ` (${plan.support} of them a support column up from the ground)`;
   return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${column}${around}${pitNote}` };
+}
+
+/** The holes, with what the dig brought; only the rest is fetched. Null when they are filled. */
+async function fillHoles(
+  context: SkillContext,
+  what: string,
+  batches: readonly (readonly TerrainCell[])[],
+  holes: number,
+  spareIn: (stacks: readonly { readonly name: string; readonly count: number }[]) => (item: string) => number,
+  fillFor: (count: number, has: (item: string) => number) => string,
+  run: (batches: readonly (readonly TerrainCell[])[]) => Promise<SkillResult | null>,
+): Promise<SkillResult | null> {
+  const has = spareIn((await context.runtime.status()).inventory);
+  const fill = fillFor(holes, has);
+  if (has(fill) < holes) {
+    const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
+    if (got.status !== "done") return got;
+  }
+  context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
+  return run(batches.map((batch) => batch.map((cell) => ({ ...cell, block: fill }))));
+}
+
+/** The refusal of a level that moves more blocks than its budget. Counted before the first block goes (run 12: a 25x25 level dug 1324 blocks; a cellar dug by repeated levels). */
+function overBudget(what: string, plan: ReturnType<typeof levelPlan>, pitNote: string, moved: number, budget: number): SkillResult {
+  const perColumn = new Map<string, number>();
+  for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
+  const deepest = Math.max(0, ...perColumn.values());
+  return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pitNote}; at most ${budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
+}
+
+/** A tool worn out mid-leveling is made again, only for the digging still to do (`digging`: the tool classes of those cells); null when it went well. */
+async function replaceWornTool(context: SkillContext, what: string, missing: (stacks: readonly { readonly name: string; readonly count: number }[]) => { item: string; count: number }[], digging: ReadonlySet<string>): Promise<SkillResult | null> {
+  const replace = missing((await context.runtime.status()).inventory).filter(({ item }) => [...digging].some((kind) => item.endsWith(`_${kind}`)));
+  if (replace.length === 0) return null;
+  const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
+  return got.status === "done" ? null : got;
 }
 
 /** The part of `build_structure`'s audit the skill reports (src/actions/build-structure/contract.ts). */
@@ -1087,7 +1116,9 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   }
   // A way already sailed from near here without finding land is not sailed again (live 2026-10-04: Vex rode 450
   // blocks of sea out and back nine times, from the same base, north, north-west, north-east and north again).
-  const sailed = openSeaWays(context.runtime).find((sea) => sea.toward === step.toward && Math.hypot(sea.from.x - start.x, sea.from.z - start.z) <= OPEN_SEA_NEAR);
+  // Only from near where it was sailed, and only where the ride went past her by more than she sees: from the boat
+  // where it ended at sea, the way on is unsailed (run 14 review SF5).
+  const sailed = openSeaWays(context.runtime).find((sea) => sea.toward === step.toward && Math.hypot(sea.from.x - start.x, sea.from.z - start.z) <= OPEN_SEA_NEAR && (sea.to.x - start.x) * dx + (sea.to.z - start.z) * dz > SIGHT);
   if (sailed !== undefined) {
     return { status: "failed", detail: `${step.toward} from here is open sea: you sailed it and found no land within ${sailed.blocks} blocks: explore another way (${await unseenWays(context, start)})` };
   }
@@ -1175,7 +1206,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
-  if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, blocks: Number(noLand[1]) });
+  if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, to: { x: here.x, z: here.z }, blocks: Number(noLand[1]) });
   // Done only when the walk went its whole way or found what it was for within reach: a walk that stopped says why,
   // even when the block is in sight farther off (live 2026-10-07: "done" after 0 blocks, forty times).
   if (stop === null || found !== undefined || sighted !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
@@ -1198,10 +1229,18 @@ async function onWater(runtime: BotRuntime, at: Position): Promise<boolean> {
   const names = [y, y - 1].map((level) => area.blocks.get(areaKey(x, level, z)));
   return names.every((name) => name === undefined) || names.includes("water");
 }
-/** Ways sailed without finding land, by bot, this run. */
-const openSeas = new WeakMap<object, { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[]>();
+/** A way sailed without finding land: where the ride started, where it ended (at sea), and how far no land was found. */
+interface OpenSeaWay {
+  readonly toward: string;
+  readonly from: { readonly x: number; readonly z: number };
+  readonly to: { readonly x: number; readonly z: number };
+  readonly blocks: number;
+}
 
-function openSeaWays(runtime: object): { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[] {
+/** Ways sailed without finding land, by bot, this run. */
+const openSeas = new WeakMap<object, OpenSeaWay[]>();
+
+function openSeaWays(runtime: object): OpenSeaWay[] {
   const ways = openSeas.get(runtime) ?? [];
   openSeas.set(runtime, ways);
   return ways;
