@@ -11,8 +11,8 @@ import { observePlayerEvents } from "./player-events.js";
 
 /** A bot at (12.5, 64, -3.25); `added(event)` counts the listeners on `event` beyond the idle bot's own. */
 function playerBot(username = "MineAI") {
-  const { bot } = createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 } });
-  return { bot, added: listenersAddedSince(bot) };
+  const { bot, chat } = createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 } });
+  return { bot, chat, added: listenersAddedSince(bot) };
 }
 
 test("records incoming and outgoing player messages while notifying only for incoming ones", (t) => {
@@ -259,4 +259,53 @@ test("a chat message after the store closed does not throw", (t) => {
 
   assert.doesNotThrow(() => bot.emit("chat", "Alex", "after the shutdown", null, {} as never, null));
   assert.deepEqual(stderr, ["[player-events] SqlBotData is closed.\n"]);
+});
+
+test("records talk heard through Localized Chat once, as incoming chat with its distance", (t) => {
+  const { bot, chat, added } = playerBot("Theo");
+  const data = SqlBotData.create({
+    storage: { kind: "temporary" },
+    identity: { worldId: "player-events-local-chat-test", scope: { kind: "bot", botId: bot.username } },
+  });
+  const stopObserving = observePlayerEvents(bot, data, () => undefined);
+  t.after(() => data.close());
+
+  chat.hearSystem("[From 12.0 blocks away] <Ayla> hi Theo");
+  // The sender's own echo is a plain `<Name> text` system line, which Mineflayer's `chat` already reads (spike result 4).
+  chat.hearSystem("<Theo> my own echo");
+  chat.hearSystem("[From x blocks away] <Ayla> not a distance");
+  // Vanilla talk arrives as a player's chat line: the localized pattern must not record it a second time.
+  chat.hearPlayer("Ayla", "hi");
+
+  const events = readRecentEvents(data, bot.username, 50).events.map(({ payload }) => payload);
+  assert.deepEqual(events, [
+    { username: "Ayla", channel: "chat", direction: "incoming", message: "hi Theo", addressed: true, distance: 12 },
+    { username: "Theo", channel: "chat", direction: "outgoing", message: "my own echo", addressed: false },
+    { username: "Ayla", channel: "chat", direction: "incoming", message: "hi", addressed: false },
+  ]);
+
+  stopObserving();
+  assert.equal(added("chat:localChat"), 0);
+  let heardAfterStop = false;
+  bot.on("chat:localChat" as "chat", () => {
+    heardAfterStop = true;
+  });
+  chat.hearSystem("[From 3.0 blocks away] <Ayla> after the stop");
+  assert.equal(heardAfterStop, false, "the pattern is removed with the observer");
+});
+
+test("localized talk during a database lock does not throw out of the listener", (t) => {
+  const { bot, chat } = playerBot("LockedBot");
+  const { data, lock, release } = lockedStore(t, bot.username);
+  const stderr = captureStderr(t);
+  const stopObserving = observePlayerEvents(bot, data, () => undefined);
+  t.after(stopObserving);
+
+  lock();
+  assert.doesNotThrow(() => chat.hearSystem("[From 20.0 blocks away] <Alex> first, during the lock"));
+  assert.ok(stderr.some((line) => line.startsWith("[player-events] ")), "the lost event leaves a line naming the observer");
+  release();
+  chat.hearSystem("[From 20.0 blocks away] <Alex> second, after the lock");
+
+  assert.deepEqual(readRecentEvents(data, bot.username, 50).events.map((event) => event.summary), ["Alex: second, after the lock"]);
 });

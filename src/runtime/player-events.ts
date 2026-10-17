@@ -24,6 +24,11 @@ export function deathMessage(bot: Bot, message: unknown): string | null {
     return null;
   }
 }
+const LOCAL_CHAT_PATTERN_NAME = "localChat";
+/** The Localized Chat mod's wire format for talk heard from `distance` blocks away; matches nothing on vanilla. */
+const LOCAL_CHAT_PATTERN = /^\[From ([\d.]+) blocks away\] <([A-Za-z0-9_]{1,16})> (.*)$/u;
+/** Mineflayer emits `chat:<pattern name>`; its typings only list the built-in events. */
+const LOCAL_CHAT_EVENT = `chat:${LOCAL_CHAT_PATTERN_NAME}` as keyof BotEvents;
 type CancelForegroundAction = (reason: string) => unknown;
 type GuardedWrite = ReturnType<typeof guardObservedWrite>;
 
@@ -34,28 +39,38 @@ export function observePlayerEvents(
   cancelForegroundAction: CancelForegroundAction,
 ): () => void {
   const guarded = guardObservedWrite("player-events");
+  const recordMessage = (channel: "chat" | "whisper", username: string, message: string, distance?: number) => {
+    const direction = username.toLowerCase() === bot.username.toLowerCase() ? "outgoing" : "incoming";
+    guarded(() =>
+      recordEvent(data, bot.username, {
+        type: "player_message",
+        observedAt: new Date().toISOString(),
+        summary: `${username}: ${message}`,
+        payload: {
+          username,
+          channel,
+          direction,
+          message,
+          addressed: direction === "incoming" && addressesUsername(message, bot.username),
+          ...(distance === undefined ? {} : { distance }),
+        },
+      }),
+    );
+  };
   const observeMessage =
     (channel: "chat" | "whisper"): PlayerMessageListener =>
-    (username, message) => {
-      const direction = username.toLowerCase() === bot.username.toLowerCase() ? "outgoing" : "incoming";
-      guarded(() =>
-        recordEvent(data, bot.username, {
-          type: "player_message",
-          observedAt: new Date().toISOString(),
-          summary: `${username}: ${message}`,
-          payload: {
-            username,
-            channel,
-            direction,
-            message,
-            addressed: direction === "incoming" && addressesUsername(message, bot.username),
-          },
-        }),
-      );
-    };
+    (username, message) => recordMessage(channel, username, message);
 
   const onChat = observeMessage("chat");
   const onWhisper = observeMessage("whisper");
+  // Localized Chat delivers talk as a system line, so `chat` never fires for it.
+  const onLocalChat = (matches: readonly (readonly string[])[]) => {
+    for (const [distance, username, message] of matches) {
+      if (distance !== undefined && username !== undefined && message !== undefined) {
+        recordMessage("chat", username, message, Number(distance));
+      }
+    }
+  };
   let lastDeathMessage: string | null = null;
   const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
     if (packet.playerId !== undefined && packet.playerId !== bot.entity?.id) return;
@@ -83,6 +98,8 @@ export function observePlayerEvents(
     recordDimensionArrival(bot, data, from, to, guarded);
   };
 
+  bot.addChatPattern(LOCAL_CHAT_PATTERN_NAME, LOCAL_CHAT_PATTERN, { repeat: true, parse: true });
+  bot.on(LOCAL_CHAT_EVENT, onLocalChat as never);
   bot.on("chat", onChat);
   bot.on("whisper", onWhisper);
   bot.on("death", onDeath);
@@ -97,6 +114,8 @@ export function observePlayerEvents(
     bot.off("death", onDeath);
     bot.off("whisper", onWhisper);
     bot.off("chat", onChat);
+    bot.off(LOCAL_CHAT_EVENT, onLocalChat as never);
+    bot.removeChatPattern(LOCAL_CHAT_PATTERN_NAME);
   };
 }
 

@@ -981,6 +981,14 @@ to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
 and the result's `to` repeats the name asked for (on success, the name as the
 server spells it). A message holding `§` or a control character (U+0000-U+001F, U+007F) is refused before anything is sent, because the
 server disconnects a client for it and the bot does not reconnect; the refusal tells the model to remove them and send again.
+The optional `shout: true` sends the message as `/shout <message>` (at most 249
+characters; not with `to`). On a server with localized chat, plain talk is heard
+only within a range and a shout reaches everyone, at a small hunger cost; a shout
+is confirmed by the same chat echo as public talk. On a server without `/shout`
+the server answers "Unknown or incomplete command" and the call fails at once
+with `[SHOUT_UNAVAILABLE]`, nothing sent. Talk heard from another player on a
+localized-chat server arrives as a system line `[From N blocks away] <Name>
+text`; it is recorded as an incoming `chat` event with `payload.distance` (blocks).
 Success proves the message was sent and the bot observed its own chat echo
 returned by the server (for a whisper, the server's
 `commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground

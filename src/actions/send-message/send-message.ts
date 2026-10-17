@@ -20,10 +20,13 @@ const MESSAGE_ECHO_TIMEOUT_MS = 5_000;
  * language. Matching the key, not the wording, makes the echo observable whatever language the server speaks.
  */
 const OUTGOING_WHISPER_KEY = "commands.message.display.outgoing";
+/** The key of the reply to a command the server does not have ("Unknown or incomplete command"). */
+const UNKNOWN_COMMAND_KEY = "command.unknown.command";
 
 type MessageDelivery =
   | { readonly kind: "observed" }
   | { readonly kind: "not_observed" }
+  | { readonly kind: "shout_unavailable" }
   | { readonly kind: "send_failed"; readonly cause: unknown };
 
 type ChatListener = BotEvents["chat"];
@@ -37,7 +40,7 @@ export async function sendMessage(
 ): Promise<SendMessageResult> {
   context.signal?.throwIfAborted();
   if (request.to !== undefined) return whisper(bot, request.message, request.to, context);
-  return resultOf(await observePublicMessage(bot, request.message, context), request.message);
+  return resultOf(await observePublicMessage(bot, request.message, request.shout === true, context), request.message);
 }
 
 function resultOf(delivery: MessageDelivery, message: string, to?: string): SendMessageResult {
@@ -52,6 +55,8 @@ function resultOf(delivery: MessageDelivery, message: string, to?: string): Send
         message,
         ...recipient,
       };
+    case "shout_unavailable":
+      return { status: "failed", error: sendMessageOutcomes.shoutUnavailable(), message, ...recipient };
     case "send_failed":
       return { status: "failed", error: sendMessageOutcomes.sendFailed(delivery.cause), message, ...recipient };
   }
@@ -78,7 +83,7 @@ async function whisper(bot: Bot, message: string, to: string, context: ActionCon
   return resultOf(delivery, message, target);
 }
 
-function observePublicMessage(bot: Bot, message: string, context: ActionContext): Promise<MessageDelivery> {
+function observePublicMessage(bot: Bot, message: string, shout: boolean, context: ActionContext): Promise<MessageDelivery> {
   return observeDelivery(
     context,
     (finish) => {
@@ -88,10 +93,27 @@ function observePublicMessage(bot: Bot, message: string, context: ActionContext)
         }
       };
       bot.on("chat", onChat);
-      return () => bot.off("chat", onChat);
+      // A server without /shout answers with its unknown-command reply instead of the echo.
+      const onMessage: MessageListener = (jsonMsg) => {
+        if (shout && mentionsTranslation(jsonMsg, UNKNOWN_COMMAND_KEY)) finish({ kind: "shout_unavailable" });
+      };
+      bot.on("message", onMessage);
+      return () => {
+        bot.off("chat", onChat);
+        bot.off("message", onMessage);
+      };
     },
-    () => bot.chat(message),
+    () => bot.chat(shout ? `/shout ${message}` : message),
   );
+}
+
+/** Whether a server line, or any part of it, is the translation `key` (the unknown-command reply nests it in `extra`). */
+function mentionsTranslation(node: unknown, key: string): boolean {
+  if (typeof node !== "object" || node === null) return false;
+  const { translate, extra, json } = node as { translate?: unknown; extra?: unknown; json?: unknown };
+  if (translate === key) return true;
+  if (json !== undefined && json !== node && mentionsTranslation(json, key)) return true;
+  return Array.isArray(extra) && extra.some((part) => mentionsTranslation(part, key));
 }
 
 /**
