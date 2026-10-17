@@ -144,6 +144,9 @@ export function observeMineflayerBlock(block: MineflayerBlock): LoadedBlock {
   );
 }
 
+/** Building the class walks the whole registry, so each registry builds it once. */
+const blockClasses = new WeakMap<object, ReturnType<typeof prismarineBlock>>();
+
 /** Prismarine's `Block` class bound to this bot's registry, for describing a state without a world position. */
 export function blockClass(bot: Pick<Bot, "registry">): {
   fromStateId(stateId: number, biomeId: number): MineflayerBlock;
@@ -153,7 +156,11 @@ export function blockClass(bot: Pick<Bot, "registry">): {
     biomeId: number,
   ): MineflayerBlock;
 } {
-  return prismarineBlock(bot.registry);
+  const cached = blockClasses.get(bot.registry);
+  if (cached) return cached;
+  const built = prismarineBlock(bot.registry);
+  blockClasses.set(bot.registry, built);
+  return built;
 }
 
 /** The Prismarine chunk column surface the section store copies from. */
