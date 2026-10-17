@@ -98,6 +98,15 @@ function whisperBot(players: string[], echo: (bot: Bot, to: string, message: str
   return { bot, whispered, publicLines };
 }
 
+test("a whisper succeeds on the echo as Mineflayer really delivers it: the key already resolved to its English format", async () => {
+  // Live 2026-10-18 (vanilla and Localized Chat): `translate` is "You whisper to %s: %s", never the key itself.
+  const resolved = (bot: Bot, to: string, message: string) =>
+    emitMessage(bot, { ...whisperEcho(to, message), translate: "You whisper to %s: %s" });
+  const { bot } = whisperBot(["Alex"], resolved);
+  const output = await new ActionRunner().run(createSendMessageAction(bot), { message: "On my way", to: "Alex" });
+  assert.deepEqual(output.result, { status: "succeeded", message: "On my way", to: "Alex" });
+});
+
 test("accepts a whisper target that is a username, and keeps the whisper short enough for one command", () => {
   assert.deepEqual(parseSendMessageRequest({ message: "psst", to: "Alex_2" }), { message: "psst", to: "Alex_2" });
   for (const to of ["", "Al ex", "x".repeat(17), "/op", "Al,ex", "Alex\n"]) {
