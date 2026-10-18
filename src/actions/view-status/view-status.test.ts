@@ -572,3 +572,16 @@ test("lists each carried food once with its hunger points and saturation from ga
   const markdown = formatViewStatusResult({ status: "succeeded", situation });
   assert.match(markdown, /- Food carried: cooked_beef x2 \(8 hunger points, 12.8 saturation each\); bread x4 \(5 hunger points, 6 saturation each\)/);
 });
+
+test("vehicle is null on foot, names the boat while mounted and is null again after the dismount", (t) => {
+  const bot = liveBot();
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  assert.equal(observeLiveSituation(bot, data, idleActivity).vehicle, null);
+  const boat = { id: 77, name: "oak_boat", position: new Vec3(0, 99, 0) };
+  Object.assign(bot.entity, { vehicle: boat });
+  const mounted = observeLiveSituation(bot, data, idleActivity);
+  assert.deepEqual(mounted.vehicle, { name: "oak_boat", id: 77 });
+  assert.equal(viewStatusResultSchema.safeParse({ status: "succeeded", situation: mounted }).success, true);
+  Object.assign(bot.entity, { vehicle: null });
+  assert.equal(observeLiveSituation(bot, data, idleActivity).vehicle, null);
+});

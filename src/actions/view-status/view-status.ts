@@ -29,6 +29,7 @@ import {
 } from "../../world/end-fight.js";
 import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../world/index.js";
 import { observeMobAge } from "../../world/mob-age.js";
+import { currentVehicle } from "../navigate/vehicle-sync.js";
 import { defineAction } from "../action.js";
 import {
   DRAGON_PHASE_NAMES,
@@ -93,6 +94,7 @@ export function observeLiveSituation(
       sleeping: snapshot.isSleeping,
       raining: snapshot.isRaining,
     },
+    vehicle: observeVehicle(bot),
     position: {
       x: round(snapshot.x, 2),
       y: round(snapshot.y, 2),
@@ -149,6 +151,12 @@ export function observeLiveSituation(
  * sources the policy reads, so a blocked movement names the thing to fix
  * rather than leaving the model to guess from an empty slot.
  */
+/** The vehicle the client view says she sits in; null on foot. */
+function observeVehicle(bot: Bot): LiveSituation["vehicle"] {
+  const vehicle = currentVehicle(bot);
+  return vehicle === null ? null : { name: vehicle.name ?? "unknown", id: vehicle.id };
+}
+
 function observeMobility(bot: Bot): LiveSituation["mobility"] {
   const navigation = readNavigationPolicy(bot);
   const { waterBuckets, dimensionHoldsWater } = waterLandingSupply(bot);
@@ -415,6 +423,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     "### Position",
     `- ${at(position)}, chunk \`${position.chunkX}, ${position.chunkZ}\`, heading ${position.headingDegrees}°`,
     `- ${position.onGround ? "On the ground" : "Not on the ground"}; ${position.inWater ? "in water" : "not in water"}`,
+    ...(situation.vehicle ? [`- Riding ${situation.vehicle.name} #${situation.vehicle.id}`] : []),
     `- Last death: ${situation.lastDeath ? `${at(situation.lastDeath.position)} in \`${situation.lastDeath.dimension}\` at ${situation.lastDeath.observedAt}${situation.lastDeath.cause ? ` (${situation.lastDeath.cause})` : ""}` : "none recorded"}`,
     "",
     `### Inventory (${inventory.usedSlots} of ${CARRIED_SLOT_COUNT} slots used, ${inventory.freeSlots} free)`,
