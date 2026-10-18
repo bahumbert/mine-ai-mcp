@@ -53,11 +53,12 @@ import {
   type RoutePlan,
   stateMatcher,
 } from "../movements/movement.js";
-import { ESCAPE_RELAXED_RULES, relaxedForEscape } from "./escape-policy.js";
+import { ESCAPE_RELAXED_RULES, RelaxedRulesUsed, relaxedForEscape } from "./escape-policy.js";
 import type { FailedEdges } from "./failed-edges.js";
 import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movements/policy.js";
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
 import { IncrementalSearch } from "../search/search.js";
+import { neverLeftStart } from "../search/start-refusals.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
@@ -202,7 +203,7 @@ const ESCAPE_REFUSALS = ["policy_dig_down", "opens_into_liquid", "under_water"] 
 
 /** An exhausted search that never left its start, shut in by refusals an escape sets aside. */
 function isShutInByStyleRule(failure: Extract<NavigationCalculationFailure, { kind: "no_path" }>): boolean {
-  return failure.closest.withinStartBlocks !== undefined &&
+  return neverLeftStart(failure.search) &&
     ESCAPE_REFUSALS.some((cause) => (failure.search.startRefusals?.[cause] ?? 0) > 0);
 }
 
@@ -300,8 +301,8 @@ export class NavigationRun {
   #ownRegionsOpened = false;
   /** The style rules set aside for this run only so that the bot can leave a pocket; the request's own policy is never changed. */
   #relaxedRules: readonly string[] = [];
-  /** Whether a route committed under the relaxation digs: only then did the escape set a rule aside in fact. */
-  #escapeDug = false;
+  /** The relaxed rules the committed routes used in fact: the result names what the escape dug, not what it was allowed to. */
+  readonly #relaxedRulesUsed = new RelaxedRulesUsed();
   constructor(dependencies: NavigationRunDependencies) {
     this.context = dependencies.context;
     this.request = dependencies.request;
@@ -848,7 +849,7 @@ export class NavigationRun {
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
     this.#planningStall.committed();
     this.#counters.plans += 1;
-    if (this.#relaxedRules.length > 0 && plan.steps.some((step) => step.operations.some((operation) => operation.kind === "break"))) this.#escapeDug = true;
+    if (this.#relaxedRules.length > 0) this.#relaxedRulesUsed.note(plan.steps, this.request.policy, this.context.world);
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
@@ -1131,7 +1132,7 @@ export class NavigationRun {
       start: this.#start,
       final: this.context.bot.observe(),
       goalRevision: this.#goalRevision,
-      escapeRelaxed: this.#escapeDug ? this.#relaxedRules : [],
+      escapeRelaxed: this.#relaxedRulesUsed.rules,
       ...this.#counters,
       movementAttempts: { ...this.#counters.movementAttempts },
       // Provisional: `execute` measures this again once cleanup has run.

@@ -6,6 +6,9 @@ import { requestSchema, survivalStatusSchema, type SurvivalStatus } from "../sur
 import { policySnapshotSchema, type PolicySnapshot } from "../survival/policy/contract.js";
 import type { Facts } from "../survival/state/answered.js";
 
+/** How a movement action gets the bot somewhere: by going there, or by doing work that moves it. */
+export type MovementUse = "travel" | "work";
+
 export type ActionResult =
   { status: "succeeded" } | { status: "partial" | "failed" | "cancelled"; error: string };
 
@@ -109,10 +112,12 @@ interface ActionContract<
   /** Present the action-owned evidence as useful Markdown. */
   formatResult(result: Result): string;
   /**
-   * Set on an action whose work is getting the bot somewhere (navigate, collect_block, collect_mob_drop): its failures
-   * count toward a pinned bot, and a pinned bot runs it as an escape or has it refused at once.
+   * Set on an action whose work is getting the bot somewhere: a failure of its route counts toward a pinned bot, and a
+   * pinned bot runs it as an escape. `travel` (navigate, explore_frontier) is also refused at once while an escape has
+   * failed; `work` (collect_block, collect_mob_drop) never is, because work within reach is what freed Finn in run 15
+   * (he dug the bank beside him).
    */
-  movement?: true;
+  movement?: MovementUse;
   annotations?: ToolAnnotations;
   /** Reject bad arguments before execution starts. */
   parse(input: unknown): Request;

@@ -765,15 +765,31 @@ test("the legs of one navigate share one tool-loss observer, whose listeners go 
   assert.notEqual(toolLossObserverOf(bot, new AbortController().signal), first, "another call has its own");
 });
 
-test("a route that set rules aside to leave a pocket says so in its result text", () => {
-  const result = {
+/** A settled route out of a pocket whose evidence names the rules it used. */
+function escapedResult(escapeRelaxed: readonly string[] | undefined): Parameters<typeof formatNavigateResult>[0] {
+  return {
     status: "succeeded", navigation: {
       startDimension: "overworld", endDimension: "overworld", target: { x: 0, y: 55, z: 0 }, range: 1,
       start: { x: 0, y: 57, z: 0 }, end: { x: 0, y: 55, z: 0 }, remainingDistance: 0, elapsedMs: 10, scaffolding: [],
-      bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], escapeRelaxed: ["dig_straight_down", "dig_next_to_flowing_water"],
+      bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], escapeRelaxed,
     },
   } as unknown as Parameters<typeof formatNavigateResult>[0];
-  const text = formatNavigateResult(result);
+}
+
+test("a route that dug down and beside flowing water to leave a pocket says both in its result text", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down", "dig_next_to_flowing_water"]));
   assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once and a dig next to flowing water was allowed/);
-  assert.doesNotMatch(formatNavigateResult({ ...result, navigation: { ...result.navigation, escapeRelaxed: undefined } } as never), /out of a pocket/);
+  assert.doesNotMatch(formatNavigateResult(escapedResult(undefined)), /out of a pocket/);
+});
+
+test("a route that only dug down says nothing of flowing water", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down"]));
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once\./);
+  assert.doesNotMatch(text, /flowing water/);
+});
+
+test("a route that only dug beside flowing water does not claim to have dug down", () => {
+  const text = formatNavigateResult(escapedResult(["dig_next_to_flowing_water"]));
+  assert.match(text, /Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once \(a water source and lava still refuse\)\./);
+  assert.doesNotMatch(text, /Dug down|digging straight down/);
 });

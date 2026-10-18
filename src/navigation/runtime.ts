@@ -8,6 +8,7 @@
  * This is not the caller-facing boundary — `src/navigation/index.ts` is.
  */
 import { EscapeHolds } from "./escape-holds.js";
+import type { RouteOutcomes } from "./route-outcomes.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { Diving } from "./diving.js";
 import type { Bot } from "mineflayer";
@@ -65,11 +66,32 @@ export function createMovements(bot: Bot, options?: MineflayerMovementPolicyOpti
 export interface NavigationRuntimeOptions {
   /** How long a new route waits for a cancelled one to settle before abandoning it (default 5 s). */
   readonly releaseWaitMs?: number;
+  /** Told how every route of this bot ended, so the session can tell a failed route from another failure (see `RouteOutcomes`). */
+  readonly routes?: RouteOutcomes;
+}
+
+/** Reports the search and the steps of a route to its execution scope, as it goes. */
+function reportNavigationProgress(execution: ExecutionScope, event: NavigationEvent): void {
+  switch (event.kind) {
+    case "search_started":
+      execution.progress("search", `${event.searchId}: ${event.reason}; goal=${event.goal}`);
+      break;
+    case "search_slice":
+      execution.progress("search", `${event.searchId}: visited=${event.visited}, generated=${event.generated}, computeMs=${event.computeMs}`);
+      break;
+    case "step_started":
+      execution.progress("movement", `${event.stepId}: ${event.movement}`);
+      break;
+    case "step_phase":
+      execution.progress("movement", `${event.stepId}: ${event.phase}`);
+      break;
+  }
 }
 
 /** Build the navigation runtime for one connected Mineflayer bot. */
 export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOptions = {}): NavigationRuntime {
   const releaseWaitMs = options.releaseWaitMs ?? 5_000;
+  const { routes } = options;
   // Built in dependency order: the world view, the bot port over it, and the
   // navigator that looks at and acts on the bot through that port.
   const world = new MineflayerWorldView(bot);
@@ -168,25 +190,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
   const navigate: Navigate = async (options) => {
       using execution = new ExecutionScope({ bot: bot.username, operation: "navigation", targetId: null });
       using observations = new DisposableStack();
-      const reportProgress = (event: NavigationEvent) => {
-        switch (event.kind) {
-          case "search_started":
-            execution.progress("search", `${event.searchId}: ${event.reason}; goal=${event.goal}`);
-            break;
-          case "search_slice":
-            execution.progress(
-              "search",
-              `${event.searchId}: visited=${event.visited}, generated=${event.generated}, computeMs=${event.computeMs}`,
-            );
-            break;
-          case "step_started":
-            execution.progress("movement", `${event.stepId}: ${event.movement}`);
-            break;
-          case "step_phase":
-            execution.progress("movement", `${event.stepId}: ${event.phase}`);
-            break;
-        }
-      };
+      const reportProgress = (event: NavigationEvent) => reportNavigationProgress(execution, event);
       listeners.add(reportProgress);
       observations.defer(() => listeners.delete(reportProgress));
       const startedAt = Date.now();
@@ -262,7 +266,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
       await releaseCancelled();
       requireOpen();
       selectedTool = options.onToolSelected;
-      const pending = diving.run(escapes.active ? { ...options, escape: true } : options, navigate);
+      const pending = diving.run(escapes.active ? { ...options, escape: true } : options, navigate).then((result) => routes?.note(result) ?? result);
       const held = { pending, signal: options.signal, cancelled: false };
       activeNavigation = held;
       try { return await pending; }

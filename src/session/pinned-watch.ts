@@ -1,7 +1,7 @@
 /**
  * Notices a bot that cannot get out of one place (run 15: Dirk 216 min, Sana 164 min, Finn 75 min, Lena 149 min, about
  * 14 % of all bot time). Pinned means the bot stayed within one block of one point for ten minutes while three
- * movement actions in a row failed. The watch reads the position itself on the injectable monotonic clock, so it
+ * movement actions in a row failed on their route or movement (not on "none usable near" or a full inventory). The watch reads the position itself on the injectable monotonic clock, so it
  * counts when physics ticks stop, and a death, a dimension change or a move of two blocks ends it.
  *
  * One watch per runtime, never shared: each pinned bot escapes and is refused on its own.
@@ -59,7 +59,7 @@ export class PinnedWatch {
     this.#sample();
   }
 
-  /** A movement action failed with this text: the count that, with ten minutes in one place, pins the bot. */
+  /** A movement action's route failed, with this text: the count that, with ten minutes in one place, pins the bot. */
   recordFailure(reason: string): void {
     this.#sample();
     this.#failures += 1;
@@ -87,7 +87,7 @@ export class PinnedWatch {
   }
 
   /**
-   * The `[PINNED]` failure a movement action gets without running, or null when it may run: always null before an
+   * The `[PINNED]` failure a travel action gets without running, or null when it may run: always null before an
    * escape failed, and again once a full window has passed since the last failed escape (it runs the escape again).
    */
   refusal(): string | null {
@@ -99,9 +99,9 @@ export class PinnedWatch {
     const { x, y, z } = this.#anchor;
     return (
       `[PINNED] Pinned within ${STAYED_BLOCKS} block of ${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)} for ` +
-      `${describeSpan(this.#clock.now() - this.#anchoredAt)}: ${this.#failures} movement actions failed there and an escape ` +
-      `failed too (last refusal: ${this.#lastRefusal}). Movement will try an escape again in about ${describeSpan(untilRetry)} ` +
-      `(or at once if something moves it ${FREED_BLOCKS} blocks); until then do work that needs no walking.`
+      `${describeSpan(this.#clock.now() - this.#anchoredAt)}: ${this.#failures} routes failed there and an escape ` +
+      `failed too (last refusal: ${this.#lastRefusal}). Going anywhere will try an escape again in about ${describeSpan(untilRetry)} ` +
+      `(or at once if something moves it ${FREED_BLOCKS} blocks); until then collect what is within reach or do work that needs no walking.`
     );
   }
 

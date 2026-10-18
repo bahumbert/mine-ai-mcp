@@ -5,6 +5,7 @@ import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.j
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
 import type { ToolSnapshot } from "../world/tool-tiers.js";
 import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
+import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
@@ -34,7 +35,7 @@ import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
  * like any other, nested separately from action-owned physical evidence.
  */
 import { runWithHighlighter, type BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
-import type { RequestExecution, ActionExecution } from "../actions/action.js";
+import type { RequestExecution, ActionExecution, MovementUse } from "../actions/action.js";
 import {
   type Action,
   type ActionOutput,
@@ -69,6 +70,8 @@ export interface ActionRunnerOptions {
   readonly pinned?: PinnedWatch;
   /** What a pinned bot's next movement action starts with; without it a pinned bot is only watched. */
   readonly pinnedEscape?: PinnedEscape;
+  /** How this bot's routes ended: a movement action's failure counts toward `pinned` only when its route failed; unset: none does. */
+  readonly routes?: RouteOutcomes;
 }
 
 // ── Reported outcomes ────────────────────────────────────────────────────────
@@ -150,6 +153,8 @@ interface AdmittedRequest {
   readonly progress: RequestProgress;
   /** The bot was pinned when this movement action was admitted: it runs as an escape. */
   escaping: boolean;
+  /** `RouteOutcomes.mark()` when the action was admitted: its routes are the ones settled after it. */
+  routeMark: number;
 }
 
 export interface BodyOwnership {
@@ -220,6 +225,7 @@ export class ActionRunner {
   readonly #clock: StallClock;
   readonly #pinned: PinnedWatch | undefined;
   readonly #pinnedEscape: PinnedEscape | undefined;
+  readonly #routes: RouteOutcomes | undefined;
   #lastPhysicsTickAt: number;
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
@@ -240,6 +246,7 @@ export class ActionRunner {
     this.#clock = options.clock ?? MONOTONIC_CLOCK;
     this.#pinned = options.pinned;
     this.#pinnedEscape = options.pinnedEscape;
+    this.#routes = options.routes;
     this.#lastPhysicsTickAt = this.#clock.now();
   }
 
@@ -330,6 +337,7 @@ export class ActionRunner {
       evidence: null,
       progress: new RequestProgress(this.#position(), this.#tools),
       escaping: false,
+      routeMark: 0,
     };
     try {
       const output = await this.#whileConnected(() => this.#run(definition, input, invocation, signal));
@@ -402,9 +410,10 @@ export class ActionRunner {
     if (this.#admittedRequest) return refusal(definition.name, outcomes.actionBusy({
       action: this.#admittedRequest.action, startedAt: new Date(this.#admittedRequest.admittedAt).toISOString(),
     }));
-    const pinnedRefusal = definition.movement ? this.#pinned?.refusal() : null;
+    const pinnedRefusal = definition.movement === "travel" ? this.#pinned?.refusal() : null;
     if (pinnedRefusal) return refusal(definition.name, pinnedRefusal);
-    invocation.escaping = definition.movement === true && this.#pinned?.isPinned() === true;
+    invocation.escaping = definition.movement !== undefined && this.#pinned?.isPinned() === true;
+    invocation.routeMark = this.#routes?.mark() ?? 0;
     this.#releaseBaseline();
     invocation.objective = request;
     invocation.evidence = () => ({ baseline: null, checkpoint: { phase: "executing" },
@@ -489,13 +498,16 @@ export class ActionRunner {
     return run();
   }
 
-  /** What a movement action did to the pinned watch: a failure counts, and a failed escape shuts movement actions out. */
-  #countMovement(definition: { readonly movement?: true }, invocation: AdmittedRequest, result: ActionResult | RuntimeFailure): void {
+  /**
+   * What a movement action did to the pinned watch: a success resets it, a failure counts when the route or the movement
+   * itself failed (not "none usable near", a lost tool, a full inventory), and a failed escape shuts travel actions out.
+   */
+  #countMovement(definition: { readonly movement?: MovementUse }, invocation: AdmittedRequest, result: ActionResult | RuntimeFailure): void {
     const watch = this.#pinned;
     // Still "admitted": the request was refused before it ran (busy, bad arguments, [PINNED]), so it says nothing of the bot.
     if (!definition.movement || !watch || invocation.state.kind === "admitted") return;
     if (result.status === "succeeded") watch.recordSuccess();
-    else if (result.status === "failed") {
+    else if (result.status === "failed" && this.#routes?.failedSince(invocation.routeMark)) {
       watch.recordFailure("error" in result ? result.error : "failed");
       if (invocation.escaping) watch.escapeFailed();
     }

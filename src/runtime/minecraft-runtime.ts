@@ -31,7 +31,7 @@ import {
 import { observeIncidents } from "../diagnostics/incident-observer.js";
 import { INCIDENT_HISTORY_MS, type IncidentProvenance } from "../diagnostics/incident-recorder.js";
 import { ExecutionScope, observeExecution } from "../execution/execution-scope.js";
-import { createNavigationRuntime, type NavigationRuntime } from "../navigation/index.js";
+import { createNavigationRuntime, RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
 import type { StepFieldProvider } from "../navigation/step-field.js";
 import { ActionRunner, type ActionRunnerStatus } from "../session/action-runner.js";
 import { createPinnedEscape } from "../session/pinned-escape.js";
@@ -308,16 +308,19 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
  * The action runner and the body observations it reads: physics ticks (the stall watch's clock), server repositions,
  * and the vehicle the server lets her off. A stall is recorded and physics turned back on where she is (run 14b).
  */
-function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, recordStall: (action: string) => void): ActionRunner {
+function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, recordStall: (action: string) => void): { readonly runner: ActionRunner; readonly routes: RouteOutcomes } {
   const position = () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null;
   // One watch per runtime: a bot pinned for ten minutes escapes on its next movement action (run 15: 14 % of bot time).
   const pinned = new PinnedWatch({ position, windowMs: options.pinned?.windowMs });
+  // The one record of how this bot's routes end: navigation notes them, the runner counts a movement failure only if one failed.
+  const routes = new RouteOutcomes();
   const runner = new ActionRunner({
     highlighter: options.highlighter,
     pinned,
     pinnedEscape: createPinnedEscape(bot, routesAsEscape),
+    routes,
     physicsStallMs: PHYSICS_STALL_MS,
     physicsExpected: () => currentVehicle(bot) === null,
     onPhysicsStall: (action) => {
@@ -349,7 +352,7 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
     pinned.close();
   });
   resources.defer(watchVehicle(bot));
-  return runner;
+  return { runner, routes };
 }
 
 /** Own every long-lived facility attached to one connected Minecraft bot. */
@@ -365,9 +368,9 @@ export async function createMinecraftRuntime(
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
   // Set once the incident observer exists: no action, so no stall, comes before the runtime is built.
   let recordStall: (action: string) => void = () => {};
-  const runner = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, (action) => recordStall(action));
+  const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, (action) => recordStall(action));
   const reflexes = resources.use(new ReflexDriver(bot, runner));
-  const navigation = resources.use(createNavigationRuntime(bot));
+  const navigation = resources.use(createNavigationRuntime(bot, { routes }));
   installMinecraftKnowledge(botData, bot.registry);
   const frontier = resources.use(attachSessionFrontier(bot, botData));
   const perception = resources.use(new CombatPerception(bot));

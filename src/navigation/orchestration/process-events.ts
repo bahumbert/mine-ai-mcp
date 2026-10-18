@@ -5,6 +5,7 @@
  * caller resolves — navigation does not decide whether the process is done.
  */
 import type { PlanningNode } from "../goals/goal.js";
+import { neverLeftStart } from "../search/start-refusals.js";
 import type { NavigationObservation } from "../world/world.js";
 import type { NavigationFailure } from "./outcome.js";
 
@@ -61,8 +62,9 @@ export function describeCalculationFailure(failure: NavigationCalculationFailure
         : `search radius limit ${failure.limit.limit} blocks reached after ${spent}; no path or usable partial route found`;
   const near = closest.withinStartBlocks;
   // What is known: the node nearest the goal is within `near` blocks of the bot. Only an exhausted search
-  // (no_path) shows nothing else is reachable; a timeout or radius limit may just have stopped too soon.
-  const shutIn = near === undefined ? "" : describeStartRefusals(failure.search.startRefusals);
+  // (no_path) shows nothing else is reachable; a timeout or radius limit may just have stopped too soon. The
+  // refusals counted at the start explain it only when the search never left the start cell (run 15 review).
+  const shutIn = near === undefined || !neverLeftStart(failure.search) ? "" : describeStartRefusals(failure.search.startRefusals);
   const standing =
     near === undefined
       ? ""

@@ -10,6 +10,7 @@ import { createMovements } from "../runtime.js";
 import type { BlockPosition } from "../world/world.js";
 import type { MemoryWorld } from "../world/memory-world.js";
 import { IncrementalSearch } from "./search.js";
+import { neverLeftStart } from "./start-refusals.js";
 
 /** One search from a pocket's cell to its cave, with the straight-down dig off (the persona's style override) or on. */
 function leavePocket(world: (bot: ReturnType<typeof botFixture>) => MemoryWorld, start: BlockPosition, cave: BlockPosition, digDown: boolean) {
@@ -30,6 +31,21 @@ test("Dirk's pocket, straight-down dig off: no path, and the refusals at the sta
   const refusals = result.evidence.startRefusals ?? {};
   assert.equal(refusals.policy_dig_down, 1, JSON.stringify(refusals));
   assert.ok((refusals.opens_into_liquid ?? 0) + (refusals.under_water ?? 0) >= 1, JSON.stringify(refusals));
+});
+
+test("Dirk's and Sana's searches never left the start cell: one node visited, one generated", () => {
+  for (const [world, start, cave] of [[dirkPocket, DIRK_START, DIRK_CAVE], [sanaPocket, SANA_START, SANA_CAVE]] as const) {
+    const result = leavePocket(world, start, cave, false);
+    assert.equal(result.kind, "no_path");
+    if (result.kind !== "no_path") return;
+    assert.deepEqual([result.evidence.visited, result.evidence.generated], [1, 1]);
+    assert.equal(neverLeftStart(result.evidence), true);
+  }
+});
+
+test("a search that visited a second node left the start cell, whatever sits near the goal", () => {
+  assert.equal(neverLeftStart({ visited: 2 }), false);
+  assert.equal(neverLeftStart({ visited: 9 }), false);
 });
 
 test("Dirk's pocket, straight-down dig on: the route digs down and arrives", () => {

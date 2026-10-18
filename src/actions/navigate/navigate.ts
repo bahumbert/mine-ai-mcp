@@ -8,6 +8,8 @@ import {
   createMovements,
   nearGoal,
   nearXzGoal,
+  RELAXED_DIG_STRAIGHT_DOWN,
+  RELAXED_FLOWING_WATER,
   type Goal,
   type Navigate,
   type NavigationResult,
@@ -642,10 +644,12 @@ function standsAtSea(bot: Bot): boolean {
   return feetAtSea(water, feet, (x, y, z) => bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block");
 }
 
-/** The line that tells the model a rule of its own style was set aside once to get it out of a pocket. */
+/** The line that tells the model which rule of its own was set aside once to get it out of a pocket, and what that dug. */
 function describeEscape(relaxed: readonly string[]): string {
-  const flowing = relaxed.includes("dig_next_to_flowing_water") ? " and a dig next to flowing water was allowed" : "";
-  return `- Dug down out of a pocket: your rule against digging straight down was set aside once${flowing}.`;
+  const flowing = relaxed.includes(RELAXED_FLOWING_WATER);
+  if (!relaxed.includes(RELAXED_DIG_STRAIGHT_DOWN))
+    return "- Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once (a water source and lava still refuse).";
+  return `- Dug down out of a pocket: your rule against digging straight down was set aside once${flowing ? " and a dig next to flowing water was allowed" : ""}.`;
 }
 
 export function formatNavigateResult(result: NavigateResult): string {
@@ -685,7 +689,7 @@ export function createNavigateAction(
     inputSchema: navigateInputSchema,
     resultSchema: navigateResultSchema,
     formatResult: formatNavigateResult,
-    movement: true,
+    movement: "travel",
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: NAVIGATE,

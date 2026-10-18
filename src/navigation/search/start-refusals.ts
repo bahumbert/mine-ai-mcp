@@ -9,9 +9,19 @@ import { standsFree } from "../movements/catalogue.js";
 import { breakRefusalCause, type MovementPolicy } from "../movements/policy.js";
 import { isPassable } from "../world/block-geometry.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
+import type { SearchEvidence } from "./search-result.js";
 
 /** Refusal counts by cause: the policy's own causes, `policy_dig_down` (the style override), `unloaded`. */
 export type StartRefusals = Readonly<Record<string, number>>;
+
+/**
+ * Whether an exhausted search visited the start cell and nothing else (Dirk and Sana: "visited 1 nodes, generated 1"):
+ * only then are the refusals counted at the start what shuts the bot in. A shore with an unreachable goal visits every
+ * cell of the shore, and a refusal there says nothing of why the goal is out of reach.
+ */
+export function neverLeftStart(search: Pick<SearchEvidence, "visited">): boolean {
+  return search.visited <= 1;
+}
 
 const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
 

@@ -6,6 +6,8 @@ description: >-
   Run 15 lost about 14 % of bot time to bots pinned in one place whose navigates each took minutes to fail. A bot sealed
   in a stone box fails three navigates, stays past the (here shortened) pinned window, runs the escape on its next
   navigate, which fails too, and its next movement action is refused at once with [PINNED] and the last refusal.
+  The target is firm ground outside the box, so each navigate fails for want of a route: only a route that failed
+  counts toward pinned (run 15 review), and a target in mid-air is refused before any route is tried.
 
 world:
   type: flat
@@ -42,7 +44,7 @@ tick:
 params:
   pinnedWindowMs: 2000
   waitTicks: 70
-  target: [8, -58, 0]
+  target: [8, -63, 0]
 
 goal:
   kind: all

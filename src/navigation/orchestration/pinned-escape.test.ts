@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { botFixture } from "../../test-support/bot.js";
-import { loadNamedBlock } from "../../test-support/layered-world.js";
+import { layeredWorld, loadNamedBlock } from "../../test-support/layered-world.js";
 import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkPocket, sanaPocket } from "../../test-support/frozen-pockets.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
@@ -14,6 +14,7 @@ import type { MemoryWorld } from "../world/memory-world.js";
 import type { BlockPosition } from "../world/world.js";
 import { FAILED_EDGE_MEMORY_MS } from "./failed-edges.js";
 import { createNavigator } from "./navigator.js";
+import { describeCalculationFailure } from "./process-events.js";
 
 /**
  * Run 15: Dirk and Sana stood pinned for hours because their persona's style override (`dig_straight_down: false`)
@@ -54,7 +55,7 @@ test("Dirk's pocket with dig_straight_down off: the run digs down once, says wha
   assert.deepEqual(relaxed?.kind === "escape_relaxed" ? relaxed.relaxed : null, ["dig_straight_down", "dig_next_to_flowing_water"]);
   assert.ok(kinds(run.events).indexOf("route_committed") > kinds(run.events).indexOf("escape_relaxed"), "a route follows the escape");
   assert.equal(run.override.digDown, false, "the style override is untouched");
-  assert.deepEqual(run.outcome.evidence.escapeRelaxed, ["dig_straight_down", "dig_next_to_flowing_water"]);
+  assert.deepEqual(run.outcome.evidence.escapeRelaxed, ["dig_straight_down"], "the dig below opens into no water: only the dig down was set aside");
 });
 
 test("Dirk's pocket with the dig allowed needs no escape", async () => {
@@ -100,11 +101,72 @@ test("Sana's pocket with one water source beside the opened cell stays shut and 
   assert.deepEqual(run.outcome.evidence.escapeRelaxed ?? [], [], "a no-path failure dug nothing: it must not claim a dig");
 });
 
+/**
+ * A one-cell pocket on an undiggable floor whose only way on is east, through a stone wall two cells high: falling water
+ * runs beside the wall (north of it), so each break lets flowing water in. The cell beyond the wall is the goal.
+ */
+const WALL_START = { x: 0, y: 64, z: 0 } as const;
+const WALL_GOAL = { x: 3, y: 64, z: 0 } as const;
+function pocketBesideFallingWater(bot: ReturnType<typeof botFixture>): MemoryWorld {
+  const sealed = "RRRRRRR";
+  return layeredWorld(bot, {
+    origin: { x: -2, z: -2 },
+    legend: { R: "bedrock", S: "stone", A: "air", F: "water[level=8]" },
+    outside: () => "bedrock",
+    margin: 2,
+    yRange: { min: 62, max: 66 },
+    layers: {
+      63: [sealed, "RRRSRRR", "RRRSSSR", sealed, sealed],
+      64: [sealed, "RRRFRRR", "RRASAAR", sealed, sealed],
+      65: [sealed, "RRRFRRR", "RRASAAR", sealed, sealed],
+    },
+  });
+}
+
+test("a pocket left sideways beside falling water, with the dig down allowed, reports the flowing-water exception and no dig down", async () => {
+  const run = await leavePocket(pocketBesideFallingWater, WALL_START, WALL_GOAL, { digDown: true });
+  assert.ok(kinds(run.events).includes("route_committed"), JSON.stringify(run.outcome.kind));
+  assert.deepEqual(run.outcome.evidence.escapeRelaxed, ["dig_next_to_flowing_water"]);
+});
+
 test("lava beside the opened cell is never let through", async () => {
   const run = await leavePocket(sanaPocket, SANA_START, SANA_CAVE, {
     edit: (world, bot) => loadNamedBlock(world, bot, { x: -454, y: 57, z: 100 }, "lava"),
   });
   assert.ok(!kinds(run.events).includes("route_committed"));
+});
+
+/**
+ * A 3x3 stone shore the goal cannot be reached from: a stone wall and a strip of water lie between it and the goal's
+ * cell, bedrock everywhere else. The bot stands at the wall, where the dig east opens into the water.
+ */
+const SHORE_START = { x: 1, y: 64, z: 0 } as const;
+const SHORE_GOAL = { x: 4, y: 64, z: 0 } as const;
+function shoreBesideWater(bot: ReturnType<typeof botFixture>): MemoryWorld {
+  return layeredWorld(bot, {
+    origin: { x: -3, z: -3 },
+    legend: { R: "bedrock", S: "stone", A: "air", W: "water" },
+    outside: () => "bedrock",
+    margin: 2,
+    yRange: { min: 62, max: 66 },
+    layers: {
+      63: ["RRRRRRRRR", "RRRRRRRRR", "RRSSSRRRR", "RRSSSRRSR", "RRSSSRRRR", "RRRRRRRRR", "RRRRRRRRR"],
+      64: ["RRRRRRRRR", "RRRRRRRRR", "RRAAARRRR", "RRAAASWAR", "RRAAARRRR", "RRRRRRRRR", "RRRRRRRRR"],
+      65: ["RRRRRRRRR", "RRRRRRRRR", "RRAAARRRR", "RRAAARAAR", "RRAAARRRR", "RRRRRRRRR", "RRRRRRRRR"],
+    },
+  });
+}
+
+test("a shore whose goal is unreachable is a dead end: one liquid refusal at the start does not set the persona's rule aside", async () => {
+  const run = await leavePocket(shoreBesideWater, SHORE_START, SHORE_GOAL);
+  assert.ok(!kinds(run.events).includes("escape_relaxed"), "the search visited the whole shore: it never was shut in at its start");
+  assert.equal(run.outcome.kind, "failed");
+  if (run.outcome.kind !== "failed" || run.outcome.failure.kind !== "no_path") return assert.fail(JSON.stringify(run.outcome));
+  const failure = run.outcome.failure;
+  assert.ok(failure.search.visited > 1, `visited ${failure.search.visited}`);
+  assert.ok((failure.search.startRefusals?.opens_into_liquid ?? 0) >= 1, JSON.stringify(failure.search.startRefusals));
+  assert.match(describeCalculationFailure(failure), /dead end from here$/);
+  assert.deepEqual(run.outcome.evidence.escapeRelaxed ?? [], []);
 });
 
 test("two bots pinned at once each escape once: the escape is the run's own state", async () => {
