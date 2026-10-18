@@ -3,6 +3,7 @@ import type { ClientCompletion } from "mine-labs/client";
 import type { ScenarioContext } from "../scenario.ts";
 
 const requestSchema = z.strictObject({
+  debugExecuteJavaScript: z.boolean().optional(),
   actions: z.array(z.strictObject({
     action: z.string().trim().min(1),
     input: z.record(z.string(), z.unknown()),
