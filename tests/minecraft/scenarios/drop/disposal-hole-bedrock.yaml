@@ -9,9 +9,11 @@ world:
   time: noon
   gamerules: { doDaylightCycle: false, doMobSpawning: false, randomTickSpeed: 0 }
 reset:
-  - "fill -8 -63 -8 8 -54 8 air"
+  - "fill -10 -63 -10 10 -54 10 air"
 geometry:
-  - fill: { block: bedrock, from: [-8, -63, -8], to: [8, -61, 8] }
+  # The pit search walks up to 8 blocks (HOLE_SEARCH_RADIUS) and digs one cell beside its stance: the bedrock reaches
+  # 10, at least the radius + 2, or the pit lands on dirt outside the box.
+  - fill: { block: bedrock, from: [-10, -63, -10], to: [10, -61, 10] }
 players:
   - name: Disposer
     pos: [0.5, -60, 0.5]
