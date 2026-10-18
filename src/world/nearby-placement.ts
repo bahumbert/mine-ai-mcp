@@ -124,7 +124,12 @@ export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, ite
 export async function placeCarriedBlockNearby(
   bot: Bot,
   itemName: string,
-  options: { readonly maxRadius?: number; readonly signal?: AbortSignal } = {},
+  options: {
+    readonly maxRadius?: number;
+    readonly signal?: AbortSignal;
+    /** Told the cell before the block is placed, so a caller cut off during the placement still knows where it may stand. */
+    readonly onCellChosen?: (position: Vec3) => void;
+  } = {},
 ): Promise<NearbyPlacement> {
   const item = bot.inventory.items().find((candidate) => candidate.name === itemName);
   if (!item) return { kind: "no_item" };
@@ -132,6 +137,7 @@ export async function placeCarriedBlockNearby(
   // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside one only when nothing else is free.
   const cell = chooseCell(bot, itemName, options.maxRadius ?? 3, false) ?? chooseCell(bot, itemName, options.maxRadius ?? 3, true);
   if (!cell) return { kind: "no_cell" };
+  options.onCellChosen?.(cell.position);
   const result = await placeBlock(bot, {
     item,
     support: cell.support,

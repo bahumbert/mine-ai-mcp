@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { botFixture, registry, type FakeStack } from "../../test-support/bot.js";
+import { observedFurnace } from "../../test-support/furnace.js";
 import { createSmeltItemAction, parseSmeltItemRequest, smeltItem, type SmeltItemDependencies } from "./index.js";
 
 test("a named furnace and a temporary one are exclusive, and a temporary one must be carried", async () => {
@@ -160,84 +161,6 @@ test("does not insert anything into a furnace that already owns contents", async
   assert.equal(readProgress?.().completion.observed, false);
 });
 
-function observedFurnace(options: { readonly cookMs: number; readonly stopAfter?: number; readonly starved?: boolean; readonly recoverInputCount?: number; readonly raw?: number; readonly coal?: number; readonly full?: boolean }) {
-  const items: FakeStack[] = [
-    { name: "raw_iron", count: options.raw ?? 3 },
-    { name: "coal", count: options.coal ?? 1 },
-  ];
-  const adjust = (name: string, delta: number) => {
-    const stack = items.find((candidate) => candidate.name === name);
-    if (stack) stack.count += delta;
-    else items.push({ name, count: delta, type: registry.itemsByName[name]!.id });
-    if (stack?.count === 0) items.splice(items.indexOf(stack), 1);
-  };
-  let now = 0;
-  let input = 0;
-  let output = 0;
-  let activeFuel = 0;
-  const furnace = {
-    progress: 0,
-    fuel: 0,
-    inputItem: () => input > 0 ? { name: "raw_iron", count: input } : null,
-    fuelItem: () => null,
-    outputItem: () => output > 0 ? { name: "iron_ingot", count: output, type: registry.itemsByName.iron_ingot!.id, stackSize: 64, slot: 2 } : null,
-    putInput: async (_type: number, _metadata: null, count: number) => {
-      adjust("raw_iron", -count);
-      input = count;
-    },
-    putFuel: async (_type: number, _metadata: null, count: number) => {
-      adjust("coal", -count);
-      activeFuel = options.starved ? 0 : 1;
-      furnace.fuel = activeFuel;
-    },
-    takeInput: async () => {
-      const taken = { name: "raw_iron", count: input };
-      const moved = Math.min(input, options.recoverInputCount ?? input);
-      adjust(taken.name, moved);
-      input -= moved;
-      return taken;
-    },
-    takeFuel: async () => null,
-    takeOutput: async () => {
-      const taken = { name: "iron_ingot", count: output };
-      adjust(taken.name, taken.count);
-      output = 0;
-      return taken;
-    },
-    close: () => undefined,
-  };
-  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } });
-  if (options.full) (bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
-  bot.clickWindow = async (slot) => {
-    if (slot !== 2 || output === 0) return;
-    adjust("iron_ingot", output);
-    output = 0;
-  };
-  let elapsedInItem = 0;
-  const dependencies: SmeltItemDependencies = {
-    createMovements: () => ({}) as never,
-    navigate: async () => ({ status: "completed", elapsedMs: 0 }),
-    openFurnace: async () => furnace as never,
-    now: () => now,
-    pause: async (milliseconds, signal) => {
-      signal?.throwIfAborted();
-      now += milliseconds;
-      if (output === options.stopAfter) return;
-      if (activeFuel === 0) return;
-      elapsedInItem += milliseconds;
-      furnace.progress = Math.min(1, elapsedInItem / options.cookMs);
-      furnace.fuel = activeFuel > 0 ? Math.max(0, 1 - now / (options.cookMs * 8 * (options.coal ?? 1))) : 0;
-      if (elapsedInItem < options.cookMs) return;
-      elapsedInItem = 0;
-      furnace.progress = 0;
-      input -= 1;
-      output += 1;
-      if (input === 0) activeFuel = 0;
-    },
-  };
-  return { bot, dependencies, furnace, get now() { return now; } };
-}
-
 test("keeps waiting while native cook progress advances beyond the old wall-clock deadline", async () => {
   const fixture = observedFurnace({ cookMs: 20_000 });
   const result = await smeltItem(
@@ -337,10 +260,12 @@ test("the production action clock is monotonic when the wall clock jumps", async
   const fixture = observedFurnace({ cookMs: 20_000, stopAfter: 0 });
   fixture.bot.openFurnace = async () => fixture.furnace as never;
   const controller = new AbortController();
-  const pending = createSmeltItemAction(fixture.bot, navigation).execute(
+  const lifetime = new AbortController();
+  const pending = createSmeltItemAction(fixture.bot, navigation).begin(
     { itemName: "raw_iron", count: 3, fuelItemName: "coal", x: 2, y: 64, z: 0 },
-    { signal: controller.signal },
-  );
+    lifetime.signal,
+    () => {},
+  )({ signal: controller.signal });
   setTimeout(() => controller.abort(new Error("clock test cancelled")), 20);
 
   await assert.rejects(pending, /clock test cancelled/);

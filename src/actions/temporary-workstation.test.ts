@@ -4,10 +4,10 @@ import { Vec3 } from "vec3";
 import { craftingBot } from "../test-support/crafting.js";
 import type { WorldBlock } from "../world/placement.js";
 import type { ActionResult } from "./action.js";
-import { useTemporaryWorkstation, type WorkstationOperations } from "./temporary-workstation.js";
+import { useTemporaryWorkstation, type WorkstationHold, type WorkstationOperations } from "./temporary-workstation.js";
 
 function fixture() {
-  const { bot } = craftingBot({ crafting_table: 1 });
+  const { bot, counts } = craftingBot({ crafting_table: 1 });
   const position = new Vec3(1, 64, 0);
   const block = { name: "crafting_table", position } as WorldBlock;
   const calls: string[] = [];
@@ -29,7 +29,7 @@ function fixture() {
     },
   };
   const failure = (error: string): ActionResult => ({ status: "failed", error });
-  return { bot, block, position, calls, operations, failure };
+  return { bot, block, position, calls, operations, failure, counts };
 }
 
 test("temporary station cleanup runs after success and an operation failure", async () => {
@@ -244,4 +244,191 @@ test("cancellation releases ownership without moving to collect a workstation", 
     /cancelled/,
   );
   assert.deepEqual(f.calls, ["place"]);
+});
+
+/** The table as the world shows it once placed: no longer carried, standing at the position. */
+function placeTableForReal(f: ReturnType<typeof fixture>): void {
+  f.operations.place = async () => {
+    f.calls.push("place");
+    f.counts.set(f.bot.registry.itemsByName.crafting_table!.id, 0);
+    return { kind: "placed", block: f.block, position: f.position };
+  };
+}
+
+function abortingAttempt(f: ReturnType<typeof fixture>, hold: WorkstationHold) {
+  const controller = new AbortController();
+  return assert.rejects(
+    useTemporaryWorkstation(
+      f.bot,
+      "crafting_table",
+      { signal: controller.signal },
+      f.operations,
+      async () => {
+        controller.abort(new Error("reflex took the body"));
+        controller.signal.throwIfAborted();
+        return { status: "succeeded" };
+      },
+      f.failure,
+      hold,
+    ),
+    /reflex took the body/,
+  );
+}
+
+test("a workstation left placed by an aborted attempt is reused by the next, never a second one", async () => {
+  // Run 15: a reflex ended every smelt; with a resume the table stands and nothing carried is left to place again.
+  const f = fixture();
+  placeTableForReal(f);
+  const hold: WorkstationHold = { placedAt: null };
+  await abortingAttempt(f, hold);
+  assert.deepEqual(hold.placedAt, f.position);
+
+  const result = await useTemporaryWorkstation(
+    f.bot,
+    "crafting_table",
+    {},
+    f.operations,
+    async (block) => {
+      f.calls.push("craft batch");
+      assert.equal(block, f.block);
+      return { status: "succeeded" };
+    },
+    f.failure,
+    hold,
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.workstation?.recovered, true);
+  assert.deepEqual(f.calls, ["place", "craft batch", "collect"]);
+  assert.equal(hold.placedAt, null, "recovered: the next call places afresh");
+});
+
+test("a workstation broken between attempts is placed again when it is carried again", async () => {
+  const f = fixture();
+  placeTableForReal(f);
+  const hold: WorkstationHold = { placedAt: null };
+  await abortingAttempt(f, hold);
+  f.bot.blockAt = () => ({ name: "air", position: f.position }) as WorldBlock;
+  f.counts.set(f.bot.registry.itemsByName.crafting_table!.id, 1);
+  f.operations.place = async () => {
+    f.calls.push("place again");
+    f.bot.blockAt = () => f.block;
+    return { kind: "placed", block: f.block, position: f.position };
+  };
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
+  );
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(f.calls, ["place", "place again", "collect"]);
+});
+
+test("a workstation broken between attempts and not carried is the usual refusal", async () => {
+  const f = fixture();
+  placeTableForReal(f);
+  const hold: WorkstationHold = { placedAt: null };
+  await abortingAttempt(f, hold);
+  f.bot.blockAt = () => ({ name: "air", position: f.position }) as WorldBlock;
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async () => { throw new Error("must not execute"); }, f.failure, hold,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_NOT_CARRIED/);
+  assert.equal(hold.placedAt, null);
+});
+
+test("an abort during the recovery keeps the workstation for one more attempt that collects it once", async () => {
+  const f = fixture();
+  placeTableForReal(f);
+  const hold: WorkstationHold = { placedAt: null };
+  const controller = new AbortController();
+  const collect = f.operations.collect;
+  f.operations.collect = async () => {
+    f.calls.push("collect aborted");
+    controller.abort(new Error("reflex during recovery"));
+    throw controller.signal.reason;
+  };
+  await assert.rejects(
+    useTemporaryWorkstation(
+      f.bot, "crafting_table", { signal: controller.signal }, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
+    ),
+    /reflex during recovery/,
+  );
+  f.operations.collect = collect;
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
+  );
+  assert.equal(result.workstation?.recovered, true);
+  assert.deepEqual(f.calls, ["place", "collect aborted", "collect"]);
+});
+
+test("a held workstation whose chunk is not loaded is not replaced by a second one", async () => {
+  const f = fixture();
+  placeTableForReal(f);
+  const hold: WorkstationHold = { placedAt: null };
+  await abortingAttempt(f, hold);
+  f.bot.blockAt = () => null;
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async () => { throw new Error("must not execute"); }, f.failure, hold,
+  );
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_NOT_LOADED/);
+  assert.deepEqual(hold.placedAt, f.position, "still ours: a later attempt can find it");
+  assert.deepEqual(f.calls, ["place"]);
+});
+
+/** A placement the abort cuts off: the cell was chosen, and the block lands (or not) before the abort is thrown. */
+function cutOffPlacement(f: ReturnType<typeof fixture>, controller: AbortController, blockLands: boolean) {
+  f.operations.place = async (_name, _signal, onCellChosen) => {
+    f.calls.push("place");
+    onCellChosen?.(f.position);
+    if (blockLands) f.counts.set(f.bot.registry.itemsByName.crafting_table!.id, 0);
+    else f.bot.blockAt = () => ({ name: "air", position: f.position }) as WorldBlock;
+    controller.abort(new Error("reflex during the placement"));
+    throw controller.signal.reason;
+  };
+}
+
+test("an abort after the block landed but before the placement answered: the next attempt reuses it, no second block", async () => {
+  // placeBlock waits for the server's block update; a reflex can abort in that wait with the block already set.
+  const f = fixture();
+  const controller = new AbortController();
+  const hold: WorkstationHold = { placedAt: null };
+  cutOffPlacement(f, controller, true);
+  await assert.rejects(
+    useTemporaryWorkstation(f.bot, "crafting_table", { signal: controller.signal }, f.operations, async () => ({ status: "succeeded" }), f.failure, hold),
+    /reflex during the placement/,
+  );
+  assert.deepEqual(hold.placedAt, f.position, "the cell was recorded before the place call could throw");
+
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async (block) => {
+      f.calls.push("craft batch");
+      assert.equal(block, f.block);
+      return { status: "succeeded" };
+    }, f.failure, hold,
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.workstation?.recovered, true);
+  assert.deepEqual(f.calls, ["place", "craft batch", "collect"]);
+});
+
+test("an abort before the block landed: the next attempt finds the cell empty and places normally", async () => {
+  const f = fixture();
+  const controller = new AbortController();
+  const hold: WorkstationHold = { placedAt: null };
+  cutOffPlacement(f, controller, false);
+  await assert.rejects(
+    useTemporaryWorkstation(f.bot, "crafting_table", { signal: controller.signal }, f.operations, async () => ({ status: "succeeded" }), f.failure, hold),
+    /reflex during the placement/,
+  );
+  f.operations.place = async (_name, _signal, onCellChosen) => {
+    f.calls.push("place again");
+    onCellChosen?.(f.position);
+    f.bot.blockAt = () => f.block;
+    return { kind: "placed", block: f.block, position: f.position };
+  };
+  const result = await useTemporaryWorkstation(
+    f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
+  );
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(f.calls, ["place", "place again", "collect"]);
 });
