@@ -3,7 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { collectBlockInputSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
 import type { Bot } from "mineflayer";
-import { breakBudget, collectionChance, inventoryStop, pursuedInventoryStop, settle } from "./collect-block.js";
+import { breakBudget, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
 import { botFixture } from "../../test-support/bot.js";
 
 test("capacity admission allows a clearing break with free space or a compatible partial stack", () => {
@@ -140,6 +140,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
       allowFullInventory: true,
       onToolLoss: "stop",
       maxDistance: null,
+      maxBreaks: null,
     },
   );
   assert.deepEqual(parseCollectBlockRequest({ block_name: "oak_log", x: 8, y: 64, z: -3 }), {
@@ -150,6 +151,7 @@ test("collect_block parses MCP arguments into its normalized action model", () =
     allowFullInventory: false,
     onToolLoss: "stop",
     maxDistance: null,
+    maxBreaks: null,
   });
   assert.throws(() => parseCollectBlockRequest({ block_name: "minecraft:" }), /must identify a block/);
   assert.throws(
@@ -192,4 +194,30 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
   const result = settle(bot, request, {}, new Set(["dark_oak_log"]), new Vec3(0, 64, 0), { status: "no_targets", broken: [], reason: null });
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /^\[NO_TARGET_IN_RANGE\] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either\./u);
+});
+
+/** Live run 13: a shovel that broke while collecting dirt was only a sentence in the stop reason, and the fetch went on by hand. */
+test("a tool that broke during the run is reported as a field of the result, not only in the stop reason", () => {
+  const request = parseCollectBlockRequest({ block_name: "dirt", count: 4 });
+  const bot = Object.assign(botFixture(), { inventory: { items: () => [{ name: "dirt", count: 2 }] } }) as unknown as Bot;
+  const stopped = settle(bot, request, {}, new Set(["dirt"]), new Vec3(0, 64, 0), { status: "stopped", broken: [], reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains." });
+  const lost = {
+    class: "shovel" as const,
+    before: { class: "shovel" as const, tier: "wooden" as const, item: "wooden_shovel", slot: 36, durabilityLeft: 1, maximumDurability: 59 },
+    now: { class: "shovel" as const, tier: "none" as const, item: null, slot: null, durabilityLeft: null, maximumDurability: null },
+    reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains.",
+  };
+  assert.deepEqual(reportToolLoss(stopped, lost).collected.toolLost, { item: "wooden_shovel", class: "shovel" });
+  // No loss, no field.
+  assert.equal("toolLost" in reportToolLoss(stopped, null).collected, false);
+});
+
+/** Run 14 review SF7: `get_items apple 5` asked for 5 drops at 0.5%, a budget of 2004 breaks, while the brain bounds a rare fetch at 64 blocks. */
+test("max_breaks caps the break budget whatever the drop chance asks for", () => {
+  assert.equal(parseCollectBlockRequest({ block_name: "oak_leaves", count: 5, max_breaks: 12 }).maxBreaks, 12);
+  assert.equal(parseCollectBlockRequest({ block_name: "oak_leaves" }).maxBreaks, null);
+  assert.throws(() => parseCollectBlockRequest({ block_name: "oak_leaves", max_breaks: 0 }));
+  assert.equal(breakBudget(5, 0.005), 2004, "no cap: twice the expected breaks");
+  assert.equal(breakBudget(5, 0.005, 12), 12);
+  assert.equal(breakBudget(5, 1, 12), 9, "a sure drop needs fewer breaks than the cap: the cap does not raise it");
 });

@@ -108,6 +108,20 @@ export const stepSchema = z.discriminatedUnion("skill", [
 ]);
 
 export type Step = z.infer<typeof stepSchema>;
+
+/**
+ * Why a step was refused, in words a model can act on: zod's text, plus, when the skill is known and the step carried
+ * fields it does not have, the fields it does accept (read from its own schema, so every skill's list is current).
+ */
+export function describeStepError(raw: unknown, error: z.ZodError): string {
+  const text = z.prettifyError(error);
+  const skill = typeof raw === "object" && raw !== null ? (raw as { skill?: unknown }).skill : undefined;
+  const extra = error.issues.some((issue) => issue.code === "unrecognized_keys" && issue.path.length === 0);
+  const option = extra ? stepSchema.options.find((candidate) => candidate.shape.skill.value === skill) : undefined;
+  if (!option) return text;
+  const fields = Object.keys(option.shape).filter((name) => name !== "skill").map((name) => `"${name}"`);
+  return `${text}\n${String(skill)} takes only: ${fields.length === 0 ? "no fields besides skill" : fields.join(", ")}`;
+}
 export type SkillName = Step["skill"];
 
 /** What a `drop_item` step drops, whichever form it was written in. */

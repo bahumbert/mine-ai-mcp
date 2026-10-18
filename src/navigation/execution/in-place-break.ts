@@ -20,7 +20,7 @@ export interface BreakBlockInPlaceOptions {
 }
 
 export type BreakBlockInPlaceResult =
-  { readonly status: "broken" } | { readonly status: "failed"; readonly reason: string };
+  { readonly status: "broken" } | { readonly status: "failed"; readonly reason: string; readonly cause?: "policy" };
 
 export type BreakBlockInPlace = (options: BreakBlockInPlaceOptions) => Promise<BreakBlockInPlaceResult>;
 
@@ -87,7 +87,7 @@ export async function breakBlockInPlace(
         return { status: "failed", reason: "The excavation changed before its next dig." };
       }
       const decision = policy.evaluateBreak(before, dig.position, dependencies.world).decision;
-      if (decision.kind === "prohibited") return { status: "failed", reason: decision.reason };
+      if (decision.kind === "prohibited") return { status: "failed", reason: decision.reason, cause: "policy" };
       options.onToolSelected?.(dig.toolType);
       const handle = dependencies.bot.startEffect(
         {

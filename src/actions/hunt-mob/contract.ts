@@ -159,6 +159,7 @@ export const huntHandoffSchema = z.discriminatedUnion("kind", [
 export const huntTerminationSchema = z.enum([
   "quantity_collected",
   "no_loaded_targets",
+  "drop_not_given",
   "observation_exhausted",
   "spawner_unavailable",
   "spawner_unreachable",
@@ -205,6 +206,14 @@ export const huntMobOutcomes = {
     `[UNKNOWN_HUNT_DROP] Minecraft has no item registry entry named ${drop}.${similar.length === 0 ? "" : ` Its items with that name are ${similar.join(", ")}.`}`,
   noLoadedTarget: (mob: string, drop: string, gained: number, requested: number) =>
     `[HUNT_TARGET_NOT_LOADED] No loaded ${mob} remained after observing ${drop} ${gained}/${requested}.`,
+  dropNotGiven: (mob: string, drop: string, kills: number, chance: number | null = null) =>
+    `[HUNT_DROP_NOT_GIVEN] ${kills} ${mob} killed and none gave ${drop}` +
+    (chance !== null && chance >= 1
+      ? `: a ${mob} always drops it, so the drops were not picked up (out of reach, despawned or taken). Look for them where the ${mob} died, or check the inventory is not full.`
+      : (chance === null
+          ? ": it is dropped only under a condition (a cooked drop only when the mob burns as it dies). "
+          : `, which a ${mob} drops with a chance of ${Number((chance * 100).toPrecision(3))} % per kill: getting nothing in ${kills} kills is under 1 % luck, so it is dropped only under a condition (a cooked drop only when the mob burns as it dies). `) +
+        `Hunt ${mob} for its raw drop and cook that (smelt_item) instead of hunting more.`),
   tooHurt: (mob: string, health: number, minimum: number) =>
     `[HUNT_TOO_HURT] Health ${health} is below the ${minimum} needed to start a fight with a ${mob}; eat or rest first.`,
   /** The pursuit's own reason names where the mob was and how far, so the model can walk closer and ask again. */

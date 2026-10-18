@@ -38,7 +38,7 @@ export interface ItemUse {
   readonly signal?: AbortSignal;
 }
 
-export type ItemUseResult = { kind: "used" } | { kind: "failed"; error: string };
+export type ItemUseResult = { kind: "used" } | { kind: "failed"; error: string; /** Set when the use went out and the wait ended with the expected change not seen (not a thrown error): how many ticks the server clock (`bot.time.age`) advanced since the use, 0 when unknown. */ serverTicksWaited?: number };
 
 const DEFAULT_TIMEOUT_TICKS = 40;
 
@@ -80,6 +80,7 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
     use.signal?.throwIfAborted();
     if (use.on) await bot.activateBlock(use.on.block, asVec3(use.on.face));
     else bot.activateItem();
+    const ageAtUse = bot.time?.age;
     for (let tick = 0; tick < timeoutTicks; tick += 1) {
       await bot.waitForTicks(1);
       use.signal?.throwIfAborted();
@@ -88,6 +89,7 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
     }
     return {
       kind: "failed",
+      serverTicksWaited: ageAtUse === undefined || bot.time?.age === undefined ? 0 : bot.time.age - ageAtUse,
       error: `The use of ${use.item.name} was not confirmed within ${timeoutTicks} ticks; observed ${[
         observed(bot, use),
         ...(gain

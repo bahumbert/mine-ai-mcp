@@ -470,6 +470,7 @@ test("refuses a mid-air target instead of building up to it, and names the groun
   assert.equal(output.result.status, "failed");
   assert.match(output.result.error ?? "", /NAVIGATION_TARGET_UNSUPPORTED/);
   assert.match(output.result.error ?? "", /ground in that column is at y=64/);
+  assert.match(output.result.error ?? "", /the standable cell there is 120, 64, -36/);
   assert.match(output.result.error ?? "", /Choose an observed supported height/);
   assert.match(output.result.error ?? "", /build: true/);
 });

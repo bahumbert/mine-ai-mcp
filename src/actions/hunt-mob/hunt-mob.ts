@@ -21,6 +21,7 @@ import { readCombatItems } from "../../survival/weapons/equipment.js";
 import { waitForSignal, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
+import { mobSourcesOf } from "../../world/mob-drops.js";
 import {
   DROPPED_ITEM_OBSERVATION_EVENTS,
   findNewItemEntity,
@@ -51,6 +52,20 @@ type Entity = Parameters<Bot["attack"]>[0];
 
 /** A normal entity drop appears immediately; this allows ordinary server delay and late metadata. */
 const HUNT_DROP_OBSERVATION_MS = 1_000;
+/** Kills without the wanted drop after which a hunt stops when the drop's chance is unknown: it is conditional (cooked meat only when the mob burns), not unlucky. */
+export const HUNT_FRUITLESS_KILLS = 8;
+/** Getting nothing in the capped number of kills must be at most this likely when the drop's chance is known. */
+const HUNT_FRUITLESS_LUCK = 0.01;
+
+/**
+ * Kills after which getting nothing has under `HUNT_FRUITLESS_LUCK` chance for a drop given with `chance` per kill
+ * (game data: `mobSourcesOf`): `ceil(ln 0.01 / ln(1 - p))`, 7 at 0.5. A sure drop (p >= 1) has no luck to wait out (a kill without it is a pickup failure) and, like no known chance, keeps `HUNT_FRUITLESS_KILLS`.
+ */
+export function fruitlessKillLimit(chance: number | null): number {
+  if (chance === null || !(chance > 0) || chance >= 1) return HUNT_FRUITLESS_KILLS;
+  return Math.ceil(Math.log(HUNT_FRUITLESS_LUCK) / Math.log(1 - chance));
+}
+
 /** How far from the death the sweep looks for the kill's other drops; knockback leaves them within a few blocks. */
 const HUNT_SWEEP_RADIUS = 4;
 /** How many items besides the requested drop one kill is worth walking for. */
@@ -680,6 +695,8 @@ function beginHuntMob(
     const missingSpawner = camp?.unavailable();
     if (missingSpawner) return stoppedResult(missingSpawner.reason, observation, missingSpawner.termination);
 
+    const dropChance = mobSourcesOf(request.dropName, bot.version).find((source) => source.mob === request.mobName)?.chance ?? null;
+    const fruitlessKills = fruitlessKillLimit(dropChance);
     const quarry: HuntDrop = { name: request.dropName, id: drop.id };
     const fight: HuntEngagement = { bot, request, drop: quarry, observation, dependencies, context };
     const settled = () => settleInventory(bot, quarry, observation);
@@ -720,6 +737,10 @@ function beginHuntMob(
         if (settled()) return { kind: "defeated" };
         const unshielded = checkShield();
         if (unshielded) return { kind: "stopped", reason: unshielded };
+        if (observation.targetDeathsObserved >= fruitlessKills && observation.inventoryAfter <= inventoryBefore) {
+          observation.stopReason = "drop_not_given";
+          return { kind: "stopped", reason: huntMobOutcomes.dropNotGiven(request.mobName, request.dropName, observation.targetDeathsObserved, dropChance) };
+        }
         const full = inventoryStop();
         if (full) observation.stopReason = "inventory_full";
         return full ? { kind: "stopped", reason: full } : fightAndCollect(fight, targetId);

@@ -66,6 +66,8 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   const site = { door: { x: 1, y: 64, z: 2 }, facing: "north" as const };
   const withMaterials = { kind: "small medieval house", site, part: 2, prepared: true, materials: { roof: "dirt" } };
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: withMaterials }).context], LIMITS).unfinished, withMaterials);
+  const refused = { kind: "small medieval house", site, part: 2, prepared: true, refused: [{ x: 1, y: 64, z: 1 }] };
+  assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: refused }).context], LIMITS).unfinished, refused, "the refused cells survive a restart");
   const older = { kind: "small medieval house", site, part: 2 };
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
 });

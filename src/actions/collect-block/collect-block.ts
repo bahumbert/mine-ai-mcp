@@ -31,7 +31,7 @@ import { findLoadedBlockPositions } from "../../world/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
-import { observeToolTierLoss } from "../../world/tool-loss.js";
+import { observeToolTierLoss, type ToolTierLoss } from "../../world/tool-loss.js";
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { watchForStall } from "../stall-watch.js";
@@ -104,10 +104,12 @@ export function collectionChance(bot: Bot, blockNames: readonly string[], collec
 /**
  * Breaks a run may make: a sure drop gets the requested count plus the allowance for lost ones; an uncertain one twice
  * the breaks expected at its chance, so bad luck rarely cuts the run short (the expected count alone fell short about
- * one run in three for 4 seeds from grass).
+ * one run in three for 4 seeds from grass). `cap` (the request's `max_breaks`) bounds it from above: a caller that
+ * limits what a fetch may cost (a rare drop) is not given the budget of its chance.
  */
-export function breakBudget(requested: number, chance: number): number {
-  return (chance >= 1 ? requested : Math.ceil((2 * requested) / chance)) + MAX_EXTRA_BREAKS;
+export function breakBudget(requested: number, chance: number, cap: number | null = null): number {
+  const wanted = (chance >= 1 ? requested : Math.ceil((2 * requested) / chance)) + MAX_EXTRA_BREAKS;
+  return cap === null ? wanted : Math.min(wanted, cap);
 }
 
 function collectionMovements(bot: Bot, request: CollectBlockRequest, target: CollectionTarget) {
@@ -224,7 +226,7 @@ function beginCollectBlock(
       owes: `Net inventory gain of ${request.requested} collectible items still carried at settlement.`,
     },
   }));
-  return async (context: ActionContext): Promise<CollectBlockResult> => {
+  const run = async (context: ActionContext): Promise<CollectBlockResult> => {
     context.signal?.throwIfAborted();
     const gained = () => sumValues(inventoryGains(bot, inventoryBefore, collectable));
     if (gained() >= request.requested) {
@@ -309,7 +311,7 @@ function beginCollectBlock(
         castSearchRadius: LOADED_SEARCH_RADIUS,
         // Exploring for a block is what walks a run across the map: never under max_distance.
         explore: exactCell === null && request.maxDistance === null,
-        maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance) - broken.length),
+        maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance, request.maxBreaks) - broken.length),
         signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
         ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
         onTargets: (targets) => {
@@ -337,6 +339,13 @@ function beginCollectBlock(
       bot.off("physicsTick", checkCapacity);
     }
   };
+  return async (context: ActionContext): Promise<CollectBlockResult> => reportToolLoss(await run(context), toolLoss.loss());
+}
+
+/** `result`, with the tool that broke during the run (if one did) as a field, so a caller need not read the stop reason. */
+export function reportToolLoss(result: CollectBlockResult, loss: ToolTierLoss | null): CollectBlockResult {
+  if (loss === null || loss.before.item === null) return result;
+  return { ...result, collected: { ...result.collected, toolLost: { item: loss.before.item, class: loss.class } } };
 }
 
 /** Blocks are work sites; live drops are entities whose bounds the viewer follows. */

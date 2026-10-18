@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { McpBotRuntime, type ToolClient } from "./runtime-client.js";
@@ -103,4 +103,69 @@ test("a refused connection whose reconnect also fails throws the original error,
   });
   await assert.rejects(runtime.blockSources(["wheat"]), /fetch failed/u);
   assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
+});
+
+test("a rationale longer than the contract's 200 characters is cut before it is sent", async () => {
+  // Run 12: `[MCP_CALL_FAILED] craft_item: ... Too big: expected string to have <=200 characters at rationale`.
+  const sent: Record<string, unknown>[] = [];
+  const client: ToolClient = {
+    callTool: async (call) => {
+      sent.push(call.arguments as Record<string, unknown>);
+      return { structuredContent: { response: { format: "json", data: { result: {} } } } };
+    },
+    close: async () => {},
+  };
+  const runtime = McpBotRuntime.over(client);
+  await runtime.submit("craft_item", {}, "x".repeat(300), 1000).catch(() => undefined); // the empty reply is not a state; only what was sent counts
+  assert.equal((sent[0]?.["rationale"] as string).length, 200);
+  await runtime.submit("craft_item", {}, "short", 1000).catch(() => undefined); // the empty reply is not a state; only what was sent counts
+  assert.equal(sent[1]?.["rationale"], "short");
+});
+
+test("the values a tool's input property accepts are read from the tool's schema, once", async () => {
+  let listed = 0;
+  const client: ToolClient = {
+    callTool: async () => ({}),
+    listTools: async () => {
+      listed += 1;
+      return { tools: [{ name: "use_bucket", inputSchema: { type: "object", properties: { liquid: { type: "string", enum: ["water", "lava"], default: "water" }, action: { type: "string" } } } }] };
+    },
+    close: async () => {},
+  };
+  const runtime = McpBotRuntime.over(client);
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), ["water", "lava"]);
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "action"), [], "a property with no enum");
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "nothing"), [], "an unknown property");
+  assert.deepEqual(await runtime.toolEnum("nothing", "liquid"), [], "an unknown tool");
+  assert.equal(listed, 1);
+});
+
+test("a client that cannot list its tools gives no values", async () => {
+  const runtime = McpBotRuntime.over({ callTool: async () => ({}), close: async () => {} });
+  assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+});
+
+test("an unreadable tool listing is asked for once and logged once, not on every call", async () => {
+  // Run 14 review N12: gathering asks toolEnum every round; a failing listTools was retried each time, silently.
+  let listed = 0;
+  const client: ToolClient = {
+    callTool: async () => ({}),
+    listTools: async () => {
+      listed += 1;
+      throw new Error("tools/list is not supported");
+    },
+    close: async () => {},
+  };
+  const warnings: string[] = [];
+  const warn = mock.method(console, "warn", (line: string) => { warnings.push(line); });
+  try {
+    const runtime = McpBotRuntime.over(client);
+    assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+    assert.deepEqual(await runtime.toolEnum("use_bucket", "liquid"), []);
+    assert.equal(listed, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /tools\/list is not supported/u);
+  } finally {
+    warn.mock.restore();
+  }
 });

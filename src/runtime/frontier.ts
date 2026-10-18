@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import type { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Vec3 } from "vec3";
+import { findLoadedBlockPositions } from "../world/loaded-block-scan.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { sourcesOf } from "../world/block-drops.js";
@@ -99,26 +100,55 @@ const ROUTINE_MATERIALS = new Set([
 export const SEEN_RADIUS = 32;
 /** Loaded blocks of one kind counted at most: enough to tell near from none, cheap to ask. */
 export const SEEN_CAP = 64;
+/** The answers of {@link seenInWorld} are kept this long, and until the bot moves {@link SEEN_MOVED} blocks. */
+export const SEEN_TTL_MS = 20_000;
+export const SEEN_MOVED = 8;
 
 /**
  * How much of an item the explored world has, for the crafting planner's ties: over the blocks it is gathered from,
  * the most of the loaded blocks of that kind within {@link SEEN_RADIUS} of the bot (up to {@link SEEN_CAP}) or the
  * recorded chunks that hold it (the frontier leaves out stone, deepslate and the like, so those count by what is
  * near). Run 10: a stone pickaxe planned cobbled_deepslate at the surface, Mira dug toward it for 18 minutes, with
- * stone underfoot. Each block kind is asked once per call.
+ * stone underfoot. Each block kind is scanned once per {@link SEEN_TTL_MS}.
  */
-export function seenInWorld(bot: Bot, frontier: Pick<SessionFrontier, "chunksWithMaterial">): (item: string) => number {
-  const byBlock = new Map<string, number>();
-  const blockSeen = (block: string): number => {
+export function seenInWorld(
+  bot: Bot,
+  frontier: Pick<SessionFrontier, "chunksWithMaterial">,
+  now: () => number = Date.now,
+): (item: string) => number {
+  let byBlock = new Map<string, number>();
+  let askedAt = Number.NEGATIVE_INFINITY;
+  let askedFrom: Vec3 | null = null;
+  // The planner asks for every wood kind of every recipe, and the brain asks again within seconds: the answers are
+  // kept while the bot stays about where it was (run 12: 70 of 86 runtime stalls were this scan, 0.4-0.5 s a call).
+  const refresh = (): Vec3 | null => {
+    const position = bot.entity?.position ?? null;
+    const moved = position !== null && askedFrom !== null && position.distanceTo(askedFrom) > SEEN_MOVED;
+    if (moved || now() - askedAt > SEEN_TTL_MS) {
+      byBlock = new Map();
+      askedAt = now();
+      askedFrom = position?.clone() ?? null;
+    }
+    return position;
+  };
+  const blockSeen = (block: string, position: Vec3 | null): number => {
     let seen = byBlock.get(block);
     if (seen === undefined) {
-      const id = bot.registry.blocksByName[block]?.id;
-      const near = id === undefined ? 0 : bot.findBlocks({ matching: id, maxDistance: SEEN_RADIUS, count: SEEN_CAP }).length;
+      const definition = bot.registry.blocksByName[block];
+      let near = 0;
+      if (definition !== undefined && position !== null) {
+        const stateIds = new Set<number>();
+        for (let stateId = definition.minStateId!; stateId <= definition.maxStateId!; stateId += 1) stateIds.add(stateId);
+        near = findLoadedBlockPositions(bot, { center: position, radius: SEEN_RADIUS, stateIds, limit: SEEN_CAP }).length;
+      }
       byBlock.set(block, (seen = Math.max(near, frontier.chunksWithMaterial(block))));
     }
     return seen;
   };
-  return (item) => Math.max(0, ...sourcesOf(item, bot.version).map(({ block }) => blockSeen(block)));
+  return (item) => {
+    const position = refresh();
+    return Math.max(0, ...sourcesOf(item, bot.version).map(({ block }) => blockSeen(block, position)));
+  };
 }
 
 /**

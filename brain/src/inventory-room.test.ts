@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { junkHint, neededItems } from "./inventory-room.ts";
+import { consumedBy, junkHint, junkStacks, neededItems } from "./inventory-room.ts";
+import { FakeRuntime } from "./testing.ts";
 
 const stack = (name: string, count: number) => ({ name, count });
 const snapshot = (inventory: { name: string; count: number }[], foods: string[] = []) => ({ inventory, foods: foods.map((name) => ({ name, hunger: 4, count: 1 })) }) as never;
@@ -37,4 +38,27 @@ test("neededItems: an item the objective names is never junk, and neither is the
   assert.match(hint, /128 dirt/u);
   assert.doesNotMatch(hint, /cobblestone|oak_log/u);
   assert.equal(neededItems(carried, { objective: "Mine something else" }).has("cobblestone"), false);
+});
+
+test("junkStacks lists the unneeded kinds with their stacks in inventory order, most slots first", () => {
+  const carried = snapshot([stack("dirt", 30), stack("cobblestone", 64), stack("gravel", 40), stack("dirt", 5), stack("stone_axe", 1)]);
+  const junk = junkStacks(carried, new Set(["cobblestone", "stone_axe"]));
+  assert.deepEqual(junk, [
+    { name: "dirt", count: 35, slots: 2, stacks: [30, 5] },
+    { name: "gravel", count: 40, slots: 1, stacks: [40] },
+  ]);
+  assert.deepEqual(junkStacks(carried, new Set(["dirt", "gravel", "cobblestone", "stone_axe"])), []);
+});
+
+test("consumedBy: a craft's whole recipe tree, a smelt's input and fuel, nothing else", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = {
+    stick: { makes: 4, needs: [{ item: "oak_planks", count: 2 }] },
+    oak_planks: { makes: 4, needs: [{ item: "oak_log", count: 1 }] },
+    stone_shovel: { makes: 1, needs: [{ item: "cobblestone", count: 1 }, { item: "stick", count: 2 }] },
+  };
+  const craft = await consumedBy(runtime, "craft_item", { items: [{ item_name: "stone_shovel", count: 1 }] });
+  assert.deepEqual([...craft].sort(), ["cobblestone", "oak_log", "oak_planks", "stick"]);
+  assert.deepEqual([...(await consumedBy(runtime, "smelt_item", { item_name: "raw_iron", count: 3, fuel_item_name: "coal" }))].sort(), ["coal", "raw_iron"]);
+  assert.equal((await consumedBy(runtime, "navigate", { x: 1 })).size, 0);
 });

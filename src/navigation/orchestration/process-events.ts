@@ -45,6 +45,14 @@ export function describeCalculationFailure(failure: NavigationCalculationFailure
       : failure.limit.kind === "search_time"
         ? `search timed out after ${spent} (limit ${failure.limit.limit} ms); no path or usable partial route found`
         : `search radius limit ${failure.limit.limit} blocks reached after ${spent}; no path or usable partial route found`;
-  const what = `${stopped}; ${work}; ${where}`;
+  const near = closest.withinStartBlocks;
+  // What is known: the node nearest the goal is within `near` blocks of the bot. Only an exhausted search
+  // (no_path) shows nothing else is reachable; a timeout or radius limit may just have stopped too soon.
+  const standing =
+    near === undefined
+      ? ""
+      : `; the node nearest the goal is within ${near} blocks of where the bot stands, so no route found gets it more than ${near} blocks nearer` +
+        (failure.kind === "no_path" ? "; every reachable place was searched, so this direction is a dead end from here" : "");
+  const what = `${stopped}; ${work}; ${where}${standing}`;
   return failure.after ? `${what}, while replanning after a movement failure: ${failure.after.observation}` : what;
 }
