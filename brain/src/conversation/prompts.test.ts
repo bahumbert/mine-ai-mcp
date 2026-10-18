@@ -53,3 +53,7 @@ test("a call is said to be shouted only where localized chat makes it so", () =>
   assert.match(describeOpening(input, { range: 64 }), /shouted/u);
   assert.match(openingSystemPrompt(testPersona(), { range: 64 }), /shouted/u);
 });
+
+test("the opening prompt tells the model to name those it speaks to", () => {
+  assert.match(openingSystemPrompt(testPersona()), /name those you speak to/iu);
+});

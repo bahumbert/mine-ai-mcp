@@ -972,7 +972,7 @@ test("openConversation reads the opening reply", async () => {
 
 test("an opening with a length that does not exist gets one repair round", async () => {
   const { chat, mind } = scriptedMind();
-  chat.reply({ open: true, to: ["Theo"], topic: "x", length: "epic", say: "hi" }, { open: true, to: ["Theo"], topic: "x", length: "long", say: "hi" });
+  chat.reply({ open: true, to: ["Theo"], topic: "x", length: "epic", say: "hi Theo" }, { open: true, to: ["Theo"], topic: "x", length: "long", say: "hi Theo" });
   assert.equal((await mind.openConversation(opening(), signal)).length, "long");
   assert.equal(chat.requests[1]?.length, 4);
 });
@@ -1004,4 +1004,39 @@ test("sumUpConversation returns the gist", async () => {
   chat.reply({ gist: "Talked with Theo about the mine." });
   assert.equal(await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [{ speaker: "Theo", text: "hi" }] }, signal), "Talked with Theo about the mine.");
   assert.match(chat.requests[0]?.[1]?.content ?? "", /Theo: "hi"/u);
+});
+
+test("an opening that names none of its listeners is sent back", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(
+    { open: true, to: ["Bruno"], topic: "ground", length: "short", say: "The ground here is uneven." },
+    { open: true, to: ["Bruno"], topic: "ground", length: "short", say: "Bruno, the ground here is uneven." },
+  );
+  const input = { ...opening(), near: [{ username: "Bruno", distance: 5, lastTalk: null }] };
+  assert.equal((await mind.openConversation(input, signal)).say, "Bruno, the ground here is uneven.");
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /Bruno/u);
+});
+
+test("an everyone opening passes when it names one of those near", async () => {
+  const input = { ...opening(), near: [{ username: "Ayla", distance: 5, lastTalk: null }, { username: "Bruno", distance: 6, lastTalk: null }] };
+  for (const say of ["Salut Ayla !", "ayla, salut"]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply({ open: true, to: ["everyone"], topic: "x", length: "short", say });
+    assert.equal((await mind.openConversation(input, signal)).say, say);
+    assert.equal(chat.requests.length, 1, "accepted at once");
+  }
+});
+
+test("nameless openings beyond the send-back rounds fail the call", async () => {
+  const { chat, mind } = scriptedMind();
+  const nameless = { open: true, to: ["Theo"], topic: "x", length: "short", say: "Nice weather." };
+  chat.reply(nameless, nameless, nameless, nameless, nameless, nameless);
+  await assert.rejects(mind.openConversation(opening(), signal), /LLM_SENT_BACK/u);
+});
+
+test("no name is asked of an opening that does not open or says nothing", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ open: false, say: "Nice weather." }, { open: true, to: ["Theo"], topic: "x", length: "short", say: "" });
+  assert.equal((await mind.openConversation(opening(), signal)).open, false);
+  assert.equal((await mind.openConversation(opening(), signal)).say, "");
 });

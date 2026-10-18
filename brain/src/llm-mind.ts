@@ -355,6 +355,15 @@ export class LlmMind implements Mind {
   async openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision> {
     return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat), describeOpening(input, this.localizedChat), signal, (json) => {
       const reply = openingReplySchema.parse(json);
+      // A line is heard as spoken to someone only when it names them (ADR-017): a nameless opening reaches nobody.
+      if (reply.open && reply.say.trim() !== "") {
+        const to = addressees(reply.to);
+        const everyone = to.some((name) => name.toLowerCase() === "everyone");
+        const listeners = everyone ? input.near.map((player) => player.username) : to;
+        if (!listeners.some((name) => namesWord(reply.say, name))) {
+          throw new SendBack(`your line names none of those it is for (${listeners.join(", ")}): they hear it as spoken to them only when it names them, so name the ones you speak to in the line`);
+        }
+      }
       return { open: reply.open, to: addressees(reply.to), topic: reply.topic.trim(), length: reply.length, say: reply.say.trim() };
     });
   }

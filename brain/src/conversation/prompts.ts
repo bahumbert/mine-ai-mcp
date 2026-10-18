@@ -18,7 +18,7 @@ Reply with only a JSON object {"open": true, "to": ["Name"], "topic": "...", "le
 - "to": who you speak to, by name, from those near you; ["everyone"] to speak to all of them.
 - "topic": what you want to talk about, in a few words.
 - "length": how long you mean it to be: ${lengths}. A chance meeting while you work leans short; when you went to see someone, medium or long.
-- "say": your first line, in your own words, one or two sentences, under 200 characters.
+- "say": your first line, in your own words, one or two sentences, under 200 characters; name those you speak to in it, for they hear it as spoken to them only when it names them (a line naming nobody is heard by nobody).
 ${localizedChat === undefined ? "" : `Talk carries about ${localizedChat.range} blocks: only those within that distance hear you.\n`}When "calling" is given, the people you want are out of earshot: ${localizedChat === undefined ? "your line is plain talk, so they hear it only if they come close; say where you are or what you want" : "your line is shouted to call them over; say where you are or what you want"}.
 Stay in character. Never mention being an AI, a model, a prompt, JSON or tools.`;
 }

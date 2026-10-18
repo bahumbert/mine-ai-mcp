@@ -266,3 +266,19 @@ test("freeFor: with known slots a free slot, with unknown slots no call of this 
   await call;
   assert.equal(unknown.freeFor("cy"), true);
 });
+
+test("freeWithin is true once a slot frees in time, false on time-out or abort", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  assert.equal(await queue.freeWithin("ada", 50, signal), true, "free at once");
+  const fake = controlled();
+  const call = queue.track(fake.model, "ada").complete([], signal);
+  assert.equal(await queue.freeWithin("bob", 20, signal), false, "time-out");
+  const abort = new AbortController();
+  const aborted = queue.freeWithin("bob", 5_000, abort.signal);
+  abort.abort();
+  assert.equal(await aborted, false, "abort");
+  const freed = queue.freeWithin("bob", 5_000, signal);
+  fake.settle(0);
+  await call;
+  assert.equal(await freed, true);
+});

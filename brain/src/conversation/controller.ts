@@ -1,4 +1,5 @@
 import type { BrainEvent } from "../brain-log.ts";
+import { namesWord } from "../llm-mind.ts";
 import type { Memory } from "../memory.ts";
 import type { ChatLine, ConversationFacts, Mind, Nearby, OpeningDecision, OpeningInput, PastTalk } from "../mind.ts";
 import type { Persona } from "../persona.ts";
@@ -12,6 +13,10 @@ import {
 const PARTNERS_KEPT = 5;
 /** A social call waits this long for the partner to come within earshot (spec 2026-10-18-conversations-design). */
 const CALL_WAIT_MS = 60_000;
+/** A gist waits this long for a model slot before the fallback is written. */
+const GIST_WAIT_MS = 120_000;
+/** The most of a member's last line the fallback gist quotes. */
+const FALLBACK_GIST_CHARS = 120;
 
 /** Conversations this brain's characters have opened and still hold; at most `max` at a time (`--max-conversations`). */
 export class ConversationBudget {
@@ -43,6 +48,8 @@ export interface ControllerDeps {
   readonly budget: ConversationBudget;
   /** Whether the model queue has a free slot: openings and gists are skipped, never queued. */
   readonly modelFree: () => boolean;
+  /** Resolves true once a model slot is free within `ms`, false on time-out or abort; absent: a gist does not wait. */
+  readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   /** Blocks (Manhattan) talk carries: the Localized Chat range, else the staying distance. */
   readonly talkRange: number;
   /** Whether the server limits how far talk carries (Localized Chat): only then is a call shouted. */
@@ -71,6 +78,14 @@ interface Talk {
 }
 
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** What is remembered of a talk the model did not sum up: its topic, else the last line another member said, else who it was with. Never empty. */
+function fallbackGist(topic: string, othersLines: readonly ChatLine[], others: readonly string[]): string {
+  if (topic !== "") return topic;
+  const last = othersLines.at(-1);
+  if (last !== undefined) return `${last.speaker}: "${last.text}"`.slice(0, FALLBACK_GIST_CHARS);
+  return `with ${others.join(", ")}`;
+}
 
 /**
  * One character's conversation (spec 2026-10-18-conversations-design): the gates for opening one, its record, and how
@@ -107,9 +122,9 @@ export class ConversationController {
   }
 
   /** The latest talk with `name` (gist, else topic), or null when there was none. */
-  lastTalk(name: string): { readonly topic: string; readonly gist: string } | null {
+  lastTalk(name: string): { readonly topic: string; readonly gist: string; readonly endedAt: number } | null {
     const talk = this.talks.get(name.toLowerCase());
-    return talk === undefined ? null : { topic: talk.topic, gist: talk.gist };
+    return talk === undefined ? null : { topic: talk.topic, gist: talk.gist, endedAt: talk.endedAt };
   }
 
   facts(): ConversationFacts | undefined {
@@ -136,7 +151,7 @@ export class ConversationController {
     }
   }
 
-  async tick(snapshot: BotSnapshot, _signal: AbortSignal): Promise<void> {
+  async tick(snapshot: BotSnapshot, signal: AbortSignal): Promise<void> {
     const c = this.record;
     if (c === null) return;
     const now = this.deps.now();
@@ -145,7 +160,7 @@ export class ConversationController {
       this.journal("left", c, { member, why: "out of range" });
     }
     const reason = ending(c, this.deps.self, this.limits, now);
-    if (reason !== null) this.end(reason);
+    if (reason !== null) this.end(reason, signal);
   }
 
   /** A chance opening: only when every code gate passes, then the chance draw, then one model call. */
@@ -188,10 +203,12 @@ export class ConversationController {
       return false;
     }
     const now = this.deps.now();
-    const to = partner !== null ? [partner] : this.addressed(decision.to, o.snapshot);
+    // Only the names the line holds hear it as spoken to them (a favour of ADR-017's name rule).
+    const to = (partner !== null ? [partner] : this.addressed(decision.to, o.snapshot)).filter((name) => namesWord(decision.say, name));
     this.deps.log(`conversation: opening answer open=${decision.open} to=${to.join(",")} length=${decision.length} say=${JSON.stringify(decision.say)}`);
     // A line heard while the model thought may have opened one already: it is the conversation now.
     if (!decision.open || decision.say === "" || to.length === 0 || this.record !== null) {
+      if (decision.open && decision.say !== "" && to.length === 0) this.deps.log("conversation: opening names nobody it is for");
       this.deps.budget.give();
       return false;
     }
@@ -246,17 +263,17 @@ export class ConversationController {
   }
 
   /** Her own line in the conversation: a goodbye ends it, and so does a line after the cap told her to say goodbye. */
-  said(close: boolean): void {
+  said(close: boolean, signal?: AbortSignal): void {
     const c = this.record;
     if (c === null) return;
     const now = this.deps.now();
     const afterCap = capReached(c, this.limits, now);
     lineSaid(c, now);
-    if (close) this.end("goodbye");
-    else if (afterCap) this.end("cap");
+    if (close) this.end("goodbye", signal);
+    else if (afterCap) this.end("cap", signal);
   }
 
-  /** Ends the conversation once; the gist is asked of the model when it has a free slot, else it is the topic. */
+  /** Ends the conversation once; the gist is asked of the model when it has a free slot (waiting for one for a while), else it is {@link fallbackGist}. */
   end(reason: EndReason, signal?: AbortSignal): void {
     const c = this.record;
     if (c === null) return;
@@ -276,15 +293,32 @@ export class ConversationController {
       this.deps.memorize({ kind: "conversation", talk: { id: c.id, members: others, topic: c.topic, gist, endedAt: new Date(now).toISOString(), reason } });
       if (gist !== "" || c.topic !== "") this.remember({ with: others, topic: c.topic, gist, endedAt: now });
     };
-    const fallback = c.topic;
-    if (c.lines === 0 || !this.deps.modelFree()) {
+    const fallback = fallbackGist(c.topic, lines.filter((line) => !same(line.speaker, self)), others);
+    if (c.lines === 0) {
       finish(fallback);
       return;
     }
-    const task = this.deps.mind.sumUpConversation({ persona: this.deps.persona, others, topic: c.topic, lines }, signal ?? new AbortController().signal)
+    const stop = signal ?? new AbortController().signal;
+    const sumUp = (): Promise<void> => this.deps.mind.sumUpConversation({ persona: this.deps.persona, others, topic: c.topic, lines }, stop)
       .then((gist) => finish(gist === "" ? fallback : gist), () => finish(fallback));
+    let task: Promise<void>;
+    if (this.deps.modelFree()) task = sumUp();
+    else if (this.deps.waitForModel === undefined) {
+      finish(fallback);
+      return;
+    } else task = this.slotWithin(GIST_WAIT_MS, stop).then((free) => (free ? sumUp() : finish(fallback)));
     const tracked = task.finally(() => this.pending.delete(tracked));
     this.pending.add(tracked);
+  }
+
+  /** Whether a model slot came free within `ms`; false on time-out, abort or a failed wait. */
+  private slotWithin(ms: number, signal: AbortSignal): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      if (signal.aborted) return resolve(false);
+      const onAbort = (): void => resolve(false);
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.deps.waitForModel!(ms, signal).then(resolve, () => resolve(false)).finally(() => signal.removeEventListener("abort", onAbort));
+    });
   }
 
   private history(): readonly ChatLine[] {

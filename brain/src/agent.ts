@@ -81,7 +81,7 @@ export interface AgentOptions {
    */
   readonly otherAgents: readonly string[];
   /** Conversations (spec 2026-10-18-conversations-design); absent: the character holds none. */
-  readonly conversations?: { readonly budget: ConversationBudget; readonly modelFree: () => boolean };
+  readonly conversations?: { readonly budget: ConversationBudget; readonly modelFree: () => boolean; readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean> };
   /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
   readonly localizedChat?: LocalizedChat;
   readonly log: (line: string) => void;
@@ -103,6 +103,8 @@ export interface AgentOptions {
 /** One objective on the stack and what was done for it. */
 interface Work {
   readonly objective: Objective;
+  /** When it was taken on (ms), for the socialising routine: a talk ended since then is the one it came for. */
+  readonly startedAt: number;
   readonly steps: StepRecord[];
   /** What was carried after each of `steps` (name:count, sorted; null when unknown); not shown to the model, so prompts do not change. */
   readonly carried: (string | null)[];
@@ -142,7 +144,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), purpose: objective.purpose };
+  return { objective, startedAt: Date.now(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), purpose: objective.purpose };
 }
 
 /**
@@ -238,6 +240,7 @@ export class Agent {
       mind: options.mind,
       budget: conversations.budget,
       modelFree: conversations.modelFree,
+      ...(conversations.waitForModel !== undefined && { waitForModel: conversations.waitForModel }),
       talkRange: localizedChat?.range ?? persona.settings.conversation.stayingDistance,
       localized: localizedChat !== undefined,
       random: options.random ?? Math.random,
@@ -436,9 +439,12 @@ export class Agent {
 
   /** Her line in a conversation counts in it; a goodbye (or a line after the cap) ends it. */
   private spokeInConversation(decision: { readonly say: string; readonly close?: boolean }): void {
-    if (decision.say.trim() !== "") this.talks?.said(decision.close === true);
+    if (decision.say.trim() !== "") this.talks?.said(decision.close === true, this.runSignal);
     else if (decision.close === true) this.talks?.end("goodbye", this.runSignal);
   }
+
+  /** Whether each speaker (lowercase) was already in the conversation when their last line was heard. */
+  private readonly memberBeforeLine = new Map<string, boolean>();
 
   /**
    * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed). Another
@@ -450,6 +456,8 @@ export class Agent {
     const speaker = message.username.toLowerCase();
     const agent = otherAgents.some((name) => name.toLowerCase() === speaker);
     if (!agent && !(persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker))) return false;
+    // A line naming her makes its speaker a member: whether they already were is what a request of theirs is judged by.
+    this.memberBeforeLine.set(speaker, this.talks?.isMember(message.username) === true);
     this.talks?.heard(message.username, message.message, named, message.channel, !agent && this.withinTalkRange(message));
     return !agent || this.talks?.isMember(message.username) === true;
   }
@@ -529,7 +537,8 @@ export class Agent {
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
   private take(objective: Objective, whisperTo: string | null = null): void {
-    this.talks?.end("taken_over", this.runSignal);
+    // A member's request is worked on while the conversation goes on, as a chance conversation does; anything else takes the body.
+    if (objective.requester === null || this.memberBeforeLine.get(objective.requester.toLowerCase()) !== true) this.talks?.end("taken_over", this.runSignal);
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.sheltering?.abort();
@@ -865,6 +874,7 @@ export class Agent {
         signal,
         partner,
         talks,
+        since: work.startedAt,
         context: { runtime, body: this.body, signal, self: persona.username },
         openFacts: { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed },
         limits: { openingDistance: persona.settings.conversation.openingDistance, talkRange, maxMinutes: persona.settings.conversation.maxMinutes },
@@ -882,7 +892,8 @@ export class Agent {
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: null, step: label, input: { skill: "socialise", partner }, thought: "", outcome, detail, ms, activity: "socialising", purpose: "socialising" });
     this.journalState(null);
     log(`  -> ${label}: ${outcome}: ${detail}`);
-    // Stopped, it was set aside for an order or a night: the talk is over, so is the objective.
+    // Set aside (a member's favour, a night) it stays on the stack and runs again; stopped and removed, it ends here.
+    if (result.status === "stopped" && this.stack.includes(work) && !this.runSignal.aborted) return;
     this.finish(work, result.status === "done" ? "done" : "failed", detail);
   }
 

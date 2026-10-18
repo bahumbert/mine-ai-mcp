@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatLine } from "../mind.ts";
+import type { ChatLine, OpeningDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
-import { ConversationBudget, ConversationController, maxConversations, type ConversationEvent, type ConversationMemory } from "./controller.ts";
+import { ConversationBudget, ConversationController, maxConversations, type ControllerDeps, type ConversationEvent, type ConversationMemory } from "./controller.ts";
 
 const signal = new AbortController().signal;
 const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "short", say: "Theo! How's the mine?" };
 
-function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[] } = {}) {
-  const { chat, mind } = scriptedMind();
+function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"] } = {}) {
+  const { chat, mind: scripted } = scriptedMind();
+  const mind = options.decision === undefined ? scripted : Object.assign(Object.create(scripted) as typeof scripted, { openConversation: async () => options.decision as OpeningDecision });
   const clock = { now: 1_000_000 };
   const spoken: { text: string; to: readonly string[]; whisperTo: string | null; shout: boolean }[] = [];
   const journal: ConversationEvent[] = [];
@@ -18,7 +19,7 @@ function setup(options: { random?: number; budget?: ConversationBudget; modelFre
   const budget = options.budget ?? new ConversationBudget(2);
   const draw = { value: options.random ?? 0.1 };
   const controller = new ConversationController({
-    self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), talkRange: 64,
+    self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), talkRange: 64,
     ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now,
     speak: (text, to, whisperTo, shout) => spoken.push({ text, to, whisperTo, shout }),
     journal: (event) => journal.push(event), memorize: (memory) => memories.push(memory), log: (line) => logs.push(line),
@@ -180,7 +181,7 @@ test("tick ends out_of_range after 20 s alone", async () => {
   assert.equal(t.journal.at(-1)?.reason, "out_of_range");
 });
 
-test("gist falls back to the topic when the queue is full", async () => {
+test("without a way to wait, a full queue gives the topic as the gist at once", async () => {
   let free = true;
   const t = setup({ modelFree: () => free });
   t.chat.reply(OPEN);
@@ -189,10 +190,85 @@ test("gist falls back to the topic when the queue is full", async () => {
   t.controller.end("silence");
   assert.equal(t.chat.requests.length, 1, "only the opening");
   assert.equal(t.memories[0]?.talk.gist, "the mine");
-  const opened = setup({ modelFree: () => false });
-  opened.controller.heard("Theo", "Ayla, the mine?", ["Ayla"], "chat");
-  opened.controller.end("silence");
-  assert.equal(opened.memories[0]?.talk.gist, "", "no topic: no gist");
+});
+
+test("gist waits for a free slot", async () => {
+  let free = true;
+  let grant!: (ok: boolean) => void;
+  const waits: number[] = [];
+  const t = setup({ modelFree: () => free, waitForModel: (ms) => { waits.push(ms); return new Promise<boolean>((resolve) => { grant = resolve; }); } });
+  t.chat.reply(OPEN, { gist: "Planned the mine." });
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  free = false;
+  t.controller.end("silence");
+  assert.deepEqual(waits, [120_000]);
+  assert.equal(t.journal.at(-1)?.event, "opened", "nothing is written while it waits");
+  free = true;
+  grant(true);
+  await t.controller.finished();
+  assert.equal(t.chat.requests.length, 2, "the opening and one gist call");
+  assert.equal(t.journal.at(-1)?.event === "ended" && t.journal.at(-1)?.gist, "Planned the mine.");
+  assert.equal(t.memories[0]?.talk.gist, "Planned the mine.");
+});
+
+test("the fallback gist is never empty", async () => {
+  const gistOf = async (history: ChatLine[], opener: string, topic = "") => {
+    const t = setup({ modelFree: () => false, waitForModel: async () => false, history });
+    t.controller.heard(opener, "Ayla, hi", ["Ayla"], "chat");
+    if (topic !== "") t.controller.current!.topic = topic;
+    t.controller.end("silence");
+    await t.controller.finished();
+    return t.memories[0]?.talk.gist;
+  };
+  const said = (speaker: string, text: string, at: number): ChatLine => ({ speaker, text, at });
+  assert.equal(await gistOf([said("Theo", "I will bring the logs", 1_000_001), said("Ayla", "great", 1_000_002)], "Theo"), `Theo: "I will bring the logs"`, "no topic: the last line another member said");
+  assert.equal(await gistOf([], "GlutenFoul"), "with GlutenFoul", "no topic, no member line");
+  assert.equal(await gistOf([said("Theo", "x", 1_000_001)], "Theo", "the mine"), "the mine", "the topic first");
+  assert.equal((await gistOf([said("Theo", "x".repeat(300), 1_000_001)], "Theo"))?.length, 120, "cut to 120 characters");
+});
+
+test("an empty gist from the model uses the fallback", async () => {
+  const t = setup();
+  t.chat.reply({ gist: "" });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.end("silence");
+  await t.controller.finished();
+  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+});
+
+test("the brain stopping ends the wait for a slot: the fallback is written, no model call", async () => {
+  const t = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>(() => undefined) });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const stop = new AbortController();
+  t.controller.end("silence", stop.signal);
+  stop.abort();
+  await t.controller.finished();
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+  const early = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>(() => undefined) });
+  early.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const stopped = AbortSignal.abort();
+  early.controller.end("silence", stopped);
+  await early.controller.finished();
+  assert.equal(early.memories[0]?.talk.gist, "with Theo");
+});
+
+test("a new conversation can open while the last gist waits; the gist lands on the old one", async () => {
+  let grant!: (ok: boolean) => void;
+  const t = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>((resolve) => { grant = resolve; }) });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const oldId = t.controller.current!.id;
+  t.controller.end("silence");
+  t.clock.now += 11 * 60_000;
+  t.controller.heard("Theo", "Ayla, again", ["Ayla"], "chat");
+  assert.notEqual(t.controller.current, null);
+  assert.notEqual(t.controller.current?.id, oldId);
+  grant(false);
+  await t.controller.finished();
+  const ended = t.journal.filter((event) => event.event === "ended");
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0]?.id, oldId);
+  assert.equal(t.memories[0]?.talk.id, oldId);
 });
 
 test("the last talks feed the next opening and the conversation block", async () => {
@@ -236,7 +312,7 @@ test("a social opening is skipped, without a model call, when the model queue is
 test("simultaneous openings: the username that sorts later takes the other as opener and gives its budget slot back", async () => {
   const t = setup();
   const aaron = { username: "Aaron", position: { x: 5, y: 64, z: 0 } };
-  t.chat.reply({ ...OPEN, to: ["Aaron"] });
+  t.chat.reply({ ...OPEN, to: ["Aaron"], say: "Aaron, a word?" });
   await t.controller.maybeOpen(t.facts(t.snapshotWith([aaron])), signal);
   assert.equal(t.budget.active, 1);
   t.controller.heard("Aaron", "Ayla, hi", ["Ayla"], "chat");
@@ -251,7 +327,7 @@ test("simultaneous openings: the username that sorts later takes the other as op
 test("simultaneous openings: the username that sorts first keeps its record and its slot", async () => {
   const t = setup();
   const zed = { username: "Zed", position: { x: 5, y: 64, z: 0 } };
-  t.chat.reply({ ...OPEN, to: ["Zed"] });
+  t.chat.reply({ ...OPEN, to: ["Zed"], say: "Zed, a word?" });
   await t.controller.maybeOpen(t.facts(t.snapshotWith([zed])), signal);
   t.controller.heard("Zed", "Ayla, hi", ["Ayla"], "chat");
   assert.equal(t.controller.current?.opener, "Ayla");
@@ -271,4 +347,97 @@ test("a nameless line from someone within talk range joins; from farther away or
   const alone = setup();
   alone.controller.heard("Steve", "nice day", [], "chat", true);
   assert.equal(alone.controller.current, null, "near alone opens nothing");
+});
+
+test("budget given back when the model keeps writing nameless openings", async () => {
+  const t = setup();
+  const nameless = { ...OPEN, say: "The ground here is uneven." };
+  t.chat.reply(nameless, nameless, nameless, nameless, nameless, nameless);
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.budget.active, 0);
+  assert.equal(t.controller.current, null);
+  assert.deepEqual(t.spoken, []);
+});
+
+test("members are the names the opening line names", async () => {
+  const t = setup();
+  const players = t.snapshotWith([{ username: "Bruno", position: { x: 5, y: 64, z: 0 } }, { username: "Lena", position: { x: 6, y: 64, z: 0 } }]);
+  t.chat.reply({ ...OPEN, to: ["Bruno", "Lena"], say: "Bruno, a word?" });
+  assert.equal(await t.controller.maybeOpen(t.facts(players), signal), true);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Bruno"]);
+  assert.deepEqual(t.spoken.map((line) => line.to), [["Bruno"]]);
+  assert.deepEqual(t.journal[0]?.members, ["Ayla", "Bruno"]);
+});
+
+test("an opening whose line names nobody it is for opens nothing, gives the slot back and logs it", async () => {
+  const decision: OpeningDecision = { open: true, to: ["Theo"], topic: "x", length: "short", say: "Got a minute?" };
+  const social = setup({ decision });
+  assert.equal(await social.controller.openSocial("Theo", null, social.facts(social.snapshotWith([])), signal), false);
+  assert.equal(social.budget.active, 0);
+  assert.deepEqual(social.spoken, []);
+  assert.ok(social.logs.includes("conversation: opening names nobody it is for"));
+  const chance = setup({ decision });
+  assert.equal(await chance.controller.maybeOpen(chance.facts(chance.theoAt(10)), signal), false);
+  assert.equal(chance.budget.active, 0);
+});
+
+/** Two controllers whose `speak` reaches the other's `heard`, at once or when `deliver` is called; each opening call waits for `release`. */
+function pair(deliverAtOnce: boolean) {
+  const clock = { now: 1_000_000 };
+  const outbox: (() => void)[] = [];
+  const make = (self: string, other: string, getOther: () => ConversationController) => {
+    const { mind: inner } = scriptedMind();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const mind = Object.assign(Object.create(inner) as typeof inner, {
+      openConversation: async () => {
+        await gate;
+        return { open: true, to: [other], topic: "x", length: "short" as const, say: `${other}, hello from ${self}` };
+      },
+    });
+    const budget = new ConversationBudget(2);
+    const controller = new ConversationController({
+      self, persona: testPersona(), mind, budget, modelFree: () => true, talkRange: 64, random: () => 0, now: () => clock.now,
+      speak: (text) => {
+        const hear = () => getOther().heard(self, text, [other], "chat");
+        if (deliverAtOnce) hear(); else outbox.push(hear);
+      },
+      journal: () => {}, memorize: () => {}, log: () => {}, history: () => [],
+    });
+    return { controller, budget, release };
+  };
+  const ayla: ReturnType<typeof make> = make("Ayla", "Theo", () => theo.controller);
+  const theo: ReturnType<typeof make> = make("Theo", "Ayla", () => ayla.controller);
+  const snapshot = (otherName: string): BotSnapshot => ({ ...new FakeRuntime().snapshot, position: { x: 0, y: 64, z: 0 }, players: [{ username: otherName, position: { x: 3, y: 64, z: 0 } }] });
+  const facts = (otherName: string) => ({ snapshot: snapshot(otherName), activity: "idle", lately: [], lastFailed: null, busy: false });
+  return { ayla, theo, outbox, facts };
+}
+
+test("two controllers: an opening line that names the other reaches it (Theo opens while Ayla's call is pending)", async () => {
+  const p = pair(true);
+  const aylaOpening = p.ayla.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, p.facts("Theo"), signal);
+  const theoOpening = p.theo.controller.openSocial("Ayla", { x: 3, y: 64, z: 0 }, p.facts("Ayla"), signal);
+  p.theo.release();
+  assert.equal(await theoOpening, true);
+  assert.equal(p.ayla.controller.current?.opener, "Theo", "heard while her own call was pending");
+  p.ayla.release();
+  assert.equal(await aylaOpening, false, "she says nothing");
+  assert.equal(p.ayla.budget.active, 0);
+  assert.equal(p.theo.budget.active, 1);
+  assert.equal(p.ayla.controller.current?.opener, "Theo");
+});
+
+test("two controllers: both openings resolve before either line is heard, one opener is left", async () => {
+  const p = pair(false);
+  const aylaOpening = p.ayla.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, p.facts("Theo"), signal);
+  const theoOpening = p.theo.controller.openSocial("Ayla", { x: 3, y: 64, z: 0 }, p.facts("Ayla"), signal);
+  p.ayla.release();
+  p.theo.release();
+  assert.equal(await aylaOpening, true);
+  assert.equal(await theoOpening, true);
+  for (const deliver of p.outbox) deliver();
+  assert.equal(p.ayla.controller.current?.opener, "Ayla");
+  assert.equal(p.theo.controller.current?.opener, "Ayla");
+  assert.equal(p.ayla.budget.active, 1);
+  assert.equal(p.theo.budget.active, 0);
 });

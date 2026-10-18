@@ -12,6 +12,8 @@ const WAIT_POLL_MS = 2_000;
 const FOLLOW_POLL_MS = 1_000;
 /** How close it keeps to the partner while they talk. */
 const FOLLOW_DISTANCE = 3;
+/** The routine reports at most this long after the talk, whatever its gist is waiting for. */
+const GIST_REPORT_MS = 10_000;
 
 export interface Clock {
   now(): number;
@@ -33,6 +35,8 @@ export interface SocialiseDeps {
   readonly openFacts: Omit<OpenFacts, "snapshot">;
   /** The persona's settings the routine needs: opening distance, talk range, the conversation's minutes cap. */
   readonly limits: { readonly openingDistance: number; readonly talkRange: number; readonly maxMinutes: number };
+  /** When the objective started (the clock's time): a talk with the partner that ended since is the one it came for. */
+  readonly since: number;
   readonly clock?: Clock;
 }
 
@@ -59,9 +63,14 @@ function positionOf(snapshot: BotSnapshot, partner: string): Position | null {
  * only cost latency): call or walk up to the partner, open the conversation, stay with them until it ends.
  */
 export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
-  const { runtime, signal, partner, talks, context, openFacts, limits } = deps;
+  const { runtime, signal, partner, talks, context, openFacts, limits, since } = deps;
   const clock = deps.clock ?? realClock;
   const stopped: SkillResult = { status: "stopped" };
+  // Set aside while it talked and back with the conversation over: it talked, it opens nothing new.
+  if (talks.current === null) {
+    const earlier = talks.lastTalk(partner);
+    if (earlier !== null && earlier.endedAt >= since) return talked(earlier, partner);
+  }
   let snapshot = await runtime.status();
   let position = positionOf(snapshot, partner);
   if (position === null || manhattan(snapshot.position, position) > limits.talkRange) {
@@ -110,8 +119,14 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
   await watching;
   if (signal.aborted) return stopped;
   if (result.status === "failed" && talks.current !== null) return result;
-  await talks.finished();
-  const talk = talks.lastTalk(partner);
+  // The gist may wait for a model slot for minutes: the routine reports with the topic after a few seconds.
+  const waiting = new AbortController();
+  await Promise.race([talks.finished(), clock.sleep(GIST_REPORT_MS, AbortSignal.any([signal, waiting.signal]))]);
+  waiting.abort();
+  return talked(talks.lastTalk(partner), partner);
+}
+
+function talked(talk: { readonly topic: string; readonly gist: string } | null, partner: string): SkillResult {
   const gist = talk === null ? "" : talk.gist !== "" ? talk.gist : talk.topic;
   return { status: "done", detail: `talked with ${partner}${gist === "" ? "" : `: ${gist}`}` };
 }

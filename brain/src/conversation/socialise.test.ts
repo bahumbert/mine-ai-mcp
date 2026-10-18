@@ -22,10 +22,10 @@ function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) 
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };
   const controller = new AbortController();
-  const run = (extra: { clock?: Clock } = {}) => socialise({
-    runtime, signal: controller.signal, partner: "Theo", talks,
+  const run = (extra: { clock?: Clock; signal?: AbortSignal } = {}) => socialise({
+    runtime, signal: extra.signal ?? controller.signal, partner: "Theo", talks,
     context: { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: controller.signal, self: "Ayla" },
-    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, ...extra,
+    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, since: 0, ...(extra.clock !== undefined && { clock: extra.clock }),
   });
   return { runtime, chat, talks, spoken, clock, run, controller };
 }
@@ -49,7 +49,9 @@ test("goes to the partner, opens, follows until the end", async () => {
   assert.deepEqual(t.runtime.submitted.map((call) => call.tool).slice(0, 1), ["navigate"], "it walked up first");
   assert.equal(t.spoken[0]?.shout, false, "close enough to hear: not shouted");
   t.talks.said(true);
-  assert.deepEqual(await running, { status: "done", detail: "talked with Theo: the mine" });
+  const result = await running;
+  assert.equal(result.status, "done");
+  assert.match(result.status === "done" ? result.detail : "", /^talked with Theo/u);
 });
 
 test("calls a partner out of sight with one shout, and gives up after 60 s", async () => {
@@ -92,4 +94,35 @@ test("with the agent's tick running, an unanswered call fails once: no second ca
   assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
   assert.equal(t.spoken.length, 1, "one shouted call only");
   assert.deepEqual(t.runtime.submitted.map((call) => call.tool), []);
+});
+
+test("resumed after its conversation ended, it finishes without a new opening", async () => {
+  const t = setup(true, theoAt(30));
+  t.runtime.durations.navigate = 5;
+  t.chat.reply(OPEN, { gist: "Talked." }, OPEN);
+  const first = t.run();
+  await until(() => t.talks.current !== null);
+  t.talks.end("out_of_range");
+  t.controller.abort();
+  await first;
+  await t.talks.finished();
+  // Set aside while it followed, the record ended meanwhile: run again.
+  assert.deepEqual(await t.run({ signal: new AbortController().signal }), { status: "done", detail: "talked with Theo: Talked." });
+  assert.equal(t.chat.requests.length, 2, "the first opening and its gist only");
+  assert.equal(t.spoken.length, 1);
+});
+
+test("a slow gist does not hold the routine", async () => {
+  const t = setup(true, theoAt(30));
+  t.runtime.durations.navigate = 5;
+  t.chat.reply(OPEN);
+  t.talks.finished = () => new Promise(() => undefined);
+  const waits: number[] = [];
+  const clock: Clock = { now: () => waits.reduce((a, b) => a + b, 1_000_000), sleep: async (ms) => { waits.push(ms); await new Promise((resolve) => setTimeout(resolve, 2)); } };
+  const running = t.run({ clock });
+  await until(() => t.talks.current !== null);
+  t.talks.said(true);
+  const result = await running;
+  assert.equal(result.status, "done");
+  assert.match(result.status === "done" ? result.detail : "", /^talked with Theo/u);
 });

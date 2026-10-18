@@ -181,7 +181,7 @@ async function main(): Promise<void> {
         otherAgents: usernames.filter((name) => name !== persona.username),
         knownNames,
         soil,
-        conversations: { budget, modelFree: () => queue.freeFor(persona.id) },
+        conversations: { budget, modelFree: () => queue.freeFor(persona.id), waitForModel: (ms, signal) => queue.freeWithin(persona.id, ms, AbortSignal.any([signal, shutdown.signal])) },
         ...(localizedChat !== undefined && { localizedChat }),
         log,
         ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),

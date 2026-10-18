@@ -1508,3 +1508,77 @@ test("a player's nameless line from within talk range joins the conversation; fr
   await agent.handle({ ...say("Steve", "lovely weather", false), distance: 10 });
   assert.equal(agent.conversation?.members.includes("Steve"), true);
 });
+
+test("a request from a conversation member keeps the conversation", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  const act = { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true };
+  chat.reply({ ...toAyla, say: "Sure." }, act, { ...toAyla, say: "Almost done, Vex." }, { gist: "x" });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const record = agent.conversation;
+  assert.notEqual(record, null);
+  await agent.handle(say("Vex", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, record, "the same record: the favour did not end it");
+  assert.ok(!events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  // The next line of the member is still handled inside the conversation.
+  await agent.handle(say("Vex", "how is it going?", false));
+  assert.match(chat.requests.at(-1)?.[1]?.content ?? "", /This conversation:/u);
+  assert.equal(agent.conversation, record);
+});
+
+test("a request from someone who is not a member still ends it taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  assert.equal(events.some((event) => event.kind === "conversation" && event.event === "ended" && event.reason === "taken_over"), true);
+});
+
+test("a stop from a member still ends the conversation taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "Stopping.", route: "stop", request: "" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle(say("Vex", "Ayla, stop", false));
+  assert.equal(agent.conversation, null);
+  assert.equal(events.some((event) => event.kind === "conversation" && event.event === "ended" && event.reason === "taken_over"), true);
+});
+
+test("a later from a member keeps the conversation going", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({}, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "Later.", route: "later", request: "collect 5 dirt" });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const record = agent.conversation;
+  await agent.handle(say("Vex", "Ayla, collect 5 dirt when you can", false));
+  assert.equal(agent.conversation, record);
+});
+
+test("a favour agreed with the partner of a social conversation keeps it; the routine resumes without a second opening", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 5;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  chat.reply(
+    { open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" },
+    { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true },
+    { gist: "Talked about the village." }, { gist: "Talked about the village." },
+  );
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social");
+  const record = agent.conversation;
+  await agent.handle(say("Vex", "Ayla, please collect 5 dirt"));
+  assert.equal(agent.conversation, record, "the favour did not end the conversation");
+  await until(() => action.requests.length >= 1);
+  assert.equal(events.filter((event) => event.kind === "conversation" && event.event === "opened").length, 1, "one opening only");
+});

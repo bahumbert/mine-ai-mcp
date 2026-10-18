@@ -91,6 +91,16 @@ export class ModelQueue {
     return this.slots === null ? !this.byAgent.has(agentId) : this.free();
   }
 
+  /** Whether `agentId` may start a skippable call within `ms`: true once a slot is free, false on time-out or abort. */
+  async freeWithin(agentId: string, ms: number, signal: AbortSignal): Promise<boolean> {
+    try {
+      await this.whenFree(AbortSignal.any([signal, AbortSignal.timeout(ms)]));
+    } catch {
+      return false;
+    }
+    return this.freeFor(agentId);
+  }
+
   /** Resolves once a slot is free (at once if one is); rejects when `signal` aborts. */
   whenFree(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
