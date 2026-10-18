@@ -185,7 +185,7 @@ test("a route ended by a failed break names the block, and only a break is named
 
 test("a route is marked failed only when the route or the movement itself failed", async () => {
   const closest = { position: { x: 0, y: 63, z: 0 }, heuristic: 1, routeCost: 1, basis: "best_heuristic_search_node" as const };
-  const search = { queued: 0, visited: 9, generated: 9, slices: 1, computeMs: 5 };
+  const search = { queued: 0, visited: 9, farthestVisited: 3, generated: 9, slices: 1, computeMs: 5 };
   const movement = { kind: "operation_failed" as const, stepId: "s", phase: "moving" as const, observation: "no" };
   const failures: ReadonlyArray<readonly [NavigationFailure, boolean]> = [
     [{ kind: "no_path", search, closest }, true],

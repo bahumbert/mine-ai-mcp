@@ -43,9 +43,11 @@ test("Dirk's and Sana's searches never left the start cell: one node visited, on
   }
 });
 
-test("a search that visited a second node left the start cell, whatever sits near the goal", () => {
-  assert.equal(neverLeftStart({ visited: 2 }), false);
-  assert.equal(neverLeftStart({ visited: 9 }), false);
+test("a search whose every visited node lies within 1 block of the start never left it; one that went 2 away did", () => {
+  assert.equal(neverLeftStart({ farthestVisited: 0 }), true);
+  assert.equal(neverLeftStart({ farthestVisited: 1 }), true, "Dirk's pocket: his cell and the pillar cell above it");
+  assert.equal(neverLeftStart({ farthestVisited: 2 }), false);
+  assert.equal(neverLeftStart({ farthestVisited: 9 }), false);
 });
 
 test("Dirk's pocket, straight-down dig on: the route digs down and arrives", () => {

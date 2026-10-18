@@ -2,9 +2,10 @@
  * The two pockets run 15 left bots pinned in, cut from the frozen scene (`~/.mine-ai-backups/pinned-run15-2026-10-17/world`,
  * read with `.agent/scripts/frozen-scene/blocks.py`). Both bots carried the style override `dig_straight_down: false`.
  * Dirk stood at -549 56 -50 and Sana at -455 57 100; each fixture is the 5x5 columns around the bot, stone outside and
- * water over the top as in the scene.
+ * water over the top as in the scene. `dirkItems` and `sanaItems` are what they carried.
  */
 import type { Bot } from "mineflayer";
+import type { FakeStack } from "./bot.js";
 import { layeredWorld } from "./layered-world.js";
 
 const LEGEND = {
@@ -70,3 +71,9 @@ export function sanaPocket(bot: Pick<Bot, "registry">) {
     },
   });
 }
+
+/** What each bot carried when the scene was frozen: a search counts the cobblestone as scaffold, so Dirk can pillar up one cell. */
+export const dirkItems = (): FakeStack[] => [
+  { name: "stone_pickaxe", count: 1 }, { name: "wooden_pickaxe", count: 1 }, { name: "cobblestone", count: 10 }, { name: "oak_planks", count: 3 },
+];
+export const sanaItems = (): FakeStack[] => [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 9 }, { name: "cobblestone", count: 13 }];

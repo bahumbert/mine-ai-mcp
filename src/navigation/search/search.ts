@@ -359,6 +359,8 @@ export class IncrementalSearch {
   /** The cheapest goal-satisfying node generated so far, offered first when a partial route is cut. */
   #bestGoal = NO_NODE;
   #visited = 0;
+  /** The largest Chebyshev distance of a visited node's feet cell from the root's (0 while only the root was visited). */
+  #farthestVisited = 0;
   #generated = 1;
   #slices = 0;
   #computeMs = 0;
@@ -420,6 +422,7 @@ export class IncrementalSearch {
       // the scaffold frontier has dominated, is skipped rather than deleted.
       if (store.finish[current] === null && !this.#arrivals.isLive(current)) continue;
       this.#visited += 1;
+      this.#noteFarthest(current);
       expanded += 1;
       this.#noteClosest(current);
       if (
@@ -626,7 +629,16 @@ export class IncrementalSearch {
   }
 
   #evidence(): SearchEvidence {
-    return { queued: this.#open.size, visited: this.#visited, generated: this.#generated, slices: this.#slices, computeMs: this.#computeMs };
+    return {
+      queued: this.#open.size, visited: this.#visited, farthestVisited: this.#farthestVisited, generated: this.#generated,
+      slices: this.#slices, computeMs: this.#computeMs,
+    };
+  }
+
+  #noteFarthest(node: number): void {
+    const root = this.#store.feet(this.#root);
+    const feet = this.#store.feet(node);
+    this.#farthestVisited = Math.max(this.#farthestVisited, Math.abs(feet.x - root.x), Math.abs(feet.y - root.y), Math.abs(feet.z - root.z));
   }
 
   #nodeEvidence(node: number) {

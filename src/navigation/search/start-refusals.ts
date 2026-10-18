@@ -15,12 +15,13 @@ import type { SearchEvidence } from "./search-result.js";
 export type StartRefusals = Readonly<Record<string, number>>;
 
 /**
- * Whether an exhausted search visited the start cell and nothing else (Dirk and Sana: "visited 1 nodes, generated 1"):
- * only then are the refusals counted at the start what shuts the bot in. A shore with an unreachable goal visits every
- * cell of the shore, and a refusal there says nothing of why the goal is out of reach.
+ * Whether an exhausted search stayed within 1 block of the start cell (Sana: "visited 1 nodes"; Dirk, run 15 P2: his
+ * cell and the pillar cell above it, "visited 2 nodes"): only then are the refusals counted at the start what shuts
+ * the bot in. A shore with an unreachable goal visits cells 2 or more away, and a refusal there says nothing of why
+ * the goal is out of reach.
  */
-export function neverLeftStart(search: Pick<SearchEvidence, "visited">): boolean {
-  return search.visited <= 1;
+export function neverLeftStart(search: Pick<SearchEvidence, "farthestVisited">): boolean {
+  return search.farthestVisited <= 1;
 }
 
 const SIDES = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;

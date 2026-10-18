@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { type FakeStack, botFixture } from "../../test-support/bot.js";
 import { layeredWorld, loadNamedBlock } from "../../test-support/layered-world.js";
-import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkPocket, sanaPocket } from "../../test-support/frozen-pockets.js";
+import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkItems, dirkPocket, sanaItems, sanaPocket } from "../../test-support/frozen-pockets.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
 import type { PlannedStep } from "../movements/movement.js";
@@ -26,14 +26,16 @@ function styledPolicy(bot: ReturnType<typeof botFixture>, override: { digDown: b
 }
 
 async function leavePocket(world: (bot: ReturnType<typeof botFixture>) => MemoryWorld, start: BlockPosition, cave: BlockPosition,
-  options: { digDown?: boolean; escape?: boolean; edit?: (world: MemoryWorld, bot: ReturnType<typeof botFixture>) => void; cancelOn?: string } = {}) {
-  const bot = botFixture({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5) });
+  options: { digDown?: boolean; escape?: boolean; items?: FakeStack[]; edit?: (world: MemoryWorld, bot: ReturnType<typeof botFixture>) => void; cancelOn?: string } = {}) {
+  const items = options.items ?? [];
+  const bot = botFixture({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5), items });
   const override = { digDown: options.digDown ?? false };
   const memory = world(bot);
   options.edit?.(memory, bot);
   const events: NavigationEvent[] = [];
   const fake = new FakeNavigationBot();
-  fake.current = observation(start.x, start.y, start.z);
+  // The run counts the scaffold from the observation: an empty one plans no pillar (the unit pocket escaped where the live one did not).
+  fake.current = { ...observation(start.x, start.y, start.z), inventory: new Map(items.map((stack) => [stack.type!, stack.count])) };
   let cancel: (() => void) | undefined;
   const navigator = createNavigator({ world: memory, bot: fake, telemetry: onEvent((event) => {
     events.push(event);
@@ -230,4 +232,56 @@ test("another bot's navigator does not know the edge", async () => {
   const other = new LipBot();
   const outcome = await requestPast(createNavigator({ world: flatWorld(), bot: other }), other);
   assert.equal(outcome.kind, "failed", "it plans the same edge and fails on it itself");
+});
+
+// ── The search that visits the start cell and the one above it is shut in too (run 15 P2, Dirk) ──
+
+test("Dirk's pocket with his cobblestone: the first search pillars one cell up, yet the run escapes once and commits the dig down", async () => {
+  const run = await leavePocket(dirkPocket, DIRK_START, DIRK_CAVE, { items: dirkItems() });
+  const kind = kinds(run.events);
+  assert.equal(kind.filter((entry) => entry === "escape_relaxed").length, 1, kind.join(" "));
+  assert.ok(kind.indexOf("route_committed") > kind.indexOf("escape_relaxed"), "a route follows the escape");
+  // The fake body cannot break a block, so the walk itself ends there; the live and Mine Labs runs arrive.
+  assert.deepEqual(run.outcome.evidence.escapeRelaxed, ["dig_straight_down"]);
+  assert.equal(run.override.digDown, false, "the style override is untouched");
+});
+
+test("Sana's pocket with her blocks, lava beside the opened cell: the no-path text names the refusals at the start, not a dead end", async () => {
+  const run = await leavePocket(sanaPocket, SANA_START, SANA_CAVE, {
+    items: sanaItems(),
+    edit: (world, bot) => loadNamedBlock(world, bot, { x: -454, y: 57, z: 100 }, "lava"),
+  });
+  assert.equal(run.outcome.kind, "failed");
+  if (run.outcome.kind !== "failed" || run.outcome.failure.kind !== "no_path") return assert.fail(JSON.stringify(run.outcome));
+  const text = describeCalculationFailure(run.outcome.failure);
+  assert.match(text, /shut in at the start: /);
+  assert.doesNotMatch(text, /dead end/);
+});
+
+/** A 3x3 stone platform in bedrock, entered in its middle; the only open cell beyond the bedrock is the goal, 4 cells east. */
+const PLATFORM_START = { x: 0, y: 64, z: 0 } as const;
+const PLATFORM_GOAL = { x: 4, y: 64, z: 0 } as const;
+function sealedPlatform(bot: ReturnType<typeof botFixture>): MemoryWorld {
+  const solid = "RRRRRRRRR";
+  const platform = [solid, "RSSSRRRRR", "RSSSRRRRR", "RSSSRRRRR", solid];
+  return layeredWorld(bot, {
+    origin: { x: -2, z: -2 },
+    legend: { R: "bedrock", S: "stone", A: "air" },
+    outside: () => "bedrock",
+    margin: 2,
+    yRange: { min: 62, max: 66 },
+    layers: {
+      63: platform,
+      64: [solid, "RAAARRRRR", "RAAARRARR", "RAAARRRRR", solid],
+      65: [solid, "RAAARRRRR", "RAAARRARR", "RAAARRRRR", solid],
+    },
+  });
+}
+
+test("a bot in the middle of a sealed 3x3 platform is shut in: the escape is tried once and the failure names the refusals", async () => {
+  const run = await leavePocket(sealedPlatform, PLATFORM_START, PLATFORM_GOAL);
+  assert.equal(kinds(run.events).filter((entry) => entry === "escape_relaxed").length, 1, kinds(run.events).join(" "));
+  assert.equal(run.outcome.kind, "failed");
+  if (run.outcome.kind !== "failed" || run.outcome.failure.kind !== "no_path") return assert.fail(JSON.stringify(run.outcome));
+  assert.match(describeCalculationFailure(run.outcome.failure), /shut in at the start: /);
 });
