@@ -244,3 +244,25 @@ test("a snapshot that cannot be written (rename refused on a shared drive) is lo
   await new Promise((resolve) => setTimeout(resolve, 650));
   assert.equal(logs.length, 1);
 });
+
+test("freeFor: with known slots a free slot, with unknown slots no call of this agent in flight", async () => {
+  const fake = controlled();
+  const known = new ModelQueue({ slots: 2, file: null });
+  const ada = known.track(fake.model, "ada");
+  void ada.complete([], signal);
+  assert.equal(known.freeFor("ada"), true);
+  assert.equal(known.freeFor("bo"), true);
+  void known.track(fake.model, "bo").complete([], signal);
+  assert.equal(known.freeFor("bo"), false, "both slots taken");
+
+  const unknown = new ModelQueue({ slots: null, file: null });
+  const cy = unknown.track(fake.model, "cy");
+  assert.equal(unknown.freeFor("cy"), true);
+  const call = cy.complete([], signal);
+  assert.equal(unknown.free(), true, "unknown slots: free() is always true");
+  assert.equal(unknown.freeFor("cy"), false, "one call of this agent in flight is its limit");
+  assert.equal(unknown.freeFor("di"), true);
+  fake.settle(2);
+  await call;
+  assert.equal(unknown.freeFor("cy"), true);
+});

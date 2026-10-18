@@ -83,6 +83,14 @@ export class ModelQueue {
     return this.slots === null || this.count < this.slots;
   }
 
+  /**
+   * Whether `agentId` may start a model call that can be skipped (an opening, a gist): a free slot when the slots are
+   * known, else (spec 2026-10-18 "Model use") none of its own calls in flight.
+   */
+  freeFor(agentId: string): boolean {
+    return this.slots === null ? !this.byAgent.has(agentId) : this.free();
+  }
+
   /** Resolves once a slot is free (at once if one is); rejects when `signal` aborts. */
   whenFree(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();

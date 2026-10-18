@@ -71,10 +71,11 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
     for (;;) {
       await clock.sleep(WAIT_POLL_MS, signal);
       if (signal.aborted) return stopped;
-      if (talks.current === null) break;
       snapshot = await runtime.status();
       position = positionOf(snapshot, partner);
       if (position !== null && manhattan(snapshot.position, position) <= limits.openingDistance) break;
+      // The record is gone before they came (the tick ended it): the call failed, it is not made again.
+      if (talks.current === null) return { status: "failed", detail: `${partner} did not come` };
       if (clock.now() >= deadline) {
         talks.end("out_of_range", signal);
         return { status: "failed", detail: `${partner} did not come` };

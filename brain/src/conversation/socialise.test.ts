@@ -14,8 +14,9 @@ function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) 
   const { chat, mind } = scriptedMind();
   const spoken: { text: string; shout: boolean }[] = [];
   let now = 1_000_000;
+  // Free for the opening call; once a talk runs the queue is "full", so its end takes the topic as the gist.
   const talks = new ConversationController({
-    self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => false, talkRange: 64, localized,
+    self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => talks.current === null, talkRange: 64, localized,
     random: () => 0, now: () => now, speak: (text, _to, _whisperTo, shout) => spoken.push({ text, shout }), journal: () => undefined,
     memorize: () => undefined, log: () => undefined, history: () => [],
   });
@@ -78,4 +79,17 @@ test("a partner who comes within the opening distance is talked with", async () 
   await until(() => looks >= 3);
   t.talks.said(true);
   assert.equal((await running).status, "done");
+});
+
+test("with the agent's tick running, an unanswered call fails once: no second call, no follow", async () => {
+  const t = setup(true, []);
+  t.chat.reply(OPEN, OPEN);
+  const clock: Clock = {
+    now: t.clock.now,
+    sleep: async (ms, signal) => { await t.clock.sleep(ms, signal); await t.talks.tick(await t.runtime.status(), signal); },
+  };
+  const result = await t.run({ clock });
+  assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
+  assert.equal(t.spoken.length, 1, "one shouted call only");
+  assert.deepEqual(t.runtime.submitted.map((call) => call.tool), []);
 });

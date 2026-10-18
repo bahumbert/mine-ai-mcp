@@ -123,7 +123,7 @@ export class ConversationController {
       if (talk !== undefined) gists.add(talk);
     }
     return {
-      kind: c.kind, others, topic: c.topic, planned: c.planned, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10,
+      kind: c.kind, others, opener: c.opener, topic: c.topic, planned: c.planned, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10,
       iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => this.pastTalk(talk, now)),
     };
   }
@@ -168,6 +168,7 @@ export class ConversationController {
   /** A deliberate opening (the socialising activity): no chance draw, no cooldown. */
   async openSocial(partner: string, partnerPosition: Position | null, o: OpenFacts, signal: AbortSignal): Promise<boolean> {
     if (this.record !== null) return isMember(this.record, partner);
+    if (!this.deps.modelFree()) return false;
     const now = this.deps.now();
     const calling = partnerPosition === null || manhattan(o.snapshot.position, partnerPosition) > this.limits.talkRange;
     if (!this.deps.budget.tryTake()) return false;
@@ -206,8 +207,8 @@ export class ConversationController {
     return true;
   }
 
-  /** A line another character or player said, with the names it holds as words. */
-  heard(speaker: string, text: string, named: readonly string[], channel: "chat" | "whisper"): void {
+  /** A line another character or player said, with the names it holds as words; `near`: a player within talk range (their nameless line joins). */
+  heard(speaker: string, text: string, named: readonly string[], channel: "chat" | "whisper", near = false): void {
     void text;
     const { self } = this.deps;
     if (same(speaker, self)) return;
@@ -222,8 +223,17 @@ export class ConversationController {
       this.journal("opened", opened, { conversationKind: "chance", topic: "", planned: null });
       return;
     }
+    // Two characters opened to each other at once: one conversation. The later username takes the other as opener.
+    if (c.opener === self && this.holdsBudget && c.lines === 1 && isMember(c, speaker) && namesHer && speaker.toLowerCase() < self.toLowerCase()) {
+      this.deps.log(`conversation: ${speaker} opened to me at the same time, so they are the opener`);
+      c.opener = speaker;
+      c.planned = null;
+      c.topic = "";
+      this.holdsBudget = false;
+      this.deps.budget.give();
+    }
     if (!isMember(c, speaker)) {
-      if (!namesHer && !named.some((name) => isMember(c, name))) return;
+      if (!namesHer && !near && !named.some((name) => isMember(c, name))) return;
       addMembers(c, [speaker]);
       this.touched.add(speaker);
       this.journal("joined", c, { member: speaker, why: "spoke to the conversation" });

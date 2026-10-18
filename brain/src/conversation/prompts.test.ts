@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConversationFacts, OpeningInput } from "../mind.ts";
 import { testPersona } from "../testing.ts";
-import { conversationBlock, describeOpening } from "./prompts.ts";
+import { conversationBlock, describeOpening, openingSystemPrompt } from "./prompts.ts";
 
 const facts = (overrides: Partial<ConversationFacts> = {}): ConversationFacts => ({
-  kind: "chance", others: ["Theo"], topic: "the mine", planned: "short", lines: 2, minutes: 1, iAmOpener: true, sayGoodbye: false, lastGists: [], ...overrides,
+  kind: "chance", others: ["Theo"], opener: "Ayla", topic: "the mine", planned: "short", lines: 2, minutes: 1, iAmOpener: true, sayGoodbye: false, lastGists: [], ...overrides,
 });
 
 test("the block tells the opener its planned length", () => {
@@ -18,7 +18,7 @@ test("at the cap the block says goodbye now", () => {
 });
 
 test("someone who did not open it has no planned length", () => {
-  const block = conversationBlock(facts({ iAmOpener: false, planned: null, topic: "" }));
+  const block = conversationBlock(facts({ iAmOpener: false, planned: null, topic: "", opener: "Theo" }));
   assert.doesNotMatch(block, /you meant/u);
   assert.match(block, /Theo opened it/u);
 });
@@ -36,4 +36,20 @@ test("the opening says who is out of sight and who it never talked with", () => 
   assert.match(text, /Theo, out of sight; never talked/u);
   assert.match(text, /Bruno, 7 blocks away; last talk 30 min ago about farm: wheat/u);
   assert.doesNotMatch(text, /- a$/mu);
+});
+
+test("the block names the real opener, not the first other member", () => {
+  const block = conversationBlock(facts({ iAmOpener: false, planned: null, topic: "", others: ["Theo", "Bruno"], opener: "Bruno" }));
+  assert.match(block, /Bruno opened it/u);
+  assert.doesNotMatch(block, /Theo opened it/u);
+});
+
+test("a call is said to be shouted only where localized chat makes it so", () => {
+  const input: OpeningInput = {
+    persona: testPersona(), kind: "social", near: [{ username: "Theo", distance: null, lastTalk: null }], activity: "idle", lately: [], lastFailed: null, calling: true,
+  };
+  assert.doesNotMatch(describeOpening(input), /shout/u);
+  assert.doesNotMatch(openingSystemPrompt(testPersona()), /shout/u);
+  assert.match(describeOpening(input, { range: 64 }), /shouted/u);
+  assert.match(openingSystemPrompt(testPersona(), { range: 64 }), /shouted/u);
 });

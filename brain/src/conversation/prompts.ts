@@ -19,7 +19,7 @@ Reply with only a JSON object {"open": true, "to": ["Name"], "topic": "...", "le
 - "topic": what you want to talk about, in a few words.
 - "length": how long you mean it to be: ${lengths}. A chance meeting while you work leans short; when you went to see someone, medium or long.
 - "say": your first line, in your own words, one or two sentences, under 200 characters.
-${localizedChat === undefined ? "" : `Talk carries about ${localizedChat.range} blocks: only those within that distance hear you.\n`}When "calling" is given, the people you want are out of earshot: your line is shouted to call them over; say where you are or what you want.
+${localizedChat === undefined ? "" : `Talk carries about ${localizedChat.range} blocks: only those within that distance hear you.\n`}When "calling" is given, the people you want are out of earshot: ${localizedChat === undefined ? "your line is plain talk, so they hear it only if they come close; say where you are or what you want" : "your line is shouted to call them over; say where you are or what you want"}.
 Stay in character. Never mention being an AI, a model, a prompt, JSON or tools.`;
 }
 
@@ -33,13 +33,13 @@ function describeTalk(talk: PastTalk): string {
   return `${talk.minutesAgo} min ago about ${talk.topic === "" ? "nothing in particular" : talk.topic}: ${talk.gist === "" ? "(no gist)" : talk.gist}`;
 }
 
-export function describeOpening(input: OpeningInput): string {
+export function describeOpening(input: OpeningInput, localizedChat?: LocalizedChat): string {
   const parts = [
     `${input.calling ? "You want to call over" : "Near you"}:\n${input.near.map(describeNearby).join("\n")}`,
     `You are doing: ${input.activity}.`,
     ...(input.lately.length === 0 ? [] : [`Lately:\n${input.lately.slice(-3).map((line) => `- ${line}`).join("\n")}`]),
     ...(input.lastFailed === null ? [] : [`Your last objective "${input.lastFailed.objective}" failed: ${input.lastFailed.reason}.`]),
-    ...(input.calling ? ["calling: they are out of earshot, your line is shouted to call them over."] : []),
+    ...(input.calling ? [localizedChat === undefined ? "calling: they are out of earshot, your line is plain talk and may not reach them." : "calling: they are out of earshot, your line is shouted to call them over."] : []),
     input.kind === "social" ? "You chose to go and talk with them." : "You meet them while you work.",
   ];
   return parts.join("\n\n");
@@ -50,7 +50,7 @@ export function conversationBlock(facts: ConversationFacts): string {
   const lines = [`- With ${facts.others.join(", ")}.`];
   lines.push(facts.iAmOpener
     ? `- You opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`
-    : `- ${facts.others[0] ?? "Someone"} opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`);
+    : `- ${facts.opener} opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`);
   lines.push(`- ${facts.lines} lines so far, ${facts.minutes} min.`);
   if (facts.iAmOpener && facts.planned !== null) {
     lines.push(`- As its opener, you meant it to be ${facts.planned} (${PLANNED_LINES[facts.planned].join("-")} lines in all).`);

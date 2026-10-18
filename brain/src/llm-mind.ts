@@ -353,7 +353,7 @@ export class LlmMind implements Mind {
   }
 
   async openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision> {
-    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat), describeOpening(input), signal, (json) => {
+    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat), describeOpening(input, this.localizedChat), signal, (json) => {
       const reply = openingReplySchema.parse(json);
       return { open: reply.open, to: addressees(reply.to), topic: reply.topic.trim(), length: reply.length, say: reply.say.trim() };
     });

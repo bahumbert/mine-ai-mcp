@@ -76,3 +76,23 @@ test("the record opens with self and opener, id from the opener", () => {
 test("manhattan distance", () => {
   assert.equal(manhattan({ x: 0, y: 0, z: 0 }, { x: 3, y: -4, z: 5 }), 12);
 });
+
+test("a call nobody answered ends out_of_range at waitUntil, not silence", () => {
+  const c = open({ waitUntil: t0 + 60_000 });
+  c.lines = 1;
+  assert.equal(ending(c, "Ayla", limits, t0 + 59_999), null);
+  assert.equal(ending(c, "Ayla", limits, t0 + 60_000), "out_of_range");
+  c.lines = 2;
+  assert.equal(ending(c, "Ayla", limits, t0 + 60_000), "silence", "they answered, then went quiet");
+});
+
+test("a conversation opened by whisper ignores range (a whisper carries any distance) but not silence or the cap", () => {
+  const c = openConversation({ self: "Ayla", opener: "Theo", kind: "chance", members: [], topic: "", planned: null, whisper: true, now: t0 });
+  assert.deepEqual(checkRange(c, "Ayla", here, [], limits, t0), []);
+  assert.deepEqual(checkRange(c, "Ayla", here, [], limits, t0 + 120_000), [], "absent for two minutes: still a member");
+  assert.deepEqual(c.members, ["Ayla", "Theo"]);
+  assert.equal(ending(c, "Ayla", limits, t0 + 59_999), null);
+  assert.equal(ending(c, "Ayla", limits, t0 + 60_000), "silence");
+  c.lines = 24;
+  assert.equal(capReached(c, limits, t0), true);
+});

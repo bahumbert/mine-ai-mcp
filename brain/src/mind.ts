@@ -227,6 +227,8 @@ export interface ConversationFacts {
   readonly kind: ConversationKind;
   /** The other members. */
   readonly others: readonly string[];
+  /** Who opened it (this character or one of the others). */
+  readonly opener: string;
   readonly topic: string;
   readonly planned: PlannedLength | null;
   readonly lines: number;

@@ -978,7 +978,7 @@ test("an opening with a length that does not exist gets one repair round", async
 });
 
 test("chat reply close defaults to false, and is read inside a conversation only", async () => {
-  const facts = { kind: "chance" as const, others: ["Steve"], topic: "", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
+  const facts = { kind: "chance" as const, others: ["Steve"], opener: "Steve", topic: "", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
   const { chat, mind } = scriptedMind();
   chat.reply({ spoken_to: ["Ayla"], say: "ok", route: "talk" }, { spoken_to: ["Ayla"], say: "bye", route: "talk", close: true }, { spoken_to: ["Ayla"], say: "bye", route: "talk", close: true });
   assert.equal((await mind.chat({ ...chatInput("hm", false), conversation: facts }, signal)).close, undefined);
@@ -987,7 +987,7 @@ test("chat reply close defaults to false, and is read inside a conversation only
 });
 
 test("the chat request carries the conversation block only inside a conversation, and the line of a member is hers", async () => {
-  const facts = { kind: "chance" as const, others: ["Steve"], topic: "ore", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
+  const facts = { kind: "chance" as const, others: ["Steve"], opener: "Steve", topic: "ore", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
   const { chat, mind } = scriptedMind();
   chat.reply({ spoken_to: ["Ayla"], say: "ok", route: "talk" }, { spoken_to: ["Ayla"], say: "ok", route: "talk" });
   const decision = await mind.chat({ ...chatInput("and then?", false), conversation: facts }, signal);

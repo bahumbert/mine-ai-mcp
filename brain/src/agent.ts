@@ -219,9 +219,13 @@ export class Agent {
   private readonly talks: ConversationController | null;
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
+  /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
+  private lastLook: BotSnapshot | null = null;
   /** When conversations were last looked at, and whether that look is still running. */
   private talksCheckedAt = 0;
   private talksLooking = false;
+  /** The conversation check could not read the runtime: logged once, again only after a read worked. */
+  private talksUnreadable = false;
 
   constructor(private readonly options: AgentOptions) {
     this.soil = options.soil ?? new TillFacts();
@@ -369,9 +373,7 @@ export class Agent {
     if (decision.to !== undefined) this.annotate(line, decision.to);
     // Its speaker went on while the model thought: this reply answers a state that is gone. The newest lines are read
     // next, with this one in the history (spec 2026-10-09-chat-handling, A).
-    // In a conversation, any member speaking since does the same.
-    const members = this.talks?.current?.members.filter((name) => name.toLowerCase() !== persona.username.toLowerCase()) ?? [];
-    const superseded = heard !== undefined && (this.inbox.superseded(message.username, heard.seq) || this.inbox.spokeSince(members, heard.seq));
+    const superseded = this.supersededBy(message, heard);
     const talkId = conversation === undefined ? undefined : this.talks?.current?.id;
     this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
     if (superseded) {
@@ -400,11 +402,7 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
-    // Her line in a conversation counts in it; a goodbye (or a line after the cap) ends it.
-    if (conversation !== undefined) {
-      if (decision.say.trim() !== "") this.talks?.said(decision.close === true);
-      else if (decision.close === true) this.talks?.end("goodbye", this.runSignal);
-    }
+    if (conversation !== undefined) this.spokeInConversation(decision);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
@@ -428,6 +426,20 @@ export class Agent {
     }
   }
 
+  /** Whether the message's speaker went on, or in a conversation any member spoke, since it was taken (its reply answers a state that is gone). */
+  private supersededBy(message: PlayerMessage, heard: Heard | undefined): boolean {
+    if (heard === undefined) return false;
+    const self = this.options.persona.username.toLowerCase();
+    const members = this.talks?.current?.members.filter((name) => name.toLowerCase() !== self) ?? [];
+    return this.inbox.superseded(message.username, heard.seq) || this.inbox.spokeSince(members, heard.seq);
+  }
+
+  /** Her line in a conversation counts in it; a goodbye (or a line after the cap) ends it. */
+  private spokeInConversation(decision: { readonly say: string; readonly close?: boolean }): void {
+    if (decision.say.trim() !== "") this.talks?.said(decision.close === true);
+    else if (decision.close === true) this.talks?.end("goodbye", this.runSignal);
+  }
+
   /**
    * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed). Another
    * agent is heard only inside a conversation: a member of it, or a line naming this character or a member (an opening
@@ -438,8 +450,16 @@ export class Agent {
     const speaker = message.username.toLowerCase();
     const agent = otherAgents.some((name) => name.toLowerCase() === speaker);
     if (!agent && !(persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker))) return false;
-    this.talks?.heard(message.username, message.message, named, message.channel);
+    this.talks?.heard(message.username, message.message, named, message.channel, !agent && this.withinTalkRange(message));
     return !agent || this.talks?.isMember(message.username) === true;
+  }
+
+  /** Whether a player's line came from within talk range: its distance, else where the last look put them. */
+  private withinTalkRange(message: PlayerMessage): boolean {
+    const range = this.options.localizedChat?.range ?? this.options.persona.settings.conversation.stayingDistance;
+    if (message.distance !== undefined) return message.distance <= range;
+    const at = this.lastLook?.players.find((player) => player.username.toLowerCase() === message.username.toLowerCase())?.position;
+    return at !== undefined && at !== null && this.lastLook !== null && Math.abs(at.x - this.lastLook.position.x) + Math.abs(at.y - this.lastLook.position.y) + Math.abs(at.z - this.lastLook.position.z) <= range;
   }
 
   /** The characters and players a line holds as words (not its speaker), as spelled in the game. */
@@ -491,12 +511,19 @@ export class Agent {
     this.talksLooking = true;
     void (async () => {
       const snapshot = await this.options.runtime.status();
+      this.talksUnreadable = false;
       this.onlineNames = snapshot.players.map((player) => player.username);
+      this.lastLook = snapshot;
       await talks.tick(snapshot, this.runSignal);
-      const busy = (this.stack.at(-1)?.objective.requester ?? null) !== null || this.sheltering !== null;
+      // An order, a night shelter or a socialising objective on its way (it opens its own conversation) is busy enough.
+      const top = this.stack.at(-1);
+      const busy = (top?.objective.requester ?? null) !== null || top?.objective.purpose === "socialising" || this.sheltering !== null;
       await talks.maybeOpen({ snapshot, activity: this.activity, lately: this.lately, lastFailed: this.lastFailed, busy }, this.runSignal);
     })()
-      .catch((error: unknown) => this.options.log(`conversation check failed: ${String(error)}`))
+      .catch((error: unknown) => {
+        if (!this.talksUnreadable) this.options.log(`conversation check failed (not logged again until a read works): ${String(error)}`);
+        this.talksUnreadable = true;
+      })
       .finally(() => { this.talksLooking = false; });
   }
 

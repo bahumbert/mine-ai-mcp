@@ -224,3 +224,51 @@ test("--max-conversations: default 2, 0 accepted, a negative or fractional value
   assert.equal(maxConversations("3"), 3);
   for (const bad of ["-1", "1.5", "two", ""]) assert.throws(() => maxConversations(bad), /\[BAD_START_ARG\]/u);
 });
+
+test("a social opening is skipped, without a model call, when the model queue is full", async () => {
+  const t = setup({ modelFree: () => false });
+  t.chat.reply(OPEN);
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), false);
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.budget.active, 0);
+});
+
+test("simultaneous openings: the username that sorts later takes the other as opener and gives its budget slot back", async () => {
+  const t = setup();
+  const aaron = { username: "Aaron", position: { x: 5, y: 64, z: 0 } };
+  t.chat.reply({ ...OPEN, to: ["Aaron"] });
+  await t.controller.maybeOpen(t.facts(t.snapshotWith([aaron])), signal);
+  assert.equal(t.budget.active, 1);
+  t.controller.heard("Aaron", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.current?.opener, "Aaron");
+  assert.equal(t.controller.current?.planned, null);
+  assert.equal(t.controller.current?.topic, "");
+  assert.equal(t.controller.current?.lines, 2);
+  assert.equal(t.budget.active, 0);
+  assert.equal(t.controller.facts()?.iAmOpener, false);
+});
+
+test("simultaneous openings: the username that sorts first keeps its record and its slot", async () => {
+  const t = setup();
+  const zed = { username: "Zed", position: { x: 5, y: 64, z: 0 } };
+  t.chat.reply({ ...OPEN, to: ["Zed"] });
+  await t.controller.maybeOpen(t.facts(t.snapshotWith([zed])), signal);
+  t.controller.heard("Zed", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.current?.opener, "Ayla");
+  assert.equal(t.budget.active, 1);
+  assert.equal(t.controller.current?.lines, 2);
+});
+
+test("a nameless line from someone within talk range joins; from farther away or unknown, it does not", () => {
+  const t = setup();
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.heard("Steve", "nice day", [], "chat", false);
+  t.controller.heard("Cleo", "hello", [], "chat");
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
+  t.controller.heard("Steve", "nice day", [], "chat", true);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo", "Steve"]);
+  assert.equal(t.journal.at(-1)?.event, "joined");
+  const alone = setup();
+  alone.controller.heard("Steve", "nice day", [], "chat", true);
+  assert.equal(alone.controller.current, null, "near alone opens nothing");
+});

@@ -1397,10 +1397,11 @@ test("an order ends a chance conversation taken_over", async (t) => {
 
 test("simultaneous openings merge: both end with both members", async (t) => {
   const open = (to: string) => ({ open: true, to: [to], topic: "hello", length: "short", say: `${to}, hi` });
+  const budget = new ConversationBudget(2);
   const world = (self: string, other: string) => {
     const runtime = new FakeRuntime();
     runtime.snapshot = { ...runtime.snapshot, players: [{ username: other, position: { x: 10, y: 64, z: 0 } }] };
-    const tiers = agentFor(t, runtime, { username: self, displayName: self }, talkOptions({ random: () => 0, otherAgents: [other] }));
+    const tiers = agentFor(t, runtime, { username: self, displayName: self }, talkOptions({ random: () => 0, otherAgents: [other], conversations: { budget, modelFree: () => true } }));
     tiers.chat.reply(open(other), { spoken_to: [other], say: "Hi!", route: "talk" }, { spoken_to: [other], say: "Hi again.", route: "talk" });
     return { runtime, ...tiers };
   };
@@ -1412,6 +1413,12 @@ test("simultaneous openings merge: both end with both members", async (t) => {
   await until(() => ayla.runtime.said.length >= 2 && vex.runtime.said.length >= 2);
   assert.deepEqual([...ayla.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
   assert.deepEqual([...vex.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
+  assert.equal(budget.active, 1, "one slot held for the one conversation");
+  assert.equal(ayla.agent.conversation!.opener, "Ayla");
+  assert.equal(vex.agent.conversation!.opener, "Ayla", "Vex sorts later: it takes Ayla as the opener");
+  assert.deepEqual([ayla.runtime.said.length, vex.runtime.said.length], [2, 2], "each side answered the other's line once");
+  assert.equal(ayla.chat.requests.length, 2);
+  assert.equal(vex.chat.requests.length, 2);
 });
 
 test("its own line coming back is not a member's: no wake, no line counted", async (t) => {
@@ -1431,9 +1438,9 @@ test("an order ends a social conversation: its follow step is aborted, the order
   runtime.durations.navigate = 5;
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
   const events: BrainEvent[] = [];
-  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }, false));
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }));
   planner.reply({ objective: "go and chat with Vex", for: "socialising" });
-  chat.reply({ open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  chat.reply({ open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true }, { gist: "Walked a bit, then an order came." });
   action.reply({ done: "got the dirt" });
   await until(() => agent.conversation?.kind === "social");
   assert.match(agent.activity, /go and chat with Vex/u);
@@ -1453,4 +1460,51 @@ test("socialising is never offered to a character without conversations", async 
   await until(() => planner.requests.length >= 1);
   assert.doesNotMatch(JSON.stringify(planner.requests[0]), /chatting with someone/u);
   assert.equal(agent.conversation, null);
+});
+
+test("a runtime that stays down is logged once by the conversation check, again only after a read worked", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ log: (line) => logs.push(line) }));
+  chat.reply({ ...toAyla, say: "Hi." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await until(() => logs.some((line) => line.startsWith("listening as")));
+  const status = runtime.status.bind(runtime);
+  let down = true;
+  runtime.status = async () => {
+    if (down) throw new Error("runtime down");
+    return status();
+  };
+  await sleep(120);
+  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 1);
+  down = false;
+  await sleep(60);
+  down = true;
+  await sleep(60);
+  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 2, "logged again after a read worked");
+});
+
+test("no chance opening while a socialising objective is on its way to its partner", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 1_500;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const settings = { ...testPersona().settings, conversation: { ...testPersona().settings.conversation, checkEverySeconds: 1 } };
+  const { agent, chat, planner } = agentFor(t, runtime, { goal: "Be friendly.", settings }, talkOptions({ otherAgents: ["Vex"], random: () => 0 }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  await until(() => agent.activity.includes("go and chat with Vex"));
+  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, { username: "Bruno", position: { x: 4, y: 64, z: 0 } }] };
+  await sleep(1_300);
+  assert.equal(chat.requests.length, 0, "no opening call to Bruno on the way");
+  assert.equal(agent.conversation, null);
+});
+
+test("a player's nameless line from within talk range joins the conversation; from farther away it does not", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Hi Vex." }, { ...toAyla, say: "Hello Steve." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle({ ...say("Steve", "lovely weather", false), distance: 100 });
+  assert.equal(agent.conversation?.members.includes("Steve"), false);
+  await agent.handle({ ...say("Steve", "lovely weather", false), distance: 10 });
+  assert.equal(agent.conversation?.members.includes("Steve"), true);
 });

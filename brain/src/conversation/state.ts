@@ -15,13 +15,14 @@ export const PLANNED_LINES: Readonly<Record<PlannedLength, readonly [number, num
 export interface Conversation {
   readonly id: string;
   readonly kind: ConversationKind;
-  readonly opener: string;
+  /** Changes once: when two characters opened to each other at the same time, the later username takes the other as opener. */
+  opener: string;
   /** Always holds the character itself. */
   members: string[];
   /** The opener's, in its words; "" when someone else opened it. */
   topic: string;
   /** Only the opener has one. */
-  readonly planned: PlannedLength | null;
+  planned: PlannedLength | null;
   /** Lines said in it, all members. */
   lines: number;
   readonly startedAt: number;
@@ -81,7 +82,8 @@ export function manhattan(a: Position, b: Position): number {
 
 /** Notes who is out of range; members out for `outOfRangeSeconds` are dropped from the record and returned. */
 export function checkRange(c: Conversation, self: string, at: Position, players: BotSnapshot["players"], limits: Limits, now: number): string[] {
-  if (c.waitUntil !== null && now < c.waitUntil) return [];
+  // A whisper carries any distance: only silence and the cap end a whispered talk.
+  if (c.whisper || (c.waitUntil !== null && now < c.waitUntil)) return [];
   const dropped: string[] = [];
   for (const member of [...c.members]) {
     if (same(member, self)) continue;
@@ -104,7 +106,8 @@ export function checkRange(c: Conversation, self: string, at: Position, players:
 export function ending(c: Conversation, self: string, limits: Limits, now: number): EndReason | null {
   if (c.waitUntil !== null && now < c.waitUntil) return null;
   if (!c.members.some((m) => !same(m, self))) return "out_of_range";
-  if (now - c.lastLineAt >= limits.silenceSeconds * 1_000) return "silence";
+  // A call nobody answered (only the opener's line) is a partner who did not come, not a quiet talk.
+  if (now - c.lastLineAt >= limits.silenceSeconds * 1_000) return c.waitUntil !== null && c.lines <= 1 ? "out_of_range" : "silence";
   return null;
 }
 
