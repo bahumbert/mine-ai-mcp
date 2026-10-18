@@ -8,8 +8,10 @@ import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
+import { DIVE_BACKSTOP_TICKS } from "./world/swimming.js";
 
-function fixture() {
+/** Water levels (`level` property) by y for the column's cells; an unlisted cell is a source. */
+function fixture(levels: Record<number, number> = {}) {
   const world = new MemoryWorld();
   for (let y = 59; y <= 65; y++) world.load({ x: 0, y, z: 0 }, y === 59 ? { stateId: 1 } : y <= 63
     ? { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } } : { stateId: 0 });
@@ -18,7 +20,8 @@ function fixture() {
     registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
     blockAt: (p: Vec3) => {
       const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone") } : null;
+      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone"),
+        getProperties: () => ({ level: String(levels[Math.floor(p.y)] ?? 0) }) } : null;
     },
     setControlState: () => {},
   }) as unknown as Bot;
@@ -290,4 +293,31 @@ test("an action already cancelled when its run ends does not start a swim back",
   }), /cancelled by the model/);
   assert.equal(calls, 1);
   assert.equal(diving.active, false);
+});
+
+/** A dive owned in open water, then roofed in the middle of the route: the admission premise (an ascent) is gone. */
+async function backstopUnderRoof(eyeCell: { liquidSource: boolean; level: number }) {
+  const levels: Record<number, number> = {};
+  const { world, bot } = fixture(levels);
+  // Feet at y 60 on the floor: the eye cell is y 61, which holds water for the whole dive.
+  Object.assign(bot.entity, { position: new Vec3(0.5, 60, 0.5) });
+  const diving = new Diving(bot, world);
+  let backstop: number | null = null;
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async () => {
+    assert.equal(diving.owned, true);
+    world.load({ x: 0, y: 61, z: 0 }, { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: eyeCell.liquidSource } });
+    levels[61] = eyeCell.level;
+    for (let y = 62; y <= 65; y++) world.load({ x: 0, y, z: 0 }, { stateId: 1 });
+    backstop = diving.backstop();
+    return { status: "completed", elapsedMs: 0 };
+  });
+  return backstop;
+}
+
+test("the backstop of a roofed dive does not ask a rescue while the eyes are in the air above flowing water of level 4", async () => {
+  assert.equal(await backstopUnderRoof({ liquidSource: false, level: 4 }), DIVE_BACKSTOP_TICKS);
+});
+
+test("the backstop of a roofed dive still asks an immediate rescue with the eyes under a source and no ascent", async () => {
+  assert.equal(await backstopUnderRoof({ liquidSource: true, level: 0 }), 300);
 });

@@ -277,3 +277,42 @@ test("a third breath reflex after three minutes starts the count again and resum
   assert.equal(surfaceAt(0, 19_000).kind, "resume");
   assert.equal(surfaceAt(0, 3 * MINUTE + 1).kind, "resume");
 });
+
+/** "takeover" when the breath reflex fired within 10 ticks, else "idle": an owned dive whose backstop asks `floor` ticks, `air` ticks on the server's meter. */
+async function reflexOutcome(t: import("node:test").TestContext, floor: number | null, air: number) {
+  const fixture = waterFixture(t);
+  Object.assign(fixture.bot, { health: 20, username: "Diver", blockAt: () => null });
+  Reflect.set(fixture.bot.entity.metadata, 0, air);
+  fixture.entity.isInWater = true;
+  const fired: string[] = [];
+  fixture.reflex.onTransition((event) => { if (event.kind === "claim") fired.push(event.kind); });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex, () => floor);
+  for (let tick = 0; tick < 10; tick++) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  await control[Symbol.asyncDispose]();
+  return fired.length === 0 ? "idle" : "takeover";
+}
+
+test("an owned dive whose backstop asks an immediate rescue does not fire while the server's air is full", async (t) => {
+  assert.equal(await reflexOutcome(t, 300, 300), "idle");
+});
+
+test("the same backstop fires from the first tick of air lost", async (t) => {
+  assert.equal(await reflexOutcome(t, 300, 299), "takeover");
+});
+
+test("an unowned bot at 12 of 20 air fires as before", async (t) => {
+  assert.equal(await reflexOutcome(t, null, 12 * 15), "takeover");
+});
+
+test("an owned dive with the air metadata missing reports unknown and does not fire", async (t) => {
+  const fixture = waterFixture(t);
+  Object.assign(fixture.bot, { health: 20, username: "Diver", blockAt: () => null });
+  Object.assign(fixture.entity, { metadata: [] });
+  fixture.entity.isInWater = true;
+  const control = attachBreathReflex(fixture.bot, fixture.reflex, () => 300);
+  for (let tick = 0; tick < 10; tick++) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.reflex.runner.status().owner, "idle");
+  await control[Symbol.asyncDispose]();
+});
