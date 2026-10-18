@@ -150,3 +150,65 @@ test("an unconfirmed use says how far the server clock moved after the use went 
     assert.deepEqual(result.kind === "failed" ? result.serverTicksWaited : null, expected);
   }
 });
+
+/** Server wait: the world age (not client ticks) decides, and the wall clock bounds it. */
+function serverWaitWorld(ageJumps: (wall: number) => number) {
+  const world = usingBot(1_000);
+  const time = { age: 1_000 };
+  Object.defineProperty(world.bot, "time", { value: time });
+  let wall = 0;
+  const clock = {
+    now: () => wall,
+    sleep: async (ms: number) => {
+      wall += ms;
+      time.age += ageJumps(wall);
+    },
+  };
+  return { ...world, clock, wall: () => wall };
+}
+
+test("a server wait confirms an unchanged block only once the world age moved 40 ticks", async () => {
+  const world = serverWaitWorld(() => 20);
+  const result = await useItemAt(world.bot, {
+    item: { name: "bucket" } as InventoryItem,
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    serverWait: { ticks: 40, wallMs: 10_000, ...world.clock },
+  });
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") return;
+  assert.ok((result.serverTicksWaited ?? 0) >= 40);
+  assert.equal(result.timedOut, undefined);
+});
+
+test("a server wait on a frozen world age ends on the wall clock and says it timed out", async () => {
+  const world = serverWaitWorld(() => 0);
+  const result = await useItemAt(world.bot, {
+    item: { name: "bucket" } as InventoryItem,
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    serverWait: { ticks: 40, wallMs: 10_000, ...world.clock },
+  });
+  assert.equal(result.kind === "failed" ? result.timedOut : null, true);
+  assert.ok(world.wall() >= 10_000);
+  assert.equal(world.bot.usingHeldItem, false);
+});
+
+test("a server wait frozen 10 s then +200 still sees a change that arrives late", async () => {
+  const world = serverWaitWorld((wall) => (wall === 10_000 ? 200 : 0));
+  // The effect lands once the age jumps: client ticks never run in this wait.
+  world.bot.waitForTicks = async () => {};
+  const original = world.clock.sleep;
+  let landed = false;
+  world.clock.sleep = async (ms: number) => {
+    await original(ms);
+    if (world.wall() >= 10_000) landed = true;
+  };
+  const result = await useItemAt(world.bot, {
+    item: { name: "bucket" } as InventoryItem,
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: () => landed }],
+    serverWait: { ticks: 40, wallMs: 15_000, ...world.clock },
+  });
+  assert.deepEqual(result, { kind: "used" });
+});

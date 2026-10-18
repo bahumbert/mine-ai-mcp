@@ -177,22 +177,37 @@ test("running out of seeds leaves the last farmland empty, said as such", async 
   assert.equal(evidence.after.emptyFarmland, 1);
 });
 
-test("tilling without a hoe is refused before any work; so is planting what is not carried", async () => {
+test("with no hoe the plot is harvested and replanted, the cells needing tilling skipped as no hoe, and a hoe later tills them (G2)", async () => {
   const farm = new FakeFarm();
   farm.set(0, 0, "dirt");
   farm.set(1, 0, "farmland", "wheat", 7);
   farm.hoe = false;
-  assert.match((await tendPlot(plot({}), farm, CROPS)).refused ?? "", /^\[TEND_NO_HOE\] 1 cell need tilling/u);
-  assert.deepEqual(farm.calls, []);
+  farm.inventory.set("wheat_seeds", 4);
+  const first = await tendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  assert.equal(first.refused, null);
+  assert.equal(first.evidence.harvested, 1);
+  assert.equal(first.evidence.planted, 1);
+  assert.deepEqual(first.evidence.skipped, { "no hoe": [{ x: 0, z: 0 }] });
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), []);
+  // Next farm call with a hoe tills the skipped cell.
   farm.hoe = true;
-  assert.match((await tendPlot(plot({ plant: "carrot" }), farm, CROPS)).refused ?? "", /^\[TEND_PLANT_MISSING\] No carrot/u);
-  assert.deepEqual(farm.calls, []);
-  // Without tilling asked, soil is left as it is and nothing needs a hoe.
-  farm.hoe = false;
-  const { evidence, refused } = await tendPlot(plot({ till: false }), farm, CROPS);
+  const second = await tendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  assert.equal(second.evidence.tilled, 1);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), ["till 0,0"]);
+});
+
+test("with the plant item not carried the harvest still goes on and the plantable cells say so (G2)", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland");
+  const { evidence, refused } = await tendPlot(plot({ plant: "carrot" }), farm, CROPS);
   assert.equal(refused, null);
   assert.equal(evidence.harvested, 1);
-  assert.deepEqual(evidence.skipped, { "not farmland": [{ x: 0, z: 0 }] });
+  assert.deepEqual(evidence.skipped, { "no carrot left": [{ x: 1, z: 0 }] });
+  // Without tilling asked, soil is left as it is and nothing needs a hoe.
+  farm.hoe = false;
+  const none = await tendPlot(plot({ till: false }), farm, CROPS);
+  assert.equal(none.refused, null);
 });
 
 test("progress is reported at each phase and each cell farmed", async () => {

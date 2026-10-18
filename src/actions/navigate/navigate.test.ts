@@ -8,7 +8,7 @@ import { createMovements, type NavigationResult } from "../../navigation/index.j
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
-import { createNavigateAction, formatNavigateResult, type NavigateDependencies } from "./navigate.js";
+import { createNavigateAction, formatNavigateResult, toolLossObserverOf, type NavigateDependencies } from "./navigate.js";
 import { EventEmitter } from "node:events";
 import minecraftData from "minecraft-data";
 
@@ -748,4 +748,19 @@ test("the swim to land and a swim with no land in reach are not stopped by the b
   const sea = swimming(open.bot, 40);
   await new ActionRunner().run(createNavigateAction(open.bot, fakeNavigation, dependencies(sea.navigate)), { x: 210, y: 64, z: 0 });
   assert.equal(sea.walk.stoppedAt, null);
+});
+
+test("the legs of one navigate share one tool-loss observer, whose listeners go with the call (C14)", () => {
+  const bot = botFixture().bot as unknown as Bot & EventEmitter;
+  bot.registry = minecraftData("1.21.4") as never;
+  (bot as unknown as { inventory: unknown }).inventory = Object.assign(new EventEmitter(), { items: () => [], count: () => 0 });
+  const lifetime = new AbortController();
+  const listeners = () => bot.listenerCount("heldItemChanged");
+  const first = toolLossObserverOf(bot, lifetime.signal);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(listeners(), 1, "three legs, one observer");
+  lifetime.abort();
+  assert.equal(listeners(), 0);
+  assert.notEqual(toolLossObserverOf(bot, new AbortController().signal), first, "another call has its own");
 });

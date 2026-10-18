@@ -4,7 +4,7 @@
  * planted. The physical gestures belong to a `FarmBody`; this file decides which gesture each cell gets and keeps
  * the evidence, so it is the same whether the body is a live bot or a test's fake.
  */
-import { tendCropsOutcomes, type TendCell, type TendCropsRequest, type TendEvidence } from "./contract.js";
+import type { TendCell, TendCropsRequest, TendEvidence } from "./contract.js";
 
 /** One block as the decisions need it. */
 export interface CellBlock {
@@ -115,6 +115,7 @@ export async function tendPlot(
     phase = next;
     observe({ phase, ...counts });
   };
+  const hoeCarriedAtStart = body.hasHoe();
   const tilledSoil: Record<string, number> = {};
   const till = { hoeGone: false, untillable: {} as Record<string, TendCell[]> };
   const skipped: Record<string, TendCell[]> = {};
@@ -134,13 +135,6 @@ export async function tendPlot(
     after: plotAfter(request, cells, body, crops),
   });
 
-  const decisions = cells.map(decide);
-  const tilling = decisions.filter((decision) => decision === "till").length;
-  if (request.till && tilling > 0 && !body.hasHoe()) return { evidence: evidence(), stop: null, refused: tendCropsOutcomes.noHoe(tilling) };
-  const plantable = decisions.filter((decision) => decision === "till" || decision === "plant").length;
-  if (request.plant !== null && plantable > 0 && body.carried(request.plant) === 0) {
-    return { evidence: evidence(), stop: null, refused: tendCropsOutcomes.plantMissing(request.plant) };
-  }
   if (request.plant !== null) remember(request.plant);
 
   // First what comes off the soil, so its drops (a harvest's seeds) are in hand before planting.
@@ -199,8 +193,8 @@ export async function tendPlot(
       continue;
     }
     if (decision === "clear") continue;
-    if (decision === "till" && (!request.till || till.hoeGone)) {
-      skip(cell, request.till ? NO_HOE_LEFT : "not farmland");
+    if (decision === "till" && (!request.till || till.hoeGone || !body.hasHoe())) {
+      skip(cell, !request.till ? "not farmland" : hoeCarriedAtStart ? NO_HOE_LEFT : NO_HOE);
       continue;
     }
     if (decision === "plant" && choices(cell).length === 0) {
@@ -246,6 +240,7 @@ export async function tendPlot(
 }
 
 const NO_HOE_LEFT = "no hoe left";
+const NO_HOE = "no hoe";
 const TILL_NOT_CONFIRMED = "till not confirmed (server behind)";
 
 /** What a failed till teaches: no hoe ends the tilling, an unchanged block is untillable, an error is neither. Returns the skip reason. */

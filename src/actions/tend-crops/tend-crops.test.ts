@@ -68,3 +68,8 @@ test("a failed hoe use is unchanged only when the server clock moved 20 ticks an
   assert.deepEqual(tillFailure(failed(40), false), { kind: "error", error: "not confirmed" });
   assert.deepEqual(tillFailure(failed(null), true), { kind: "error", error: "not confirmed" });
 });
+
+test("a hoe use whose wait ended on the wall clock is never an untillable verdict", () => {
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 30, timedOut: true }, true), { kind: "unconfirmed" });
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 40 }, true), { kind: "unchanged" });
+});

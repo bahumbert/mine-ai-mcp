@@ -241,6 +241,18 @@ function highestFloor(bot: Bot, x: number, z: number): number | null {
   return null;
 }
 
+const toolLossObservers = new WeakMap<AbortSignal, ReturnType<typeof observeToolTierLoss>>();
+
+/** The one tool-loss observer of a navigate call: its legs (boat crossings, climbs, landings) share it and its listeners. */
+export function toolLossObserverOf(bot: Bot, lifetime: AbortSignal): ReturnType<typeof observeToolTierLoss> {
+  const known = toolLossObservers.get(lifetime);
+  if (known !== undefined) return known;
+  const observer = observeToolTierLoss(bot);
+  toolLossObservers.set(lifetime, observer);
+  lifetime.addEventListener("abort", observer.close, { once: true });
+  return observer;
+}
+
 function beginNavigate(
   bot: Bot,
   request: NavigateRequest,
@@ -251,8 +263,7 @@ function beginNavigate(
   climbed = false,
   unbudgeted = false,
 ) {
-  const toolLoss = request.dig ? observeToolTierLoss(bot) : null;
-  lifetime.addEventListener("abort", () => toolLoss?.close(), { once: true });
+  const toolLoss = request.dig ? toolLossObserverOf(bot, lifetime) : null;
   const start = position(bot.entity.position);
   const startDimension = bot.game.dimension;
   const bucketBefore = bucketDropTotals(bot);

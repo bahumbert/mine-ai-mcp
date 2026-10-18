@@ -47,14 +47,25 @@ export function cropFacts(bot: Pick<Bot, "registry" | "version">): CropFacts {
 
 /** Server ticks that must pass after a use for an unchanged block to count as the server's answer (the server may be far behind). */
 export const TILL_CONFIRM_TICKS = 20;
+/** The hoe's wait: the world age moving this far past the use, bounded by the wall clock (a stopped server clock never answers). */
+const TILL_SERVER_TICKS = 40;
+const TILL_WALL_MS = 10_000;
+
+interface UseFailure {
+  readonly error: string;
+  readonly serverTicksWaited: number | null;
+  /** The wait ended on the wall clock with the server clock not moved far enough: no answer was seen. */
+  readonly timedOut?: boolean;
+}
 
 /**
  * A failed hoe use as the plot sees it. The block is "unchanged" only once the server clock moved on by
  * {@link TILL_CONFIRM_TICKS} after the use with no block update (packets arrive in order: ours would have come first)
  * and the hoe is still carried; a wait that ended earlier is "unconfirmed", an error or a broken hoe teaches nothing.
  */
-export function tillFailure(failure: { readonly error: string; readonly serverTicksWaited: number | null }, hoeCarried: boolean): TillFailure {
+export function tillFailure(failure: UseFailure, hoeCarried: boolean): TillFailure {
   if (failure.serverTicksWaited === null || !hoeCarried) return { kind: "error", error: failure.error };
+  if (failure.timedOut === true) return { kind: "unconfirmed" };
   return failure.serverTicksWaited >= TILL_CONFIRM_TICKS ? { kind: "unchanged" } : { kind: "unconfirmed" };
 }
 
@@ -73,7 +84,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
   };
 
   /** Right-click the top face of the block at `cell` holding `item`, until `watched` reads differently. */
-  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell): Promise<{ readonly error: string; readonly serverTicksWaited: number | null } | null> => {
+  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell, serverWait = false): Promise<UseFailure | null> => {
     const block = bot.blockAt(vec(cell));
     if (block === null) return { error: "the cell is not loaded", serverTicksWaited: null };
     const before = bot.blockAt(vec(watched))?.stateId;
@@ -83,9 +94,10 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       on: { block, face: { x: 0, y: 1, z: 0 } },
       expectedCells: [{ position: watched, matches: (current) => current.stateId !== before }],
       timeoutTicks: USE_TIMEOUT_TICKS,
+      ...(serverWait && { serverWait: { ticks: TILL_SERVER_TICKS, wallMs: TILL_WALL_MS } }),
       ...(signal && { signal }),
     });
-    return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null };
+    return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null, ...(result.timedOut && { timedOut: true }) };
   };
 
   return {
@@ -124,7 +136,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
     async till(soil) {
       const item = hoe();
       if (item === null) return { kind: "no hoe" };
-      const failure = await useOnTop(soil, item, soil);
+      const failure = await useOnTop(soil, item, soil, true);
       if (failure === null) return null;
       return tillFailure(failure, hoe() !== null);
     },
