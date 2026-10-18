@@ -63,7 +63,26 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
     }
     return { outcome: await done, position: fixture.entity.position, digs };
   };
-  return { run, bot, fixture, digs, held };
+  return { run, bot, fixture, digs, held, step };
+}
+
+/**
+ * Runs `surface` for `ticks` physics ticks with the air held short (a bot that keeps breathing leaves the loop), calls
+ * `onTick(tick)` before each, then stops it; returns where the body is.
+ */
+async function surfaceWithShortAir(world: ReturnType<typeof swimWorld>, ticks: number, onTick: (tick: number) => void) {
+  const stop = new AbortController();
+  const done = surface(world.bot, stop.signal, new Budgets(), 600).catch(() => undefined);
+  for (let tick = 0; tick < ticks; tick++) {
+    onTick(tick);
+    world.step();
+    if (world.digs.length === 0) (world.bot as unknown as { oxygenLevel: number }).oxygenLevel = 8;
+    world.bot.emit("physicsTick");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  stop.abort();
+  await done;
+  return world.fixture.entity.position;
 }
 
 /** A roofed stream along x (y 0-1), floor below, stone roof at y 2. */
@@ -140,4 +159,40 @@ test("a death during the surfacing ends it with the controls released", async (t
   world.bot.emit("death");
   assert.equal((await done).kind, "bot_died");
   assert.equal(world.held.size, 0);
+});
+
+// Review 2026-10-18 (run 15 fixes), blocking 2: a route that is empty (the head was in air) or fully walked was never
+// asked for again, so a bot that bobbed back under the roof with air still short only jumped.
+test("the head in air, then under water again with the air short and no pocket left: the reflex digs within a second", async (t) => {
+  let flooded = false;
+  const seen = (x: number, y: number, z: number): Cell => (!flooded && x >= -6 && x <= -5 && y === 1 && z === 0 ? "air" : tunnel(x, y, z));
+  const world = swimWorld(t, seen, new Vec3(-4.5, 0.2, 0.5));
+  await surfaceWithShortAir(world, 25, (tick) => {
+    if (tick === 5) flooded = true;
+  });
+  assert.deepEqual(world.digs, ["roof"], "the empty route of the breathing head was dropped when it went under again");
+});
+
+test("the head in air, then under water again with another pocket in reach: a new route swims to it within a second", async (t) => {
+  let flooded = false;
+  const seen = (x: number, y: number, z: number): Cell =>
+    y === 1 && z === 0 && ((!flooded && x >= -6 && x <= -5) || x === 6) ? "air" : tunnel(x, y, z);
+  const world = swimWorld(t, seen, new Vec3(-4.5, 0.2, 0.5));
+  const position = await surfaceWithShortAir(world, 25, (tick) => {
+    if (tick === 5) flooded = true;
+  });
+  assert.ok(position.x > -3.5, `swam east toward the other pocket, ended at x ${position.x}`);
+  assert.deepEqual(world.digs, []);
+});
+
+test("a route walked to its last cell, then the pocket floods: a new route is asked for within a second", async (t) => {
+  let flooded = false;
+  const seen = (x: number, y: number, z: number): Cell =>
+    y === 1 && z === 0 && ((!flooded && x >= -5 && x <= -4) || x === 6) ? "air" : tunnel(x, y, z);
+  const world = swimWorld(t, seen, new Vec3(0.5, 0.2, 0.5));
+  const position = await surfaceWithShortAir(world, 100, (tick) => {
+    if (tick === 80) flooded = true;
+  });
+  assert.ok(position.x > -3, `walked to the pocket (x -4), then swam east after it flooded, ended at x ${position.x}`);
+  assert.deepEqual(world.digs, []);
 });

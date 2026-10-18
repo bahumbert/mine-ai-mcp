@@ -1,16 +1,12 @@
 import type { Bot } from "mineflayer";
-import type { Vec3 } from "vec3";
 import { horizontalControlsToward } from "../../navigation/index.js";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { airSupplyPoints, FULL_AIR_POINTS, isInWater } from "../perception/body.js";
-import { routeCellReached, routeVerticalControls, swimBreathRoute, swimCellKey, swimmingRoof } from "../positioning/swim-escape.js";
+import { routeVerticalControls, swimmingRoof } from "../positioning/swim-escape.js";
 import type { Budgets } from "../state/budgets.js";
+import { AirRoute } from "./air-route.js";
 
-/** A cell of the swim to air that is not closed in this long (one second) marks that way blocked. */
-const CELL_STALL_TICKS = 20;
-/** After this many blocked ways the reflex digs up instead of asking for another. */
-const BLOCKED_WAYS_BEFORE_DIGGING = 2;
 const TICK_MS = 50;
 /** The wall clock allows this many times the tick budget, so a stopped physics clock cannot hold the body. */
 const WALL_CLOCK_FACTOR = 2;
@@ -34,11 +30,7 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
     measure: () => ticks,
     exhaustion: "stuck",
   });
-  let route: Vec3[] | null = null;
-  let next = 0;
-  let cellTicks = 0;
-  let blockedWays = 0;
-  const closedCells = new Set<string>();
+  const route = new AirRoute();
   let jumping = true;
   let sneaking = false;
   signal.throwIfAborted();
@@ -63,32 +55,18 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
       if (air === null || air >= FULL_AIR_POINTS) break;
       const roof = isInWater(bot) ? swimmingRoof(bot) : null;
       if (bot.health <= 0) break;
-      if (route && next < route.length) {
-        if (routeCellReached(bot.entity.position, route[next]!)) {
-          next++;
-          cellTicks = 0;
-        } else if (++cellTicks >= CELL_STALL_TICKS) {
-          closedCells.add(swimCellKey(route[next]!.floored()));
-          blockedWays++;
-          route = null;
-        }
-      }
-      if (roof && !route && blockedWays < BLOCKED_WAYS_BEFORE_DIGGING) {
-        route = swimBreathRoute(bot, closedCells);
-        next = 0;
-        cellTicks = 0;
-      }
-      const target = route?.[next] ?? null;
+      route.update(bot, roof !== null);
+      const target = route.target;
       const horizontal = target ? horizontalControlsToward(bot.entity, target, 0.05) : null;
       for (const control of ["forward", "back", "left", "right"] as const)
         bot.setControlState(control, horizontal?.[control] ?? false);
-      const vertical = target ? routeVerticalControls(bot, target, next === route!.length - 1) : { jump: true, sneak: false };
+      const vertical = target ? routeVerticalControls(bot, target, route.onLastCell) : { jump: true, sneak: false };
       if (vertical.jump !== jumping) bot.setControlState("jump", (jumping = vertical.jump));
       if (vertical.sneak !== sneaking) bot.setControlState("sneak", (sneaking = vertical.sneak));
       // No way to air within reach (or each tried one stalled): dig up through the roof, with the best tool carried.
       // The reflex digs by the body in the water, never by the route policy, so its rule against mining under water
       // does not apply here.
-      if (roof?.diggable && !route) {
+      if (roof?.diggable && route.none) {
         try {
           const tool = selectHarvestTool(bot, roof);
           if (tool && bot.heldItem?.name !== tool.name) await bot.equip(tool, "hand");

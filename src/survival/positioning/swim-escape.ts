@@ -95,6 +95,12 @@ export function swimBreathRoute(bot: Bot, closed: ReadonlySet<string>): Vec3[] |
   return path && path.map((cell) => new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5));
 }
 
+/** Whether the cell over the one the feet are in is air: the head breathes there (the cell test of `swimBreathRoute`). */
+export function headInAir(bot: Bot): boolean {
+  const feet = bot.entity.position.floored();
+  return swimCellOf(bot)(feet.x, feet.y + 1, feet.z) === "air";
+}
+
 /** Within this of a cell's centre sideways, and this of its feet height, the cell is closed. */
 const CELL_REACHED_SIDEWAYS = 0.25;
 const CELL_REACHED_VERTICALLY = 0.7;

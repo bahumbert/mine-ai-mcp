@@ -228,3 +228,66 @@ test("a death during the swim back ends it cleanly", async () => {
   assert.equal(bot.listenerCount("death"), 0);
   assert.equal(bot.listenerCount("respawn"), 0);
 });
+
+// Review 2026-10-18 (run 15 fixes), blocking 3: the swim back ran after successful arrivals and ignored the action's cancel.
+
+/** The first navigate of a run into the tunnel: the pocket passed with the head in air, then the dive owned, five blocks in. */
+function intoTheTunnel(bot: Bot, diving: Diving): void {
+  bot.emit("physicsTick");
+  diving.committed({ steps: [movementStep("swim", { x: 4, y: 60, z: 0 }, { x: 5, y: 60, z: 0 })] });
+  bot.entity.position.x = 5.5;
+}
+
+test("a goal under water that was reached is where the run ends: no swim back undoes the arrival", async () => {
+  const { world, bot } = tunnelFixture();
+  const diving = new Diving(bot, world);
+  let calls = 0;
+  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 5, y: 60, z: 0 }) }, async () => {
+    calls++;
+    intoTheTunnel(bot, diving);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 1, "the arrival is not swum back from");
+  assert.equal(bot.entity.position.x, 5.5);
+});
+
+test("the action cancelled during the swim back stops it at once, with no control held", async () => {
+  const { world, bot } = tunnelFixture();
+  const held = new Set<string>();
+  bot.setControlState = (control, active) => void (active ? held.add(control) : held.delete(control));
+  const diving = new Diving(bot, world);
+  const cancel = new AbortController();
+  let calls = 0;
+  let stoppedAtOnce = false;
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }), signal: cancel.signal }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      intoTheTunnel(bot, diving);
+      return { status: "stopped", reason: "no route", elapsedMs: 0 };
+    }
+    cancel.abort("cancelled by the model");
+    stoppedAtOnce = request.stopSignal?.aborted === true;
+    return { status: "stopped", reason: "cancelled", elapsedMs: 0 };
+  });
+  assert.equal(calls, 2);
+  assert.equal(stoppedAtOnce, true, "the swim back is told to stop when the action is cancelled");
+  assert.equal(held.size, 0);
+  assert.equal(diving.active, false);
+  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") + bot.listenerCount("physicsTick"), 0);
+});
+
+test("an action already cancelled when its run ends does not start a swim back", async () => {
+  const { world, bot } = tunnelFixture();
+  const diving = new Diving(bot, world);
+  const cancel = new AbortController();
+  let calls = 0;
+  await assert.rejects(diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }), signal: cancel.signal }, async () => {
+    calls++;
+    intoTheTunnel(bot, diving);
+    cancel.abort("cancelled by the model");
+    throw cancel.signal.reason;
+  }), /cancelled by the model/);
+  assert.equal(calls, 1);
+  assert.equal(diving.active, false);
+});
