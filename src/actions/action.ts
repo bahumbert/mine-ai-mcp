@@ -108,6 +108,11 @@ interface ActionContract<
   outputSchema: z.ZodType<ActionOutput<Name, Result>, ActionOutput<Name, Result>>;
   /** Present the action-owned evidence as useful Markdown. */
   formatResult(result: Result): string;
+  /**
+   * Set on an action whose work is getting the bot somewhere (navigate, collect_block, collect_mob_drop): its failures
+   * count toward a pinned bot, and a pinned bot runs it as an escape or has it refused at once.
+   */
+  movement?: true;
   annotations?: ToolAnnotations;
   /** Reject bad arguments before execution starts. */
   parse(input: unknown): Request;

@@ -7,6 +7,7 @@
  *
  * This is not the caller-facing boundary — `src/navigation/index.ts` is.
  */
+import { EscapeHolds } from "./escape-holds.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { Diving } from "./diving.js";
 import type { Bot } from "mineflayer";
@@ -33,6 +34,11 @@ export interface NavigationRuntime extends AsyncDisposable {
   /** The world as navigation observes it, for callers that judge blocks the way routes do. */
   readonly world: WorldView;
   readonly navigate: Navigate;
+  /**
+   * While the returned handle is open every route of this bot starts as an escape (`NavigateOptions.escape`): the
+   * session holds it around a pinned bot's movement action, so no action passes the flag down by hand.
+   */
+  routesAsEscape(): Disposable;
   readonly breakBlockInPlace: BreakBlockInPlace;
   /**
    * Register the one provider every search asks for its step field.
@@ -118,6 +124,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     }
   };
   let closed = false;
+  const escapes = new EscapeHolds();
 
   const botDied = () => {
     diving.cancel("bot died");
@@ -255,7 +262,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
       await releaseCancelled();
       requireOpen();
       selectedTool = options.onToolSelected;
-      const pending = diving.run(options, navigate);
+      const pending = diving.run(escapes.active ? { ...options, escape: true } : options, navigate);
       const held = { pending, signal: options.signal, cancelled: false };
       activeNavigation = held;
       try { return await pending; }
@@ -266,6 +273,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
         }
       }
     },
+    routesAsEscape: () => escapes.hold(),
     breakBlockInPlace: async (options) => {
       requireOpen();
       const block = world.blockAt(options.position.x, options.position.y, options.position.z);

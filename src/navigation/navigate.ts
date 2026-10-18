@@ -75,6 +75,8 @@ export interface NavigateOptions {
   readonly onToolSelected?: (itemType: number | null) => void;
   /** Optional search qualification owned by a caller with a more volatile goal. */
   readonly searchLimits?: SearchLimits;
+  /** Starts the route as an escape (see `NavigationRequest.escape`): the caller knows the bot is pinned. */
+  readonly escape?: boolean;
   /**
    * Opts this route out of the runtime's registered step field.
    *
@@ -130,6 +132,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     ...(options.onCalculationFailure && { onCalculationFailure: options.onCalculationFailure }),
     ...(options.onPlacement && { onPlacement: options.onPlacement }),
     stepField: options.stepField,
+    ...(options.escape && { escape: true }),
     signal,
     // Commit a useful partial route instead of retaining an ever-growing A*
     // frontier. Without this qualified boundary cavern-ore-return expanded

@@ -685,6 +685,7 @@ export function createNavigateAction(
     inputSchema: navigateInputSchema,
     resultSchema: navigateResultSchema,
     formatResult: formatNavigateResult,
+    movement: true,
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: NAVIGATE,

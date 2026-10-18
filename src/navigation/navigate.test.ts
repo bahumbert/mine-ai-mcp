@@ -182,3 +182,10 @@ test("a route ended by a failed break names the block, and only a break is named
   );
   assert.equal(placement.status === "stopped" && placement.failedBreak, undefined);
 });
+
+test("an escape request reaches the run as an escape, and a plain one does not", async () => {
+  const { navigator, requests } = fakeNavigator(() => ({ kind: "completed", evidence: evidence() }));
+  await runNavigation(navigator, { ...request, escape: true });
+  await runNavigation(navigator, request);
+  assert.deepEqual(requests.map((started) => started.escape), [true, undefined]);
+});

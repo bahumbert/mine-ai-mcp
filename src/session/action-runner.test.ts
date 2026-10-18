@@ -13,7 +13,9 @@ import {
 import { ReflexDriver } from "../survival/control/driver.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { BodyAbort } from "./abort.js";
+import type { StallClock } from "../actions/stall-watch.js";
 import { ActionRunner } from "./action-runner.js";
+import { PinnedWatch, type PinnedEscape } from "./pinned-watch.js";
 
 test("disconnect fails an executor that never settles and permanently closes admission", async () => {
   const runner = new ActionRunner();
@@ -372,9 +374,11 @@ type StubAction = Action<"stub", { block_name: string }, StubResult>;
 function stubAction(
   execute: NonNullable<StubAction["execute"]>,
   execution: ActionExecution = { kind: "task" },
+  movement = false,
 ): StubAction {
   return defineAction({
     name: "stub",
+    ...(movement && { movement: true as const }),
     description: "stub",
     inputSchema: stubInputSchema,
     resultSchema: stubResultSchema,
@@ -1232,4 +1236,130 @@ test("a 60 s wall clock step fails nothing while ticks come", async () => {
     Date.now = realNow;
     clearInterval(ticking);
   }
+});
+
+// ── Pinned watch (run 15: bots pinned for hours) ─────────────────────────────
+
+const PINNED_MINUTES = 10 * 60_000;
+
+/** A pinned bot's runner: a hand-stepped clock, a body the test moves, and an escape that records what it did. */
+function pinnedRunner() {
+  let now = 0;
+  const clock: StallClock = { now: () => now, every: () => () => {} };
+  const body = { x: 0, z: 0 };
+  const position = () => ({ dimension: "overworld", x: body.x, y: 64, z: body.z });
+  const watch = new PinnedWatch({ position, clock });
+  const log: string[] = [];
+  let routesAsEscape = false;
+  const escape: PinnedEscape = {
+    leave: async () => { log.push("leave"); },
+    routesAsEscape: () => {
+      routesAsEscape = true;
+      return { [Symbol.dispose]: () => { routesAsEscape = false; } };
+    },
+  };
+  const runner = new ActionRunner({ position, clock, pinned: watch, pinnedEscape: escape });
+  const failing = stubAction(async () => ({ status: "failed", error: "dead end: dig into water 4" }), { kind: "task" }, true);
+  const pin = async () => {
+    for (let n = 0; n < 3; n++) await runner.run(failing, { block_name: "stone" });
+    now += PINNED_MINUTES;
+  };
+  return { runner, watch, body, log, failing, pin, escaping: () => routesAsEscape, advance: (ms: number) => { now += ms; } };
+}
+
+test("a pinned bot's next movement action leaves the water or boat first and runs its routes as an escape", async () => {
+  const { runner, log, pin, escaping } = pinnedRunner();
+  await pin();
+  let escapingDuringRun = false;
+  const movement = stubAction(async () => {
+    escapingDuringRun = escaping();
+    return { status: "succeeded" };
+  }, { kind: "task" }, true);
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.deepEqual(log, ["leave"]);
+  assert.equal(escapingDuringRun, true);
+  assert.equal(escaping(), false, "the escape ends with the action");
+});
+
+test("a bot that failed twice and sat ten minutes runs its next movement action without an escape", async () => {
+  const { runner, log, failing, body } = pinnedRunner();
+  await runner.run(failing, { block_name: "stone" });
+  await runner.run(failing, { block_name: "stone" });
+  body.x = 0.2;
+  let ran = false;
+  const movement = stubAction(async () => { ran = true; return { status: "succeeded" }; }, { kind: "task" }, true);
+  await runner.run(movement, { block_name: "stone" });
+  assert.equal(ran, true);
+  assert.deepEqual(log, []);
+});
+
+test("an escape that leaves the bot in place makes movement actions fail at once with [PINNED], other actions still run", async () => {
+  const { runner, pin, failing } = pinnedRunner();
+  await pin();
+  await runner.run(failing, { block_name: "stone" });
+  let ran = 0;
+  const movement = stubAction(async () => { ran++; return { status: "succeeded" }; }, { kind: "task" }, true);
+  const refused = (await runner.run(movement, { block_name: "stone" })).result;
+  assert.equal(refused.status, "failed");
+  assert.match("error" in refused ? refused.error : "", /^\[PINNED\].*dig into water 4/u);
+  assert.equal(ran, 0, "a refused movement action never reached the body");
+  const other = stubAction(async () => { ran++; return { status: "succeeded" }; });
+  assert.equal((await runner.run(other, { block_name: "stone" })).result.status, "succeeded");
+  assert.equal(ran, 1);
+});
+
+test("after [PINNED], a move of 2 blocks by any action lets the next movement action run normally", async () => {
+  const { runner, pin, failing, body, log } = pinnedRunner();
+  await pin();
+  await runner.run(failing, { block_name: "stone" });
+  body.x = 2;
+  let ran = false;
+  const movement = stubAction(async () => { ran = true; return { status: "succeeded" }; }, { kind: "task" }, true);
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.equal(ran, true);
+  assert.deepEqual(log, ["leave"], "only the one escape ran; the freed bot needs no second");
+});
+
+test("a failing action that is not a movement action does not count toward pinned", async () => {
+  const { runner, watch, body } = pinnedRunner();
+  const notMovement = stubAction(async () => ({ status: "failed", error: "nope" }));
+  for (let n = 0; n < 3; n++) await runner.run(notMovement, { block_name: "stone" });
+  assert.equal(watch.isPinned(), false);
+  body.x = 0;
+});
+
+test("two runners in one process escape and refuse independently", async () => {
+  const first = pinnedRunner();
+  const second = pinnedRunner();
+  await first.pin();
+  await first.runner.run(first.failing, { block_name: "stone" });
+  const movement = stubAction(async () => ({ status: "succeeded" }), { kind: "task" }, true);
+  assert.equal((await second.runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.deepEqual(second.log, []);
+  assert.equal((await first.runner.run(movement, { block_name: "stone" })).result.status, "failed");
+});
+
+test("a refused pinned bot runs the escape again after another window, and is refused again when it fails", async () => {
+  const { runner, pin, failing, log, advance } = pinnedRunner();
+  await pin();
+  await runner.run(failing, { block_name: "stone" });
+  assert.deepEqual(log, ["leave"]);
+  const refused = (await runner.run(failing, { block_name: "stone" })).result;
+  assert.match("error" in refused ? refused.error : "", /^\[PINNED\]/u);
+  assert.deepEqual(log, ["leave"], "refused without an escape inside the window");
+  advance(PINNED_MINUTES);
+  await runner.run(failing, { block_name: "stone" });
+  assert.deepEqual(log, ["leave", "leave"], "the retry ran the escape");
+  const again = (await runner.run(failing, { block_name: "stone" })).result;
+  assert.match("error" in again ? again.error : "", /^\[PINNED\]/u, "refusal resumes");
+});
+
+test("a retry escape that succeeds frees the next movement action", async () => {
+  const { runner, pin, failing, advance } = pinnedRunner();
+  await pin();
+  await runner.run(failing, { block_name: "stone" });
+  advance(PINNED_MINUTES);
+  const movement = stubAction(async () => ({ status: "succeeded" }), { kind: "task" }, true);
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
 });

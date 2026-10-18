@@ -140,6 +140,8 @@ function runtimeOptions(session: NodeClientSession, artifacts: string | undefine
       identity: { worldId, scope: { kind: "bot", botId: session.username } },
     },
     onDisconnect: (reason) => session.log(`runtime disconnected: ${reason}`),
+    // A scenario that shows the pinned watch shortens its ten minutes to seconds.
+    ...(typeof session.scenario.params?.pinnedWindowMs === "number" && { pinned: { windowMs: session.scenario.params.pinnedWindowMs } }),
   };
 }
 

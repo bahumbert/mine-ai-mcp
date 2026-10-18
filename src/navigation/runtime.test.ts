@@ -135,3 +135,29 @@ test("a navigate that is not cancelled still refuses a second one at once", asyn
     clearInterval(ticking);
   }
 });
+
+/** Plans one route on the waiting floor, stops it at its commit, and returns the events it raised before. */
+async function eventsOfOneRoute(open: (navigation: ReturnType<typeof createNavigationRuntime>) => Disposable | undefined) {
+  const { navigation, movements, goal } = waitingRoute();
+  const kinds: string[] = [];
+  const stop = new AbortController();
+  navigation.onEvent((event) => {
+    kinds.push(event.kind);
+    if (event.kind === "route_committed") stop.abort("route observed");
+  });
+  const held = open(navigation);
+  try {
+    await navigation.navigate({ movements, goal, stopSignal: stop.signal });
+  } finally {
+    held?.[Symbol.dispose]();
+    await navigation.close();
+  }
+  return kinds;
+}
+
+// Run 15: a pinned bot's next movement action routes as an escape without every action passing a flag down.
+test("while routesAsEscape is open every route starts as an escape, and the next one after it does not", async () => {
+  const escaping = await eventsOfOneRoute((navigation) => navigation.routesAsEscape());
+  assert.ok(escaping.includes("escape_relaxed"), "the route set its style rules aside");
+  assert.equal((await eventsOfOneRoute(() => undefined)).includes("escape_relaxed"), false);
+});

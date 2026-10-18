@@ -1,0 +1,52 @@
+template: ../../templates/flat-single-action.yaml
+
+name: pinned-box-refuses-movement-at-once
+tags: [regression]
+description: >-
+  Run 15 lost about 14 % of bot time to bots pinned in one place whose navigates each took minutes to fail. A bot sealed
+  in a stone box fails three navigates, stays past the (here shortened) pinned window, runs the escape on its next
+  navigate, which fails too, and its next movement action is refused at once with [PINNED] and the last refusal.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  # A solid block of stone with a two-cell air room in it: nothing to walk to, and digging is not asked for.
+  - fill: { block: stone, from: [-3, -63, -3], to: [3, -54, 3] }
+  - fill: { block: air, from: [0, -58, 0], to: [0, -57, 0] }
+
+players:
+  - name: Pinned
+    pos: [0.5, -58, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/pinned-navigates.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Pinned,gamemode=!spectator]"
+
+params:
+  pinnedWindowMs: 2000
+  waitTicks: 70
+  target: [8, -58, 0]
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: health, who: Pinned, health: 20 }
+    - { kind: completion, who: Pinned }

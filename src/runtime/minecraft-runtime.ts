@@ -34,6 +34,8 @@ import { ExecutionScope, observeExecution } from "../execution/execution-scope.j
 import { createNavigationRuntime, type NavigationRuntime } from "../navigation/index.js";
 import type { StepFieldProvider } from "../navigation/step-field.js";
 import { ActionRunner, type ActionRunnerStatus } from "../session/action-runner.js";
+import { createPinnedEscape } from "../session/pinned-escape.js";
+import { PinnedWatch } from "../session/pinned-watch.js";
 import { attachIdleWaterControl } from "../survival/baseline/idle-water.js";
 import { ReflexDriver } from "../survival/control/driver.js";
 import type { SurvivalStatus } from "../survival/evidence/contract.js";
@@ -68,6 +70,8 @@ export interface MinecraftRuntimeOptions {
   readonly onDisconnect?: (reason: string) => void;
   /** A replacement receives the same perception, footing and budgets as every reflex. */
   readonly createCombatController?: typeof createCombatController;
+  /** The pinned-bot watch (ten minutes in one place by default); a scenario shortens the window to see it within seconds. */
+  readonly pinned?: { readonly windowMs: number };
   /** Optional field replacement for controlled navigation comparisons. */
   readonly stepFieldProvider?: StepFieldProvider;
   /** The host supplies process/source identity; scenario callers may select their artifact directory. */
@@ -300,12 +304,20 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
 }
 
 /**
+ * `routesAsEscape` reaches the navigation built after the runner, which needs it only once a pinned bot escapes.
  * The action runner and the body observations it reads: physics ticks (the stall watch's clock), server repositions,
  * and the vehicle the server lets her off. A stall is recorded and physics turned back on where she is (run 14b).
  */
-function createBodyRunner(bot: Bot, highlighter: MinecraftRuntimeOptions["highlighter"], resources: AsyncDisposableStack, recordStall: (action: string) => void): ActionRunner {
+function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, recordStall: (action: string) => void): ActionRunner {
+  const position = () => bot.entity?.position ? {
+    dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
+  } : null;
+  // One watch per runtime: a bot pinned for ten minutes escapes on its next movement action (run 15: 14 % of bot time).
+  const pinned = new PinnedWatch({ position, windowMs: options.pinned?.windowMs });
   const runner = new ActionRunner({
-    highlighter,
+    highlighter: options.highlighter,
+    pinned,
+    pinnedEscape: createPinnedEscape(bot, routesAsEscape),
     physicsStallMs: PHYSICS_STALL_MS,
     physicsExpected: () => currentVehicle(bot) === null,
     onPhysicsStall: (action) => {
@@ -314,23 +326,27 @@ function createBodyRunner(bot: Bot, highlighter: MinecraftRuntimeOptions["highli
     },
     tools: () => snapshotTools(bot),
     inWater: () => isInWater(bot),
-    position: () => bot.entity?.position ? {
-      dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
-    } : null,
+    position,
   });
   const sampleProgress = () => {
     runner.observePhysicsTick();
     runner.samplePosition();
   };
   const resetProgress = () => runner.samplePosition("server_reposition");
+  // A new life starts where it respawns: the old place, failures and refusal are not its.
+  const died = () => {
+    resetProgress();
+    pinned.clear();
+  };
   resources.defer(observeCombatResourceEvents(bot, runner));
   bot.on("physicsTick", sampleProgress);
   bot.on("forcedMove", resetProgress);
-  bot.on("death", resetProgress);
+  bot.on("death", died);
   bot.on("game", resetProgress);
   resources.defer(() => {
     bot.off("physicsTick", sampleProgress); bot.off("forcedMove", resetProgress);
-    bot.off("death", resetProgress); bot.off("game", resetProgress);
+    bot.off("death", died); bot.off("game", resetProgress);
+    pinned.close();
   });
   resources.defer(watchVehicle(bot));
   return runner;
@@ -349,7 +365,7 @@ export async function createMinecraftRuntime(
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
   // Set once the incident observer exists: no action, so no stall, comes before the runtime is built.
   let recordStall: (action: string) => void = () => {};
-  const runner = createBodyRunner(bot, options.highlighter, resources, (action) => recordStall(action));
+  const runner = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, (action) => recordStall(action));
   const reflexes = resources.use(new ReflexDriver(bot, runner));
   const navigation = resources.use(createNavigationRuntime(bot));
   installMinecraftKnowledge(botData, bot.registry);
