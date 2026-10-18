@@ -1,0 +1,53 @@
+template: ../../templates/flat-single-action.yaml
+
+name: breath-air-pocket
+tags: [regression]
+description: >-
+  Live run 15 (2026-10-17): Sana and Nora drowned under a stone roof with an air pocket a few blocks away, because the
+  breath reflex knew only sky-open columns and held jump under the roof. A bot in a roofed water tunnel with no sky
+  column within twelve blocks, an air pocket four blocks behind it, is sent on a long swim east: it ends alive with
+  health kept, the breath reflex having swum back to the pocket (or the plan's own dive having kept it breathing).
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -6 40 -50 6 air"
+
+geometry:
+  - fill: { block: stone, from: [-10, -63, -4], to: [38, -55, 4] }
+  # The water tunnel: two high, from the pocket to the far east end, sealed by the stone round it.
+  - fill: { block: water, from: [-10, -60, 0], to: [36, -59, 0] }
+  # The air pocket four blocks west of the start: two cells of air above the water.
+  - fill: { block: air, from: [-8, -58, 0], to: [-7, -58, 0] }
+
+players:
+  - name: Swimmer
+    pos: [-3.5, -60, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+tick:
+  - "gamemode spectator @a[name=!Swimmer,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 34
+    y: -60
+    z: 0
+    range: 2
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - { kind: health, who: Swimmer, health: 14 }
+    - { kind: completion, who: Swimmer }
