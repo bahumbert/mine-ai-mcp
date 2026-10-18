@@ -495,7 +495,8 @@ export class ActionRunner {
     if (!invocation.escaping || escape === undefined) return run();
     await escape.leave(signal);
     using _escaping = escape.routesAsEscape();
-    return run();
+    // `await`: a `using` hold is released when the function returns, and `return run()` returns the still-pending promise.
+    return await run();
   }
 
   /**

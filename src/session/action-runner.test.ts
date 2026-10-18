@@ -1290,6 +1290,66 @@ test("a pinned bot's next movement action leaves the water or boat first and run
   assert.equal(escaping(), false, "the escape ends with the action");
 });
 
+test("the escape's relaxed routing lasts until a pinned movement action settles, not until it first awaits", async () => {
+  const { runner, pin, escaping } = pinnedRunner();
+  await pin();
+  let escapingAfterAwait: boolean | undefined;
+  const movement = stubAction(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    escapingAfterAwait = escaping();
+    return { status: "succeeded" };
+  }, { kind: "task" }, "travel");
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.equal(escapingAfterAwait, true, "the hold was still open when the action's route ran");
+  assert.equal(escaping(), false, "and it is released with the result");
+});
+
+test("a pinned movement action that fails after its first await still releases the escape hold", async () => {
+  const { runner, pin, escaping } = pinnedRunner();
+  await pin();
+  let escapingAfterAwait: boolean | undefined;
+  const movement = stubAction(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    escapingAfterAwait = escaping();
+    throw new Error("route exploded");
+  }, { kind: "task" }, "travel");
+  const result = (await runner.run(movement, { block_name: "stone" })).result;
+  assert.equal(result.status, "failed");
+  assert.equal(escapingAfterAwait, true);
+  assert.equal(escaping(), false, "a failed escape does not leave the next route relaxed");
+});
+
+test("a pinned movement action cancelled mid-run releases the escape hold when it settles", async () => {
+  const { runner, pin, escaping } = pinnedRunner();
+  await pin();
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const movement = stubAction(async (_request, context) => {
+    started();
+    await new Promise<void>((resolve) => context.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { status: "cancelled", error: "stopped" };
+  }, { kind: "task" }, "travel");
+  const request = runner.run(movement, { block_name: "stone" });
+  await running;
+  assert.equal(escaping(), true, "the hold is open while the action runs");
+  runner.cancelActive("operator stop");
+  await request;
+  assert.equal(escaping(), false);
+});
+
+test("a movement action of a bot that is not pinned never takes the escape hold", async () => {
+  const { runner, escaping, log } = pinnedRunner();
+  let escapingDuringRun: boolean | undefined;
+  const movement = stubAction(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    escapingDuringRun = escaping();
+    return { status: "succeeded" };
+  }, { kind: "task" }, "travel");
+  assert.equal((await runner.run(movement, { block_name: "stone" })).result.status, "succeeded");
+  assert.equal(escapingDuringRun, false);
+  assert.deepEqual(log, []);
+});
+
 test("a bot that failed twice and sat ten minutes runs its next movement action without an escape", async () => {
   const { runner, log, failing, body } = pinnedRunner();
   await runner.run(failing, { block_name: "stone" });
