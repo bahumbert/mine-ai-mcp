@@ -78,6 +78,24 @@ test("the service admits one run and settles from observed final state", async (
   assert.deepEqual(outcome.evidence.cleanup, { listeners: 0, controls: 0, expectations: 0 });
 });
 
+// Run 14b: a route whose owner was gone waited for a physics tick for good; its admission must not outlive it.
+test("an abandoned run frees admission at once, and its aborted control stops it when it wakes", async () => {
+  const world = flatWorld();
+  const actuator = new FakeNavigationBot();
+  let id = 0;
+  const navigator = createNavigator({ world, bot: actuator, createId: () => `run-${++id}` });
+  const first = navigator.startRun({ goal: exactBlockGoal({ x: 2, y: 63, z: 0 }), policy: createMovementPolicy() });
+  assert.equal(first.kind, "started");
+  navigator.abandonActive("its owner is gone");
+  assert.equal(navigator.active, null);
+  const next = navigator.startRun({ goal: exactBlockGoal({ x: -2, y: 63, z: 0 }), policy: createMovementPolicy() });
+  assert.equal(next.kind, "started");
+  if (first.kind !== "started" || next.kind !== "started") return;
+  assert.equal((await first.handle.outcome).kind, "stopped");
+  assert.equal((await next.handle.outcome).kind, "completed");
+  assert.equal(actuator.current.position.x, -1.5, "only the new run moved the body");
+});
+
 test("a run stops in the words of whoever asked, before it moves, and a timeout reads as a timeout", async () => {
   const far = { goal: exactBlockGoal({ x: 6, y: 63, z: 0 }), policy: createMovementPolicy() };
 

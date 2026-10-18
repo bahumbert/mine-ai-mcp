@@ -143,6 +143,25 @@ for (const entersDuringAim of [false, true]) {
   });
 }
 
+test("a player standing in the cell is named by username, with a request to step out, not an entity id", async () => {
+  const target = new Vec3(0, 64, 0);
+  const entity = { id: 305, name: "player", username: "Tester", type: "player", isValid: true, width: 0.6, height: 1.8, position: new Vec3(0.5, 64, 0.5) };
+  const bot = placer({ entities: { 305: entity }, entity: { id: 1 }, players: { Tester: { gamemode: 0 } } });
+  const result = await placeBlock(bot, {
+    item: { name: "cobblestone" } as InventoryItem,
+    support: { position: target.offset(0, -1, 0) } as WorldBlock,
+    face: new Vec3(0, 1, 0),
+    expectedCells: [target],
+    matches: () => true,
+  });
+  assert.equal(result.kind, "failed");
+  if (result.kind === "failed") {
+    assert.match(result.error, /overlaps player Tester/u);
+    assert.match(result.error, /ask Tester to step out/u);
+    assert.doesNotMatch(result.error, /#305/u);
+  }
+});
+
 test("does not accept half of a multi-block placement", async () => {
   const foot = new Vec3(1, 64, 0);
   const head = new Vec3(2, 64, 0);

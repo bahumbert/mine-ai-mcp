@@ -1,5 +1,9 @@
+import { z } from "zod";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
-import type { Body } from "./body.ts";
+import { toolToMake } from "./building/tool-loss.ts";
+import { boatsOfWood } from "./boats.ts";
+import type { ActOutcome, Body } from "./body.ts";
+import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
@@ -16,6 +20,13 @@ const MAX_SMELT = 64;
  * replacing what crafting used up of the kept items (fences eat planks, planks eat logs) a few more, and glass panes
  * about ten (sand, logs, table, pickaxe, stone, furnace and fuel, glass, panes). */
 const MAX_ROUNDS = 24;
+/** A drop this unlikely per break (apple from leaves, 0.5%) is rare: a fetch of it is bounded, and says the drop is rare. */
+export const RARE_DROP_CHANCE = 0.1;
+/**
+ * Blocks one fetch breaks for a rare drop without gaining it before it stops (live run 12, 2026-10-14: apples from
+ * leaves took Sana 23 and 21 minutes, Mira 15). The brain decides what to do instead.
+ */
+export const RARE_DROP_BREAKS = 64;
 /** Farther than this from home, the bot walks back before setting its crafting table or furnace down. */
 const HOME_RANGE = 3;
 /** Fuel made when none is carried: planks of the wood it carries, else these. */
@@ -32,6 +43,8 @@ export interface GatherContext {
   readonly progress?: (fact: string) => void;
   /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
   readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
+  /** Drops what the work does not need to free a slot, never the `inputs` of the craft or smelt in hand; true when a slot is free now (unset: nothing is dropped unasked). */
+  readonly makeRoom?: (inputs: ReadonlySet<string>) => Promise<boolean>;
 }
 
 export type GatherResult =
@@ -74,6 +87,13 @@ interface Knowledge {
   fuels: Readonly<Record<string, number>>;
   /** Per block, the tools without which it drops nothing, cheapest first (game data); null when a hand will do. */
   readonly harvest: Map<string, readonly string[] | null>;
+  /** Per block, the tool class it is mined with (game data: `shovel` for dirt); null when no tool helps. */
+  readonly toolClass: Map<string, string | null>;
+  /**
+   * Tool classes whose tool broke during this gathering (the runtime's structured `toolLost`), and no other of the class
+   * is carried yet: a block of that class gets another before it is dug, though it drops by hand (run 13: a shovel).
+   */
+  readonly lost: Set<string>;
   /** Per gathered item, the block collect_block breaks for it (game data: cobblestone from stone); null when none drops it. */
   readonly source: Map<string, string | null>;
   /** Per item, the mob hunted for it (game data: white wool from sheep), passive ones first; null when none drops it. */
@@ -82,6 +102,34 @@ interface Knowledge {
   readonly cropOnly: Set<string>;
   /** The woods growing nearby, nearest first, looked up once: recipes that take any wood are planned with them. */
   woods: readonly string[] | null;
+  /** Per block fetched for a rare drop, what it is fetched for and the breaks so far without gaining it. */
+  readonly rare: Map<string, RareFetch>;
+}
+
+interface RareFetch {
+  readonly item: string;
+  readonly chance: number;
+  readonly blocks: readonly string[];
+  /** Blocks broken for it since it was last gained. */
+  broken: number;
+  /** How many of the item were carried when `broken` started (-1: not looked yet). */
+  had: number;
+}
+
+/** "rare (0.5% of breaks)": how a rare drop is told. */
+export function rareNote(chance: number): string {
+  return `rare (${Math.round(chance * 1000) / 10}% of breaks)`;
+}
+
+/**
+ * Where a block-only item comes from, in words, for a refusal that sends the model to get_items: "apple drops from
+ * oak_leaves, dark_oak_leaves, and the drop is rare (0.5% of breaks)"; null when no block drops it.
+ */
+export async function dropSourcesNote(runtime: BotRuntime, item: string): Promise<string | null> {
+  const sources = ((await runtime.blockSources([item]).catch(() => ({})))[item] ?? []).filter((source) => !source.planted && source.block !== item);
+  if (sources.length === 0) return null;
+  const rare = sources[0]!.chance < RARE_DROP_CHANCE ? `, and the drop is ${rareNote(sources[0]!.chance)}` : "";
+  return `${item} drops from ${sources.map((source) => source.block).join(", ")}${rare}`;
 }
 
 /**
@@ -109,8 +157,10 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const items = [...bill, ...keep].map((entry) => entry.item);
-  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, keep));
+  const knowledge = newKnowledge();
+  const kept = await madeItems(context.runtime, keep, knowledge);
+  const items = [...bill, ...kept].map((entry) => entry.item);
+  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, kept, knowledge));
 }
 
 /**
@@ -133,25 +183,53 @@ export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly 
   }
 }
 
+// Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
+// is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
+// gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
+// game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
+// not a Minecraft item id").
+async function madeItems(runtime: BotRuntime, keep: readonly ItemCount[], knowledge: Knowledge): Promise<ItemCount[]> {
+  return (await Promise.all(keep.map(async (entry) => {
+    const how = await howToGet(runtime, entry.item, knowledge);
+    return how === null || how === "gather" ? null : entry;
+  })))
+    .filter((entry): entry is ItemCount => entry !== null);
+}
+
+/** The one step of a round (or why there is none): collect, hunt, make a table or tool, craft or smelt, whichever the plan puts first. */
+async function roundStep(
+  context: GatherContext,
+  plan: Round,
+  inventory: Stacks,
+  missing: readonly ItemCount[],
+  purpose: string,
+  site: Site,
+  knowledge: Knowledge,
+  spent: Spent,
+): Promise<GatherResult | string> {
+  const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
+  const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
+  if (ungated.length > 0) return collectAll(context, ungated, purpose, knowledge);
+  if (plan.hunt.size > 0) return huntAll(context, plan.hunt, purpose, knowledge);
+  if (plan.tableFirst) return craft(context, [TABLE], purpose, false, spent);
+  if (plan.toolFirst !== null) return craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
+  if (gated.length > 0) return collectAll(context, gated, purpose, knowledge);
+  const ready = await readyCrafts(context.runtime, plan.craft);
+  const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
+  if (ready.length > 0) return craftAtHome(context, ready, purpose, site, spent);
+  if (job !== undefined) return smeltAtHome(context, job, purpose, site);
+  return `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt`;
+}
+
 async function gatherRounds(
   context: GatherContext,
   bill: readonly ItemCount[],
   purpose: string,
   home: Position,
   keep: readonly ItemCount[],
+  knowledge: Knowledge,
 ): Promise<GatherResult> {
-  const knowledge = newKnowledge();
   const site: Site = { home };
-  // Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
-  // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
-  // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
-  // game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
-  // not a Minecraft item id").
-  keep = (await Promise.all(keep.map(async (entry) => {
-    const how = await howToGet(context.runtime, entry.item, knowledge);
-    return how === null || how === "gather" ? null : entry;
-  })))
-    .filter((entry): entry is ItemCount => entry !== null);
   const actions: string[] = [];
   /** Her own items a craft used and that were not replaced, none being near. */
   const usedOwn: ItemCount[] = [];
@@ -164,30 +242,40 @@ async function gatherRounds(
     const inventory = (await context.runtime.status()).inventory;
     const missing = shortfall(wanted, inventory);
     if (missing.length === 0) return finish(actions.length === 0 ? "had everything" : actions.join(", "));
-    const plan = await planRound(context.runtime, missing, inventory, knowledge);
+    // A full bucket is no drop and no craft: a bucket (made like any item) filled at the liquid.
+    const liquids = await context.runtime.toolEnum("use_bucket", "liquid");
+    const filling = missing.find((entry) => bucketLiquid(entry.item, liquids) !== null);
+    if (filling !== undefined && carried(inventory, "bucket") > 0) {
+      const liquid = bucketLiquid(filling.item, liquids)!;
+      context.progress?.(`filling a bucket with ${liquid}, for ${purpose}`);
+      const filled = await act(context, "use_bucket", { action: "fill", liquid }, `Fill a bucket with ${liquid}, for ${purpose}.`);
+      if (filled !== null) return filled.status === "failed" && actions.length > 0 ? { status: "failed", detail: `got ${actions.join(", ")} so far; ${filled.detail}` } : filled;
+      actions.push(`filled a bucket with ${liquid}`);
+      continue;
+    }
+    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
-    const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
-    const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
     // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
     // is not fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
     const spent: Spent = (before, after) => {
       wanted = keepWhatCraftingUsed(wanted, keep, before, after);
     };
-    let step: GatherResult;
-    if (ungated.length > 0) step = await collectAll(context, ungated, purpose);
-    else if (plan.hunt.size > 0) step = await huntAll(context, plan.hunt, purpose);
-    else if (plan.tableFirst) step = await craft(context, [TABLE], purpose, false, spent);
-    else if (plan.toolFirst !== null) step = await craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
-    else if (gated.length > 0) step = await collectAll(context, gated, purpose);
-    else {
-      const ready = await readyCrafts(context.runtime, plan.craft);
-      const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
-      if (ready.length > 0) step = await craftAtHome(context, ready, purpose, site, spent);
-      else if (job !== undefined) step = await smeltAtHome(context, job, purpose, site);
-      else return { status: "failed", detail: `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt` };
-    }
+    const stepped = await roundStep(context, plan, inventory, missing, purpose, site, knowledge, spent);
+    if (typeof stepped === "string") return { status: "failed", detail: stepped };
+    const step = stepped;
     if (step.status === "stopped") return step;
+    // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
+    const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
+    if (remade !== null && knowledge.lost.delete(remade) && step.status === "failed") {
+      // A block that drops nothing without the tool cannot go on without it: the gather ends here, not a round later.
+      const now = (await context.runtime.status()).inventory;
+      if ([...plan.collect.keys()].some((block) => requiresTool(block, now, knowledge))) return step;
+      actions.push(`setback (could not make another ${plan.toolFirst}: ${step.detail}); going on without it`);
+      continue;
+    }
+    const fruitless = rareFruitless(knowledge, (await context.runtime.status()).inventory);
+    if (fruitless !== null) return { status: "failed", detail: fruitless };
     // What a craft took from her own items is replaced only from what is near: when the replacement is out of range,
     // she goes on with what was asked for and says what she used (live 2026-10-03: a wooden pickaxe used one of Vex's
     // own dark oak logs, and replacing it walked 700 blocks; with the range, it ended the fetch instead).
@@ -249,7 +337,7 @@ function units(items: readonly ItemCount[]): number {
 }
 
 function newKnowledge(): Knowledge {
-  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null };
+  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), toolClass: new Map(), lost: new Set(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null, rare: new Map() };
 }
 
 /** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, broken from `block`, or hunted. */
@@ -307,14 +395,41 @@ async function howToGet(runtime: BotRuntime, item: string, knowledge: Knowledge)
   return recipes.length > 0 ? "smelt" : "gather";
 }
 
+/**
+ * The liquid a full bucket `item` holds, among the `liquids` a `use_bucket` fill scoops (the contract's enum, read from
+ * the runtime: a full bucket is named for its liquid); null for any other item (milk, powder snow, a fish...).
+ */
+function bucketLiquid(item: string, liquids: readonly string[]): string | null {
+  return liquids.find((liquid) => item === `${liquid}_bucket`) ?? null;
+}
+
 /** Why `item` is no item id, in the runtime's words: they name the registry ids close to it ("sticks": stick). */
 async function unknownItem(runtime: BotRuntime, item: string): Promise<string> {
   return (await runtime.craftingNeeds([{ item, count: 1 }])).error ?? `${item} is not a Minecraft item id`;
 }
 
+/**
+ * Where the first one of a crop that is its own seed (carrot, potato) comes from, in the game's data: no wild block
+ * drops it, a farm plants the ones carried, so a mob's drop or a find starts the farm. Null for any other item (a
+ * crop with a seed of its own, or a wild source, is fetched or farmed as usual).
+ */
+export async function firstOfOwnSeed(runtime: BotRuntime, item: string): Promise<string | null> {
+  const sources = (await runtime.blockSources([item]).catch(() => ({})))[item] ?? [];
+  if (sources.some((source) => !source.planted) || !sources.some((source) => source.planted && source.seed === item)) return null;
+  const mobs = ((await runtime.mobSources([item]).catch(() => ({})))[item] ?? []).slice().sort((a, b) => Number(a.hostile) - Number(b.hostile) || b.chance - a.chance);
+  const first = mobs[0];
+  const from = first === undefined
+    ? "no mob drops it"
+    : `a ${first.mob} drops it ${(first.chance * 100).toFixed(1)}% of the time (hunt ${first.mob} for ${item}${mobs.length > 1 ? `; others: ${mobs.slice(1).map((mob) => mob.mob).join(", ")}` : ""})`;
+  return `${item} is its own seed, so no block gives it and a farm plants the ones you carry (one per cell): a first one comes from ${from}, or a chest, a village or another player; with one in hand, farm ${item}`;
+}
+
 async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<string> {
   // A farm's crops are someone's work, and routes never break them: gathering would only fail at them.
-  if (knowledge.cropOnly.has(item)) return `${item} grows as a crop: farm it (harvest a farm of yours, or make one), then use it`;
+  if (knowledge.cropOnly.has(item)) {
+    const first = await firstOfOwnSeed(runtime, item);
+    return `${item} grows as a crop: ${first ?? "farm it (harvest a farm of yours, or make one), then use it"}`;
+  }
   // A block that drops something else is asked for by its drop (live 2026-10-07: Vex asked for iron_ore, which drops
   // raw_iron without silk touch).
   const known: Readonly<Record<string, readonly string[]>> = await runtime.blockDrops([item]).catch(() => ({}));
@@ -380,6 +495,12 @@ async function sourceBlock(runtime: BotRuntime, item: string, knowledge: Knowled
     }
   }
   knowledge.source.set(item, block);
+  const chosen = pool.find((source) => source.block === block);
+  if (block !== null && block !== item && chosen !== undefined && chosen.chance < RARE_DROP_CHANCE) {
+    // `had` starts at what she carries now, so the first check already sees a gain.
+    const had = carried((await runtime.status()).inventory, item);
+    knowledge.rare.set(block, { item, chance: chosen.chance, blocks: pool.filter((source) => source.chance === chosen.chance).map((source) => source.block), broken: 0, had });
+  }
   return block;
 }
 
@@ -528,8 +649,18 @@ function signature(counts: ReadonlyMap<string, number>): string {
 /** The cheapest tool `block` drops anything with, when it carries none of them; null when it can be collected now. */
 function toolMissing(block: string, inventory: Stacks, knowledge: Knowledge): string | null {
   const harvest = knowledge.harvest.get(block) ?? null;
-  if (harvest === null || harvest.some((tool) => carried(inventory, tool) > 0)) return null;
-  return harvest[0] ?? null;
+  if (harvest !== null && !harvest.some((tool) => carried(inventory, tool) > 0)) return harvest[0] ?? null;
+  // A tool that broke on the way is made again for the blocks of its class, even those a hand digs (live run 13: the
+  // wooden shovel, then dirt by hand): the best the materials allow, as a level's tool is chosen.
+  const kind = knowledge.toolClass.get(block) ?? null;
+  if (kind === null || !knowledge.lost.has(kind) || inventory.some((stack) => stack.name.endsWith(`_${kind}`))) return null;
+  return toolToMake(kind, (item) => carried(inventory, item));
+}
+
+/** Whether `block` drops nothing without a harvest tool that is not carried (game data: stone without a pickaxe). */
+function requiresTool(block: string, inventory: Stacks, knowledge: Knowledge): boolean {
+  const harvest = knowledge.harvest.get(block) ?? null;
+  return harvest !== null && !harvest.some((tool) => carried(inventory, tool) > 0);
 }
 
 /** The harvest tools still to make for `blocks`, learning each block's harvest tools from game data once. */
@@ -538,7 +669,10 @@ async function missingTools(runtime: BotRuntime, blocks: readonly string[], inve
   if (unknown.length > 0) {
     const kinds = await runtime.blockKinds(unknown);
     // Not a block (an item gathered some other way): nothing to dig it with.
-    for (const block of unknown) knowledge.harvest.set(block, kinds[block]?.harvest ?? null);
+    for (const block of unknown) {
+      knowledge.harvest.set(block, kinds[block]?.harvest ?? null);
+      knowledge.toolClass.set(block, kinds[block]?.tool ?? null);
+    }
   }
   const tools = blocks.map((block) => toolMissing(block, inventory, knowledge)).filter((tool): tool is string => tool !== null);
   return [...new Set(tools)];
@@ -559,14 +693,38 @@ function withTools(batch: readonly ItemCount[], tools: readonly string[], invent
   return [...(table ? [TABLE] : []), ...tools.map((item) => ({ item, count: 1 })), ...batch];
 }
 
-async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string): Promise<GatherResult> {
+/**
+ * Says so once a rare drop has cost {@link RARE_DROP_BREAKS} blocks without being gained; null while it is still worth
+ * trying. A gain starts the count again.
+ */
+function rareFruitless(knowledge: Knowledge, inventory: Stacks): string | null {
+  for (const [block, fetch] of knowledge.rare) {
+    const now = carried(inventory, fetch.item);
+    if (now > fetch.had && fetch.had >= 0) fetch.broken = 0;
+    fetch.had = now;
+    if (fetch.broken >= RARE_DROP_BREAKS) {
+      return `broke ${fetch.broken} ${block} without gaining ${fetch.item}: it drops from ${fetch.blocks.join(", ")} but the drop is ${rareNote(fetch.chance)}, so this fetch stops here; decide whether more of it is worth the time, or do something else`;
+    }
+  }
+  return null;
+}
+
+async function collectAll(context: GatherContext, targets: readonly (readonly [string, number])[], purpose: string, knowledge: Knowledge): Promise<GatherResult> {
   const done: string[] = [];
   for (const [block, total] of targets) {
     context.progress?.(`gathering ${total} ${block} for ${purpose}`);
+    const rare = knowledge.rare.get(block);
     for (let left = total; left > 0; left -= MAX_COLLECT) {
-      const count = Math.min(left, MAX_COLLECT);
-      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
-      if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step);
+      // A rare drop is asked for only as many blocks as its bound still allows.
+      const count = Math.max(1, Math.min(left, MAX_COLLECT, rare === undefined ? MAX_COLLECT : RARE_DROP_BREAKS - rare.broken));
+      let broken = 0;
+      const countBroken = (outcome: ActOutcome) => { broken += blocksBroken(outcome.result); };
+      // A rare drop is also told the breaks it has left, so one call cannot spend the budget of its chance (hundreds of leaves).
+      const breaksLeft = (): number | null => rare === undefined ? null : Math.max(1, RARE_DROP_BREAKS - rare.broken - broken);
+      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, knowledge.lost, countBroken);
+      if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step, countBroken, breaksLeft);
+      // The blocks broken, as the runtime counts them, not the drops that came (a rare drop comes from few of them).
+      if (rare !== undefined) rare.broken += broken;
       if (step !== null) return step.status === "failed" ? { status: "failed", detail: await notNear(context, block, step.detail) } : step;
     }
     done.push(`collected ${total} ${block}`);
@@ -632,7 +790,7 @@ async function forgetEmptyNear(runtime: BotRuntime, block: string, here: Positio
  * needs a boat, and `navigate` says so). Null when collected, else what went wrong; with no place known, she is told to
  * explore.
  */
-async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult): Promise<GatherResult | null> {
+async function fetchFarther(context: GatherContext, block: string, count: number, purpose: string, failed: GatherResult, observe?: (outcome: ActOutcome) => void, breaksLeft: () => number | null = () => null): Promise<GatherResult | null> {
   const tried = triedSet(context.runtime);
   const start = (await context.runtime.status()).position;
   const code = failed.status === "failed" ? errorCode(failed.detail) : null;
@@ -670,22 +828,66 @@ async function fetchFarther(context: GatherContext, block: string, count: number
       tried.add(`${seen.x},${seen.z}`);
       last = there;
       // The same water lies between her and the next far place: not walked to (live 2026-10-10 run 10: ~1500 blocks swum).
-      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: acrossWaterHint(block, failed) };
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
       continue;
     }
-    const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE }, `Gather ${count} ${block} for ${purpose}.`);
+    const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, undefined, observe);
     if (step === null) return null;
     last = step;
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
     tried.add(`${seen.x},${seen.z}`);
   }
-  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: acrossWaterHint(block, failed) };
+  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
   return last;
 }
 
 /** What a fetch tells when the places it knows lie across deep water and no boat is carried. */
-function acrossWaterHint(block: string, failed: GatherResult): string {
-  return `the ${block} you know of is across the water: take a boat (get_items oak_boat) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
+async function acrossWaterHint(runtime: BotRuntime, block: string, failed: GatherResult): Promise<string> {
+  return `the ${block} you know of is across the water: take a boat (get_items ${await boatToMake(runtime)}) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
+}
+
+/** The boat a fetch names when nothing carried says otherwise. */
+const DEFAULT_BOAT = "oak_boat";
+
+/** The game's block tags of a wood: the logs (stems and wood blocks included) and the planks of every tree. */
+const WOOD_TAGS = ["logs", "planks"];
+
+/** Per bot, whether each carried name is a wood in the game's data (its block tags, asked once per name). */
+const woodNames = new WeakMap<BotRuntime, Map<string, boolean>>();
+
+/** Whether `name` is a wood (a log, a stem, a plank), by the game's block tags; an item that is no block is not. */
+async function isWood(runtime: BotRuntime, name: string): Promise<boolean> {
+  const known = woodNames.get(runtime) ?? new Map<string, boolean>();
+  woodNames.set(runtime, known);
+  let wood = known.get(name);
+  if (wood === undefined) {
+    const tags = (await runtime.blockKinds([name]))[name]?.tags ?? [];
+    wood = WOOD_TAGS.some((tag) => tags.includes(tag));
+    known.set(name, wood);
+  }
+  return wood;
+}
+
+/**
+ * The boat she can make from the wood she carries: each carried wood (a log, stem or planks by the game's block tags;
+ * an iron block is none) gives the boats whose recipe takes its planks (the game's recipe data, `boats.ts`), and the game's
+ * craft planner says whether what she carries fits one. A wood with no boat recipe (a crimson stem) costs no planner call.
+ * A boat she can craft now comes first,
+ * then one with a recipe, then {@link DEFAULT_BOAT} (live 2026-10-15 run 12: Ayla, on an island with birch, was told
+ * oak_boat over and over).
+ */
+async function boatToMake(runtime: BotRuntime): Promise<string> {
+  const boats = new Set<string>();
+  for (const stack of (await runtime.status()).inventory) {
+    if (await isWood(runtime, stack.name)) for (const boat of await boatsOfWood(runtime, stack.name)) boats.add(boat);
+  }
+  let possible: string | null = null;
+  for (const boat of boats) {
+    const status = (await runtime.craftingNeeds([{ item: boat, count: 1 }])).status;
+    if (status === "ready") return boat;
+    if (status === "missing_materials") possible ??= boat;
+  }
+  return possible ?? DEFAULT_BOAT;
 }
 
 /** The eight compass directions, by the angle from east going south (Minecraft's +z is south). */
@@ -711,7 +913,7 @@ export async function notNear(context: Pick<GatherContext, "runtime">, block: st
   const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
   if (water !== null && water.share > 0.5) {
     const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
-    const trip = boat ? "go_to there crosses by boat (you carry one)" : "take a boat (get_items oak_boat) and go_to there";
+    const trip = boat ? "go_to there crosses by boat (you carry one)" : `take a boat (get_items ${await boatToMake(context.runtime)}) and go_to there`;
     return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
   }
   return `${near}; you saw some ${describeWay(here, seen)}, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: go_to there yourself if it is worth the trip, use another material, or say so (${detail})`;
@@ -835,8 +1037,13 @@ async function craft(context: GatherContext, items: readonly ItemCount[], purpos
 }
 
 /** Hunts each item from its mob (`collect_mob_drop`: it finds, fights and picks up), one after the other. */
-async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { readonly mob: string; readonly count: number }>, purpose: string): Promise<GatherResult> {
+async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { readonly mob: string; readonly count: number }>, purpose: string, knowledge: Knowledge): Promise<GatherResult> {
   const done: string[] = [];
+  // No hostile mob spawns on a peaceful server (run 12: rotten_flesh and bone hunts ended in HUNT_TARGET_NOT_LOADED): refuse before walking.
+  const hostile = [...hunts].find(([item]) => knowledge.mob.get(item)?.hostile === true);
+  if (hostile !== undefined && (await context.runtime.status()).difficulty === "peaceful") {
+    return { status: "failed", detail: `no ${hostile[1].mob} spawns on this peaceful server: ${hostile[0]} cannot be hunted here` };
+  }
   for (const [item, { mob, count }] of hunts) {
     context.progress?.(`hunting ${mob} for ${count} ${item}, for ${purpose}`);
     const step = await act(context, "collect_mob_drop", { mob_name: mob, drop_name: item, count }, `Hunt ${mob} for ${count} ${item}, for ${purpose}.`);
@@ -846,10 +1053,32 @@ async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { read
   return { status: "done", detail: done.join(", ") };
 }
 
-/** Runs one action; null when it succeeded. */
-async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate", input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
-  const outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
+/** The part of a `collect_block` result that names a tool which broke during the run (src/actions/collect-block/contract.ts). */
+const toolLostSchema = z.object({ collected: z.object({ toolLost: z.object({ class: z.string() }) }) });
+
+/**
+ * Runs one action; null when it succeeded. A tool the runtime says broke during it (`toolLost`, succeeded or not) is
+ * added to `lost`; `observe` sees each outcome.
+ */
+async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string, lost?: Set<string>, observe?: (outcome: ActOutcome) => void): Promise<GatherResult | null> {
+  let outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
+  const broke = toolLostSchema.safeParse(outcome.result);
+  if (broke.success) lost?.add(broke.data.collected.toolLost.class);
   if (context.signal.aborted) return { status: "stopped" };
+  // A craft or a smelt with no room for its result or its workstation: room is made once, then it runs again (run 12).
+  if (outcome.status !== "succeeded" && (tool === "craft_item" || tool === "smelt_item") && FULL_INVENTORY.test(outcome.error ?? "") && context.makeRoom !== undefined && (await context.makeRoom(await consumedBy(context.runtime, tool, input)))) {
+    outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
+    if (context.signal.aborted) return { status: "stopped" };
+  }
+  observe?.(outcome);
   if (outcome.status === "succeeded") return null;
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
+}
+
+/** What a `collect_block` result reports (src/actions/collect-block/contract.ts `collected`), on success and on failure. */
+const collectedSchema = z.object({ collected: z.object({ blocksBroken: z.number() }) });
+
+/** The matching blocks a `collect_block` result reports broken; 0 when it reports none. */
+function blocksBroken(result: ActOutcome["result"]): number {
+  return collectedSchema.safeParse(result).data?.collected.blocksBroken ?? 0;
 }

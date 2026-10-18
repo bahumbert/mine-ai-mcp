@@ -2,6 +2,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
+import { REFUSAL_CAUSES } from "../../world/placement.js";
 import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
 import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
 
@@ -186,6 +187,8 @@ export const leftCellSchema = z.strictObject({
   holds: z.string().optional(),
   /** What refused the cell, when something did. */
   detail: z.string().optional(),
+  /** Present with `detail`: what refused it. Only a policy refusal is for good; an entity, a route or a placement may pass. */
+  cause: z.enum(REFUSAL_CAUSES).optional(),
 });
 
 export const structureAuditSchema = z.strictObject({

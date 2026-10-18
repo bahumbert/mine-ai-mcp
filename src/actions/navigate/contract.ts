@@ -121,6 +121,10 @@ export const navigationEvidenceSchema = z.strictObject({
     .nonnegative()
     .optional()
     .describe("Blocks of deep open water crossed by boat on the way; absent when none."),
+  afloat: z
+    .boolean()
+    .optional()
+    .describe("The bot ended in its boat on the water at the target's x z (a target on open water); absent when not."),
   landLeg: z
     .strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })
     .optional()
@@ -144,7 +148,7 @@ export const navigateOutcomes = {
     `[NAVIGATION_TARGET_UNSUPPORTED] No usable footing was observed within ${range} blocks of ${target.x}, ${target.y}, ${target.z}. ${
       ground === null
         ? "No ground was found within 64 blocks below it."
-        : `The ground in that column is at y=${ground}.`
+        : `The ground in that column is at y=${ground}: the standable cell there is ${target.x}, ${ground}, ${target.z}.`
     } Choose an observed supported height, or pass build: true to scaffold to this point deliberately.`,
   dimensionChanged: (from: string, to: string) =>
     `[NAVIGATION_DIMENSION_CHANGED] Navigation started in ${from} but ended in ${to}.`,

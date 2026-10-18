@@ -25,6 +25,8 @@ export interface ModelQueueOptions {
   /** Where to write {@link QueueSnapshot}; null writes nothing. */
   readonly file: string | null;
   readonly now?: () => number;
+  /** Told once when the file cannot be written (and again after a write worked in between). */
+  readonly log?: (line: string) => void;
 }
 
 /**
@@ -43,8 +45,11 @@ export class ModelQueue {
   private count = 0;
   private lastWrite = Number.NEGATIVE_INFINITY;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private writeFailed = false;
+  private readonly log: ((line: string) => void) | undefined;
 
   constructor(options: ModelQueueOptions) {
+    this.log = options.log;
     this.slots = options.slots;
     this.file = options.file;
     this.now = options.now ?? Date.now;
@@ -161,8 +166,17 @@ export class ModelQueue {
       starts: this.starts,
     };
     // Whole file or nothing: the monitor reads it while the brain writes.
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(snapshot));
-    renameSync(`${this.file}.tmp`, this.file);
+    // On a shared drive the rename can be refused (EPERM/EBUSY): the monitor's graph is not worth a failed model call or
+    // a dead timer, so the failure is logged once and the next write tries again.
+    try {
+      writeFileSync(`${this.file}.tmp`, JSON.stringify(snapshot));
+      renameSync(`${this.file}.tmp`, this.file);
+    } catch (error) {
+      if (!this.writeFailed) this.log?.(`model queue file not written, retrying at the next change: ${String(error)}`);
+      this.writeFailed = true;
+      return;
+    }
+    this.writeFailed = false;
   }
 }
 

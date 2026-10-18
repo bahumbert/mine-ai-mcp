@@ -13,3 +13,20 @@ test("an unknown name is matched to the registry names holding its words, then t
   assert.equal(withSimilar("sticks", NAMES), "sticks (closest: stick)");
   assert.equal(withSimilar("moon_rock", NAMES), "moon_rock");
 });
+
+const TOOLS = ["wooden_sword", "stone_sword", "iron_sword", "golden_sword", "wooden_pickaxe", "stone_pickaxe", "wooden_hoe", "iron_hoe", "water_bucket", "iron_ingot", "oak_wood", "oak_planks", "stick"];
+
+test("a wrong material is still matched to the items of the same kind, a bare kind to the names holding it", () => {
+  assert.ok(similarNames("oak_sword", TOOLS).includes("wooden_sword"));
+  assert.ok(similarNames("oak_sword", TOOLS).slice(0, 4).every((name) => name.endsWith("_sword")));
+  assert.ok(similarNames("birch_pickaxe", TOOLS).includes("wooden_pickaxe"));
+  assert.deepEqual(similarNames("hoe", TOOLS), ["iron_hoe", "wooden_hoe"]);
+  assert.deepEqual(similarNames("water", TOOLS), ["water_bucket"]);
+  assert.deepEqual(similarNames("sticks", TOOLS), ["stick"]);
+});
+
+test("a name more than two letters longer or shorter than the asked one is no near spelling, a name two off still is", () => {
+  assert.deepEqual(similarNames("stik", ["stick", "stickyy", "sticks_and_more", "x".repeat(5000)]), ["stick"]);
+  assert.deepEqual(similarNames("stk", ["stick", "stickyy"]), ["stick"]);
+  assert.deepEqual(similarNames("sticks", ["stick", "x".repeat(5000)]), ["stick"]);
+});

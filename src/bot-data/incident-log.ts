@@ -14,6 +14,7 @@ export const incidentTriggerSchema = z.enum([
   "runtime_unresponsive",
   "runtime_exited",
   "combat_waiting",
+  "physics_stalled",
 ]);
 export type IncidentTrigger = z.output<typeof incidentTriggerSchema>;
 export const incidentReferenceSchema = z.strictObject({

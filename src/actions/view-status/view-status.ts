@@ -69,6 +69,7 @@ export function observeLiveSituation(
     observedAt: snapshot.updatedAt ?? new Date().toISOString(),
     dimension: snapshot.dimension,
     gameMode: snapshot.gameMode,
+    difficulty: snapshot.difficulty,
     lastDeath: lastDeath ? {
       dimension: lastDeath.dimension,
       position: roundedPosition(lastDeath.position),

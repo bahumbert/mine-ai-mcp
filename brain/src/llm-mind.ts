@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { describeStep, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
+import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
@@ -167,7 +167,7 @@ export class LlmMind implements Mind {
       if (firstReading !== null && reply.route !== "ignore") return { to: firstReading, say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
       if (reply.route !== "ignore" && !speaksTo(to, input.persona.username)) {
         firstReading ??= to;
-        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
+        throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
       }
       // Answering a line it reads as spoken to her by name ("everyone"/"unclear" do not count): held to the facts below.
       const answersAsHers = reply.route !== "ignore" && to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase());
@@ -175,26 +175,26 @@ export class LlmMind implements Mind {
       // the misreading the facts were given against (bench 2026-10-09, French). Taking an order on is not held to it:
       // "Ayla, get wood and Vex mine stone" gives Vex an order with no comma after his name (bench: Vex 0/3 when held).
       if (answersAsHers && reply.route !== "act" && reply.route !== "later" && called.length > 0) {
-        throw new Error(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
+        throw new SendBack(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
       }
       // The line answers someone else who just spoke to its speaker, and names nobody: a reply that speaks to her and
       // answers it ignores the fact given in the prompt (bench 2026-10-09, "ok j'arrive").
       if (answersAsHers && answering !== null) {
-        throw new Error(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
+        throw new SendBack(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
       }
       // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
       // to let pass (the bench: held to them too, she answered every line to "Opus").
       const named = to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase()) || (given.length > 0 && listeners.length === 0);
       if (reply.route === "ignore" && named) {
-        throw new Error(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
+        throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
       }
-      if (reply.route === "later" && !canWait) throw new Error(`"later" is not a route now: you work for nobody else, so a request is "act"`);
+      if (reply.route === "later" && !canWait) throw new SendBack(`"later" is not a route now: you work for nobody else, so a request is "act"`);
       // Taken on, the order starts at once (live 2026-10-04: "Just let me finish this little project first", again,
       // though the rule says so). The model judges its own line, in the language it wrote it.
       if (reply.route === "act" && reply.starts_now === false) {
-        throw new Error(`"starts_now" is false, but "act" stops what you were doing and starts at once: write a "say" that starts now${canWait ? `, or use "later" if it must wait` : ""}, or answer "talk" if you cannot`);
+        throw new SendBack(`"starts_now" is false, but "act" stops what you were doing and starts at once: write a "say" that starts now${canWait ? `, or use "later" if it must wait` : ""}, or answer "talk" if you cannot`);
       }
-      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new Error(`"request" is required when "route" is "${reply.route}"`);
+      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new SendBack(`"request" is required when "route" is "${reply.route}"`);
       const acts = reply.route === "act" || reply.route === "later";
       return {
         ...(to.length > 0 && { to }),
@@ -231,22 +231,23 @@ export class LlmMind implements Mind {
       }
       if (reply.step !== undefined && reply.step !== null) {
         const step = stepSchema.safeParse(reply.step);
-        if (!step.success) throw new Error(`step: ${z.prettifyError(step.error)}`);
+        if (!step.success) throw new Error(`step: ${describeStepError(reply.step, step.error)}`);
         if (!skills.includes(step.data.skill)) throw new Error(`you cannot use ${step.data.skill}: pick one of the listed skills`);
         // A sign dropped from a coordinate (live 2026-10-04: "go to 499 76 109" for a log at -499 76 109 walked Ayla
         // 750 blocks east, over the ocean): far away, yet close once a sign is turned, it goes back once.
         const flipped = signChecked ? null : signFlipped(step.data, input.snapshot.position);
         if (flipped !== null) {
           signChecked = true;
-          throw new Error(`${flipped}: if you meant that, send the same step again`);
+          throw new SendBack(`${flipped}: if you meant that, send the same step again`);
         }
         // An area order "around you" is the bot's own area (live 2026-10-11, L7: place "you" was read right, then the
-        // step named the requester): sent back once per objective with where it stands.
+        // step named the requester): sent back once per step with where it stands.
         const aroundRequester = step.data.skill === "protect_area" ? step.data.player : step.data.skill === "level_area" ? step.data.around : undefined;
-        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has("around you")) {
-          this.resent(input.objective).add("around you");
+        const aroundKey = `around you: ${describeStep(step.data)}`;
+        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has(aroundKey)) {
+          this.resent(input.objective).add(aroundKey);
           const { x, y, z } = input.snapshot.position;
-          throw new Error(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
+          throw new SendBack(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
         }
         // A step that failed twice lately, for any objective, is refused every time (live 2026-10-10, run 6: sent back
         // once, "craft cooked_beef" and "get 7 spruce_log" still came 18 and 22 times): one retry, then another step.
@@ -257,13 +258,13 @@ export class LlmMind implements Mind {
           const wanted = step.data.for;
           const player = input.snapshot.players.find((entry) => entry.username.toLowerCase() === wanted.toLowerCase());
           if (player !== undefined || wanted === "player") {
-            throw new Error(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
+            throw new SendBack(`"${player?.username ?? wanted}" is a player: go_to_player reaches a player you can see; if you cannot see them, say so or ask where they are`);
           }
-          if (wanted === "air") throw new Error("air is everywhere: to find a clear site, use the coordinates the last failure gave");
+          if (wanted === "air") throw new SendBack("air is everywhere: to find a clear site, use the coordinates the last failure gave");
           // A block the last explore already found known is fetched, not explored for again (live 2026-10-11 run 10: Kenji and
           // Theo, "explore for oak_log" over and over, each result naming one 2-6 blocks away). Every time, from the records only.
           const known = knownByEarlierExplore(input.steps, wanted);
-          if (known !== null) throw new Error(`your explore for ${wanted} found one known ${known}: get_items ${wanted} gathers it`);
+          if (known !== null) throw new SendBack(`your explore for ${wanted} found one known ${known}: get_items ${wanted} gathers it`);
         }
         // A step that just succeeded, sent again identically, goes back once per objective (live 2026-10-11, orders test:
         // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
@@ -271,7 +272,7 @@ export class LlmMind implements Mind {
         const last = input.steps.at(-1);
         if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input.objective).has(label)) {
           this.resent(input.objective).add(label);
-          throw new Error(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
+          throw new SendBack(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
         }
         const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);
         if (earlier !== undefined) {
@@ -281,7 +282,7 @@ export class LlmMind implements Mind {
           if (refusals >= MAX_REFUSALS) {
             return { kind: "give_up", reason: `"${describeStep(step.data)}" was refused ${MAX_REFUSALS} times: it failed ${earlier.count} times lately (${earlier.detail}) and nothing changed since` };
           }
-          throw new Error(`"${describeStep(step.data)}" failed ${earlier.count} times in the last ${FAILED_STEP_MINUTES} minutes, the last ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. It is refused: choose a different step, or give this objective up`);
+          throw new SendBack(`"${describeStep(step.data)}" failed ${earlier.count} times in the last ${FAILED_STEP_MINUTES} minutes, the last ${earlier.minutesAgo} minute${earlier.minutesAgo === 1 ? "" : "s"} ago, as "${earlier.step}" for "${earlier.objective}": ${earlier.detail}. It is refused: choose a different step, or give this objective up`);
         }
         return { kind: "step", step: step.data, thought: reply.thought };
       }
@@ -303,7 +304,7 @@ export class LlmMind implements Mind {
       const failed = input.lastFailed;
       if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
         sentBack = true;
-        throw new Error(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
+        throw new SendBack(`"${objective}" is what you just tried, and it failed: ${failed.reason}. Pick an objective that does not run into the same problem, or, if you still want this one, say in it what you will do differently`);
       }
       // Only a kind of work it could take on now is a purpose (none known: any of ours).
       const named = parseActivity(purpose);
@@ -326,10 +327,14 @@ export class LlmMind implements Mind {
 }
 
 /**
- * One model call, plus up to {@link REPAIR_ROUNDS} repair rounds when the answer is not the JSON we asked for or a check
- * sends it back (two checks may each send one reply back once, live 2026-10-04).
+ * One model call, plus up to {@link REPAIR_ROUNDS} repair rounds when the answer is not the JSON we asked for, and up to
+ * {@link SEND_BACK_ROUNDS} more when a content check sends it back ({@link SendBack}): the checks do not eat the format budget (C21).
  */
 const REPAIR_ROUNDS = 2;
+const SEND_BACK_ROUNDS = 4;
+
+/** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
+class SendBack extends Error {}
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
@@ -338,7 +343,9 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
   let contextTokens: number | null = null;
   const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
   let problem = "";
-  for (let attempt = 0; attempt <= REPAIR_ROUNDS; attempt += 1) {
+  let formatFailures = 0;
+  let sendBacks = 0;
+  for (;;) {
     let text: string;
     try {
       const reply = await model.complete(turns, signal);
@@ -356,12 +363,16 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
       return result;
     } catch (error) {
       problem = error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error);
+      if (error instanceof SendBack) sendBacks += 1;
+      else formatFailures += 1;
+      if (formatFailures > REPAIR_ROUNDS || sendBacks > SEND_BACK_ROUNDS) {
+        const failure = `[${formatFailures > REPAIR_ROUNDS ? "LLM_BAD_REPLY" : "LLM_SENT_BACK"}] ${model.name}: ${problem}`;
+        done({ error: failure });
+        throw new Error(failure);
+      }
       turns.push({ role: "assistant", content: text }, { role: "user", content: `That was not valid (${problem}). Reply with only the corrected JSON object.` });
     }
   }
-  const error = `[LLM_BAD_REPLY] ${model.name}: ${problem}`;
-  done({ error });
-  throw new Error(error);
 }
 
 function describeAuthority(persona: Persona): string {

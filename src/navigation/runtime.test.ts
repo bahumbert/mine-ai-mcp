@@ -63,3 +63,75 @@ test("navigation uses observed perched-cloud clearance", async () => {
     await navigation.close();
   }
 });
+
+/** A flat stone floor at y 63 and a route along it that waits on physics ticks the test does not send. */
+function waitingRoute(releaseWaitMs?: number) {
+  const bot = botFixture({ groundY: 63 });
+  bot.world.getBlockStateId = (p) => (p.y <= 63 ? bot.registry.blocksByName.stone.defaultState : 0);
+  Object.assign(bot.world, { getColumn: () => ({ minY: -64, worldHeight: 384, getBlockStateId: bot.world.getBlockStateId }) });
+  const navigation = createNavigationRuntime(bot, releaseWaitMs === undefined ? {} : { releaseWaitMs });
+  const committed = new Promise<void>((resolve) => {
+    const stop = navigation.onEvent((event) => {
+      if (event.kind === "route_committed") {
+        stop();
+        resolve();
+      }
+    });
+  });
+  const movements = createMovementPolicy({ allowDigging: false, allowParkour: false });
+  const goal = exactBlockGoal({ x: 6, y: 64, z: 0 });
+  return { bot, navigation, committed, movements, goal };
+}
+
+// Run 14b: a stalled navigate waited for a tick for good and kept the one navigation slot: every later route was
+// refused "Navigation is busy with another request" (172 times) until the run ended.
+test("a navigate cancelled while it waits for a tick that never comes frees the navigation for the next one within a bound", async () => {
+  const { bot, navigation, movements, goal } = waitingRoute(300);
+  let routes = 0;
+  let secondCommitted!: () => void;
+  const second = new Promise<void>((resolve) => { secondCommitted = resolve; });
+  let firstCommitted!: () => void;
+  const first = new Promise<void>((resolve) => { firstCommitted = resolve; });
+  navigation.onEvent((event) => {
+    if (event.kind !== "route_committed") return;
+    routes += 1;
+    (routes === 1 ? firstCommitted : secondCommitted)();
+  });
+  const owner = new AbortController();
+  navigation.navigate({ movements, goal, signal: owner.signal }).catch(() => undefined);
+  await first;
+  // The stall stops the owning action; the next action's preparation cancels the route.
+  owner.abort(new Error("[RUNTIME_PHYSICS_STALLED] navigate owned the body for 30 s with no physics tick"));
+  navigation.cancel("foreground action preparation");
+  const stop = new AbortController();
+  const started = performance.now();
+  const next = navigation.navigate({ movements, goal: exactBlockGoal({ x: -6, y: 64, z: 0 }), stopSignal: stop.signal });
+  await Promise.race([second, next.then(() => undefined)]);
+  assert.equal(routes, 2, "the next route was planned and committed, not refused busy");
+  assert.ok(performance.now() - started < 2_000, "within the bounded wait");
+  // Physics back: the new route ends at its stop, and the abandoned one, aborted, settles too.
+  stop.abort("test over");
+  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
+  try {
+    assert.equal((await next).status, "stopped");
+    await navigation.close();
+  } finally {
+    clearInterval(ticking);
+  }
+});
+
+test("a navigate that is not cancelled still refuses a second one at once", async () => {
+  const { bot, navigation, committed, movements, goal } = waitingRoute(300);
+  const owner = new AbortController();
+  const first = navigation.navigate({ movements, goal, signal: owner.signal });
+  first.catch(() => undefined);
+  await committed;
+  await assert.rejects(navigation.navigate({ movements, goal }), /Navigation is busy with another request/);
+  owner.abort(new Error("test over"));
+  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
+  try {
+    await navigation.close();
+  } finally {
+    clearInterval(ticking);
+  }
+});

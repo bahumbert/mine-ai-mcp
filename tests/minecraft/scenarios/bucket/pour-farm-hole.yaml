@@ -1,0 +1,32 @@
+template: ../../templates/flat-single-action.yaml
+name: pour-farm-hole
+tags: [regression]
+description: >-
+  Guard against the Run 13 failure where a farm's water could not be poured ([BUCKET_NO_FACE], four times for one
+  bot, then the farm was refused three times and its objective failed). The plot's middle cell is a hole three cells
+  deep in the soil, and the bot stands two cells from it on the soil, where the farm step leaves it: from there the
+  rim hides every face of the hole. The pour steps closer to a face it can use and the water fills the cell.
+
+geometry:
+  - fill: { block: grass_block, from: [-2, -61, -4], to: [12, -61, 4] }
+  # The dug hole of the plot's middle, two cells deep.
+  - fill: { block: air, from: [4, -63, 0], to: [4, -61, 0] }
+
+players:
+  - name: Actor
+    pos: [4.5, -60, 2.5]
+    inventory:
+      - { item: water_bucket, count: 1 }
+
+params:
+  action: use_bucket
+  input: { action: pour, liquid: water, x: 4, y: -63, z: 0 }
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }
+    - kind: blocksAt
+      block: water
+      positions: [[4, -63, 0]]

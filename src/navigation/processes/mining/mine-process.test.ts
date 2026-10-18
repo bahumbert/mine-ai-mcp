@@ -1876,12 +1876,13 @@ test("a live drop remains a target after the vanished-item settlement window", a
 test("a drop the bot stands in without gaining anything is given up before the server despawns it", async () => {
   const cell = new Vec3(0, 64, 0);
   let ticks = 0;
+  let clock = 1_000;
   const bot = fakeBot({
     drops: [cell],
     feet: cell,
     onWaitForTicks: async () => {
       ticks += 1;
-      if (ticks === 1) await new Promise((resolve) => setTimeout(resolve, DROP_PICKUP_TIMEOUT_MS + 50));
+      if (ticks === 1) clock += DROP_PICKUP_TIMEOUT_MS + 50;
     },
   });
   // The overlap is judged against the item's pickup box, which the fake must carry.
@@ -1890,6 +1891,7 @@ test("a drop the bot stands in without gaining anything is given up before the s
   const result = await mine(
     bot,
     request(bot, {
+      now: () => clock,
       route: async (options) => {
         const arrival = {
           goalRevision: "test",

@@ -56,8 +56,14 @@ export function createMovements(bot: Bot, options?: MineflayerMovementPolicyOpti
   return createMineflayerMovementPolicy(bot, options);
 }
 
+export interface NavigationRuntimeOptions {
+  /** How long a new route waits for a cancelled one to settle before abandoning it (default 5 s). */
+  readonly releaseWaitMs?: number;
+}
+
 /** Build the navigation runtime for one connected Mineflayer bot. */
-export function createNavigationRuntime(bot: Bot): NavigationRuntime {
+export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOptions = {}): NavigationRuntime {
+  const releaseWaitMs = options.releaseWaitMs ?? 5_000;
   // Built in dependency order: the world view, the bot port over it, and the
   // navigator that looks at and acts on the bot through that port.
   const world = new MineflayerWorldView(bot);
@@ -81,7 +87,36 @@ export function createNavigationRuntime(bot: Bot): NavigationRuntime {
   const navigator = createNavigator({ world, bot: navigationBot, telemetry });
 
   let activeRoute: Promise<NavigationResult> | null = null;
-  let activeNavigation: Promise<NavigationResult> | null = null;
+  /** The one route request that owns navigation, and whether it was cancelled (by its caller or this runtime). */
+  let activeNavigation: { readonly pending: Promise<NavigationResult>; readonly signal: AbortSignal | undefined; cancelled: boolean } | null = null;
+  const markCancelled = () => {
+    if (activeNavigation !== null) activeNavigation.cancelled = true;
+  };
+  /**
+   * The slot held by a cancelled request is waited for, then abandoned: "busy" never outlives the owner (run 14b: a
+   * stalled navigate waited for a tick for good and every later route was refused busy). A live one is still busy.
+   */
+  const releaseCancelled = async (): Promise<void> => {
+    const held = activeNavigation;
+    if (held === null) return;
+    if (!held.cancelled && !held.signal?.aborted) throw new Error("Navigation is busy with another request.");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      held.pending.then(() => true, () => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), releaseWaitMs); }),
+    ]);
+    clearTimeout(timer);
+    if (activeNavigation !== held) {
+      if (activeNavigation !== null) throw new Error("Navigation is busy with another request.");
+      return;
+    }
+    if (!settled) {
+      diving.cancel("abandoned: its owner stopped it and it did not settle");
+      navigator.abandonActive("abandoned: its owner stopped it and it did not settle");
+      if (activeRoute !== null) activeRoute = null;
+      activeNavigation = null;
+    }
+  };
   let closed = false;
 
   const botDied = () => {
@@ -112,7 +147,7 @@ export function createNavigationRuntime(bot: Bot): NavigationRuntime {
     closed = true;
     diving.cancel("navigation runtime closed");
     navigator.terminateActive("navigation runtime closed");
-    if (activeNavigation) await activeNavigation.catch(() => undefined);
+    if (activeNavigation) await activeNavigation.pending.catch(() => undefined);
     if (activeRoute) await activeRoute.catch(() => undefined);
     navigationBot.clearOwnedControls();
     bot.removeListener("death", botDied);
@@ -217,14 +252,18 @@ export function createNavigationRuntime(bot: Bot): NavigationRuntime {
     diveBackstop: () => diving.backstop(),
     navigate: async (options) => {
       requireOpen();
-      if (activeNavigation) throw new Error("Navigation is busy with another request.");
+      await releaseCancelled();
+      requireOpen();
       selectedTool = options.onToolSelected;
       const pending = diving.run(options, navigate);
-      activeNavigation = pending;
+      const held = { pending, signal: options.signal, cancelled: false };
+      activeNavigation = held;
       try { return await pending; }
       finally {
-        if (activeNavigation === pending) activeNavigation = null;
-        selectedTool = undefined;
+        if (activeNavigation === held) {
+          activeNavigation = null;
+          selectedTool = undefined;
+        }
       }
     },
     breakBlockInPlace: async (options) => {
@@ -254,10 +293,12 @@ export function createNavigationRuntime(bot: Bot): NavigationRuntime {
       return () => listeners.delete(listener);
     },
     cancel(reason = "cancelled") {
+      markCancelled();
       diving.cancel(reason);
       navigator.cancelActive(reason);
     },
     releaseForTakeover(reason) {
+      markCancelled();
       diving.cancel(reason);
       navigator.terminateActive(reason);
     },

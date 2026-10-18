@@ -20,6 +20,9 @@ export interface StopPace {
   readonly giveUpMs: number;
 }
 
+const GAVE_UP = Symbol("gave up");
+const WOKEN = Symbol("woken");
+
 /** `send_message` refuses longer lines. */
 const MAX_CHAT_LENGTH = 256;
 
@@ -121,24 +124,53 @@ export class Body {
         if (stop || (options.interruptWhen !== undefined && await options.interruptWhen())) {
           cancelled = true;
           preempted = !stop;
-          cancelledAt = lastCancel = Date.now();
+          cancelledAt = lastCancel = performance.now();
           await this.runtime.cancel(state.actionId, stop ? "Stopped by the agent." : "Re-planning.");
         }
       } else {
-        const waited = Date.now() - cancelledAt;
+        const waited = performance.now() - cancelledAt;
         if (waited >= this.pace.giveUpMs) {
           this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
           return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
         }
-        if (Date.now() - lastCancel >= this.pace.recancelMs) {
-          lastCancel = Date.now();
+        if (performance.now() - lastCancel >= this.pace.recancelMs) {
+          lastCancel = performance.now();
           await this.runtime.cancel(state.actionId, "Stopped by the agent.");
         }
       }
-      state = await this.runtime.wait(state.actionId, WAIT_SLICE_MS);
+      const slice = await this.waitSlice(state.actionId, cancelled ? cancelledAt + this.pace.giveUpMs : null, options.signal);
+      if (slice === WOKEN) continue;
+      if (slice === GAVE_UP) {
+        const waited = performance.now() - cancelledAt;
+        this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
+        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+      }
+      state = slice;
     }
     if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, preempted: false };
     return { status: state.status, error: state.error, preempted, ...(state.result !== undefined && { result: state.result }) };
+  }
+
+  /**
+   * One wait. A runtime that does not answer must not hold the step: before a cancel, an abort of `signal` ends the
+   * wait ({@link WOKEN}) so the cancel goes out; after it, the give-up deadline does ({@link GAVE_UP}).
+   */
+  private async waitSlice(actionId: string, deadline: number | null, signal: AbortSignal | undefined): Promise<ForegroundState | typeof GAVE_UP | typeof WOKEN> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<typeof GAVE_UP | typeof WOKEN>((resolve) => {
+      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - performance.now()) + WAIT_SLICE_MS);
+      else if (signal !== undefined) {
+        onAbort = () => resolve(WOKEN);
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    try {
+      return await Promise.race([this.runtime.wait(actionId, WAIT_SLICE_MS), stopped]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   /**

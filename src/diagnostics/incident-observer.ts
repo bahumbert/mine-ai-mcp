@@ -16,6 +16,7 @@ import { damageSourceName } from "../world/damage-registry.js";
 import { IncidentRecorder } from "./incident-recorder.js";
 import { observeCombatPackets } from "./combat-packets.js";
 import { projectileSnapshot } from "./projectile-snapshot.js";
+import { currentVehicle } from "../actions/navigate/vehicle-sync.js";
 
 const vectorSchema = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const velocityComponent = z.number().int().min(-32768).max(32767);
@@ -51,6 +52,7 @@ const explosionSchema = z.object({
   z: z.number(),
   playerKnockback: vectorSchema.nullish().transform((value) => value ?? null),
 });
+const passengersSchema = z.object({ entityId: z.number(), passengers: z.array(z.number()) });
 const correctionSchema = z.object({
   teleportId: z.number(),
   x: z.number(),
@@ -288,6 +290,7 @@ export function observeIncidents(
     recorder.record("server_position_applied", {
       dimension: bot.game.dimension,
       position: vector(bot.entity.position),
+      vehicleId: currentVehicle(bot)?.id ?? null,
     });
     previous = null; // Never label a teleport delta as local movement.
   };
@@ -305,6 +308,19 @@ export function observeIncidents(
   listeners.defer(() => bot.off("forcedMove", onForcedMove));
   bot.on("respawn", onRespawn);
   listeners.defer(() => bot.off("respawn", onRespawn));
+  // Run 14b: physics stayed off after a boat ride; the mount, the get-off and the server's answer are kept for a stall.
+  let lastVehicleId: number | null = null;
+  const onMount = () => {
+    lastVehicleId = currentVehicle(bot)?.id ?? lastVehicleId;
+    recorder.record("vehicle", { event: "mount", vehicleId: lastVehicleId, position: vector(bot.entity.position) });
+  };
+  const onDismount = (vehicle: { readonly id: number } | null) => {
+    recorder.record("vehicle", { event: "dismount", vehicleId: vehicle?.id ?? null, position: vector(bot.entity.position) });
+  };
+  bot.on("mount", onMount);
+  listeners.defer(() => bot.off("mount", onMount));
+  bot.on("dismount", onDismount);
+  listeners.defer(() => bot.off("dismount", onDismount));
 
   // These schemas deliberately select only diagnostic fields from 1.21.4.
   // Unsupported packet shapes are recorded as unavailable, never guessed.
@@ -394,6 +410,11 @@ export function observeIncidents(
   listeners.defer(() => bot._client.off("entity_velocity", onVelocity));
   packet("explosion", explosionSchema);
   packet("position", correctionSchema);
+  // Her own passenger lists, or her last vehicle's (one without her says the server let her off).
+  packet("set_passengers", passengersSchema, (value) => {
+    if (value.passengers.includes(bot.entity.id)) lastVehicleId = value.entityId;
+    return value.entityId === lastVehicleId || value.entityId === currentVehicle(bot)?.id;
+  });
   const onCombatDeath = (raw: unknown) => {
     const packet = z.object({ playerId: z.number().optional(), message: z.unknown() }).safeParse(raw);
     if (packet.success && (packet.data.playerId === undefined || packet.data.playerId === bot.entity.id))
@@ -427,6 +448,9 @@ export function observeIncidents(
   return {
     recorder,
     capture: () => capture("operator"),
+    physicsStalled: (action: string) => {
+      void capture("physics_stalled", { action, vehicleId: currentVehicle(bot)?.id ?? null, lastVehicleId });
+    },
     status: () => ({ ...recorder.status(), physicsSamples, observationMs, maxObservationMs }),
     connectionLost: onEnd,
     async close() {

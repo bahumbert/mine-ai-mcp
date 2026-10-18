@@ -209,3 +209,57 @@ test("failure evidence separates lost support, server corrections, and local mot
   assert.deepEqual(bot.eventNames(), []);
   assert.deepEqual(bot._client.eventNames(), []);
 });
+
+// Run 14b: eight bots froze after a boat ride with no record of the mount, the get-off or the server's answer.
+test("a physics stall is captured with the mount, the server's passenger lists and the vehicle state before it", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const boat = { id: 7, name: "oak_boat", position: new Vec3(0.5, 62.46, 0.5), passengers: [] as unknown[] };
+  const bot = Object.assign(new EventEmitter(), {
+    version: "1.21.4",
+    health: 20,
+    registry: { entitiesByName: { player: { metadataKeys: [] } } },
+    game: { dimension: "overworld" },
+    entity: { id: 5, position: new Vec3(0.5, 62.96, 0.5), velocity: new Vec3(0, 0, 0), onGround: false, yaw: 0, pitch: 0, metadata: [], vehicle: null as unknown },
+    vehicle: null as unknown,
+    entities: { 7: boat },
+    inventory: { slots: [] },
+    _client: new EventEmitter(),
+    getControlState: () => false,
+  });
+  const references: IncidentReference[] = [];
+  const observer = observeIncidents(bot as unknown as Bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
+    directory,
+    identity: { worldId: "test" },
+    published: (reference) => references.push(reference),
+    owner: () => ({
+      requestId: 3,
+      precedingRequestId: null,
+      session: { owner: "foreground", busy: true, activeAction: { action: "navigate", startedAt: "test" } },
+      combat: { targetId: null, position: null },
+    }),
+  });
+  bot._client.emit("set_passengers", { entityId: 7, passengers: [5] });
+  bot.vehicle = boat;
+  bot.entity.vehicle = boat;
+  bot.emit("mount");
+  bot._client.emit("set_passengers", { entityId: 9, passengers: [11] });
+  // The server lets her off: the list no longer names her; Mineflayer keeps the vehicle.
+  bot._client.emit("set_passengers", { entityId: 7, passengers: [] });
+  bot.vehicle = null;
+  bot.entity.vehicle = null;
+  bot.emit("dismount", boat);
+  observer.physicsStalled("navigate");
+  await observer.recorder.flush();
+  assert.equal(references[0]?.trigger, "physics_stalled");
+  const artifact = references[0]!.artifact;
+  if (artifact.kind !== "written") return assert.fail("not written");
+  const text = await readFile(artifact.path, "utf8");
+  assert.match(text, /"packet":"set_passengers","botEntityId":5,"fields":\{"entityId":7,"passengers":\[5\]\}/);
+  assert.match(text, /"packet":"set_passengers","botEntityId":5,"fields":\{"entityId":7,"passengers":\[\]\}/);
+  assert.doesNotMatch(text, /"entityId":9/, "another entity's passengers are not hers");
+  assert.match(text, /"kind":"vehicle","atMs":\d+,"event":"mount","vehicleId":7/);
+  assert.match(text, /"kind":"vehicle","atMs":\d+,"event":"dismount","vehicleId":7/);
+  assert.match(text, /"trigger":"physics_stalled".*"action":"navigate".*"vehicleId":null/);
+  await observer.close();
+});
