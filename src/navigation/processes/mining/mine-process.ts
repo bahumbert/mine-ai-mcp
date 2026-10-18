@@ -160,6 +160,8 @@ export type MineTarget =
 export interface MineRequest {
   /** Deliberate discards are excluded from both scans and anticipated drops. */
   readonly ignoredDropIds?: ReadonlySet<number>;
+  /** Milliseconds on a monotonic clock; the drop and refresh timers read it. Tests inject a fake. */
+  readonly now?: () => number;
   /** Which blocks count as ore. */
   readonly matches: (block: MinecraftBlock) => boolean;
   /**
@@ -688,6 +690,8 @@ class MineTargeting {
   #branchFailure: string | null = null;
   #knownBlocks: readonly BlockPosition[] = [];
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
+  /** Monotonic: a wall clock that steps (NTP, WSL host sync) must not stretch or cut the drop timers. */
+  readonly #now: () => number;
   #announced = "";
   /** Why each loaded matching block the last scan saw could not be a target, and how many were rejected for it. */
   rejections: ReadonlyMap<string, number> = new Map();
@@ -706,6 +710,7 @@ class MineTargeting {
     private readonly bot: Bot,
     private readonly request: MineRequest,
   ) {
+    this.#now = request.now ?? (() => performance.now());
     this.#casts = new CastTargets(bot, request, MAX_MINE_TARGETS);
     this.#drops = new MineDropTracker(bot, request, this.#dropBlacklist, this.#anticipatedDropBlacklist);
   }
@@ -859,7 +864,7 @@ class MineTargeting {
   }
 
   /** The current target set, rescanning the world at most every `GOAL_UPDATE_MS`. */
-  targets(now = Date.now()): readonly MineTarget[] {
+  targets(now = this.#now()): readonly MineTarget[] {
     if (now - this.#refreshedAtMs < GOAL_UPDATE_MS) return this.#targets;
 
     // A block this run knew about that is loaded and no longer matches came
@@ -880,7 +885,7 @@ class MineTargeting {
     });
     const found = [...scanResult.targets];
     this.rejections = scanResult.rejections;
-    const tracked = this.#drops.update(found);
+    const tracked = this.#drops.update(found, now);
     // An item the bot stands in that never enters the inventory is one the
     // inventory cannot take. Give it up now rather than when the server
     // despawns it; whether a full bag ends the run is the caller's decision.
@@ -926,7 +931,7 @@ class MineTargeting {
     // Measure the cache window from completed work. If a rich block refresh
     // itself takes longer than the interval, recording its start time makes it
     // immediately stale and every search slice performs the whole scan again.
-    this.#refreshedAtMs = Date.now();
+    this.#refreshedAtMs = this.#now();
     this.announce();
     return this.#targets;
   }

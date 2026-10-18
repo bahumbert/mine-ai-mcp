@@ -67,6 +67,19 @@ test("the work tier may end the objective: done, or given up with a reason", asy
   assert.deepEqual(await mind.next(workInput("build a tower"), signal), { kind: "give_up", reason: "I do not know how to build a tower." });
 });
 
+test("a step with fields its skill does not have is sent back naming the fields the skill does accept", async () => {
+  const { action, mind } = scriptedMind();
+  const bad = { step: { skill: "improve_house", x: 1, y: 64, z: 2 } };
+  action.reply(bad, { step: { skill: "improve_house" } });
+  assert.deepEqual((await mind.next(workInput("improve my house"), signal)).kind, "step");
+  const sent = action.requests[1]?.at(-1)?.content ?? "";
+  assert.match(sent, /"x", "y", "z"/u);
+  assert.match(sent, /improve_house takes only: "roles"/u);
+  action.reply({ step: { skill: "go_to_player", player: "Steve", distance: 2 } }, { step: { skill: "go_to_player", player: "Steve" } });
+  await mind.next(workInput("go to Steve"), signal);
+  assert.match(action.requests[3]?.at(-1)?.content ?? "", /go_to_player takes only: "player"/u);
+});
+
 test("a skill outside the catalog, or one this character cannot use, is rejected after the repair round", async () => {
   const { action, mind } = scriptedMind();
   const bad = { step: { skill: "op_player", player: "Steve" } };
@@ -852,6 +865,66 @@ test("the chat prompt gives examples for the routes and places the 2026-10-11 re
   const prompt = chatSystemPrompt(testPersona());
   assert.match(prompt, /"come here", "follow me", "get me 5 logs"\s+are "act" even though your line answers them/u);
   assert.match(prompt, /"protect the area around you" are "you", never "speaker"; "come here", "build me a house here", "around me" are "speaker"/u);
+});
+
+test("the around-you send-back is once per step, not once per objective (live L7: step 1 spent it, step 2 'protect Tester's area' went through)", async () => {
+  const input = workInput("protect the area around you", { objective: { text: "protect the area around you", requester: "Steve", purpose: null, place: "you" } });
+  const level = { skill: "level_area", around: "Steve", radius: 5 } as const;
+  const protect = { skill: "protect_area", player: "Steve", radius: 5, label: "my place" } as const;
+  const fixed = { skill: "protect_area", radius: 5, label: "my place" } as const;
+  const { action, mind } = scriptedMind();
+  action.reply({ thought: "Level.", step: level }, { thought: "Level.", step: level });
+  assert.equal((await mind.next(input, signal)).kind, "step");
+  assert.equal(action.requests.length, 2, "step 1 sent back once, then it stands");
+  action.reply({ thought: "Protect.", step: protect }, { thought: "Protect.", step: fixed });
+  assert.deepEqual(await mind.next(input, signal), { kind: "step", step: fixed, thought: "Protect." });
+  assert.equal(action.requests.length, 4, "step 2 is sent back too");
+  assert.match(action.requests[3]?.at(-1)?.content ?? "", /the order is around you/u);
+});
+
+test("content checks have their own budget: two send-backs and a malformed reply are not a bad reply (C21)", async () => {
+  const input = workInput("protect the area around you", { objective: { text: "protect the area around you", requester: "Steve", purpose: null, place: "you" } });
+  const protect = { skill: "protect_area", player: "Steve", radius: 5, label: "my place" } as const;
+  const fixed = { skill: "protect_area", radius: 5, label: "my place" } as const;
+  const give = { skill: "give_item", player: "Steve", item: "oak_log", count: 4 } as const;
+  const { action, mind } = scriptedMind();
+  // Sent back as a repeat of the step that just succeeded, then around-you, with one reply that is not JSON between.
+  action.reply({ thought: "a", step: give }, { thought: "b", step: protect }, "not json at all", { thought: "c", step: fixed });
+  const withSteps = { ...input, steps: [{ step: describeStep(give), outcome: "done" as const, detail: "gave 4 oak_log" }] };
+  assert.deepEqual(await mind.next(withSteps, signal), { kind: "step", step: fixed, thought: "c" });
+  assert.equal(action.requests.length, 4);
+});
+
+test("a check that keeps sending back ends in a send-back error, not a bad reply, after its own budget", async () => {
+  const { action, mind } = scriptedMind();
+  const explore = { thought: "x", step: { skill: "explore", toward: "north", for: "air" } };
+  action.reply(explore, explore, explore, explore, explore, explore);
+  await assert.rejects(mind.next(workInput("find a site"), signal), (error: Error) => /\[LLM_SENT_BACK\]/u.test(error.message) && !/LLM_BAD_REPLY/u.test(error.message));
+});
+
+test("chat-tier content checks have the send-back budget too, not the format budget: they never end as a bad reply (review R19)", async () => {
+  const later = { say: "Later!", route: "later", request: "build a house" };
+  const act = { say: "On it.", route: "act", request: "build a house" };
+  const input = { ...chatInput("build me a house"), canWait: false };
+  {
+    // Three content refusals in a row (the format budget is two repairs) and the fourth reply is taken.
+    const { chat, mind } = scriptedMind();
+    chat.reply(later, later, later, act);
+    const decision = await mind.chat(input, signal);
+    assert.equal(decision.route, "act");
+    assert.equal(chat.requests.length, 4);
+  }
+  {
+    const { chat, mind } = scriptedMind();
+    chat.reply(later, later, later, later, later, later);
+    await assert.rejects(mind.chat(input, signal), (error: Error) => /\[LLM_SENT_BACK\]/u.test(error.message) && !/LLM_BAD_REPLY/u.test(error.message));
+  }
+  {
+    // A reply that is not JSON still takes the format budget alone.
+    const { chat, mind } = scriptedMind();
+    chat.reply("nope", "still nope", "nope again");
+    await assert.rejects(mind.chat(input, signal), /\[LLM_BAD_REPLY\]/u);
+  }
 });
 
 test("the chat range is told, and a shout offered, only when the server limits talk", () => {

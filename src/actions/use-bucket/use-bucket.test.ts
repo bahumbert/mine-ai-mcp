@@ -328,3 +328,67 @@ test("pour refuses an occupied cell and reports the missing bucket", async () =>
   if (missing.status === "succeeded") assert.fail("no lava bucket is carried");
   assert.match(missing.error, /BUCKET_MISSING\] Bot inventory holds no lava_bucket/);
 });
+
+/** A farm's water hole: one cell dug into the plot's soil, its floor one block lower. */
+function holeWorld() {
+  const world = poolWorld("water_bucket");
+  world.blocks.set(key(new Vec3(6, 63, 0)), {
+    name: "air",
+    stateId: 0,
+    boundingBox: "empty",
+    position: new Vec3(6, 63, 0),
+  });
+  world.blocks.set(key(new Vec3(6, 62, 0)), {
+    name: "stone",
+    stateId: 1,
+    boundingBox: "block",
+    position: new Vec3(6, 62, 0),
+  });
+  return world;
+}
+
+test("a pour whose route ended too far for any face steps closer instead of refusing", async () => {
+  const { bot, dependencies, uses } = holeWorld();
+  // The first route ends four cells back, where the rim hides every face; the second ends beside the hole.
+  bot.entity.position.set(6.5, 64, 8.5);
+  const stands = [new Vec3(6.5, 64, 4.5), new Vec3(6.5, 64, 1.5)];
+  let routes = 0;
+  const result = await useBucket(
+    bot,
+    { action: "pour", liquid: "water", cell: { x: 6, y: 63, z: 0 } },
+    {},
+    {
+      ...dependencies,
+      navigate: async () => {
+        bot.entity.position.set(...(stands[Math.min(routes, stands.length - 1)]!.toArray() as [number, number, number]));
+        routes += 1;
+        return { status: "completed", elapsedMs: 0 };
+      },
+    },
+  );
+
+  // From four blocks back no face of the hole is in reach: the first stance has nothing to pour against.
+  assert.equal(result.status, "succeeded");
+  assert.equal(routes, 2);
+  assert.equal(uses.length, 1);
+  // The face is one of the hole's own walls or its floor, seen from the second stance.
+  const aimed = result.bucket.aimedAt!;
+  assert.equal(Math.abs(aimed.x - 6) + Math.abs(aimed.y - 63) + Math.abs(aimed.z), 1);
+});
+
+test("a pour with no face even from the nearest stance still names the missing face", async () => {
+  const { bot, dependencies } = holeWorld();
+  bot.entity.position.set(6.5, 64, 4.5);
+  const result = await useBucket(
+    bot,
+    { action: "pour", liquid: "water", cell: { x: 6, y: 63, z: 0 } },
+    {},
+    {
+      ...dependencies,
+      // A route that cannot get closer than where the bot already stands.
+      navigate: async () => ({ status: "completed", elapsedMs: 0 }),
+    },
+  );
+  if (result.status === "succeeded") assert.fail("a rim that hides the floor from every stance has no face");
+  assert.match(result.error, /BUCKET_NO_FACE/);
+});

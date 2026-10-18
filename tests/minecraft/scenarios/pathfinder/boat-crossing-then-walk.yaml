@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-crossing-then-walk
+tags: [regression]
+description: >-
+  Run 14b, 8 of 20 bots froze: a navigate crossed deep water by boat and got off by shift; the server let the bot off
+  and told its client nothing, Mineflayer (physics off since the mount) never ticked again, the route on stalled after
+  30 s (RUNTIME_PHYSICS_STALLED) and every later route was refused "Navigation is busy". The first navigate crosses a
+  40-block sea and walks 20 blocks on the far land; the second must go on 15 blocks further.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea three deep and 40 long, 81 wide, from the bot's shore (x 0) to the far land (x 41), level with the water.
+  - fill: { block: water, from: [ 1, -63, -40 ], to: [ 40, -61, 40 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 1
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  actions:
+    # Across by boat, off at the far shore, then on foot: the route after the get-off needs physics ticks.
+    - { action: navigate, input: { x: 60, y: -60, z: 0, range: 2 } }
+    - { action: navigate, input: { x: 75, y: -60, z: 10, range: 2 } }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: reach
+      who: Rower
+      pos: [ 75.5, -60, 10.5 ]
+      radius: 3.0
+    - kind: completion
+      who: Rower

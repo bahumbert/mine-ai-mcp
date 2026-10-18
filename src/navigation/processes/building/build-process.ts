@@ -36,6 +36,7 @@ import {
   isReplaceableForPlacement,
   type BlockPlacement,
   type BlockPlacementResult,
+  type RefusalCause,
   type WorldBlock,
 } from "../../../world/index.js";
 import {
@@ -171,7 +172,7 @@ export type BuildCellState =
   /** The bot's own feet or head. */
   | { readonly kind: "occupied" }
   /** A placement, dig, or route to it failed; it is not tried again this run. */
-  | { readonly kind: "refused"; readonly reason: string };
+  | { readonly kind: "refused"; readonly reason: string; readonly cause: RefusalCause };
 
 export interface BuildRequest {
   readonly cells: readonly BuildCell[];
@@ -283,7 +284,7 @@ function carriedCounts(bot: Bot): Map<string, number> {
  */
 class BuildTargeting {
   readonly #states = new Map<number, BuildCellState>();
-  readonly #refused = new Map<number, string>();
+  readonly #refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
   /** The correct cells as packed keys, handed to the movement policy and kept current. */
   readonly protectedCells = new Set<number>();
   readonly #bounds: { readonly min: Vec3; readonly max: Vec3 };
@@ -306,13 +307,13 @@ class BuildTargeting {
     return this.placed + this.dug + this.#refused.size;
   }
 
-  refuse(cell: BuildCell, reason: string): void {
-    this.#refused.set(keyOf(cell.position), reason);
+  refuse(cell: BuildCell, reason: string, cause: RefusalCause): void {
+    this.#refused.set(keyOf(cell.position), { reason, cause });
     this.#refreshedAtMs = Number.NEGATIVE_INFINITY;
   }
 
   /** Baritone's `blacklistClosestOnFailure`: the target nearest the failure is given up on, not the build. */
-  refuseClosest(position: BlockPosition, reason: string): boolean {
+  refuseClosest(position: BlockPosition, reason: string, cause: RefusalCause): boolean {
     const origin = asVec3(position);
     let closest: BuildCell | null = null;
     for (const target of this.targets()) {
@@ -323,7 +324,7 @@ class BuildTargeting {
         closest = target;
     }
     if (closest === null) return false;
-    this.refuse(closest, reason);
+    this.refuse(closest, reason, cause);
     return true;
   }
 
@@ -360,7 +361,7 @@ class BuildTargeting {
     if (block === null) return { kind: "unloaded" };
     if (holdsCell(block, cell) || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
     const refused = this.#refused.get(keyOf(cell.position));
-    if (refused !== undefined) return { kind: "refused", reason: refused };
+    if (refused !== undefined) return { kind: "refused", ...refused };
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
     if (!isReplaceableForPlacement(block)) {
@@ -516,7 +517,7 @@ async function workInReach(
     if (state.kind === "diggable") {
       const dug = await request.breakInPlace({ movements, position: target.position, signal });
       if (dug.status === "broken") targeting.dug += 1;
-      else targeting.refuse(target, dug.reason);
+      else targeting.refuse(target, `${state.holds} there could not be cleared: ${dug.reason}`, dug.cause ?? "placement");
     } else if (state.kind === "placeable") {
       const item = bot.inventory.items().find((candidate) => candidate.name === target.blockName)!;
       const placed = await request.place({
@@ -530,7 +531,7 @@ async function workInReach(
         signal,
       });
       if (placed.kind === "placed") targeting.placed += 1;
-      else targeting.refuse(target, placed.error);
+      else targeting.refuse(target, placed.error, placed.cause ?? "placement");
     } else {
       // A cell within reach that still reads as unloaded is nothing to work on.
       return worked;
@@ -590,7 +591,7 @@ export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown 
       if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
       // A goal the search could not reach is not a reason to abandon the build,
       // only that cell — unless the targets already changed underneath it.
-      if (targeting.identity() === routed && !targeting.refuseClosest(feetOf(bot), route.reason)) {
+      if (targeting.identity() === routed && !targeting.refuseClosest(feetOf(bot), route.reason, "route")) {
         return targeting.result("stopped", route.reason);
       }
     }
@@ -624,7 +625,7 @@ async function runRoute(
       return more ? { kind: "continue" } : { kind: "completed" };
     },
     onCalculationFailure: async ({ failure, observation }) => {
-      targeting.refuseClosest(observation.position, describeCalculationFailure(failure));
+      targeting.refuseClosest(observation.position, describeCalculationFailure(failure), "route");
       targeting.refresh();
       return targeting.targets().length > 0 ? { kind: "continue" } : { kind: "completed" };
     },

@@ -130,3 +130,23 @@ test("a hand that need not change is not waited on", async () => {
   });
   assert.deepEqual(result, { kind: "used" });
 });
+
+test("an unconfirmed use says how far the server clock moved after the use went out", async () => {
+  for (const [serverTicksPerClientTick, expected] of [[0, 0], [1, 5]] as const) {
+    const world = usingBot(1_000);
+    const time = { age: 1_000 };
+    Object.defineProperty(world.bot, "time", { value: time });
+    const wait = world.bot.waitForTicks;
+    world.bot.waitForTicks = async (ticks?: number) => {
+      time.age += serverTicksPerClientTick;
+      return wait(ticks ?? 1);
+    };
+    const result = await useItemAt(world.bot, {
+      item: { name: "bucket" } as InventoryItem,
+      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+      timeoutTicks: 5,
+    });
+    assert.deepEqual(result.kind === "failed" ? result.serverTicksWaited : null, expected);
+  }
+});

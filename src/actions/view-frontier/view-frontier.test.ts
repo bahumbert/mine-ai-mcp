@@ -60,6 +60,7 @@ function botStatus(x: number, z: number): BotStatusSnapshot {
     health: 13,
     food: 9,
     gameMode: "survival",
+    difficulty: "normal",
     onGround: true,
     inWater: false,
     saturation: 2.5,

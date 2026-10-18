@@ -3,9 +3,10 @@ import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
 import type { KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
-import { describeWay } from "../gathering.ts";
+import { describeWay, firstOfOwnSeed } from "../gathering.ts";
 import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, overlapsOf, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
-import { farmPlot, plotBehind, type FarmPlot } from "./plot.ts";
+import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
+import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
 const WALK_RANGE = 8;
@@ -17,6 +18,8 @@ const tendedSchema = z.object({
   tended: z.object({
     after: z.object({ crops: z.record(z.string(), z.number()), emptyFarmland: z.number() }),
     skipped: z.record(z.string(), z.array(z.unknown())).optional(),
+    tilledSoil: z.record(z.string(), z.number()).optional(),
+    untillable: z.record(z.string(), z.array(z.unknown())).optional(),
   }),
 });
 
@@ -55,6 +58,17 @@ function withNote(result: SkillResult, note: string): SkillResult {
   return result.status === "done" && note !== "" ? { ...result, detail: `${result.detail}; ${note}` } : result;
 }
 
+/**
+ * The first of these remembered farms whose ground is still soil. One whose ground is no soil any more (a plot made
+ * on stone) is skipped: it is not tended again and does not shadow a farm made since (run 13 review).
+ */
+async function farmOnSoil(context: SkillContext, candidates: readonly KnownFarm[]): Promise<KnownFarm | undefined> {
+  for (const candidate of candidates) {
+    if (await farmStandsOnSoil(context.runtime, farmPlot(candidate.centre, candidate.size as FarmSize), context.soil)) return candidate;
+  }
+  return undefined;
+}
+
 function horizontal(a: Position, b: Position): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
@@ -68,13 +82,17 @@ function horizontal(a: Position, b: Position): number {
 export async function farm(context: SkillContext, step: Extract<Step, { skill: "farm" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const at = step.x !== undefined && step.y !== undefined && step.z !== undefined ? { x: step.x, y: step.y, z: step.z } : null;
-  const known = context.farms?.find((candidate) => horizontal(candidate.centre, at ?? snapshot.position) <= FARM_RANGE);
+  const centre = at ?? snapshot.position;
+  const known = await farmOnSoil(context, (context.farms ?? []).filter((candidate) => horizontal(candidate.centre, centre) <= FARM_RANGE));
   if (known !== undefined) return tendKnown(context, snapshot, known, step.crop);
   const crop = step.crop;
   if (crop === undefined) return { status: "failed", detail: "a new farm needs a crop to plant: say which item (wheat_seeds, carrot, potato, beetroot_seeds)" };
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plot = at === null ? plotBehind(snapshot.position, toward, step.size) : farmPlot({ x: at.x, y: at.y - 1, z: at.z }, step.size);
-  return makeFarm(context, snapshot, plot, crop);
+  // The ground there must be tillable under the open sky; if not, the nearest plot that is, else a refusal that says why.
+  const site = await chooseSite(context.runtime, plot, context.soil);
+  if ("refusal" in site) return { status: "failed", detail: site.refusal };
+  return makeFarm(context, snapshot, site.plot, crop);
 }
 
 async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, asked: string): Promise<SkillResult> {
@@ -92,6 +110,11 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
     ...(needsBucket ? [{ item: "bucket", count: 1 }] : []),
     ...(carried(snapshot, crop) === 0 ? [{ item: crop, count: STARTING_SEEDS }] : []),
   ];
+  // A crop that is its own seed cannot be fetched by get_items (no block drops it, and it says "farm it"): say where a first one comes from.
+  if (carried(snapshot, crop) === 0) {
+    const first = await firstOfOwnSeed(context.runtime, crop);
+    if (first !== null) return { status: "failed", detail: `${what} needs one ${crop} to plant, and ${first}` };
+  }
   // Named as the step that fetches them, as a build does: get_items adds to what she carries.
   if (missing.length > 0) return { status: "failed", detail: `${what} needs ${describeMaterials(missing)} (not carried): fetch exactly those with get_items, then farm again` };
 
@@ -186,12 +209,32 @@ async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: Kn
   return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
 }
 
+const cellSchema = z.object({ x: z.number(), z: z.number() });
+
+/**
+ * What a tend says of the ground (SF2): each cell a hoe was used on without the block changing (`untillable`) counts
+ * against its block name, then each soil a till worked on clears its name, so one call with both leaves the name
+ * usable. Skip reasons teach nothing: a hoe that broke or a use that timed out says nothing of the block (run 14b).
+ * The facts refuse a name only on repeated failures at different cells (see {@link TillFacts}).
+ */
+function learnSoil(soil: TillFacts | undefined, tended: { readonly untillable?: Readonly<Record<string, readonly unknown[]>> | undefined; readonly tilledSoil?: Readonly<Record<string, number>> | undefined } | undefined): void {
+  if (soil === undefined) return;
+  for (const [block, cells] of Object.entries(tended?.untillable ?? {})) {
+    for (const cell of cells) {
+      const at = cellSchema.safeParse(cell).data;
+      if (at !== undefined) soil.failed(block, at);
+    }
+  }
+  for (const block of Object.keys(tended?.tilledSoil ?? {})) soil.tilled(block);
+}
+
 /** One `tend_crops` over the plot, then the farm remembered as it stands. */
 async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string }, doneDetail: string): Promise<SkillResult> {
   const input = { x1: plot.min.x, z1: plot.min.z, x2: plot.max.x, z2: plot.max.z, y: plot.water.y, ...(plant !== null && { plant }) };
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   const tended = tendedSchema.safeParse(outcome.result).data?.tended;
+  learnSoil(context.soil, tended);
   const after = tended?.after;
   const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});

@@ -17,6 +17,7 @@ const status: BotStatusSnapshot = {
   health: 11,
   food: 7,
   gameMode: "survival",
+  difficulty: "normal",
   onGround: true,
   inWater: false,
   saturation: 1,

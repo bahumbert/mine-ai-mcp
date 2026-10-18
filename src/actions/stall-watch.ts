@@ -21,6 +21,23 @@ export interface StallFacts {
   readonly walked: number;
 }
 
+/** Time and repetition, injectable so a test steps them by hand instead of waiting. */
+export interface StallClock {
+  /** Milliseconds on a monotonic clock. */
+  readonly now: () => number;
+  /** Call `tick` every `ms` until the returned function is called. */
+  readonly every: (tick: () => void, ms: number) => () => void;
+}
+
+/** Monotonic: a wall clock that steps (NTP, WSL host sync) must not stretch or cut the stall window. */
+export const MONOTONIC_CLOCK: StallClock = {
+  now: () => performance.now(),
+  every: (tick, ms) => {
+    const timer = setInterval(tick, ms);
+    return () => clearInterval(timer);
+  },
+};
+
 export interface StallWatchOptions {
   /** Anything that changes when the action makes progress, such as `blocks broken:items gained`. */
   readonly work: () => string | number;
@@ -29,6 +46,7 @@ export interface StallWatchOptions {
   readonly inWater?: () => boolean;
   readonly stallMs: number;
   readonly sampleMs?: number;
+  readonly clock?: StallClock;
   readonly describe: (facts: StallFacts) => string;
 }
 
@@ -45,28 +63,29 @@ export function watchForStall(options: StallWatchOptions): StallWatch {
   const controller = new AbortController();
   let reason: string | null = null;
   let lastWork = options.work();
-  let lastChange = Date.now();
+  const clock = options.clock ?? MONOTONIC_CLOCK;
+  let lastChange = clock.now();
   const travel = new AnchorTravel();
   travel.add(options.position(), false);
   let walked = 0;
-  const timer = setInterval(() => {
+  const stop = clock.every(() => {
     const here = options.position();
     walked += travel.add(here, options.inWater?.() ?? false);
     const work = options.work();
     if (work !== lastWork) {
       lastWork = work;
-      lastChange = Date.now();
+      lastChange = clock.now();
       walked = 0;
       return;
     }
-    if (Date.now() - lastChange < options.stallMs) return;
+    if (clock.now() - lastChange < options.stallMs) return;
     reason = options.describe({ seconds: options.stallMs / 1_000, walked: Math.round(walked) });
-    clearInterval(timer);
+    stop();
     controller.abort(new Error(reason));
   }, options.sampleMs ?? SAMPLE_MS);
   return {
     signal: controller.signal,
     reason: () => reason,
-    close: () => clearInterval(timer),
+    close: stop,
   };
 }

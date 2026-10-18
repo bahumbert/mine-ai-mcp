@@ -505,7 +505,8 @@ they are, including blocks the bot placed itself; navigate to the area first
 when a particular deposit matters. `max_distance` keeps the whole run within that
 many blocks (horizontally) of where it started: no farther target, no exploring;
 with none left in range it stops `[NO_TARGET_IN_RANGE]`, naming the nearest
-loaded one beyond the range and its distance. The best carried tool for each block is
+loaded one beyond the range and its distance. `max_breaks` caps the blocks the run may
+break (otherwise the drop chance sets the budget: a rare drop may break hundreds). The best carried tool for each block is
 equipped automatically. The response lists every cell broken with its distance
 from where the run started, so the model can see which deposit was mined.
 

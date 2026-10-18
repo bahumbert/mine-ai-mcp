@@ -35,6 +35,11 @@ export interface ClosestNodeEvidence {
   readonly heuristic: number;
   readonly routeCost: number;
   readonly basis: "best_heuristic_search_node";
+  /**
+   * Set when the nearest node to the goal lies within this many blocks of where the search began (it is not
+   * necessarily the start itself): no route found gets the bot more than that many blocks nearer.
+   */
+  readonly withinStartBlocks?: number;
 }
 
 export interface SearchLimitEvidence {

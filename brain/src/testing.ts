@@ -54,7 +54,7 @@ export class FakeRuntime implements BotRuntime {
   /** Returned by the next submit instead of accepting it. */
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   /** The next call of that tool fails once with this error, after `effect` (what it got done before failing). */
-  failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void }>> = {};
+  failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void; readonly result?: Readonly<Record<string, unknown>> }>> = {};
   /** Recipes known to the fake crafting planner; items without one are uncraftable. */
   recipes: Readonly<Record<string, FakeRecipe>> = {};
   /** Items whose recipes the fake planner cannot plan (Minecraft: coal, iron ingots, made back from their blocks). */
@@ -115,6 +115,13 @@ export class FakeRuntime implements BotRuntime {
     return true;
   }
 
+  /** The values the fake's contract lets a tool's input property take, by "tool.property" (`toolEnum`); the runtime's own schema in real life. */
+  toolEnums: Readonly<Record<string, readonly string[]>> = { "use_bucket.liquid": ["water", "lava"] };
+
+  async toolEnum(tool: string, property: string): Promise<readonly string[]> {
+    return this.toolEnums[`${tool}.${property}`] ?? [];
+  }
+
   /** The `prefer` lists `craftingNeeds` was given, in order (the fake planner does not use them). */
   readonly preferences: (readonly string[])[] = [];
   /** Names that are no item id at all (`craftingNeeds` answers unknown). */
@@ -131,7 +138,9 @@ export class FakeRuntime implements BotRuntime {
     const missing = [...leaves]
       .map(([item, count]) => ({ item, count: count - this.carried(item) }))
       .filter((entry) => entry.count > 0);
-    return { status: missing.length === 0 ? "ready" : "missing_materials", missing };
+    const inputs = new Set<string>();
+    for (const { item } of items) this.inputsOf(item, inputs);
+    return { status: missing.length === 0 ? "ready" : "missing_materials", missing, inputs: [...inputs] };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
@@ -184,15 +193,19 @@ export class FakeRuntime implements BotRuntime {
 
   /** The game's block tags the fake reports per block name, on a `blockKinds` lookup only, like the runtime (others: none). */
   blockTags: Readonly<Record<string, readonly string[]>> = {
-    dirt: ["mineable/shovel"], grass_block: ["mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
+    dirt: ["dirt", "mineable/shovel"], grass_block: ["dirt", "mineable/shovel"], sand: ["mineable/shovel"], gravel: ["mineable/shovel"],
     stone: ["mineable/pickaxe"], cobblestone: ["mineable/pickaxe"], iron_ore: ["mineable/pickaxe"], coal_ore: ["mineable/pickaxe"],
     oak_log: ["logs", "mineable/axe"], spruce_log: ["logs", "mineable/axe"], oak_door: ["doors"], spruce_door: ["doors"],
+    oak_planks: ["planks"], birch_planks: ["planks"], spruce_planks: ["planks"], birch_log: ["logs", "mineable/axe"],
   };
 
   /** Where blocks were seen, by name, as the bot data's frontier map would answer (others: never seen). */
   seen: Readonly<Record<string, SeenBlock>> = {};
   /** Further places for a block, after the one in {@link seen} (farther away, as the frontier map lists nearest first). */
   alsoSeen: Readonly<Record<string, readonly SeenBlock[]>> = {};
+
+  /** How many blocks each successful `collect_block` reports broken, whatever it was asked for (default: the count asked). */
+  collectBroken: ((input: Readonly<Record<string, unknown>>) => number) | null = null;
 
   /** A successful `navigate` moves the bot to its target (off by default: most tests keep the bot where it is). */
   walkOnNavigate = false;
@@ -333,6 +346,14 @@ export class FakeRuntime implements BotRuntime {
     return this.snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   }
 
+  /** Every item the recipe tree of `item` takes, the intermediate ones included. */
+  private inputsOf(item: string, into: Set<string>): void {
+    for (const need of this.recipes[item]?.needs ?? []) {
+      into.add(need.item);
+      this.inputsOf(need.item, into);
+    }
+  }
+
   private leaves(item: string, count: number, into: Map<string, number>): void {
     const recipe = this.recipes[item];
     if (recipe === undefined) {
@@ -355,14 +376,23 @@ export class FakeRuntime implements BotRuntime {
   tendAfter: Readonly<Record<string, unknown>> | null = null;
   /** Cells `tend_crops` leaves as they were, by reason: the fake then settles it as partial ([TEND_INCOMPLETE]). */
   tendSkipped: Readonly<Record<string, readonly { x: number; z: number }[]>> | null = null;
+  /** The soils `tend_crops` reports tilled, by block name and cells. */
+  tendTilledSoil: Readonly<Record<string, number>> = {};
+  /** The blocks a hoe was used on without changing them, by block name and cells (`untillable`). */
+  tendUntillable: Readonly<Record<string, readonly { x: number; z: number }[]>> = {};
   /** How such a tend settles: partial, or failed when no cell changed. */
   tendSkippedStatus: "partial" | "failed" = "partial";
 
+  private collectResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    const requested = Number(input.count ?? 1);
+    return { status: "succeeded", collected: { requested, gained: requested, gainedByItem: {}, blocksBroken: this.collectBroken?.(input) ?? requested, brokenAt: [] } };
+  }
+
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     const skipped = this.tendSkipped ?? {};
-    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped } };
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
     const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
-    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped } };
+    return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
   }
 
   /** What a successful action does to the inventory (leaves only: the fake crafts in one go). */
@@ -376,7 +406,8 @@ export class FakeRuntime implements BotRuntime {
     }
     if (tool === "collect_mob_drop") this.addItem(String(input.drop_name), Number(input.count ?? 1));
     if (tool === "use_bucket") {
-      const [from, to] = input.action === "fill" ? ["bucket", "water_bucket"] : ["water_bucket", "bucket"];
+      const full = `${String(input.liquid ?? "water")}_bucket`;
+      const [from, to] = input.action === "fill" ? ["bucket", full] : [full, "bucket"];
       this.addItem(from, -1);
       this.addItem(to, 1);
       if (input.action === "pour") this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "water");
@@ -422,7 +453,7 @@ export class FakeRuntime implements BotRuntime {
     if (once !== undefined) {
       delete this.failNext[action.tool];
       once.effect?.();
-      return { state: "settled", actionId, status: "failed", error: once.error };
+      return { state: "settled", actionId, status: "failed", error: once.error, ...(once.result !== undefined && { result: once.result }) };
     }
     const failure = this.failures[action.tool];
     if (failure !== undefined) {
@@ -434,7 +465,7 @@ export class FakeRuntime implements BotRuntime {
       // It reaches the ground asked for, at the height it stands.
       this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
     }
-    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : undefined;
+    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : undefined;
     if (action.tool === "tend_crops" && this.tendSkipped !== null) {
       const cells = Object.values(this.tendSkipped).reduce((sum, list) => sum + list.length, 0);
       return { state: "settled", actionId, status: this.tendSkippedStatus, error: `[TEND_INCOMPLETE] ${cells} cells could not be farmed; see skipped.`, result };

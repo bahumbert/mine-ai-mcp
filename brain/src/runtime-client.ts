@@ -68,6 +68,8 @@ export interface BotSnapshot {
   readonly position: Position;
   readonly health: number;
   readonly food: number;
+  /** The server difficulty (`peaceful`...); `unknown` or unset when the runtime did not say. */
+  readonly difficulty?: string;
   readonly inventory: readonly CarriedStack[];
   /** Carried foods, most filling first; empty when it carries none. */
   readonly foods: readonly CarriedFood[];
@@ -134,6 +136,8 @@ export interface CraftingNeeds {
   readonly missing: readonly ItemCount[];
   /** Why there is no plan, in the runtime's words (an unknown name comes with the registry names close to it). */
   readonly error?: string;
+  /** Every item the plan consumes, carried or not: the raw leaves and what the intermediate steps take (what a craft must never drop to make room). */
+  readonly inputs?: readonly string[];
 }
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
@@ -299,6 +303,11 @@ export interface BotRuntime {
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
   /** The blocks routes may place as scaffolding (runtime survival policy `navigation.scaffold_blocks`). */
   setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean>;
+  /**
+   * The values the runtime's contract lets input `property` of `tool` take (its schema's enum: the liquids `use_bucket`
+   * fills); none when the tool or property is unknown or has no enum.
+   */
+  toolEnum(tool: string, property: string): Promise<readonly string[]>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
   /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
@@ -315,12 +324,16 @@ export interface BotRuntime {
   close(): Promise<void>;
 }
 
+/** The part of a tool's JSON input schema that tells the values a property accepts. */
+const toolSchemaSchema = z.object({ properties: z.record(z.string(), z.object({ enum: z.array(z.string()).optional() })).optional() });
+
 const positionSchema = z.object({ x: z.number(), y: z.number(), z: z.number() });
 
 const viewStatusSchema = z.object({
   result: z.object({
     situation: z.object({
       position: positionSchema,
+      difficulty: z.string().optional(),
       vitals: z.object({ health: z.number(), food: z.number() }),
       inventory: z.object({
         stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null) })),
@@ -353,6 +366,8 @@ const craftingRequirementsSchema = z.object({
       plan: z.object({
         status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
         missingMaterials: z.array(z.object({ item: z.string(), count: z.number() })),
+        requiredMaterials: z.array(z.object({ item: z.string() })).default([]),
+        steps: z.array(z.object({ ingredients: z.array(z.object({ item: z.string() })).default([]) })).default([]),
       }).optional(),
     }).optional(),
   }),
@@ -462,6 +477,8 @@ const foregroundDataSchema = z.discriminatedUnion("state", [
 
 const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"), data: z.unknown() }) });
 
+/** The runtime contract's longest rationale (`rationaleSchema` in src/server/mcp.ts); a longer one fails the whole call. */
+const MAX_RATIONALE = 200;
 /** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
@@ -487,6 +504,8 @@ export function errorCode(error: string | null | undefined): string | null {
 /** The part of the MCP client the runtime client uses; tests give a fake. */
 export interface ToolClient {
   callTool(call: { name: string; arguments: Record<string, unknown> }): Promise<Record<string, unknown>>;
+  /** The runtime's tools with their input schemas (JSON Schema); a client that cannot list them leaves this out. */
+  listTools?(): Promise<{ readonly tools: readonly { readonly name: string; readonly inputSchema: unknown }[] }>;
   close(): Promise<void>;
 }
 
@@ -495,6 +514,9 @@ export class McpBotRuntime implements BotRuntime {
   private lost: Error | null = null;
 
   private constructor(private client: ToolClient, private readonly reopen: () => Promise<ToolClient>) {}
+
+  /** The tools' input schemas, listed once per session (empty when the listing cannot be read). */
+  private toolSchemas: Map<string, unknown> | null = null;
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
     const open = async (): Promise<ToolClient> => {
@@ -517,6 +539,7 @@ export class McpBotRuntime implements BotRuntime {
       position: situation.position,
       health: situation.vitals.health,
       food: situation.vitals.food,
+      difficulty: situation.difficulty,
       inventory: situation.inventory.stacks.map(({ name, count, durability }) => ({ name, count, durability })),
       foods: situation.inventory.foods,
       mobs: mobSpecies(situation.nearby.mobs),
@@ -553,7 +576,8 @@ export class McpBotRuntime implements BotRuntime {
     // Only an item Minecraft does not have fails without a plan.
     const plan = result.requirements?.plan;
     if (plan === undefined) return { status: "unknown", missing: [], ...(result.error !== undefined && { error: result.error }) };
-    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })) };
+    const inputs = new Set([...plan.requiredMaterials, ...plan.steps.flatMap(({ ingredients }) => ingredients)].map(({ item }) => item));
+    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })), inputs: [...inputs] };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
@@ -662,6 +686,19 @@ export class McpBotRuntime implements BotRuntime {
     return row === undefined ? null : { x: Number(row[0]), z: Number(row[1]) };
   }
 
+  async toolEnum(tool: string, property: string): Promise<readonly string[]> {
+    if (this.toolSchemas === null) {
+      // An unreadable listing is remembered as an empty one: gathering asks every round, and says why only once.
+      const listed = await this.client.listTools?.().catch((error: unknown) => {
+        console.warn(`[runtime] the tool listing cannot be read, so no tool's allowed values are known: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      });
+      this.toolSchemas = new Map(listed?.tools.map((entry) => [entry.name, entry.inputSchema]));
+    }
+    const read = toolSchemaSchema.safeParse(this.toolSchemas.get(tool));
+    return read.data?.properties?.[property]?.enum ?? [];
+  }
+
   async blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>> {
     const kinds: Record<string, BlockKind> = {};
     // One read per name: an unknown name fails the whole read, and it should only leave itself out.
@@ -765,6 +802,7 @@ export class McpBotRuntime implements BotRuntime {
       const fresh = await this.reopen();
       await this.client.close().catch(() => undefined);
       this.client = fresh;
+      this.toolSchemas = null;
       this.lost = null;
       return true;
     } catch {
@@ -775,7 +813,7 @@ export class McpBotRuntime implements BotRuntime {
   private async callOnce(name: string, args: Readonly<Record<string, unknown>>, rationale: string): Promise<unknown> {
     let reply: Awaited<ReturnType<ToolClient["callTool"]>>;
     try {
-      reply = await this.client.callTool({ name, arguments: { ...args, rationale, response_format: "json" } });
+      reply = await this.client.callTool({ name, arguments: { ...args, rationale: rationale.slice(0, MAX_RATIONALE), response_format: "json" } });
     } catch (error) {
       if (error instanceof Error && isLostSession(error)) throw new LostSession(error);
       throw error;

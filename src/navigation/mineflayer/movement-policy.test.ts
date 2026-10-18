@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture, type FakeBot, type FakeStack } from "../../test-support/bot.js";
 import { flatWorld } from "../../test-support/navigation.js";
+import { siteBreakRequest } from "../../actions/build-structure/build-structure.js";
+import { parseBuildStructureRequest } from "../../actions/build-structure/contract.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 
 /** Air around the origin: no liquid beside any cell these tests break. */
@@ -237,6 +239,20 @@ test("routes preserve what a player built or uses, while terrain stays diggable"
   );
 });
 
+test("a build clears a workstation standing in its own site, and no other one (live 2026-10-14: Oskar's house, 4 times)", () => {
+  const bot = botFixture();
+  const request = parseBuildStructureRequest({ blocks: [{ x: 0, y: 64, z: 0, block_name: "cobblestone" }], remove_wrong_blocks: true });
+  const policy = createMovements(bot, { isRequestedBreak: siteBreakRequest(request) });
+  const table = observed(bot, "crafting_table");
+  assert.equal(policy.evaluateBreak(table, { x: 0, y: 64, z: 0 }, world).decision.kind, "penalized", "inside the site");
+  assert.equal(policy.evaluateBreak(table, { x: 5, y: 64, z: 0 }, world).decision.kind, "prohibited", "a route keeps other workstations");
+  const keeping = parseBuildStructureRequest({ blocks: [{ x: 0, y: 64, z: 0, block_name: "cobblestone" }] });
+  assert.equal(
+    createMovements(bot, { isRequestedBreak: siteBreakRequest(keeping) }).evaluateBreak(table, { x: 0, y: 64, z: 0 }, world).decision.kind,
+    "prohibited",
+    "a build that keeps wrong blocks digs nothing",
+  );
+});
 
 test("scaffold admission follows other mobs moving into and out of a placement cell", () => {
   const bot = botFixture();

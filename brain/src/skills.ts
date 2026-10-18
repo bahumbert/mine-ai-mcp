@@ -7,13 +7,14 @@ import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
-import { LEVEL_LIMITS, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
-import { describeWay, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
+import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
+import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
-import { junkHint, KEPT_KINDS, kindOf } from "./inventory-room.ts";
+import { consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
+import type { TillFacts } from "./farming/site.ts";
 import { ToolLosses } from "./building/tool-loss.ts";
 import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
@@ -65,6 +66,8 @@ export interface SkillContext {
   readonly progress?: (fact: string) => void;
   /** Told where a fetch is travelling to (a place it saw the block), and null when it arrived or gave up: getting nearer counts as progress for the no-gain stop. */
   readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
+  /** Told that the step is alive without doing anything the brain can see (a follower holding beside a player who stands still): resets the silence limit. */
+  readonly alive?: () => void;
   /** Told that the step's work is another activity from now on (the house's site preparation is terraforming). */
   readonly phase?: (activity: Activity) => void;
   /** When the player who asked for this step last said anything (epoch ms); unset for her own goals. */
@@ -73,8 +76,16 @@ export interface SkillContext {
   readonly farms?: readonly KnownFarm[];
   /** Told about a farm made or tended, to remember it. */
   readonly rememberFarm?: (farm: KnownFarm) => void;
+  /** The block names a till failed on, shared by every character: a farm site never has them as soil. */
+  readonly soil?: TillFacts;
   /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
   readonly needed?: (snapshot: BotSnapshot) => ReadonlySet<string>;
+  /**
+   * The place a `level_area` around a player was first aimed at in this objective, by the player's lower-case name: later
+   * steps around the same player level the same place, wherever the player has gone since (run 13: Brea's second level
+   * followed the owner, flying, 4 blocks up and 20 away). Kept for the objective's life by the agent.
+   */
+  readonly levelSites?: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
 }
 
 export interface UnfinishedHouse {
@@ -86,6 +97,12 @@ export interface UnfinishedHouse {
   readonly prepared?: boolean;
   /** The roles built with other blocks than the style's (an older note has none: as the style). */
   readonly materials?: Materials;
+  /**
+   * The cells the runtime refused in the last run that stopped on them (an older note has none). A refusal is often
+   * transient (an animal in the cell, a route that timed out), so the house is kept; it is given up only when a
+   * resume is refused at one of these cells again.
+   */
+  readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
 export type SkillResult =
@@ -115,11 +132,9 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       }
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "drop_item": return await dropItems(context, step, why);
-      case "craft_item":
-        // A table close by is used where it stands; else the runtime sets a carried one down.
-        await walkToStation(context, "crafting_table");
-        return await once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+      case "craft_item": return await craftItem(context, step, why);
       case "get_items": return await getItems(context, step.items);
+      // No refusal from the bar here: golden apples and chorus fruit are edible when it is full, so the game answers.
       case "eat": return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
       case "sleep": return await once(context, "sleep", {}, why, "slept");
@@ -152,12 +167,13 @@ export function planFollowStep(snapshot: BotSnapshot, player: string, distance: 
 }
 
 async function follow(context: SkillContext, player: string, distance: number, minutes?: number): Promise<SkillResult> {
-  const { runtime, body, signal, heardFrom } = context;
+  const { runtime, body, signal, heardFrom, alive } = context;
   const started = Date.now();
   const until = started + (minutes ?? FOLLOW_OWN_MINUTES) * 60_000;
   let unseen = 0;
   let failures = 0;
   while (!signal.aborted) {
+    alive?.();
     // Asked for by a player: it lasts while they keep talking (any line restarts the count). On her own goal: its minutes.
     if (heardFrom !== undefined && minutes === undefined) {
       if (Date.now() - heardFrom() >= FOLLOW_QUIET_MS) {
@@ -213,6 +229,50 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return { status: "done", detail: doneDetail };
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
+}
+
+/**
+ * Crafts one item. A table close by is used where it stands; else the runtime sets a carried one down. With no room for
+ * the result or the table, room is made from what the work does not need and the craft runs again; with no table
+ * carried, one is made first (run 12: "needs inventory room to store 1 stone_shovel", "No crafting_table is carried").
+ */
+async function craftItem(context: SkillContext, step: Extract<Step, { skill: "craft_item" }>, why: string): Promise<SkillResult> {
+  await walkToStation(context, "crafting_table");
+  const run = () => once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
+  const first = await run();
+  if (first.status !== "failed") return first;
+  if (FULL_INVENTORY.test(first.detail) && (await makeRoom(context, await consumedBy(context.runtime, "craft_item", { items: [{ item_name: step.item, count: step.count }] })))) return run();
+  if (/WORKSTATION_NOT_CARRIED/u.test(first.detail)) {
+    const table = await getItems(context, [{ item: "crafting_table", count: 1 }], `crafting ${step.item}`);
+    if (table.status === "stopped") return table;
+    return table.status === "done" ? run() : { status: "failed", detail: `${first.detail}; making a crafting table failed: ${table.detail}` };
+  }
+  // Run 12: 16 crafts lacked raw materials; get_items gathers them and crafts (one clear next step).
+  return first.detail.includes("CRAFT_MATERIALS_MISSING")
+    ? { status: "failed", detail: `${first.detail} craft only uses what you carry: \`get_items ${step.item} ${step.count}\` gathers the missing materials and crafts it.` }
+    : first;
+}
+
+/**
+ * Frees a slot for a craft or a smelt from the carried items neither its own work nor the objective needs (the same
+ * sparing as {@link dropItems}): one stack at a time, the kind with most stacks first (`junkStacks`' order), until a slot is free. `inputs` are what the
+ * craft or the smelt consumes: never dropped, whatever the objective says (run 13: a full inventory of cobblestone lost
+ * all of it to a stone shovel craft). False for an order (no `needed`), when everything carried is needed, or when no
+ * slot came free: the failure then names what to drop.
+ */
+async function makeRoom(context: SkillContext, inputs: ReadonlySet<string>): Promise<boolean> {
+  if (context.needed === undefined) return false;
+  for (let attempt = 0; attempt < INVENTORY_SLOTS; attempt++) {
+    const before = await context.runtime.status();
+    // The kind junkStacks lists first (most stacks: a lone bucket or pair of shears is never first), and a count drops
+    // the kind's stacks in inventory order: the first stack's count frees exactly the first stack.
+    const [kind] = junkStacks(before, new Set([...context.needed(before), ...inputs]));
+    if (kind === undefined) return false;
+    const dropped = await dropItems(context, { skill: "drop_item", items: [{ item: kind.name, count: kind.stacks[0]! }] }, "Make room in the inventory for what I am crafting.");
+    if (dropped.status !== "done") return false;
+    if ((await context.runtime.status()).inventory.length < INVENTORY_SLOTS) return true;
+  }
+  return false;
 }
 
 /** What the action says it really dropped (its `drop.dropped` counts); null when the result carries none. */
@@ -312,7 +372,7 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
-  const gathered = await gatherMaterials(context, targets, purpose, start, keep);
+  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
@@ -404,8 +464,8 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
   noteArea(context, protection.area);
-  const leaveUnfinished = (part: number, prepared = true) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials };
+  const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => {
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...(refused !== undefined && refused.length > 0 && { refused }) };
   };
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
@@ -441,8 +501,10 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   }
   const stopped = await buildParts(context, plan, what, {
     reserved: plan.bill,
-    leave: (part) => leaveUnfinished(part),
+    leave: (part, refused) => leaveUnfinished(part, true, refused),
+    refusedBefore: resumed?.refused,
     again: context.building === undefined ? "" : "; building it again resumes it there",
+    abandon: () => { if (context.building !== undefined) context.building.unfinished = null; },
   });
   if (stopped !== null) return stopped;
   if (context.building !== undefined) context.building.unfinished = null;
@@ -520,10 +582,14 @@ async function improveOnSite(context: SkillContext, { place, house, style, roles
 interface PartsOptions {
   /** Blocks a remade tool must not use up: the house's bill. */
   readonly reserved: readonly MaterialCount[];
-  /** Told the part (batch index) to start again from when the work stops before the end. */
-  readonly leave: (part: number) => void;
+  /** Told the part (batch index) to start again from when the work stops before the end, and the cells the runtime refused (none given: the stop was not a refusal). */
+  readonly leave: (part: number, refused?: readonly Cell[]) => void;
+  /** The cells refused when the house was last left: refused again, the house is given up. */
+  readonly refusedBefore?: readonly Cell[];
   /** Ends the failure sentence: how the house is asked again. */
   readonly again: string;
+  /** Forgets the unfinished house, when resuming it keeps meeting the same refused cell. */
+  readonly abandon?: () => void;
 }
 
 /**
@@ -578,11 +644,50 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
         return { status: "stopped" };
       }
       const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
-      options.leave(Math.min(index, plan.batches.length - 1));
-      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${options.again}` };
+      // A refusal is read from the audit's structured groups, not from the error text. One refusal may be transient
+      // (an animal in the cell, a route that timed out): the house is kept with the refused cells; the same cell
+      // refused again on a resume is the one that would be refused for good, so the site is given up.
+      // A stop that is no refusal keeps the cells an earlier one named (refusal A, a tool failure, refusal A again is a repeat).
+      const refused = refusedCells(outcome.result);
+      options.leave(Math.min(index, plan.batches.length - 1), refused.length > 0 ? refused : undefined);
+      const repeated = options.again !== "" && refused.some((cell) => options.refusedBefore?.some((before) => sameCell(before, cell)) === true);
+      if (repeated) options.abandon?.();
+      const again = repeated ? "; building here again would be refused at the same cell: build somewhere else, or clear that cell first" : options.again;
+      return { status: "failed", detail: `${what} stopped at ${part}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${again}` };
     }
   }
   return null;
+}
+
+type Cell = { readonly x: number; readonly y: number; readonly z: number };
+
+function sameCell(left: Cell, right: Cell): boolean {
+  return left.x === right.x && left.y === right.y && left.z === right.z;
+}
+
+/** The part of `build_structure`'s audit that names the cells it left refused (src/actions/build-structure/contract.ts `left`). */
+const refusedAuditSchema = z.object({
+  structure: z.object({
+    left: z.array(z.object({ reason: z.string(), count: z.number(), named: z.array(z.object({ x: z.number(), y: z.number(), z: z.number(), cause: z.string().optional() })) })),
+  }),
+});
+
+/**
+ * The cells a `build_structure` audit says were refused for good: by policy (named ones only: the runtime names a few
+ * per reason). A body in the cell, a route that failed or a placement that did not take may pass on the next try, so
+ * they do not count toward giving the house up.
+ */
+function refusedCells(result: Readonly<Record<string, unknown>> | undefined): Cell[] {
+  const parsed = refusedAuditSchema.safeParse(result);
+  if (!parsed.success) return [];
+  return parsed.data.structure.left.filter((group) => group.reason === "refused").flatMap((group) => group.named.filter((cell) => cell.cause === "policy").map(({ x, y, z }) => ({ x, y, z })));
+}
+
+/** How many cells a `build_structure` audit left, when every one of them was refused (0 when some other reason is in it). */
+function onlyRefused(result: Readonly<Record<string, unknown>> | undefined): number {
+  const parsed = refusedAuditSchema.safeParse(result);
+  if (!parsed.success || !parsed.data.structure.left.every((group) => group.reason === "refused")) return 0;
+  return parsed.data.structure.left.reduce((sum, group) => sum + group.count, 0);
 }
 
 /** The non-air cells of the parts before `index`: what a later part's routes must keep. */
@@ -641,7 +746,13 @@ export async function levelZone(context: SkillContext, zone: Zone, level: number
 
 /** {@link levelZone}'s work, once the zone and its margin are set aside. */
 async function levelInside(context: SkillContext, zone: Zone, level: number, what: string, options: LevelOptions & { readonly fillWith?: string }, reserved: readonly { readonly item: string; readonly count: number }[], { min, max }: ReturnType<typeof levelBox>): Promise<SkillResult> {
-  const area = await context.runtime.blocksIn(min, max);
+  // One column past the zone on every side: what a layer can be placed against, and the ground around it (a pit's walls).
+  const read = async (below: number) => {
+    const area = await context.runtime.blocksIn({ x: min.x - 1, y: min.y - below, z: min.z - 1 }, { x: max.x + 1, y: max.y, z: max.z + 1 });
+    // A box read names no block tags; the game's tags tell a tree (a pit wall stops at it) from planks or a chest. A lookup that fails leaves them untagged.
+    const tagged = await context.runtime.blockKinds(Object.keys(area.kinds)).catch(() => ({}) as Awaited<ReturnType<BotRuntime["blockKinds"]>>);
+    return { ...area, kinds: Object.fromEntries(Object.entries(area.kinds).map(([name, kind]) => [name, { ...kind, tags: tagged[name]?.tags ?? [] }])) };
+  };
   const inventory = (await context.runtime.status()).inventory;
   // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone).
   const spareIn = (stacks: typeof inventory) => (item: string) =>
@@ -653,8 +764,20 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const fillFor = (count: number, has: (item: string) => number) =>
     options.fillWith ?? (has("cobblestone") >= count && has("cobblestone") > has("dirt") ? "cobblestone" : "dirt");
   const cells = (batches: readonly (readonly TerrainCell[])[]) => batches.reduce((sum, batch) => sum + batch.length, 0);
-  const plan = levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
+  const planFor = (area: Awaited<ReturnType<typeof read>>) => levelPlan(zone, level, area, fillFor(cells(levelPlan(zone, level, area, "dirt", options).phases.fillFirst), spare), options);
+  let area = await read(0);
+  let plan = planFor(area);
+  if (plan.floating) {
+    // A platform in the air: the ground to build its support column from is further down than the zone's own layers.
+    area = await read(SUPPORT_REACH);
+    plan = planFor(area);
+    if (plan.floating) return { status: "failed", detail: `leveling ${what} would build a platform in the air with no solid ground within ${SUPPORT_REACH} blocks under it: choose a nearer height` };
+  }
   if (plan.batches.length === 0) return { status: "done", detail: `${what} is already level` };
+  const moved = plan.dug + plan.filled;
+  // A pit is told whatever the count (run 13: a cellar dug by repeated small levels passed silently under the budget).
+  const pitNote = plan.pit > 0 ? ` (this digs a pit ${plan.pit} deep)` : "";
+  if (options.budget !== undefined && moved > options.budget) return overBudget(what, plan, pitNote, moved, options.budget);
   // The tool of each class the dig needs and it does not carry: stone when it has the cobblestone, else wood.
   const toolsMissing = (stacks: typeof inventory) => {
     const has = spareIn(stacks);
@@ -662,6 +785,9 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       .filter((tool) => !stacks.some((stack) => stack.name.endsWith(`_${tool}`)))
       .map((tool) => ({ item: has("cobblestone") >= (TOOL_COBBLESTONE[tool] ?? 3) ? `stone_${tool}` : `wooden_${tool}`, count: 1 }));
   };
+  // The tool classes (game data: what each block is mined with) of the cells these batches dig clear.
+  const toolsDug = (batches: readonly (readonly TerrainCell[])[]) =>
+    new Set(batches.flat().filter((cell) => cell.block === "air").map((cell) => area.kinds[area.blocks.get(areaKey(cell.x, cell.y, cell.z)) ?? ""]?.tool).filter((tool) => tool !== null && tool !== undefined));
   const needs = toolsMissing(inventory);
   const first = cells(plan.phases.fillFirst);
   const firstFill = plan.phases.fillFirst[0]?.[0]?.block;
@@ -687,18 +813,16 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       // 2026-10-02: a worn stone axe, then the shovel, each ended the whole job).
       if (errorCode(outcome.error) === "TOOL_TIER_LOST" && toolsLost < MAX_TOOLS_LOST) {
         toolsLost += 1;
-        const replace = toolsMissing((await context.runtime.status()).inventory);
-        if (replace.length > 0) {
-          const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
-          if (got.status !== "done") return got;
-        }
+        // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
+        const replaced = await replaceWornTool(context, what, toolsMissing, toolsDug(batches.slice(index)));
+        if (replaced !== null) return replaced;
         done -= 1;
         index -= 1;
         continue;
       }
-      const refused = /^\[BUILD_INCOMPLETE\] (\d+) cells? still wrong: \1 were refused/u.exec(outcome.error ?? "");
-      if (refused !== null) {
-        left += Number(refused[1]);
+      const refused = errorCode(outcome.error) === "BUILD_INCOMPLETE" ? onlyRefused(outcome.result) : 0;
+      if (refused > 0) {
+        left += refused;
         continue;
       }
       return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
@@ -708,21 +832,50 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   context.progress?.(`leveling ${what}: ${plan.dug > 0 ? "digging what stands above it" : "filling it"}`);
   const dug = await run([...plan.phases.fillFirst, ...plan.phases.dig]);
   if (dug !== null) return dug;
-  // The holes, with what the dig brought; only the rest is fetched.
   const holes = cells(plan.phases.fillAfter);
   if (holes > 0) {
-    const has = spareIn((await context.runtime.status()).inventory);
-    const fill = fillFor(holes, has);
-    if (has(fill) < holes) {
-      const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
-      if (got.status !== "done") return got;
-    }
-    context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
-    const filled = await run(plan.phases.fillAfter.map((batch) => batch.map((cell) => ({ ...cell, block: fill }))));
+    const filled = await fillHoles(context, what, plan.phases.fillAfter, holes, spareIn, fillFor, run);
     if (filled !== null) return filled;
   }
   const around = left === 0 ? "" : ` (left ${left} cell${left === 1 ? "" : "s"} it may not dig, leveled around)`;
-  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${around}` };
+  const column = plan.support === 0 ? "" : ` (${plan.support} of them a support column up from the ground)`;
+  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${column}${around}${pitNote}` };
+}
+
+/** The holes, with what the dig brought; only the rest is fetched. Null when they are filled. */
+async function fillHoles(
+  context: SkillContext,
+  what: string,
+  batches: readonly (readonly TerrainCell[])[],
+  holes: number,
+  spareIn: (stacks: readonly { readonly name: string; readonly count: number }[]) => (item: string) => number,
+  fillFor: (count: number, has: (item: string) => number) => string,
+  run: (batches: readonly (readonly TerrainCell[])[]) => Promise<SkillResult | null>,
+): Promise<SkillResult | null> {
+  const has = spareIn((await context.runtime.status()).inventory);
+  const fill = fillFor(holes, has);
+  if (has(fill) < holes) {
+    const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
+    if (got.status !== "done") return got;
+  }
+  context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
+  return run(batches.map((batch) => batch.map((cell) => ({ ...cell, block: fill }))));
+}
+
+/** The refusal of a level that moves more blocks than its budget. Counted before the first block goes (run 12: a 25x25 level dug 1324 blocks; a cellar dug by repeated levels). */
+function overBudget(what: string, plan: ReturnType<typeof levelPlan>, pitNote: string, moved: number, budget: number): SkillResult {
+  const perColumn = new Map<string, number>();
+  for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
+  const deepest = Math.max(0, ...perColumn.values());
+  return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pitNote}; at most ${budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
+}
+
+/** A tool worn out mid-leveling is made again, only for the digging still to do (`digging`: the tool classes of those cells); null when it went well. */
+async function replaceWornTool(context: SkillContext, what: string, missing: (stacks: readonly { readonly name: string; readonly count: number }[]) => { item: string; count: number }[], digging: ReadonlySet<string>): Promise<SkillResult | null> {
+  const replace = missing((await context.runtime.status()).inventory).filter(({ item }) => [...digging].some((kind) => item.endsWith(`_${kind}`)));
+  if (replace.length === 0) return null;
+  const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
+  return got.status === "done" ? null : got;
 }
 
 /** The part of `build_structure`'s audit the skill reports (src/actions/build-structure/contract.ts). */
@@ -784,11 +937,14 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
     for (const at of found) keep.add(`${at.x},${at.y},${at.z}`);
     level ??= Math.min(...found.map((at) => at.y));
   } else if (step.around !== undefined) {
-    const seen = whereIs(snapshot, step.around, context.self);
+    // The first look fixes the place for the whole objective (the player may walk or fly away between two steps).
+    const fixed = context.levelSites?.get(step.around.toLowerCase());
+    const seen = fixed ?? whereIs(snapshot, step.around, context.self);
     if (seen === null) return { status: "failed", detail: `cannot see ${step.around} to level the ground around them` };
-    const [x, z] = [Math.floor(seen.x), Math.floor(seen.z)];
-    zone = { minX: x - step.radius, maxX: x + step.radius, minZ: z - step.radius, maxZ: z + step.radius };
-    level ??= Math.floor(seen.y);
+    const site = { x: Math.floor(seen.x), y: Math.floor(seen.y), z: Math.floor(seen.z) };
+    if (fixed === undefined) context.levelSites?.set(step.around.toLowerCase(), site);
+    zone = { minX: site.x - step.radius, maxX: site.x + step.radius, minZ: site.z - step.radius, maxZ: site.z + step.radius };
+    level ??= site.y;
   } else if (step.x1 !== undefined && step.z1 !== undefined && step.x2 !== undefined && step.z2 !== undefined) {
     zone = { minX: Math.min(step.x1, step.x2), maxX: Math.max(step.x1, step.x2), minZ: Math.min(step.z1, step.z2), maxZ: Math.max(step.z1, step.z2) };
   } else {
@@ -799,7 +955,7 @@ async function levelArea(context: SkillContext, step: Extract<Step, { skill: "le
   if (width > LEVEL_LIMITS.side || depth > LEVEL_LIMITS.side) return { status: "failed", detail: `the zone is ${width} by ${depth}: at most ${LEVEL_LIMITS.side} by ${LEVEL_LIMITS.side} at a time` };
   // One layer under the level: a flat floor, bridged over a pond or a ravine, not columns hanging into it (owner,
   // 2026-10-02: "a flat platform of 1 level").
-  return levelZone(context, zone, level, `${width}x${depth} at y ${level}`, { keep, below: 1, ...(step.fill !== undefined && { fillWith: step.fill }) });
+  return levelZone(context, zone, level, `${width}x${depth} at y ${level}`, { keep, below: 1, budget: LEVEL_BLOCK_BUDGET, ...(step.fill !== undefined && { fillWith: step.fill }) });
 }
 
 /** Keeps the character's own digging and scaffolding out of an area (ADR-012); its own choice, e.g. when asked. */
@@ -913,7 +1069,8 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   const notBlock = step.for !== undefined && kinds !== null && kinds[step.for] === undefined;
   const creature = notBlock && step.for !== undefined && isCreature(step.for) ? step.for : undefined;
   if (notBlock && creature === undefined) {
-    return { status: "failed", detail: `${step.for} is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
+    const from = step.for === undefined ? null : await dropSourcesNote(context.runtime, step.for);
+    return { status: "failed", detail: `${step.for} is not a block${from === null ? "" : ` (${from}: get_items ${step.for} breaks them)`}: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
   }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).
@@ -967,7 +1124,9 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   }
   // A way already sailed from near here without finding land is not sailed again (live 2026-10-04: Vex rode 450
   // blocks of sea out and back nine times, from the same base, north, north-west, north-east and north again).
-  const sailed = openSeaWays(context.runtime).find((sea) => sea.toward === step.toward && Math.hypot(sea.from.x - start.x, sea.from.z - start.z) <= OPEN_SEA_NEAR);
+  // Only from near where it was sailed, and only where the ride went past her by more than she sees: from the boat
+  // where it ended at sea, the way on is unsailed (run 14 review SF5).
+  const sailed = openSeaWays(context.runtime).find((sea) => sea.toward === step.toward && Math.hypot(sea.from.x - start.x, sea.from.z - start.z) <= OPEN_SEA_NEAR && (sea.to.x - start.x) * dx + (sea.to.z - start.z) * dz > SIGHT);
   if (sailed !== undefined) {
     return { status: "failed", detail: `${step.toward} from here is open sea: you sailed it and found no land within ${sailed.blocks} blocks: explore another way (${await unseenWays(context, start)})` };
   }
@@ -1055,7 +1214,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
-  if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, blocks: Number(noLand[1]) });
+  if (noLand !== null) openSeaWays(context.runtime).push({ toward: step.toward, from: { x: start.x, z: start.z }, to: { x: here.x, z: here.z }, blocks: Number(noLand[1]) });
   // Done only when the walk went its whole way or found what it was for within reach: a walk that stopped says why,
   // even when the block is in sight farther off (live 2026-10-07: "done" after 0 blocks, forty times).
   if (stop === null || found !== undefined || sighted !== undefined) return { status: "done", detail: `explored ${step.toward}: ${parts.join("; ")}` };
@@ -1078,10 +1237,18 @@ async function onWater(runtime: BotRuntime, at: Position): Promise<boolean> {
   const names = [y, y - 1].map((level) => area.blocks.get(areaKey(x, level, z)));
   return names.every((name) => name === undefined) || names.includes("water");
 }
-/** Ways sailed without finding land, by bot, this run. */
-const openSeas = new WeakMap<object, { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[]>();
+/** A way sailed without finding land: where the ride started, where it ended (at sea), and how far no land was found. */
+interface OpenSeaWay {
+  readonly toward: string;
+  readonly from: { readonly x: number; readonly z: number };
+  readonly to: { readonly x: number; readonly z: number };
+  readonly blocks: number;
+}
 
-function openSeaWays(runtime: object): { readonly toward: string; readonly from: { readonly x: number; readonly z: number }; readonly blocks: number }[] {
+/** Ways sailed without finding land, by bot, this run. */
+const openSeas = new WeakMap<object, OpenSeaWay[]>();
+
+function openSeaWays(runtime: object): OpenSeaWay[] {
   const ways = openSeas.get(runtime) ?? [];
   openSeas.set(runtime, ways);
   return ways;

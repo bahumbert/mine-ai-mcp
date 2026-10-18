@@ -87,6 +87,11 @@ export interface Navigator {
   readonly active: NavigationStatus | null;
   cancelActive(reason?: string): void;
   terminateActive(reason: string): void;
+  /**
+   * Stop the active run and free admission now, without waiting for it to settle: its owner is gone and it waits for a
+   * physics tick that does not come (run 14b). Its control stays aborted, so it stops at its first check if ticks return.
+   */
+  abandonActive(reason: string): void;
 }
 
 export function createNavigator(dependencies: {
@@ -155,6 +160,13 @@ export function createNavigator(dependencies: {
     terminateActive(reason) {
       activeControl?.abort(reason);
       activeRun?.terminate();
+    },
+    abandonActive(reason) {
+      activeControl?.abort(reason);
+      activeRun?.terminate();
+      activeRun = undefined;
+      activeControl = undefined;
+      activeStatus = null;
     },
   };
 }

@@ -89,6 +89,7 @@ const memorySchema = z.discriminatedUnion("kind", [
       part: z.number().int().min(0),
       prepared: z.boolean().optional(),
       materials: materials.optional(),
+      refused: z.array(position).optional(),
     }).nullable(),
   }),
   z.object({

@@ -55,6 +55,7 @@ import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus
 import { observeEquipmentEvents } from "./equipment-events.js";
 import { observeNavigationEvents } from "./navigation-events.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
+import { currentVehicle, recoverPhysics, watchVehicle } from "../actions/navigate/vehicle-sync.js";
 import { observeReflexActivity } from "./reflex-activity.js";
 import { observeBotStatus } from "./bot-status.js";
 import { observePlayerEvents } from "./player-events.js";
@@ -125,6 +126,8 @@ export interface MinecraftRuntime extends AsyncDisposable {
  * whatever is on screen; a session's full history belongs to the call log.
  */
 const RECENT_CALL_LIMIT = 8;
+/** An action that owns the body with no physics tick for this long fails RUNTIME_PHYSICS_STALLED (ticks come 20 times a second). */
+const PHYSICS_STALL_MS = 30_000;
 
 export interface ActionCall {
   readonly requestId: number;
@@ -296,6 +299,43 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
   }
 }
 
+/**
+ * The action runner and the body observations it reads: physics ticks (the stall watch's clock), server repositions,
+ * and the vehicle the server lets her off. A stall is recorded and physics turned back on where she is (run 14b).
+ */
+function createBodyRunner(bot: Bot, highlighter: MinecraftRuntimeOptions["highlighter"], resources: AsyncDisposableStack, recordStall: (action: string) => void): ActionRunner {
+  const runner = new ActionRunner({
+    highlighter,
+    physicsStallMs: PHYSICS_STALL_MS,
+    physicsExpected: () => currentVehicle(bot) === null,
+    onPhysicsStall: (action) => {
+      recordStall(action);
+      recoverPhysics(bot);
+    },
+    tools: () => snapshotTools(bot),
+    inWater: () => isInWater(bot),
+    position: () => bot.entity?.position ? {
+      dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
+    } : null,
+  });
+  const sampleProgress = () => {
+    runner.observePhysicsTick();
+    runner.samplePosition();
+  };
+  const resetProgress = () => runner.samplePosition("server_reposition");
+  resources.defer(observeCombatResourceEvents(bot, runner));
+  bot.on("physicsTick", sampleProgress);
+  bot.on("forcedMove", resetProgress);
+  bot.on("death", resetProgress);
+  bot.on("game", resetProgress);
+  resources.defer(() => {
+    bot.off("physicsTick", sampleProgress); bot.off("forcedMove", resetProgress);
+    bot.off("death", resetProgress); bot.off("game", resetProgress);
+  });
+  resources.defer(watchVehicle(bot));
+  return runner;
+}
+
 /** Own every long-lived facility attached to one connected Minecraft bot. */
 export async function createMinecraftRuntime(
   bot: Bot,
@@ -307,20 +347,9 @@ export async function createMinecraftRuntime(
   const protectedRegions = new ProtectedRegionStore(botData);
   setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
-  const runner = new ActionRunner({ highlighter: options.highlighter, tools: () => snapshotTools(bot), inWater: () => isInWater(bot), position: () => bot.entity?.position ? {
-    dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
-  } : null });
-  const sampleProgress = () => runner.samplePosition();
-  const resetProgress = () => runner.samplePosition("server_reposition");
-  resources.defer(observeCombatResourceEvents(bot, runner));
-  bot.on("physicsTick", sampleProgress);
-  bot.on("forcedMove", resetProgress);
-  bot.on("death", resetProgress);
-  bot.on("game", resetProgress);
-  resources.defer(() => {
-    bot.off("physicsTick", sampleProgress); bot.off("forcedMove", resetProgress);
-    bot.off("death", resetProgress); bot.off("game", resetProgress);
-  });
+  // Set once the incident observer exists: no action, so no stall, comes before the runtime is built.
+  let recordStall: (action: string) => void = () => {};
+  const runner = createBodyRunner(bot, options.highlighter, resources, (action) => recordStall(action));
   const reflexes = resources.use(new ReflexDriver(bot, runner));
   const navigation = resources.use(createNavigationRuntime(bot));
   installMinecraftKnowledge(botData, bot.registry);
@@ -371,6 +400,7 @@ export async function createMinecraftRuntime(
     }),
     (observer) => observer.close(),
   );
+  recordStall = incidents.physicsStalled;
   resources.use(
     attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation, (receipt) =>
       incidents.recorder.record("survival_receipt", { receipt }),

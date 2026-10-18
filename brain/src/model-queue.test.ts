@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -224,4 +224,23 @@ test("a shutdown during the wait stops starting agents without an error", async 
     },
   });
   assert.deepEqual(events, ["a"]);
+});
+
+test("a snapshot that cannot be written (rename refused on a shared drive) is logged once and never fails a model call or the timer (review C19)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "model-queue-"));
+  // A directory where the file goes: the rename fails whatever the platform.
+  const file = join(dir, "queue.json");
+  mkdirSync(file);
+  const logs: string[] = [];
+  let clock = 0;
+  const queue = new ModelQueue({ slots: 3, file, now: () => clock, log: (line) => logs.push(line) });
+  const fake = controlled();
+  const call = queue.track(fake.model, "ada").complete([], signal);
+  clock = 100;
+  queue.started("bo");
+  queue.flush();
+  fake.settle(0);
+  await call;
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  assert.equal(logs.length, 1);
 });

@@ -462,3 +462,53 @@ test("scaffold that cannot be reached is reported and the build is still complet
   assert.equal(result.status, "complete");
   assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 9, y: 67, z: 2 }] });
 });
+
+/** What refused a cell decides whether asking again can help: only a policy refusal is for good (run 14 review SF1). */
+function refusalCause(result: BuildResult): unknown {
+  return (result.cells[0]!.state as { cause?: unknown }).cause;
+}
+
+test("a refused cell carries the cause: placement, entity, policy or route", async () => {
+  const one = cells([[2, 64, 0]]);
+  const placementWorld = structureWorld();
+  const placement = await build(placementWorld.bot, {
+    ...placementWorld.physics,
+    place: async () => ({ kind: "failed", error: "the server did not update the block" }),
+    cells: one,
+    removeWrongBlocks: false,
+  });
+  assert.equal(refusalCause(placement), "placement");
+
+  const entityWorld = structureWorld();
+  const entity = await build(entityWorld.bot, {
+    ...entityWorld.physics,
+    place: async () => ({ kind: "failed", error: "a cow stands in the cell", cause: "entity" }),
+    cells: one,
+    removeWrongBlocks: false,
+  });
+  assert.equal(refusalCause(entity), "entity");
+
+  const policyWorld = structureWorld();
+  policyWorld.put(new Vec3(2, 64, 0), "crafting_table");
+  const policy = await build(policyWorld.bot, {
+    ...policyWorld.physics,
+    breakInPlace: async () => ({ status: "failed", reason: "movement policy prohibits breaking this block", cause: "policy" }),
+    cells: one,
+    removeWrongBlocks: true,
+  });
+  assert.equal(refusalCause(policy), "policy");
+
+  const routeWorld = structureWorld();
+  let stopped = false;
+  const route = await build(routeWorld.bot, {
+    ...routeWorld.physics,
+    route: async (options) => {
+      if (stopped) return routeWorld.physics.route(options);
+      stopped = true;
+      return { status: "stopped", reason: "no path; closest node was 5,64,0", elapsedMs: 0 };
+    },
+    cells: cells([[10, 64, 0]]),
+    removeWrongBlocks: false,
+  });
+  assert.equal(refusalCause(route), "route");
+});

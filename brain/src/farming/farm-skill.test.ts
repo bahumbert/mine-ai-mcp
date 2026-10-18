@@ -4,6 +4,7 @@ import { stepSchema } from "../actions.ts";
 import { Body } from "../body.ts";
 import type { KnownFarm } from "../memory.ts";
 import { runStep, type SkillContext } from "../skills.ts";
+import { TillFacts } from "./site.ts";
 import { FakeRuntime } from "../testing.ts";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
@@ -16,7 +17,7 @@ function farmRuntime(inventory: { name: string; count: number }[]): FakeRuntime 
   runtime.simulateInventory = true;
   // What view_block_drops answers for the crops used here: the planted block and the item it is planted from.
   runtime.dropSources = {
-    wheat_seeds: [{ block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }],
+    wheat_seeds: [{ block: "short_grass", chance: 0.125, planted: false }, { block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }],
     wheat: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }],
     carrot: [{ block: "carrots", chance: 1, planted: true, seed: "carrot" }],
   };
@@ -150,6 +151,7 @@ test("cells a tend left as they were are counted by reason, not left as a list s
 test("a plot whose ground is air says it is in a cave or over a pit, and to farm under the open sky", async () => {
   // Live 2026-10-09: Ayla, in a cave at y 10, farmed there 20 times, each "25 not tillable (air)".
   const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  runtime.groundTop = 9;
   runtime.tendSkipped = { "not tillable (air)": Array.from({ length: 25 }, (_, index) => ({ x: index % 5, z: Math.floor(index / 5) })) };
   runtime.tendSkippedStatus = "failed";
   const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5, x: 4, y: 10, z: 6 }, contextFor(runtime));
@@ -209,4 +211,131 @@ test("tending a known wheat farm asked for wheat plants wheat_seeds", async () =
   const result = await runStep({ skill: "farm", crop: "wheat", size: 5 }, contextFor(runtime, { farms }));
   assert.equal(runtime.submitted[0]!.input.plant, "wheat_seeds");
   assert.match(result.status === "done" ? result.detail : "", /wheat is the harvest: planted wheat_seeds/u);
+});
+
+test("a new farm is not made on stone: the plot behind her is stone, so the nearest grass patch is used instead", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  // Soil level 63 is stone everywhere in reach, except a grass patch 6 blocks east of the plot behind her.
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, x >= 4 && x <= 14 && z >= -1 && z <= 9 ? "grass_block" : "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const tend = runtime.submitted.find((call) => call.tool === "tend_crops")!.input;
+  assert.ok(Number(tend.x1) >= 4 && Number(tend.x2) <= 14, JSON.stringify(tend));
+});
+
+test("a new farm on stone with no tillable ground near is refused with the reason, nothing protected or tended", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /no ground to farm within .*25 stone.*open sky/u);
+  assert.deepEqual(calls(runtime), []);
+  assert.deepEqual(runtime.areas, []);
+});
+
+test("a new farm under a roof is refused: a cave floor of dirt is not open to the sky", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},66,${z}`, "stone");
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /roofed/u);
+});
+
+test("a remembered farm standing on stone is not tended again", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  for (let x = -20; x <= 20; x += 1) for (let z = -12; z <= 20; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const known: KnownFarm = { crop: "wheat_seeds", size: 5, centre: { x: 0, y: 63, z: 4 }, madeAt: "2026-10-14T00:00:00Z", tendedAt: "2026-10-14T00:00:00Z", state: { planted: 0, ripe: 0, empty: 0 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [known] }));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /no ground to farm/u);
+  assert.deepEqual(calls(runtime), []);
+});
+
+test("a remembered farm on stone does not shadow the farm made since: the one on soil is tended (run 13 review)", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }]);
+  for (let x = -6; x <= 2; x += 1) for (let z = -2; z <= 10; z += 1) runtime.world.set(`${x},63,${z}`, "stone");
+  const made = { crop: "wheat_seeds", size: 5, madeAt: "2026-10-14T00:00:00Z", tendedAt: "2026-10-14T00:00:00Z", state: { planted: 0, ripe: 0, empty: 0 } };
+  const stale: KnownFarm = { ...made, centre: { x: 0, y: 63, z: 4 } };
+  const good: KnownFarm = { ...made, centre: { x: 5, y: 63, z: -3 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [stale, good] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+  assert.deepEqual(runtime.submitted.find((call) => call.tool === "tend_crops")!.input, { x1: 3, z1: -5, x2: 7, z2: -1, y: 63, plant: "wheat_seeds" });
+});
+
+test("a remembered farm in chunks that are not loaded is kept, not replaced by a new farm", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }]);
+  for (let x = -6; x <= 6; x += 1) for (let z = -2; z <= 10; z += 1) runtime.world.set(`${x},63,${z}`, "unloaded");
+  const known: KnownFarm = { crop: "wheat_seeds", size: 5, centre: { x: 0, y: 63, z: 4 }, madeAt: "t0", tendedAt: "t0", state: { planted: 20, ripe: 0, empty: 0 } };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { farms: [known] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+});
+
+test("a till that failed on two cells of a block name is remembered, and a later success forgets it (SF2)", async () => {
+  const farm = async (runtime: FakeRuntime, soil: TillFacts) => runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { soil }));
+  const have = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+  const soil = new TillFacts();
+  // One failed cell on dirt (a block on top, lag) and one on podzol: nothing is refused.
+  const once = farmRuntime(have);
+  once.tendUntillable = { dirt: [{ x: 1, z: 1 }], podzol: [{ x: 1, z: 2 }] };
+  once.tendSkipped = { "not tillable (dirt)": [{ x: 1, z: 1 }], "not tillable (podzol)": [{ x: 1, z: 2 }], "unreachable: no path": [{ x: 3, z: 3 }] };
+  await farm(once, soil);
+  assert.deepEqual([soil.refuses("dirt"), soil.refuses("podzol"), soil.refuses("unreachable: no path")], [false, false, false]);
+  // Podzol failing on a second cell is refused; dirt stays soil.
+  const twice = farmRuntime(have);
+  twice.tendUntillable = { podzol: [{ x: 2, z: 2 }] };
+  await farm(twice, soil);
+  assert.deepEqual([soil.refuses("podzol"), soil.refuses("dirt")], [true, false]);
+  // A till that worked on podzol later forgets the failures.
+  const worked = farmRuntime(have);
+  worked.tendTilledSoil = { podzol: 3 };
+  await farm(worked, soil);
+  assert.equal(soil.refuses("podzol"), false);
+});
+
+test("a hoe that broke mid-plot teaches nothing: dirt stays soil and the next farm on dirt is made (V1)", async () => {
+  const have = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+  const soil = new TillFacts();
+  const broke = farmRuntime(have);
+  broke.tendSkipped = { "no hoe left": [{ x: 1, z: 1 }, { x: 2, z: 1 }, { x: 3, z: 1 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(broke, { soil }));
+  assert.equal(soil.refuses("dirt"), false);
+  // A use that timed out on three dirt cells, and the old reason text, teach nothing either.
+  const timedOut = farmRuntime(have);
+  timedOut.tendSkipped = { "till failed: not confirmed": [{ x: 1, z: 1 }, { x: 2, z: 1 }, { x: 3, z: 1 }], "not tillable (dirt)": [{ x: 1, z: 2 }, { x: 2, z: 2 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(timedOut, { soil }));
+  assert.equal(soil.refuses("dirt"), false);
+  const next = farmRuntime(have);
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(next, { soil }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.ok(calls(next).includes("tend_crops"));
+  // Cells a hoe really was used on without a change still refuse the name (T5 behaviour kept).
+  const real = farmRuntime(have);
+  real.tendUntillable = { dirt: [{ x: 1, z: 1 }, { x: 2, z: 1 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(real, { soil }));
+  assert.equal(soil.refuses("dirt"), true);
+});
+
+test("farm carrot with 3 carried plants 3 cells: one carried carrot plants one cell (N1)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "carrot", count: 3 }, { name: "water_bucket", count: 1 }]);
+  const result = await runStep({ skill: "farm", crop: "carrot", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.equal(runtime.submitted.find((call) => call.tool === "tend_crops")!.input.plant, "carrot");
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "carrot"), undefined);
+});
+
+test("farm carrot with none carried names where a first one comes from, not get_items (N1)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "water_bucket", count: 1 }]);
+  runtime.mobDrops = { carrot: [{ mob: "zombie", chance: 0.025, hostile: true }] };
+  const result = await runStep({ skill: "farm", crop: "carrot", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  const detail = result.status === "failed" ? result.detail : "";
+  assert.match(detail, /zombie/u);
+  assert.doesNotMatch(detail, /fetch exactly those with get_items/u);
+  assert.deepEqual(calls(runtime), []);
+  // A crop with a wild source (seeds from grass) still says to fetch it with get_items: that works.
+  runtime.dropSources = { ...runtime.dropSources, wheat_seeds: [{ block: "short_grass", chance: 0.125, planted: false }, { block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }] };
+  const seeds = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.match(seeds.status === "failed" ? seeds.detail : "", /get_items/u);
 });

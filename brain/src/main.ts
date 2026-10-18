@@ -8,6 +8,7 @@ import { LlmMind } from "./llm-mind.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
+import { TillFacts } from "./farming/site.ts";
 
 const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free]
 
@@ -141,7 +142,7 @@ async function main(): Promise<void> {
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
-  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE) });
+  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: (line) => console.log(`${new Date().toISOString()} [queue] ${line}`) });
   const localizedChat = readLocalizedChat(env);
   if (localizedChat !== undefined) console.log(`localized chat: talk carries ${localizedChat.range} blocks`);
   const minds = personas.map((persona, index) => {
@@ -155,6 +156,8 @@ async function main(): Promise<void> {
     console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
     return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
   });
+  // What a till failed on is learned once for every character of the process.
+  const soil = new TillFacts();
   const runtimes = await Promise.all(specs.map((spec, index) => McpBotRuntime.connect(spec.url, `agent-${personas[index]!.id}`)));
 
   const shutdown = new AbortController();
@@ -172,6 +175,7 @@ async function main(): Promise<void> {
         mind: minds[index]!,
         otherAgents: usernames.filter((name) => name !== persona.username),
         knownNames,
+        soil,
         log,
         ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
       });

@@ -219,6 +219,25 @@ test("what is carried still wins over what the explored world has", () => {
   assert.equal(planCraftingFromInventory(bot, table, { seen: seenIn({ birch_log: 50 }) }).kind, "ready");
 });
 
+/** Put the bot in one loaded section whose first cells hold `blocks` (name -> count), as the seen-in-world scan reads them. */
+function loadBlocks(bot: object, blocks: Record<string, number>): void {
+  const cells = new Map<number, number>();
+  let cell = 0;
+  for (const [name, count] of Object.entries(blocks)) {
+    for (let index = 0; index < count; index += 1) cells.set(cell++, registry.blocksByName[name]!.minStateId!);
+  }
+  const section = {
+    solidBlockCount: 4_096,
+    palette: [0, ...new Set(cells.values())],
+    data: {},
+    get: ({ x, y, z }: { x: number; y: number; z: number }) => cells.get(y * 256 + z * 16 + x) ?? 0,
+  };
+  Object.assign(bot, {
+    entity: { position: new Vec3(8, 8, 8) },
+    world: { getColumns: () => [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections: [section] } }] },
+  });
+}
+
 test("the planner follows what is near the bot: stone at the surface, deepslate underground, recorded logs", () => {
   const alternatives = [
     craftingRecipe("stone_pickaxe", 1, { cobbled_deepslate: 3, stick: 2 }, true),
@@ -227,10 +246,7 @@ test("the planner follows what is near the bot: stone at the surface, deepslate 
   const { bot } = craftingBot({ oak_planks: 2 }, true, alternatives);
   const pickaxe = [{ ...registry.itemsByName.stone_pickaxe, count: 1 }];
   const near = (blocks: Record<string, number>) => {
-    Object.assign(bot, {
-      findBlocks: ({ matching, count }: { matching: number; count: number }) =>
-        Array.from({ length: Math.min(count, blocks[registry.blocks[matching]?.name ?? ""] ?? 0) }, () => new Vec3(0, 0, 0)),
-    });
+    loadBlocks(bot, blocks);
     return { seen: seenInWorld(bot, { chunksWithMaterial: () => 0 }) };
   };
   assert.deepEqual(planCraftingFromInventory(bot, pickaxe, near({ stone: 200 })).plan.missingMaterials, [{ item: "cobblestone", count: 3 }]);
@@ -238,11 +254,11 @@ test("the planner follows what is near the bot: stone at the surface, deepslate 
 
   const woods = craftingBot({}, false, TWO_WOODS).bot;
   const sticks = [{ ...registry.itemsByName.stick, count: 1 }];
-  Object.assign(woods, { findBlocks: () => [] });
+  loadBlocks(woods, {});
   const recorded = seenInWorld(woods, { chunksWithMaterial: (block) => (block === "birch_log" ? 9 : 0) });
   assert.deepEqual(planCraftingFromInventory(woods, sticks, { seen: recorded }).plan.missingMaterials, [{ item: "birch_log", count: 1 }]);
 
   const carrying = craftingBot({ cobbled_deepslate: 3, oak_planks: 2 }, true, alternatives);
-  Object.assign(carrying.bot, { findBlocks: () => Array.from({ length: 64 }, () => new Vec3(0, 0, 0)) });
+  loadBlocks(carrying.bot, { cobblestone: 64, cobbled_deepslate: 64 });
   assert.equal(planCraftingFromInventory(carrying.bot, pickaxe, { seen: seenInWorld(carrying.bot, { chunksWithMaterial: () => 0 }) }).kind, "ready");
 });

@@ -14,7 +14,7 @@ import { droppedItemName, pickupObservedItem, snapshotEntityIds } from "../../wo
 import { useItemAt } from "../../world/item-use.js";
 import { snapshotTools } from "../../world/tool-tiers.js";
 import type { TendCropsRequest } from "./contract.js";
-import type { CellBlock, CropFacts, FarmBody, FarmCell } from "./tend-plot.js";
+import type { CellBlock, CropFacts, FarmBody, FarmCell, TillFailure } from "./tend-plot.js";
 
 /** A player's block reach is 4.5 from the eyes; a little less keeps the use from failing at the edge. */
 const FARM_REACH = 4.2;
@@ -45,6 +45,19 @@ export function cropFacts(bot: Pick<Bot, "registry" | "version">): CropFacts {
   };
 }
 
+/** Server ticks that must pass after a use for an unchanged block to count as the server's answer (the server may be far behind). */
+export const TILL_CONFIRM_TICKS = 20;
+
+/**
+ * A failed hoe use as the plot sees it. The block is "unchanged" only once the server clock moved on by
+ * {@link TILL_CONFIRM_TICKS} after the use with no block update (packets arrive in order: ours would have come first)
+ * and the hoe is still carried; a wait that ended earlier is "unconfirmed", an error or a broken hoe teaches nothing.
+ */
+export function tillFailure(failure: { readonly error: string; readonly serverTicksWaited: number | null }, hoeCarried: boolean): TillFailure {
+  if (failure.serverTicksWaited === null || !hoeCarried) return { kind: "error", error: failure.error };
+  return failure.serverTicksWaited >= TILL_CONFIRM_TICKS ? { kind: "unchanged" } : { kind: "unconfirmed" };
+}
+
 export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal): FarmBody {
   const baseline = snapshotEntityIds(bot);
   /** Drops it could not get (a full inventory, no route): left, so the others are still fetched. */
@@ -60,9 +73,9 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
   };
 
   /** Right-click the top face of the block at `cell` holding `item`, until `watched` reads differently. */
-  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell): Promise<string | null> => {
+  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell): Promise<{ readonly error: string; readonly serverTicksWaited: number | null } | null> => {
     const block = bot.blockAt(vec(cell));
-    if (block === null) return "the cell is not loaded";
+    if (block === null) return { error: "the cell is not loaded", serverTicksWaited: null };
     const before = bot.blockAt(vec(watched))?.stateId;
     const result = await useItemAt(bot, {
       item,
@@ -72,7 +85,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       timeoutTicks: USE_TIMEOUT_TICKS,
       ...(signal && { signal }),
     });
-    return result.kind === "used" ? null : result.error;
+    return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null };
   };
 
   return {
@@ -110,12 +123,15 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
 
     async till(soil) {
       const item = hoe();
-      return item === null ? "no hoe is carried" : useOnTop(soil, item, soil);
+      if (item === null) return { kind: "no hoe" };
+      const failure = await useOnTop(soil, item, soil);
+      if (failure === null) return null;
+      return tillFailure(failure, hoe() !== null);
     },
 
     async plant(soil, item) {
       const seeds = stack(item);
-      return seeds === null ? `no ${item} is carried` : useOnTop(soil, seeds, { x: soil.x, y: soil.y + 1, z: soil.z });
+      return seeds === null ? `no ${item} is carried` : (await useOnTop(soil, seeds, { x: soil.x, y: soil.y + 1, z: soil.z }))?.error ?? null;
     },
 
     async collectDrops() {

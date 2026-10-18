@@ -29,8 +29,6 @@ import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-
 const MAX_CROSSINGS = 2;
 /** Deep open water in a row on the straight way that a bot with a boat crosses by boat before trying a way round. */
 const BOAT_FIRST_LENGTH = 24;
-/** How far past its target a boat ride may go looking for land before it turns back. */
-const BOAT_OVERSHOOT = 32;
 import {
   navigateOutcomes,
   parseNavigateRequest,
@@ -428,12 +426,17 @@ function beginNavigate(
       }
       const from = bot.entity.position;
       const length = Math.hypot(request.x - from.x, request.z - from.z);
-      // At most a little past the target: across to it, not on over open sea.
-      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length + BOAT_OVERSHOOT);
+      // At most to the target: across to it, not on over open sea; with no land by then she stays there, in her boat.
+      const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length);
       if (context.signal?.aborted) return stopped;
       if (crossed.status !== "crossed") {
         // Where the ride left her, not where the route had stopped before it.
         const navigation = { ...stopped.navigation, end: position(bot.entity.position), boatBlocks: crossed.blocks };
+        // A target on open water is reached by the ride itself: she floats there in her boat, which is where she was sent.
+        const left = Math.hypot(request.x - bot.entity.position.x, request.z - bot.entity.position.z);
+        if (crossed.atSea && left <= Math.max(request.range, 1)) {
+          return { status: "succeeded", navigation: { ...navigation, remainingDistance: left, afloat: true } };
+        }
         return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
       }
       const onward = await beginNavigate(bot, request, dependencies, lifetime, () => {}, crossings + 1)(context);
@@ -636,6 +639,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Target: \`${navigation.target.x}, ${navigation.target.y ?? "ground"}, ${navigation.target.z}\``,
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
+    ...(navigation.afloat ? ["- Arrived, afloat in its boat at " + Math.round(navigation.end.x) + " " + Math.round(navigation.end.z)] : []),
     ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,
     "- Scaffold stocks:",
