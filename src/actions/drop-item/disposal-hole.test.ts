@@ -7,7 +7,13 @@ import { Vec3 } from "vec3";
 import { blockClass } from "../../navigation/mineflayer/world.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
-import { prepareDisposalHole, observeHoleDrops, sealDisposalHole, snapshotDroppedCounts } from "./disposal-hole.js";
+import {
+  observeHoleDrops,
+  pluggedCellCount,
+  prepareDisposalHole,
+  sealDisposalHole,
+  snapshotDroppedCounts,
+} from "./disposal-hole.js";
 
 const registry = minecraftData("1.21.4");
 const Block = blockClass({ registry } as Pick<Bot, "registry">);
@@ -292,4 +298,82 @@ test("a pit that holds a dropped item is skipped for the next one (live 2026-10-
     return { status: "broken" };
   }, {});
   assert.ok(free);
+});
+
+/** Digs the pit and aborts after its first block, leaving the half-dug pit and the item that block dropped. */
+async function digUntilReflex(
+  bot: Bot,
+  changed: Map<string, string>,
+  pit: { bottom: Vec3 | null } | undefined,
+): Promise<void> {
+  const reflex = new AbortController();
+  await assert.rejects(
+    prepareDisposalHole(
+      bot,
+      createMovementPolicy(),
+      async ({ position }) => {
+        changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+        reflex.abort(new Error("hunger reflex"));
+        return { status: "broken" };
+      },
+      { signal: reflex.signal },
+      undefined,
+      pit,
+    ),
+    /hunger reflex/,
+  );
+  // The block the first dig broke dropped its item into the pit.
+  Object.assign(bot, {
+    entities: { 9: { id: 9, position: new Vec3(1.5, 62.5, 0.5), getDroppedItem: () => ({ name: "dirt", count: 1 }) } },
+  });
+}
+
+test("a pit cut short by a reflex is dug on by the next attempt, not replaced by a second pit", async () => {
+  const { bot, changed } = ground();
+  const pit = { bottom: null as Vec3 | null };
+  await digUntilReflex(bot, changed, pit);
+  assert.deepEqual(pit.bottom, new Vec3(1, 62, 0));
+  const digs: number[] = [];
+
+  const bottom = await prepareDisposalHole(
+    bot,
+    createMovementPolicy(),
+    async ({ position }) => {
+      digs.push(position.y);
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    {},
+    undefined,
+    pit,
+  );
+
+  assert.deepEqual(bottom, new Vec3(1, 62, 0));
+  assert.deepEqual(digs, [62], "only the cell the first attempt had not reached is dug");
+});
+
+test("without the pit memory the item the first dig dropped makes the next attempt start another pit", async () => {
+  const { bot, changed } = ground();
+  await digUntilReflex(bot, changed, undefined);
+
+  const bottom = await prepareDisposalHole(
+    bot,
+    createMovementPolicy(),
+    async ({ position }) => {
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    {},
+  );
+
+  assert.notDeepEqual(bottom, new Vec3(1, 62, 0));
+});
+
+test("a plug a first attempt began is counted with what the next attempt placed", async () => {
+  const { bot, changed } = ground([{ name: "cobblestone", count: 2 }]);
+  changed.set(new Vec3(1, 62, 0).toString(), "air");
+  changed.set(new Vec3(1, 63, 0).toString(), "cobblestone");
+  changed.set(new Vec3(1, 64, 0).toString(), "air");
+
+  assert.equal(pluggedCellCount(bot, new Vec3(1, 62, 0)), 1);
 });

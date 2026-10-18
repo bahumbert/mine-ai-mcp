@@ -30,6 +30,7 @@ import {
 import { exploreForBlocks } from "../../navigation/processes/mining/block-exploration.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import {
+  carriedCount,
   countFormations,
   isLiquidSource,
   isReplaceableForPlacement,
@@ -39,8 +40,10 @@ import {
   sourceFeeding,
   useItemAt,
   type ItemUseResult,
+  type LiquidFormations,
 } from "../../world/index.js";
-import { defineAction, type ActionContext } from "../action.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
 import {
   parseUseBucketRequest,
   USE_BUCKET,
@@ -173,11 +176,14 @@ async function approachVisibleSource(
   return source ? { source } : { error: useBucketOutcomes.noLineOfSight };
 }
 
-interface Attempt {
+/** What one bucket request keeps across the attempts a reflex splits it into. */
+interface BucketProgress {
   readonly request: UseBucketRequest;
-  readonly target: Vec3 | null;
-  readonly targetBefore: string | null;
+  target: Vec3 | null;
+  targetBefore: string | null;
   readonly heldBefore: string | null;
+  /** The formations around a pour's cell before the water or lava landed. */
+  formationsBefore: LiquidFormations | null;
   aimedAt?: Vec3;
   obsidian: number;
   cobblestone: number;
@@ -185,26 +191,26 @@ interface Attempt {
   explored?: boolean;
 }
 
-function evidence(bot: Bot, attempt: Attempt): BucketUseEvidence {
+function evidence(bot: Bot, progress: BucketProgress): BucketUseEvidence {
   return {
     dimension: bot.game.dimension,
-    action: attempt.request.action,
-    liquid: attempt.request.liquid,
-    target: attempt.target ? coordinates(attempt.target) : null,
-    targetBefore: attempt.targetBefore,
-    targetAfter: attempt.target ? (bot.blockAt(attempt.target)?.name ?? null) : null,
-    ...(attempt.aimedAt && { aimedAt: coordinates(attempt.aimedAt.floored()) }),
-    heldBefore: attempt.heldBefore,
+    action: progress.request.action,
+    liquid: progress.request.liquid,
+    target: progress.target ? coordinates(progress.target) : null,
+    targetBefore: progress.targetBefore,
+    targetAfter: progress.target ? (bot.blockAt(progress.target)?.name ?? null) : null,
+    ...(progress.aimedAt && { aimedAt: coordinates(progress.aimedAt.floored()) }),
+    heldBefore: progress.heldBefore,
     heldAfter: bot.heldItem?.name ?? null,
-    obsidianFormed: attempt.obsidian,
-    cobblestoneFormed: attempt.cobblestone,
-    used: attempt.used,
-    ...(attempt.explored !== undefined && { explored: attempt.explored }),
+    obsidianFormed: progress.obsidian,
+    cobblestoneFormed: progress.cobblestone,
+    used: progress.used,
+    ...(progress.explored !== undefined && { explored: progress.explored }),
   };
 }
 
-function failure(bot: Bot, attempt: Attempt, error: string): UseBucketResult {
-  return { status: "failed", error, bucket: evidence(bot, attempt) };
+function failure(bot: Bot, progress: BucketProgress, error: string): UseBucketResult {
+  return { status: "failed", error, bucket: evidence(bot, progress) };
 }
 
 /**
@@ -307,86 +313,140 @@ async function aimWithCloserSteps(
   return aim ? { aim } : { error: useBucketOutcomes.noFace };
 }
 
-/** Scoop a source or pour a full bucket, and report only what was observed. */
-export async function useBucket(
+interface BucketCounts {
+  readonly empty: number;
+  readonly full: number;
+}
+
+function bucketCounts(bot: Bot, liquid: BucketLiquid): BucketCounts {
+  return { empty: carriedCount(bot, bucketFor(liquid, false)), full: carriedCount(bot, bucketFor(liquid, true)) };
+}
+
+/** Whether the inventory already shows this request's scoop or pour, made by an attempt a reflex cut short. */
+function bucketChangeMade(bot: Bot, request: UseBucketRequest, before: BucketCounts): boolean {
+  const now = bucketCounts(bot, request.liquid);
+  return request.action === "fill"
+    ? now.full > before.full && now.empty < before.empty
+    : now.full < before.full && now.empty > before.empty;
+}
+
+/** The use is made and seen in the inventory: count what a pour formed, then report it. */
+async function confirmBucketUsed(bot: Bot, progress: BucketProgress, context: ActionContext): Promise<UseBucketResult> {
+  if (progress.target && progress.formationsBefore) {
+    const after = await settledFormations(bot, progress.target, context.signal);
+    progress.obsidian = Math.max(0, after.obsidian - progress.formationsBefore.obsidian);
+    progress.cobblestone = Math.max(0, after.cobblestone - progress.formationsBefore.cobblestone);
+  }
+  progress.used = true;
+  return { status: "succeeded", bucket: evidence(bot, progress) };
+}
+
+/** A cast the action declined to make: the cell is not a source, is occupied, is unloaded, or has no face to pour at. */
+interface BucketRefusal {
+  readonly kind: "refused";
+  readonly error: string;
+}
+
+function refused(error: string): BucketRefusal {
+  return { kind: "refused", error };
+}
+
+/** Cast the bucket at the cell this attempt resolved; the use itself, not yet confirmed. */
+async function castBucket(
   bot: Bot,
-  request: UseBucketRequest,
+  progress: BucketProgress,
+  item: NonNullable<ReturnType<typeof carried>>,
+  target: Vec3,
   context: ActionContext,
   dependencies: UseBucketDependencies,
-): Promise<UseBucketResult> {
-  const filling = request.action === "fill";
-  const bucketName = bucketFor(request.liquid, !filling);
-  const heldBefore = bot.heldItem?.name ?? null;
-  const item = carried(bot, bucketName);
-  const attempt: Attempt = {
-    request,
-    target: request.cell ? new Vec3(request.cell.x, request.cell.y, request.cell.z) : null,
-    targetBefore: null,
-    heldBefore,
-    obsidian: 0,
-    cobblestone: 0,
-    used: false,
-  };
-  let observed = attempt;
-  context.observeProgress?.(() => ({ baseline: { held: heldBefore },
-    checkpoint: { phase: observed.used ? "confirmed" : filling ? "finding_and_filling" : "approaching_and_pouring", held: bot.heldItem?.name ?? null,
-      target: observed.target ? { x: observed.target.x, y: observed.target.y, z: observed.target.z } : null,
-      targetBlock: observed.target ? bot.blockAt(observed.target)?.name ?? null : null, used: observed.used,
-      obsidianFormed: observed.obsidian, cobblestoneFormed: observed.cobblestone },
-    completion: { kind: "event", observed: observed.used, owes: "Both the bucket inventory and the selected world cell must confirm the use." },
-  }));
-  if (!item) return failure(bot, attempt, useBucketOutcomes.noBucket(bucketName));
-
-  const resolved = await resolveBucketTarget(bot, request, context, dependencies);
-  if (resolved.kind === "failed") {
-    return failure(bot, { ...attempt, target: resolved.target, explored: resolved.explored }, resolved.error);
-  }
-  const { target } = resolved;
-  attempt.explored = resolved.explored;
-  const placed: Attempt = { ...attempt, target, targetBefore: bot.blockAt(target)?.name ?? null };
-  observed = placed;
-
+): Promise<ItemUseResult | BucketRefusal> {
+  const { request } = progress;
   const targetBlock = bot.blockAt(target);
-  if (!targetBlock) return failure(bot, placed, useBucketOutcomes.targetUnloaded);
-
-  let use: ItemUseResult;
-  if (filling) {
+  if (!targetBlock) return refused(useBucketOutcomes.targetUnloaded);
+  if (request.action === "fill") {
     if (!isLiquidSource(bot, targetBlock, request.liquid)) {
-      return failure(bot, placed, useBucketOutcomes.notASource(request.liquid, targetBlock.name));
+      return refused(useBucketOutcomes.notASource(request.liquid, targetBlock.name));
     }
     // Aim at the source's surface, not its centre: from four blocks back a
     // ray to the centre dips into the shore block just before the water.
-    use = await dependencies.useItem(bot, {
+    return dependencies.useItem(bot, {
       item,
       lookAt: target.offset(0.5, 0.9, 0.5),
       expectedInventoryGain: { item: bucketFor(request.liquid, true), count: 1 },
       signal: context.signal,
     });
-  } else {
-    if (!isReplaceableForPlacement(targetBlock)) {
-      return failure(bot, placed, useBucketOutcomes.targetOccupied(targetBlock.name));
-    }
-    const stepped = await aimWithCloserSteps(bot, target, context, dependencies);
-    if ("error" in stepped) return failure(bot, placed, stepped.error);
-    const { aim } = stepped;
-    placed.aimedAt = aim.surface;
-    const before = countFormations(bot, target);
-    use = await dependencies.useItem(bot, {
-      item,
-      lookAt: aim.lookAt,
-      expectedCells: [{ position: target, matches: (block) => block.name === request.liquid }],
-      expectedHeldItem: "bucket",
-      signal: context.signal,
-    });
-    if (use.kind === "used") {
-      const after = await settledFormations(bot, target, context.signal);
-      placed.obsidian = Math.max(0, after.obsidian - before.obsidian);
-      placed.cobblestone = Math.max(0, after.cobblestone - before.cobblestone);
-    }
   }
-  if (use.kind === "failed") return failure(bot, placed, useBucketOutcomes.failed(use.error));
-  placed.used = true;
-  return { status: "succeeded", bucket: evidence(bot, placed) };
+  if (!isReplaceableForPlacement(targetBlock)) return refused(useBucketOutcomes.targetOccupied(targetBlock.name));
+  const stepped = await aimWithCloserSteps(bot, target, context, dependencies);
+  if ("error" in stepped) return refused(stepped.error);
+  progress.aimedAt = stepped.aim.surface;
+  progress.formationsBefore = countFormations(bot, target);
+  return dependencies.useItem(bot, {
+    item,
+    lookAt: stepped.aim.lookAt,
+    expectedCells: [{ position: target, matches: (block) => block.name === request.liquid }],
+    expectedHeldItem: "bucket",
+    signal: context.signal,
+  });
+}
+
+/**
+ * One request's executor. Its progress (the cell, what the formations were, the counts at `begin`) lives across
+ * attempts, so one the inventory already shows used goes straight to its evidence instead of using a bucket twice.
+ */
+export function beginUseBucket(
+  bot: Bot,
+  request: UseBucketRequest,
+  observe: ObserveRequest,
+  dependencies: UseBucketDependencies,
+): RequestExecution<UseBucketResult> {
+  const filling = request.action === "fill";
+  const bucketName = bucketFor(request.liquid, !filling);
+  const before = bucketCounts(bot, request.liquid);
+  const progress: BucketProgress = {
+    request,
+    target: request.cell ? new Vec3(request.cell.x, request.cell.y, request.cell.z) : null,
+    targetBefore: null,
+    heldBefore: bot.heldItem?.name ?? null,
+    formationsBefore: null,
+    obsidian: 0,
+    cobblestone: 0,
+    used: false,
+  };
+  observe(() => ({ baseline: { held: progress.heldBefore },
+    checkpoint: { phase: progress.used ? "confirmed" : filling ? "finding_and_filling" : "approaching_and_pouring", held: bot.heldItem?.name ?? null,
+      target: progress.target ? { x: progress.target.x, y: progress.target.y, z: progress.target.z } : null,
+      targetBlock: progress.target ? bot.blockAt(progress.target)?.name ?? null : null, used: progress.used,
+      obsidianFormed: progress.obsidian, cobblestoneFormed: progress.cobblestone },
+    completion: { kind: "event", observed: progress.used, owes: "Both the bucket inventory and the selected world cell must confirm the use." },
+  }));
+  return async (context) => {
+    context.signal?.throwIfAborted();
+    if (progress.used) return { status: "succeeded", bucket: evidence(bot, progress) };
+    if (bucketChangeMade(bot, request, before)) return confirmBucketUsed(bot, progress, context);
+    const item = carried(bot, bucketName);
+    if (!item) return failure(bot, progress, useBucketOutcomes.noBucket(bucketName));
+
+    const resolved = await resolveBucketTarget(bot, request, context, dependencies);
+    progress.explored = resolved.explored;
+    progress.target = resolved.target;
+    if (resolved.kind === "failed") return failure(bot, progress, resolved.error);
+    progress.targetBefore = bot.blockAt(resolved.target)?.name ?? null;
+    const use = await castBucket(bot, progress, item, resolved.target, context, dependencies);
+    if (use.kind === "refused") return failure(bot, progress, use.error);
+    if (use.kind === "failed") return failure(bot, progress, useBucketOutcomes.failed(use.error));
+    return confirmBucketUsed(bot, progress, context);
+  };
+}
+
+/** Scoop a source or pour a full bucket, and report only what was observed. */
+export function useBucket(
+  bot: Bot,
+  request: UseBucketRequest,
+  context: ActionContext,
+  dependencies: UseBucketDependencies,
+): Promise<UseBucketResult> {
+  return beginUseBucket(bot, request, context.observeProgress ?? (() => {}), dependencies)(context);
 }
 
 export function formatUseBucketResult(result: UseBucketResult): string {
@@ -422,9 +482,9 @@ export function createUseBucketAction(
     inputSchema: useBucketInputSchema,
     resultSchema: useBucketResultSchema,
     formatResult: formatUseBucketResult,
-    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: useBucketAnnotations,
     parse: parseUseBucketRequest,
-    execute: (request, context) => useBucket(bot, request, context, dependencies),
+    begin: (request, _lifetime, observe) => beginUseBucket(bot, request, observe, dependencies),
   });
 }

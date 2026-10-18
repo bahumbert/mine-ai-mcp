@@ -9,7 +9,9 @@ import {
   ticksUntilNight,
   type WorldBlock,
 } from "../../world/index.js";
-import { defineAction } from "../action.js";
+import { Vec3 } from "vec3";
+import type { ObserveRequest } from "../../session/request.js";
+import { defineAction, type RequestExecution } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
 import { recordPersonalRespawn } from "../portal-entry/respawn-knowledge.js";
 import { isBedBlock, placeCarriedBed } from "./bed-placement.js";
@@ -83,12 +85,32 @@ function findUnoccupiedBed(bot: Bot): WorldBlock | null {
   return null;
 }
 
-async function findOrPlaceBed(bot: Bot, signal?: AbortSignal): Promise<BedAvailability> {
+/** The bed a request placed from the inventory, kept across attempts so a resumed sleep uses it and never places another. */
+interface RequestBed {
+  placedAt: Vec3 | null;
+  /** Beds carried when the request began: fewer now means this request put one down. */
+  readonly carriedBefore: number;
+}
+
+function carriedBedCount(bot: Bot): number {
+  return bot.inventory.items().reduce((total, item) => total + (isBedBlock(item.name) ? item.count : 0), 0);
+}
+
+function startRequestBed(bot: Bot): RequestBed {
+  return { placedAt: null, carriedBefore: carriedBedCount(bot) };
+}
+
+async function findOrPlaceBed(bot: Bot, ownBed: RequestBed, signal?: AbortSignal): Promise<BedAvailability> {
+  const own = ownBed.placedAt ? bot.blockAt(ownBed.placedAt) : null;
+  if (own && isBedBlock(own.name) && !isBedOccupied(own)) return { kind: "available", bed: { block: own, placed: true } };
   const existing = findUnoccupiedBed(bot);
-  if (existing) return { kind: "available", bed: { block: existing, placed: false } };
+  if (existing) {
+    return { kind: "available", bed: { block: existing, placed: carriedBedCount(bot) < ownBed.carriedBefore } };
+  }
 
   const placement = await placeCarriedBed(bot, signal);
   if (placement.kind === "placed") {
+    ownBed.placedAt = placement.block.position.clone();
     return { kind: "available", bed: { block: placement.block, placed: true } };
   }
   return {
@@ -311,6 +333,7 @@ export async function executeSleep(
   navigation: NavigationRuntime,
   _request: SleepRequest,
   signal?: AbortSignal,
+  ownBed: RequestBed = startRequestBed(bot),
 ): Promise<SleepResult> {
   signal?.throwIfAborted();
   if (bot.game.dimension !== "overworld") {
@@ -335,7 +358,7 @@ export async function executeSleep(
     };
   }
 
-  const availability = await findOrPlaceBed(bot, signal);
+  const availability = await findOrPlaceBed(bot, ownBed, signal);
   if (availability.kind === "failed") {
     return {
       status: "failed",
@@ -401,6 +424,28 @@ function formatSleepEvidence(sleep: SleepEvidence, error?: string): string {
   return lines.join("\n");
 }
 
+/** One request's executor: the bed it placed is remembered, and a sleep that succeeded is not repeated. */
+export function beginSleep(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: SleepRequest,
+  observe: ObserveRequest,
+): RequestExecution<SleepResult> {
+  const timeBefore = bot.time.timeOfDay;
+  const ownBed = startRequestBed(bot);
+  let succeeded: SleepResult | null = null;
+  observe(() => ({ baseline: { timeOfDay: timeBefore },
+    checkpoint: { phase: bot.isSleeping ? "sleeping" : "finding_or_entering_bed", asleep: bot.isSleeping, timeOfDay: bot.time.timeOfDay },
+    completion: { kind: "event", observed: false, owes: "The sleep executor must confirm sleeping, respawn setting, or morning." },
+  }));
+  return async (context) => {
+    if (succeeded) return succeeded;
+    const result = await executeSleep(bot, navigation, request, context.signal, ownBed);
+    if (result.status === "succeeded") succeeded = result;
+    return result;
+  };
+}
+
 /** Define the standalone sleep action. */
 export function createSleepAction(bot: Bot, navigation: NavigationRuntime) {
   return defineAction({
@@ -410,16 +455,9 @@ export function createSleepAction(bot: Bot, navigation: NavigationRuntime) {
     inputSchema: sleepInputSchema,
     resultSchema: sleepResultSchema,
     formatResult: formatSleepResult,
-    execution: { kind: "task" },
+    execution: { kind: "resumable_task" },
     annotations: sleepAnnotations,
     parse: parseSleepRequest,
-    execute: (request, context) => {
-      const timeBefore = bot.time.timeOfDay;
-      context.observeProgress?.(() => ({ baseline: { timeOfDay: timeBefore },
-        checkpoint: { phase: bot.isSleeping ? "sleeping" : "finding_or_entering_bed", asleep: bot.isSleeping, timeOfDay: bot.time.timeOfDay },
-        completion: { kind: "event", observed: false, owes: "The sleep executor must confirm sleeping, respawn setting, or morning." },
-      }));
-      return executeSleep(bot, navigation, request, context.signal);
-    },
+    begin: (request, _lifetime, observe) => beginSleep(bot, navigation, request, observe),
   });
 }

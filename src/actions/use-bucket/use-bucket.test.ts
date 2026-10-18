@@ -6,7 +6,7 @@ import { FULL_CUBE, NO_SHAPE, type FakeBlock } from "../../test-support/world.js
 import prismarineBlock from "prismarine-block";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { parseUseBucketRequest } from "./contract.js";
-import { formatUseBucketResult, useBucket, type UseBucketDependencies } from "./use-bucket.js";
+import { beginUseBucket, formatUseBucketResult, useBucket, type UseBucketDependencies } from "./use-bucket.js";
 
 const water = registry.blocksByName.water;
 const lava = registry.blocksByName.lava;
@@ -391,4 +391,131 @@ test("a pour with no face even from the nearest stance still names the missing f
   );
   if (result.status === "succeeded") assert.fail("a rim that hides the floor from every stance has no face");
   assert.match(result.error, /BUCKET_NO_FACE/);
+});
+
+/** The pool world with a useItem that also moves the bucket counts as the server does, and a navigate that arrives. */
+function bucketRequestWorld(held: string) {
+  const world = poolWorld(held);
+  const stacks = world.bot.inventory.items();
+  const count = (name: string) => stacks.find((stack) => stack.name === name)!;
+  const shiftBuckets = (filling: boolean) => {
+    count("bucket").count += filling ? -1 : 1;
+    count("water_bucket").count += filling ? 1 : -1;
+  };
+  const useItem = world.dependencies.useItem;
+  const dependencies: UseBucketDependencies = {
+    ...world.dependencies,
+    navigate: async () => {
+      world.bot.entity.position.set(6.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    },
+    useItem: async (bot, use) => {
+      const used = await useItem(bot, use);
+      shiftBuckets(use.item.name === "bucket");
+      return used;
+    },
+  };
+  return { ...world, dependencies, count };
+}
+
+/** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
+function bucketAttempts(world: ReturnType<typeof bucketRequestWorld>, request: Parameters<typeof beginUseBucket>[1]) {
+  const run = beginUseBucket(world.bot, request, () => {}, world.dependencies);
+  return (signal?: AbortSignal) => run({ signal });
+}
+
+/** Makes the world's useItem abort the request right after its effect, as a reflex taking the body would. */
+function abortAfterUse(world: ReturnType<typeof bucketRequestWorld>, owner: AbortController): void {
+  const useItem = world.dependencies.useItem;
+  world.dependencies = {
+    ...world.dependencies,
+    useItem: async (bot, use) => {
+      await useItem(bot, use);
+      owner.abort(new Error("hunger reflex"));
+      throw owner.signal.reason;
+    },
+  };
+}
+
+const POUR_BESIDE_POOL = { action: "pour", liquid: "water", cell: { x: 7, y: 64, z: 0 } } as const;
+
+test("a pour cut off right after the water landed is not poured again and still counts the obsidian", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  const owner = new AbortController();
+  abortAfterUse(world, owner);
+  const attempt = bucketAttempts(world, POUR_BESIDE_POOL);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1);
+  assert.equal(world.count("water_bucket").count, 0);
+  assert.equal(result.bucket.obsidianFormed, 2);
+  assert.deepEqual(result.bucket.aimedAt, { x: 7, y: 63, z: 0 });
+  assert.equal(result.bucket.used, true);
+});
+
+test("a fill cut off right after the scoop is not scooped again and keeps its source cell", async () => {
+  const world = bucketRequestWorld("bucket");
+  const owner = new AbortController();
+  abortAfterUse(world, owner);
+  const attempt = bucketAttempts(world, { action: "fill", liquid: "water", cell: null });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1);
+  assert.equal(result.bucket.target?.x, 4);
+  assert.equal(world.count("water_bucket").count, 2);
+});
+
+test("a fill whose source was drained between attempts says so and uses nothing", async () => {
+  const world = bucketRequestWorld("bucket");
+  const owner = new AbortController();
+  const explore = world.dependencies.explore;
+  let searches = 0;
+  world.dependencies = {
+    ...world.dependencies,
+    explore: async (bot, request) => {
+      if (searches++ > 0) return explore(bot, request);
+      owner.abort(new Error("fall reflex"));
+      throw owner.signal.reason;
+    },
+  };
+  const attempt = bucketAttempts(world, { action: "fill", liquid: "water", cell: null });
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  world.blocks.delete("4,63,0");
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  assert.match("error" in result ? result.error : "", /BUCKET_NO_SOURCE/);
+  assert.equal(world.uses.length, 0);
+});
+
+test("a second call after a completed pour returns the success without pouring", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  const attempt = bucketAttempts(world, POUR_BESIDE_POOL);
+
+  const first = await attempt();
+  const second = await attempt();
+
+  assert.equal(first.status, "succeeded");
+  assert.equal(second.status, "succeeded");
+  assert.equal(world.uses.length, 1);
+  assert.deepEqual(second.bucket, first.bucket);
+});
+
+test("a pour that was refused is tried again by the next attempt, not counted as done", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  const attempt = bucketAttempts(world, { action: "pour", liquid: "water", cell: { x: 5, y: 63, z: 0 } });
+
+  const refused = await attempt();
+  const again = await attempt();
+
+  assert.equal(refused.status, "failed");
+  assert.equal(again.status, "failed");
+  assert.equal(world.uses.length, 0);
 });
