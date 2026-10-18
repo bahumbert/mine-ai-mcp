@@ -4,6 +4,7 @@ import type { Facing } from "./building/blueprint.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
+import type { ConversationKind, PlannedLength } from "./conversation/state.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
@@ -75,6 +76,8 @@ export interface ChatInput {
   readonly knownNames?: readonly string[];
   /** The character the speaker's latest line naming one was for, when this line names none and that was lately (see Agent.talkedTo). */
   readonly talkedTo?: { readonly name: string; readonly secondsAgo: number };
+  /** The conversation this line is part of, when the character is in one (spec 2026-10-18-conversations-design). */
+  readonly conversation?: ConversationFacts;
 }
 
 export interface ChatDecision {
@@ -96,6 +99,8 @@ export interface ChatDecision {
   readonly startsNow?: boolean;
   /** Only on a server with localized chat: the line is shouted, so everyone hears it. */
   readonly shout?: boolean;
+  /** The line ends the conversation for the character (a goodbye); only asked inside one. */
+  readonly close?: boolean;
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */
@@ -209,6 +214,63 @@ export interface NarrateInput {
   readonly history: readonly ChatLine[];
 }
 
+/** What the code knows of a past conversation with someone, for the prompts. */
+export interface PastTalk {
+  readonly with: readonly string[];
+  readonly topic: string;
+  readonly gist: string;
+  readonly minutesAgo: number;
+}
+
+/** The facts of the conversation a chat request is in (the "This conversation" block). */
+export interface ConversationFacts {
+  readonly kind: ConversationKind;
+  /** The other members. */
+  readonly others: readonly string[];
+  readonly topic: string;
+  readonly planned: PlannedLength | null;
+  readonly lines: number;
+  readonly minutes: number;
+  readonly iAmOpener: boolean;
+  /** The cap is reached: it says goodbye now. */
+  readonly sayGoodbye: boolean;
+  readonly lastGists: readonly PastTalk[];
+}
+
+/** Someone near enough to talk to. */
+export interface Nearby {
+  readonly username: string;
+  /** Blocks (Manhattan); null when out of sight. */
+  readonly distance: number | null;
+  readonly lastTalk: PastTalk | null;
+}
+
+export interface OpeningInput {
+  readonly persona: Persona;
+  readonly kind: ConversationKind;
+  readonly near: readonly Nearby[];
+  readonly activity: string;
+  readonly lately: readonly string[];
+  readonly lastFailed: { readonly objective: string; readonly reason: string } | null;
+  /** Social, partner out of earshot: the line is shouted to call them over. */
+  readonly calling: boolean;
+}
+
+export interface OpeningDecision {
+  readonly open: boolean;
+  readonly to: readonly string[];
+  readonly topic: string;
+  readonly length: PlannedLength;
+  readonly say: string;
+}
+
+export interface GistInput {
+  readonly persona: Persona;
+  readonly others: readonly string[];
+  readonly topic: string;
+  readonly lines: readonly ChatLine[];
+}
+
 /** The thinking part of an agent (ADR-008, ADR-011). Code around it only runs the skills it picks. */
 export interface Mind {
   /** Chat tier: fast, in character; answers and routes every message it hears. */
@@ -219,4 +281,8 @@ export interface Mind {
   chooseObjective(input: GoalInput, signal: AbortSignal): Promise<ChosenObjective>;
   /** Chat tier: one in-character line about an order (how it ended, or what it does now); empty means say nothing. */
   narrate(input: NarrateInput, signal: AbortSignal): Promise<string>;
+  /** Chat tier: whether and how to open a conversation with those near; `open: false` when it has nothing to say. */
+  openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision>;
+  /** Chat tier: one sentence to remember a finished conversation by. */
+  sumUpConversation(input: GistInput, signal: AbortSignal): Promise<string>;
 }

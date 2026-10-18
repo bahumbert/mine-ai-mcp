@@ -9,7 +9,7 @@ import type { ForegroundTool } from "./runtime-client.ts";
  */
 export const ACTIVITIES = [
   "building", "terraforming", "farming", "mining", "woodcutting", "digging", "foraging", "hunting", "mob_combat", "pvp",
-  "exploring", "following", "travelling", "crafting", "cooking", "storing", "trading", "guarding",
+  "exploring", "following", "socialising", "travelling", "crafting", "cooking", "storing", "trading", "guarding",
 ] as const;
 export type Activity = (typeof ACTIVITIES)[number];
 
@@ -26,6 +26,7 @@ const WORDS: Readonly<Partial<Record<Activity, string>>> = {
   digging: "digging out a cellar, a pond or a tunnel",
   terraforming: "reshaping ground",
   following: "following someone",
+  socialising: "chatting with someone",
   foraging: "foraging",
   exploring: "exploring",
 };
@@ -145,7 +146,7 @@ export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> 
   farm: ["farming"],
   explore: ["exploring"],
   go_to: ["travelling"],
-  go_to_player: ["travelling"],
+  go_to_player: ["travelling", "socialising"],
   follow_player: ["following"],
   hunt: ["hunting", "mob_combat"],
   collect_block: ["woodcutting", "mining", "digging", "foraging"],

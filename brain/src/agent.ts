@@ -7,7 +7,11 @@ import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint
 import { improvement, temporaryRoles } from "./building/materials.ts";
 import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
+import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
+import type { Conversation } from "./conversation/state.ts";
+import { pickPartner, socialise } from "./conversation/socialise.ts";
 import { Inbox, type Heard } from "./inbox.ts";
+import { namesWord, type LocalizedChat } from "./llm-mind.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
@@ -71,10 +75,15 @@ export interface AgentOptions {
   readonly runtime: BotRuntime;
   readonly mind: Mind;
   /**
-   * Usernames of the other agents. Never answered in Phase 1, so two bots cannot talk each other into an endless
-   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5.
+   * Usernames of the other agents. Their lines are answered only inside a conversation (a member of it, or a line
+   * naming this character or a member), so two bots cannot talk each other into an endless chatter; with
+   * {@link AgentOptions.conversations} absent they are never answered.
    */
   readonly otherAgents: readonly string[];
+  /** Conversations (spec 2026-10-18-conversations-design); absent: the character holds none. */
+  readonly conversations?: { readonly budget: ConversationBudget; readonly modelFree: () => boolean };
+  /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
+  readonly localizedChat?: LocalizedChat;
   readonly log: (line: string) => void;
   /** The block names a till failed on, shared by the agents of one process (each agent has its own when none is given). */
   readonly soil?: TillFacts;
@@ -206,10 +215,40 @@ export class Agent {
   /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
   private wakeChat: (() => void) | null = null;
 
+  /** Its conversations; null when the brain runs without them. */
+  private readonly talks: ConversationController | null;
+  /** Who was online at the last look, as spelled in the game: the names a line may hold. */
+  private onlineNames: readonly string[] = [];
+  /** When conversations were last looked at, and whether that look is still running. */
+  private talksCheckedAt = 0;
+  private talksLooking = false;
+
   constructor(private readonly options: AgentOptions) {
     this.soil = options.soil ?? new TillFacts();
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
+    const { conversations, persona, localizedChat } = options;
+    this.talks = conversations === undefined ? null : new ConversationController({
+      self: persona.username,
+      persona,
+      mind: options.mind,
+      budget: conversations.budget,
+      modelFree: conversations.modelFree,
+      talkRange: localizedChat?.range ?? persona.settings.conversation.stayingDistance,
+      localized: localizedChat !== undefined,
+      random: options.random ?? Math.random,
+      now: Date.now,
+      speak: (text, to, whisperTo, shout) => this.speak(text, undefined, to, whisperTo, shout),
+      journal: (event) => options.journal?.(event),
+      memorize: (talk) => this.memorize(talk),
+      log: (line) => options.log(line),
+      history: () => this.history,
+    });
+  }
+
+  /** The conversation it is in now, if any. */
+  get conversation(): Conversation | null {
+    return this.talks?.current ?? null;
   }
 
   get activity(): string {
@@ -254,6 +293,8 @@ export class Agent {
         // A runtime restarting under a poll fails the read: the next poll tries again (review B5).
         try {
           for (const message of await this.options.runtime.readMessages()) {
+            // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
+            if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
             this.inbox.push(message);
             this.wakeChat?.();
@@ -263,6 +304,7 @@ export class Agent {
           if (!unreadable) this.options.log(`chat unreadable, retrying at the next poll (not logged again until a read works): ${String(error)}`);
           unreadable = true;
         }
+        this.lookAtConversations();
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -306,11 +348,15 @@ export class Agent {
     const { persona, mind, log } = this.options;
     const line = this.remember(message.username, message.message);
     const talkedTo = this.noteNamed(message, heardAt);
-    if (!this.listensTo(message.username)) return;
+    const named = this.namedIn(message);
+    if (!this.hears(message, named)) return;
+    if (!(await this.conversationGate(message, heard, named))) return;
     let decision;
+    let conversation;
     try {
       const snapshot = await this.options.runtime.status();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }) }, this.runSignal);
+      conversation = this.talks?.facts();
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }) }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -323,8 +369,11 @@ export class Agent {
     if (decision.to !== undefined) this.annotate(line, decision.to);
     // Its speaker went on while the model thought: this reply answers a state that is gone. The newest lines are read
     // next, with this one in the history (spec 2026-10-09-chat-handling, A).
-    const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
-    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
+    // In a conversation, any member speaking since does the same.
+    const members = this.talks?.current?.members.filter((name) => name.toLowerCase() !== persona.username.toLowerCase()) ?? [];
+    const superseded = heard !== undefined && (this.inbox.superseded(message.username, heard.seq) || this.inbox.spokeSince(members, heard.seq));
+    const talkId = conversation === undefined ? undefined : this.talks?.current?.id;
+    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
     if (superseded) {
       // The line answers a state that is gone and is dropped, but a stop is not: it was meant, and the newer line
       // (read next) does not take it back.
@@ -351,6 +400,11 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
+    // Her line in a conversation counts in it; a goodbye (or a line after the cap) ends it.
+    if (conversation !== undefined) {
+      if (decision.say.trim() !== "") this.talks?.said(decision.close === true);
+      else if (decision.close === true) this.talks?.end("goodbye", this.runSignal);
+    }
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
@@ -375,18 +429,80 @@ export class Agent {
   }
 
   /**
-   * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed).
-   * Other agents are never answered (see {@link AgentOptions.otherAgents}).
+   * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed). Another
+   * agent is heard only inside a conversation: a member of it, or a line naming this character or a member (an opening
+   * or a join, see {@link AgentOptions.otherAgents}).
    */
-  private listensTo(username: string): boolean {
+  private hears(message: PlayerMessage, named: readonly string[]): boolean {
     const { persona, otherAgents } = this.options;
-    const speaker = username.toLowerCase();
-    if (otherAgents.some((name) => name.toLowerCase() === speaker)) return false;
-    return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
+    const speaker = message.username.toLowerCase();
+    const agent = otherAgents.some((name) => name.toLowerCase() === speaker);
+    if (!agent && !(persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker))) return false;
+    this.talks?.heard(message.username, message.message, named, message.channel);
+    return !agent || this.talks?.isMember(message.username) === true;
+  }
+
+  /** The characters and players a line holds as words (not its speaker), as spelled in the game. */
+  private namedIn(message: PlayerMessage): string[] {
+    const { persona, otherAgents, knownNames } = this.options;
+    const candidates = [persona.username, ...otherAgents, ...(knownNames ?? []), ...this.onlineNames, ...(this.talks?.current?.members ?? [])];
+    const seen = new Set<string>([message.username.toLowerCase()]);
+    return candidates.filter((name) => {
+      if (seen.has(name.toLowerCase()) || !namesWord(message.message, name)) return false;
+      seen.add(name.toLowerCase());
+      return true;
+    });
+  }
+
+  /**
+   * In a conversation of three or more, not every member answers every line (spec 2026-10-18): a line naming members
+   * but not her is only recorded; a line naming nobody is answered after a random wait, unless a member spoke meanwhile.
+   * True: go on to the chat tier.
+   */
+  private async conversationGate(message: PlayerMessage, heard: Heard | undefined, named: readonly string[]): Promise<boolean> {
+    const talk = this.talks?.current;
+    if (talk === null || talk === undefined || talk.members.length < 3) return true;
+    const { persona, log } = this.options;
+    const self = persona.username.toLowerCase();
+    if (message.addressed || message.channel === "whisper" || named.some((name) => name.toLowerCase() === self)) return true;
+    if (named.some((name) => this.talks?.isMember(name))) {
+      log(`  group: ${message.username} named ${named.join(", ")}, not me: recorded, no answer`);
+      return false;
+    }
+    const [from, to] = persona.settings.conversation.groupReplyJitterMs;
+    await sleep(from + (this.options.random ?? Math.random)() * (to - from), undefined, { signal: this.runSignal }).catch(() => undefined);
+    const others = (this.talks?.current?.members ?? []).filter((name) => name.toLowerCase() !== self);
+    if (heard !== undefined && this.inbox.spokeSince(others, heard.seq)) {
+      log("  group: a member spoke meanwhile, no answer");
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Looks after the conversation in the background, so a slow opening call never holds up reading the chat: range and
+   * silence ends while in one, else the code gate of an opening every check interval.
+   */
+  private lookAtConversations(): void {
+    const talks = this.talks;
+    if (talks === null || this.talksLooking || this.runSignal.aborted) return;
+    if (talks.current === null && Date.now() - this.talksCheckedAt < this.options.persona.settings.conversation.checkEverySeconds * 1_000) return;
+    this.talksCheckedAt = Date.now();
+    this.talksLooking = true;
+    void (async () => {
+      const snapshot = await this.options.runtime.status();
+      this.onlineNames = snapshot.players.map((player) => player.username);
+      await talks.tick(snapshot, this.runSignal);
+      const busy = (this.stack.at(-1)?.objective.requester ?? null) !== null || this.sheltering !== null;
+      await talks.maybeOpen({ snapshot, activity: this.activity, lately: this.lately, lastFailed: this.lastFailed, busy }, this.runSignal);
+    })()
+      .catch((error: unknown) => this.options.log(`conversation check failed: ${String(error)}`))
+      .finally(() => { this.talksLooking = false; });
   }
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
   private take(objective: Objective, whisperTo: string | null = null): void {
+    this.talks?.end("taken_over", this.runSignal);
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.sheltering?.abort();
@@ -458,6 +574,7 @@ export class Agent {
     if (!persona.settings.shelterAtNight || Date.now() < this.shelterRetryAt) return false;
     if (work !== undefined && work.objective.requester !== null) return false;
     if (!(await this.outInTheNight())) return false;
+    this.talks?.end("taken_over", this.runSignal);
     const controller = new AbortController();
     this.sheltering = controller;
     const objective = work?.objective.text ?? "(own goal)";
@@ -503,7 +620,7 @@ export class Agent {
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
-    const chances = activityChances(availableActivities(personaSkills(persona), snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
+    const chances = activityChances(availableActivities(personaSkills(persona), snapshot, this.partners()), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
     const opportunities = await this.opportunities(snapshot, drawn);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
@@ -521,6 +638,7 @@ export class Agent {
     const { persona, mind, runtime, log } = this.options;
     if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
+    if (work.objective.requester === null && work.objective.purpose === "socialising") return this.socialiseStep(work);
     const snapshot = await runtime.status();
     await this.keepSettings(snapshot);
     let decision: WorkDecision;
@@ -679,6 +797,66 @@ export class Agent {
     if (work.failing.count >= persona.settings.maxSkillFailuresInARow) {
       this.finish(work, "failed", `${decision.step.skill.replaceAll("_", " ")} failed ${work.failing.count} times in a row, whichever way it was tried; the last: ${record.detail}`);
     }
+  }
+
+  /** Who it could go and chat with: the other agents and the players heard in the last {@link PARTNER_HEARD_MS}, not itself. */
+  private partners(): string[] {
+    if (this.talks === null) return [];
+    const self = this.options.persona.username.toLowerCase();
+    const heard = [...this.lastHeard].filter(([, at]) => Date.now() - at <= PARTNER_HEARD_MS).map(([name]) => this.onlineNames.find((online) => online.toLowerCase() === name) ?? name);
+    const seen = new Set<string>([self]);
+    return [...this.options.otherAgents, ...heard].filter((name) => {
+      if (seen.has(name.toLowerCase())) return false;
+      seen.add(name.toLowerCase());
+      return true;
+    });
+  }
+
+  /**
+   * The step of a `socialising` objective of its own: the code routine in conversation/socialise.ts (like the night
+   * shelter, no work-tier call). An order that takes the body aborts it, and the objective ends.
+   */
+  private async socialiseStep(work: Work): Promise<void> {
+    const { persona, runtime, log } = this.options;
+    const talks = this.talks;
+    if (talks === null) return this.finish(work, "failed", "conversations are off");
+    const snapshot = await runtime.status();
+    const partner = pickPartner(work.objective.text, this.partners(), snapshot);
+    if (partner === null) return this.finish(work, "failed", "nobody to talk to");
+    const controller = new AbortController();
+    work.step = controller;
+    const label = `chat with ${partner}`;
+    log(`socialising: ${label}`);
+    this.journalState(label);
+    const started = Date.now();
+    const signal = AbortSignal.any([controller.signal, this.runSignal]);
+    const { talkRange } = { talkRange: this.options.localizedChat?.range ?? persona.settings.conversation.stayingDistance };
+    let result: SkillResult;
+    try {
+      result = await socialise({
+        runtime,
+        signal,
+        partner,
+        talks,
+        context: { runtime, body: this.body, signal, self: persona.username },
+        openFacts: { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed },
+        limits: { openingDistance: persona.settings.conversation.openingDistance, talkRange, maxMinutes: persona.settings.conversation.maxMinutes },
+      });
+    } catch (error) {
+      result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      work.step = null;
+    }
+    const ended = Date.now();
+    const ms = ended - started;
+    const outcome = result.status === "stopped" ? "interrupted" : result.status;
+    const detail = result.status === "stopped" ? "an order came first" : result.detail;
+    this.spent({ activity: "socialising", purpose: "socialising", ended: new Date(ended).toISOString(), minutes: ms / 60_000 }, ms >= MIN_RECORDED_MS);
+    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: null, step: label, input: { skill: "socialise", partner }, thought: "", outcome, detail, ms, activity: "socialising", purpose: "socialising" });
+    this.journalState(null);
+    log(`  -> ${label}: ${outcome}: ${detail}`);
+    // Stopped, it was set aside for an order or a night: the talk is over, so is the objective.
+    this.finish(work, result.status === "done" ? "done" : "failed", detail);
   }
 
   /**
@@ -1019,6 +1197,7 @@ export class Agent {
       this.places.push(...recalled.places);
       this.lately.push(...recalled.lately);
       this.farms.push(...recalled.farms);
+      this.talks?.recalled(recalled.conversations);
       for (const time of recalled.times) this.spent(time, false);
       this.building.unfinished = recalled.unfinished;
       this.savedUnfinished = JSON.stringify(recalled.unfinished);
@@ -1123,6 +1302,7 @@ export class Agent {
    * of its own starts for the persona's rest time.
    */
   private stopAndRest(speaker?: string): void {
+    this.talks?.end("taken_over", this.runSignal);
     if (speaker === undefined) this.stopAll();
     else this.stopWorkOf(speaker);
     this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
@@ -1166,6 +1346,9 @@ export class Agent {
     if (index !== -1) this.history[index] = { ...line, to };
   }
 }
+
+/** A player heard this recently (ms) can be gone and chat with. */
+const PARTNER_HEARD_MS = 10 * 60_000;
 
 /** How long after a line naming a character a line naming nobody is still shown as following it. */
 const TALKED_TO_MS = 60_000;

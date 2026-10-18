@@ -21,10 +21,11 @@ const NOT_DRAWN: ReadonlySet<Activity> = new Set(["travelling", "following", "pv
 
 /**
  * The activities a character can take on now: one a skill of its own does ({@link SKILL_ACTIVITIES}), judged from what
- * is in sight where it needs a target (hunting an animal that is not hostile, mob combat a hostile mob). In
+ * is in sight where it needs a target (hunting an animal that is not hostile, mob combat a hostile mob, socialising someone
+ * to talk with: `partners`). In
  * {@link ACTIVITIES} order.
  */
-export function availableActivities(skills: readonly SkillName[], snapshot: BotSnapshot): Activity[] {
+export function availableActivities(skills: readonly SkillName[], snapshot: BotSnapshot, partners: readonly string[]): Activity[] {
   const can = new Set<Activity>(skills.flatMap((skill) => SKILL_ACTIVITIES[skill]));
   const animals = snapshot.mobs.some((mob) => !mob.hostile);
   const monsters = snapshot.mobs.some((mob) => mob.hostile);
@@ -32,6 +33,7 @@ export function availableActivities(skills: readonly SkillName[], snapshot: BotS
     if (!can.has(activity) || NOT_DRAWN.has(activity)) return false;
     if (activity === "hunting") return animals;
     if (activity === "mob_combat") return monsters;
+    if (activity === "socialising") return partners.length > 0;
     return true;
   });
 }

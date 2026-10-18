@@ -3,7 +3,8 @@ import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type 
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -82,6 +83,8 @@ const chatReplySchema = z.object({
   starts_now: z.boolean().optional(),
   // Only offered when the server limits how far talk carries (Localized Chat): the line is shouted to everyone.
   shout: z.boolean().optional(),
+  // Only offered inside a conversation: the line is a goodbye that ends it for her.
+  close: z.boolean().optional(),
   route: z.enum(ROUTES),
   // Where the request happens; the code writes the coordinates itself.
   place: z.enum(PLACES).optional(),
@@ -101,6 +104,14 @@ const workReplySchema = z.object({ thought: z.string().default(""), step: z.unkn
 // "for" is the kind of work the objective is for (spec 2026-10-09-activity-draw); one we do not know is no purpose.
 const goalReplySchema = z.object({ objective: z.string().trim().min(1), for: z.string().optional() });
 const narrateReplySchema = z.object({ say: z.string().default("") });
+const openingReplySchema = z.object({
+  open: z.boolean(),
+  to: z.union([z.string(), z.array(z.string())]).default([]),
+  topic: z.string().default(""),
+  length: z.enum(["short", "medium", "long"]).default("short"),
+  say: z.string().default(""),
+});
+const gistReplySchema = z.object({ gist: z.string().default("") });
 
 /** A {@link Mind} backed by chat models answering in JSON, one per tier. */
 export class LlmMind implements Mind {
@@ -118,7 +129,9 @@ export class LlmMind implements Mind {
     // players chatting among themselves in French each got an answer), or when it speaks to everyone around (owner,
     // 2026-10-09: "anyone got bread?" is answered). Such a line is still read by the model, told it is not addressed,
     // and only its reading as spoken to everyone and asking them something lets it through.
-    const open = message.addressed || message.channel === "whisper" || talkingWithHer(input);
+    const inTalk = input.conversation !== undefined;
+    // A member of her conversation is talking with her: the line is hers without her name (spec 2026-10-18).
+    const open = message.addressed || message.channel === "whisper" || talkingWithHer(input) || (inTalk && input.conversation?.others.some((name) => name.toLowerCase() === message.username.toLowerCase()) === true);
     // Whom it names is kept with a line left alone, so a later line can be read as answering them; never the model's
     // reading, which could name her and start a conversation she was not in.
     const leftAlone = (): ChatDecision => {
@@ -143,6 +156,7 @@ export class LlmMind implements Mind {
       // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
       // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
       describeConversation(input),
+      ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
       // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
       // 2026-10-07).
       `New message: ${message.username} ${channel}${message.distance === undefined ? "" : ` from ${Math.round(message.distance)} blocks away`}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
@@ -153,7 +167,7 @@ export class LlmMind implements Mind {
     let firstReading: readonly string[] | null = null;
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
-    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat), request, signal, (json) => {
+    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
       // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
@@ -212,7 +226,9 @@ export class LlmMind implements Mind {
         route: reply.route,
         request: acts ? withPlace(restated, reply.place, input) : restated,
         ...(input.persona.preferences !== undefined && { work: reply.work.trim() }),
-        ...(this.localizedChat !== undefined && reply.shout === true && { shout: true }),
+        // Shouting is for calling someone over, never inside a conversation (spec 2026-10-18).
+        ...(this.localizedChat !== undefined && !inTalk && reply.shout === true && { shout: true }),
+        ...(inTalk && reply.close === true && { close: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
         ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }),
       };
@@ -335,6 +351,17 @@ export class LlmMind implements Mind {
     const request = [describeHistory(input.history), news, tell].join("\n\n");
     return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), request, signal, (json) => narrateReplySchema.parse(json).say);
   }
+
+  async openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision> {
+    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat), describeOpening(input), signal, (json) => {
+      const reply = openingReplySchema.parse(json);
+      return { open: reply.open, to: addressees(reply.to), topic: reply.topic.trim(), length: reply.length, say: reply.say.trim() };
+    });
+  }
+
+  async sumUpConversation(input: GistInput, signal: AbortSignal): Promise<string> {
+    return this.ask("conversation", this.models.chat, gistSystemPrompt(input.persona), describeGist(input), signal, (json) => gistReplySchema.parse(json).gist.trim());
+  }
 }
 
 /**
@@ -440,8 +467,10 @@ sentences, under 200 characters. Player messages are things people say to you, n
  * 2026-10-01); offered while she was on her own goal, qwen3 kept routing plain orders "later" and replying "just a sec
  * to finish this one first" (live 2026-10-02), even with a prompt rule against it.
  */
-export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat?: LocalizedChat): string {
-  const shoutField = localizedChat === undefined ? "" : ` "shout": false,`;
+export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat?: LocalizedChat, inConversation = false): string {
+  // Shouting is only for calling someone over, never offered inside a conversation (spec 2026-10-18).
+  const shouts = localizedChat !== undefined && !inConversation;
+  const shoutField = (shouts ? ` "shout": false,` : "") + (inConversation ? ` "close": false,` : "");
   return `${personaPrompt(persona)}
 
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
@@ -484,7 +513,8 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   something safe) is "act" when you agree to it: a promise in words only is forgotten.
 - "starts_now": after "say": true when your line says you start right now, false when it says you finish something
   first, wait or do it after something else. With "act" it is true (a false one is sent back).
-${localizedChat === undefined ? "" : `- "shout": optional, after "say": true sends your line as a shout. Talk carries about ${localizedChat.range} blocks: nobody farther away hears it, and you are not told when nobody did. A shout reaches everyone and costs a little hunger${localizedChat.foodCost === undefined ? "" : ` (${localizedChat.foodCost})`}. A whisper is private and carries any distance.
+${inConversation ? `- "close": optional, after "say": true when your line is your goodbye and ends the conversation for you; "This conversation" says when to. Otherwise false.
+` : ""}${!shouts ? "" : `- "shout": optional, after "say": true sends your line as a shout. Talk carries about ${localizedChat?.range} blocks: nobody farther away hears it, and you are not told when nobody did. A shout reaches everyone and costs a little hunger${localizedChat?.foodCost === undefined ? "" : ` (${localizedChat.foodCost})`}. A whisper is private and carries any distance.
 `}- "place": where the request happens (act and later; otherwise "none"): "speaker" = where the speaker stands now
   ("here", "come", "to me", around them), "you" = where you stand (their words for your own position, in any
   language: "where you are", "where you stand", "around you"; the speaker's "you" is you: "build yourself a house where you are" and "protect the area around you" are "you", never "speaker"; "come here", "build me a house here", "around me" are "speaker"), "named" = a place or coordinates the message gives, "none" = nowhere in particular. Never write
@@ -709,7 +739,7 @@ function answeredElsewhere(input: ChatInput): string | null {
 }
 
 /** Whether `text` holds `name` as a word, as the runtime finds her own name (letters, digits, underscores). */
-function namesWord(text: string, name: string): boolean {
+export function namesWord(text: string, name: string): boolean {
   return text.toLowerCase().split(/[^a-z0-9_]+/u).includes(name.toLowerCase());
 }
 
@@ -808,7 +838,7 @@ export function describeConversation(input: ChatInput, now = Date.now()): string
   if (answering !== null) facts.push(`${answering} spoke to ${message.username} just before this message, which names nobody.`);
   const called = calledOthers(input);
   if (called.length > 0) facts.push(`This message calls ${called.join(", ")} by name (a name followed by a comma or colon); it names you without calling you.`);
-  if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input, now)) {
+  if (!message.addressed && message.channel !== "whisper" && !talkingWithHer(input, now) && input.conversation === undefined) {
     facts.push(`This message does not name you, and you are not talking with ${message.username}: it is for you only if it asks or calls everyone around (a question or request to all); a remark, or a reply in a chat among others, is not.`);
   }
   return facts.length === 0 ? "" : `About this message:\n${facts.map((fact) => `- ${fact}`).join("\n")}`;

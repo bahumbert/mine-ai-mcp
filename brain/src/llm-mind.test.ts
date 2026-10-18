@@ -957,3 +957,51 @@ test("a heard line shows how far its speaker is when the server said so", async 
   await mind.chat(input, signal);
   assert.doesNotMatch(chat.requests[1]?.at(-1)?.content ?? "", /blocks away/u);
 });
+
+const opening = () => ({
+  persona: testPersona(), kind: "chance" as const, near: [{ username: "Theo", distance: 10, lastTalk: null }], activity: "idle", lately: [],
+  lastFailed: null, calling: false,
+});
+
+test("openConversation reads the opening reply", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ open: true, to: ["Theo"], topic: "the mine", length: "medium", say: "Theo! How's the mine going?" }, { open: false });
+  assert.deepEqual(await mind.openConversation(opening(), signal), { open: true, to: ["Theo"], topic: "the mine", length: "medium", say: "Theo! How's the mine going?" });
+  assert.deepEqual(await mind.openConversation(opening(), signal), { open: false, to: [], topic: "", length: "short", say: "" });
+});
+
+test("an opening with a length that does not exist gets one repair round", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ open: true, to: ["Theo"], topic: "x", length: "epic", say: "hi" }, { open: true, to: ["Theo"], topic: "x", length: "long", say: "hi" });
+  assert.equal((await mind.openConversation(opening(), signal)).length, "long");
+  assert.equal(chat.requests[1]?.length, 4);
+});
+
+test("chat reply close defaults to false, and is read inside a conversation only", async () => {
+  const facts = { kind: "chance" as const, others: ["Steve"], topic: "", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["Ayla"], say: "ok", route: "talk" }, { spoken_to: ["Ayla"], say: "bye", route: "talk", close: true }, { spoken_to: ["Ayla"], say: "bye", route: "talk", close: true });
+  assert.equal((await mind.chat({ ...chatInput("hm", false), conversation: facts }, signal)).close, undefined);
+  assert.equal((await mind.chat({ ...chatInput("bye", false), conversation: facts }, signal)).close, true);
+  assert.equal((await mind.chat(chatInput("bye"), signal)).close, undefined, "not in a conversation");
+});
+
+test("the chat request carries the conversation block only inside a conversation, and the line of a member is hers", async () => {
+  const facts = { kind: "chance" as const, others: ["Steve"], topic: "ore", planned: null, lines: 3, minutes: 1, iAmOpener: false, sayGoodbye: false, lastGists: [] };
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["Ayla"], say: "ok", route: "talk" }, { spoken_to: ["Ayla"], say: "ok", route: "talk" });
+  const decision = await mind.chat({ ...chatInput("and then?", false), conversation: facts }, signal);
+  assert.equal(decision.say, "ok", "an unnamed line from a member is answered");
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /This conversation:/u);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"close"/u);
+  await mind.chat(chatInput("hey Ayla"), signal);
+  assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /This conversation:/u);
+  assert.doesNotMatch(chat.requests[1]?.[0]?.content ?? "", /"close"/u);
+});
+
+test("sumUpConversation returns the gist", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ gist: "Talked with Theo about the mine." });
+  assert.equal(await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [{ speaker: "Theo", text: "hi" }] }, signal), "Talked with Theo about the mine.");
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Theo: "hi"/u);
+});

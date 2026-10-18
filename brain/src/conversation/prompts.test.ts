@@ -1,0 +1,39 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { ConversationFacts, OpeningInput } from "../mind.ts";
+import { testPersona } from "../testing.ts";
+import { conversationBlock, describeOpening } from "./prompts.ts";
+
+const facts = (overrides: Partial<ConversationFacts> = {}): ConversationFacts => ({
+  kind: "chance", others: ["Theo"], topic: "the mine", planned: "short", lines: 2, minutes: 1, iAmOpener: true, sayGoodbye: false, lastGists: [], ...overrides,
+});
+
+test("the block tells the opener its planned length", () => {
+  assert.match(conversationBlock(facts()), /you meant it to be short \(2-4 lines in all\)/u);
+  assert.match(conversationBlock(facts()), /This conversation:/u);
+});
+
+test("at the cap the block says goodbye now", () => {
+  assert.match(conversationBlock(facts({ sayGoodbye: true })), /say goodbye now/u);
+});
+
+test("someone who did not open it has no planned length", () => {
+  const block = conversationBlock(facts({ iAmOpener: false, planned: null, topic: "" }));
+  assert.doesNotMatch(block, /you meant/u);
+  assert.match(block, /Theo opened it/u);
+});
+
+test("the last talk with each member is shown", () => {
+  assert.match(conversationBlock(facts({ lastGists: [{ with: ["Theo"], topic: "iron", gist: "I promised logs", minutesAgo: 12 }] })), /12 min ago about iron: I promised logs/u);
+});
+
+test("the opening says who is out of sight and who it never talked with", () => {
+  const input: OpeningInput = {
+    persona: testPersona(), kind: "social", near: [{ username: "Theo", distance: null, lastTalk: null }, { username: "Bruno", distance: 7, lastTalk: { with: ["Bruno"], topic: "farm", gist: "wheat", minutesAgo: 30 } }],
+    activity: "idle", lately: ["a", "b", "c", "d"], lastFailed: null, calling: true,
+  };
+  const text = describeOpening(input);
+  assert.match(text, /Theo, out of sight; never talked/u);
+  assert.match(text, /Bruno, 7 blocks away; last talk 30 min ago about farm: wheat/u);
+  assert.doesNotMatch(text, /- a$/mu);
+});

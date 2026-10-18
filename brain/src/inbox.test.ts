@@ -75,3 +75,15 @@ test("it says how long until the next message is ready", () => {
   clock.now += 2_000;
   assert.equal(inbox.readyIn(), 0);
 });
+
+test("spokeSince sees any of the speakers after seq", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "Ayla"));
+  clock.now += 2_000;
+  const heard = inbox.next()!;
+  assert.equal(inbox.spokeSince(["theo", "bruno"], heard.seq), false);
+  inbox.push(line("Theo", "hello"));
+  assert.equal(inbox.spokeSince(["THEO", "Bruno"], heard.seq), true);
+  assert.equal(inbox.spokeSince(["Bruno"], heard.seq), false);
+  assert.equal(inbox.spokeSince([], heard.seq), false);
+});

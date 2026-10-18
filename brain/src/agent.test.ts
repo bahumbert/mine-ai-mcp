@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentOptions } from "./agent.ts";
+import { ConversationBudget } from "./conversation/controller.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
@@ -1311,4 +1312,145 @@ test("a reply that shouts is sent as a shout in public chat, and as a plain whis
     { message: "Coming!", shout: true },
     { message: "Psst!", to: "Steve" },
   ]);
+});
+
+// Conversations (spec 2026-10-18-conversations-design).
+function talkOptions(extra: Partial<AgentOptions> = {}, modelFree = true): Partial<AgentOptions> {
+  return { conversations: { budget: new ConversationBudget(2), modelFree: () => modelFree }, otherAgents: ["Vex", "Bruno"], ...extra };
+}
+
+const toAyla = { spoken_to: ["Ayla"], route: "talk" };
+
+test("another agent's line is still ignored outside a conversation, and always without conversations", async (t) => {
+  const runtime = new FakeRuntime();
+  const withTalks = agentFor(t, runtime, {}, talkOptions());
+  await withTalks.agent.handle(say("Vex", "hello everyone", false));
+  await withTalks.agent.handle(say("Vex", "Bruno, did you see?", false));
+  assert.equal(withTalks.chat.requests.length, 0);
+  assert.equal(withTalks.agent.conversation, null);
+  const off = agentFor(t, new FakeRuntime());
+  await off.agent.handle(say("Vex", "Ayla, got a minute?"));
+  assert.equal(off.chat.requests.length, 0, "conversations off: as before");
+  assert.equal(off.agent.conversation, null);
+});
+
+test("an agent's line naming her opens a conversation and is answered; a member's line naming nobody is answered too", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Sure, what's up?" }, { ...toAyla, say: "The farm is fine." });
+  await agent.handle(say("Vex", "Ayla, got a minute?"));
+  assert.deepEqual(runtime.said, ["Sure, what's up?"]);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /This conversation:/u);
+  assert.deepEqual(agent.conversation?.members, ["Ayla", "Vex"]);
+  await agent.handle(say("Vex", "how is the farm?", false));
+  assert.deepEqual(runtime.said, ["Sure, what's up?", "The farm is fine."]);
+  assert.equal(agent.conversation?.lines, 4);
+});
+
+test("in a group, a line naming another member is not answered by her, and a nameless one is dropped when a member spoke meanwhile", async (t) => {
+  const runtime = new FakeRuntime();
+  const settings = { ...testPersona().settings, chatBurstMs: 60_000 };
+  const { agent, chat } = agentFor(t, runtime, { settings }, talkOptions());
+  chat.reply({ ...toAyla, say: "Hello you two." });
+  await agent.handle(say("Vex", "Ayla and Bruno, hello"));
+  assert.deepEqual(agent.conversation?.members, ["Ayla", "Vex", "Bruno"]);
+  assert.equal(chat.requests.length, 1);
+  await agent.handle(say("Bruno", "Vex, how are you?", false));
+  assert.equal(chat.requests.length, 1, "a line naming another member: no call");
+  // Bruno spoke after the message Ayla is about to read.
+  (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Bruno", "anyone hungry?", false));
+  await agent.handle(say("Vex", "I could eat", false), { message: say("Vex", "I could eat", false), lines: 1, seq: 0 });
+  assert.equal(chat.requests.length, 1, "a nameless line after which a member spoke: no call");
+  chat.reply({ ...toAyla, say: "Me too." });
+  await agent.handle(say("Vex", "bread then?", false));
+  assert.deepEqual(runtime.said, ["Hello you two.", "Me too."], "nobody spoke since: she answers");
+});
+
+test("close ends the conversation, journaled as goodbye with its gist", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }));
+  chat.reply({ ...toAyla, say: "Bye, Vex!", close: true }, { gist: "Said hello to Vex." });
+  await agent.handle(say("Vex", "Ayla, I must go, bye"));
+  assert.equal(agent.conversation, null);
+  await until(() => events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "goodbye");
+  assert.equal(ended?.kind === "conversation" && ended.gist, "Said hello to Vex.");
+  const chatRow = events.find((event) => event.kind === "chat");
+  assert.ok(chatRow?.kind === "chat" && chatRow.conversation !== undefined, "the chat row carries the conversation");
+});
+
+test("an order ends a chance conversation taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  assert.notEqual(agent.conversation, null);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "taken_over");
+});
+
+test("simultaneous openings merge: both end with both members", async (t) => {
+  const open = (to: string) => ({ open: true, to: [to], topic: "hello", length: "short", say: `${to}, hi` });
+  const world = (self: string, other: string) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players: [{ username: other, position: { x: 10, y: 64, z: 0 } }] };
+    const tiers = agentFor(t, runtime, { username: self, displayName: self }, talkOptions({ random: () => 0, otherAgents: [other] }));
+    tiers.chat.reply(open(other), { spoken_to: [other], say: "Hi!", route: "talk" }, { spoken_to: [other], say: "Hi again.", route: "talk" });
+    return { runtime, ...tiers };
+  };
+  const ayla = world("Ayla", "Vex");
+  const vex = world("Vex", "Ayla");
+  await until(() => ayla.agent.conversation !== null && vex.agent.conversation !== null);
+  ayla.runtime.inbox.push(say("Vex", "Ayla, hi"));
+  vex.runtime.inbox.push(say("Ayla", "Vex, hi"));
+  await until(() => ayla.runtime.said.length >= 2 && vex.runtime.said.length >= 2);
+  assert.deepEqual([...ayla.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
+  assert.deepEqual([...vex.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
+});
+
+test("its own line coming back is not a member's: no wake, no line counted", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Hi." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const lines = agent.conversation!.lines;
+  runtime.inbox.push(say("Ayla", "Hi."));
+  await sleep(40);
+  assert.equal(agent.conversation?.lines, lines);
+  assert.equal(chat.requests.length, 1);
+});
+
+test("an order ends a social conversation: its follow step is aborted, the order runs", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 5;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }, false));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  chat.reply({ open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social");
+  assert.match(agent.activity, /go and chat with Vex/u);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  await until(() => events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "taken_over");
+  await until(() => action.requests.length >= 1);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Objective \(asked by Steve\): "collect 5 dirt"/u);
+});
+
+test("socialising is never offered to a character without conversations", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, planner } = agentFor(t, runtime, { goal: "Live well." });
+  planner.reply({ objective: "chat with Vex", for: "socialising" });
+  await until(() => planner.requests.length >= 1);
+  assert.doesNotMatch(JSON.stringify(planner.requests[0]), /chatting with someone/u);
+  assert.equal(agent.conversation, null);
 });
