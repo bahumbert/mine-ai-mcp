@@ -300,6 +300,8 @@ export class NavigationRun {
   #ownRegionsOpened = false;
   /** The style rules set aside for this run only so that the bot can leave a pocket; the request's own policy is never changed. */
   #relaxedRules: readonly string[] = [];
+  /** Whether a route committed under the relaxation digs: only then did the escape set a rule aside in fact. */
+  #escapeDug = false;
   constructor(dependencies: NavigationRunDependencies) {
     this.context = dependencies.context;
     this.request = dependencies.request;
@@ -846,6 +848,7 @@ export class NavigationRun {
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
     this.#planningStall.committed();
     this.#counters.plans += 1;
+    if (this.#relaxedRules.length > 0 && plan.steps.some((step) => step.operations.some((operation) => operation.kind === "break"))) this.#escapeDug = true;
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
@@ -1128,7 +1131,7 @@ export class NavigationRun {
       start: this.#start,
       final: this.context.bot.observe(),
       goalRevision: this.#goalRevision,
-      escapeRelaxed: this.#relaxedRules,
+      escapeRelaxed: this.#escapeDug ? this.#relaxedRules : [],
       ...this.#counters,
       movementAttempts: { ...this.#counters.movementAttempts },
       // Provisional: `execute` measures this again once cleanup has run.

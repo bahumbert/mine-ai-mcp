@@ -3,9 +3,10 @@ template: ../../templates/flat-single-action.yaml
 name: roofed-dive-fails-back-to-air
 tags: [regression]
 description: >-
-  Run 15, Sana drowned: a navigate committed a swim segment into a roofed water tunnel, the next search failed and the
-  dive was released five blocks inside, out of reach of air. Here the goal lies behind a wall at the far end of a roofed
-  tunnel: the navigate fails, and the bot must end in the air pocket it came from, breathing and alive.
+  Run 15, Sana drowned: a navigate committed a swim segment into a roofed water tunnel, a later search failed and the
+  dive was released five blocks inside, out of reach of air. Here a bot in a two-deep pool navigates through a roofed
+  tunnel to its far end; once it is inside, the tunnel is sealed ahead of it (a tick command), so the
+  navigate fails mid-tunnel and the bot must swim back to the pool's air, alive.
 
 world:
   type: flat
@@ -18,41 +19,39 @@ world:
     randomTickSpeed: 0
 
 reset:
-  - "fill -10 -63 -10 40 -40 10 air"
+  - "fill -10 -63 -10 28 -40 10 air"
 
 geometry:
-  - fill: { block: stone, from: [-6, -63, -4], to: [34, -54, 4] }
-  # The air pocket at the entry (x -3..0) and a water tunnel from x 1 to 24, two high, closed by the stone at x 25.
-  - fill: { block: air, from: [-3, -61, 0], to: [0, -60, 0] }
-  - fill: { block: water, from: [1, -61, 0], to: [24, -60, 0] }
-  # The goal: an air cell sealed off behind the wall, which a route cannot reach without digging.
-  - fill: { block: air, from: [30, -61, 0], to: [30, -60, 0] }
+  - fill: { block: stone, from: [-7, -63, -4], to: [20, -54, 4] }
+  # An open pool x -6..-1 (z -2..2), two deep, open to the sky.
+  - fill: { block: air, from: [-6, -61, -2], to: [-1, -54, 2] }
+  - fill: { block: water, from: [-6, -61, -2], to: [-1, -60, 2] }
+  # A roofed water tunnel, two high, from the pool east to x 5, closed by stone at x 6.
+  - fill: { block: water, from: [0, -61, 0], to: [5, -60, 0] }
 
 players:
   - name: Diver
-    pos: [-0.5, -61, 0.5]
+    pos: [-1.5, -61, 0.5]
     inventory:
       - { item: stone_pickaxe, count: 1 }
 
 client:
   command: bun
   cwd: ../..
-  args: [client-host.ts, drivers/single-action.ts]
+  args: [client-host.ts, drivers/action-sequence.ts]
 
 tick:
+  # Once the bot is one block into the tunnel, seal it ahead (x 4): the planned route can no longer be walked.
+  - "execute if entity @a[name=Diver,x=1,y=-62,z=-1,dx=1,dy=3,dz=2] run fill 4 -61 0 4 -60 0 stone"
   - "gamemode spectator @a[name=!Diver,gamemode=!spectator]"
 
 params:
-  action: navigate
-  input:
-    x: 30
-    y: -61
-    z: 0
-    range: 1
-    dig: false
-    scaffold: false
-  expect:
-    status: failed
+  actions:
+    # Eight ticks on the pool floor first: the server reports the falling air, as it had for Sana. Up to the surface,
+    # where the head is in air...
+    - { action: navigate, waitTicks: 8, input: { x: -3, y: -60, z: 0, range: 1, dig: false, scaffold: false } }
+    # ...then the route dives into the roofed tunnel toward its end and is cut off.
+    - { action: navigate, input: { x: 5, y: -61, z: 0, range: 1, dig: false, scaffold: false }, expect: failed }
 
 goal:
   kind: all
@@ -60,7 +59,7 @@ goal:
   goals:
     - kind: reach
       who: Diver
-      pos: [-1.5, -61, 0.5]
-      radius: 3.5
+      pos: [-3.5, -59, 0.5]
+      radius: 4.5
     - { kind: health, who: Diver, health: 20 }
     - { kind: completion, who: Diver }

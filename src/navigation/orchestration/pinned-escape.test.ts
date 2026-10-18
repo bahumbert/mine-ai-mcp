@@ -97,6 +97,7 @@ test("Sana's pocket with one water source beside the opened cell stays shut and 
   assert.equal(run.outcome.kind, "failed");
   if (run.outcome.kind !== "failed" || run.outcome.failure.kind !== "no_path") return assert.fail(JSON.stringify(run.outcome));
   assert.ok((run.outcome.failure.search.startRefusals?.opens_into_liquid ?? 0) >= 1);
+  assert.deepEqual(run.outcome.evidence.escapeRelaxed ?? [], [], "a no-path failure dug nothing: it must not claim a dig");
 });
 
 test("lava beside the opened cell is never let through", async () => {

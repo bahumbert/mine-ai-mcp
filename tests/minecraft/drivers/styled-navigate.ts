@@ -14,7 +14,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { noDigStraightDown, target: [x, y, z], range } = requestSchema.parse(context.scenario.params);
   if (noDigStraightDown) {
     const status = await context.call("view_status", {});
-    const revision = (status.result as { survivalPolicy?: { revision?: string } }).survivalPolicy?.revision;
+    const revision = status.survivalPolicy?.revision;
     if (!revision) return { status: "failed", detail: `view_status gave no survivalPolicy revision: ${status.summary}` };
     const set = await context.call("set_survival_policy", {
       operation: "set", expected_revision: revision, changes: { navigation: { dig_straight_down: false } },
