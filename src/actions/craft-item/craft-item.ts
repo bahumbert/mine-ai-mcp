@@ -8,7 +8,7 @@ import { executeCraftPlan } from "../../world/crafting.js";
 import { recipesFor } from "../../world/smelting.js";
 import { carriedCount, settledNow, settleInventoryMinimum, type SettledInventoryCount } from "../../world/index.js";
 import type { WorldBlock } from "../../world/placement.js";
-import { withSimilar } from "../../world/similar-names.js";
+import { unknownItemAnswer } from "../../world/mob-drops.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock, unconfirmedCount } from "../markdown.js";
 import { formatWorkstation, useTemporaryWorkstation, workstationOperations } from "../temporary-workstation.js";
@@ -168,7 +168,7 @@ async function craftBatch(
   for (const requested of request.items) {
     const target = bot.registry.itemsByName[requested.itemName];
     if (!target) {
-      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
+      unknownItems.push(unknownItemAnswer(requested.itemName, Object.keys(bot.registry.itemsByName), bot.registry.entitiesByName, bot.version));
       requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0 });
       continue;
     }

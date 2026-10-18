@@ -105,6 +105,14 @@ test("an unknown name is answered with the registry names close to it", async ()
   assert.deepEqual(craftCalls, []);
 });
 
+test("an unknown item that is a mob is answered with what the mob drops", async () => {
+  const { bot, craftCalls } = craftingBot({}, false);
+  const result = await craftItem(bot, navigation, { items: [{ itemName: "cow", count: 1 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /cow is a mob, not an item: it drops beef, leather \(get_items beef hunts it\)/u);
+  assert.deepEqual(craftCalls, []);
+});
+
 test("an item made in a furnace is refused with what it is smelted from", async () => {
   // Live 2026-10-10: Mira sent "craft cooked_beef" 18 times over six objectives, told only "no crafting recipe".
   const { bot, craftCalls } = craftingBot({ beef: 3 }, false);

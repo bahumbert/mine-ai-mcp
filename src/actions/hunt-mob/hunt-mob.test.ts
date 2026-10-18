@@ -1200,3 +1200,12 @@ test("a drop named without its colour is answered with the item ids that carry i
   assert.deepEqual(similarItemNames(bot, "wool"), ["white_wool", "black_wool", "red_wool"]);
   assert.deepEqual(similarItemNames(bot, "unobtanium"), []);
 });
+
+test("an unknown drop is answered with its closest item ids, or with the drops of the mob it names", async () => {
+  // Live run 15: [UNKNOWN_HUNT_DROP] raw_beef named no closest ids; `cow` as a drop got no mob answer.
+  const inventory = { count: 0 };
+  const bot = huntBot([], inventory);
+  const hunt = async (dropName: string) => { const result = await huntMob(bot, { campSpawner: false, allowWithoutShield: false, observeForMs: 0, mobName: "cow", dropName, count: 1 }, {}, dependencies(bot, inventory, [])); return result.status === "failed" ? result.error : ""; };
+  assert.match(await hunt("raw_beef"), /UNKNOWN_HUNT_DROP\] .*raw_beef.*closest item ids are beef, cooked_beef/u);
+  assert.match(await hunt("cow"), /UNKNOWN_HUNT_DROP\] cow is a mob, not an item: it drops beef, leather \(get_items beef hunts it\)/u);
+});

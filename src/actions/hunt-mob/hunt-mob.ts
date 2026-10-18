@@ -21,7 +21,8 @@ import { readCombatItems } from "../../survival/weapons/equipment.js";
 import { waitForSignal, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
-import { mobSourcesOf } from "../../world/mob-drops.js";
+import { mobNotItemAnswer, mobSourcesOf } from "../../world/mob-drops.js";
+import { similarNames } from "../../world/similar-names.js";
 import {
   DROPPED_ITEM_OBSERVATION_EVENTS,
   findNewItemEntity,
@@ -685,7 +686,7 @@ function beginHuntMob(
 
     if (!mob) return stoppedResult(huntMobOutcomes.unknownMob(request.mobName), observation, "invalid_request");
     // "wool" is a family: the ids carry a colour (white_wool ...), named back so the caller can pick one.
-    if (!drop) return stoppedResult(huntMobOutcomes.unknownDrop(request.dropName, similarItemNames(bot, request.dropName)), observation, "invalid_request");
+    if (!drop) return stoppedResult(huntMobOutcomes.unknownDrop(request.dropName, similarItemNames(bot, request.dropName), mobNotItemAnswer(request.dropName, bot.registry.entitiesByName, bot.version)), observation, "invalid_request");
     // Check admission, every target approach, and contact after drop collection.
     // One pursuit can fight several loaded targets before this function returns.
     let shieldRequired: string | null = null;
@@ -929,10 +930,11 @@ export function createCollectMobDropAction(
   });
 }
 
-/** Item ids ending in `_name` (colours, woods: "wool" gives white_wool first), at most five. */
+/** Item ids ending in `_name` (colours, woods: "wool" gives white_wool first), else the closest item ids; at most five. */
 export function similarItemNames(bot: Bot, name: string): string[] {
-  return Object.keys(bot.registry.itemsByName)
+  const family = Object.keys(bot.registry.itemsByName)
     .filter((item) => item.endsWith(`_${name}`))
     .sort((a, b) => Number(b.startsWith("white_")) - Number(a.startsWith("white_")) || a.localeCompare(b))
     .slice(0, 5);
+  return family.length > 0 ? family : similarNames(name, Object.keys(bot.registry.itemsByName));
 }
