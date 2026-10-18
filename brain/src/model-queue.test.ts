@@ -20,6 +20,11 @@ function controlled(name = "fake"): { model: ChatModel; settle: (index: number, 
 
 const signal = new AbortController().signal;
 
+/** Lets queued promise callbacks run. */
+const tick = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+};
+
 test("a tracked model keeps its name and counts calls in flight, per agent", async () => {
   const queue = new ModelQueue({ slots: 3, file: null });
   const fake = controlled("qwen3");
@@ -42,17 +47,21 @@ test("a tracked model keeps its name and counts calls in flight, per agent", asy
   assert.equal(queue.inFlight(), 0);
 });
 
-test("calls beyond the slots are counted as waiting", async () => {
+test("calls beyond the slots are held and counted as waiting, not in flight", async () => {
   const queue = new ModelQueue({ slots: 2, file: null });
   const fake = controlled();
   const model = queue.track(fake.model, "ada");
   const calls = [model.complete([], signal), model.complete([], signal), model.complete([], signal), model.complete([], signal)];
-  assert.equal(queue.inFlight(), 4);
+  await Promise.resolve();
+  assert.equal(queue.inFlight(), 2);
   assert.equal(queue.waiting(), 2);
   fake.settle(0);
   await calls[0];
+  await tick();
   assert.equal(queue.waiting(), 1);
-  for (const index of [1, 2, 3]) fake.settle(index);
+  for (const index of [1, 2]) fake.settle(index);
+  await tick();
+  fake.settle(3);
   await Promise.all(calls);
 });
 
@@ -150,7 +159,7 @@ test("writes are at most one per 500 ms, with a trailing write", async () => {
   queue.flush();
 });
 
-test("history keeps the last hour and at most 4000 samples", () => {
+test("history keeps the last hour and at most 4000 samples", async () => {
   const dir = mkdtempSync(join(tmpdir(), "model-queue-"));
   const file = join(dir, "queue.json");
   let clock = 0;
@@ -170,7 +179,10 @@ test("history keeps the last hour and at most 4000 samples", () => {
     clock += 1;
     void model.complete([], signal);
   }
-  for (let index = 0; index < 2_100; index += 1) fake.settle(index);
+  for (let index = 0; index < 2_100; index += 1) {
+    fake.settle(index);
+    await tick();
+  }
   queue.flush();
   assert.ok((JSON.parse(readFileSync(file, "utf8")) as QueueSnapshot).history.length <= 4_000);
 });
@@ -281,4 +293,140 @@ test("freeWithin is true once a slot frees in time, false on time-out or abort",
   fake.settle(0);
   await call;
   assert.equal(await freed, true);
+});
+
+
+test("the third call on two slots is held until one ends, and only it reports a wait", async () => {
+  let clock = 0;
+  const queue = new ModelQueue({ slots: 2, file: null, now: () => clock });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const first = model.complete([], signal);
+  const second = model.complete([], signal);
+  const third = model.complete([], signal);
+  await tick();
+  assert.equal(fake.calls(), 2);
+  assert.equal(queue.inFlight(), 2);
+  assert.equal(queue.waiting(), 1);
+  clock = 700;
+  fake.settle(0);
+  assert.equal((await first).waitMs, 0);
+  await tick();
+  assert.equal(fake.calls(), 3);
+  assert.equal(queue.waiting(), 0);
+  fake.settle(1);
+  fake.settle(2);
+  assert.equal((await second).waitMs, 0);
+  assert.equal((await third).waitMs, 700);
+});
+
+test("a chat call held behind a work call goes first when a slot frees", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const order: string[] = [];
+  const pending: (() => void)[] = [];
+  const model: ChatModel = {
+    name: "fake",
+    complete: (turns) => new Promise<ChatReply>((resolve) => {
+      order.push(turns[0]!.content);
+      pending.push(() => resolve(REPLY));
+    }),
+  };
+  const tracked = queue.track(model, "ada");
+  const busy = tracked.complete([{ role: "user", content: "busy" }], signal);
+  const work = tracked.complete([{ role: "user", content: "work" }], signal, { priority: 2 });
+  const chat = tracked.complete([{ role: "user", content: "chat" }], signal, { priority: 0 });
+  await tick();
+  pending[0]!();
+  await busy;
+  await tick();
+  pending[1]!();
+  await chat;
+  await tick();
+  pending[2]!();
+  await work;
+  assert.deepEqual(order, ["busy", "chat", "work"]);
+});
+
+test("the same priority goes out in arrival order", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const order: string[] = [];
+  const pending: (() => void)[] = [];
+  const model: ChatModel = {
+    name: "fake",
+    complete: (turns) => new Promise<ChatReply>((resolve) => {
+      order.push(turns[0]!.content);
+      pending.push(() => resolve(REPLY));
+    }),
+  };
+  const tracked = queue.track(model, "ada");
+  const calls = ["a", "b", "c", "d"].map((name) => tracked.complete([{ role: "user", content: name }], signal, { priority: 1 }));
+  for (let i = 0; i < 4; i += 1) {
+    await tick();
+    pending[i]!();
+  }
+  await Promise.all(calls);
+  assert.deepEqual(order, ["a", "b", "c", "d"]);
+});
+
+test("a call aborted while held leaves the queue, takes no slot, and the next waiter still runs", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const tracked = queue.track(fake.model, "ada");
+  const busy = tracked.complete([], signal);
+  const abort = new AbortController();
+  const aborted = tracked.complete([], abort.signal);
+  const next = tracked.complete([], signal);
+  await tick();
+  assert.equal(queue.waiting(), 2);
+  abort.abort(new Error("stopped"));
+  await assert.rejects(aborted, /stopped/u);
+  assert.equal(queue.waiting(), 1);
+  assert.equal(queue.inFlight(), 1);
+  fake.settle(0);
+  await busy;
+  await tick();
+  assert.equal(fake.calls(), 2);
+  fake.settle(1);
+  await next;
+  assert.equal(queue.inFlight(), 0);
+  assert.equal(queue.waiting(), 0);
+});
+
+test("a signal already aborted never takes a slot", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const abort = new AbortController();
+  abort.abort(new Error("late"));
+  await assert.rejects(queue.track(fake.model, "ada").complete([], abort.signal), /late/u);
+  assert.equal(fake.calls(), 0);
+  assert.equal(queue.inFlight(), 0);
+});
+
+test("a model that throws frees its slot for the next waiter", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const tracked = queue.track(fake.model, "ada");
+  const failing = tracked.complete([], signal);
+  const next = tracked.complete([], signal);
+  await tick();
+  fake.settle(0, new Error("boom"));
+  await assert.rejects(failing, /boom/u);
+  await tick();
+  assert.equal(fake.calls(), 2);
+  assert.equal(queue.inFlight(), 1);
+  fake.settle(1);
+  await next;
+  assert.equal(queue.inFlight(), 0);
+  assert.equal(queue.free(), true);
+});
+
+test("unknown slots run five calls at once with no wait", async () => {
+  const queue = new ModelQueue({ slots: null, file: null });
+  const fake = controlled();
+  const tracked = queue.track(fake.model, "ada");
+  const calls = [0, 1, 2, 3, 4].map(() => tracked.complete([], signal));
+  await tick();
+  assert.equal(fake.calls(), 5);
+  for (const index of [0, 1, 2, 3, 4]) fake.settle(index);
+  for (const reply of await Promise.all(calls)) assert.equal(reply.waitMs, 0);
 });

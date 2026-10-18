@@ -23,7 +23,10 @@ export type MindTier = "chat" | "work" | "goal" | "narrate" | "conversation";
 export interface ModelCall {
   readonly tier: MindTier;
   readonly model: string;
+  /** The whole call, the time held by the brain's model queue included. */
   readonly ms: number;
+  /** Of `ms`, the time the attempts waited for a model slot (spec 2026-10-19); absent when the queue holds nothing. */
+  readonly waitMs?: number;
   /** The turns sent, repair round included. */
   readonly turns: readonly ChatTurn[];
   /** The raw replies, one per attempt. */

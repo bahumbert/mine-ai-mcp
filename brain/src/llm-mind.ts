@@ -113,13 +113,19 @@ const openingReplySchema = z.object({
 });
 const gistReplySchema = z.object({ gist: z.string().default("") });
 
+/**
+ * Which held model call goes out first when the brain's queue is full (lower first): a player waits for the chat tier,
+ * a conversation line or a narration is read at leisure, goals and work are the bots' own pace (spec 2026-10-19).
+ */
+const TIER_PRIORITY: Record<MindTier, number> = { chat: 0, conversation: 1, narrate: 1, goal: 2, work: 2 };
+
 /** A {@link Mind} backed by chat models answering in JSON, one per tier. */
 export class LlmMind implements Mind {
   /** `onCall`: told about every model call (the brain log, read by the monitor). */
   constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void, private readonly localizedChat?: LocalizedChat) {}
 
   private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
-    return ask(model, system, request, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
+    return ask(model, system, request, signal, read, TIER_PRIORITY[tier], this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
@@ -176,11 +182,16 @@ export class LlmMind implements Mind {
       const given = addressees(reply.spoken_to);
       const listeners = given.filter((name) => name.toLowerCase() !== message.username.toLowerCase());
       const to = given.length > 0 && listeners.length === 0 ? ["unclear"] : listeners;
-      // Not addressed and no conversation going on: hers only when read as spoken to everyone around and asking them
-      // something, and not when the
+      // Not addressed and no conversation going on: hers only when read as spoken to everyone around, and not when the
       // history shows it answering someone else (bench 2026-10-09: "yeah, restarting now" after Bob asked the speaker,
-      // read as spoken to everyone).
-      if (!open && (answering !== null || reply.asks.trim() === "" || !to.some((name) => name.toLowerCase() === "everyone"))) return leftAlone();
+      // read as spoken to everyone). It must ask them something (owner 2026-10-09), or else (owner 2026-10-19, conv5:
+      // "sups boys ?" was ignored by all five) it is hers only if she is the bot nearest the speaker, the one the brain
+      // lets answer a greeting.
+      if (!open) {
+        const toEveryone = to.some((name) => name.toLowerCase() === "everyone");
+        if (answering !== null || !toEveryone) return leftAlone();
+        if (reply.asks.trim() === "" && input.claimEveryoneLine?.() !== true) return leftAlone();
+      }
       // Only checks read from the reply's own fields (spec 2026-10-09-chat-handling, B, ADR-017): a reply that
       // contradicts itself goes back. What the history shows is given in the prompt beforehand, and nothing here reads
       // what the player wrote.
@@ -382,21 +393,23 @@ const SEND_BACK_ROUNDS = 4;
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
 class SendBack extends Error {}
-async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
+async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, priority: number, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = Date.now();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
+  let waitMs: number | undefined;
+  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...(waitMs === undefined ? {} : { waitMs }), ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;
   for (;;) {
     let text: string;
     try {
-      const reply = await model.complete(turns, signal);
+      const reply = await model.complete(turns, signal, { priority });
       text = reply.text;
+      if (reply.waitMs !== undefined) waitMs = (waitMs ?? 0) + reply.waitMs;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
       contextTokens = reply.contextTokens ?? contextTokens;
     } catch (error) {

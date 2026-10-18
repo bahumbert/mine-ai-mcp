@@ -12,12 +12,20 @@ export interface ChatReply {
   readonly promptTokens: number | null;
   /** The context window the model ran with: configured, or read from Ollama; null when unknown. */
   readonly contextTokens: number | null;
+  /** Milliseconds the call was held by the brain's model queue before it ran; set by the queue only. */
+  readonly waitMs?: number;
+}
+
+/** What a caller says about one call. Models ignore it; the brain's model queue reads it. */
+export interface CompleteOptions {
+  /** Which held call goes out first when a slot frees: lower first (chat 0), equal ones by arrival. */
+  readonly priority?: number;
 }
 
 /** A text-in, text-out model. One per tier: chat, action, planner (ADR-008). */
 export interface ChatModel {
   readonly name: string;
-  complete(turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply>;
+  complete(turns: readonly ChatTurn[], signal: AbortSignal, options?: CompleteOptions): Promise<ChatReply>;
 }
 
 export interface OpenAiCompatibleConfig {

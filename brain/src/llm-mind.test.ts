@@ -1040,3 +1040,70 @@ test("no name is asked of an opening that does not open or says nothing", async 
   assert.equal((await mind.openConversation(opening(), signal)).open, false);
   assert.equal((await mind.openConversation(opening(), signal)).say, "");
 });
+
+test("a repaired reply reports the sum of both attempts' waits in the model row", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.chat.reply("not json", { say: "Hi!", route: "talk", request: "" }).waitMs(300, 450);
+  await mind.chat(chatInput("hello"), signal);
+  assert.equal(calls[0]?.waitMs, 750);
+});
+
+test("a model that reports no wait leaves waitMs out of the row", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.chat.reply({ say: "Hi!", route: "talk", request: "" });
+  await mind.chat(chatInput("hello"), signal);
+  assert.equal(calls[0]?.waitMs, undefined);
+});
+
+test("each tier asks the model queue with its priority: chat 0, conversation and narrate 1, goal and work 2", async () => {
+  const models = scriptedMind();
+  models.chat.reply({ say: "Hi!", route: "talk", request: "" });
+  await models.mind.chat(chatInput("hello"), signal);
+  assert.deepEqual(models.chat.options, [{ priority: 0 }]);
+
+  models.chat.reply({ gist: "They talked." }, { say: "" });
+  await models.mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [] }, signal);
+  await models.mind.narrate({ persona: testPersona(), objective: "make a farm", outcome: "progress", detail: "tilling", history: [] }, signal);
+  assert.deepEqual(models.chat.options, [{ priority: 0 }, { priority: 1 }, { priority: 1 }]);
+
+  models.action.reply({ done: "ok" });
+  await models.mind.next(workInput("give Steve 5 oak_log"), signal);
+  assert.deepEqual(models.action.options, [{ priority: 2 }]);
+});
+
+const GREETING = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey Steve!", route: "talk", request: "" };
+
+test("a greeting to everyone that asks nothing is answered only when the bot claims the line", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(GREETING, GREETING, GREETING);
+  const claimed = await mind.chat({ ...chatInput("sups boys ?", false), claimEveryoneLine: () => true }, signal);
+  assert.deepEqual([claimed.route, claimed.say, claimed.to], ["talk", "Hey Steve!", ["everyone"]]);
+  assert.equal((await mind.chat({ ...chatInput("sups boys ?", false), claimEveryoneLine: () => false }, signal)).route, "ignore");
+  assert.equal((await mind.chat(chatInput("sups boys ?", false), signal)).route, "ignore", "no claim function: left alone as before");
+});
+
+test("a line to everyone that asks something never calls the claim, and addressed or whispered lines neither", async () => {
+  const { chat, mind } = scriptedMind();
+  let claims = 0;
+  const claimEveryoneLine = () => (claims += 1) > 0;
+  chat.reply({ ...GREETING, asks: "who has bread?" });
+  assert.equal((await mind.chat({ ...chatInput("anyone got bread?", false), claimEveryoneLine }, signal)).route, "talk");
+  chat.reply({ ...GREETING, spoken_to: ["Ayla"] });
+  assert.equal((await mind.chat({ ...chatInput("Ayla hi"), claimEveryoneLine }, signal)).route, "talk");
+  chat.reply({ ...GREETING, spoken_to: ["Ayla"] });
+  assert.equal((await mind.chat({ ...chatInput("psst", false), message: { username: "Steve", channel: "whisper", message: "psst", addressed: false }, claimEveryoneLine }, signal)).route, "talk");
+  assert.equal(claims, 0);
+});
+
+test("a line that answers someone else is never claimed, even read as a greeting to everyone", async () => {
+  const { chat, mind } = scriptedMind();
+  let claims = 0;
+  chat.reply(GREETING);
+  const input = { ...chatInput("sups boys ?", false), history: [{ speaker: "Bob", text: "Steve, did you restart?", to: ["Steve"], at: Date.now() }], claimEveryoneLine: () => (claims += 1) > 0 };
+  assert.equal((await mind.chat(input, signal)).route, "ignore");
+  assert.equal(claims, 0);
+});

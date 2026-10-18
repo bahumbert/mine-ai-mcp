@@ -1,5 +1,5 @@
 import { renameSync, writeFileSync } from "node:fs";
-import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
+import type { ChatModel, ChatReply, ChatTurn, CompleteOptions } from "./chat-model.ts";
 
 /** Where the brain tells the monitor how busy the model is, next to the bots' folders (monitor "Model queue" panel). */
 export const MODEL_QUEUE_FILE = "brain-model-queue.json";
@@ -29,10 +29,18 @@ export interface ModelQueueOptions {
   readonly log?: (line: string) => void;
 }
 
+/** A call held for a slot; lower priority goes first, then the earlier arrival. */
+interface Waiter {
+  readonly priority: number;
+  readonly arrival: number;
+  readonly agentId: string;
+  readonly grant: () => void;
+}
+
 /**
- * Counts the model calls in flight across every agent of the brain process. The model server queues what exceeds its
- * parallel slots and has no endpoint to say so (run 5, 2026-10-10: twelve bots started at once, each first goal call
- * waited 29-66 s behind three slots), so only the brain can tell how many calls wait.
+ * Counts the model calls in flight across every agent of the brain process, and with the slots known holds the calls
+ * beyond them itself, the chat tier first (conv5, 2026-10-18: Ollama served its queue in its own order and a player's
+ * line waited 28 s behind the bots' work; run 5, 2026-10-10: twelve bots at once waited 29-66 s behind three slots).
  */
 export class ModelQueue {
   private readonly slots: number | null;
@@ -42,6 +50,8 @@ export class ModelQueue {
   private readonly history: { at: number; inFlight: number }[] = [];
   private readonly starts: { id: string; at: number }[] = [];
   private readonly freed: (() => void)[] = [];
+  private readonly held: Waiter[] = [];
+  private arrivals = 0;
   private count = 0;
   private lastWrite = Number.NEGATIVE_INFINITY;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -59,10 +69,14 @@ export class ModelQueue {
   track(model: ChatModel, agentId: string): ChatModel {
     return {
       name: model.name,
-      complete: async (turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply> => {
-        this.change(agentId, 1);
+      complete: async (turns: readonly ChatTurn[], signal: AbortSignal, options?: CompleteOptions): Promise<ChatReply> => {
+        const asked = this.now();
+        // A free slot is taken without yielding, so the model starts in the same tick as before the gate existed.
+        const held = this.takeSlot(agentId, signal, options?.priority ?? 0);
+        if (held !== null) await held;
+        const waitMs = this.now() - asked;
         try {
-          return await model.complete(turns, signal);
+          return { ...(await model.complete(turns, signal, options)), waitMs };
         } finally {
           this.change(agentId, -1);
         }
@@ -70,13 +84,56 @@ export class ModelQueue {
     };
   }
 
+  /** Takes a slot at once (null) when one is free, else waits for it by priority; rejects with the signal's reason on abort. */
+  private takeSlot(agentId: string, signal: AbortSignal, priority: number): Promise<void> | null {
+    signal.throwIfAborted();
+    if (this.slots === null || (this.count < this.slots && this.held.length === 0)) {
+      this.change(agentId, 1);
+      return null;
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter: Waiter = {
+        priority,
+        arrival: this.arrivals++,
+        agentId,
+        grant: () => {
+          signal.removeEventListener("abort", onAbort);
+          this.change(agentId, 1);
+          resolve();
+        },
+      };
+      const onAbort = (): void => {
+        const index = this.held.indexOf(waiter);
+        if (index >= 0) this.held.splice(index, 1);
+        this.changed();
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.held.push(waiter);
+      this.changed();
+    });
+  }
+
+  /** Lets the best waiter run while a slot is free. */
+  private grantFreeSlots(): void {
+    while (this.held.length > 0 && (this.slots === null || this.count < this.slots)) {
+      let best = 0;
+      for (let i = 1; i < this.held.length; i += 1) {
+        const a = this.held[i]!;
+        const b = this.held[best]!;
+        if (a.priority < b.priority || (a.priority === b.priority && a.arrival < b.arrival)) best = i;
+      }
+      this.held.splice(best, 1)[0]!.grant();
+    }
+  }
+
   inFlight(): number {
     return this.count;
   }
 
-  /** Calls beyond the slots: the model server holds them until a slot frees. */
+  /** Calls the brain holds for a slot. */
   waiting(): number {
-    return this.slots === null ? 0 : Math.max(0, this.count - this.slots);
+    return this.held.length;
   }
 
   free(): boolean {
@@ -148,7 +205,10 @@ export class ModelQueue {
     const at = this.now();
     this.history.push({ at, inFlight: this.count });
     this.prune(at);
-    if (by < 0) for (const onFree of [...this.freed]) onFree();
+    if (by < 0) {
+      this.grantFreeSlots();
+      for (const onFree of [...this.freed]) onFree();
+    }
     this.changed();
   }
 

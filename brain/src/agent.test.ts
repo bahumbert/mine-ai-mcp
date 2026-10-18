@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentOptions } from "./agent.ts";
+import { EveryoneLines } from "./everyone-lines.ts";
 import { ConversationBudget } from "./conversation/controller.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
@@ -1581,4 +1582,64 @@ test("a favour agreed with the partner of a social conversation keeps it; the ro
   assert.equal(agent.conversation, record, "the favour did not end the conversation");
   await until(() => action.requests.length >= 1);
   assert.equal(events.filter((event) => event.kind === "conversation" && event.event === "opened").length, 1, "one opening only");
+});
+
+/** The next call answers 400 ms after the test starts, as a live model takes seconds: every bot has registered its distance to the speaker before any claims the line. */
+function slowModel(model: { hold(): () => void }): void {
+  const release = model.hold();
+  setTimeout(release, 400);
+}
+
+/** Two agents (Ayla and Vex) sharing one record of the lines to everyone; each model reads the line as a greeting. */
+function greetedBy(t: Parameters<typeof agentFor>[0], speakerAt: { ayla: number; vex: number }, line: ReturnType<typeof say> & { distance?: number }, hearers: { ayla: boolean; vex: boolean } = { ayla: true, vex: true }) {
+  const everyone = new EveryoneLines();
+  const greeting = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey!", route: "talk", request: "" };
+  const make = (name: string, at: number, hears: boolean) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players: [steveAt(at)] };
+    const built = agentFor(t, runtime, { id: name.toLowerCase(), username: name }, { everyone, otherAgents: ["Ayla", "Vex"].filter((other) => other !== name) });
+    built.chat.reply(greeting);
+    slowModel(built.chat);
+    return { runtime, hears, ...built };
+  };
+  const ayla = make("Ayla", speakerAt.ayla, hearers.ayla);
+  const vex = make("Vex", speakerAt.vex, hearers.vex);
+  return { ayla, vex, say: async () => {
+    await sleep(100); // the agents drain the chat from before they started first
+    for (const bot of [ayla, vex]) if (bot.hears) bot.runtime.inbox.push(line);
+  } };
+}
+
+test("a greeting to everyone is answered by the bot nearest the speaker only, distances from positions", async (t) => {
+  const { ayla, vex, say: speak } = greetedBy(t, { ayla: 30, vex: 5 }, say("Steve", "sups boys ?", false));
+  await speak();
+  await until(() => vex.runtime.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual([ayla.runtime.said, vex.runtime.said], [[], ["Hey!"]]);
+});
+
+test("a greeting to everyone with the line's own distance (localized chat) is answered by the nearer bot only", async (t) => {
+  const everyone = new EveryoneLines();
+  const greeting = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey!", route: "talk", request: "" };
+  const bots = [["Ayla", 40], ["Vex", 6]].map(([name, distance]) => {
+    const runtime = new FakeRuntime();
+    const built = agentFor(t, runtime, { id: String(name).toLowerCase(), username: String(name) }, { everyone, otherAgents: ["Ayla", "Vex"].filter((other) => other !== name) });
+    built.chat.reply(greeting);
+    slowModel(built.chat);
+    return { runtime, distance: distance as number };
+  });
+  await sleep(100); // the agents drain the chat from before they started first
+  for (const bot of bots) bot.runtime.inbox.push({ ...say("Steve", "sups boys ?", false), distance: bot.distance });
+  const runtimes = bots.map((bot) => bot.runtime);
+  await until(() => runtimes[1]!.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual(runtimes.map((runtime) => runtime.said), [[], ["Hey!"]]);
+});
+
+test("a bot that does not hear the greeting is no candidate: the one that heard it answers", async (t) => {
+  const { ayla, vex, say: speak } = greetedBy(t, { ayla: 30, vex: 5 }, say("Steve", "sups boys ?", false), { ayla: true, vex: false });
+  await speak();
+  await until(() => ayla.runtime.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual([ayla.runtime.said, vex.runtime.said], [["Hey!"], []]);
 });

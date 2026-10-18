@@ -78,6 +78,8 @@ export interface ChatInput {
   readonly talkedTo?: { readonly name: string; readonly secondsAgo: number };
   /** The conversation this line is part of, when the character is in one (spec 2026-10-18-conversations-design). */
   readonly conversation?: ConversationFacts;
+  /** For a line to everyone that asks nothing: true for the one bot that answers it (the nearest the speaker); absent: none does. */
+  readonly claimEveryoneLine?: () => boolean;
 }
 
 export interface ChatDecision {

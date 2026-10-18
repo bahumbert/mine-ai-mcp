@@ -21,6 +21,7 @@ import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortf
 import { shelterForNight, underCover } from "./night-shelter.ts";
 import { personaSkills, type Persona } from "./persona.ts";
 import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
+import type { EveryoneLines } from "./everyone-lines.ts";
 import { TillFacts } from "./farming/site.ts";
 import { RESUME_RANGE, runStep, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
@@ -82,6 +83,11 @@ export interface AgentOptions {
   readonly otherAgents: readonly string[];
   /** Conversations (spec 2026-10-18-conversations-design); absent: the character holds none. */
   readonly conversations?: { readonly budget: ConversationBudget; readonly modelFree: () => boolean; readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean> };
+  /**
+   * The lines to everyone the brain's agents heard, shared by all of them: a greeting that asks nothing is answered by
+   * the bot nearest the speaker only. Absent: such a line is never answered.
+   */
+  readonly everyone?: EveryoneLines;
   /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
   readonly localizedChat?: LocalizedChat;
   readonly log: (line: string) => void;
@@ -303,6 +309,7 @@ export class Agent {
             // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
+            if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
             this.inbox.push(message);
             this.wakeChat?.();
           }
@@ -363,7 +370,8 @@ export class Agent {
     try {
       const snapshot = await this.options.runtime.status();
       conversation = this.talks?.facts();
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }) }, this.runSignal);
+      const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
+      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }) }, this.runSignal);
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -460,6 +468,20 @@ export class Agent {
     this.memberBeforeLine.set(speaker, this.talks?.isMember(message.username) === true);
     this.talks?.heard(message.username, message.message, named, message.channel, !agent && this.withinTalkRange(message));
     return !agent || this.talks?.isMember(message.username) === true;
+  }
+
+  /**
+   * What lets the chat tier answer a greeting to everyone: the speaker's distance, from the positions when the line
+   * carries none, goes to the record shared with the other agents; the claim is true for the nearest bot only.
+   */
+  private everyoneLineClaim(message: PlayerMessage, snapshot: BotSnapshot): (() => boolean) | undefined {
+    const { everyone, persona } = this.options;
+    if (everyone === undefined || message.channel !== "chat") return undefined;
+    const at = snapshot.players.find((player) => player.username.toLowerCase() === message.username.toLowerCase())?.position;
+    if (message.distance === undefined && at !== undefined && at !== null) {
+      everyone.heard(message.username, message.message, persona.username, Math.hypot(at.x - snapshot.position.x, at.y - snapshot.position.y, at.z - snapshot.position.z));
+    }
+    return () => everyone.claim(message.username, message.message, persona.username);
   }
 
   /** Whether a player's line came from within talk range: its distance, else where the last look put them. */

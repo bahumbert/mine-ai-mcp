@@ -6,6 +6,7 @@ import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { readLocalizedChat } from "./chat-range.ts";
 import { ConversationBudget, maxConversations } from "./conversation/controller.ts";
 import { LlmMind } from "./llm-mind.ts";
+import { EveryoneLines } from "./everyone-lines.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
@@ -143,6 +144,7 @@ async function main(): Promise<void> {
   const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
   const slots = positiveInteger(values["model-slots"] ?? env("MODEL_SLOTS"));
   const gapMs = startGapMs(values["start-gap"]);
+  const everyone = new EveryoneLines();
   const budget = new ConversationBudget(maxConversations(values["max-conversations"]));
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
@@ -181,6 +183,7 @@ async function main(): Promise<void> {
         otherAgents: usernames.filter((name) => name !== persona.username),
         knownNames,
         soil,
+        everyone,
         conversations: { budget, modelFree: () => queue.freeFor(persona.id), waitForModel: (ms, signal) => queue.freeWithin(persona.id, ms, AbortSignal.any([signal, shutdown.signal])) },
         ...(localizedChat !== undefined && { localizedChat }),
         log,

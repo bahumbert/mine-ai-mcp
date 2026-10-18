@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
+import type { ChatModel, ChatReply, ChatTurn, CompleteOptions } from "./chat-model.ts";
 import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
@@ -495,7 +495,16 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
 /** A chat model replying from a script, recording what it was sent. */
 export class ScriptedModel implements ChatModel {
   readonly requests: (readonly ChatTurn[])[] = [];
+  /** The options of each call, in the order of {@link requests}. */
+  readonly options: (CompleteOptions | undefined)[] = [];
+  private readonly waits: number[] = [];
   constructor(readonly name: string, private readonly replies: string[] = []) {}
+
+  /** The next replies report these waits (`waitMs`, as the brain's model queue does); calls past the list report none. */
+  waitMs(...waits: number[]): this {
+    this.waits.push(...waits);
+    return this;
+  }
 
   /** Queue replies, as objects (sent as JSON) or raw text. */
   reply(...replies: (string | object)[]): this {
@@ -512,13 +521,15 @@ export class ScriptedModel implements ChatModel {
     return release;
   }
 
-  async complete(turns: readonly ChatTurn[]): Promise<ChatReply> {
+  async complete(turns: readonly ChatTurn[], _signal?: AbortSignal, options?: CompleteOptions): Promise<ChatReply> {
     this.requests.push([...turns]);
+    this.options.push(options);
     const hold = this.holds.shift();
     if (hold !== undefined) await hold;
     const reply = this.replies.shift();
     if (reply === undefined) throw new Error(`${this.name}: no scripted reply left`);
-    return { text: reply, promptTokens: null, contextTokens: null };
+    const waitMs = this.waits.shift();
+    return { text: reply, promptTokens: null, contextTokens: null, ...(waitMs === undefined ? {} : { waitMs }) };
   }
 }
 
