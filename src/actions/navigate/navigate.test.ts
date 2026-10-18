@@ -764,3 +764,16 @@ test("the legs of one navigate share one tool-loss observer, whose listeners go 
   assert.equal(listeners(), 0);
   assert.notEqual(toolLossObserverOf(bot, new AbortController().signal), first, "another call has its own");
 });
+
+test("a route that set rules aside to leave a pocket says so in its result text", () => {
+  const result = {
+    status: "succeeded", navigation: {
+      startDimension: "overworld", endDimension: "overworld", target: { x: 0, y: 55, z: 0 }, range: 1,
+      start: { x: 0, y: 57, z: 0 }, end: { x: 0, y: 55, z: 0 }, remainingDistance: 0, elapsedMs: 10, scaffolding: [],
+      bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], escapeRelaxed: ["dig_straight_down", "dig_next_to_flowing_water"],
+    },
+  } as unknown as Parameters<typeof formatNavigateResult>[0];
+  const text = formatNavigateResult(result);
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once and a dig next to flowing water was allowed/);
+  assert.doesNotMatch(formatNavigateResult({ ...result, navigation: { ...result.navigation, escapeRelaxed: undefined } } as never), /out of a pocket/);
+});

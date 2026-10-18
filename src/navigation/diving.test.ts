@@ -3,6 +3,7 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { Vec3 } from "vec3";
 import type { Bot } from "mineflayer";
+import { movementStep } from "../test-support/navigation.js";
 import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
@@ -140,4 +141,90 @@ test("roofed and with no air metadata, a submerged start takes its air as unchan
   } finally {
     clearInterval(ticking);
   }
+});
+
+// ── A run that ends under a roof swims back to the last air it passed (run 15, Sana) ───────────────
+
+/** An air pocket at x -2..0 and a water tunnel x 1..8 (y 60-61), roofed (y 62) and floored (y 59), z 0 only. */
+function tunnelFixture() {
+  const world = new MemoryWorld();
+  for (let x = -2; x <= 8; x++)
+    for (let y = 59; y <= 62; y++)
+      world.load({ x, y, z: 0 }, y === 59 || y === 62 ? { stateId: 1 } : x <= 0 ? { stateId: 0 }
+        : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } });
+  const bot = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 60, 0.5), metadata: [300], onGround: true },
+    registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
+    health: 20,
+    blockAt: (p: Vec3) => {
+      const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone") } : null;
+    },
+    setControlState: () => {},
+  }) as unknown as Bot;
+  return { world, bot };
+}
+
+test("a dive that fails five blocks into a roofed tunnel swims back to the air pocket before it releases", async () => {
+  const { world, bot } = tunnelFixture();
+  const states: string[] = [];
+  const diving = new Diving(bot, world, (state) => states.push(state));
+  const calls: { goal: unknown; air: unknown }[] = [];
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }) }, async (request) => {
+    calls.push({ goal: request.goal, air: request.movements.dive });
+    if (calls.length === 1) {
+      bot.emit("physicsTick");
+      diving.committed({ steps: [movementStep("swim", { x: 4, y: 60, z: 0 }, { x: 5, y: 60, z: 0 })] });
+      bot.entity.position.x = 5.5;
+      bot.emit("physicsTick");
+      return { status: "failed", elapsedMs: 0 } as never;
+    }
+    bot.entity.position.x = 0.5;
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(calls.length, 2, "one swim back");
+  const back = calls[1]!.goal as { resolve(observation: unknown): { kind: string } };
+  assert.ok(back !== calls[0]!.goal);
+  assert.equal(bot.entity.position.x, 0.5, "she ends in the air pocket, not inside");
+  assert.deepEqual(states, ["released"]);
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("death"), 0);
+});
+
+test("a takeover cancel leaves the swim back to the reflex that took the body", async () => {
+  const { world, bot } = tunnelFixture();
+  const diving = new Diving(bot, world);
+  let calls = 0;
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }) }, async () => {
+    calls++;
+    bot.emit("physicsTick");
+    diving.committed({ steps: [movementStep("swim", { x: 4, y: 60, z: 0 }, { x: 5, y: 60, z: 0 })] });
+    bot.entity.position.x = 5.5;
+    diving.cancel("takeover");
+    return { status: "stopped", reason: "takeover", elapsedMs: 0 };
+  });
+  assert.equal(calls, 1);
+});
+
+test("a death during the swim back ends it cleanly", async () => {
+  const { world, bot } = tunnelFixture();
+  const diving = new Diving(bot, world);
+  let calls = 0;
+  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }) }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      bot.emit("physicsTick");
+      diving.committed({ steps: [movementStep("swim", { x: 4, y: 60, z: 0 }, { x: 5, y: 60, z: 0 })] });
+      bot.entity.position.x = 5.5;
+      return { status: "failed", elapsedMs: 0 } as never;
+    }
+    bot.emit("death");
+    assert.equal(request.stopSignal?.aborted, true, "the swim back is told to stop");
+    return { status: "stopped", reason: "died", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(calls, 2);
+  assert.equal(diving.active, false);
+  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(bot.listenerCount("respawn"), 0);
 });

@@ -647,3 +647,27 @@ test("a body that catches a vine in flight stops pushing and holds the column", 
   assert.equal(hanging.controls.sprint, false);
   assert.equal(hanging.controls.back, true, "the column centre is behind a body that has drifted past it");
 });
+
+test("a swimmer floating too high for the lip over the next cell holds shift until its head fits under it (run 15, Finn)", () => {
+  // Finn: water y 59-62, diorite along the shore at y 63. Floating at 61.3 his body reaches 63.1 and hits the lip;
+  // the cell beneath it is reached only from 61.2 or lower. A full ceiling over the target cell has a water rise of 0.
+  const step = movementStep("swim", { x: 0, y: 61, z: 0 }, { x: 1, y: 61, z: 0 }, { expectedTicks: 20 });
+  const floating = snap({ position: { x: 0.5, y: 61.3, z: 0.5 }, onGround: false, isInWater: true });
+  const underLip = control(step, floating, CONTINUOUS, 0);
+  const high = running(underLip.advance(floating));
+  assert.equal(high.controls.sneak, true, "sink first");
+  assert.equal(high.controls.jump, false);
+  assert.equal(high.controls.forward, true, "the heading is kept while sinking");
+  const low = running(underLip.advance({ ...floating, position: { ...floating.position, y: 61.1 } }));
+  assert.equal(low.controls.sneak, false, "the head fits: no more sinking");
+  // An open sky over the target cell never asks the swimmer to sink.
+  const open = running(control(step, floating, CONTINUOUS, WATER_RISE).advance(floating));
+  assert.equal(open.controls.sneak, false);
+});
+
+test("a swimmer under the lip arrives by the cell it occupies, not by a float height", () => {
+  const step = movementStep("swim", { x: 0, y: 61, z: 0 }, { x: 1, y: 61, z: 0 }, { expectedTicks: 20 });
+  const underLip = control(step, snap({ position: { x: 0.5, y: 61.1, z: 0.5 }, onGround: false, isInWater: true }), SETTLED, 0);
+  const inCell = snap({ position: { x: 1.5, y: 61.1, z: 0.5 }, onGround: false, isInWater: true });
+  assert.equal(underLip.advance(inCell).kind, "arrived");
+});

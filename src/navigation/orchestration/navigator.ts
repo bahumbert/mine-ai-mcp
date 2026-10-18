@@ -7,6 +7,7 @@
 import type { NavigationBot } from "../bot.js";
 import { ExpectedMutationLedger } from "../execution/mutations.js";
 import type { Goal } from "../goals/goal.js";
+import { FailedEdges } from "./failed-edges.js";
 import { createMovementCatalogue, type MovementCatalogue } from "../movements/catalogue.js";
 import type { MovementPolicy } from "../movements/policy.js";
 import type { SearchLimits } from "../search/search-result.js";
@@ -43,6 +44,12 @@ export interface NavigationRequest {
   readonly onCalculationFailure?: (
     event: NavigationCalculationFailureEvent,
   ) => NavigationCalculationFailureResult | Promise<NavigationCalculationFailureResult>;
+  /**
+   * Starts the run as an escape: the bot's style rule against digging straight down is set aside from the first
+   * search (every safety rule stays), for a caller that knows the bot is pinned. Without it, a run sets the rule aside
+   * once on its own after a search finds the start shut in by that rule alone.
+   */
+  readonly escape?: boolean;
   /** Stops the run; the abort reason becomes the stopped outcome's reason. */
   readonly signal?: AbortSignal;
   /** Search budget used while the bot is waiting for its first route or a replan. */
@@ -100,12 +107,16 @@ export function createNavigator(dependencies: {
   readonly catalogue?: MovementCatalogue;
   readonly telemetry?: TelemetrySink;
   readonly createId?: () => string;
+  /** The monotonic clock the failed-edge memory expires by; tests move it. */
+  readonly now?: () => number;
 }): Navigator {
   let activeRun: NavigationRun | undefined;
   let activeControl: AbortController | undefined;
   let activeStatus: NavigationStatus | null = null;
   let sequence = 0;
   const ledger = new ExpectedMutationLedger();
+  // One memory per navigator, which is one per bot: what one bot's routes failed on is not another's to avoid.
+  const failedEdges = new FailedEdges(dependencies.now);
   const catalogue = dependencies.catalogue ?? createMovementCatalogue();
   const telemetry = dependencies.telemetry ?? silentTelemetry;
   const createId = dependencies.createId ?? (() => `navigation-${Date.now()}-${++sequence}`);
@@ -129,6 +140,7 @@ export function createNavigator(dependencies: {
         bot: dependencies.bot,
         catalogue,
         ledger,
+        failedEdges,
         telemetry,
         signal: request.signal ? AbortSignal.any([request.signal, control.signal]) : control.signal,
         // The request either opted out with an explicit null, or said nothing

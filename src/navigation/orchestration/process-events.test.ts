@@ -87,3 +87,19 @@ test("a search timeout reports generic work counts without guessing why the goal
     "search timed out after 2000 ms compute (limit 2000 ms); no path or usable partial route found; visited 113132 nodes, generated 191298; closest node was 295,32,-314",
   );
 });
+
+test("a dead end at the start names the refusals counted there instead of claiming a dead end (run 15 Dirk, Sana)", () => {
+  const text = describeCalculationFailure({
+    kind: "no_path",
+    search: { ...search, visited: 2, startRefusals: { opens_into_liquid: 3, policy_dig_down: 1, under_water: 1 } },
+    closest: { ...closest, position: { x: -549, y: 56, z: -50 }, withinStartBlocks: 5 },
+  });
+  assert.doesNotMatch(text, /dead end/);
+  assert.match(text, /shut in at the start: 3 digs would open into water or lava, 1 refused by your rule against digging straight down, 1 under water$/);
+});
+
+test("refusals counted at a start the search left are not claimed, and an empty count says nothing extra", () => {
+  const far = { ...closest, position: { x: 3, y: 63, z: 0 } };
+  assert.doesNotMatch(describeCalculationFailure({ kind: "no_path", search: { ...search, startRefusals: { protected: 2 } }, closest: far }), /shut in/);
+  assert.doesNotMatch(describeCalculationFailure({ kind: "no_path", search: { ...search, startRefusals: {} }, closest: { ...far, withinStartBlocks: 5 } }), /shut in/);
+});

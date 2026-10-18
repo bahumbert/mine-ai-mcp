@@ -1,0 +1,66 @@
+template: ../../templates/flat-single-action.yaml
+
+name: roofed-dive-fails-back-to-air
+tags: [regression]
+description: >-
+  Run 15, Sana drowned: a navigate committed a swim segment into a roofed water tunnel, the next search failed and the
+  dive was released five blocks inside, out of reach of air. Here the goal lies behind a wall at the far end of a roofed
+  tunnel: the navigate fails, and the bot must end in the air pocket it came from, breathing and alive.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -10 -63 -10 40 -40 10 air"
+
+geometry:
+  - fill: { block: stone, from: [-6, -63, -4], to: [34, -54, 4] }
+  # The air pocket at the entry (x -3..0) and a water tunnel from x 1 to 24, two high, closed by the stone at x 25.
+  - fill: { block: air, from: [-3, -61, 0], to: [0, -60, 0] }
+  - fill: { block: water, from: [1, -61, 0], to: [24, -60, 0] }
+  # The goal: an air cell sealed off behind the wall, which a route cannot reach without digging.
+  - fill: { block: air, from: [30, -61, 0], to: [30, -60, 0] }
+
+players:
+  - name: Diver
+    pos: [-0.5, -61, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/single-action.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Diver,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 30
+    y: -61
+    z: 0
+    range: 1
+    dig: false
+    scaffold: false
+  expect:
+    status: failed
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    - kind: reach
+      who: Diver
+      pos: [-1.5, -61, 0.5]
+      radius: 3.5
+    - { kind: health, who: Diver, health: 20 }
+    - { kind: completion, who: Diver }

@@ -31,6 +31,8 @@ import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./sea
 import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
+import { endsStrandedUnderWater } from "./stranded-segment.js";
+import { countStartRefusals } from "./start-refusals.js";
 import { NodeStore } from "./node-store.js";
 import { OpenSet } from "./open-set.js";
 
@@ -327,7 +329,10 @@ function attemptSegment(
   // end during a detour's initial retreat, where the next search cheaply walks
   // straight back and repeats the same detour forever.
   const plan = buildPlan(options, store, selection.node, visited, false);
-  return plan ? { kind: "segment", plan } : { kind: "stale" };
+  if (!plan) return { kind: "stale" };
+  // Out of one breath of air at its end, under a roof: the search goes on (or fails) rather than commit the dive.
+  if (!plan.complete && endsStrandedUnderWater(options.context.world, options.context.policy, plan)) return { kind: "none" };
+  return { kind: "segment", plan };
 }
 
 /**
@@ -476,10 +481,11 @@ export class IncrementalSearch {
         evidence: this.#evidence(),
       };
     }
+    const { world, policy } = this.#options.context;
     return {
       kind: "no_path",
       closest: this.#closestEvidence(),
-      evidence: this.#evidence(),
+      evidence: { ...this.#evidence(), startRefusals: countStartRefusals(world, policy, this.#store.feet(this.#root)) },
       checkpoint: this.#slice.checkpoint,
     };
   }

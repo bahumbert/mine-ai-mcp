@@ -65,6 +65,8 @@ export interface NavigationEvidence {
   readonly start: NavigationObservation;
   readonly final: NavigationObservation;
   readonly goalRevision: string;
+  /** The style rules this run set aside to leave a pocket (`dig_straight_down`), empty when it set none aside. */
+  readonly escapeRelaxed?: readonly string[];
   readonly searches: number;
   readonly searchSlices: number;
   readonly plans: number;

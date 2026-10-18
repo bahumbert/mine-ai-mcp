@@ -125,6 +125,10 @@ export const navigationEvidenceSchema = z.strictObject({
     .boolean()
     .optional()
     .describe("The bot ended in its boat on the water at the target's x z (a target on open water); absent when not."),
+  escapeRelaxed: z
+    .array(z.string())
+    .optional()
+    .describe("The style rules this route set aside once to leave a pocket (dig_straight_down, dig_next_to_flowing_water); absent when none."),
   landLeg: z
     .strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })
     .optional()

@@ -560,6 +560,7 @@ function beginNavigate(
         navigation: evidence,
       };
     }
+    if (route.escapeRelaxed?.length) evidence.escapeRelaxed = [...route.escapeRelaxed];
     const swum = swim?.exceeded();
     if (swum && route.status === "stopped") {
       return { status: "failed", error: navigateOutcomes.deepWater(request, swum.start, swum.blocks), navigation: evidence };
@@ -641,6 +642,12 @@ function standsAtSea(bot: Bot): boolean {
   return feetAtSea(water, feet, (x, y, z) => bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block");
 }
 
+/** The line that tells the model a rule of its own style was set aside once to get it out of a pocket. */
+function describeEscape(relaxed: readonly string[]): string {
+  const flowing = relaxed.includes("dig_next_to_flowing_water") ? " and a dig next to flowing water was allowed" : "";
+  return `- Dug down out of a pocket: your rule against digging straight down was set aside once${flowing}.`;
+}
+
 export function formatNavigateResult(result: NavigateResult): string {
   const { navigation } = result;
   const evidence = [
@@ -651,6 +658,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
     ...(navigation.afloat ? ["- Arrived, afloat in its boat at " + Math.round(navigation.end.x) + " " + Math.round(navigation.end.z)] : []),
+    ...(navigation.escapeRelaxed?.length ? [describeEscape(navigation.escapeRelaxed)] : []),
     ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,
     "- Scaffold stocks:",

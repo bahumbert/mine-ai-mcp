@@ -31,6 +31,7 @@ import {
   type MovementSnapshot,
 } from "../execution/movement-controller.js";
 import type { AttemptToken } from "../execution/mutations.js";
+import { OPEN_WATER_RISE } from "../execution/water-movement-controller.js";
 import { DIG_REACH } from "../movements/excavation.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
 import {
@@ -323,7 +324,7 @@ export class MineflayerBot implements NavigationBot {
     if (!ceiling) return 0;
     // Retain the two-block passage's 0.2 clearance for upward momentum after
     // releasing jump. A full ceiling therefore requires swimming at feet level.
-    return observeMineflayerBlock(ceiling).collisionShapes.reduce((rise, box) => Math.min(rise, box.minY), 0.6);
+    return observeMineflayerBlock(ceiling).collisionShapes.reduce((rise, box) => Math.min(rise, box.minY), OPEN_WATER_RISE);
   }
 
   #stepUpHeadBonkClear(step: PlannedStep): boolean {

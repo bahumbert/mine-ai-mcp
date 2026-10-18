@@ -66,4 +66,6 @@ export interface SearchEvidence {
   readonly generated: number;
   readonly slices: number;
   readonly computeMs: number;
+  /** Set when the search was exhausted: the first digs around the start the policy refused, counted by cause. */
+  readonly startRefusals?: Readonly<Record<string, number>>;
 }

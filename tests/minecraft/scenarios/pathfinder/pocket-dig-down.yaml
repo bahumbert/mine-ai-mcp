@@ -1,0 +1,61 @@
+template: ../../templates/flat-single-action.yaml
+
+name: pocket-dig-down-with-style-override
+tags: [regression]
+description: >-
+  Run 15, Dirk and Sana stood pinned for hours in a pocket of their own diggings: water beside the head, stone above, and
+  their persona's override (navigation.dig_straight_down false) left no first move, so every navigate failed at once.
+  A bot in a one-cell pocket cut into stone, with source water on both sides at feet and head height, carries that
+  override; navigate to the cell below it must set the override aside for that leg and arrive one block lower.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [-5, -63, -5], to: [5, -50, 5] }
+  # Source water east and west of the pocket at feet and head height: no side dig is allowed.
+  - fill: { block: water, from: [-1, -57, 0], to: [-1, -56, 0] }
+  - fill: { block: water, from: [1, -57, 0], to: [1, -56, 0] }
+  # The pocket itself, two cells high, and the cave cell under the stone below it.
+  - fill: { block: air, from: [0, -57, 0], to: [0, -56, 0] }
+  - fill: { block: air, from: [0, -59, 0], to: [0, -59, 0] }
+
+players:
+  - name: Pinned
+    pos: [0.5, -57, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/styled-navigate.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Pinned,gamemode=!spectator]"
+
+params:
+  noDigStraightDown: true
+  target: [0, -58, 0]
+  range: 0
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: reach
+      who: Pinned
+      pos: [0.5, -58, 0.5]
+      radius: 1.0
+    - { kind: health, who: Pinned, health: 20 }
+    - { kind: completion, who: Pinned }
