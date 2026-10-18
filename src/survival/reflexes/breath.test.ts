@@ -245,10 +245,10 @@ function breathContinuations(t: Parameters<typeof waterFixture>[0]) {
   const driver = { register: (captured: typeof definition) => { definition = captured; return { [Symbol.asyncDispose]: async () => {} }; } };
   attachBreathReflex(fixture.bot, driver as never, () => null, () => clock);
   return {
-    surfaceAt: (x: number, atMs: number) => {
+    surfaceAt: (x: number, atMs: number, ownedDive = false, kind = "air_full") => {
       clock = atMs;
       Object.assign(fixture.entity, { position: new Vec3(x + 0.5, 50, 0.5) });
-      return definition!.continuation({ kind: "air_full", ownedDive: false });
+      return definition!.continuation({ kind, ownedDive });
     },
   };
 }
@@ -262,6 +262,37 @@ test("the third breath reflex at the same place within three minutes ends the ac
   const third = surfaceAt(2, 38_000);
   assert.equal(third.kind, "return");
   assert.match(third.reason ?? "", /Out of air three times here/);
+});
+
+test("an owned-dive rescue that reached full air resumes the action", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+});
+
+test("the third owned-dive rescue at one place within three minutes ends the action", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000, true).kind, "resume");
+  const third = surfaceAt(2, 38_000, true);
+  assert.equal(third.kind, "return");
+  assert.match(third.reason ?? "", /Out of air three times here/);
+});
+
+test("owned and unowned rescues at one place count together", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000, false).kind, "resume");
+  assert.match(surfaceAt(2, 38_000, true).reason ?? "", /Out of air three times here/);
+});
+
+test("a rescue that did not observe full air still returns, owned or not", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  for (const ownedDive of [true, false]) {
+    const rescue = surfaceAt(0, 0, ownedDive, "stuck");
+    assert.equal(rescue.kind, "return");
+    assert.match(rescue.reason ?? "", /Full air was not observed/);
+  }
+  assert.match(surfaceAt(0, 0, true, "air_unknown").reason ?? "", /air metadata is unavailable/);
 });
 
 test("three breath reflexes ten blocks apart all resume", (t) => {

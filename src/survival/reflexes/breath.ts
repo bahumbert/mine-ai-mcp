@@ -69,7 +69,8 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
       };
     },
     continuation: (outcome) => {
-      if (outcome.ownedDive) return { kind: "return", reason: "Navigation dive budget failed; the breath backstop rescued the bot." };
+      // A rescue from a dive navigation owned resumes like any other (navigation plans again from the surface) and counts
+      // in the same guard, so a dive that keeps failing at one place still ends. `ownedDive` stays in the receipts.
       if (outcome.kind === "air_full") {
         const { x, z } = bot.entity.position;
         const at = now();

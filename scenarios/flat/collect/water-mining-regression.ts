@@ -32,6 +32,9 @@ export const run: MineAiScenario = async (context) => {
           get active() {
             return digging;
           },
+          get steering() {
+            return digging;
+          },
         },
         runner,
       ),

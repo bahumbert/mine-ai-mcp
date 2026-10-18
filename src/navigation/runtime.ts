@@ -21,6 +21,7 @@ import type { WorldView } from "./world/world.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import { runNavigation, type Navigate, type NavigationResult } from "./navigate.js";
 import { createNavigator } from "./orchestration/navigator.js";
+import { waterStancesHeld } from "./steering/hold-water-position.js";
 import type { StepFieldProvider } from "./step-field.js";
 import type { NavigationEvent, TelemetrySink } from "./telemetry/index.js";
 
@@ -52,6 +53,8 @@ export interface NavigationRuntime extends AsyncDisposable {
   setStepFieldProvider(provider: StepFieldProvider): void;
   /** Whether a route currently owns the bot. */
   readonly active: boolean;
+  /** Whether navigation steers the body: a route, process or dive owns it, or a water stance is held (mining under water keeps its depth). */
+  readonly steering: boolean;
   cancel(reason?: string): void;
   /** An admitted recovery owner will steer the airborne body after this route releases its controls. */
   releaseForTakeover(reason: string): void;
@@ -300,6 +303,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     get active() {
       return diving.active || navigator.active !== null;
     },
+    get steering() { return this.active || waterStancesHeld(bot) > 0; },
     onEvent(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

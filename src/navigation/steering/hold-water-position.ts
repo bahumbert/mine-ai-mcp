@@ -9,7 +9,15 @@ interface WaterPositionBot {
   setControlState(control: HorizontalSteeringControl | "jump", active: boolean): void;
 }
 
-/** Hold a stationary interaction against a current without changing its aim. */
+/** How many water stances each bot holds right now: the stance steers the body (it keeps its own depth), so nothing else may. */
+const stancesHeld = new WeakMap<object, number>();
+
+/** Water stances `bot` holds at this moment (see {@link holdWaterPosition}). */
+export function waterStancesHeld(bot: object): number {
+  return stancesHeld.get(bot) ?? 0;
+}
+
+/** Hold a stationary interaction against a current without changing its aim. It counts as held (see {@link waterStancesHeld}) until released or aborted. */
 export function holdWaterPosition(
   bot: WaterPositionBot,
   signal: AbortSignal | undefined,
@@ -30,8 +38,18 @@ export function holdWaterPosition(
     if (bot.entity.isInWater) setControl("jump", !signal?.aborted && !bot.entity.onGround &&
       holdSwimDepth(bot.entity.position.y, bot.entity.velocity?.y ?? 0, standing.y));
   };
+  let counted = signal?.aborted !== true;
+  const leaveStance = () => {
+    if (!counted) return;
+    counted = false;
+    stancesHeld.set(bot, waterStancesHeld(bot) - 1);
+  };
+  if (counted) stancesHeld.set(bot, waterStancesHeld(bot) + 1);
+  signal?.addEventListener("abort", leaveStance, { once: true });
   bot.on("physicsTick", hold);
   return () => {
+    signal?.removeEventListener("abort", leaveStance);
+    leaveStance();
     bot.off("physicsTick", hold);
     for (const control of controls) setControl(control, false);
     setControl("jump", false);
