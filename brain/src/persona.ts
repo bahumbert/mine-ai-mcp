@@ -104,6 +104,30 @@ export const personaSchema = z.strictObject({
       dislikes: feelingMultiplier(0.6),
       hates: feelingMultiplier(0.3),
     }).prefault({}),
+    /** Conversations with the characters and players in talk range (spec 2026-10-18-conversations-design). */
+    conversation: z.strictObject({
+      /** Chance, at each check with someone near, that the character opens a conversation. */
+      sociability: z.number().min(0).max(1).default(0.3),
+      /** Seconds between two checks for an opening. */
+      checkEverySeconds: z.number().int().min(1).max(3_600).default(30),
+      /** After a conversation, minutes before the same pair may open another by chance. */
+      pairCooldownMinutes: z.number().min(0).max(1_440).default(10),
+      /** Lines (all members) after which the conversation is wound up. */
+      maxLines: z.number().int().min(2).max(500).default(24),
+      /** Minutes after which the conversation is wound up. */
+      maxMinutes: z.number().min(1).max(240).default(6),
+      /** A member out of talk range this long leaves the conversation. */
+      outOfRangeSeconds: z.number().int().min(1).max(3_600).default(20),
+      /** No line from anyone this long ends the conversation. */
+      silenceSeconds: z.number().int().min(1).max(3_600).default(60),
+      /** In a group, a line naming nobody is answered after a random wait between these two ms values. */
+      groupReplyJitterMs: z.tuple([z.number().int().min(0).max(30_000), z.number().int().min(0).max(30_000)])
+        .refine(([from, to]) => from <= to, "the first value must not exceed the second").default([1_000, 4_000]),
+      /** A conversation opens between characters at most this many blocks apart (Manhattan). */
+      openingDistance: z.number().int().min(1).max(512).default(16),
+      /** Vanilla servers (no localized chat): the distance a member may stay at (Manhattan). */
+      stayingDistance: z.number().int().min(1).max(512).default(32),
+    }).prefault({}),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
   models: z.strictObject({ chat: modelId.optional(), action: modelId.optional(), planner: modelId.optional() }).default({}),

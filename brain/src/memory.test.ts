@@ -69,3 +69,12 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   const older = { kind: "small medieval house", site, part: 2 };
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
 });
+
+test("a conversation is remembered as a sentence without the character, and the newest 5 are read back newest first", () => {
+  const talk = (index: number) => ({ id: `Theo-${index}`, members: ["Theo", "Bruno"], topic: "the mine", gist: `gist ${index}`, endedAt: `2026-10-18T12:0${index}:00.000Z`, reason: "goodbye" as const });
+  assert.equal(memoryNote({ kind: "conversation", talk: { ...talk(1), members: ["Theo"] } }).note, "I talked with Theo about the mine: gist 1 (2026-10-18T12:01:00.000Z).");
+  const contexts = [7, 6, 5, 4, 3, 2, 1].map((index) => memoryNote({ kind: "conversation", talk: talk(index) }).context);
+  assert.deepEqual(recall(contexts, LIMITS).conversations.map((known) => known.gist), ["gist 7", "gist 6", "gist 5", "gist 4", "gist 3"]);
+  assert.deepEqual(recall(contexts, LIMITS).conversations[0], { members: ["Theo", "Bruno"], topic: "the mine", gist: "gist 7", endedAt: "2026-10-18T12:07:00.000Z" });
+  assert.match(recallQuery("Ayla", LIMITS), /brain memory: conversation .*LIMIT 5/u);
+});

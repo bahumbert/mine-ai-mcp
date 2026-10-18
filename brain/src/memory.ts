@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ACTIVITIES } from "./activities.ts";
 import { BUILD_ROLES } from "./building/blueprint.ts";
 import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
+import type { EndReason } from "./conversation/state.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -31,9 +32,25 @@ export type Memory =
   | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null }
   | { readonly kind: "farm"; readonly farm: KnownFarm }
   /** One finished step's activity and time (spec 2026-10-03-specialisations-preferences): the time per activity. */
-  | { readonly kind: "activity_time"; readonly time: ActivityTime };
+  | { readonly kind: "activity_time"; readonly time: ActivityTime }
+  /** A finished conversation (spec 2026-10-18-conversations-design): `members` are the others, not the character. */
+  | { readonly kind: "conversation"; readonly talk: PastConversation };
+
+export interface PastConversation {
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly topic: string;
+  readonly gist: string;
+  readonly endedAt: string;
+  readonly reason: EndReason;
+}
+
+/** The latest conversation notes read back (all kinds together). */
+const CONVERSATIONS_RECALLED = 5;
 
 export interface Recalled {
+  /** Newest first, at most {@link CONVERSATIONS_RECALLED}. */
+  readonly conversations: readonly { readonly members: readonly string[]; readonly topic: string; readonly gist: string; readonly endedAt: string }[];
   /** Oldest first, one per name (the latest wins). */
   readonly places: readonly KnownPlace[];
   /** Oldest first. */
@@ -55,7 +72,7 @@ export interface RecallLimits {
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time", "conversation"] as const;
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
@@ -89,6 +106,17 @@ const memorySchema = z.discriminatedUnion("kind", [
     kind: z.literal("activity_time"),
     time: z.object({ activity: z.enum(ACTIVITIES), purpose: z.enum(ACTIVITIES).optional(), ended: z.string(), minutes: z.number().min(0) }),
   }),
+  z.object({
+    kind: z.literal("conversation"),
+    talk: z.object({
+      id: z.string().min(1),
+      members: z.array(z.string().min(1)),
+      topic: z.string(),
+      gist: z.string(),
+      endedAt: z.string(),
+      reason: z.enum(["goodbye", "out_of_range", "silence", "cap", "taken_over"]),
+    }),
+  }),
 ]);
 
 /** The note and context `note_save` stores for one memory. */
@@ -110,6 +138,7 @@ function describe(memory: Memory): string {
       const { farm } = memory;
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
     }
+    case "conversation": return `I talked with ${memory.talk.members.join(", ")} about ${memory.talk.topic}: ${memory.talk.gist} (${memory.talk.endedAt}).`;
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }
 }
@@ -125,7 +154,7 @@ export function recallQuery(username: string, limits: RecallLimits): string {
       `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC LIMIT ${limit})`;
   };
   // A farm is noted at every tend: read enough notes to find the latest of each of the farms kept.
-  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times)].join(" UNION ALL ")} ORDER BY note_id DESC`;
+  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times), latest("conversation", CONVERSATIONS_RECALLED)].join(" UNION ALL ")} ORDER BY note_id DESC`;
 }
 
 /** Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. */
@@ -135,6 +164,7 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
   let unfinished: UnfinishedHouse | null | undefined;
   const farms = new Map<string, KnownFarm>();
   const times: ActivityTime[] = [];
+  const conversations: Recalled["conversations"][number][] = [];
   for (const context of contexts) {
     const memory = parse(context);
     if (memory === null) continue;
@@ -146,8 +176,12 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
       if (!farms.has(key) && farms.size < limits.farms) farms.set(key, memory.farm);
     }
     if (memory.kind === "activity_time" && times.length < limits.times) times.push(memory.time);
+    if (memory.kind === "conversation" && conversations.length < CONVERSATIONS_RECALLED) {
+      const { members, topic, gist, endedAt } = memory.talk;
+      conversations.push({ members, topic, gist, endedAt });
+    }
   }
-  return { places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse() };
+  return { conversations, places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse() };
 }
 
 function parse(context: string): Memory | null {

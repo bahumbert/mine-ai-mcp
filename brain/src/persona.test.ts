@@ -74,3 +74,15 @@ test("a persona allowed to build may improve its house too", () => {
   assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to"] })), ["go_to"]);
   assert.ok(personaSkills(personaSchema.parse(base)).includes("improve_house"));
 });
+
+test("conversation settings default", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const defaults = {
+    sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20,
+    silenceSeconds: 60, groupReplyJitterMs: [1_000, 4_000], openingDistance: 16, stayingDistance: 32,
+  };
+  assert.deepEqual(personaSchema.parse(base).settings.conversation, defaults);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { sociability: 1.5 } } }).success, false);
+  assert.deepEqual(personaSchema.parse({ ...base, settings: { conversation: { sociability: 0.6 } } }).settings.conversation, { ...defaults, sociability: 0.6 });
+  assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { groupReplyJitterMs: [5, 1] } } }).success, false);
+});

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import type { Activity } from "./activities.ts";
 import type { ActivityChance } from "./activity-draw.ts";
 import type { ChatTurn } from "./chat-model.ts";
+import type { ConversationKind, EndReason, PlannedLength } from "./conversation/state.ts";
 import type { Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { ActivityTotal } from "./time-spent.ts";
@@ -17,7 +18,7 @@ export const PREVIOUS_BRAIN_LOG_FILE = "brain.prev.jsonl";
 const MAX_BYTES = 20 * 1024 * 1024;
 
 /** Which part of the mind a model call was for. */
-export type MindTier = "chat" | "work" | "goal" | "narrate";
+export type MindTier = "chat" | "work" | "goal" | "narrate" | "conversation";
 
 export interface ModelCall {
   readonly tier: MindTier;
@@ -95,6 +96,24 @@ export type BrainEvent =
     /** What the chat tier read besides the route: where the request happens, whether the line starts it now. */
     readonly place?: Place;
     readonly startsNow?: boolean;
+    /** The conversation (id) the line belongs to, when it is in one. */
+    readonly conversation?: string;
+  }
+  /** A conversation (spec 2026-10-18-conversations-design): opened, a member joined or left, ended. */
+  | {
+    readonly kind: "conversation";
+    readonly event: "opened" | "joined" | "left" | "ended";
+    readonly id: string;
+    readonly members: readonly string[];
+    readonly conversationKind?: ConversationKind;
+    readonly topic?: string;
+    readonly planned?: PlannedLength | null;
+    readonly member?: string;
+    readonly why?: string;
+    readonly reason?: EndReason;
+    readonly lines?: number;
+    readonly minutes?: number;
+    readonly gist?: string;
   }
   /** What it is doing now: the stack (top last), the step running, if any. */
   | { readonly kind: "state"; readonly stack: readonly StackEntry[]; readonly step: string | null }
