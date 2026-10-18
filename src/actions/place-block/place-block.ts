@@ -23,7 +23,8 @@ import {
   type SettledInventoryCount,
   type WorldBlock,
 } from "../../world/index.js";
-import { defineAction, type ActionContext } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { unconfirmedCount } from "../markdown.js";
 import {
   parsePlaceBlockRequest,
@@ -147,18 +148,79 @@ async function approachTarget(
   });
 }
 
+/** What one place_block request keeps across the attempts a reflex cuts it into. */
+interface PlaceRun {
+  readonly bot: Bot;
+  readonly request: PlaceBlockRequest;
+  readonly dependencies: PlaceBlockDependencies;
+  /** The count of the block carried when the request was taken: a resume that finds fewer knows a block was put down. */
+  readonly inventoryBefore: number;
+  /** What the target cell held before this request put anything there, for the evidence of a resumed attempt. */
+  beforeBlock: string | null;
+  /** The cell a block put down beside the bot went to, once an attempt has seen it (the progress checkpoint reads it too). */
+  chosen: Vec3 | null;
+  /** Where the bot stood when the first nearby placement began, and the cells around it that already held the block. */
+  nearby: { readonly origin: Vec3; readonly alreadyHolding: ReadonlySet<string> } | null;
+}
+
+/** How far around the first nearby placement's origin a block it put down is looked for after an abort. */
+const NEARBY_SEARCH_RADIUS = 5;
+
+const cellId = (cell: Vec3) => `${cell.x},${cell.y},${cell.z}`;
+
+/** The cells around `origin` (feet level, one down and one up) that hold `blockName` now. */
+function cellsHolding(bot: Bot, blockName: string, origin: Vec3): Vec3[] {
+  const found: Vec3[] = [];
+  for (let dx = -NEARBY_SEARCH_RADIUS; dx <= NEARBY_SEARCH_RADIUS; dx += 1)
+    for (let dz = -NEARBY_SEARCH_RADIUS; dz <= NEARBY_SEARCH_RADIUS; dz += 1)
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const cell = origin.offset(dx, dy, dz);
+        if (bot.blockAt(cell)?.name === blockName) found.push(cell);
+      }
+  return found;
+}
+
+function supportBelow(bot: Bot, cell: Vec3): { block: WorldBlock; face: Vec3 } | undefined {
+  const block = bot.blockAt(cell.offset(0, -1, 0));
+  return block ? { block, face: new Vec3(0, 1, 0) } : undefined;
+}
+
+/**
+ * The block an earlier, aborted attempt put down beside the bot, as a success: the carried count fell from the baseline
+ * and a cell that did not hold the block before now does. Null when no earlier attempt put one down.
+ */
+async function nearbyBlockAlreadyPlaced(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult | null> {
+  const { bot, request, inventoryBefore, nearby } = run;
+  if (nearby === null || carriedCount(bot, request.blockName) >= inventoryBefore) return null;
+  const cell = run.chosen ?? cellsHolding(bot, request.blockName, nearby.origin)
+    .filter((candidate) => !nearby.alreadyHolding.has(cellId(candidate)))
+    .sort((a, b) => a.distanceTo(nearby.origin) - b.distanceTo(nearby.origin))[0] ?? null;
+  if (cell === null) {
+    return {
+      status: "failed",
+      error: placeBlockOutcomes.failed("An earlier attempt used a block, but no placed block was found beside the bot."),
+      placement: evidence(bot, request, bot.entity.position.floored(), inventoryBefore, null),
+    };
+  }
+  run.chosen = cell;
+  return {
+    status: "succeeded",
+    placement: evidence(bot, request, cell, inventoryBefore, "air", supportBelow(bot, cell), true,
+      await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal })),
+  };
+}
+
 /** Put one carried block on a cell chosen around the bot, without moving. */
-async function placeNearby(
-  bot: Bot,
-  request: PlaceBlockRequest,
-  inventoryBefore: number,
-  context: ActionContext,
-  dependencies: PlaceBlockDependencies,
-): Promise<PlaceBlockResult> {
+async function placeNearby(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult> {
+  const { bot, request, inventoryBefore, dependencies } = run;
+  const placedBefore = await nearbyBlockAlreadyPlaced(run, context);
+  if (placedBefore !== null) return placedBefore;
   const feet = bot.entity.position.floored();
+  run.nearby ??= { origin: feet, alreadyHolding: new Set(cellsHolding(bot, request.blockName, feet).map(cellId)) };
   const result = await dependencies.placeNearby(bot, request.blockName, { signal: context.signal });
   switch (result.kind) {
     case "placed":
+      run.chosen = result.position;
       return {
         status: "succeeded",
         placement: evidence(
@@ -195,36 +257,44 @@ async function placeNearby(
   }
 }
 
-/** Place one carried block, at the exact cell asked for or on a cell chosen nearby, and report only what was observed. */
-export async function executePlaceBlock(
-  bot: Bot,
-  request: PlaceBlockRequest,
-  context: ActionContext,
-  dependencies: PlaceBlockDependencies,
-): Promise<PlaceBlockResult> {
-  const inventoryBefore = carriedCount(bot, request.blockName);
-  let progressTarget = request.target;
-  context.observeProgress?.(() => ({ baseline: { inventory: inventoryBefore },
-    checkpoint: { phase: "placing", inventory: carriedCount(bot, request.blockName), target: progressTarget ? { ...progressTarget } : null,
-      currentBlock: progressTarget ? bot.blockAt(new Vec3(progressTarget.x, progressTarget.y, progressTarget.z))?.name ?? null : null },
-    completion: { kind: "current", observed: progressTarget !== null && bot.blockAt(new Vec3(progressTarget.x, progressTarget.y, progressTarget.z))?.name === request.blockName,
-      owes: "Observed placement of the requested block in the selected cell." },
-  }));
-  if (!bot.registry.blocksByName[request.blockName]) {
-    const feet = bot.entity.position.floored();
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.unknownBlock(request.blockName),
-      placement: evidence(bot, request, feet, inventoryBefore, null),
-    };
+/** Walk within reach of the target, or the failure that says why not; null when the bot may place from where it stands. */
+async function reachTarget(run: PlaceRun, target: Vec3, context: ActionContext): Promise<PlaceBlockResult | null> {
+  const { bot, request, inventoryBefore, dependencies } = run;
+  const stopped = (error: string): PlaceBlockResult => ({
+    status: "failed",
+    error,
+    placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
+  });
+  let route: NavigationResult | null;
+  try {
+    route = await approachTarget(bot, target, context, dependencies);
+  } catch (cause) {
+    context.signal?.throwIfAborted();
+    return stopped(placeBlockOutcomes.routeStopped(cause instanceof Error ? cause.message : String(cause)));
   }
-  if (request.target === null) {
-    const result = await placeNearby(bot, request, inventoryBefore, context, dependencies);
-    progressTarget = result.placement.target;
-    return result;
+  if (route?.status === "stopped") return stopped(placeBlockOutcomes.routeStopped(route.reason));
+  if (cellIntersectsPlayerBody(target, bot.entity.position)) {
+    return stopped(placeBlockOutcomes.failed("The bot's body still intersects the requested cell after approaching it."));
   }
+  return null;
+}
 
-  const target = new Vec3(request.target.x, request.target.y, request.target.z);
+/** The target already holds the requested block: ours when an earlier attempt took one from the inventory, else it was there. */
+async function targetAlreadyHoldsBlock(run: PlaceRun, target: Vec3, context: ActionContext): Promise<PlaceBlockResult> {
+  const { bot, request, inventoryBefore } = run;
+  if (carriedCount(bot, request.blockName) >= inventoryBefore) {
+    return { status: "succeeded", placement: evidence(bot, request, target, inventoryBefore, request.blockName) };
+  }
+  return {
+    status: "succeeded",
+    placement: evidence(bot, request, target, inventoryBefore, run.beforeBlock ?? "air", supportBelow(bot, target), true,
+      await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal })),
+  };
+}
+
+/** Place one carried block at the exact cell asked for. */
+async function placeAtTarget(run: PlaceRun, target: Vec3, context: ActionContext): Promise<PlaceBlockResult> {
+  const { bot, request, inventoryBefore, dependencies } = run;
   if (inventoryBefore < 1) {
     return {
       status: "failed",
@@ -232,33 +302,8 @@ export async function executePlaceBlock(
       placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
     };
   }
-
-  let route: NavigationResult | null;
-  try {
-    route = await approachTarget(bot, target, context, dependencies);
-  } catch (cause) {
-    context.signal?.throwIfAborted();
-    const reason = cause instanceof Error ? cause.message : String(cause);
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.routeStopped(reason),
-      placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
-    };
-  }
-  if (route?.status === "stopped") {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.routeStopped(route.reason),
-      placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
-    };
-  }
-  if (cellIntersectsPlayerBody(target, bot.entity.position)) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.failed("The bot's body still intersects the requested cell after approaching it."),
-      placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
-    };
-  }
+  const unreached = await reachTarget(run, target, context);
+  if (unreached !== null) return unreached;
 
   const targetBlock = bot.blockAt(target);
   if (!targetBlock) {
@@ -268,12 +313,8 @@ export async function executePlaceBlock(
       placement: evidence(bot, request, target, inventoryBefore, null),
     };
   }
-  if (targetBlock.name === request.blockName) {
-    return {
-      status: "succeeded",
-      placement: evidence(bot, request, target, inventoryBefore, targetBlock.name),
-    };
-  }
+  if (targetBlock.name === request.blockName) return targetAlreadyHoldsBlock(run, target, context);
+  run.beforeBlock ??= targetBlock.name;
   if (!isReplaceableForPlacement(targetBlock)) {
     return {
       status: "failed",
@@ -331,6 +372,58 @@ export async function executePlaceBlock(
   };
 }
 
+/** One attempt: do only what the world still needs of the request. */
+async function placeAttempt(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult> {
+  const { bot, request, inventoryBefore } = run;
+  if (!bot.registry.blocksByName[request.blockName]) {
+    return {
+      status: "failed",
+      error: placeBlockOutcomes.unknownBlock(request.blockName),
+      placement: evidence(bot, request, bot.entity.position.floored(), inventoryBefore, null),
+    };
+  }
+  if (request.target === null) return placeNearby(run, context);
+  return placeAtTarget(run, new Vec3(request.target.x, request.target.y, request.target.z), context);
+}
+
+/**
+ * Take the request: the carried count (the baseline a resume measures what it put down against) and the cell chosen
+ * beside the bot are kept here, and the executor it returns runs one attempt each time the runner calls it.
+ */
+export function beginPlaceBlock(
+  bot: Bot,
+  request: PlaceBlockRequest,
+  dependencies: PlaceBlockDependencies,
+  observe: ObserveRequest = () => {},
+): RequestExecution<PlaceBlockResult> {
+  const run: PlaceRun = {
+    bot, request, dependencies, beforeBlock: null, chosen: null, nearby: null,
+    inventoryBefore: carriedCount(bot, request.blockName),
+  };
+  const progressTarget = () => run.chosen ?? request.target;
+  const blockAtProgressTarget = () => {
+    const target = progressTarget();
+    return target ? bot.blockAt(new Vec3(target.x, target.y, target.z))?.name ?? null : null;
+  };
+  observe(() => ({ baseline: { inventory: run.inventoryBefore },
+    checkpoint: { phase: "placing", inventory: carriedCount(bot, request.blockName), target: progressTarget() ? { ...progressTarget()! } : null,
+      currentBlock: blockAtProgressTarget() },
+    completion: { kind: "current", observed: progressTarget() !== null && blockAtProgressTarget() === request.blockName,
+      owes: "Observed placement of the requested block in the selected cell." },
+  }));
+  return (context) => placeAttempt(run, context);
+}
+
+/** Place one carried block, at the exact cell asked for or on a cell chosen nearby, and report only what was observed. */
+export function executePlaceBlock(
+  bot: Bot,
+  request: PlaceBlockRequest,
+  context: ActionContext,
+  dependencies: PlaceBlockDependencies,
+): Promise<PlaceBlockResult> {
+  return beginPlaceBlock(bot, request, dependencies, context.observeProgress)(context);
+}
+
 export function formatPlaceBlockResult(result: PlaceBlockResult): string {
   const { placement } = result;
   const summary = placement.placed
@@ -366,9 +459,9 @@ export function createPlaceBlockAction(
     inputSchema: placeBlockInputSchema,
     resultSchema: placeBlockResultSchema,
     formatResult: formatPlaceBlockResult,
-    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: placeBlockAnnotations,
     parse: parsePlaceBlockRequest,
-    execute: (request, context) => executePlaceBlock(bot, request, context, dependencies),
+    begin: (request, _lifetime, observe) => beginPlaceBlock(bot, request, dependencies, observe),
   });
 }

@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { botFixture, type FakeStack } from "../../test-support/bot.js";
 import { parsePlaceBlockRequest } from "./contract.js";
-import { formatPlaceBlockResult, executePlaceBlock, type PlaceBlockDependencies } from "./place-block.js";
+import { formatPlaceBlockResult, executePlaceBlock, beginPlaceBlock, type PlaceBlockDependencies } from "./place-block.js";
 
 const goalTestWorld = new GoalTestWorld();
 
@@ -245,4 +245,132 @@ test("refuses placement when the carried block is absent", async () => {
 
   assert.equal(result.status, "failed");
   if (result.status === "failed") assert.match(result.error, /^\[PLACE_ITEM_MISSING\]/);
+});
+
+// Reflex continuity (spec 2026-10-18, R2): a reflex that takes the body mid-placement hands it back, and the resumed
+// attempt never puts down a second block.
+const cutByReflex = () => {
+  const controller = new AbortController();
+  controller.abort(new Error("[HUNGER] reflex"));
+  return controller.signal;
+};
+
+test("a block that landed just before the reflex's abort threw is reported placed once after the resume", async () => {
+  const { bot, dependencies } = testWorld();
+  let placements = 0;
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeBlock: async (...args) => {
+      placements += 1;
+      await dependencies.placeBlock(...args);
+      throw cutByReflex().reason;
+    },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, cutting);
+  await assert.rejects(run({ signal: new AbortController().signal }), /HUNGER/);
+  const result = await run({ signal: new AbortController().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.placement.placed, true, "the block is ours: the inventory fell from the begin baseline");
+  assert.deepEqual([result.placement.inventoryBefore, result.placement.inventoryAfter], [2, 1]);
+  assert.equal(result.placement.beforeBlock, "air");
+  assert.equal(placements, 1);
+});
+
+test("a cell chosen beside the bot is found again after the abort threw, and no second block goes down", async () => {
+  const { bot, dependencies } = testWorld();
+  let placements = 0;
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeNearby: async (...args) => {
+      placements += 1;
+      await dependencies.placeNearby(...args);
+      throw cutByReflex().reason;
+    },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: null }, cutting);
+  await assert.rejects(run({ signal: new AbortController().signal }), /HUNGER/);
+  const result = await run({ signal: new AbortController().signal });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(result.placement.target, { x: 1, y: 64, z: 0 });
+  assert.equal(result.placement.placed, true);
+  assert.equal(result.placement.inventoryAfter, 1);
+  assert.equal(placements, 1);
+});
+
+test("a cell chosen beside the bot already holding the block before the request is not mistaken for the placed one", async () => {
+  const { bot, blocks, dependencies } = testWorld();
+  const old = new Vec3(0, 64, 1);
+  blocks.set(key(old), { name: "cobblestone", boundingBox: "block", position: old });
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeNearby: async (...args) => {
+      await dependencies.placeNearby(...args);
+      throw cutByReflex().reason;
+    },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: null }, cutting);
+  await assert.rejects(run({ signal: new AbortController().signal }));
+  const result = await run({ signal: new AbortController().signal });
+  assert.deepEqual(result.placement.target, { x: 1, y: 64, z: 0 });
+});
+
+test("a resume after a nearby placement that never landed places the block, once", async () => {
+  const { bot, dependencies } = testWorld();
+  let placements = 0;
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: null }, {
+    ...dependencies,
+    placeNearby: async (...args) => {
+      placements += 1;
+      if (placements === 1) throw cutByReflex().reason;
+      return dependencies.placeNearby(...args);
+    },
+  });
+  await assert.rejects(run({ signal: new AbortController().signal }));
+  const result = await run({ signal: new AbortController().signal });
+  assert.equal(result.placement.placed, true);
+  assert.equal(placements, 2);
+  assert.equal(result.placement.inventoryAfter, 1);
+});
+
+test("the same block put in the target by someone else between the attempts is present, not ours", async () => {
+  const { bot, blocks, dependencies, target } = testWorld();
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeBlock: async () => { throw cutByReflex().reason; },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, cutting);
+  await assert.rejects(run({ signal: new AbortController().signal }));
+  blocks.set(key(target), { name: "cobblestone", boundingBox: "block", position: target });
+  const result = await run({ signal: new AbortController().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.placement.placed, false);
+  assert.equal(result.placement.inventoryAfter, 2);
+});
+
+test("another block put in the target between the attempts is refused as occupied", async () => {
+  const { bot, blocks, dependencies, target } = testWorld();
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, {
+    ...dependencies,
+    placeBlock: async () => { throw cutByReflex().reason; },
+  });
+  await assert.rejects(run({ signal: new AbortController().signal }));
+  blocks.set(key(target), { name: "dirt", boundingBox: "block", position: target });
+  const result = await run({ signal: new AbortController().signal });
+  assert.equal(result.status, "failed");
+});
+
+test("a placement that already finished answers a second call with the same success and places nothing", async () => {
+  const { bot, dependencies } = testWorld();
+  let placements = 0;
+  const counting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeBlock: async (...args) => { placements += 1; return dependencies.placeBlock(...args); },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, counting);
+  const first = await run({ signal: new AbortController().signal });
+  const again = await run({ signal: new AbortController().signal });
+  assert.equal(first.placement.placed, true);
+  assert.equal(again.status, "succeeded");
+  assert.equal(again.placement.placed, true);
+  assert.equal(placements, 1);
 });
