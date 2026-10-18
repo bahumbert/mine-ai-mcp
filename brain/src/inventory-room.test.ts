@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { consumedBy, junkHint, junkStacks, neededItems } from "./inventory-room.ts";
+import { bestTool, consumedBy, junkHint, junkStacks, neededItems } from "./inventory-room.ts";
 import { FakeRuntime } from "./testing.ts";
 
 const stack = (name: string, count: number) => ({ name, count });
+const worn = (name: string, remaining: number, maximum: number) => ({ name, count: 1, durability: { remaining, maximum } });
 const snapshot = (inventory: { name: string; count: number }[], foods: string[] = []) => ({ inventory, foods: foods.map((name) => ({ name, hunger: 4, count: 1 })) }) as never;
 
 test("neededItems: tools, armour, stations, foods, the house bill and the items being fetched", () => {
@@ -64,7 +65,7 @@ test("consumedBy: a craft's whole recipe tree, a smelt's input and fuel, nothing
 });
 
 test("neededItems keeps one tool of each class, the best tier: a lesser tier of the same class is spare (run 15 N5)", () => {
-  const carried = snapshot([stack("wooden_pickaxe", 1), stack("stone_pickaxe", 1), stack("wooden_sword", 1), stack("white_bed", 1), stack("oak_boat", 1)]);
+  const carried = snapshot([worn("wooden_pickaxe", 59, 59), worn("stone_pickaxe", 131, 131), stack("wooden_sword", 1), stack("white_bed", 1), stack("oak_boat", 1)]);
   const needed = neededItems(carried);
   assert.deepEqual([...needed].sort(), ["oak_boat", "stone_pickaxe", "white_bed", "wooden_sword"]);
 });
@@ -75,4 +76,28 @@ test("junkStacks lists the copies of a needed tool beyond the first as junk", ()
     { name: "wooden_sword", count: 2, slots: 2, stacks: [1, 1] },
     { name: "dirt", count: 4, slots: 1, stacks: [4] },
   ]);
+});
+
+test("the best tool of a class is the one with the larger durability maximum: a stone pickaxe beats a golden one, diamond beats iron", () => {
+  // Review 2026-10-18 #9: a hardcoded tier list put golden above stone. The ladder is the game's own: wooden 59, golden 32, stone 131, iron 250, diamond 1561.
+  const stoneAndGolden = snapshot([worn("golden_pickaxe", 32, 32), worn("stone_pickaxe", 131, 131)]);
+  assert.deepEqual([...neededItems(stoneAndGolden)], ["stone_pickaxe"]);
+  assert.deepEqual(junkStacks(stoneAndGolden, neededItems(stoneAndGolden)).map(({ name }) => name), ["golden_pickaxe"]);
+  assert.deepEqual([...neededItems(snapshot([worn("iron_pickaxe", 250, 250), worn("diamond_pickaxe", 1561, 1561)]))], ["diamond_pickaxe"]);
+});
+
+test("with equal maxima the tool with more durability left is the one kept", () => {
+  assert.equal(bestTool([worn("copper_pickaxe", 20, 200), worn("tin_pickaxe", 150, 200)])?.name, "tin_pickaxe");
+});
+
+test("a tool reporting no durability ranks last, and a lone one is still kept", () => {
+  const older = { name: "wooden_pickaxe", count: 1 };
+  assert.equal(bestTool([older, worn("golden_pickaxe", 5, 32)])?.name, "golden_pickaxe");
+  assert.deepEqual([...neededItems(snapshot([older]))], ["wooden_pickaxe"]);
+  assert.equal(bestTool([]), undefined);
+});
+
+test("two stacks of one tool with different wear are one name: that name is kept once", () => {
+  const carried = snapshot([worn("iron_axe", 10, 250), worn("iron_axe", 200, 250), worn("wooden_axe", 59, 59)]);
+  assert.deepEqual([...neededItems(carried)], ["iron_axe"]);
 });

@@ -1,12 +1,23 @@
-import type { BotRuntime, BotSnapshot } from "./runtime-client.ts";
+import type { BotRuntime, BotSnapshot, CarriedStack } from "./runtime-client.ts";
 
 /** The tool classes (and bed, boat) of which the last one carried is never dropped on its own. */
 export const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
 export const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
 
-const TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"];
-/** 0 for the best tier of a tool, up; an item with no tier ranks last. */
-export const tierRank = (item: string): number => { const rank = TIERS.indexOf(item.split("_")[0]!); return rank < 0 ? TIERS.length : rank; };
+/**
+ * The stack to keep among stacks of one tool class: the largest `durability.maximum` (the game's own tier ladder, as the
+ * runtime reports it), then the most durability left; a stack reporting none (an older runtime) ranks last, the first
+ * carried among those.
+ */
+export function bestTool<Stack extends CarriedStack>(stacks: readonly Stack[]): Stack | undefined {
+  const rank = ({ durability }: Stack) => [durability?.maximum ?? -1, durability?.remaining ?? -1] as const;
+  return stacks.reduce<Stack | undefined>((best, stack) => {
+    if (best === undefined) return stack;
+    const [bestMaximum, bestRemaining] = rank(best);
+    const [maximum, remaining] = rank(stack);
+    return maximum > bestMaximum || (maximum === bestMaximum && remaining > bestRemaining) ? stack : best;
+  }, undefined);
+}
 
 /** The failures of a full inventory: a workstation or a craft without room, a pickup or a collect with no free slot. */
 export const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot|needs inventory room/u;
@@ -32,14 +43,11 @@ export interface RoomFacts {
 export function neededItems(snapshot: Pick<BotSnapshot, "inventory" | "foods">, facts: RoomFacts = {}): Set<string> {
   const needed = new Set<string>([...(facts.houseBill ?? []), ...(facts.wanted ?? []), ...snapshot.foods.map((food) => food.name)]);
   const named = new Set(facts.objective?.toLowerCase().match(/[a-z][a-z0-9_]*/gu) ?? []);
-  // One tool of each class (and one bed, one boat) is needed: the best tier carried; the others are spare (run 15 N5).
-  const best = new Map<string, string>();
-  for (const { name } of snapshot.inventory) {
-    const kind = kindOf(name);
-    const current = kind === null ? undefined : best.get(kind);
-    if (kind !== null && (current === undefined || tierRank(name) < tierRank(current))) best.set(kind, name);
+  // One tool of each class (and one bed, one boat) is needed: the best one carried ({@link bestTool}); the others are spare (run 15 N5).
+  for (const kind of KEPT_KINDS) {
+    const best = bestTool(snapshot.inventory.filter(({ name }) => kindOf(name) === kind));
+    if (best !== undefined) needed.add(best.name);
   }
-  for (const name of best.values()) needed.add(name);
   for (const { name } of snapshot.inventory) {
     const last = name.split("_").at(-1)!;
     if (ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);

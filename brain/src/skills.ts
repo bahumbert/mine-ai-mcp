@@ -10,13 +10,13 @@ import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
-import { consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf, tierRank } from "./inventory-room.ts";
+import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
 import { lostToolClass, ToolLosses, toolToMake } from "./building/tool-loss.ts";
-import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -287,10 +287,10 @@ function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): {
 }
 
 /**
- * The last tool of a class, the last bed and the last boat stay in the inventory: one is kept, the best tier carried
+ * The last tool of a class, the last bed and the last boat stay in the inventory: one is kept, the best carried (`bestTool`)
  * (live 2026-10-10 run 8: Ayla dropped her stone pickaxe, axe, shovel, boat and bed; Yuki her axe while crafting one).
  */
-function keepLastOfKind(entries: readonly { item: string; count?: number }[], inventory: readonly { name: string; count: number }[]): { entries: { item: string; count?: number }[]; kept: string[] } {
+function keepLastOfKind(entries: readonly { item: string; count?: number }[], inventory: readonly CarriedStack[]): { entries: { item: string; count?: number }[]; kept: string[] } {
   const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const result = entries.map((entry) => ({ ...entry }));
   const kept: string[] = [];
@@ -299,7 +299,7 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
     if (owned.length === 0) continue;
     const dropping = (item: string) => { const entry = result.find((candidate) => candidate.item === item); return entry === undefined ? 0 : Math.min(entry.count ?? carried(item), carried(item)); };
     if (owned.some((item) => carried(item) - dropping(item) > 0)) continue;
-    const keep = [...owned].sort((a, b) => tierRank(a) - tierRank(b))[0]!;
+    const keep = bestTool(inventory.filter((stack) => kindOf(stack.name) === kind))!.name;
     const entry = result.find((candidate) => candidate.item === keep);
     if (entry === undefined) continue;
     entry.count = Math.max(0, dropping(keep) - 1);

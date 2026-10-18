@@ -323,7 +323,7 @@ export interface BotRuntime {
   toolEnum(tool: string, property: string): Promise<readonly string[]>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
-  /** The containers `owner` opened in the overworld (the snapshot names no dimension, as for the seen places) within `within` blocks of `near` (horizontally), nearest first. */
+  /** The containers `owner` opened in the overworld (stored as `overworld` or `minecraft:overworld`; the snapshot names no dimension, as for the seen places) within `within` blocks of `near` (horizontally), nearest first. */
   knownContainers(owner: string, near: Position, within: number): Promise<readonly KnownContainer[]>;
   /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
   queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]>;
@@ -731,12 +731,12 @@ export class McpBotRuntime implements BotRuntime {
 
   async knownContainers(owner: string, near: Position, within: number): Promise<readonly KnownContainer[]> {
     // The username goes inside an SQL literal: only the characters of its format.
-    if (!/^w{1,16}$/u.test(owner)) return [];
+    if (!/^\w{1,16}$/u.test(owner)) return [];
     const [x, z, reach] = [Math.floor(near.x), Math.floor(near.z), Math.floor(within)];
     const squared = `((block_x - (${x})) * (block_x - (${x})) + (block_z - (${z})) * (block_z - (${z})))`;
     const rows = await this.queryBotData(
       "SELECT block_x, block_y, block_z, block_name, slot_count, json_array_length(contents_json) FROM observed_containers " +
-      `WHERE observed_by_bot_id = '${owner}' AND dimension = 'overworld' AND ${squared} <= ${reach * reach} ORDER BY ${squared}`,
+      `WHERE observed_by_bot_id = '${owner}' AND dimension IN ('overworld', 'minecraft:overworld') AND ${squared} <= ${reach * reach} ORDER BY ${squared}`,
     );
     return rows.map((row) => ({ x: Number(row[0]), y: Number(row[1]), z: Number(row[2]), blockName: String(row[3]), slotCount: Number(row[4]), usedSlots: Number(row[5]) }));
   }

@@ -1737,12 +1737,19 @@ test("drop_item keeps the last tool of a class, the last bed and the last boat (
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_pickaxe", count: 2 }] }), contextFor(several));
   assert.deepEqual(several.submitted.map((call) => call.input.items), [[{ item_name: "stone_pickaxe", count: 2 }]], "two of three is fine");
 
-  // Dropping every pickaxe keeps the best one, not the one named first.
+  // Dropping every pickaxe keeps the best one, not the one named first: the best is the one the runtime reports the larger durability maximum for.
   const tiers = new FakeRuntime();
-  tiers.snapshot = { ...tiers.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1 }, { name: "iron_pickaxe", count: 1 }] };
+  tiers.snapshot = { ...tiers.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1, durability: { remaining: 59, maximum: 59 } }, { name: "iron_pickaxe", count: 1, durability: { remaining: 250, maximum: 250 } }] };
   tiers.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "wooden_pickaxe", dropped: 1 }] });
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "wooden_pickaxe" }, { item: "iron_pickaxe" }] }), contextFor(tiers));
   assert.deepEqual(tiers.submitted.map((call) => call.input.items), [[{ item_name: "wooden_pickaxe" }]]);
+
+  // A golden pickaxe wears out sooner than a stone one: dropping both keeps the stone one (review 2026-10-18 #9).
+  const golden = new FakeRuntime();
+  golden.snapshot = { ...golden.snapshot, inventory: [{ name: "golden_pickaxe", count: 1, durability: { remaining: 32, maximum: 32 } }, { name: "stone_pickaxe", count: 1, durability: { remaining: 100, maximum: 131 } }] };
+  golden.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "golden_pickaxe", dropped: 1 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "golden_pickaxe" }, { item: "stone_pickaxe" }] }), contextFor(golden));
+  assert.deepEqual(golden.submitted.map((call) => call.input.items), [[{ item_name: "golden_pickaxe" }]]);
 
   const only = new FakeRuntime();
   only.snapshot = { ...only.snapshot, inventory: [{ name: "stone_axe", count: 1 }] };
