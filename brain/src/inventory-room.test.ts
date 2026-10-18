@@ -62,3 +62,17 @@ test("consumedBy: a craft's whole recipe tree, a smelt's input and fuel, nothing
   assert.deepEqual([...(await consumedBy(runtime, "smelt_item", { item_name: "raw_iron", count: 3, fuel_item_name: "coal" }))].sort(), ["coal", "raw_iron"]);
   assert.equal((await consumedBy(runtime, "navigate", { x: 1 })).size, 0);
 });
+
+test("neededItems keeps one tool of each class, the best tier: a lesser tier of the same class is spare (run 15 N5)", () => {
+  const carried = snapshot([stack("wooden_pickaxe", 1), stack("stone_pickaxe", 1), stack("wooden_sword", 1), stack("white_bed", 1), stack("oak_boat", 1)]);
+  const needed = neededItems(carried);
+  assert.deepEqual([...needed].sort(), ["oak_boat", "stone_pickaxe", "white_bed", "wooden_sword"]);
+});
+
+test("junkStacks lists the copies of a needed tool beyond the first as junk", () => {
+  const carried = snapshot([stack("wooden_sword", 1), stack("dirt", 4), stack("wooden_sword", 1), stack("wooden_sword", 1)]);
+  assert.deepEqual(junkStacks(carried, new Set(["wooden_sword"])), [
+    { name: "wooden_sword", count: 2, slots: 2, stacks: [1, 1] },
+    { name: "dirt", count: 4, slots: 1, stacks: [4] },
+  ]);
+});

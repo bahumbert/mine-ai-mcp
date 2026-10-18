@@ -100,7 +100,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
-  | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
+  | "use_container" | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
   | "tend_crops" | "use_bucket" | "raw_action";
 
 export type ForegroundState =
@@ -162,6 +162,21 @@ export interface MobSource {
   readonly chance: number;
   /** The game counts the species as hostile: a fight, not a hunt. */
   readonly hostile: boolean;
+  /** The mob spawns naturally in the bot's dimension (the runtime orders sources by it). */
+  readonly spawnsInDimension?: boolean;
+  /** How many of that mob are loaded now. */
+  readonly loaded?: number;
+}
+
+/** A storage block the runtime remembers a bot opened (`observed_containers`). */
+export interface KnownContainer {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly blockName: string;
+  readonly slotCount: number;
+  /** Slots holding something when it was last opened. */
+  readonly usedSlots: number;
 }
 
 /** Furnace knowledge for some items: the recipes making each (none: not smeltable) and how far each fuel goes. */
@@ -308,6 +323,8 @@ export interface BotRuntime {
   toolEnum(tool: string, property: string): Promise<readonly string[]>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
   readMessages(): Promise<readonly PlayerMessage[]>;
+  /** The containers `owner` opened in the overworld (the snapshot names no dimension, as for the seen places) within `within` blocks of `near` (horizontally), nearest first. */
+  knownContainers(owner: string, near: Position, within: number): Promise<readonly KnownContainer[]>;
   /** One read-only SQL statement over the bot's data (`query_bot_data`), as rows of cells in column order. */
   queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]>;
   submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState>;
@@ -387,7 +404,7 @@ const blockDropsSchema = z.object({
       items: z.array(z.object({
         item: z.string(),
         sources: z.array(z.object({ block: z.string(), chance: z.number(), planted: z.boolean(), seed: z.string().optional() })),
-        mobs: z.array(z.object({ mob: z.string(), chance: z.number(), hostile: z.boolean() })).default([]),
+        mobs: z.array(z.object({ mob: z.string(), chance: z.number(), hostile: z.boolean(), spawnsInDimension: z.boolean().optional(), loaded: z.number().optional() })).default([]),
       })),
       blocks: z.array(z.object({
         block: z.string(),
@@ -710,6 +727,18 @@ export class McpBotRuntime implements BotRuntime {
   async say(message: string, to?: string): Promise<{ readonly status: ActionStatus; readonly error: string | null }> {
     const { result } = sayResultSchema.parse(await this.call("send_message", { message, ...(to !== undefined && { to }) }, "Speak in character."));
     return { status: result.status, error: result.error ?? null };
+  }
+
+  async knownContainers(owner: string, near: Position, within: number): Promise<readonly KnownContainer[]> {
+    // The username goes inside an SQL literal: only the characters of its format.
+    if (!/^w{1,16}$/u.test(owner)) return [];
+    const [x, z, reach] = [Math.floor(near.x), Math.floor(near.z), Math.floor(within)];
+    const squared = `((block_x - (${x})) * (block_x - (${x})) + (block_z - (${z})) * (block_z - (${z})))`;
+    const rows = await this.queryBotData(
+      "SELECT block_x, block_y, block_z, block_name, slot_count, json_array_length(contents_json) FROM observed_containers " +
+      `WHERE observed_by_bot_id = '${owner}' AND dimension = 'overworld' AND ${squared} <= ${reach * reach} ORDER BY ${squared}`,
+    );
+    return rows.map((row) => ({ x: Number(row[0]), y: Number(row[1]), z: Number(row[2]), blockName: String(row[3]), slotCount: Number(row[4]), usedSlots: Number(row[5]) }));
   }
 
   async queryBotData(sql: string): Promise<readonly (readonly (string | number | null)[])[]> {

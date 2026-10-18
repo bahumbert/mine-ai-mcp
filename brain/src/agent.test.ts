@@ -1288,3 +1288,19 @@ test("a plain stop from one player ends her work and the character's own goals, 
   const stacks = events.flatMap((event) => event.kind === "state" ? [event.stack.map((work) => work.text)] : []);
   assert.deepEqual(stacks.filter((stack) => stack.length > 0 && !stack.includes("collect 16 oak_log")).at(0), ["mine stone"], "Steve's logs ended, Alex's queued order stayed");
 });
+
+test("what a collect_block step mines is wanted: fresh raw_iron is not named as junk when the inventory is full (run 15 N5)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.dropSources = { ...runtime.dropSources, raw_iron: [{ block: "iron_ore", chance: 1, planted: false }] };
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "raw_iron", count: 40 }, { name: "dirt", count: 128 }] };
+  runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "mine some iron" }, { say: "Full, sorry." });
+  const mine = { step: { skill: "collect_block", block: "iron_ore", count: 5 } };
+  action.reply(mine, mine);
+  await agent.handle(say("Steve", "mine some iron"));
+  await until(() => action.requests.length >= 2);
+  const prompt = JSON.stringify(action.requests[1]);
+  assert.match(prompt, /128 dirt/u);
+  assert.doesNotMatch(prompt, /nothing you are doing needs[^"]*raw_iron/u);
+});

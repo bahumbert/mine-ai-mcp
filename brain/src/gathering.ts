@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { describeMaterials, shortfall } from "./building/blueprint.ts";
-import { toolToMake } from "./building/tool-loss.ts";
+import { MAX_TOOL_LOSSES, toolToMake } from "./building/tool-loss.ts";
 import { boatsOfWood } from "./boats.ts";
 import type { ActOutcome, Body } from "./body.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
@@ -45,6 +45,8 @@ export interface GatherContext {
   readonly heading?: (target: { readonly x: number; readonly z: number } | null) => void;
   /** Drops what the work does not need to free a slot, never the `inputs` of the craft or smelt in hand; true when a slot is free now (unset: nothing is dropped unasked). */
   readonly makeRoom?: (inputs: ReadonlySet<string>) => Promise<boolean>;
+  /** See {@link SkillContext.toolsLost}. */
+  readonly toolsLost?: Set<string>;
 }
 
 export type GatherResult =
@@ -94,6 +96,8 @@ interface Knowledge {
    * is carried yet: a block of that class gets another before it is dug, though it drops by hand (run 13: a shovel).
    */
   readonly lost: Set<string>;
+  /** Per tool class, how many times its tool broke in this gathering (a tool that keeps dying ends the step). */
+  readonly losses: Map<string, number>;
   /** Per gathered item, the block collect_block breaks for it (game data: cobblestone from stone); null when none drops it. */
   readonly source: Map<string, string | null>;
   /** Per item, the mob hunted for it (game data: white wool from sheep), passive ones first; null when none drops it. */
@@ -157,7 +161,7 @@ export async function gatherMaterials(
   home: Position,
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
-  const knowledge = newKnowledge();
+  const knowledge = newKnowledge(context.toolsLost);
   const kept = await madeItems(context.runtime, keep, knowledge);
   const items = [...bill, ...kept].map((entry) => entry.item);
   return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, kept, knowledge));
@@ -265,6 +269,10 @@ async function gatherRounds(
     if (typeof stepped === "string") return { status: "failed", detail: stepped };
     const step = stepped;
     if (step.status === "stopped") return step;
+    const worn = wornOutTool(knowledge);
+    if (worn !== null && step.status === "failed" && shortfall(wanted, (await context.runtime.status()).inventory).length > 0) {
+      return { status: "failed", detail: `${worn}: stopping here; ${step.detail}` };
+    }
     // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
     const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
     if (remade !== null && knowledge.lost.delete(remade) && step.status === "failed") {
@@ -332,12 +340,19 @@ function keepWhatCraftingUsed(wanted: readonly ItemCount[], keep: readonly ItemC
   return next;
 }
 
+/** Says so when a tool class broke {@link MAX_TOOL_LOSSES} times in this gathering: a tool that keeps dying ends the step. */
+function wornOutTool(knowledge: Knowledge): string | null {
+  const worn = [...knowledge.losses].find(([, count]) => count >= MAX_TOOL_LOSSES);
+  return worn === undefined ? null : `the ${worn[0]} was lost ${worn[1]} times in this step (remade ${worn[1] - 1} times)`;
+}
+
 function units(items: readonly ItemCount[]): number {
   return items.reduce((sum, { count }) => sum + count, 0);
 }
 
-function newKnowledge(): Knowledge {
-  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), toolClass: new Map(), lost: new Set(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null, rare: new Map() };
+/** `lost`: the tool classes broken earlier in the objective, shared with the next gathering of it. */
+function newKnowledge(lost: Set<string> = new Set()): Knowledge {
+  return { craftable: new Map(), smelted: new Map(), fuels: {}, harvest: new Map(), toolClass: new Map(), lost, losses: new Map(), source: new Map(), mob: new Map(), cropOnly: new Set(), woods: null, rare: new Map() };
 }
 
 /** How a player gets an item, as `get_items` would: crafted, smelted, grown on a farm, broken from `block`, or hunted. */
@@ -441,11 +456,16 @@ async function notDropped(runtime: BotRuntime, item: string, knowledge: Knowledg
 /** A drop this likely, or more, makes a mob a source to hunt (cod drop bone meal 5% of the time: no source). */
 const HUNT_CHANCE = 0.5;
 
-/** The mob to hunt for `item` (game data), a passive one before a hostile one, the likeliest first; null when none. */
+/** The mobs worth hunting for `item`, in the runtime's preference order (loaded, spawns here, chance, name). */
+async function huntSources(runtime: BotRuntime, item: string): Promise<readonly MobSource[]> {
+  return ((await runtime.mobSources([item]).catch(() => ({})))[item] ?? []).filter((source) => source.chance >= HUNT_CHANCE);
+}
+
+/** The mob to hunt for `item` (game data): the first non-hostile source, else the first; null when none. */
 async function huntedFrom(runtime: BotRuntime, item: string, knowledge: Knowledge): Promise<MobSource | null> {
   const known = knowledge.mob.get(item);
   if (known !== undefined) return known;
-  const sources = ((await runtime.mobSources([item]).catch(() => ({})))[item] ?? []).filter((source) => source.chance >= HUNT_CHANCE);
+  const sources = await huntSources(runtime, item);
   const mob = sources.find((source) => !source.hostile) ?? sources[0] ?? null;
   knowledge.mob.set(item, mob);
   return mob;
@@ -721,7 +741,7 @@ async function collectAll(context: GatherContext, targets: readonly (readonly [s
       const countBroken = (outcome: ActOutcome) => { broken += blocksBroken(outcome.result); };
       // A rare drop is also told the breaks it has left, so one call cannot spend the budget of its chance (hundreds of leaves).
       const breaksLeft = (): number | null => rare === undefined ? null : Math.max(1, RARE_DROP_BREAKS - rare.broken - broken);
-      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, knowledge.lost, countBroken);
+      let step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, knowledge, countBroken);
       if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step, countBroken, breaksLeft);
       // The blocks broken, as the runtime counts them, not the drops that came (a rare drop comes from few of them).
       if (rare !== undefined) rare.broken += broken;
@@ -1045,12 +1065,32 @@ async function huntAll(context: GatherContext, hunts: ReadonlyMap<string, { read
     return { status: "failed", detail: `no ${hostile[1].mob} spawns on this peaceful server: ${hostile[0]} cannot be hunted here` };
   }
   for (const [item, { mob, count }] of hunts) {
-    context.progress?.(`hunting ${mob} for ${count} ${item}, for ${purpose}`);
-    const step = await act(context, "collect_mob_drop", { mob_name: mob, drop_name: item, count }, `Hunt ${mob} for ${count} ${item}, for ${purpose}.`);
-    if (step !== null) return step;
-    done.push(`got ${count} ${item} from ${mob}`);
+    const hunted = await huntWithFallback(context, item, mob, count, purpose, knowledge);
+    if (hunted.failure !== null) return hunted.failure;
+    done.push(`got ${count} ${item} from ${hunted.mob}`);
   }
   return { status: "done", detail: done.join(", ") };
+}
+
+/**
+ * Hunts `mob` for `item`; when that fails (no such mob loaded, a refusal), the next source of the runtime's order is
+ * tried, each once per step, and the cache moves to the one that worked. The failure names every source tried.
+ */
+async function huntWithFallback(context: GatherContext, item: string, first: string, count: number, purpose: string, knowledge: Knowledge): Promise<{ readonly mob: string; readonly failure: GatherResult | null }> {
+  const tried: string[] = [];
+  let failure: GatherResult | null = null;
+  for (let mob: string | undefined = first; mob !== undefined; ) {
+    tried.push(mob);
+    context.progress?.(`hunting ${mob} for ${count} ${item}, for ${purpose}`);
+    failure = await act(context, "collect_mob_drop", { mob_name: mob, drop_name: item, count }, `Hunt ${mob} for ${count} ${item}, for ${purpose}.`);
+    if (failure === null || failure.status === "stopped") break;
+    const next = (await huntSources(context.runtime, item)).find((source) => !tried.includes(source.mob));
+    if (next !== undefined) knowledge.mob.set(item, next);
+    mob = next?.mob;
+  }
+  if (failure === null) return { mob: tried[tried.length - 1]!, failure };
+  if (failure.status === "failed" && tried.length > 1) failure = { status: "failed", detail: `${failure.detail} (hunted ${tried.join(", then ")} for ${item}; none worked)` };
+  return { mob: tried[tried.length - 1]!, failure };
 }
 
 /** The part of a `collect_block` result that names a tool which broke during the run (src/actions/collect-block/contract.ts). */
@@ -1058,12 +1098,16 @@ const toolLostSchema = z.object({ collected: z.object({ toolLost: z.object({ cla
 
 /**
  * Runs one action; null when it succeeded. A tool the runtime says broke during it (`toolLost`, succeeded or not) is
- * added to `lost`; `observe` sees each outcome.
+ * added to `wear.lost` and counted in `wear.losses`; `observe` sees each outcome.
  */
-async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string, lost?: Set<string>, observe?: (outcome: ActOutcome) => void): Promise<GatherResult | null> {
+async function act(context: GatherContext, tool: "collect_block" | "collect_mob_drop" | "craft_item" | "smelt_item" | "navigate" | "use_bucket", input: Record<string, unknown>, rationale: string, wear?: Knowledge, observe?: (outcome: ActOutcome) => void): Promise<GatherResult | null> {
   let outcome = await context.body.act(tool, input, rationale, { signal: context.signal });
   const broke = toolLostSchema.safeParse(outcome.result);
-  if (broke.success) lost?.add(broke.data.collected.toolLost.class);
+  if (broke.success && wear !== undefined) {
+    const toolClass = broke.data.collected.toolLost.class;
+    wear.lost.add(toolClass);
+    wear.losses.set(toolClass, (wear.losses.get(toolClass) ?? 0) + 1);
+  }
   if (context.signal.aborted) return { status: "stopped" };
   // A craft or a smelt with no room for its result or its workstation: room is made once, then it runs again (run 12).
   if (outcome.status !== "succeeded" && (tool === "craft_item" || tool === "smelt_item") && FULL_INVENTORY.test(outcome.error ?? "") && context.makeRoom !== undefined && (await context.makeRoom(await consumedBy(context.runtime, tool, input)))) {

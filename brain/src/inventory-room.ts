@@ -4,6 +4,10 @@ import type { BotRuntime, BotSnapshot } from "./runtime-client.ts";
 export const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
 export const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
 
+const TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"];
+/** 0 for the best tier of a tool, up; an item with no tier ranks last. */
+export const tierRank = (item: string): number => { const rank = TIERS.indexOf(item.split("_")[0]!); return rank < 0 ? TIERS.length : rank; };
+
 /** The failures of a full inventory: a workstation or a craft without room, a pickup or a collect with no free slot. */
 export const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot|needs inventory room/u;
 
@@ -28,9 +32,17 @@ export interface RoomFacts {
 export function neededItems(snapshot: Pick<BotSnapshot, "inventory" | "foods">, facts: RoomFacts = {}): Set<string> {
   const needed = new Set<string>([...(facts.houseBill ?? []), ...(facts.wanted ?? []), ...snapshot.foods.map((food) => food.name)]);
   const named = new Set(facts.objective?.toLowerCase().match(/[a-z][a-z0-9_]*/gu) ?? []);
+  // One tool of each class (and one bed, one boat) is needed: the best tier carried; the others are spare (run 15 N5).
+  const best = new Map<string, string>();
+  for (const { name } of snapshot.inventory) {
+    const kind = kindOf(name);
+    const current = kind === null ? undefined : best.get(kind);
+    if (kind !== null && (current === undefined || tierRank(name) < tierRank(current))) best.set(kind, name);
+  }
+  for (const name of best.values()) needed.add(name);
   for (const { name } of snapshot.inventory) {
     const last = name.split("_").at(-1)!;
-    if (kindOf(name) !== null || ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);
+    if (ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);
   }
   return needed;
 }
@@ -45,11 +57,17 @@ export interface JunkStack {
   readonly stacks: readonly number[];
 }
 
-/** The carried kinds not in `needed`, most stacks first, then the biggest count, then by name. */
+/**
+ * The carried kinds not in `needed`, most stacks first, then the biggest count, then by name. The stacks of a needed tool
+ * (bed, boat) beyond the first are junk too: one is kept, the copies can go.
+ */
 export function junkStacks(snapshot: Pick<BotSnapshot, "inventory">, needed: ReadonlySet<string>): JunkStack[] {
   const junk = new Map<string, number[]>();
+  const keptOne = new Set<string>();
   for (const { name, count } of snapshot.inventory) {
-    if (!needed.has(name)) junk.set(name, [...(junk.get(name) ?? []), count]);
+    const copy = needed.has(name) && kindOf(name) !== null && keptOne.has(name);
+    if (needed.has(name) && kindOf(name) !== null) keptOne.add(name);
+    if (!needed.has(name) || copy) junk.set(name, [...(junk.get(name) ?? []), count]);
   }
   return [...junk]
     .map(([name, stacks]) => ({ name, count: stacks.reduce((sum, count) => sum + count, 0), slots: stacks.length, stacks }))
