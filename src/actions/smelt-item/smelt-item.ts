@@ -27,6 +27,8 @@ const FURNACE_REACH = 4.5;
 const COOK_MS_PER_ITEM = 10_000;
 const COOK_STALL_MS = 15_000;
 const FUEL_START_SETTLEMENT_MS = 1_000;
+const HARVEST_STACK = 8;
+const HARVEST_INTERVAL_MS = 30_000;
 const SLOT_RECOVERY_MS = 2_000;
 
 type FurnaceWindow = Awaited<ReturnType<Bot["openFurnace"]>>;
@@ -204,6 +206,41 @@ async function recover(bot: Bot, window: FurnaceWindow): Promise<Recovery> {
   return { input, fuel, output, errors };
 }
 
+/** Ingots taken out while the furnace still cooks, so the carried count rises as they come. */
+interface Harvest {
+  readonly taken: () => number;
+  readonly item: () => { readonly name: string; readonly inventoryBefore: number } | null;
+  readonly takeReady: (outputCount: number) => Promise<void>;
+}
+
+function midCookHarvest(bot: Bot, window: FurnaceWindow, now: () => number): Harvest {
+  let taken = 0;
+  let item: { name: string; inventoryBefore: number } | null = null;
+  let lastTakeAt = now();
+  let disabled = false;
+  return {
+    taken: () => taken,
+    item: () => item,
+    async takeReady(outputCount) {
+      const at = now();
+      if (disabled || outputCount === 0) return;
+      if (outputCount < HARVEST_STACK && at - lastTakeAt < HARVEST_INTERVAL_MS) return;
+      lastTakeAt = at;
+      try {
+        const out = await boundedTake(() => takeOutputOnce(bot, window), "takeOutput");
+        if (!out) return;
+        item ??= { name: out.name, inventoryBefore: out.inventoryBefore };
+        taken += out.count;
+        if (!out.confirmed) disabled = true;
+      } catch {
+        // No room or a transfer that did not settle: leave the output in the furnace; the final
+        // recovery tries once more and reports the reason. No second mutation on a pending window.
+        disabled = true;
+      }
+    },
+  };
+}
+
 interface FurnaceObservation {
   readonly output: number;
   readonly input: number;
@@ -231,6 +268,7 @@ async function waitForCook(
   dependencies: SmeltItemDependencies,
   signal?: AbortSignal,
   observe?: (observation: FurnaceObservation, stalledForMs: number) => void,
+  harvest?: Harvest,
 ): Promise<{ readonly verdict: CookVerdict; readonly observation: FurnaceObservation }> {
   const startedAt = dependencies.now();
   const safetyDeadline = startedAt + Math.max(60_000, requested * COOK_MS_PER_ITEM * 4 + COOK_STALL_MS);
@@ -243,7 +281,7 @@ async function waitForCook(
     if (current.output !== previous.output || current.cookProgress !== previous.cookProgress) lastAdvanceAt = now;
     const stalledForMs = Math.max(0, now - lastAdvanceAt);
     observe?.(current, stalledForMs);
-    if (current.output >= requested && current.input === 0 && (current.cookProgress ?? 0) === 0)
+    if ((harvest?.taken() ?? 0) + current.output >= requested && current.input === 0 && (current.cookProgress ?? 0) === 0)
       return { verdict: "completed", observation: current };
     if (
       now - startedAt >= FUEL_START_SETTLEMENT_MS &&
@@ -254,7 +292,8 @@ async function waitForCook(
     ) return { verdict: "fuel_starved", observation: current };
     if (stalledForMs >= COOK_STALL_MS) return { verdict: "stalled", observation: current };
     if (now >= safetyDeadline) return { verdict: "safety_timeout", observation: current };
-    previous = current;
+    await harvest?.takeReady(current.output);
+    previous = furnaceObservation(window);
     await dependencies.pause(100, signal);
   }
 }
@@ -396,6 +435,7 @@ async function smeltInFurnace(
   let rawRecovered = 0;
   let fuelRecovered = 0;
   let ownsSlots = false;
+  const harvest = midCookHarvest(bot, furnace, dependencies.now);
   let current = furnaceObservation(furnace);
   let stalledForMs = 0;
   context.observeProgress?.(() => ({ baseline: { ...before },
@@ -432,7 +472,7 @@ async function smeltInFurnace(
     const waited = await waitForCook(furnace, request.count, dependencies, context.signal, (observation, idleMs) => {
       current = observation;
       stalledForMs = idleMs;
-    });
+    }, harvest);
     verdict = waited.verdict;
     current = waited.observation;
   } catch (cause) {
@@ -442,13 +482,15 @@ async function smeltInFurnace(
     furnace.close();
   }
   context.signal?.throwIfAborted();
-  if (recovery.output) {
-    outputItem = recovery.output.name;
-    produced = recovery.output.count;
+  const harvested = harvest.item();
+  if (recovery.output || harvested) {
+    outputItem = (recovery.output ?? harvested)!.name;
+    produced = harvest.taken() + (recovery.output?.count ?? 0);
+    const inventoryBefore = (harvested ?? recovery.output)!.inventoryBefore;
     const outputAfter = await settleInventoryMinimum(
       bot,
       outputItem,
-      recovery.output.inventoryBefore + produced,
+      inventoryBefore + produced,
       { timeoutMs: SLOT_RECOVERY_MS, signal: context.signal },
     );
     if (!outputAfter.confirmed) {
