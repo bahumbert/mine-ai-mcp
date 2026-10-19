@@ -1,0 +1,105 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-bamboo-inside-cell
+tags: [regression]
+description: >-
+  Live 2026-10-19, Ayla stood flush with the bamboo at 191,78,292, her centre in its cell, and no route started from
+  there. The bot walks into that cell beside the stalk (its placed box is x 191.623..191.810, z 292.556..292.744, offset
+  +0.2167 +0.15), then navigates to the stalk's far side, back, and to the free side. Pass = every navigate succeeds and
+  the server never put the bot back.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill 183 -60 286 199 -55 298 air"
+
+geometry:
+  - fill: { block: bamboo, from: [191, -60, 292], to: [191, -59, 292] }
+
+players:
+  - name: Actor
+    pos: [188.5, -60, 292.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  debugExecuteJavaScript: true
+  actions:
+    - action: debug_execute_javascript
+      input:
+        code: "globalThis.offsetCorrections = 0; bot.on('forcedMove', () => { globalThis.offsetCorrections += 1; }); return 'counting';"
+    - { action: navigate, input: { x: 190, y: -60, z: 292, range: 0 } }
+    - action: debug_execute_javascript
+      input:
+        code: |
+          const cx = 190.5, cz = 292.5, eye = 1.62;
+          for (let tick = 0; tick < 40; tick += 1) {
+            const p = bot.entity.position;
+            const distance = Math.hypot(cx - p.x, cz - p.z);
+            if (distance <= 0.03) break;
+            await bot.lookAt(new Vec3(cx, p.y + eye, cz), true);
+            bot.setControlState('sneak', distance < 0.5);
+            bot.setControlState('forward', true);
+            await bot.waitForTicks(1);
+          }
+          bot.clearControlStates();
+          await bot.waitForTicks(10);
+          await bot.lookAt(new Vec3(bot.entity.position.x + 5, bot.entity.position.y + eye, bot.entity.position.z), true);
+          bot.setControlState('forward', true);
+          await bot.waitForTicks(20);
+          bot.clearControlStates();
+          await bot.waitForTicks(10);
+          const x = bot.entity.position.x;
+          if (!(x > 191.0)) throw new Error('did not stop inside the stalk cell: x ' + x);
+          return 'inside the stalk cell at x ' + x;
+    - { action: navigate, input: { x: 196, y: -60, z: 292, range: 0 } }
+    - { action: navigate, input: { x: 190, y: -60, z: 292, range: 0 } }
+    - action: debug_execute_javascript
+      input:
+        code: |
+          const cx = 190.5, cz = 292.5, eye = 1.62;
+          for (let tick = 0; tick < 40; tick += 1) {
+            const p = bot.entity.position;
+            const distance = Math.hypot(cx - p.x, cz - p.z);
+            if (distance <= 0.03) break;
+            await bot.lookAt(new Vec3(cx, p.y + eye, cz), true);
+            bot.setControlState('sneak', distance < 0.5);
+            bot.setControlState('forward', true);
+            await bot.waitForTicks(1);
+          }
+          bot.clearControlStates();
+          await bot.waitForTicks(10);
+          await bot.lookAt(new Vec3(bot.entity.position.x + 5, bot.entity.position.y + eye, bot.entity.position.z), true);
+          bot.setControlState('forward', true);
+          await bot.waitForTicks(20);
+          bot.clearControlStates();
+          await bot.waitForTicks(10);
+          const x = bot.entity.position.x;
+          if (!(x > 191.0)) throw new Error('did not stop inside the stalk cell: x ' + x);
+          return 'inside the stalk cell at x ' + x;
+    - { action: navigate, input: { x: 186, y: -60, z: 292, range: 0 } }
+    - action: debug_execute_javascript
+      input:
+        code: "if (globalThis.offsetCorrections > 0) throw new Error('the server put the bot back ' + globalThis.offsetCorrections + ' times'); return 'no corrections';"
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [186.5, -60, 292.5]
+      radius: 1.5
+    - kind: completion
+      who: Actor

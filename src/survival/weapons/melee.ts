@@ -61,7 +61,7 @@ export function distanceToBody(
 
 /** The approach and swing must agree on reach, including targets above or below a ledge. */
 export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView): Goal {
-  const rays = worldViewRaycaster((x, y, z) => obstaclesOf(world.blockAt(x, y, z)));
+  const rays = worldViewRaycaster((x, y, z) => obstaclesOf(world.blockAt(x, y, z), x, z));
   return {
     resolve(observation) {
       const entity = bot.entities[targetId];

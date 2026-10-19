@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-collision-far
+tags: [regression]
+description: >-
+  Same failure as offset-collision-probe, far from the origin where the position seed uses negative coordinates and the
+  32-bit wrap of its x product (|x| > 686): bamboo at the maximum offset, and pointed dripstone with and without its
+  smaller clamp. The server is the oracle for the formula.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -705 -60 -705 -685 -55 -685 air"
+
+# Bamboo -700,-700 (-0.050, +0.083); -697,-700 (+0.250, +0.117, the maximum); -700,-697 (-0.050, +0.250).
+# Dripstone -694,-700 (-0.117, -0.017, no clamp); -691,-700 (-0.017, -0.125, z clamped); -700,-694 tip (-0.017, +0.125).
+# A neighbour update may change a dripstone's thickness; the driver reads the state at walk time.
+geometry:
+  - fill: { block: bamboo, from: [-700, -60, -700], to: [-700, -59, -700] }
+  - fill: { block: bamboo, from: [-697, -60, -700], to: [-697, -59, -700] }
+  - fill: { block: bamboo, from: [-700, -60, -697], to: [-700, -59, -697] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=frustum]", at: [-694, -60, -700] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=frustum]", at: [-691, -60, -700] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=tip]", at: [-700, -60, -694] }
+
+players:
+  - name: Actor
+    pos: [-698.5, -60, -698.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/offset-collision.ts]
+
+params:
+  debugExecuteJavaScript: true
+  stalks:
+    - { at: [-700, -60, -700] }
+    - { at: [-697, -60, -700] }
+    - { at: [-700, -60, -697] }
+    - { at: [-694, -60, -700] }
+    - { at: [-691, -60, -700] }
+    - { at: [-700, -60, -694] }
+
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - kind: completion
+      who: Actor

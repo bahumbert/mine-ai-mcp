@@ -1,0 +1,56 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-collision-probe
+tags: [regression]
+description: >-
+  Live 2026-10-18/19, Ayla stood at 191,78,292 and the server put her back every 100 ms for 15+ minutes: vanilla moves
+  every bamboo stalk sideways by an amount that depends on its x and z, Mineflayer gives one box to every position, so
+  the client walked into the server's stalk. The bot walks straight at five stalks from their four sides; the server is
+  the oracle. Pass = no forced move and a stop flush with the stalk as the server has it.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill 185 -60 286 197 -55 298 air"
+
+# Two high, three apart: no approach cell holds a stalk. Offsets (x, z): 191,292 +0.217 +0.150 (Ayla's cell);
+# 188,292 +0.150 -0.050; 194,292 +0.050 -0.183; 191,289 -0.117 +0.183; 191,295 +0.250 -0.117 (the maximum).
+geometry:
+  - fill: { block: bamboo, from: [191, -60, 292], to: [191, -59, 292] }
+  - fill: { block: bamboo, from: [188, -60, 292], to: [188, -59, 292] }
+  - fill: { block: bamboo, from: [194, -60, 292], to: [194, -59, 292] }
+  - fill: { block: bamboo, from: [191, -60, 289], to: [191, -59, 289] }
+  - fill: { block: bamboo, from: [191, -60, 295], to: [191, -59, 295] }
+
+players:
+  - name: Actor
+    pos: [189.5, -60, 292.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/offset-collision.ts]
+
+params:
+  debugExecuteJavaScript: true
+  stalks:
+    - { at: [191, -60, 292] }
+    - { at: [188, -60, 292] }
+    - { at: [194, -60, 292] }
+    - { at: [191, -60, 289] }
+    - { at: [191, -60, 295] }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: completion
+      who: Actor

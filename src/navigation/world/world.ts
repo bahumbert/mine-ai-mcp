@@ -6,6 +6,7 @@
  * search, not here. The Mineflayer producers of every shape here live in
  * `mineflayer/world.ts` and `mineflayer/bot.ts`.
  */
+import { horizontalOffset } from "../../world/block-offset.js";
 import { type BlockGeometry, describeBlockGeometry, observationBits } from "./block-geometry.js";
 
 /** One block cell: integer coordinates, the unit search plans in. */
@@ -89,7 +90,13 @@ export type BlockObservation =
   | {
       readonly kind: "loaded";
       readonly stateId: number;
+      /** The boxes at the cell's origin as the source gave them; `collisionBoxesAt` is the only way to place them. */
       readonly collisionShapes: readonly CollisionBox[];
+      /**
+       * The largest sideways offset in metres vanilla gives this block per cell (bamboo, pointed dripstone; see
+       * `offsetBlocks`), or 0: for every other block, and for boxes already placed (a positioned Mineflayer block).
+       */
+      readonly horizontalOffset: number;
       readonly traits: BlockTraits;
       readonly geometry: BlockGeometry;
       /** The geometry and the hot traits as one integer of `GEOMETRY_*` and `TRAIT_*` bits, for the predicates search asks of every cell it looks at. */
@@ -107,16 +114,34 @@ export function loadedObservation(
   stateId: number,
   collisionShapes: readonly CollisionBox[],
   traits: BlockTraits,
+  horizontalOffset = 0,
 ): LoadedBlock {
   const geometry = describeBlockGeometry(traits, collisionShapes);
   return Object.freeze({
     kind: "loaded",
     stateId,
     collisionShapes,
+    horizontalOffset,
     traits,
     geometry,
     bits: observationBits(geometry, traits),
   });
+}
+
+/** The boxes of `block` where cell `x`, `z` has them: the observation's own array for a block that is not offset, else moved by vanilla's per-cell offset. */
+export function collisionBoxesAt(block: LoadedBlock, x: number, z: number): readonly CollisionBox[] {
+  if (block.horizontalOffset === 0) return block.collisionShapes;
+  const offset = horizontalOffset(block.horizontalOffset, x, z);
+  const dx = block.horizontalOffset + offset.x;
+  const dz = block.horizontalOffset + offset.z;
+  return block.collisionShapes.map((box) => ({
+    minX: box.minX + dx,
+    minY: box.minY,
+    minZ: box.minZ + dz,
+    maxX: box.maxX + dx,
+    maxY: box.maxY,
+    maxZ: box.maxZ + dz,
+  }));
 }
 
 /** The identity a door or gate's halves share, or null for a block nothing activates. */

@@ -27,7 +27,7 @@ export type NavigationStatus =
       readonly movement: MovementKind;
       readonly phase: MovementPhase;
     }
-  | { readonly kind: "stabilizing"; readonly runId: string; readonly reason: "airborne" }
+  | { readonly kind: "stabilizing"; readonly runId: string; readonly reason: "airborne" | "inside_partial_block" }
   | { readonly kind: "stopping"; readonly runId: string; readonly reason: string };
 
 export interface ClosestNodeEvidence {

@@ -125,3 +125,13 @@ test("block traits are read from Prismarine's own property strings", () => {
   assert.equal(upper.traits.upperHalf, true);
   assert.equal(upper.traits.openable, true);
 });
+
+test("the world view's observation of an offset block carries its maximum offset, other blocks none", () => {
+  const BAMBOO = registry.blocksByName.bamboo.defaultState;
+  const { bot } = columnBot(new Map([["1,2,3", BAMBOO], ["2,2,3", STONE]]));
+  const view = new MineflayerWorldView(bot);
+  const bamboo = view.blockAt(1, 2, 3);
+  const stone = view.blockAt(2, 2, 3);
+  assert.equal(bamboo.kind === "loaded" && bamboo.horizontalOffset, 0.25);
+  assert.equal(stone.kind === "loaded" && stone.horizontalOffset, 0);
+});

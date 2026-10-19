@@ -190,7 +190,7 @@ const OPENED = new WeakMap<LoadedBlock, LoadedBlock>();
 function openedObservation(original: LoadedBlock, stateId: number): LoadedBlock {
   const known = OPENED.get(original);
   if (known !== undefined && known.stateId === stateId) return known;
-  const opened = loadedObservation(stateId, original.collisionShapes, { ...original.traits, open: true });
+  const opened = loadedObservation(stateId, original.collisionShapes, { ...original.traits, open: true }, original.horizontalOffset);
   OPENED.set(original, opened);
   return opened;
 }

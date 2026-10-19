@@ -47,3 +47,23 @@ test("the leaf counts only where the footprint reaches it", () => {
   assert.deepEqual(overheadPinningCell(world, { x: 1.2, y: -60, z: 0.5 }), { x: 0, y: -59, z: 0 }, "the body's edge is under it");
   assert.equal(overheadPinningCell(world, { x: 1.4, y: -60, z: 0.5 }), null, "the body is past it");
 });
+
+/** Bamboo's 1.21.4 data box (vanilla's moved by the origin cell's offset); placed at 191,292 it spans x 191.623..191.810. */
+const BAMBOO = {
+  stateId: 9,
+  collisionShapes: [{ minX: 0.15625, minY: 0, minZ: 0.15625, maxX: 0.34375, maxY: 1, maxZ: 0.34375 }],
+  horizontalOffset: 0.25,
+};
+
+test("a body flush with the placed stalk is not pinned by it, though the data box would pin it", () => {
+  // Live 2026-10-19, Ayla: bamboo two high at 191,292, the body stopped against it with its centre in the cell.
+  const world = new MemoryWorld();
+  for (const y of [-61, -60, -59, -58]) world.load({ x: 191, y, z: 292 }, { stateId: 0 });
+  world.load({ x: 191, y: -60, z: 292 }, BAMBOO);
+  world.load({ x: 191, y: -59, z: 292 }, BAMBOO);
+  assert.equal(overheadPinningCell(world, { x: 191.3229, y: -60, z: 292.5 }), null, "placed: 191.6229 is short of the stalk");
+  assert.deepEqual(overheadPinningCell(world, { x: 191.5, y: -60, z: 292.5 }), { x: 191, y: -59, z: 292 }, "inside the placed stalk");
+  const dataBox = new MemoryWorld();
+  for (const y of [-60, -59]) dataBox.load({ x: 191, y, z: 292 }, { ...BAMBOO, horizontalOffset: 0 });
+  assert.deepEqual(overheadPinningCell(dataBox, { x: 191.3229, y: -60, z: 292.5 }), { x: 191, y: -59, z: 292 }, "the data box pins");
+});

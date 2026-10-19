@@ -47,7 +47,7 @@ function sourceRay(world: WorldView, position: Position3, source: BlockPosition,
     const cell = world.blockAt(x, y, z);
     return cell.kind === "loaded" && cell.traits.liquid !== null && cell.traits.liquidSource
       ? SOURCE_SHAPE
-      : obstaclesOf(cell);
+      : obstaclesOf(cell, x, z);
   });
   const hit = ray.raycast(eye, toward.normalize(), distance);
   return hit ? ("position" in hit ? hit.position : hit) : source;

@@ -14,6 +14,7 @@
 import type { Bot } from "mineflayer";
 import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
+import { type OffsetBlocks, offsetBlocks } from "../../world/block-offset.js";
 import {
   type BlockObservation,
   type BlockTraits,
@@ -133,14 +134,19 @@ function traits(block: MineflayerBlock): BlockTraits {
   };
 }
 
-/** Describe one block state as the compact observation planning and policy read. Position-free. */
-export function observeMineflayerBlock(block: MineflayerBlock): LoadedBlock {
+/**
+ * Describe one block state as the compact observation planning and policy read. Position-free. A block read through
+ * `bot.blockAt` has its boxes placed already (`placeOffsetShapes`), so its callers pass no `horizontalOffset`; the
+ * `WorldView` describes the position-free state, so it passes the block's.
+ */
+export function observeMineflayerBlock(block: MineflayerBlock, horizontalOffset = 0): LoadedBlock {
   return loadedObservation(
     block.stateId,
     Object.freeze(
       block.shapes.map(([minX, minY, minZ, maxX, maxY, maxZ]) => Object.freeze({ minX, minY, minZ, maxX, maxY, maxZ })),
     ),
     Object.freeze(traits(block)),
+    horizontalOffset,
   );
 }
 
@@ -202,10 +208,13 @@ export class MineflayerWorldView implements WorldView {
   /** One shared observation per block state id, built on first sight. */
   readonly #observations: BlockObservation[] = [];
   readonly #Block: ReturnType<typeof blockClass>;
+  /** The blocks vanilla offsets per cell, by name: their position-free observations carry the offset. */
+  readonly #offsets: OffsetBlocks;
   #revision = 0;
 
   constructor(readonly bot: Bot) {
     this.#Block = blockClass(bot);
+    this.#offsets = offsetBlocks(bot.registry);
     bot.on("blockUpdate", this.#onBlockUpdate);
     bot.on("chunkColumnLoad", this.#onColumnChange);
     bot.on("chunkColumnUnload", this.#onColumnChange);
@@ -255,7 +264,9 @@ export class MineflayerWorldView implements WorldView {
   }
 
   #observation(stateId: number): BlockObservation {
-    return (this.#observations[stateId] ??= observeMineflayerBlock(this.#Block.fromStateId(stateId, 0)));
+    if (this.#observations[stateId] !== undefined) return this.#observations[stateId];
+    const block = this.#Block.fromStateId(stateId, 0);
+    return (this.#observations[stateId] = observeMineflayerBlock(block, this.#offsets.get(block.name) ?? 0));
   }
 
   #column(chunkX: number, chunkZ: number): CachedColumn | null {

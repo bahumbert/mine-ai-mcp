@@ -163,11 +163,11 @@ export interface StanceSight {
 
 export function stanceSight(blockAt: WorldView["blockAt"], standing: Position3): StanceSight {
   const eye = { x: standing.x, y: standing.y + STANDING_EYE_HEIGHT, z: standing.z };
-  const untouched = worldViewRaycaster((x, y, z) => obstaclesOf(blockAt(x, y, z)));
+  const untouched = worldViewRaycaster((x, y, z) => obstaclesOf(blockAt(x, y, z), x, z));
   const seen = new Map<number, boolean>();
   const aims = (rays: BlockRaycaster, dig: Dig): boolean => {
     const { x, y, z } = dig.position;
-    return visibleBlockAim(rays, eye, dig.position, DIG_REACH, obstaclesOf(blockAt(x, y, z)) ?? []) !== null;
+    return visibleBlockAim(rays, eye, dig.position, DIG_REACH, obstaclesOf(blockAt(x, y, z), x, z) ?? []) !== null;
   };
   const feetX = Math.floor(standing.x);
   const feetY = Math.floor(standing.y);
@@ -183,8 +183,10 @@ export function stanceSight(blockAt: WorldView["blockAt"], standing: Position3):
     for (const face of faces) {
       let verdict: "clear" | "blocked" | "unsure" = "clear";
       for (let index = 0; index < face.cells.length; index += 3) {
-        const cell = blockAt(feetX + face.cells[index]!, feetY + face.cells[index + 1]!, feetZ + face.cells[index + 2]!);
-        const obstacles = obstaclesOf(cell);
+        const cellX = feetX + face.cells[index]!;
+        const cellZ = feetZ + face.cells[index + 2]!;
+        const cell = blockAt(cellX, feetY + face.cells[index + 1]!, cellZ);
+        const obstacles = obstaclesOf(cell, cellX, cellZ);
         if (obstacles === null || (cell.kind === "loaded" && cell.geometry.fullCube)) {
           verdict = "blocked";
           break;
@@ -214,7 +216,7 @@ export function stanceSight(blockAt: WorldView["blockAt"], standing: Position3):
       // the digs before it are out of the way.
       if (visible || cleared.length === 0) return visible;
       const rays = worldViewRaycaster((x, y, z) =>
-        cleared.includes(packKey(x, y, z)) ? NO_OBSTACLE : obstaclesOf(blockAt(x, y, z)),
+        cleared.includes(packKey(x, y, z)) ? NO_OBSTACLE : obstaclesOf(blockAt(x, y, z), x, z),
       );
       return aims(rays, dig);
     },

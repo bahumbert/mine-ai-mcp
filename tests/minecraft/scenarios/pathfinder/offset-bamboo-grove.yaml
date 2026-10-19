@@ -1,0 +1,65 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-bamboo-grove
+tags: [acceptance]
+description: >-
+  Acceptance for offset blocks: navigate through a lane in a bamboo grove, past stalks that lean into the lane and to a
+  cell beside two stalks offset toward it. Vanilla moves each stalk by an amount that depends on its cell, so the
+  client's box must match the server's everywhere; pass = arrival, completion and no forced move in the whole run.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill 196 -60 296 211 -55 308 air"
+
+# Bamboo two high on x 200..208, z 298..306, then air lanes cut through it: z 302 for x 200..203, x 203 for z 299..302,
+# z 299 for x 203..207, x 207 for z 299..305, z 305 for x 207..208.
+geometry:
+  - fill: { block: bamboo, from: [200, -60, 298], to: [208, -59, 306] }
+  - fill: { block: air, from: [200, -60, 302], to: [203, -59, 302] }
+  - fill: { block: air, from: [203, -60, 299], to: [203, -59, 302] }
+  - fill: { block: air, from: [203, -60, 299], to: [207, -59, 299] }
+  - fill: { block: air, from: [207, -60, 299], to: [207, -59, 305] }
+  - fill: { block: air, from: [207, -60, 305], to: [208, -59, 305] }
+
+players:
+  - name: Actor
+    pos: [197.5, -60, 302.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  debugExecuteJavaScript: true
+  actions:
+    - action: debug_execute_javascript
+      input:
+        code: "globalThis.offsetCorrections = 0; bot.on('forcedMove', () => { globalThis.offsetCorrections += 1; }); return 'counting';"
+    # Beside the stalks at 201,301 (+0.117 z) and 201,303 (-0.083 z), which lean toward this cell.
+    - { action: navigate, input: { x: 201, y: -60, z: 302, range: 0 } }
+    # The lane's four corners, and along x 207 past the stalk at 208,301 (-0.083 x), which leans into the lane.
+    - { action: navigate, input: { x: 210, y: -60, z: 305, range: 0 } }
+    - action: debug_execute_javascript
+      input:
+        code: "if (globalThis.offsetCorrections > 0) throw new Error('the server put the bot back ' + globalThis.offsetCorrections + ' times'); return 'no corrections';"
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [210.5, -60, 305.5]
+      radius: 1.5
+    - kind: completion
+      who: Actor
