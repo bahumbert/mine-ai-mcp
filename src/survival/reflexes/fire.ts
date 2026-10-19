@@ -5,7 +5,7 @@ import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
 import { FIRE_ESCAPE_RADIUS, nearbyFireEscape, type FireEscapeReason } from "../positioning/fire-escape.js";
-import { escapeFire } from "../responses/fire.js";
+import { escapeFire, type FireEscapeOutcome } from "../responses/fire.js";
 
 /**
  * Whether an escape is reachable, searched once per body position, world revision and danger: the search reads up to
@@ -36,6 +36,21 @@ function fireEscapeFacts(bot: Bot) {
       .filter((item) => bot.registry.blocksByName[item.name])
       .map((item) => ({ name: item.name, count: item.count })),
   };
+}
+
+function reflexOutcomeKind(outcome: FireEscapeOutcome) {
+  if (outcome === "escaped") return "dry_footing" as const;
+  if (outcome === "died") return "bot_died" as const;
+  return outcome === "timed_out" ? ("escape_timed_out" as const) : ("no_escape" as const);
+}
+
+/** What the model is told when the escape ended without safe footing: no way to go, or out of time on the wall clock. */
+function fireEscapeFailure(kind: ReturnType<typeof reflexOutcomeKind>) {
+  if (kind === "escape_timed_out")
+    return { kind: "no_escape" as const, why: "The fire escape ran out of time before the body reached safe footing." };
+  return kind === "no_escape"
+    ? { kind: "no_escape" as const, why: "No supported local escape was observed." }
+    : null;
 }
 
 /** Fire owns its environmental authority; combat policy cannot prohibit escape. */
@@ -85,12 +100,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
       const healthBefore = bot.health;
       const outcome = await escapeFire(bot, world, signal, reason);
       return {
-        kind:
-          outcome === "escaped"
-            ? ("dry_footing" as const)
-            : outcome === "died"
-              ? ("bot_died" as const)
-              : ("no_escape" as const),
+        kind: reflexOutcomeKind(outcome),
         healthBefore,
         healthAfter: bot.health,
         burning: isBurning(bot),
@@ -105,8 +115,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
       outcome.kind === "dry_footing"
         ? { kind: "resume" }
         : { kind: "return", reason: "Fire escape did not establish safe footing." },
-    failure: (outcome) =>
-      outcome.kind === "no_escape" ? { kind: "no_escape", why: "No supported local escape was observed." } : null,
+    failure: (outcome) => fireEscapeFailure(outcome.kind),
     describe: (outcome) => outcome,
   });
   return {

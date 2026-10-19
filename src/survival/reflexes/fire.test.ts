@@ -136,7 +136,7 @@ test("a burning bot near reachable water is answered", async () => {
   assert.equal(runner.status().activeAction?.action, "fire_reflex", "the way round the lava is a reachable escape");
 });
 
-test("senses in one cell and one world revision search once", async () => {
+test("a still body in one world revision searches once", async () => {
   const { bot, world, reads } = burningBesidePit(true);
   const runner = new ActionRunner();
   await using resources = new AsyncDisposableStack();
@@ -148,4 +148,24 @@ test("senses in one cell and one world revision search once", async () => {
   for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
   assert.equal(reads(), afterFirst, "the same cell and revision read nothing more");
   assert.ok(!runner.status().activeAction, "water behind lava is no escape: the reflex stands down");
+});
+
+test("a walk that outlasts the 15 s wall clock is reported as out of time, not as no escape", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { bot, world } = burningBesidePit(false);
+  Object.assign(bot, { setControlState() {} });
+  const runner = new ActionRunner();
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, runner));
+  resources.use(attachFireReflex(bot, driver, world));
+  for (let tick = 0; tick < 3; tick++) bot.emit("physicsTick");
+  assert.equal(runner.status().activeAction?.action, "fire_reflex");
+  context.mock.timers.tick(15_000);
+  for (let tick = 0; tick < 3; tick++) {
+    bot.emit("physicsTick");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const failure = driver.answered.snapshot()[0]?.failure;
+  assert.equal(failure?.kind, "no_escape");
+  assert.match(String(failure && "why" in failure ? failure.why : ""), /ran out of time/);
 });

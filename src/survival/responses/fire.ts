@@ -15,7 +15,8 @@ import {
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
 
-export type FireEscapeOutcome = "escaped" | "blocked" | "died";
+/** `timed_out`: the wall clock ended the walk (15 s of burning), as against `blocked`: no way on. */
+export type FireEscapeOutcome = "escaped" | "blocked" | "timed_out" | "died";
 
 /** Replace adjacent lava with a solid step when there is no natural bank to climb. */
 export async function buildLavaEscapeStep(bot: Bot, signal: AbortSignal): Promise<Vec3 | null> {
@@ -66,7 +67,7 @@ function routeEndsInWater(world: WorldView, route: readonly Vec3[]): boolean {
 }
 
 /** Out of fire and lava, not burning, and standing or swimming: nothing is left to escape. */
-function hasSafeFooting(bot: Bot, reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean {
+function hasNothingLeftToEscape(bot: Bot, reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean {
   return (
     !inLava &&
     !inFire &&
@@ -102,7 +103,12 @@ export async function escapeFire(
   // The wall clock and a death end the waits even when physics ticks have stopped (as in breath's surfacing).
   const ended = new AbortController();
   const end = () => ended.abort();
-  const wallClock = setTimeout(end, maximumMs);
+  let timedOut = false;
+  const wallClock = setTimeout(() => {
+    timedOut = true;
+    end();
+  }, maximumMs);
+  const endedOutcome = (): FireEscapeOutcome => (bot.health <= 0 ? "died" : timedOut ? "timed_out" : "blocked");
   bot.once("death", end);
   bot.once("respawn", end);
   const waits = AbortSignal.any([signal, ended.signal]);
@@ -113,7 +119,7 @@ export async function escapeFire(
       signal.throwIfAborted();
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
-      if (hasSafeFooting(bot, reason, inLava, inFire)) return "escaped";
+      if (hasNothingLeftToEscape(bot, reason, inLava, inFire)) return "escaped";
       // Keep the admitted departure through the jump. Being momentarily above
       // lava is not a landing, and must not invalidate the bank we are climbing.
       const hop = walk.route[walk.next];
@@ -149,11 +155,11 @@ export async function escapeFire(
         walk = arriveAtCell(bot, world, reason, walk);
     }
     signal.throwIfAborted();
-    return bot.health > 0 ? "blocked" : "died";
+    return endedOutcome();
   } catch (error) {
     signal.throwIfAborted();
     if (!ended.signal.aborted) throw error;
-    return bot.health > 0 ? "blocked" : "died";
+    return endedOutcome();
   } finally {
     clearTimeout(wallClock);
     bot.off("death", end);

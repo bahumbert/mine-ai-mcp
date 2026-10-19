@@ -100,11 +100,14 @@ test("fire out before arriving ends the escape", async () => {
   const escape = new AbortController();
   const seen = watch(escapeFire(bot, world, escape.signal));
   await physicsTicks(bot, 3);
+  assert.equal(seen.outcome, null, "still burning with water in reach: the walk is on");
+  assert.equal(anyMoveControl(controls), true, "a move control is set toward the way round");
+  const clearedWhileWalking = cleared.count;
   setBurning(bot, false);
   await physicsTicks(bot, 2);
-  assert.equal(seen.outcome, "escaped");
+  assert.equal(seen.outcome, "escaped", "the flag cleared: ended within 2 ticks");
   assert.equal(anyMoveControl(controls), false);
-  assert.ok(cleared.count >= 1);
+  assert.ok(cleared.count > clearedWhileWalking, "the controls were cleared at the end");
 });
 
 test("water drained mid-route ends the walk", async () => {
@@ -138,7 +141,7 @@ test("no physics ticks: the wall clock ends the escape", async () => {
   const { bot, world } = burningOnTheBank();
   const started = performance.now();
   const outcome = await escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 50 });
-  assert.equal(outcome, "blocked");
+  assert.equal(outcome, "timed_out", "the clock ended it: not the same as a walk with nowhere to go");
   assert.ok(performance.now() - started < 500, "returned within 500 ms without one physics tick");
   assert.equal(bot.listenerCount("physicsTick"), 0);
 });

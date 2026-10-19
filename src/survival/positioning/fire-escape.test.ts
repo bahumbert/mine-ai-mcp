@@ -223,3 +223,22 @@ test("a body standing on the bank edge, its shoulder over the lava, still finds 
   const route = fireWaterRoute(bot, world, "contact");
   assert.deepEqual(route?.map((point) => [point.x, point.y, point.z]), [[2.5, 64, 0.5]]);
 });
+
+/** A thin block's collision: full width, `height` tall (the fixture's registry names are full cubes). */
+const thinBlock = (stateId: number, height: number) => ({
+  stateId,
+  collisionShapes: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: height, maxZ: 1 }],
+});
+
+test("a lava bank of carpet or a snow layer, which navigation walks over, is admitted from the pit", () => {
+  for (const [name, height] of [["a carpet", 0.0625], ["a snow layer", 0.125]] as const) {
+    const { bot, world } = sceneAt({ "0,64,0": "lava" }, IN_THE_PIT);
+    Reflect.set(bot.entity, "isInLava", true);
+    world.load(new Vec3(1, 65, 0), thinBlock(9, height));
+    assert.equal(
+      clearFireHop(bot, world, bot.entity.position, new Vec3(1.5, 65, 0.5), fireEscapeDeparture(bot)),
+      true,
+      `${name} is thin: its cell holds a collision shape and is still a standing cell`,
+    );
+  }
+});

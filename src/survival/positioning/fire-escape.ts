@@ -25,14 +25,19 @@ export function clearFireEscape(
   return clearFireHop(bot, world, bot.entity.position, target, departure);
 }
 
-/** The body cells at `target` (feet, head, and the head cell above `start` for a step up) must hold no block with a collision shape. */
+/**
+ * The body cells at `target` are ones navigation stands in: feet passable (a carpet, a snow layer, an open door) or in
+ * water, head and the head cell above `start` for a step up head-passable.
+ */
 function hasRoomToStand(world: WorldView, start: Vec3, target: Vec3): boolean {
   const x = Math.floor(target.x);
   const z = Math.floor(target.z);
   const y = Math.floor(target.y);
-  const cells = [world.blockAt(x, y, z), world.blockAt(x, y + 1, z)];
-  if (target.y > start.y + 0.1) cells.push(world.blockAt(Math.floor(start.x), Math.floor(start.y) + 2, Math.floor(start.z)));
-  return cells.every((block) => block.kind === "loaded" && block.collisionShapes.length === 0);
+  const feet = world.blockAt(x, y, z);
+  const heads = [world.blockAt(x, y + 1, z)];
+  if (target.y > start.y + 0.1) heads.push(world.blockAt(Math.floor(start.x), Math.floor(start.y) + 2, Math.floor(start.z)));
+  const feetFree = feet.kind === "loaded" && (isPassable(feet) || feet.traits.liquid === "water");
+  return feetFree && heads.every((block) => block.kind === "loaded" && isHeadPassable(block));
 }
 
 /**
@@ -85,13 +90,14 @@ export function clearFireHop(
         }
         // The original swimming/jumping response can climb one block. Check
         // its raised corridor; longer routes still belong to navigation.
-        for (const y of [
-          Math.floor(Math.max(start.y, target.y) + 0.1),
-          Math.floor(Math.max(start.y, target.y) + 1.7),
-        ]) {
+        // The feet cell is walked in at floor level (a carpet bank is), the head cell must fit the head.
+        for (const [y, fits] of [
+          [Math.floor(Math.max(start.y, target.y) + 0.1), isPassable],
+          [Math.floor(Math.max(start.y, target.y) + 1.7), isHeadPassable],
+        ] as const) {
           const block = world.blockAt(x, y, z);
           if (block.kind !== "loaded") return false;
-          if (isPassable(block) && isHeadPassable(block)) continue;
+          if (fits(block)) continue;
           if (step < steps && inLava && block.traits.liquid === "lava") continue;
           // Leaving an occupied fire cell necessarily overlaps that cell on
           // the way out. Never admit a new damaging cell or a burning destination.
@@ -239,8 +245,12 @@ export function fireWaterRoute(bot: Bot, world: WorldView, reason: FireEscapeRea
 /** Dry cells by distance; cells that tie go to the one nearer a scanned water, the bank a later route can use. */
 function dryCellsNearestFirst(bot: Bot, cells: EscapeCells): Vec3[] {
   const here = bot.entity.position;
-  const toWater = (point: Vec3) => Math.min(Infinity, ...cells.water.map((water) => water.distanceTo(point)));
-  return [...cells.dry].sort((a, b) => a.distanceTo(here) - b.distanceTo(here) || toWater(a) - toWater(b));
+  const ranked = cells.dry.map((point) => ({
+    point,
+    away: point.distanceTo(here),
+    toWater: Math.min(Infinity, ...cells.water.map((water) => water.distanceTo(point))),
+  }));
+  return ranked.sort((a, b) => a.away - b.away || a.toWater - b.toWater).map(({ point }) => point);
 }
 
 /**
