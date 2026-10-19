@@ -9,18 +9,17 @@
  */
 import { EscapeHolds } from "./escape-holds.js";
 import type { RouteOutcomes } from "./route-outcomes.js";
-import { ExecutionScope } from "../execution/execution-scope.js";
 import { Diving } from "./diving.js";
 import type { Bot } from "mineflayer";
-import { cloudExposure, readDragonCloudHazards } from "../world/dragon-hazards.js";
 import { breakBlockInPlace, type BreakBlockInPlace } from "./execution/in-place-break.js";
 import { MineflayerBot, installNetherVinePhysics, mineflayerBotSurface } from "./mineflayer/bot.js";
 import { createMineflayerMovementPolicy, type MineflayerMovementPolicyOptions } from "./mineflayer/movement-policy.js";
 import { MineflayerWorldView } from "./mineflayer/world.js";
 import type { WorldView } from "./world/world.js";
 import type { MovementPolicy } from "./movements/policy.js";
-import { runNavigation, type Navigate, type NavigationResult } from "./navigate.js";
-import { createNavigator } from "./orchestration/navigator.js";
+import type { Navigate, NavigationResult } from "./navigate.js";
+import { navigateAroundDragonBreath } from "./navigate-around-dragon-breath.js";
+import { createNavigator, type Navigator } from "./orchestration/navigator.js";
 import { waterStancesHeld } from "./steering/hold-water-position.js";
 import type { StepFieldProvider } from "./step-field.js";
 import type { NavigationEvent, TelemetrySink } from "./telemetry/index.js";
@@ -73,22 +72,54 @@ export interface NavigationRuntimeOptions {
   readonly routes?: RouteOutcomes;
 }
 
-/** Reports the search and the steps of a route to its execution scope, as it goes. */
-function reportNavigationProgress(execution: ExecutionScope, event: NavigationEvent): void {
-  switch (event.kind) {
-    case "search_started":
-      execution.progress("search", `${event.searchId}: ${event.reason}; goal=${event.goal}`);
-      break;
-    case "search_slice":
-      execution.progress("search", `${event.searchId}: visited=${event.visited}, generated=${event.generated}, computeMs=${event.computeMs}`);
-      break;
-    case "step_started":
-      execution.progress("movement", `${event.stepId}: ${event.movement}`);
-      break;
-    case "step_phase":
-      execution.progress("movement", `${event.stepId}: ${event.phase}`);
-      break;
+/**
+ * Ends the route and the dive when the bot dies, changes dimension (a portal respawn unloads every chunk and moves
+ * the position, so a route in flight has nothing left to stand on) or loses its connection. Returns the unwatch.
+ */
+function endNavigationWhenBotIsLost(bot: Bot, diving: Diving, navigator: Navigator): () => void {
+  const botDied = () => {
+    diving.cancel("bot died");
+    navigator.terminateActive("bot died");
+  };
+  // Mineflayer already reports the new dimension by the time "respawn" fires.
+  let dimension = bot.game.dimension;
+  const botRespawned = () => {
+    if (bot.game.dimension === dimension) return;
+    diving.cancel("dimension changed");
+    dimension = bot.game.dimension;
+    navigator.terminateActive(`dimension changed to ${dimension}`);
+  };
+  const botEnded = () => { diving.cancel("connection ended"); navigator.terminateActive("connection ended"); };
+  bot.on("death", botDied);
+  bot.on("respawn", botRespawned);
+  bot.on("end", botEnded);
+  return () => {
+    bot.removeListener("death", botDied);
+    bot.removeListener("respawn", botRespawned);
+    bot.removeListener("end", botEnded);
+  };
+}
+
+/** Breaks the block in place unless the dive cannot spare the air for it, and tells the dive when the work is done. */
+async function breakInPlaceWithinDive(
+  { bot, world, navigationBot, diving }: { bot: Bot; world: WorldView; navigationBot: MineflayerBot; diving: Diving },
+  options: Parameters<BreakBlockInPlace>[0],
+): ReturnType<BreakBlockInPlace> {
+  const block = world.blockAt(options.position.x, options.position.y, options.position.z);
+  const evaluation = options.movements.evaluateBreak(block, options.position, world);
+  const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0));
+  const ticks = options.movements.digTimeEstimator.estimate(block, evaluation.tool, {
+    submergedAtEyes: head?.name === "water", onGround: bot.entity.onGround,
+    ...navigationBot.observe().player,
+  });
+  const refused = diving.beforeWork(ticks);
+  if (refused !== null) {
+    options.signal?.throwIfAborted();
+    return { status: "failed", reason: refused };
   }
+  const result = await breakBlockInPlace({ world, bot: navigationBot }, options);
+  if (result.status === "broken") diving.workCompleted();
+  return result;
 }
 
 /** Build the navigation runtime for one connected Mineflayer bot. */
@@ -117,7 +148,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
   };
   const navigator = createNavigator({ world, bot: navigationBot, telemetry });
 
-  let activeRoute: Promise<NavigationResult> | null = null;
+    const activeRouteSlot: { current: Promise<NavigationResult> | null } = { current: null };
   /** The one route request that owns navigation, and whether it was cancelled (by its caller or this runtime). */
   let activeNavigation: { readonly pending: Promise<NavigationResult>; readonly signal: AbortSignal | undefined; cancelled: boolean } | null = null;
   const markCancelled = () => {
@@ -144,31 +175,14 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     if (!settled) {
       diving.cancel("abandoned: its owner stopped it and it did not settle");
       navigator.abandonActive("abandoned: its owner stopped it and it did not settle");
-      if (activeRoute !== null) activeRoute = null;
+      activeRouteSlot.current = null;
       activeNavigation = null;
     }
   };
   let closed = false;
   const escapes = new EscapeHolds();
 
-  const botDied = () => {
-    diving.cancel("bot died");
-    navigator.terminateActive("bot died");
-  };
-  bot.on("death", botDied);
-  // Crossing a portal is a respawn into another dimension: every chunk
-  // unloads and the position jumps, so a route in flight has nothing left
-  // to stand on. Mineflayer already reports the new dimension by then.
-  let dimension = bot.game.dimension;
-  const botRespawned = () => {
-    if (bot.game.dimension === dimension) return;
-    diving.cancel("dimension changed");
-    dimension = bot.game.dimension;
-    navigator.terminateActive(`dimension changed to ${dimension}`);
-  };
-  bot.on("respawn", botRespawned);
-  const botEnded = () => { diving.cancel("connection ended"); navigator.terminateActive("connection ended"); };
-  bot.on("end", botEnded);
+  const stopWatchingBot = endNavigationWhenBotIsLost(bot, diving, navigator);
 
   const requireOpen = (): void => {
     if (closed) throw new Error("This navigation runtime is closed.");
@@ -180,87 +194,16 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     diving.cancel("navigation runtime closed");
     navigator.terminateActive("navigation runtime closed");
     if (activeNavigation) await activeNavigation.pending.catch(() => undefined);
-    if (activeRoute) await activeRoute.catch(() => undefined);
+    if (activeRouteSlot.current) await activeRouteSlot.current.catch(() => undefined);
     navigationBot.clearOwnedControls();
-    bot.removeListener("death", botDied);
-    bot.removeListener("respawn", botRespawned);
-    bot.removeListener("end", botEnded);
+    stopWatchingBot();
     releaseNetherVinePhysics();
     world.close();
     listeners.clear();
   };
 
-  const navigate: Navigate = async (options) => {
-      using execution = new ExecutionScope({ bot: bot.username, operation: "navigation", targetId: null });
-      using observations = new DisposableStack();
-      const reportProgress = (event: NavigationEvent) => reportNavigationProgress(execution, event);
-      listeners.add(reportProgress);
-      observations.defer(() => listeners.delete(reportProgress));
-      const startedAt = Date.now();
-      for (;;) {
-        await execution.checkpoint(options.signal);
-        requireOpen();
-        // Goals and movement share the same fixed perch radius / eventual
-        // fireball radius. Ordinary cloud growth must not cancel each step.
-        const clouds = readDragonCloudHazards(bot);
-        const start = bot.entity.position.floored().offset(0.5, 0, 0.5);
-        const initialExposure = new Map(clouds.map((c) => [c.id, cloudExposure(c, start)]));
-        const movements: MovementPolicy =
-          clouds.length === 0
-            ? options.movements
-            : {
-                ...options.movements,
-                get scaffold() {
-                  return options.movements.scaffold;
-                },
-                decideStep(x, y, z, view) {
-                  const base = options.movements.decideStep(x, y, z, view);
-                  if (base.kind === "prohibited") return base;
-                  for (const cloud of clouds) {
-                    if (cloudExposure(cloud, { x: x + 0.5, y, z: z + 0.5 }) > (initialExposure.get(cloud.id) ?? 0))
-                      return { kind: "prohibited", reason: "Observed dragon breath occupies this step" };
-                  }
-                  return base;
-                },
-              };
-        // Cloud appearance, removal, or growth changes safety without a block change. Rebuild
-        // this same requested route after physical release, unless its caller
-        // stopped it or a defensive takeover cancelled the action.
-        const changed = new AbortController();
-        const known = new Map(clouds.map((c) => [c.id, c.radius]));
-        const watchClouds = () => {
-          const current = readDragonCloudHazards(bot);
-          if (current.length !== known.size || current.some((c) => known.get(c.id) !== c.radius))
-            changed.abort("Dragon breath geometry changed");
-        };
-        bot.on("physicsTick", watchClouds);
-        const route = execution.run("route", () =>
-          runNavigation(navigator, {
-            ...options,
-            timeoutMs:
-              options.timeoutMs === undefined ? undefined : Math.max(0, options.timeoutMs - (Date.now() - startedAt)),
-            movements,
-            stopSignal: AbortSignal.any([changed.signal, ...(options.stopSignal ? [options.stopSignal] : [])]),
-          }),
-        );
-        activeRoute = route;
-        try {
-          const result = await route;
-          if (
-            result.status === "stopped" &&
-            result.reason === "Dragon breath geometry changed" &&
-            !closed &&
-            !options.signal?.aborted &&
-            !options.stopSignal?.aborted
-          )
-            continue;
-          return { ...result, elapsedMs: Date.now() - startedAt };
-        } finally {
-          bot.off("physicsTick", watchClouds);
-          if (activeRoute === route) activeRoute = null;
-        }
-      }
-    };
+  const navigate: Navigate = (options) =>
+    navigateAroundDragonBreath({ bot, navigator, listeners, isClosed: () => closed, requireOpen, activeRoute: activeRouteSlot }, options);
   return {
     world,
     diveBackstop: () => diving.backstop(),
@@ -281,24 +224,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
       }
     },
     routesAsEscape: () => escapes.hold(),
-    breakBlockInPlace: async (options) => {
-      requireOpen();
-      const block = world.blockAt(options.position.x, options.position.y, options.position.z);
-      const evaluation = options.movements.evaluateBreak(block, options.position, world);
-      const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0));
-      const ticks = options.movements.digTimeEstimator.estimate(block, evaluation.tool, {
-        submergedAtEyes: head?.name === "water", onGround: bot.entity.onGround,
-        ...navigationBot.observe().player,
-      });
-      const refused = diving.beforeWork(ticks);
-      if (refused !== null) {
-        options.signal?.throwIfAborted();
-        return { status: "failed", reason: refused };
-      }
-      const result = await breakBlockInPlace({ world, bot: navigationBot }, options);
-      if (result.status === "broken") diving.workCompleted();
-      return result;
-    },
+    breakBlockInPlace: (options) => breakInPlaceWithinDive({ bot, world, navigationBot, diving }, options),
     setStepFieldProvider: (provider) => navigator.setStepFieldProvider(provider),
     get active() {
       return diving.active || navigator.active !== null;
