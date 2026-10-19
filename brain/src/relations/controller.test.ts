@@ -338,3 +338,107 @@ test("the judge keeps waiting for a model slot for 2 minutes and then asks", asy
   assert.equal(h.chat.requests.length, 1);
   assert.equal(h.book.get("Theo")!.word, "fair");
 });
+
+test("onDecision answers the trade id it recorded, and null when it recorded none", async () => {
+  const h = harness();
+  const s = snapshot();
+  const proposed = await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
+  assert.equal(proposed, theirTrade(h).id);
+  assert.equal(await h.c.onDecision(decision({ action: "propose" }), "Theo", s), null, "a proposal while one is open is ignored");
+  const agreed = await h.c.onDecision(decision({ action: "accept" }), "Theo", s);
+  assert.equal(agreed, proposed, "the accepted proposal keeps its id");
+  assert.equal(await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", s), null);
+  assert.equal(await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Zed", s), null, "nothing open to cancel");
+});
+
+test("give outside a hand-off marks gave", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.equal(theirTrade(h).gaveAt, h.state.now);
+  const gave = h.events.filter((e) => e.kind === "trade" && e.event === "gave");
+  assert.equal(gave.length, 1);
+  assert.match(String((gave[0] as TradeEvent).note), /gave 5 bread to Theo, outside the hand-off/u);
+});
+
+test("outside give on they_gave ends done", async () => {
+  const h = harness();
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(theirTrade(h).state, "done");
+  assert.equal(h.events.at(-1)?.kind === "trade" && h.events.at(-1)?.event, "done");
+});
+
+test("partial outside give, the hand-off gives the rest", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  const id = theirTrade(h).id;
+  await h.c.gaveOutside("Theo", "bread", 2);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(h.c.leftToGive(id), bread(3));
+  await h.c.gaveOutside("Theo", "bread", 3);
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.equal(h.c.leftToGive(id), null, "my side was given");
+});
+
+test("outside give to another partner is not counted", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Zed", "bread", 5);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), bread(5));
+});
+
+test("outside give of another item is not counted", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "oak_log", 5);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), bread(5));
+  assert.ok(h.logs.some((l) => /outside/u.test(l)), "one log line says it was not counted");
+});
+
+test("outside give before agreement is not counted", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(theirTrade(h).state, "proposed");
+  assert.equal(theirTrade(h).gaveAt, null);
+});
+
+test("outside give after gave is not counted", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  const gaveAt = theirTrade(h).gaveAt;
+  const rows = h.events.length;
+  h.state.now += 1_000;
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(theirTrade(h).gaveAt, gaveAt);
+  assert.equal(h.events.length, rows, "no second gave row");
+});
+
+test("outside give capped at the side", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "bread", 9);
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.equal(h.c.leftToGive(theirTrade(h).id), null);
+  assert.deepEqual(theirTrade(h).give, bread(5), "the deal is not changed");
+});
+
+test("handoffSkipped forgets the pending hand-off so the trade is not given twice", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  const id = theirTrade(h).id;
+  await h.c.gaveOutside("Theo", "bread", 5);
+  h.c.handoffSkipped(id);
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.equal(h.handoffs.length, 1, "no second give hand-off");
+});

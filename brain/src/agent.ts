@@ -432,11 +432,16 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
-    if (decision.trade !== undefined) await this.relations?.decided(decision, message.username, snapshot);
+    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
     if (conversation !== undefined) this.spokeInConversation(decision);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
+    // A line that made a trade is that trade's action: its hand-off is what she does, not an order on top whose give the trade never sees (live 2026-10-19, B1).
+    if ((routed === "act" || routed === "later") && tradeId !== null) {
+      log(`the request is trade ${tradeId}: no order taken (${JSON.stringify(decision.request)})`);
+      return;
+    }
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
@@ -870,6 +875,8 @@ export class Agent {
     if (record.outcome === "failed" && !restarted) this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
+    // A give made by any objective but the trade's own hand-off still counts for the trade with that player (B1).
+    if (decision.step.skill === "give_item" && record.outcome === "done" && work.objective.handoff === undefined) this.relations?.gaveOutside(decision.step.player, decision.step.item, decision.step.count);
     if (work.steps.length > STEP_MEMORY) {
       work.steps.splice(0, work.steps.length - STEP_MEMORY);
       work.carried.splice(0, work.carried.length - STEP_MEMORY);

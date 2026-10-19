@@ -61,10 +61,18 @@ export class AgentRelations {
     return resendRefusedTrade({ mind: this.deps.mind, input, first, trades: this.trades, log: this.deps.log, ...o });
   }
 
-  /** The trade a decision carries becomes a trade (its line was spoken already). */
-  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot): Promise<void> {
-    if (decision.trade === undefined) return;
-    await this.trades.onDecision(decision.trade, speaker, snapshot).catch((error: unknown) => this.deps.log(`could not record the trade with ${speaker}: ${String(error)}`));
+  /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. */
+  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot): Promise<string | null> {
+    if (decision.trade === undefined) return null;
+    return this.trades.onDecision(decision.trade, speaker, snapshot).catch((error: unknown) => {
+      this.deps.log(`could not record the trade with ${speaker}: ${String(error)}`);
+      return null;
+    });
+  }
+
+  /** A `give_item` step ended done outside a hand-off: it counts toward my side of the open trade with that player. */
+  gaveOutside(player: string, item: string, count: number): void {
+    void this.trades.gaveOutside(player, item, count).catch((error: unknown) => this.deps.log(`could not count a give to ${player} in the trade: ${String(error)}`));
   }
 
   /** What the conversation controller asks of the records. */
@@ -98,7 +106,13 @@ export class AgentRelations {
   async runHandoff(h: Handoff, context: SkillContext): Promise<HandoffEnd> {
     let end: HandoffEnd;
     try {
-      end = handoffOutcome(await runHandoff(context, h));
+      // A give made outside this hand-off (another objective's give_item) counts: only what is left is given.
+      const left = h.kind === "give" ? this.trades.leftToGive(h.tradeId) ?? [] : h.items;
+      if (h.kind === "give" && left.length === 0) {
+        this.trades.handoffSkipped(h.tradeId);
+        return { outcome: "done", detail: "already handed over" };
+      }
+      end = handoffOutcome(await runHandoff(context, { ...h, items: left }));
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
     }
