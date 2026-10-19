@@ -5,7 +5,7 @@ import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { readLocalizedChat } from "./chat-range.ts";
 import { ConversationBudget, maxConversations } from "./conversation/controller.ts";
-import { LlmMind } from "./llm-mind.ts";
+import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
@@ -118,6 +118,27 @@ async function openBrainLog(url: string): Promise<BrainLog | null> {
   }
 }
 
+/** One mind per persona, its three tiers counted by the brain's model queue and reported to its brain log. */
+function createMinds(
+  personas: readonly Persona[],
+  brainLogs: readonly (BrainLog | null)[],
+  queue: ModelQueue,
+  overrides: Readonly<Record<"chat" | "action" | "planner", string | undefined>>,
+  localizedChat: LocalizedChat | undefined,
+): LlmMind[] {
+  return personas.map((persona, index) => {
+    const models = {
+      chat: queue.track(createModel(persona, "chat", overrides.chat), persona.id),
+      action: queue.track(createModel(persona, "action", overrides.action), persona.id),
+      planner: queue.track(createModel(persona, "planner", overrides.planner), persona.id),
+    };
+    console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
+    const brainLog = brainLogs[index];
+    console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
+    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
+  });
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
@@ -152,17 +173,7 @@ async function main(): Promise<void> {
   const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: (line) => console.log(`${new Date().toISOString()} [queue] ${line}`) });
   const localizedChat = readLocalizedChat(env);
   if (localizedChat !== undefined) console.log(`localized chat: talk carries ${localizedChat.range} blocks`);
-  const minds = personas.map((persona, index) => {
-    const models = {
-      chat: queue.track(createModel(persona, "chat", values["chat-model"]), persona.id),
-      action: queue.track(createModel(persona, "action", values["action-model"]), persona.id),
-      planner: queue.track(createModel(persona, "planner", values["planner-model"]), persona.id),
-    };
-    console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
-    const brainLog = brainLogs[index];
-    console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
-    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
-  });
+  const minds = createMinds(personas, brainLogs, queue, { chat: values["chat-model"], action: values["action-model"], planner: values["planner-model"] }, localizedChat);
   // What a till failed on is learned once for every character of the process.
   const soil = new TillFacts();
   const runtimes = await Promise.all(specs.map((spec, index) => McpBotRuntime.connect(spec.url, `agent-${personas[index]!.id}`)));

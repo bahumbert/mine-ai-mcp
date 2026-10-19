@@ -138,35 +138,15 @@ export class LlmMind implements Mind {
     const inTalk = input.conversation !== undefined;
     // A member of her conversation is talking with her: the line is hers without her name (spec 2026-10-18).
     const open = message.addressed || message.channel === "whisper" || talkingWithHer(input) || (inTalk && input.conversation?.others.some((name) => name.toLowerCase() === message.username.toLowerCase()) === true);
-    // Whom it names is kept with a line left alone, so a later line can be read as answering them; never the model's
-    // reading, which could name her and start a conversation she was not in.
-    const leftAlone = (): ChatDecision => {
-      const named = input.snapshot.players.map((player) => player.username)
-        .filter((name) => name.toLowerCase() !== message.username.toLowerCase() && namesWord(message.message, name));
-      return { ...(named.length > 0 && { to: named }), say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
-    };
+    const leftAlone = (): ChatDecision => leftAloneDecision(input);
     // Only a line naming nobody, out of anyone else's conversation, may be to everyone; the others are left alone without
     // asking the model (bench 2026-10-09, each read as asking everyone whatever facts were given): it names someone else
     // ("teleport me Opus", "Ayla viens construire..." for Vex), the speaker's previous line spoke to others ("fix it
     // now" after a line to Opus), or others talked among themselves just before, none of it to her ("pareil, je vois
     // plus les skins" after two players' lines on it).
     if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return leftAlone();
-    const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const canWait = input.canWait ?? true;
-    const request = [
-      describeSituation(input.snapshot, input.activity, input.places, input.areas),
-      // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
-      // once. The reply is written from what she knows: that it stops now.
-      ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
-      describeHistory(input.history),
-      // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
-      // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
-      describeConversation(input),
-      ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
-      // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
-      // 2026-10-07).
-      `New message: ${message.username} ${channel}${message.distance === undefined ? "" : ` from ${Math.round(message.distance)} blocks away`}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
-    ].filter((part) => part !== "").join("\n\n");
+    const request = chatRequest(input, canWait);
     // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
     // it through).
@@ -394,6 +374,37 @@ export class LlmMind implements Mind {
  */
 const REPAIR_ROUNDS = 2;
 const SEND_BACK_ROUNDS = 4;
+
+/**
+ * The reply to a line left alone: whom it names is kept with it, so a later line can be read as answering them; never
+ * the model's reading, which could name her and start a conversation she was not in.
+ */
+function leftAloneDecision(input: ChatInput): ChatDecision {
+  const { message } = input;
+  const named = input.snapshot.players.map((player) => player.username)
+    .filter((name) => name.toLowerCase() !== message.username.toLowerCase() && namesWord(message.message, name));
+  return { ...(named.length > 0 && { to: named }), say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
+}
+
+/** The chat tier's request for one line: her situation, the chat so far, what it shows about the line, then the line. */
+function chatRequest(input: ChatInput, canWait: boolean): string {
+  const { message } = input;
+  const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
+  return [
+    describeSituation(input.snapshot, input.activity, input.places, input.areas),
+    // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
+    // once. The reply is written from what she knows: that it stops now.
+    ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
+    describeHistory(input.history),
+    // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
+    // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
+    describeConversation(input),
+    ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
+    // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
+    // 2026-10-07).
+    `New message: ${message.username} ${channel}${message.distance === undefined ? "" : ` from ${Math.round(message.distance)} blocks away`}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
+  ].filter((part) => part !== "").join("\n\n");
+}
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
 class SendBack extends Error {}

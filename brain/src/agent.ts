@@ -888,7 +888,7 @@ export class Agent {
     this.journalState(label);
     const started = Date.now();
     const signal = AbortSignal.any([controller.signal, this.runSignal]);
-    const { talkRange } = { talkRange: this.options.localizedChat?.range ?? persona.settings.conversation.stayingDistance };
+    const talkRange = this.options.localizedChat?.range ?? persona.settings.conversation.stayingDistance;
     let result: SkillResult;
     try {
       result = await socialise({
