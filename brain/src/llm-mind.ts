@@ -173,6 +173,10 @@ export class LlmMind implements Mind {
     let firstReading: readonly string[] | null = null;
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
+    // The claim is asked once per line: a reply sent back reads the line again, and a second claim is always false
+    // (review 2026-10-19: the greeting the nearest bot claimed went unanswered by all after one send-back).
+    let claimed: boolean | undefined;
+    const claimEveryoneLine = (): boolean => (claimed ??= input.claimEveryoneLine?.() === true);
     return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
@@ -190,7 +194,7 @@ export class LlmMind implements Mind {
       if (!open) {
         const toEveryone = to.some((name) => name.toLowerCase() === "everyone");
         if (answering !== null || !toEveryone) return leftAlone();
-        if (reply.asks.trim() === "" && input.claimEveryoneLine?.() !== true) return leftAlone();
+        if (reply.asks.trim() === "" && !claimEveryoneLine()) return leftAlone();
       }
       // Only checks read from the reply's own fields (spec 2026-10-09-chat-handling, B, ADR-017): a reply that
       // contradicts itself goes back. What the history shows is given in the prompt beforehand, and nothing here reads

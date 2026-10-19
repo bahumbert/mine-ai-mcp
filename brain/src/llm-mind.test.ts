@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
+import { EveryoneLines } from "./everyone-lines.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
 import { describeStep, stepKey } from "./actions.ts";
@@ -1084,6 +1085,18 @@ test("a greeting to everyone that asks nothing is answered only when the bot cla
   assert.deepEqual([claimed.route, claimed.say, claimed.to], ["talk", "Hey Steve!", ["everyone"]]);
   assert.equal((await mind.chat({ ...chatInput("sups boys ?", false), claimEveryoneLine: () => false }, signal)).route, "ignore");
   assert.equal((await mind.chat(chatInput("sups boys ?", false), signal)).route, "ignore", "no claim function: left alone as before");
+});
+
+test("a greeting the bot claimed and whose reply was sent back is still answered on the next round", async () => {
+  const { chat, mind } = scriptedMind();
+  const record = new EveryoneLines(() => 0);
+  record.heard("Steve", "sups boys ?", "Vex", 30);
+  record.heard("Steve", "sups boys ?", "Ayla", 5);
+  // "act" with no request goes back after the claim was asked.
+  chat.reply({ ...GREETING, route: "act", request: "" }, GREETING);
+  const decision = await mind.chat({ ...chatInput("sups boys ?", false), claimEveryoneLine: () => record.claim("Steve", "sups boys ?", "Ayla") }, signal);
+  assert.deepEqual([decision.route, decision.say], ["talk", "Hey Steve!"]);
+  assert.equal(record.claim("Steve", "sups boys ?", "Vex"), false, "still one bot answers");
 });
 
 test("a line to everyone that asks something never calls the claim, and addressed or whispered lines neither", async () => {
