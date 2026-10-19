@@ -2187,3 +2187,27 @@ test("a crop that is its own seed: get_items names where a first one comes from,
   assert.doesNotMatch(detail, /farm it/u);
   assert.deepEqual(runtime.submitted, []);
 });
+
+test("give says the recipient took the items, or that they were left at their feet (B2, live 2026-10-19: reported gave, never arrived)", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
+  const taken = new FakeRuntime();
+  taken.walkOnNavigate = true;
+  taken.snapshot = { ...taken.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }] };
+  taken.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "oak_log", dropped: 3 }], recipient: { collected: true, collectedCount: 3 } });
+  const gave = await runStep(step, contextFor(taken));
+  assert.equal(gave.status === "done" ? gave.detail : "", "gave 3 oak_log to Steve");
+
+  const left = new FakeRuntime();
+  left.walkOnNavigate = true;
+  left.snapshot = { ...left.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }] };
+  left.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "oak_log", dropped: 3 }], recipient: { collected: false, collectedCount: 0 } });
+  const notYet = await runStep(step, contextFor(left));
+  assert.equal(notYet.status === "done" ? notYet.detail : "", "left 3 oak_log at Steve's feet (not picked up yet)");
+
+  const picked = new FakeRuntime();
+  picked.walkOnNavigate = true;
+  picked.snapshot = { ...picked.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }] };
+  picked.dropOutcomes.push({ status: "failed", error: "[DROP_PICKED_UP] oak_log came back", dropped: [{ item: "oak_log", dropped: 0 }] });
+  const failed = await runStep(step, contextFor(picked));
+  assert.equal(failed.status, "failed");
+});

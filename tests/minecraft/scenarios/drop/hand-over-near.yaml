@@ -1,0 +1,34 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-near
+tags: [regression]
+description: >-
+  B2 (live 2026-10-19): a hand-over with the recipient 1.0 blocks away reported success, then the giver picked its own
+  toss back up when the pickup delay ended and the recipient never got it. The giver must step away after the toss,
+  wait for the recipient's pickup and report it; the recipient must end up holding all three logs.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [0.5, -60, 1.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: Giver, receiver: Receiver, item_name: oak_log, count: 3 }
+
+goal:
+  kind: all
+  timeout: 30
+  goals:
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }

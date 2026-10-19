@@ -358,7 +358,16 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
   const approach = await come(context, player);
   if (approach.status !== "done") return approach;
-  return once(context, "drop_item", { items: [{ item_name: item, count }], to_player: player }, `${player} asked me for ${item}.`, `gave ${count} ${item} to ${player}`);
+  const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player }, `${player} asked me for ${item}.`, { signal: context.signal });
+  if (context.signal.aborted) return { status: "stopped" };
+  if (outcome.status !== "succeeded") return { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` };
+  return { status: "done", detail: handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}` };
+}
+
+/** Whether the recipient picked the toss up (the action's `drop.recipient.collected`); null when the result says nothing. */
+function handedOver(result: Readonly<Record<string, unknown>> | undefined): boolean | null {
+  const collected = ((result?.drop as { recipient?: { collected?: unknown } | null } | undefined)?.recipient)?.collected;
+  return typeof collected === "boolean" ? collected : null;
 }
 
 /**

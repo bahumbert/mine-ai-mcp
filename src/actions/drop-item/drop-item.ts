@@ -16,11 +16,12 @@ import {
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
-import { droppedItemName, snapshotEntityIds } from "../../world/item-pickup.js";
+import { snapshotEntityIds } from "../../world/item-pickup.js";
 import { placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { equipmentSlots } from "../equip/index.js";
 import { describeNavigation } from "../navigation-result.js";
+import { awaitHandover, cameFromToss, handOverLine, HANDOVER_WAIT_MS, rememberDiscards, tossAimHeight } from "./hand-over.js";
 import {
   dropItemAnnotations,
   dropItemOutcomes,
@@ -62,8 +63,8 @@ const PICKUP_WAIT_MS = 3_000;
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
 const HANDOVER_RANGE = 2;
 
-/** A tossed item lands within a couple of blocks; anything further appeared for another reason. */
-const DISCARD_ATTRIBUTION_RADIUS = 4;
+/** Ticks between facing the recipient and tossing, so the server has the look the toss is thrown along. */
+const LOOK_SETTLE_TICKS = 3;
 
 /**
  * How far, in the plane, the bot ends a hole drop from the hole's column.
@@ -83,6 +84,8 @@ export interface DropItemDependencies {
   readonly settleMs?: number;
   /** How long after the toss the carried count is read again to catch items picked straight back up. */
   readonly pickupWaitMs?: number;
+  /** How long a hand-over waits for the recipient's pickup before reporting the items left at their feet. */
+  readonly handoverWaitMs?: number;
 }
 
 function productionDependencies(navigation: NavigationRuntime): DropItemDependencies {
@@ -216,29 +219,19 @@ async function approachPlayer(
 
   const target = bot.players[name]?.entity;
   if (!target) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
-  await bot.lookAt(target.position);
+  // Aimed so the toss rests at their feet: facing their body overshot them and facing their feet fell short, back at the
+  // giver (B2, 2026-10-19).
+  const reach = Math.hypot(target.position.x - bot.entity.position.x, target.position.z - bot.entity.position.z);
+  await bot.lookAt(target.position.offset(0, tossAimHeight(reach), 0));
+  // The server learns the new pitch with the next position packet; a toss sent before it flies level and overshoots.
+  await bot.waitForTicks(LOOK_SETTLE_TICKS);
   return {
     name,
     distance: Number(bot.entity.position.distanceTo(target.position).toFixed(2)),
     position: { x: target.position.x, y: target.position.y, z: target.position.z },
+    collected: false,
+    collectedCount: 0,
   };
-}
-
-/**
- * Mark the items this toss created so no sweep picks them straight back up.
- *
- * Only entities that appeared during the toss and are close enough to have come
- * from it are attributed to it. Metadata can arrive a tick after the entity, so
- * an item whose name is not yet readable is still claimed: an unattributed
- * discard is worse than a slightly wide one, and the memory expires anyway.
- */
-function rememberDiscards(bot: Bot, baseline: ReadonlySet<number>, discarded: DiscardedItems): void {
-  const ids = Object.values(bot.entities)
-    .filter((entity) => !baseline.has(entity.id))
-    .filter((entity) => entity.position.distanceTo(bot.entity.position) <= DISCARD_ATTRIBUTION_RADIUS)
-    .filter((entity) => droppedItemName(entity) !== null || entity.name === "item")
-    .map((entity) => entity.id);
-  discarded.remember(ids);
 }
 
 /** Walk to the feet cell of a stance chosen for the pit; the failure reason, or nothing once there. */
@@ -453,7 +446,9 @@ export async function dropItem(
   }
 
   // Claim what this toss put on the ground so the hunt's sweep leaves it alone.
-  if (dropped.some((entry) => entry.dropped > 0)) rememberDiscards(bot, entityBaseline, discarded);
+  const tossedIds = dropped.some((entry) => entry.dropped > 0)
+    ? rememberDiscards(bot, entityBaseline, discarded)
+    : new Set<number>();
 
   const tossedAt = Date.now();
   const droppedAt = { ...bot.entity.position };
@@ -461,12 +456,30 @@ export async function dropItem(
   // A ground toss lands at the bot's feet and is picked up again once its pickup delay ends (live 2026-10-10 run 9: a
   // cave with no pit in reach, all four items "picked up again", twice): walk off before that, away from where the
   // items landed, and only then wait out the check.
-  if (anyDropped && request.destination.kind === "ground") await walkAwayFromToss(bot, droppedAt, dependencies, context);
+  // A hand-over listens from the toss on: the recipient takes the items while the giver is still walking off (the
+  // pickup delay is 2 s), and the server says so once.
+  const handoverWatch = anyDropped && recipient
+    ? awaitHandover(bot, {
+        recipientName: recipient.name,
+        tossedIds,
+        isTossed: (entity) => cameFromToss(entity, entityBaseline, droppedAt),
+        expectedItems: dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0),
+        waitMs: dependencies.handoverWaitMs ?? HANDOVER_WAIT_MS,
+        signal: context.signal,
+      })
+    : null;
+  handoverWatch?.catch(() => undefined);
+  if (anyDropped && request.destination.kind !== "hole") await walkAwayFromToss(bot, droppedAt, dependencies, context);
+  if (handoverWatch && recipient) {
+    const handover = await handoverWatch;
+    recipient = { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount };
+  }
 
   // Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
   // times over): read the carried count again after a short wait and report only the net drop.
-  if (request.destination.kind !== "player" && anyDropped) {
-    await delay(Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - (Date.now() - tossedAt)), undefined, { signal: context.signal });
+  if (anyDropped) {
+    // A hand-over has waited for the pickup packet already.
+    if (!recipient) await delay(Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - (Date.now() - tossedAt)), undefined, { signal: context.signal });
     for (const [index, entry] of dropped.entries()) {
       if (entry.dropped <= 0 || entry.error) continue;
       const now = carriedCount(bot, entry.item);
@@ -544,8 +557,8 @@ export function formatDropItemResult(result: DropItemResult): string {
   lines.push(
     "",
     drop.recipient
-      ? `Handed to **${drop.recipient.name}** from ${drop.recipient.distance} blocks away, at \`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\`.`
-      : `Dropped at \`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\`.`,
+      ? handOverLine(drop.recipient, at)
+      :`Dropped at \`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\`.`,
     `Free slots ${drop.freeSlotsBefore} → ${drop.freeSlotsAfter}.`,
   );
   if (drop.hole) {

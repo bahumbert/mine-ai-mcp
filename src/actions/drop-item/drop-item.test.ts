@@ -5,6 +5,7 @@ import { botFixture, EQUIPMENT_SLOTS, type FakeStack } from "../../test-support/
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
 import { formatDropItemResult, dropItem, type DropItemDependencies } from "./drop-item.js";
+import { PLAYER_EYE_HEIGHT, tossAimHeight } from "./hand-over.js";
 
 interface DropBotOptions {
   readonly carried: readonly FakeStack[];
@@ -24,6 +25,10 @@ interface DropBotOptions {
   readonly returnsAfterMs?: number;
   /** With `returnsAfterMs`: the items come back only if the bot is then within this many blocks of where it tossed them. */
   readonly returnsWithin?: number;
+  /** The server announces this pickup `afterMs` after the toss; the giver's also puts the items back in its inventory. */
+  readonly collects?: { readonly by: "recipient" | "giver"; readonly afterMs: number };
+  /** Stack count the spawned item entity reports. */
+  readonly spawnedCount?: number;
 }
 
 function dropBot(options: DropBotOptions) {
@@ -48,7 +53,7 @@ function dropBot(options: DropBotOptions) {
     id,
     name: "item",
     position: new Vec3(0, 64, distance),
-    getDroppedItem: () => ({ name }),
+    getDroppedItem: () => ({ name, count: options.spawnedCount ?? 1 }),
   });
   const entities: Record<number, unknown> = {};
   for (const existing of options.existingItems ?? []) {
@@ -58,6 +63,17 @@ function dropBot(options: DropBotOptions) {
   const spawnTossed = (name: string) => {
     if (options.spawnsEntityId === undefined) return;
     entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name);
+  };
+  /** The server tells the bot who picked a tossed item up. */
+  const announceCollect = (stack: FakeStack) => {
+    const collects = options.collects;
+    const tossed = options.spawnsEntityId === undefined ? undefined : entities[options.spawnsEntityId];
+    if (!collects || !tossed) return;
+    setTimeout(() => {
+      if (collects.by === "giver") items.push(stack);
+      const collector = collects.by === "giver" ? bot.entity : Object.values(bot.players)[0]?.entity;
+      bot.emit("playerCollect", collector as never, tossed as never);
+    }, collects.afterMs);
   };
 
   // eslint-disable-next-line prefer-const
@@ -79,7 +95,7 @@ function dropBot(options: DropBotOptions) {
       players: Object.fromEntries(
         Object.entries(options.players ?? {}).map(([name, player]) => [
           name,
-          { entity: { id: player.id, position: new Vec3(player.position.x, player.position.y, player.position.z) } },
+          { entity: { id: player.id, username: name, height: 1.8, position: new Vec3(player.position.x, player.position.y, player.position.z) } },
         ]),
       ),
     },
@@ -94,6 +110,7 @@ function dropBot(options: DropBotOptions) {
         removeStack(stack);
         spawnTossed(stack.name);
         comeBack({ ...stack });
+        announceCollect({ ...stack });
       },
       toss: async (type: number, _metadata: number | null, count: number) => {
         const stack = items.find((candidate) => candidate.type === type);
@@ -103,6 +120,7 @@ function dropBot(options: DropBotOptions) {
         removeFrom(stack, count);
         spawnTossed(stack.name);
         comeBack({ ...stack, count });
+        announceCollect({ ...stack, count });
       },
     },
   );
@@ -117,6 +135,7 @@ function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependenci
     createMovements: (() => ({})) as never,
     settleMs: 50,
     pickupWaitMs: 150,
+    handoverWaitMs: 100,
     ...overrides,
   };
 }
@@ -323,7 +342,7 @@ test("walks to the named player, faces them, and records the handover", async ()
   assert.equal(result.status, "succeeded");
   assert.equal(result.drop.recipient?.name, "Dev");
   assert.equal(result.drop.dropped[0]?.dropped, 8);
-  assert.deepEqual(lookedAt, [{ x: 1, y: 64, z: 1 }], "faced the player before tossing");
+  assert.equal(lookedAt.length, 1, "faced the player before tossing");
   assert.equal(goalRange, null, "the entity goal carries its own range");
 });
 
@@ -468,4 +487,106 @@ test("a ground drop that cannot walk away still reports the items picked up agai
   assert.equal(tries, 4, "all four sides were tried");
   assert.equal(result.status, "failed");
   assert.ok(result.drop.dropped[0]?.error?.startsWith("[DROP_PICKED_UP]"));
+});
+
+const handOver = (options: Partial<DropBotOptions> = {}) =>
+  dropBot({
+    carried: [{ name: "oak_log", count: 3, type: 1 }],
+    players: { Dev: { id: 42, position: { x: 0, y: 64, z: 1.5 } } },
+    spawnsEntityId: 90,
+    spawnedCount: 3,
+    ...options,
+  });
+const handOverRequest = parseDropItemRequest({ items: [{ item_name: "oak_log" }], to_player: "Dev" });
+
+test("hand-over: the recipient collects -> succeeded, collected true", async () => {
+  const { bot } = handOver({ collects: { by: "recipient", afterMs: 40 } });
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 1_000 }), createDiscardedItems());
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.drop.recipient?.collected, true);
+  assert.equal(result.drop.recipient?.collectedCount, 3);
+  assert.match(formatDropItemResult(result), /Handed to \*\*Dev\*\*/);
+});
+
+test("hand-over: the giver collects its toss back -> failed [DROP_PICKED_UP]", async () => {
+  const { bot } = handOver({ collects: { by: "giver", afterMs: 40 } });
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 1_000 }), createDiscardedItems());
+  assert.equal(result.status, "failed");
+  assert.ok(result.drop.dropped[0]?.error?.startsWith("[DROP_PICKED_UP]"));
+  assert.equal(result.drop.recipient?.collected, false);
+});
+
+test("hand-over: nobody collects within the wait -> succeeded, collected false, ends within the wait on the wall clock", async () => {
+  const { bot } = handOver();
+  const startedAt = Date.now();
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 200 }), createDiscardedItems());
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.drop.recipient?.collected, false);
+  assert.equal(result.drop.recipient?.collectedCount, 0);
+  assert.ok(Date.now() - startedAt < 1_000, "the wait is bounded");
+  assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet, not picked up yet/);
+});
+
+test("hand-over: the giver aims the toss at the recipient", async () => {
+  const { bot, lookedAt } = handOver({ collects: { by: "recipient", afterMs: 10 } });
+  await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 500 }), createDiscardedItems());
+  assert.equal(lookedAt.length, 1);
+  assert.equal(lookedAt[0]!.y, 64 + tossAimHeight(Math.hypot(0.5, 1)), "aimed at the height that lands the toss at their feet");
+});
+
+test("hand-over: the giver steps away after the toss", async () => {
+  const { bot } = handOver({ collects: { by: "recipient", afterMs: 10 } });
+  let routes = 0;
+  await dropItem(
+    bot,
+    handOverRequest,
+    {},
+    deps({
+      handoverWaitMs: 500,
+      navigate: (async () => {
+        routes += 1;
+        return { status: "completed", elapsedMs: 5 };
+      }) as never,
+    }),
+    createDiscardedItems(),
+  );
+  assert.ok(routes > 0, "the giver routed away from the toss (the recipient was already in reach, so no approach route)");
+});
+
+test("hand-over: abort during the wait removes the listener", async () => {
+  const { bot } = handOver();
+  const controller = new AbortController();
+  const run = dropItem(bot, handOverRequest, { signal: controller.signal }, deps({ handoverWaitMs: 5_000 }), createDiscardedItems());
+  setTimeout(() => controller.abort(), 50);
+  await assert.rejects(run);
+  assert.equal(bot.listenerCount("playerCollect"), 0);
+});
+
+test("hand-over: a pickup announced while the giver walks away still counts", async () => {
+  const { bot } = handOver({ collects: { by: "recipient", afterMs: 20 } });
+  const result = await dropItem(
+    bot,
+    handOverRequest,
+    {},
+    deps({
+      handoverWaitMs: 1_000,
+      navigate: (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return { status: "completed", elapsedMs: 80 };
+      }) as never,
+    }),
+    createDiscardedItems(),
+  );
+  assert.equal(result.drop.recipient?.collected, true);
+  assert.equal(result.drop.recipient?.collectedCount, 3);
+});
+
+test("hand-over: the aim height makes the toss land at the recipient's feet, from 0.5 to 2 blocks", () => {
+  const pitchDown = (distance: number) => (Math.atan2(PLAYER_EYE_HEIGHT - tossAimHeight(distance), distance) * 180) / Math.PI;
+  // Measured toss reach (Mine Labs 2026-10-20, simulated and live): level it slides about 4.3 blocks, 60 degrees down 1.5.
+  for (const [distance, expected] of [[0.5, 79.5], [1, 69], [1.47, 59], [2, 48]] as const) {
+    assert.ok(Math.abs(pitchDown(distance) - expected) < 1, `${distance} blocks: ${pitchDown(distance).toFixed(1)} degrees down`);
+  }
+  assert.ok(tossAimHeight(0.5) < tossAimHeight(1) && tossAimHeight(1) < tossAimHeight(2), "the farther they are, the higher the aim");
+  assert.equal(tossAimHeight(6), PLAYER_EYE_HEIGHT, "beyond the toss reach the aim is level");
 });

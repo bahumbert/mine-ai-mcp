@@ -12,6 +12,8 @@ export interface ScenarioCall extends ActionOutput<string, ActionResult> {
 }
 
 export interface ScenarioContext {
+  /** The name this client plays under, so one driver can give each declared player its own part. */
+  readonly username?: string;
   readonly scenario: ScenarioDefinition;
   /** Let a fixture settle after the trial starts, before taking action. */
   waitForTicks(ticks: number): Promise<void>;

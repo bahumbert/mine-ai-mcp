@@ -104,6 +104,10 @@ export const dropRecipientSchema = z.strictObject({
   /** Distance from the bot to the player at the moment the items were tossed. */
   distance: z.number(),
   position: z.strictObject({ x: z.number(), y: z.number(), z: z.number() }),
+  /** The server announced the recipient picking up every tossed item. False: left at their feet, not taken (yet). */
+  collected: z.boolean(),
+  /** Items the recipient took, from the tossed stacks' counts; 0 when none was seen taken or the count was unknown. */
+  collectedCount: z.number().int(),
 });
 
 export const holeClosureSchema = z.strictObject({
