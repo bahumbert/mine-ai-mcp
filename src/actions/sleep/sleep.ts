@@ -87,32 +87,39 @@ function findUnoccupiedBed(bot: Bot): WorldBlock | null {
 
 /** The bed a request placed from the inventory, kept across attempts so a resumed sleep uses it and never places another. */
 interface RequestBed {
-  placedAt: Vec3 | null;
-  /** Beds carried when the request began: fewer now means this request put one down. */
-  readonly carriedBefore: number;
+  /** The two cells (foot and head) of the bed this request placed or was placing when it was cut off; empty before. */
+  placedCells: readonly Vec3[];
 }
 
-function carriedBedCount(bot: Bot): number {
-  return bot.inventory.items().reduce((total, item) => total + (isBedBlock(item.name) ? item.count : 0), 0);
+function startRequestBed(): RequestBed {
+  return { placedCells: [] };
 }
 
-function startRequestBed(bot: Bot): RequestBed {
-  return { placedAt: null, carriedBefore: carriedBedCount(bot) };
+/** The bed this request placed, when it still stands free in one of its cells. */
+function ownFreeBed(bot: Bot, ownBed: RequestBed): WorldBlock | null {
+  for (const cell of ownBed.placedCells) {
+    const block = bot.blockAt(cell);
+    if (block && isBedBlock(block.name) && !isBedOccupied(block)) return block;
+  }
+  return null;
 }
 
+/**
+ * The bed to sleep in: the request's own, any other free one nearby, or one placed from the inventory. `placed` is true
+ * only for a bed standing in the request's own cells: a free bed found instead is not ours, whatever the carried count
+ * says (review 2026-10-19: carried fewer beds because a reflex or another action used one).
+ */
 async function findOrPlaceBed(bot: Bot, ownBed: RequestBed, signal?: AbortSignal): Promise<BedAvailability> {
-  const own = ownBed.placedAt ? bot.blockAt(ownBed.placedAt) : null;
-  if (own && isBedBlock(own.name) && !isBedOccupied(own)) return { kind: "available", bed: { block: own, placed: true } };
+  const own = ownFreeBed(bot, ownBed);
+  if (own) return { kind: "available", bed: { block: own, placed: true } };
   const existing = findUnoccupiedBed(bot);
-  if (existing) {
-    return { kind: "available", bed: { block: existing, placed: carriedBedCount(bot) < ownBed.carriedBefore } };
-  }
+  if (existing) return { kind: "available", bed: { block: existing, placed: false } };
 
-  const placement = await placeCarriedBed(bot, signal);
-  if (placement.kind === "placed") {
-    ownBed.placedAt = placement.block.position.clone();
-    return { kind: "available", bed: { block: placement.block, placed: true } };
-  }
+  const placement = await placeCarriedBed(bot, signal, (cells) => {
+    ownBed.placedCells = cells.map((cell) => cell.clone());
+  });
+  if (placement.kind === "placed") return { kind: "available", bed: { block: placement.block, placed: true } };
+  ownBed.placedCells = []; // no bed went down: a bed another player puts there later is not ours
   return {
     kind: "failed",
     error:
@@ -333,7 +340,7 @@ export async function executeSleep(
   navigation: NavigationRuntime,
   _request: SleepRequest,
   signal?: AbortSignal,
-  ownBed: RequestBed = startRequestBed(bot),
+  ownBed: RequestBed = startRequestBed(),
 ): Promise<SleepResult> {
   signal?.throwIfAborted();
   if (bot.game.dimension !== "overworld") {
@@ -432,7 +439,7 @@ export function beginSleep(
   observe: ObserveRequest,
 ): RequestExecution<SleepResult> {
   const timeBefore = bot.time.timeOfDay;
-  const ownBed = startRequestBed(bot);
+  const ownBed = startRequestBed();
   let succeeded: SleepResult | null = null;
   observe(() => ({ baseline: { timeOfDay: timeBefore },
     checkpoint: { phase: bot.isSleeping ? "sleeping" : "finding_or_entering_bed", asleep: bot.isSleeping, timeOfDay: bot.time.timeOfDay },

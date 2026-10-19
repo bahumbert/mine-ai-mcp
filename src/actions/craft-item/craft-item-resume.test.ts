@@ -170,3 +170,34 @@ test("a temporary table placed by an aborted attempt is reused, never placed twi
   assert.equal(count(counts, bot, "crafting_table"), 1, "the table is carried again");
   assert.deepEqual(craftCalls, ["oak_planks", "stick", "stone_pickaxe"]);
 });
+
+test("planks picked up between attempts are not counted as crafted: the resume crafts the rest itself", async () => {
+  // 8 planks = two applications; the first made 4, the rescue then picked up 4 from the ground (carried 8 = the target).
+  const { bot, counts, craftCalls } = craftingBot({ oak_log: 2 });
+  const [first] = reflexAfterCrafts(bot, [1]);
+  const run = beginCraftItem(bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
+
+  await assert.rejects(run(first!), /reflex took the body/);
+  const planksId = bot.registry.itemsByName.oak_planks!.id;
+  counts.set(planksId, (counts.get(planksId) ?? 0) + 4);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.deepEqual(craftCalls, ["oak_planks", "oak_planks"], "the second application is made");
+  assert.equal(count(counts, bot, "oak_planks"), 12);
+  assert.equal(count(counts, bot, "oak_log"), 0);
+});
+
+test("an abort right after a craft call resolved still credits that craft to the request", async () => {
+  const { bot, counts, craftCalls } = craftingBot({ oak_log: 2 });
+  const [first, second] = reflexAfterCrafts(bot, [1, 2]);
+  const run = beginCraftItem(bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
+
+  await assert.rejects(run(first!), /reflex/);
+  await assert.rejects(run(second!), /reflex/);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(craftCalls, ["oak_planks", "oak_planks"], "no third application");
+  assert.equal(count(counts, bot, "oak_planks"), 8);
+});

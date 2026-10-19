@@ -87,7 +87,9 @@ export async function eatFood(
 
 /**
  * One request's executor: the baseline is taken once, so an attempt a reflex interrupted is followed by one that sees
- * the bite already landed (one carried fewer) and succeeds without a second bite.
+ * the bite already landed (one carried fewer) and succeeds without a second bite. Only a bite whose consume call
+ * resolved can have landed: one carried fewer with no consume of ours is the hunger reflex's own meal of the same food
+ * (review 2026-10-19), so the request eats again.
  */
 export function beginEatFood(
   bot: Bot,
@@ -97,12 +99,13 @@ export function beginEatFood(
 ): RequestExecution<EatFoodResult> {
   const before = eatingBaseline(bot, request);
   observeEating(observe, bot, request, before);
+  let consumeResolved = false;
   return async (context) => {
     context.signal?.throwIfAborted();
-    if (carriedCount(bot, request.foodName) < before.inventory) {
+    if (consumeResolved && carriedCount(bot, request.foodName) < before.inventory) {
       return { status: "succeeded", eating: evidence(bot, request, before, true) };
     }
-    return eatAgainstBaseline(bot, request, before, context, dependencies);
+    return eatAgainstBaseline(bot, request, before, context, dependencies, () => { consumeResolved = true; });
   };
 }
 
@@ -112,6 +115,7 @@ async function eatAgainstBaseline(
   before: EatingBefore,
   context: ActionContext,
   dependencies: EatFoodDependencies,
+  onConsumeResolved: () => void = () => {},
 ): Promise<EatFoodResult> {
   if (!bot.registry.foodsByName[request.foodName]) {
     return {
@@ -130,6 +134,8 @@ async function eatAgainstBaseline(
     };
   }
 
+  // The bite is judged against what is carried as this attempt starts: a meal the hunger reflex ate before it is not ours.
+  const carriedAtStart = carriedCount(bot, request.foodName);
   using resources = new DisposableStack();
   let consuming = false;
   let cancelWait: ((reason: unknown) => void) | null = null;
@@ -151,6 +157,7 @@ async function eatAgainstBaseline(
     // remains handled by the race; it performs no further body effects.
     const cancelled = new Promise<never>((_resolve, reject) => { cancelWait = reject; });
     await Promise.race([dependencies.consume(), cancelled]);
+    onConsumeResolved();
     cancelWait = null;
     context.signal?.throwIfAborted();
   } catch (cause) {
@@ -163,7 +170,7 @@ async function eatAgainstBaseline(
     };
   }
 
-  const after = await settleInventoryCount(bot, request.foodName, before.inventory - 1, {
+  const after = await settleInventoryCount(bot, request.foodName, carriedAtStart - 1, {
     timeoutMs: dependencies.settleMs ?? CONSUMPTION_SETTLE_MS,
     signal: context.signal,
   });

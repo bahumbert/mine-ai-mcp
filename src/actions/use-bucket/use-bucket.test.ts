@@ -412,6 +412,8 @@ function bucketRequestWorld(held: string) {
     useItem: async (bot, use) => {
       const used = await useItem(bot, use);
       shiftBuckets(use.item.name === "bucket");
+      // A scoop takes the source out of its cell, as the game does: the cell is what proves a resumed fill.
+      if (use.item.name === "bucket" && use.lookAt) world.blocks.delete(key(new Vec3(use.lookAt.x, use.lookAt.y, use.lookAt.z).floored()));
       return used;
     },
   };
@@ -518,4 +520,51 @@ test("a pour that was refused is tried again by the next attempt, not counted as
   assert.equal(refused.status, "failed");
   assert.equal(again.status, "failed");
   assert.equal(world.uses.length, 0);
+});
+
+/** The body is taken during the route, before any cast: the first attempt ends with nothing used. */
+function abortInRoute(world: ReturnType<typeof bucketRequestWorld>, owner: AbortController): void {
+  const navigate = world.dependencies.navigate;
+  let routes = 0;
+  world.dependencies = {
+    ...world.dependencies,
+    navigate: async (request) => {
+      if (routes++ > 0) return navigate(request);
+      owner.abort(new Error("hunger reflex"));
+      throw owner.signal.reason;
+    },
+  };
+}
+
+test("a pour resumed after the bucket counts changed elsewhere (a footing pour) but with its cell still empty pours again", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  world.count("water_bucket").count = 2;
+  const owner = new AbortController();
+  abortInRoute(world, owner);
+  const attempt = bucketAttempts(world, POUR_BESIDE_POOL);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  world.count("water_bucket").count -= 1; // the footing reflex poured one into the sea: counts moved, our cell did not
+  world.count("bucket").count += 1;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1, "the pour is cast again");
+  assert.equal(result.bucket.targetAfter, "water");
+});
+
+test("a fill resumed after the bucket counts changed elsewhere with its source still in place scoops again", async () => {
+  const world = bucketRequestWorld("bucket");
+  world.count("bucket").count = 2;
+  const owner = new AbortController();
+  owner.abort(new Error("hunger reflex")); // taken before the attempt's first step: nothing was cast
+  const attempt = bucketAttempts(world, { action: "fill", liquid: "water", cell: { x: 4, y: 63, z: 0 } });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  world.count("bucket").count -= 1; // another scoop elsewhere: counts moved, the named source is still there
+  world.count("water_bucket").count += 1;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1, "the scoop is cast again");
 });

@@ -216,21 +216,40 @@ test("a bite that landed while the first attempt was aborted in the settle is no
   assert.deepEqual([result.eating.inventoryBefore, result.eating.inventoryAfter, result.eating.consumed], [2, 1, true]);
 });
 
-test("food that a reflex ate between attempts counts as eaten without a second bite", async () => {
-  const { bot, items } = hungryBot("cooked_beef", 1);
+test("food a reflex ate between attempts, before our bite was made, is not our bite: the resume eats again", async () => {
+  const { bot, items } = hungryBot("cooked_beef", 2);
   let bites = 0;
-  const attempt = eatRequest(bot, { equip: async () => {}, consume: async () => { bites += 1; } });
+  const attempt = eatRequest(bot, { equip: async () => {}, consume: async () => { bites += 1; items[0]!.count -= 1; } });
   const owner = new AbortController();
   owner.abort(new Error("hunger reflex"));
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  items.length = 0;
+  items[0]!.count -= 1; // the hunger reflex's own meal of the same food: one carried fewer, our consume never ran
   bot.food = 20;
 
   const result = await attempt(new AbortController().signal);
 
-  assert.equal(bites, 0);
+  assert.equal(bites, 1);
   assert.equal(result.status, "succeeded");
-  assert.equal(result.eating.inventoryBefore, 1);
+  assert.equal(items[0]!.count, 0);
+  assert.equal(result.eating.inventoryBefore, 2);
+  assert.equal(result.eating.inventoryAfter, 0);
+});
+
+test("food that a reflex ate after our bite resolved but was cut in the settle counts as eaten", async () => {
+  const { bot, items } = hungryBot("cooked_beef", 1);
+  let bites = 0;
+  const owner = new AbortController();
+  const attempt = eatRequest(bot, {
+    equip: async () => {},
+    consume: async () => { bites += 1; setTimeout(() => owner.abort(new Error("fall reflex")), 10); },
+  });
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  items.length = 0; // the bite landed (or a reflex ate): the one carried is gone
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(bites, 1);
+  assert.equal(result.status, "succeeded");
   assert.equal(result.eating.inventoryAfter, 0);
 });
 

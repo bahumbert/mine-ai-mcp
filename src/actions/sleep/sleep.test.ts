@@ -348,7 +348,7 @@ test("places a carried bed and sleeps in it when no bed is around", async () => 
 
 /** A bot carrying one bed that places it on the stone at y 63; `placements` counts how many beds were put down. */
 function bedPlacingBot() {
-  const state = { placedAt: null as Vec3 | null, placements: 0, taken: false };
+  const state = { placedAt: null as Vec3 | null, placements: 0, taken: false, occupied: false };
   // The bot ends up eight blocks from the bed it places (placement walked it off), so every sleep has a route to take.
   const bot = mockBot({
     time: { timeOfDay: 15000 },
@@ -360,7 +360,7 @@ function bedPlacingBot() {
     blockAt: (pos: Vec3) => {
       const offset = state.placedAt ? pos.minus(state.placedAt) : null;
       if (!state.taken && offset && offset.y === 0 && Math.abs(offset.x) + Math.abs(offset.z) <= 1) {
-        return { name: "cyan_bed", boundingBox: "block", position: pos, getProperties: () => ({ occupied: false }) };
+        return { name: "cyan_bed", boundingBox: "block", position: pos, getProperties: () => ({ occupied: state.occupied }) };
       }
       if (pos.y === 63) return { name: "stone", boundingBox: "block", position: pos };
       return { name: "air", boundingBox: "empty", position: pos };
@@ -473,4 +473,33 @@ test("a second call after a sleep that finished returns its success without slee
   assert.equal(first.status, "succeeded");
   assert.deepEqual(second, first);
   assert.equal(sleeps, 1);
+});
+
+test("a bed another player now occupies is not ours: the free bed found instead is not reported as placed", async () => {
+  const { bot, state } = bedPlacingBot();
+  const owner = new AbortController();
+  let walksTo: Vec3 | null = null; // where a route ends; the first route is the one the reflex aborts
+  let routes = 0;
+  const navigation = {
+    navigate: async () => {
+      routes += 1;
+      if (routes === 1) { owner.abort(new Error("hunger reflex")); throw owner.signal.reason; }
+      bot.entity.position = walksTo!.offset(-1, 0, 0);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  } as unknown as NavigationRuntime;
+  const attempt = sleepAttempts(bot, navigation);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  state.occupied = true; // our bed is taken by someone else; another free bed stands nearby
+  const otherBed = state.placedAt!.offset(4, 0, 0);
+  const blockAt = bot.blockAt;
+  bot.blockAt = (pos: Vec3) => (pos.equals(otherBed) ? mockBed("cyan_bed", otherBed) : blockAt(pos));
+  loadBedColumn(bot, otherBed);
+  walksTo = otherBed;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(state.placements, 1);
+  assert.deepEqual(result.sleep?.bedPosition, { x: otherBed.x, y: otherBed.y, z: otherBed.z });
+  assert.equal(result.sleep?.placedBed, false, "the bed slept in is not the one this request put down");
 });

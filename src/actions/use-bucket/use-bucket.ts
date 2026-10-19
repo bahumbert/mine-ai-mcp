@@ -322,12 +322,31 @@ function bucketCounts(bot: Bot, liquid: BucketLiquid): BucketCounts {
   return { empty: carriedCount(bot, bucketFor(liquid, false)), full: carriedCount(bot, bucketFor(liquid, true)) };
 }
 
-/** Whether the inventory already shows this request's scoop or pour, made by an attempt a reflex cut short. */
-function bucketChangeMade(bot: Bot, request: UseBucketRequest, before: BucketCounts): boolean {
+/**
+ * Whether a pour's cell shows the pour: its liquid in source state, or what that liquid made of the lava that was
+ * there. The footing reflex's water landing elsewhere moves the bucket counts without touching this cell.
+ */
+function pourShownByCell(bot: Bot, progress: BucketProgress, target: Vec3): boolean {
+  const block = bot.blockAt(target);
+  if (!block) return false;
+  const formed = (block.name === "obsidian" || block.name === "cobblestone") && block.name !== progress.targetBefore;
+  return isLiquidSource(bot, block, progress.request.liquid) || formed;
+}
+
+/**
+ * Whether an attempt a reflex cut short already made this request's scoop or pour: the bucket counts changed and the
+ * cell the cast was aimed at shows it (a loaded cell no longer the liquid's source for a fill). The counts alone are
+ * not proof, since another bucket use moves them too (review 2026-10-19); with no cast begun there is no cell to read.
+ */
+function bucketUseAlreadyMade(bot: Bot, progress: BucketProgress, before: BucketCounts): boolean {
+  const { request, target, targetBefore } = progress;
+  if (!target || targetBefore === null) return false;
   const now = bucketCounts(bot, request.liquid);
-  return request.action === "fill"
-    ? now.full > before.full && now.empty < before.empty
-    : now.full < before.full && now.empty > before.empty;
+  if (request.action === "pour") {
+    return now.full < before.full && now.empty > before.empty && pourShownByCell(bot, progress, target);
+  }
+  const block = bot.blockAt(target);
+  return now.full > before.full && now.empty < before.empty && block !== null && !isLiquidSource(bot, block, request.liquid);
 }
 
 /** The use is made and seen in the inventory: count what a pour formed, then report it. */
@@ -423,7 +442,7 @@ export function beginUseBucket(
   return async (context) => {
     context.signal?.throwIfAborted();
     if (progress.used) return { status: "succeeded", bucket: evidence(bot, progress) };
-    if (bucketChangeMade(bot, request, before)) return confirmBucketUsed(bot, progress, context);
+    if (bucketUseAlreadyMade(bot, progress, before)) return confirmBucketUsed(bot, progress, context);
     const item = carried(bot, bucketName);
     if (!item) return failure(bot, progress, useBucketOutcomes.noBucket(bucketName));
 

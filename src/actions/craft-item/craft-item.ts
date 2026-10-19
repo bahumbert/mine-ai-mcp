@@ -128,10 +128,12 @@ interface CraftProgress {
   readonly baselines: Map<string, number>;
   /** The table the request set down (not a temporary one) and the carried tables it used. */
   readonly table: TableHold;
+  /** What this request's own craft calls produced, by item id: carried items it did not craft are never credited. */
+  readonly crafted: Map<number, number>;
 }
 
 function newCraftProgress(): CraftProgress {
-  return { baselines: new Map(), table: { placedAt: null, usedCarried: 0 } };
+  return { baselines: new Map(), table: { placedAt: null, usedCarried: 0 }, crafted: new Map() };
 }
 
 interface CraftTargets {
@@ -160,11 +162,16 @@ function resolveCraftTargets(bot: Bot, request: CraftItemRequest, progress: Craf
   return { items, requestedItems, unknownItems };
 }
 
-/** The targets still short of the request, each with the count left: what earlier attempts crafted is carried already. */
+/**
+ * The targets still short of the request, each with the count left. What earlier attempts crafted is credited as the
+ * smaller of the carried change and what this request's craft calls made: planks picked up from the ground or a
+ * hunger reflex's meal are not crafting (review 2026-10-19).
+ */
 function stillToCraft(bot: Bot, items: readonly ResolvedCraftItem[], progress: CraftProgress): CraftTarget[] {
   return items.flatMap(({ id, name, count, inventoryBefore }) => {
     const usedForTable = name === "crafting_table" ? progress.table.usedCarried : 0;
-    const left = count - Math.max(0, carriedCount(bot, name) - inventoryBefore + usedForTable);
+    const carriedChange = carriedCount(bot, name) - inventoryBefore + usedForTable;
+    const left = count - Math.max(0, Math.min(carriedChange, progress.crafted.get(id) ?? 0));
     return left > 0 ? [{ id, name, count: left }] : [];
   });
 }
@@ -297,7 +304,9 @@ async function craftBatch(
       items: unsettled(true),
     }, bot.version);
   }
-  const execution = await executeCraftPlan(bot, preparation.applications, station.craftingTable, context.signal);
+  const execution = await executeCraftPlan(bot, preparation.applications, station.craftingTable, context.signal, ({ id, count }) =>
+    progress.crafted.set(id, (progress.crafted.get(id) ?? 0) + count),
+  );
   const settled = await settleCraftedGains(bot, items, progress, context.signal);
   return craftOutcome(bot, settled, execution, preparation, progress);
 }

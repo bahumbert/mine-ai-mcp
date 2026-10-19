@@ -81,12 +81,16 @@ async function craftOnce(
   }
 }
 
-/** Execute one native recipe application at a time and close the inventory afterward. */
+/**
+ * Execute one native recipe application at a time and close the inventory afterward. `onCrafted` hears each
+ * application's output the moment its craft call resolves, so a caller that is aborted later still knows what it made.
+ */
 export async function executeCraftPlan(
   bot: Bot,
   applications: readonly CraftApplication[],
   craftingTable: NonNullable<Parameters<Bot["craft"]>[2]> | null,
   signal?: AbortSignal,
+  onCrafted?: (output: { readonly id: number; readonly count: number }) => void,
 ): Promise<CraftExecution> {
   let completedSteps = 0;
   if (bot.currentWindow) bot.closeWindow(bot.currentWindow);
@@ -97,6 +101,7 @@ export async function executeCraftPlan(
         signal?.throwIfAborted();
         requireApplicationRoom(bot, application.recipe);
         await craftOnce(bot, application.recipe, craftingTable);
+        onCrafted?.(application.recipe.result as { readonly id: number; readonly count: number });
       }
       completedSteps += 1;
     }

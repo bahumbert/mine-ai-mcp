@@ -131,6 +131,8 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 interface ContainerProgress {
   /** Carried counts of the requested items when the request began: what moved since is the difference. */
   readonly carriedBefore: ReadonlyMap<string, number>;
+  /** What the container held when the request first opened it (null until then): the chest's own share of the change. */
+  contentsAtFirstOpening: readonly ContainerContent[] | null;
 }
 
 type ContainerObservation = Pick<ContainerUseEvidence, "blockName" | "slotCount" | "contents" | "observedAt">;
@@ -141,20 +143,25 @@ function carriedOf(bot: Bot, itemName: string): number {
 }
 
 /**
- * How much of each requested item earlier attempts already moved, from the carried counts against `begin`'s: the
- * inventory is what a deposit or withdrawal changes whoever else uses the chest. Two entries naming one item share the
- * moved amount in order.
+ * How much of each requested item earlier attempts already moved: the smaller of what the inventory changed and what
+ * the container changed since the request first opened it. Eaten food (inventory down, chest unchanged) and picked-up
+ * items (inventory up, chest unchanged) credit nothing; another bot using the chest at the same time is capped by the
+ * inventory change (review 2026-10-19). Two entries naming one item share the moved amount in order.
  */
 function movedByEarlierAttempts(
   bot: Bot,
   progress: ContainerProgress,
   operation: "deposit" | "withdraw",
   items: readonly RequestedContainerItem[],
+  containerNow: readonly ContainerContent[],
 ): number[] {
   const credited = new Map<string, number>();
+  const containerAtFirstOpening = progress.contentsAtFirstOpening ?? containerNow;
   return items.map(({ itemName, count }) => {
-    const change = carriedOf(bot, itemName) - (progress.carriedBefore.get(itemName) ?? 0);
-    const moved = operation === "deposit" ? -change : change;
+    const inventoryChange = carriedOf(bot, itemName) - (progress.carriedBefore.get(itemName) ?? 0);
+    const containerChange = itemCount(containerNow, itemName) - itemCount(containerAtFirstOpening, itemName);
+    const moved =
+      operation === "deposit" ? Math.min(-inventoryChange, containerChange) : Math.min(inventoryChange, -containerChange);
     const mine = Math.min(count, Math.max(0, moved - (credited.get(itemName) ?? 0)));
     credited.set(itemName, (credited.get(itemName) ?? 0) + mine);
     return mine;
@@ -275,7 +282,8 @@ async function transferResult(
   context: ActionContext,
 ): Promise<UseContainerResult> {
   const transferTarget = target(bot, request);
-  const alreadyMoved = movedByEarlierAttempts(bot, progress, request.operation, request.items);
+  progress.contentsAtFirstOpening ??= before.contents;
+  const alreadyMoved = movedByEarlierAttempts(bot, progress, request.operation, request.items, before.contents);
   const execution = await executeTransferBatch(
     bot,
     container,
@@ -431,6 +439,7 @@ export function beginUseContainer(
 ): RequestExecution<UseContainerResult> {
   const progress: ContainerProgress = {
     carriedBefore: new Map(requestedItemNames(request).map((itemName) => [itemName, carriedOf(bot, itemName)])),
+    contentsAtFirstOpening: null,
   };
   const inventoryBefore = observe ? inventoryCounts(bot) : null;
   observe?.(() => ({ baseline: { inventory: inventoryBefore },

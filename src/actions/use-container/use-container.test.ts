@@ -634,3 +634,53 @@ test("a second call after a completed withdrawal returns the success without mov
   if (second.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(second.container.transfers[0]?.transferred, 64);
 });
+
+test("a deposit resumed after the hunger reflex ate some of the same food still puts the full count in the chest", async (t) => {
+  const carried: Record<string, number> = { bread: 20 };
+  const scenery = scene(t, { block: "barrel", contents: 0, carried });
+  const owner = new AbortController();
+  transferOnServer(scenery, carried, "deposit", owner, { takes: 3 });
+  const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "bread", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  carried.bread -= 2; // the reflex ate two between the attempts: the inventory fell, the chest did not
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  if (result.container?.operation !== "deposit") assert.fail("expected deposit evidence");
+  assert.equal(result.container.transfers[0]?.transferred, 10);
+  assert.equal(scenery.container.state.contents.find(({ name }) => name === "bread")?.count, 10);
+  assert.equal(carried.bread, 8);
+});
+
+test("a withdrawal resumed after planks were picked up from the ground still takes the full count from the chest", async (t) => {
+  const carried: Record<string, number> = { oak_planks: 0 };
+  const scenery = scene(t, { contents: [{ slot: 0, name: "oak_planks", count: 20 }], carried });
+  const owner = new AbortController();
+  transferOnServer(scenery, carried, "withdraw", owner, { takes: 3 });
+  const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "oak_planks", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  carried.oak_planks += 4; // picked up during the rescue: the inventory rose, the chest did not
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
+  assert.equal(result.container.transfers[0]?.transferred, 10);
+  assert.equal(scenery.container.state.contents.find(({ name }) => name === "oak_planks")?.count, 10);
+  assert.equal(carried.oak_planks, 14);
+});
+
+test("a resumed deposit while another bot also puts items in the chest credits no more than the inventory lost", async (t) => {
+  const carried: Record<string, number> = { bread: 20 };
+  const scenery = scene(t, { block: "barrel", contents: 0, carried });
+  const owner = new AbortController();
+  const asked = transferOnServer(scenery, carried, "deposit", owner, { takes: 3 });
+  const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "bread", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  scenery.container.state.contents.push({ slot: 5, name: "bread", count: 5 }); // another bot's own deposit
+  await attempt(new AbortController().signal);
+
+  assert.deepEqual(asked, [10, 7]);
+});
