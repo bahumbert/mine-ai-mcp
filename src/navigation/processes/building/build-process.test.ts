@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
-import { build, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
+import { build, BuildProgress, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -511,4 +511,24 @@ test("a refused cell carries the cause: placement, entity, policy or route", asy
     removeWrongBlocks: false,
   });
   assert.equal(refusalCause(route), "route");
+});
+
+test("a dig that came out just before the abort threw is counted in the progress the next attempt reports", async () => {
+  const { bot, physics, put } = structureWorld();
+  put(new Vec3(2, 64, 0), "dirt");
+  const progress = new BuildProgress();
+  const cut = new AbortController();
+  const cutting = {
+    ...physics,
+    breakInPlace: async (options: Parameters<typeof physics.breakInPlace>[0]) => {
+      await physics.breakInPlace(options);
+      cut.abort(new Error("[HUNGER] reflex"));
+      throw cut.signal.reason;
+    },
+  };
+  await assert.rejects(build(bot, { ...cutting, cells: cells([[2, 64, 0]]), removeWrongBlocks: true, signal: cut.signal }, false, progress), /HUNGER/);
+  assert.equal(progress.dug, 1);
+  const resumed = await build(bot, { ...physics, cells: cells([[2, 64, 0]]), removeWrongBlocks: true }, false, progress);
+  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.dug, 1, "the resumed attempt reports the whole request's dig, once");
 });

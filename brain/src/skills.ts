@@ -10,13 +10,13 @@ import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import type { HouseSize } from "./building/house.ts";
-import { consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
+import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
-import { ToolLosses } from "./building/tool-loss.ts";
-import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { lostToolClass, ToolLosses, toolToMake } from "./building/tool-loss.ts";
+import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -86,6 +86,8 @@ export interface SkillContext {
    * followed the owner, flying, 4 blocks up and 20 away). Kept for the objective's life by the agent.
    */
   readonly levelSites?: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
+  /** The tool classes whose tool broke and was not made again, kept for the objective's life by the agent: the next fetch makes the tool before it digs (N7). */
+  readonly toolsLost?: Set<string>;
 }
 
 export interface UnfinishedHouse {
@@ -284,14 +286,11 @@ function reallyDropped(result: Readonly<Record<string, unknown>> | undefined): {
     .filter((entry) => entry.count > 0);
 }
 
-const TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"];
-const tierRank = (item: string): number => { const rank = TIERS.indexOf(item.split("_")[0]!); return rank < 0 ? TIERS.length : rank; };
-
 /**
- * The last tool of a class, the last bed and the last boat stay in the inventory: one is kept, the best tier carried
+ * The last tool of a class, the last bed and the last boat stay in the inventory: one is kept, the best carried (`bestTool`)
  * (live 2026-10-10 run 8: Ayla dropped her stone pickaxe, axe, shovel, boat and bed; Yuki her axe while crafting one).
  */
-function keepLastOfKind(entries: readonly { item: string; count?: number }[], inventory: readonly { name: string; count: number }[]): { entries: { item: string; count?: number }[]; kept: string[] } {
+function keepLastOfKind(entries: readonly { item: string; count?: number }[], inventory: readonly CarriedStack[]): { entries: { item: string; count?: number }[]; kept: string[] } {
   const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const result = entries.map((entry) => ({ ...entry }));
   const kept: string[] = [];
@@ -300,13 +299,35 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
     if (owned.length === 0) continue;
     const dropping = (item: string) => { const entry = result.find((candidate) => candidate.item === item); return entry === undefined ? 0 : Math.min(entry.count ?? carried(item), carried(item)); };
     if (owned.some((item) => carried(item) - dropping(item) > 0)) continue;
-    const keep = [...owned].sort((a, b) => tierRank(a) - tierRank(b))[0]!;
+    const keep = bestTool(inventory.filter((stack) => kindOf(stack.name) === kind))!.name;
     const entry = result.find((candidate) => candidate.item === keep);
     if (entry === undefined) continue;
     entry.count = Math.max(0, dropping(keep) - 1);
     kept.push(`kept 1 ${keep}: your only ${kind}`);
   }
   return { entries: result.filter((entry) => entry.count !== 0), kept };
+}
+
+/** How far a remembered own chest may be for a drop to walk to it instead of burying. */
+const CHEST_REACH = 32;
+
+/**
+ * Deposits what a drop gives up into the nearest own chest the runtime remembers within {@link CHEST_REACH} blocks that
+ * has a slot free (`use_container`: it walks there itself). Null when there is none or the deposit did not succeed: the
+ * items are then buried as ever (run 15 N5: 378 cobblestone buried while a chest stood by the house).
+ */
+async function storeInChest(context: SkillContext, entries: readonly { item: string; count?: number }[], before: BotSnapshot, why: string): Promise<SkillResult | null> {
+  if (context.self === undefined) return null;
+  const chest = (await context.runtime.knownContainers(context.self, before.position, CHEST_REACH).catch(() => [])).find((known) => known.usedSlots < known.slotCount);
+  if (chest === undefined) return null;
+  const carried = (item: string) => before.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+  const items = entries.map((entry) => ({ item_name: entry.item, count: Math.min(entry.count ?? carried(entry.item), carried(entry.item)) })).filter((entry) => entry.count > 0);
+  if (items.length === 0) return null;
+  const outcome = await context.body.act("use_container", { operation: "deposit", x: chest.x, y: chest.y, z: chest.z, items }, why, { signal: context.signal });
+  if (context.signal.aborted) return { status: "stopped" };
+  if (outcome.status !== "succeeded") return null;
+  const free = Math.max(0, INVENTORY_SLOTS - (await context.runtime.status()).inventory.length);
+  return { status: "done", detail: `stored ${items.map((entry) => `${entry.count} ${entry.item_name}`).join(", ")} in your chest at ${chest.x} ${chest.y} ${chest.z}; ${free === 0 ? "the inventory is still full" : `the inventory has room again: ${free} of ${INVENTORY_SLOTS} slots free`}` };
 }
 
 /**
@@ -323,13 +344,16 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
   const needed = before.inventory.some((stack) => !workNeeds.has(stack.name)) ? workNeeds : new Set<string>();
   const kept = [...own.kept];
   const entries = own.entries.filter((entry) => {
-    if (!needed.has(entry.item)) return true;
+    // A tool, bed or boat asked to go is a copy: the last of the class was kept above.
+    if (!needed.has(entry.item) || kindOf(entry.item) !== null) return true;
     const all = before.inventory.filter((stack) => stack.name === entry.item).reduce((sum, stack) => sum + stack.count, 0);
     kept.push(`kept all ${Math.min(entry.count ?? all, all)} ${entry.item}: your current work needs them`);
     return false;
   });
   // What may go instead is said with the refusal, or the same drop came back (run 11: up to 7 times in a row).
   if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}${needed.size === 0 ? "" : `; ${junkHint(before, needed)}`}` };
+  const stored = await storeInChest(context, entries, before, why);
+  if (stored !== null) return stored;
   const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
   const act = (input: Record<string, unknown>) => context.body.act("drop_item", { items, allow_equipped: true, ...input }, why, { signal: context.signal });
   // Buried, not tossed at her feet: a toss lands within a block or two, and she picked most of it up again
@@ -707,11 +731,8 @@ function builtBefore(batches: readonly (readonly { x: number; y: number; z: numb
 /** The player inventory's main slots (hotbar included). */
 const INVENTORY_SLOTS = 36;
 
-/** Tools a leveling job replaces when they wear out before it gives up. */
-const MAX_TOOLS_LOST = 6;
-
-/** Cobblestone a stone tool of each class takes: with that much carried, the tool is made in stone, else in wood. */
-const TOOL_COBBLESTONE: Readonly<Record<string, number>> = { pickaxe: 3, axe: 3, shovel: 1, hoe: 2 };
+/** Tools a leveling job replaces when they wear out before it gives up (in all, and of one class). */
+const LEVEL_TOOL_LOSSES = { perClass: 6, total: 6 };
 
 /**
  * Makes `zone` flat with its walking level at `level` (feet height), the way a player would: carries the right tool
@@ -783,7 +804,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     const has = spareIn(stacks);
     return plan.tools
       .filter((tool) => !stacks.some((stack) => stack.name.endsWith(`_${tool}`)))
-      .map((tool) => ({ item: has("cobblestone") >= (TOOL_COBBLESTONE[tool] ?? 3) ? `stone_${tool}` : `wooden_${tool}`, count: 1 }));
+      .map((tool) => ({ item: toolToMake(tool, has), count: 1 }));
   };
   // The tool classes (game data: what each block is mined with) of the cells these batches dig clear.
   const toolsDug = (batches: readonly (readonly TerrainCell[])[]) =>
@@ -800,7 +821,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   // would (live 2026-10-02: one table on a treetop stopped a whole site); anything else stops the job.
   let left = 0;
   let done = 0;
-  let toolsLost = 0;
+  const toolLosses = new ToolLosses(LEVEL_TOOL_LOSSES);
   const run = async (batches: readonly (readonly TerrainCell[])[]): Promise<SkillResult | null> => {
     for (let index = 0; index < batches.length; index += 1) {
       const batch = batches[index]!;
@@ -811,11 +832,18 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       if (outcome.status === "succeeded") continue;
       // A tool worn out on the way is replaced and the batch done again, as a player crafts another shovel (live
       // 2026-10-02: a worn stone axe, then the shovel, each ended the whole job).
-      if (errorCode(outcome.error) === "TOOL_TIER_LOST" && toolsLost < MAX_TOOLS_LOST) {
-        toolsLost += 1;
-        // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
-        const replaced = await replaceWornTool(context, what, toolsMissing, toolsDug(batches.slice(index)));
-        if (replaced !== null) return replaced;
+      // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
+      const digging = toolsDug(batches.slice(index));
+      const lost = await toolLosses.handle(outcome.error, {
+        reserved,
+        inventory: async () => (await context.runtime.status()).inventory,
+        getItems: (items, purpose) => getItems(context, items, `${purpose}, leveling ${what}`),
+        onLost: (toolClass) => context.toolsLost?.add(toolClass),
+        stillNeeded: (toolClass) => (digging as ReadonlySet<string>).has(toolClass),
+      });
+      if (lost.status === "stopped" || context.signal.aborted) return { status: "stopped" };
+      if (lost.status === "remade" || lost.status === "unneeded") {
+        if (lost.status === "remade") context.toolsLost?.delete(lostToolClass(outcome.error)!);
         done -= 1;
         index -= 1;
         continue;
@@ -825,7 +853,8 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
         left += refused;
         continue;
       }
-      return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}` };
+      const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
+      return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}` };
     }
     return null;
   };
@@ -868,14 +897,6 @@ function overBudget(what: string, plan: ReturnType<typeof levelPlan>, pitNote: s
   for (const cell of plan.phases.dig.flat()) perColumn.set(`${cell.x},${cell.z}`, (perColumn.get(`${cell.x},${cell.z}`) ?? 0) + 1);
   const deepest = Math.max(0, ...perColumn.values());
   return { status: "failed", detail: `leveling ${what} means moving ${moved} blocks (${plan.dug} to dig, ${plan.filled} to fill), up to ${deepest} deep${pitNote}; at most ${budget} blocks are moved at a time: ask for a smaller area or a nearer height` };
-}
-
-/** A tool worn out mid-leveling is made again, only for the digging still to do (`digging`: the tool classes of those cells); null when it went well. */
-async function replaceWornTool(context: SkillContext, what: string, missing: (stacks: readonly { readonly name: string; readonly count: number }[]) => { item: string; count: number }[], digging: ReadonlySet<string>): Promise<SkillResult | null> {
-  const replace = missing((await context.runtime.status()).inventory).filter(({ item }) => [...digging].some((kind) => item.endsWith(`_${kind}`)));
-  if (replace.length === 0) return null;
-  const got = await getItems(context, replace, `a new tool to go on leveling ${what} (one wore out)`);
-  return got.status === "done" ? null : got;
 }
 
 /** The part of `build_structure`'s audit the skill reports (src/actions/build-structure/contract.ts). */
@@ -1070,7 +1091,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
   const creature = notBlock && step.for !== undefined && isCreature(step.for) ? step.for : undefined;
   if (notBlock && creature === undefined) {
     const from = step.for === undefined ? null : await dropSourcesNote(context.runtime, step.for);
-    return { status: "failed", detail: `${step.for} is not a block${from === null ? "" : ` (${from}: get_items ${step.for} breaks them)`}: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without "for": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
+    return { status: "failed", detail: `${step.for} is not a block${from === null ? "" : ` (${from}: get_items ${step.for} breaks them)`}: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, leave \"for\" out to just explore: the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)` };
   }
   // Ores lie underground nearly everywhere and the map leaves the common ones out: walking the surface finds none
   // (live 2026-10-07: Vex explored for iron_ore with 256 of it loaded around him, only short of a stone pickaxe).

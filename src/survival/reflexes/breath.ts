@@ -10,6 +10,8 @@ import { airSupplyTicks } from "../../world/air-supply.js";
 export const BREATH_REFLEX = "breath_reflex" as const;
 /** Check air every quarter second while another action or idle buoyancy owns movement. */
 const CHECK_INTERVAL_TICKS = 5;
+/** Air ticks on the server's meter while the bot breathes. */
+const FULL_AIR_TICKS = 300;
 /** Surfacing this many times within the window and radius means the action keeps diving to a place it cannot reach on one breath. */
 const REPEAT_FIRINGS = 3;
 const REPEAT_WINDOW_MS = 3 * 60_000;
@@ -29,6 +31,9 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
       if (!isInWater(bot)) return null;
       const roof = swimmingRoof(bot)?.name ?? null;
       const floor = diveBackstop();
+      // Full air on the server's meter is a bot that breathes (water breathing, respiration, eyes the server puts out of
+      // the water): the dive's own model of the cells never rescues it (run 15: 20 cancels at air 20).
+      if (floor !== null && airSupplyTicks(bot) === FULL_AIR_TICKS) return null;
       if (floor === null ? !needsBreathResponse(air, roof) : (airSupplyTicks(bot) ?? 0) > floor) return null;
       return { kind: "observed", danger: { air, ownedDive: floor !== null }, evidence: { air, roof } };
     },
@@ -64,7 +69,8 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
       };
     },
     continuation: (outcome) => {
-      if (outcome.ownedDive) return { kind: "return", reason: "Navigation dive budget failed; the breath backstop rescued the bot." };
+      // A rescue from a dive navigation owned resumes like any other (navigation plans again from the surface) and counts
+      // in the same guard, so a dive that keeps failing at one place still ends. `ownedDive` stays in the receipts.
       if (outcome.kind === "air_full") {
         const { x, z } = bot.entity.position;
         const at = now();

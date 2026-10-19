@@ -17,6 +17,7 @@ import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
+import { waitForWorldAge } from "../../world/world-age.js";
 import { currentVehicle, forgetVehicle, letsHerOff, resumePhysics } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
@@ -168,16 +169,18 @@ function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: En
  * Puts the carried boat in the water toward `heading` (a unit vector), rides straight across, gets off a block short
  * of the far shore and takes the boat back. The bot stands at the shore, facing the water.
  */
-export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING): Promise<CrossingResult> {
+export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING, timing: CrossingTiming = {}): Promise<CrossingResult> {
   const item = bot.inventory.items().find((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
   if (item === undefined) return { status: "failed", blocks: 0, detail: "no boat is carried" };
   const origin = bot.entity.position.clone();
   const boat = await launchBoat(bot, item, heading);
   if (boat === null) return { status: "failed", blocks: 0, detail: "could not put the boat in the water here" };
 
-  const mounted = new Promise<boolean>((resolve) => bot.once("mount", () => resolve(true)));
-  bot.mount(boat);
-  if (!(await Promise.race([mounted, sleep(3000).then(() => false)]))) return { status: "failed", blocks: 0, detail: "could not get into the boat" };
+  if (!(await mountBoat(bot, boat, timing.mountWallMs ?? MOUNT_WALL_MS, signal))) {
+    // The boat she put in the water is hers to take back (a boat left floating is lost to the next bot, and to her).
+    await takeBoatBack(bot, boat, signal);
+    return { status: "failed", blocks: 0, detail: "could not get into the boat" };
+  }
 
   const ride = new BoatRide(bot, boat, heading, origin, signal);
   const across = await ride.across(Math.min(maxBlocks, MAX_CROSSING));
@@ -199,13 +202,39 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   if (staysAtSea) {
     return { status: "failed", blocks: ridden, atSea: true, detail: `rode ${ridden} blocks by boat and stays at sea in its boat at ${Math.floor(x)} ${Math.floor(z)} (${stoppedBy})` };
   }
-  await getOff(bot);
+  const { answered } = await getOff(bot, timing.getOffWallMs === undefined ? {} : { wallMs: timing.getOffWallMs });
 
   await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), 6), signal);
   const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
-  const detail = `rode ${ridden} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}`;
+  const seated = answered ? "" : "; the server did not answer the get-off, she may still be seated in the boat";
+  const detail = `rode ${ridden} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}${seated}`;
   return { status: stoppedBy === "" ? "crossed" : "failed", blocks: ridden, detail };
+}
+
+/** Test knobs: the wall-clock bounds of the two waits of a crossing. */
+export interface CrossingTiming {
+  readonly mountWallMs?: number;
+  readonly getOffWallMs?: number;
+}
+
+/** Longest wait for the server to seat her in the boat, on the wall clock, next to the 40 server ticks. */
+const MOUNT_WALL_MS = 8_000;
+
+/** Seat her in `boat`; false when no `mount` came within 40 server ticks or the wall bound. The listener never outlives the wait. */
+async function mountBoat(bot: Bot, boat: Entity, wallMs: number, signal?: AbortSignal): Promise<boolean> {
+  let mounted = false;
+  const onMount = () => {
+    mounted = true;
+  };
+  bot.once("mount", onMount);
+  try {
+    bot.mount(boat);
+    await waitForWorldAge(bot, 40, { wallMs, until: () => mounted, ...(signal && { signal }) });
+  } finally {
+    bot.off("mount", onMount);
+  }
+  return mounted;
 }
 
 /**
@@ -307,7 +336,10 @@ class BoatRide {
       const open = this.#waterAhead(SHORE_LOOKAHEAD);
       if (open === null) return { stoppedBy: "the water ahead is not loaded", noLand: false };
       if (!open) return { stoppedBy: "", noLand: false };
+      this.#corrected = false;
       await this.#step(this.#heading);
+      // The server put the boat back (a bank, a rock): the leg ends there, as `#steer` does.
+      if (this.#corrected) return { stoppedBy: "", noLand: false };
     }
   }
 
@@ -376,8 +408,10 @@ class BoatRide {
   }
 }
 
-/** How long a get-off from a boat holds shift (a vanilla server never answers it) before the vehicle is forgotten. */
-const DISMOUNT_WAIT_MS = 3000;
+/** Longest a get-off holds shift on the wall clock (a server far behind answers in seconds; a stopped one never does). */
+const DISMOUNT_WALL_MS = 15_000;
+/** Server ticks that pass after the shift before the server is taken to have handled it. */
+const DISMOUNT_SERVER_TICKS = 40;
 
 /**
  * Shift down or up, which is what lets a passenger off a boat. Mineflayer's `dismount` sends the jump input instead,
@@ -398,44 +432,52 @@ function pressShift(bot: Bot, down: boolean): void {
  * the vehicle is forgotten and physics resumed, unless a position did it (run 14b: eight bots froze after a get-off
  * without this).
  */
-export async function getOff(bot: Bot): Promise<{ readonly vehicle: Entity | null; readonly answered: boolean }> {
+export async function getOff(bot: Bot, options: { readonly wallMs?: number } = {}): Promise<{ readonly vehicle: Entity | null; readonly answered: boolean }> {
   const vehicle = currentVehicle(bot);
   let repositioned = false;
   let answered = false;
-  await new Promise<void>((resolve) => {
-    const done = () => {
-      answered = true;
-      finish();
-    };
-    const onPosition = () => {
-      repositioned = true;
-      done();
-    };
-    const onPassengers = (packet: { readonly entityId: number; readonly passengers: readonly number[] }) => {
-      if (letsHerOff(bot, vehicle, packet)) done();
-    };
-    const onGone = (entity: Entity) => {
-      if (vehicle !== null && entity.id === vehicle.id) done();
-    };
-    const finish = () => {
-      clearTimeout(timer);
-      bot.off("dismount", done);
-      bot.off("forcedMove", onPosition);
-      bot.off("entityGone", onGone);
-      bot._client.off("set_passengers", onPassengers);
-      resolve();
-    };
-    const timer = setTimeout(finish, DISMOUNT_WAIT_MS);
-    bot.once("dismount", done);
-    bot.once("forcedMove", onPosition);
-    bot.on("entityGone", onGone);
-    bot._client.on("set_passengers", onPassengers);
+  let died = false;
+  const done = () => {
+    answered = true;
+  };
+  const onPosition = () => {
+    repositioned = true;
+    done();
+  };
+  const onPassengers = (packet: { readonly entityId: number; readonly passengers: readonly number[] }) => {
+    if (letsHerOff(bot, vehicle, packet)) done();
+  };
+  const onGone = (entity: Entity) => {
+    if (vehicle !== null && entity.id === vehicle.id) done();
+  };
+  const onDeath = () => {
+    died = true;
+  };
+  bot.once("dismount", done);
+  bot.once("forcedMove", onPosition);
+  bot.on("entityGone", onGone);
+  bot.once("death", onDeath);
+  bot.once("respawn", onDeath);
+  bot._client.on("set_passengers", onPassengers);
+  let ended: Awaited<ReturnType<typeof waitForWorldAge>>;
+  try {
     pressShift(bot, true);
-  });
-  pressShift(bot, false);
+    ended = await waitForWorldAge(bot, DISMOUNT_SERVER_TICKS, { wallMs: options.wallMs ?? DISMOUNT_WALL_MS, until: () => answered || died || currentVehicle(bot) === null });
+  } finally {
+    bot.off("dismount", done);
+    bot.off("forcedMove", onPosition);
+    bot.off("entityGone", onGone);
+    bot.off("death", onDeath);
+    bot.off("respawn", onDeath);
+    bot._client.off("set_passengers", onPassengers);
+    pressShift(bot, false);
+  }
+  // A death or respawn ends it here: the respawn brings its own position and physics.
+  if (died) return { vehicle, answered: false };
   // Already forgotten when the runtime's vehicle watch saw the answer first: it resumed physics too.
   if (forgetVehicle(bot) !== null && !repositioned) resumePhysics(bot);
-  return { vehicle, answered };
+  // The world age moved past the shift (or an answer came): the server handled it. Only the wall clock leaves it unknown.
+  return { vehicle, answered: answered || ended !== "timeout" };
 }
 
 /**

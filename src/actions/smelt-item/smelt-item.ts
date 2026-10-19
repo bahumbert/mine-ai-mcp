@@ -3,13 +3,31 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import type { ObserveRequest, RequestEvidence } from "../../session/request.js";
 import { carriedCount, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
 import { fuelCapacity } from "../../world/smelting.js";
-import { waitForSignal } from "../../utils/signals.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
-import { formatWorkstation, useTemporaryWorkstation, workstationOperations } from "../temporary-workstation.js";
+import {
+  formatWorkstation,
+  useTemporaryWorkstation,
+  workstationOperations,
+  type WorkstationHold,
+  type WorkstationOperations,
+} from "../temporary-workstation.js";
 import type { ExistingFurnaceRequest } from "./contract.js";
+import {
+  furnaceObservation,
+  midCookHarvest,
+  recover,
+  SLOT_RECOVERY_MS,
+  waitForCook,
+  type CookVerdict,
+  type FurnaceObservation,
+  type FurnaceWindow,
+  type Harvest,
+  type Recovery,
+} from "./furnace-cook.js";
 import {
   parseSmeltItemRequest,
   SMELT_ITEM,
@@ -24,12 +42,7 @@ import {
 } from "./contract.js";
 
 const FURNACE_REACH = 4.5;
-const COOK_MS_PER_ITEM = 10_000;
-const COOK_STALL_MS = 15_000;
-const FUEL_START_SETTLEMENT_MS = 1_000;
-const SLOT_RECOVERY_MS = 2_000;
 
-type FurnaceWindow = Awaited<ReturnType<Bot["openFurnace"]>>;
 type FurnaceBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 
 export interface SmeltItemDependencies {
@@ -101,164 +114,6 @@ function evidence(
   };
 }
 
-interface Recovery {
-  readonly input: number;
-  readonly fuel: number;
-  readonly output: { readonly name: string; readonly count: number; readonly inventoryBefore: number } | null;
-  readonly errors: readonly string[];
-}
-
-async function boundedTake<T>(operation: () => Promise<T>, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      operation(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} did not settle within ${SLOT_RECOVERY_MS} ms.`)), SLOT_RECOVERY_MS);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-function hasInventoryRoom(bot: Bot, item: ReturnType<FurnaceWindow["outputItem"]>): boolean {
-  if (!item) return false;
-  if (bot.inventory.items().some((stack) => stack.type === item.type && stack.count < stack.stackSize)) return true;
-  const inventory = bot.inventory as Bot["inventory"] & { emptySlotCount?: () => number };
-  return (inventory.emptySlotCount?.() ?? 1) > 0;
-}
-
-async function takeOutputOnce(bot: Bot, window: FurnaceWindow) {
-  const item = window.outputItem();
-  if (!item) return null;
-  if (!hasInventoryRoom(bot, item)) throw new Error(`No inventory room for furnace output ${item.name} x${item.count}.`);
-  const inventoryBefore = carriedCount(bot, item.name);
-  // Shift-clicking into an existing stack mutates this same Item's count.
-  // Retain the pre-click quantity or a successful transfer looks like 0 removed.
-  const outputBefore = item.count;
-  // Furnace slot 2 is marked as a crafting result by prismarine-windows, so
-  // Furnace.takeOutput uses a cursor pickup followed by another click. A
-  // single shift-click is safe here: cooking itself cannot repeat on click.
-  await bot.clickWindow(item.slot, 0, 1);
-  // While a container is open, Mineflayer's player inventory can lag behind
-  // the window packet even after the server accepted this click. The furnace
-  // output slot is the direct witness for this one-slot transaction.
-  const removed = await waitForSignal(
-    () => Math.max(0, outputBefore - (window.outputItem()?.count ?? 0)),
-    window,
-    "updateSlot",
-    { timeoutMs: SLOT_RECOVERY_MS },
-  );
-  const count = removed ?? 0;
-  return { name: item.name, count, inventoryBefore, confirmed: count > 0 };
-}
-
-async function takeResidualOnce(window: FurnaceWindow, slot: "inputItem" | "fuelItem") {
-  const item = window[slot]();
-  if (!item) return null;
-  if (slot === "inputItem") await window.takeInput();
-  else await window.takeFuel();
-  const remaining = window[slot]()?.count ?? 0;
-  return { name: item.name, count: Math.max(0, item.count - remaining), confirmed: remaining < item.count };
-}
-
-async function recover(bot: Bot, window: FurnaceWindow): Promise<Recovery> {
-  let input = 0;
-  let fuel = 0;
-  let output: Recovery["output"] = null;
-  const errors: string[] = [];
-  for (const [read, take] of [
-    ["outputItem", "takeOutput"],
-    ["inputItem", "takeInput"],
-    ["fuelItem", "takeFuel"],
-  ] as const) {
-    try {
-      const slotItem = window[read]();
-      if (!slotItem) continue;
-      if (!hasInventoryRoom(bot, slotItem)) {
-        errors.push(`No inventory room for furnace ${read === "outputItem" ? "output" : read === "inputItem" ? "input" : "fuel"} ${slotItem.name} x${slotItem.count}.`);
-        break;
-      }
-      if (take === "takeOutput") {
-        const taken = await boundedTake(() => takeOutputOnce(bot, window), take);
-        if (!taken) continue;
-        output = { name: taken.name, count: taken.count, inventoryBefore: taken.inventoryBefore };
-        if (!taken.confirmed) {
-          errors.push(`Inventory did not confirm furnace output ${taken.name}.`);
-          break;
-        }
-      } else {
-        const taken = await boundedTake(() => takeResidualOnce(window, read), take);
-        if (!taken) continue;
-        if (take === "takeInput") input += taken.count;
-        else fuel += taken.count;
-      }
-    } catch (cause) {
-      errors.push(cause instanceof Error ? cause.message : String(cause));
-      // A timed-out transfer can still be pending inside Mineflayer. Do not
-      // start a second slot mutation against the same window.
-      break;
-    }
-  }
-  return { input, fuel, output, errors };
-}
-
-interface FurnaceObservation {
-  readonly output: number;
-  readonly input: number;
-  readonly fuelItems: number;
-  readonly cookProgress: number | null;
-  readonly fuelProgress: number | null;
-}
-
-type CookVerdict = "completed" | "fuel_starved" | "stalled" | "safety_timeout";
-
-function furnaceObservation(window: FurnaceWindow): FurnaceObservation {
-  const state = window as FurnaceWindow & { progress?: number | null; fuel?: number | null };
-  return {
-    output: window.outputItem()?.count ?? 0,
-    input: window.inputItem()?.count ?? 0,
-    fuelItems: window.fuelItem()?.count ?? 0,
-    cookProgress: typeof state.progress === "number" ? state.progress : null,
-    fuelProgress: typeof state.fuel === "number" ? state.fuel : null,
-  };
-}
-
-async function waitForCook(
-  window: FurnaceWindow,
-  requested: number,
-  dependencies: SmeltItemDependencies,
-  signal?: AbortSignal,
-  observe?: (observation: FurnaceObservation, stalledForMs: number) => void,
-): Promise<{ readonly verdict: CookVerdict; readonly observation: FurnaceObservation }> {
-  const startedAt = dependencies.now();
-  const safetyDeadline = startedAt + Math.max(60_000, requested * COOK_MS_PER_ITEM * 4 + COOK_STALL_MS);
-  let lastAdvanceAt = startedAt;
-  let previous = furnaceObservation(window);
-  while (true) {
-    signal?.throwIfAborted();
-    const current = furnaceObservation(window);
-    const now = dependencies.now();
-    if (current.output !== previous.output || current.cookProgress !== previous.cookProgress) lastAdvanceAt = now;
-    const stalledForMs = Math.max(0, now - lastAdvanceAt);
-    observe?.(current, stalledForMs);
-    if (current.output >= requested && current.input === 0 && (current.cookProgress ?? 0) === 0)
-      return { verdict: "completed", observation: current };
-    if (
-      now - startedAt >= FUEL_START_SETTLEMENT_MS &&
-      current.input > 0 &&
-      current.fuelItems === 0 &&
-      current.fuelProgress === 0 &&
-      (current.cookProgress ?? 0) === 0
-    ) return { verdict: "fuel_starved", observation: current };
-    if (stalledForMs >= COOK_STALL_MS) return { verdict: "stalled", observation: current };
-    if (now >= safetyDeadline) return { verdict: "safety_timeout", observation: current };
-    previous = current;
-    await dependencies.pause(100, signal);
-  }
-}
-
 async function approach(
   bot: Bot,
   request: ExistingFurnaceRequest,
@@ -275,89 +130,126 @@ async function approach(
   return bot.entity.position.distanceTo(target) <= FURNACE_REACH ? null : describeNavigation(route);
 }
 
-/** Use one caller-selected empty furnace as a bounded, observed inventory transaction. */
-export async function smeltItem(
-  bot: Bot,
-  navigation: NavigationRuntime,
-  request: SmeltItemRequest,
-  context: ActionContext,
-  dependencies: SmeltItemDependencies,
-): Promise<SmeltItemResult> {
-  if (request.temporaryWorkstation !== true) return smeltInFurnace(bot, request, context, dependencies);
-  return useTemporaryWorkstation(
-    bot,
-    "furnace",
-    context,
-    workstationOperations(bot, navigation),
-    (block) =>
-      smeltInFurnace(
-        bot,
-        {
-          itemName: request.itemName,
-          count: request.count,
-          fuelItemName: request.fuelItemName,
-          x: block.position.x,
-          y: block.position.y,
-          z: block.position.z,
-        },
-        context,
-        dependencies,
-      ),
-    (error) => ({
-      status: "failed",
-      error,
-      smelt: evidence(bot, request, {
-        input: carriedCount(bot, request.itemName),
-        fuel: carriedCount(bot, request.fuelItemName),
-      }),
-    }),
-  );
+/** What one smelt request has done so far, kept across the attempts a reflex splits it into. */
+interface SmeltProgress {
+  /** Carried counts when the request began: the evidence and the final input check compare against these. */
+  readonly before: { readonly input: number; readonly fuel: number };
+  produced: number;
+  outputItem: string | null;
+  /** Summed over attempts (the unburnt part of an attempt's fuel comes back with that attempt's recovery). */
+  fuelInserted: number;
+  /** What the latest attempt took back out of the furnace. */
+  rawRecovered: number;
+  fuelRecovered: number;
+  /** The furnace cell an attempt loaded: what it still holds there, of our items, is this request's own. */
+  loadedAt: string | null;
+  ownsSlots: boolean;
+  current: FurnaceObservation;
+  stalledForMs: number;
 }
 
-async function smeltInFurnace(
-  bot: Bot,
-  request: ExistingFurnaceRequest,
-  context: ActionContext,
-  dependencies: SmeltItemDependencies,
-): Promise<SmeltItemResult> {
-  context.signal?.throwIfAborted();
-  const before = { input: carriedCount(bot, request.itemName), fuel: carriedCount(bot, request.fuelItemName) };
+function newSmeltProgress(bot: Bot, request: SmeltItemRequest): SmeltProgress {
+  return {
+    before: { input: carriedCount(bot, request.itemName), fuel: carriedCount(bot, request.fuelItemName) },
+    produced: 0,
+    outputItem: null,
+    fuelInserted: 0,
+    rawRecovered: 0,
+    fuelRecovered: 0,
+    loadedAt: null,
+    ownsSlots: false,
+    current: { output: 0, input: 0, fuelItems: 0, cookProgress: null, fuelProgress: null },
+    stalledForMs: 0,
+  };
+}
+
+function progressEvidence(bot: Bot, request: SmeltItemRequest, progress: SmeltProgress): SmeltEvidence {
+  return evidence(bot, request, progress.before, {
+    fuelInserted: progress.fuelInserted,
+    outputItem: progress.outputItem,
+    produced: progress.produced,
+    rawRecovered: progress.rawRecovered,
+    fuelRecovered: progress.fuelRecovered,
+    finalCookProgress: progress.current.cookProgress,
+    finalFuelProgress: progress.current.fuelProgress,
+  });
+}
+
+/** An early stop of an attempt: a request that already produced something ends partial, not failed. */
+function stoppedAttempt(bot: Bot, request: SmeltItemRequest, progress: SmeltProgress, error: string): SmeltItemResult {
+  return { status: progress.produced > 0 ? "partial" : "failed", error, smelt: progressEvidence(bot, request, progress) };
+}
+
+function smeltRequestEvidence(request: SmeltItemRequest, progress: SmeltProgress): RequestEvidence {
+  const { current } = progress;
+  return {
+    baseline: { ...progress.before },
+    checkpoint: {
+      phase: progress.ownsSlots ? "smelting_or_collecting" : "loading_furnace",
+      requested: request.count,
+      produced: progress.produced,
+      outputItem: progress.outputItem,
+      furnaceOutput: current.output,
+      fuelInserted: progress.fuelInserted,
+      furnaceInput: current.input,
+      furnaceFuel: current.fuelItems,
+      cookProgress: current.cookProgress,
+      fuelProgress: current.fuelProgress,
+      stalledForMs: progress.stalledForMs,
+    },
+    completion: {
+      kind: "event",
+      observed: progress.produced >= request.count,
+      owes: "Requested cooked output retrieved with confirmed furnace cleanup.",
+    },
+  };
+}
+
+type RegistryItem = NonNullable<Bot["registry"]["itemsByName"][string]>;
+
+type Supplies =
+  | {
+      readonly kind: "ready";
+      readonly input: RegistryItem;
+      readonly fuel: RegistryItem;
+      /** Input still to smelt: the request's count less what earlier attempts produced. */
+      readonly remaining: number;
+      readonly requiredFuel: number;
+    }
+  | { readonly kind: "refused"; readonly result: SmeltItemResult };
+
+/** The registry items, the fuel capacity and the carried counts this attempt needs; a refusal names what is missing. */
+function checkSupplies(bot: Bot, request: SmeltItemRequest, progress: SmeltProgress): Supplies {
+  const refuse = (error: string): Supplies => ({ kind: "refused", result: stoppedAttempt(bot, request, progress, error) });
   const input = bot.registry.itemsByName[request.itemName];
   const fuel = bot.registry.itemsByName[request.fuelItemName];
-  if (!input)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.unknownItem(request.itemName),
-      smelt: evidence(bot, request, before),
-    };
-  if (!fuel)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.unknownItem(request.fuelItemName),
-      smelt: evidence(bot, request, before),
-    };
+  if (!input) return refuse(smeltItemOutcomes.unknownItem(request.itemName));
+  if (!fuel) return refuse(smeltItemOutcomes.unknownItem(request.fuelItemName));
   const capacity = fuelCapacity(request.fuelItemName);
-  if (capacity === 0)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.unsupportedFuel(request.fuelItemName),
-      smelt: evidence(bot, request, before),
-    };
-  if (before.input < request.count)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.inputMissing(request.itemName, before.input, request.count),
-      smelt: evidence(bot, request, before),
-    };
-  const requiredFuel = Math.ceil(request.count / capacity);
-  const availableFuel = before.fuel - (request.itemName === request.fuelItemName ? request.count : 0);
+  if (capacity === 0) return refuse(smeltItemOutcomes.unsupportedFuel(request.fuelItemName));
+  const remaining = request.count - progress.produced;
+  const carriedInput = carriedCount(bot, request.itemName);
+  if (carriedInput < remaining) return refuse(smeltItemOutcomes.inputMissing(request.itemName, carriedInput, remaining));
+  const requiredFuel = Math.ceil(remaining / capacity);
+  const availableFuel = carriedCount(bot, request.fuelItemName) - (request.itemName === request.fuelItemName ? remaining : 0);
   if (availableFuel < requiredFuel)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.fuelMissing(request.fuelItemName, Math.max(0, availableFuel), requiredFuel),
-      smelt: evidence(bot, request, before),
-    };
+    return refuse(smeltItemOutcomes.fuelMissing(request.fuelItemName, Math.max(0, availableFuel), requiredFuel));
+  return { kind: "ready", input, fuel, remaining, requiredFuel };
+}
 
+type OpenedFurnace =
+  | { readonly kind: "open"; readonly furnace: FurnaceWindow }
+  | { readonly kind: "stopped"; readonly result: SmeltItemResult };
+
+/** Walk into reach, check the cell holds a furnace and open it. */
+async function openRequestedFurnace(
+  bot: Bot,
+  request: ExistingFurnaceRequest,
+  progress: SmeltProgress,
+  context: ActionContext,
+  dependencies: SmeltItemDependencies,
+): Promise<OpenedFurnace> {
+  const stop = (error: string): OpenedFurnace => ({ kind: "stopped", result: stoppedAttempt(bot, request, progress, error) });
   let routeFailure: string | null;
   try {
     routeFailure = await approach(bot, request, context, dependencies);
@@ -365,130 +257,255 @@ async function smeltInFurnace(
     context.signal?.throwIfAborted();
     routeFailure = cause instanceof Error ? cause.message : String(cause);
   }
-  if (routeFailure !== null)
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.routeStopped(routeFailure),
-      smelt: evidence(bot, request, before),
-    };
-
+  if (routeFailure !== null) return stop(smeltItemOutcomes.routeStopped(routeFailure));
   const block = bot.blockAt(new Vec3(request.x, request.y, request.z));
-  if (!block)
-    return { status: "failed", error: smeltItemOutcomes.blockUnloaded, smelt: evidence(bot, request, before) };
-  if (block.name !== "furnace")
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.furnaceMissing(block.name),
-      smelt: evidence(bot, request, before),
-    };
-
-  let furnace: FurnaceWindow;
+  if (!block) return stop(smeltItemOutcomes.blockUnloaded);
+  if (block.name !== "furnace") return stop(smeltItemOutcomes.furnaceMissing(block.name));
   try {
-    furnace = await dependencies.openFurnace(bot, block);
+    return { kind: "open", furnace: await dependencies.openFurnace(bot, block) };
   } catch (cause) {
     context.signal?.throwIfAborted();
-    return { status: "failed", error: smeltItemOutcomes.openFailed(cause), smelt: evidence(bot, request, before) };
+    return stop(smeltItemOutcomes.openFailed(cause));
   }
+}
 
-  let fuelInserted = 0;
-  let outputItem: string | null = null;
-  let produced = 0;
-  let rawRecovered = 0;
-  let fuelRecovered = 0;
-  let ownsSlots = false;
-  let current = furnaceObservation(furnace);
-  let stalledForMs = 0;
-  context.observeProgress?.(() => ({ baseline: { ...before },
-    checkpoint: { phase: ownsSlots ? "smelting_or_collecting" : "loading_furnace", requested: request.count, produced,
-      outputItem, furnaceOutput: current.output, fuelInserted, furnaceInput: current.input, furnaceFuel: current.fuelItems,
-      cookProgress: current.cookProgress, fuelProgress: current.fuelProgress, stalledForMs },
-    completion: { kind: "event", observed: produced >= request.count, owes: "Requested cooked output retrieved with confirmed furnace cleanup." },
-  }));
+function furnaceCellKey(request: ExistingFurnaceRequest): string {
+  return `${request.x},${request.y},${request.z}`;
+}
+
+/**
+ * Whether every slot the furnace holds is what an earlier attempt of this request left in it: the input and fuel we
+ * loaded there, or the output we already know the name of. Anything else is a stranger's (a bot sharing the furnace).
+ */
+function holdsOnlyOurLeftovers(furnace: FurnaceWindow, request: ExistingFurnaceRequest, progress: SmeltProgress): boolean {
+  if (progress.loadedAt !== furnaceCellKey(request)) return false;
+  const input = furnace.inputItem();
+  const fuel = furnace.fuelItem();
+  const output = furnace.outputItem();
+  return (
+    (!input || input.name === request.itemName) &&
+    (!fuel || fuel.name === request.fuelItemName) &&
+    (!output || output.name === progress.outputItem)
+  );
+}
+
+/** Empty the furnace of this request's own leftovers; the error is set when something else is in it, or the take failed. */
+async function clearFurnaceForAttempt(
+  bot: Bot,
+  furnace: FurnaceWindow,
+  request: ExistingFurnaceRequest,
+  progress: SmeltProgress,
+): Promise<string | null> {
   const occupied = [
     furnace.inputItem() && "input",
     furnace.fuelItem() && "fuel",
     furnace.outputItem() && "output",
   ].filter((slot): slot is string => Boolean(slot));
-  if (occupied.length > 0) {
-    furnace.close();
-    return {
-      status: "failed",
-      error: smeltItemOutcomes.occupied(occupied),
-      smelt: evidence(bot, request, before),
-    };
+  if (occupied.length === 0) return null;
+  if (!holdsOnlyOurLeftovers(furnace, request, progress)) return smeltItemOutcomes.occupied(occupied);
+  const recovery = await recover(bot, furnace);
+  if (recovery.output) {
+    progress.produced += recovery.output.count;
+    progress.outputItem = recovery.output.name;
   }
+  return recovery.errors.length > 0 ? smeltItemOutcomes.executionFailed(recovery.errors.join(" ")) : null;
+}
 
-  let verdict: CookVerdict | "execution_failed" = "execution_failed";
+interface CookAttempt {
+  readonly verdict: CookVerdict | "execution_failed";
+  readonly executionError: string;
+  readonly recovery: Recovery;
+  readonly harvest: Harvest;
+}
+
+/** Load this attempt's input and fuel, wait for the cook, and give back what the furnace still holds. */
+async function loadAndCook(
+  bot: Bot,
+  furnace: FurnaceWindow,
+  request: ExistingFurnaceRequest,
+  supplies: Extract<Supplies, { kind: "ready" }>,
+  progress: SmeltProgress,
+  context: ActionContext,
+  dependencies: SmeltItemDependencies,
+): Promise<CookAttempt> {
+  const harvest = midCookHarvest(bot, furnace, dependencies.now);
+  let verdict: CookAttempt["verdict"] = "execution_failed";
   let executionError = "";
   let recovery: Recovery = { input: 0, fuel: 0, output: null, errors: [] };
+  progress.ownsSlots = false;
   try {
-    await furnace.putInput(input.id, null, request.count);
-    ownsSlots = true;
+    progress.loadedAt = furnaceCellKey(request);
+    await furnace.putInput(supplies.input.id, null, supplies.remaining);
+    progress.ownsSlots = true;
     context.signal?.throwIfAborted();
-    await furnace.putFuel(fuel.id, null, requiredFuel);
-    fuelInserted = requiredFuel;
+    await furnace.putFuel(supplies.fuel.id, null, supplies.requiredFuel);
+    progress.fuelInserted += supplies.requiredFuel;
     context.signal?.throwIfAborted();
 
-    const waited = await waitForCook(furnace, request.count, dependencies, context.signal, (observation, idleMs) => {
-      current = observation;
-      stalledForMs = idleMs;
-    });
+    const waited = await waitForCook(furnace, supplies.remaining, dependencies, context.signal, (observation, idleMs) => {
+      progress.current = observation;
+      progress.stalledForMs = idleMs;
+    }, harvest);
     verdict = waited.verdict;
-    current = waited.observation;
+    progress.current = waited.observation;
   } catch (cause) {
     executionError = smeltItemOutcomes.executionFailed(cause);
   } finally {
-    if (ownsSlots) recovery = await recover(bot, furnace);
+    if (progress.ownsSlots) recovery = await recover(bot, furnace);
     furnace.close();
   }
-  context.signal?.throwIfAborted();
-  if (recovery.output) {
-    outputItem = recovery.output.name;
-    produced = recovery.output.count;
+  return { verdict, executionError, recovery, harvest };
+}
+
+interface AttemptOutput {
+  readonly produced: number;
+  readonly inventoryBefore: number;
+}
+
+/**
+ * Count what the attempt took out of the furnace into the request's progress, before an abort can throw: a resume
+ * smelts only the rest. Null when the attempt took no output.
+ */
+function recordAttemptOutput(progress: SmeltProgress, cook: CookAttempt): AttemptOutput | null {
+  const harvested = cook.harvest.item();
+  const { recovery } = cook;
+  progress.rawRecovered = recovery.input;
+  progress.fuelRecovered = recovery.fuel;
+  if (!recovery.output && !harvested) return null;
+  const produced = cook.harvest.taken() + (recovery.output?.count ?? 0);
+  progress.outputItem = (recovery.output ?? harvested)!.name;
+  progress.produced += produced;
+  return { produced, inventoryBefore: (harvested ?? recovery.output)!.inventoryBefore };
+}
+
+/** The result of a settled attempt: the request's totals, and why it stopped when it did not finish. */
+async function settleAttempt(
+  bot: Bot,
+  request: ExistingFurnaceRequest,
+  progress: SmeltProgress,
+  cook: CookAttempt,
+  output: AttemptOutput | null,
+  context: ActionContext,
+): Promise<SmeltItemResult> {
+  let { recovery } = cook;
+  if (output) {
     const outputAfter = await settleInventoryMinimum(
       bot,
-      outputItem,
-      recovery.output.inventoryBefore + produced,
+      progress.outputItem!,
+      output.inventoryBefore + output.produced,
       { timeoutMs: SLOT_RECOVERY_MS, signal: context.signal },
     );
     if (!outputAfter.confirmed) {
       recovery = {
         ...recovery,
-        errors: [...recovery.errors, `Player inventory did not confirm furnace output ${outputItem} x${produced} after close.`],
+        errors: [...recovery.errors, `Player inventory did not confirm furnace output ${progress.outputItem} x${output.produced} after close.`],
       };
     }
   }
-  rawRecovered = recovery.input;
-  fuelRecovered = recovery.fuel;
   // The furnace's take operations resolve on that window's packets; the player
   // inventory that receives the leftovers is redrawn on a later broadcast. The
   // transaction's own invariant is that the input loses exactly what was
   // smelted, so that is the count worth waiting for, and the fuel count is
   // read once it has landed.
-  const inputAfter = await settleInventoryCount(bot, request.itemName, before.input - produced, {
+  const inputAfter = await settleInventoryCount(bot, request.itemName, progress.before.input - progress.produced, {
     signal: context.signal,
   });
-  const observed = evidence(bot, request, before, {
-    fuelInserted,
-    outputItem,
-    produced,
-    inputAfter: inputAfter.count,
-    rawRecovered,
-    fuelRecovered,
-    finalCookProgress: current.cookProgress,
-    finalFuelProgress: current.fuelProgress,
-  });
-  if (verdict === "completed" && produced >= request.count && recovery.errors.length === 0)
+  const observed = { ...progressEvidence(bot, request, progress), inputInventoryAfter: inputAfter.count };
+  if (cook.verdict === "completed" && progress.produced >= request.count && recovery.errors.length === 0)
     return { status: "succeeded", smelt: observed };
+  const { produced, rawRecovered, fuelRecovered, current } = progress;
   const recoveryError = recovery.errors.length > 0 ? ` Recovery: ${recovery.errors.join(" ")}` : "";
-  const error = verdict === "fuel_starved"
+  const error = cook.verdict === "fuel_starved"
     ? smeltItemOutcomes.fuelStarved(produced, request.count, rawRecovered, fuelRecovered)
-    : verdict === "stalled"
+    : cook.verdict === "stalled"
       ? smeltItemOutcomes.stalled(produced, request.count, rawRecovered, fuelRecovered, current.cookProgress)
-      : verdict === "safety_timeout"
+      : cook.verdict === "safety_timeout"
         ? smeltItemOutcomes.safetyTimeout(produced, request.count, rawRecovered, fuelRecovered, current.cookProgress)
-        : executionError || smeltItemOutcomes.executionFailed("Cook completed but furnace contents were not recovered.");
+        : cook.executionError || smeltItemOutcomes.executionFailed("Cook completed but furnace contents were not recovered.");
   return { status: produced > 0 ? "partial" : "failed", error: `${error}${recoveryError}`, smelt: observed };
+}
+
+/** One attempt at the request in one furnace: smelts what earlier attempts left, whatever stops it. */
+async function smeltAttempt(
+  bot: Bot,
+  request: ExistingFurnaceRequest,
+  progress: SmeltProgress,
+  context: ActionContext,
+  dependencies: SmeltItemDependencies,
+): Promise<SmeltItemResult> {
+  context.signal?.throwIfAborted();
+  if (progress.produced >= request.count) return { status: "succeeded", smelt: progressEvidence(bot, request, progress) };
+  // Input an earlier attempt left in the furnace only counts as carried once it is taken back (below).
+  const early = progress.loadedAt === null ? checkSupplies(bot, request, progress) : null;
+  if (early?.kind === "refused") return early.result;
+  const opened = await openRequestedFurnace(bot, request, progress, context, dependencies);
+  if (opened.kind === "stopped") return opened.result;
+  const { furnace } = opened;
+  progress.ownsSlots = false;
+  const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress);
+  const supplies = blocked === null ? checkSupplies(bot, request, progress) : null;
+  if (blocked !== null || supplies?.kind !== "ready") {
+    furnace.close();
+    return supplies?.kind === "refused" ? supplies.result : stoppedAttempt(bot, request, progress, blocked!);
+  }
+  if (progress.produced >= request.count) {
+    furnace.close();
+    return { status: "succeeded", smelt: progressEvidence(bot, request, progress) };
+  }
+  progress.current = furnaceObservation(furnace);
+  const cook = await loadAndCook(bot, furnace, request, supplies, progress, context, dependencies);
+  const output = recordAttemptOutput(progress, cook);
+  context.signal?.throwIfAborted();
+  return settleAttempt(bot, request, progress, cook, output, context);
+}
+
+/**
+ * Start a smelt request: take the baselines once and return the executor the runner calls for each attempt. A reflex
+ * that takes the body mid-cook aborts an attempt; the next smelts only what is left, with the fuel for that.
+ */
+export function beginSmeltItem(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: SmeltItemRequest,
+  dependencies: SmeltItemDependencies,
+  observe: ObserveRequest,
+  operations: WorkstationOperations = workstationOperations(bot, navigation),
+): (context: ActionContext) => Promise<SmeltItemResult> {
+  const progress = newSmeltProgress(bot, request);
+  observe(() => smeltRequestEvidence(request, progress));
+  if (request.temporaryWorkstation !== true) {
+    return (context) => smeltAttempt(bot, request, progress, context, dependencies);
+  }
+  const hold: WorkstationHold = { placedAt: null };
+  const { itemName, count, fuelItemName } = request;
+  return (context) =>
+    useTemporaryWorkstation(
+      bot,
+      "furnace",
+      context,
+      operations,
+      (block) =>
+        smeltAttempt(
+          bot,
+          { itemName, count, fuelItemName, x: block.position.x, y: block.position.y, z: block.position.z },
+          progress,
+          context,
+          dependencies,
+        ),
+      (error) => stoppedAttempt(bot, request, progress, error),
+      hold,
+    );
+}
+
+/** Use one caller-selected empty furnace as a bounded, observed inventory transaction, in one attempt. */
+export async function smeltItem(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: SmeltItemRequest,
+  context: ActionContext,
+  dependencies: SmeltItemDependencies,
+): Promise<SmeltItemResult> {
+  return beginSmeltItem(bot, navigation, request, dependencies, context.observeProgress ?? (() => {}))(context);
 }
 
 export function formatSmeltItemResult(result: SmeltItemResult): string {
@@ -518,9 +535,9 @@ export function createSmeltItemAction(
     inputSchema: smeltItemInputSchema,
     resultSchema: smeltItemResultSchema,
     formatResult: formatSmeltItemResult,
-    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: smeltItemAnnotations,
     parse: parseSmeltItemRequest,
-    execute: (request, context) => smeltItem(bot, navigation, request, context, dependencies),
+    begin: (request, _lifetime, observe) => beginSmeltItem(bot, navigation, request, dependencies, observe),
   });
 }

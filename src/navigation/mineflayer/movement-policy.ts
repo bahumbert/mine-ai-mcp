@@ -17,7 +17,7 @@ import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
-import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
+import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
 import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
 import { OPEN_COLUMN_REACH } from "../world/swimming.js";
@@ -183,22 +183,44 @@ function liquidAt(world: WorldView, x: number, y: number, z: number): "source" |
  * checks separately prevent dropping a dry miner through an aquifer roof.
  */
 function opensIntoLiquid(world: WorldView, x: number, y: number, z: number): boolean {
-  const above = world.blockAt(x, y + 1, z);
-  if (above.kind === "loaded" && above.traits.liquid !== null) return true;
+  return liquidsOpenedInto(world, x, y, z).length > 0;
+}
 
+/** What a liquid cell a break would open into is: lava, a water source, or flowing water. */
+type OpenedLiquid = "lava" | "source" | "flowing";
+
+/** Every liquid cell that breaking the block would open into, by the rule of `opensIntoLiquid`. */
+function liquidsOpenedInto(world: WorldView, x: number, y: number, z: number): OpenedLiquid[] {
+  const opened: OpenedLiquid[] = [];
+  const note = (cx: number, cy: number, cz: number) => {
+    const block = world.blockAt(cx, cy, cz);
+    if (block.kind === "loaded" && block.traits.liquid !== null)
+      opened.push(block.traits.liquid === "lava" ? "lava" : block.traits.liquidSource ? "source" : "flowing");
+  };
+  const above = world.blockAt(x, y + 1, z);
+  if (above.kind === "loaded" && above.traits.liquid !== null) note(x, y + 1, z);
   for (const [dx, dz] of [
     [1, 0],
     [-1, 0],
     [0, 1],
     [0, -1],
   ] as const) {
-    if (above.kind === "loaded" && above.traits.empty && liquidAt(world, x + dx, y + 1, z + dz)) return true;
+    if (above.kind === "loaded" && above.traits.empty && liquidAt(world, x + dx, y + 1, z + dz)) note(x + dx, y + 1, z + dz);
     const adjacent = liquidAt(world, x + dx, y, z + dz);
     if (adjacent === null) continue;
-    if (adjacent === "source") return true;
-    if (liquidAt(world, x + dx, y - 1, z + dz) === null) return true;
+    if (adjacent === "source" || liquidAt(world, x + dx, y - 1, z + dz) === null) note(x + dx, y, z + dz);
   }
-  return false;
+  return opened;
+}
+
+/**
+ * Whether breaking the block would let in flowing water only: every liquid it opens into is a non-source water cell, and
+ * at least one is (a break that opens into nothing needs no exception). A source or any lava keeps the refusal. Asked
+ * by an escape leg alone (owner, 2026-10-18, Sana: falling water beside her cell shut her in for 164 minutes).
+ */
+function opensOnlyIntoFlowingWater(world: WorldView, x: number, y: number, z: number): boolean {
+  const opened = liquidsOpenedInto(world, x, y, z);
+  return opened.length > 0 && opened.every((liquid) => liquid === "flowing");
 }
 
 function dryGroundedDigTime(bot: Bot, block: WorldBlock, item: InventoryItem | null): number {
@@ -410,7 +432,7 @@ const OPENS_INTO_LIQUID: PolicyDecision = {
  * that closes its own surface ends in the breath reflex pulling the bot out, again and again (live: dirt for a house
  * site taken from a pond bottom). Gathering and routes take what is on land instead.
  */
-export const BREAK_UNDER_WATER = "the block is under water: the bot never mines under water";
+export { BREAK_UNDER_WATER };
 const UNDER_WATER: PolicyDecision = { kind: "prohibited", reason: BREAK_UNDER_WATER };
 const AVOIDED_BITS = TRAIT_DAMAGING | TRAIT_LAVA;
 
@@ -602,6 +624,7 @@ export function createMineflayerMovementPolicy(
   return Object.freeze({
     ...policy,
     ...(ownRegionEscape !== undefined && { ownRegionEscape }),
+    opensOnlyIntoFlowingWater: (x: number, y: number, z: number, world: WorldView) => opensOnlyIntoFlowingWater(world, x, y, z),
     get allowDownward() {
       return readNavigationPolicy(bot).dig_straight_down;
     },

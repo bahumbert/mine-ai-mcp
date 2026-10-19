@@ -3,7 +3,11 @@ import test from "node:test";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { cropFacts, tillFailure } from "./farm-body.js";
-import { formatTendCropsResult, settleTend } from "./tend-crops.js";
+import { Vec3 } from "vec3";
+import { CROPS, cutAfter, FakeFarm } from "../../test-support/fake-farm.js";
+import type { StallClock } from "../stall-watch.js";
+import { parseTendCropsRequest } from "./contract.js";
+import { beginTendCrops, formatTendCropsResult, settleTend } from "./tend-crops.js";
 import type { CellBlock } from "./tend-plot.js";
 import { tendEvidenceSchema, type TendEvidence } from "./contract.js";
 
@@ -67,4 +71,64 @@ test("a failed hoe use is unchanged only when the server clock moved 20 ticks an
   assert.deepEqual(tillFailure(failed(0), true), { kind: "unconfirmed" });
   assert.deepEqual(tillFailure(failed(40), false), { kind: "error", error: "not confirmed" });
   assert.deepEqual(tillFailure(failed(null), true), { kind: "error", error: "not confirmed" });
+});
+
+test("a hoe use whose wait ended on the wall clock is never an untillable verdict", () => {
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 30, timedOut: true }, true), { kind: "unconfirmed" });
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 40 }, true), { kind: "unchanged" });
+});
+
+// Reflex continuity (spec 2026-10-18, R2): the stall watch is per attempt, the totals are per request.
+function stallClock() {
+  const state = { now: 0, ticks: new Set<() => void>(), opened: 0, closed: 0 };
+  const clock: StallClock = {
+    now: () => state.now,
+    every: (tick) => {
+      state.opened += 1;
+      state.ticks.add(tick);
+      return () => { state.closed += 1; state.ticks.delete(tick); };
+    },
+  };
+  const advance = (ms: number) => { state.now += ms; for (const tick of [...state.ticks]) tick(); };
+  return { state, clock, advance };
+}
+
+const quietBot = { blockAt: () => ({ stateId: 1 }), entity: { position: new Vec3(0, 64, 0) } } as unknown as Bot;
+const wheatPlot = () => parseTendCropsRequest({ x1: 0, z1: 0, x2: 1, z2: 0, y: 63 });
+
+test("a tend cut by a reflex runs again under a new stall watch and answers for both attempts", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutAfter(farm, "breakBlock", 1);
+  const { state, clock, advance } = stallClock();
+  const run = beginTendCrops(quietBot, wheatPlot(), CROPS, () => farm, () => {}, { stallMs: 60_000, clock });
+  await assert.rejects(run({}), /HUNGER/);
+  assert.deepEqual([state.opened, state.closed], [1, 1], "the cut attempt closed its watch");
+  advance(600_000);
+  const result = await run({});
+  assert.equal(result.status, "succeeded", "the reflex's ten minutes are not a stall of the resumed attempt");
+  assert.deepEqual([result.tended.harvested, result.tended.planted], [2, 2]);
+  assert.deepEqual([state.opened, state.closed], [2, 2]);
+});
+
+test("a stall in the resumed attempt ends the request with what both attempts did", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  farm.set(2, 0, "farmland", "wheat", 7);
+  cutAfter(farm, "breakBlock", 1);
+  const { clock, advance } = stallClock();
+  const originalReach = farm.reach.bind(farm);
+  let reaches = 0;
+  farm.reach = async (cell) => {
+    if (++reaches === 3) advance(61_000);
+    return originalReach(cell);
+  };
+  const run = beginTendCrops(quietBot, parseTendCropsRequest({ x1: 0, z1: 0, x2: 2, z2: 0, y: 63 }), CROPS, () => farm, () => {}, { stallMs: 60_000, clock });
+  await assert.rejects(run({}), /HUNGER/);
+  const result = await run({});
+  assert.equal(result.status, "partial");
+  assert.match("error" in result ? result.error : "", /TEND_STALLED/);
+  assert.ok(result.tended.harvested >= 2, "the harvests of the cut attempt are in the total");
 });

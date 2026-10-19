@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner } from "../../session/action-runner.js";
+import { observeMineflayerBlock, type WorldView } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { botFixture } from "../../test-support/bot.js";
 import { ReflexDriver } from "../control/driver.js";
@@ -89,4 +90,82 @@ test("a failed airborne fire escape does not suppress a fresh attempt after land
   await observe();
   assert.notEqual(driver.answered.snapshot()[0]?.id, first.id, "landing changes the escape's physical premises");
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
+});
+
+/** A burning body on the west bank of the one-cell lava pit; the water 2 cells east is `ringed` by lava or open. */
+function burningBesidePit(ringed: boolean) {
+  const cells: Record<string, string> = { "0,64,0": "lava", "2,64,0": "water" };
+  if (ringed)
+    Object.assign(cells, {
+      "2,64,0": "lava",
+      "3,64,0": "water",
+      "4,64,0": "lava",
+      "3,64,1": "lava",
+      "3,64,-1": "lava",
+    });
+  const bot = botFixture(
+    { blocks: cells, groundY: 64, position: new Vec3(-0.5, 65, 0.5) },
+    { stopDigging() {}, deactivateItem() {}, clearControlStates() {} },
+  );
+  Object.assign(bot.entity, { metadata: [1] });
+  const memory = new MemoryWorld();
+  for (let x = -6; x <= 6; x++)
+    for (let z = -6; z <= 6; z++)
+      for (let y = 62; y <= 68; y++) {
+        const at = new Vec3(x, y, z);
+        memory.load(at, observeMineflayerBlock(bot.blockAt(at)!));
+      }
+  let reads = 0;
+  const world: WorldView = {
+    blockAt: (x, y, z) => (reads++, memory.blockAt(x, y, z)),
+    subscribe: (listener) => memory.subscribe(listener),
+    get revision() {
+      return memory.revision;
+    },
+  };
+  return { bot, world, reads: () => reads };
+}
+
+test("a burning bot near reachable water is answered", async () => {
+  const { bot, world } = burningBesidePit(false);
+  const runner = new ActionRunner();
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, runner));
+  resources.use(attachFireReflex(bot, driver, world));
+  for (let tick = 0; tick < 3; tick++) bot.emit("physicsTick");
+  assert.equal(runner.status().activeAction?.action, "fire_reflex", "the way round the lava is a reachable escape");
+});
+
+test("a still body in one world revision searches once", async () => {
+  const { bot, world, reads } = burningBesidePit(true);
+  const runner = new ActionRunner();
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, runner));
+  resources.use(attachFireReflex(bot, driver, world));
+  bot.emit("physicsTick");
+  const afterFirst = reads();
+  assert.ok(afterFirst > 0, "the first tick searches");
+  for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
+  assert.equal(reads(), afterFirst, "the same cell and revision read nothing more");
+  assert.ok(!runner.status().activeAction, "water behind lava is no escape: the reflex stands down");
+});
+
+test("a walk that outlasts the 15 s wall clock is reported as out of time, not as no escape", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const { bot, world } = burningBesidePit(false);
+  Object.assign(bot, { setControlState() {} });
+  const runner = new ActionRunner();
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, runner));
+  resources.use(attachFireReflex(bot, driver, world));
+  for (let tick = 0; tick < 3; tick++) bot.emit("physicsTick");
+  assert.equal(runner.status().activeAction?.action, "fire_reflex");
+  context.mock.timers.tick(15_000);
+  for (let tick = 0; tick < 3; tick++) {
+    bot.emit("physicsTick");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const failure = driver.answered.snapshot()[0]?.failure;
+  assert.equal(failure?.kind, "no_escape");
+  assert.match(String(failure && "why" in failure ? failure.why : ""), /ran out of time/);
 });

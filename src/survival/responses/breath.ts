@@ -3,11 +3,18 @@ import { horizontalControlsToward } from "../../navigation/index.js";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { airSupplyPoints, FULL_AIR_POINTS, isInWater } from "../perception/body.js";
-import { nearbySwimEscape, swimmingRoof } from "../positioning/swim-escape.js";
+import { routeVerticalControls, swimmingRoof } from "../positioning/swim-escape.js";
 import type { Budgets } from "../state/budgets.js";
+import { AirRoute } from "./air-route.js";
+
+const TICK_MS = 50;
+/** The wall clock allows this many times the tick budget, so a stopped physics clock cannot hold the body. */
+const WALL_CLOCK_FACTOR = 2;
+
 /**
- * Rise for air, swimming clear of an overhang (to the nearest open column in reach) or, with none, digging up
- * through the roof, until the bar is full or the time is up.
+ * Rise for air: swim the nearest way to a breathable cell (an air pocket or an open column, up and down included,
+ * cell by cell), give up a way that stalls for the next, and with none left dig up through the roof, until the bar is
+ * full or the time (ticks, and the wall clock beside them) is up.
  */
 export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, maximumTicks: number) {
   let dug = 0;
@@ -23,19 +30,24 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
     measure: () => ticks,
     exhaustion: "stuck",
   });
-  let escape: ReturnType<typeof nearbySwimEscape> = null;
-  const blocked: NonNullable<ReturnType<typeof nearbySwimEscape>>[] = [];
-  let bestDistance = Infinity;
-  let stalledTicks = 0;
+  const route = new AirRoute();
+  let jumping = true;
+  let sneaking = false;
   signal.throwIfAborted();
   const stopDigging = () => {
     if (bot.targetDigBlock) bot.stopDigging();
   };
   signal.addEventListener("abort", stopDigging, { once: true });
+  // The wall clock and a death end the waits even when physics ticks have stopped.
+  const ended = new AbortController();
+  const end = () => ended.abort();
+  const wallClock = setTimeout(end, maximumTicks * TICK_MS * WALL_CLOCK_FACTOR);
+  bot.once("death", end);
+  bot.once("respawn", end);
   bot.on("physicsTick", tick);
   bot.setControlState("jump", true);
   try {
-    while (!budget.exhausted) {
+    while (!budget.exhausted && !ended.signal.aborted) {
       signal.throwIfAborted();
       const air = airSupplyPoints(bot);
       // Respawn can replace the body's metadata. Unknown air cannot retain
@@ -43,30 +55,18 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
       if (air === null || air >= FULL_AIR_POINTS) break;
       const roof = isInWater(bot) ? swimmingRoof(bot) : null;
       if (bot.health <= 0) break;
-      if (escape) {
-        const distance = Math.hypot(bot.entity.position.x - escape.x, bot.entity.position.z - escape.z);
-        if (distance < bestDistance - 0.02) {
-          bestDistance = distance;
-          stalledTicks = 0;
-        } else stalledTicks++;
-        // One second without closing distance leaves time to try another
-        // corridor or dig. Holding a failed lateral input can drown too.
-        if (distance < 0.08 || stalledTicks >= 20) {
-          if (stalledTicks >= 20) blocked.push(escape);
-          escape = null;
-        }
-      }
-      if (roof && !escape) {
-        escape = nearbySwimEscape(bot, blocked);
-        bestDistance = Infinity;
-        stalledTicks = 0;
-      }
-      const horizontal = escape ? horizontalControlsToward(bot.entity, escape, 0.05) : null;
+      route.update(bot, roof !== null);
+      const target = route.target;
+      const horizontal = target ? horizontalControlsToward(bot.entity, target, 0.05) : null;
       for (const control of ["forward", "back", "left", "right"] as const)
         bot.setControlState(control, horizontal?.[control] ?? false);
-      // No open column within reach: dig up through the roof, with the best tool carried. The reflex digs by the
-      // body in the water, never by the route policy, so its rule against mining under water does not apply here.
-      if (roof?.diggable && !escape) {
+      const vertical = target ? routeVerticalControls(bot, target, route.onLastCell) : { jump: true, sneak: false };
+      if (vertical.jump !== jumping) bot.setControlState("jump", (jumping = vertical.jump));
+      if (vertical.sneak !== sneaking) bot.setControlState("sneak", (sneaking = vertical.sneak));
+      // No way to air within reach (or each tried one stalled): dig up through the roof, with the best tool carried.
+      // The reflex digs by the body in the water, never by the route policy, so its rule against mining under water
+      // does not apply here.
+      if (roof?.diggable && route.none) {
         try {
           const tool = selectHarvestTool(bot, roof);
           if (tool && bot.heldItem?.name !== tool.name) await bot.equip(tool, "hand");
@@ -77,14 +77,21 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
           // A refused dig yields one tick before another attempt.
         }
       }
-      await waitForPhysicsTicks(bot, 1, signal);
+      try {
+        await waitForPhysicsTicks(bot, 1, AbortSignal.any([signal, ended.signal]));
+      } catch {
+        signal.throwIfAborted();
+      }
     }
   } finally {
+    clearTimeout(wallClock);
+    bot.off("death", end);
+    bot.off("respawn", end);
     bot.off("physicsTick", tick);
     signal.removeEventListener("abort", stopDigging);
-    bot.setControlState("jump", false);
-    for (const control of ["forward", "back", "left", "right"] as const) bot.setControlState(control, false);
+    for (const control of ["jump", "sneak", "forward", "back", "left", "right"] as const) bot.setControlState(control, false);
   }
+
   const airAfter = airSupplyPoints(bot);
   return {
     kind:

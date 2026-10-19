@@ -245,10 +245,10 @@ function breathContinuations(t: Parameters<typeof waterFixture>[0]) {
   const driver = { register: (captured: typeof definition) => { definition = captured; return { [Symbol.asyncDispose]: async () => {} }; } };
   attachBreathReflex(fixture.bot, driver as never, () => null, () => clock);
   return {
-    surfaceAt: (x: number, atMs: number) => {
+    surfaceAt: (x: number, atMs: number, ownedDive = false, kind = "air_full") => {
       clock = atMs;
       Object.assign(fixture.entity, { position: new Vec3(x + 0.5, 50, 0.5) });
-      return definition!.continuation({ kind: "air_full", ownedDive: false });
+      return definition!.continuation({ kind, ownedDive });
     },
   };
 }
@@ -264,6 +264,37 @@ test("the third breath reflex at the same place within three minutes ends the ac
   assert.match(third.reason ?? "", /Out of air three times here/);
 });
 
+test("an owned-dive rescue that reached full air resumes the action", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+});
+
+test("the third owned-dive rescue at one place within three minutes ends the action", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000, true).kind, "resume");
+  const third = surfaceAt(2, 38_000, true);
+  assert.equal(third.kind, "return");
+  assert.match(third.reason ?? "", /Out of air three times here/);
+});
+
+test("owned and unowned rescues at one place count together", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  assert.equal(surfaceAt(0, 0, true).kind, "resume");
+  assert.equal(surfaceAt(1, 19_000, false).kind, "resume");
+  assert.match(surfaceAt(2, 38_000, true).reason ?? "", /Out of air three times here/);
+});
+
+test("a rescue that did not observe full air still returns, owned or not", (t) => {
+  const { surfaceAt } = breathContinuations(t);
+  for (const ownedDive of [true, false]) {
+    const rescue = surfaceAt(0, 0, ownedDive, "stuck");
+    assert.equal(rescue.kind, "return");
+    assert.match(rescue.reason ?? "", /Full air was not observed/);
+  }
+  assert.match(surfaceAt(0, 0, true, "air_unknown").reason ?? "", /air metadata is unavailable/);
+});
+
 test("three breath reflexes ten blocks apart all resume", (t) => {
   const { surfaceAt } = breathContinuations(t);
   assert.equal(surfaceAt(0, 0).kind, "resume");
@@ -276,4 +307,43 @@ test("a third breath reflex after three minutes starts the count again and resum
   assert.equal(surfaceAt(0, 0).kind, "resume");
   assert.equal(surfaceAt(0, 19_000).kind, "resume");
   assert.equal(surfaceAt(0, 3 * MINUTE + 1).kind, "resume");
+});
+
+/** "takeover" when the breath reflex fired within 10 ticks, else "idle": an owned dive whose backstop asks `floor` ticks, `air` ticks on the server's meter. */
+async function reflexOutcome(t: import("node:test").TestContext, floor: number | null, air: number) {
+  const fixture = waterFixture(t);
+  Object.assign(fixture.bot, { health: 20, username: "Diver", blockAt: () => null });
+  Reflect.set(fixture.bot.entity.metadata, 0, air);
+  fixture.entity.isInWater = true;
+  const fired: string[] = [];
+  fixture.reflex.onTransition((event) => { if (event.kind === "claim") fired.push(event.kind); });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex, () => floor);
+  for (let tick = 0; tick < 10; tick++) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  await control[Symbol.asyncDispose]();
+  return fired.length === 0 ? "idle" : "takeover";
+}
+
+test("an owned dive whose backstop asks an immediate rescue does not fire while the server's air is full", async (t) => {
+  assert.equal(await reflexOutcome(t, 300, 300), "idle");
+});
+
+test("the same backstop fires from the first tick of air lost", async (t) => {
+  assert.equal(await reflexOutcome(t, 300, 299), "takeover");
+});
+
+test("an unowned bot at 12 of 20 air fires as before", async (t) => {
+  assert.equal(await reflexOutcome(t, null, 12 * 15), "takeover");
+});
+
+test("an owned dive with the air metadata missing reports unknown and does not fire", async (t) => {
+  const fixture = waterFixture(t);
+  Object.assign(fixture.bot, { health: 20, username: "Diver", blockAt: () => null });
+  Object.assign(fixture.entity, { metadata: [] });
+  fixture.entity.isInWater = true;
+  const control = attachBreathReflex(fixture.bot, fixture.reflex, () => 300);
+  for (let tick = 0; tick < 10; tick++) fixture.bot.emit("physicsTick");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.reflex.runner.status().owner, "idle");
+  await control[Symbol.asyncDispose]();
 });

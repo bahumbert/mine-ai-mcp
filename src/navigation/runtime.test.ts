@@ -1,5 +1,6 @@
 import { exactBlockGoal } from "./goals/index.js";
 import { createMovementPolicy } from "./movements/policy.js";
+import { RouteOutcomes } from "./route-outcomes.js";
 import { createNavigationRuntime } from "./runtime.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -133,5 +134,62 @@ test("a navigate that is not cancelled still refuses a second one at once", asyn
     await navigation.close();
   } finally {
     clearInterval(ticking);
+  }
+});
+
+/** Plans one route on the waiting floor, stops it at its commit, and returns the events it raised before. */
+async function eventsOfOneRoute(open: (navigation: ReturnType<typeof createNavigationRuntime>) => Disposable | undefined) {
+  const { navigation, movements, goal } = waitingRoute();
+  const kinds: string[] = [];
+  const stop = new AbortController();
+  navigation.onEvent((event) => {
+    kinds.push(event.kind);
+    if (event.kind === "route_committed") stop.abort("route observed");
+  });
+  const held = open(navigation);
+  try {
+    await navigation.navigate({ movements, goal, stopSignal: stop.signal });
+  } finally {
+    held?.[Symbol.dispose]();
+    await navigation.close();
+  }
+  return kinds;
+}
+
+// Run 15: a pinned bot's next movement action routes as an escape without every action passing a flag down.
+test("while routesAsEscape is open every route starts as an escape, and the next one after it does not", async () => {
+  const escaping = await eventsOfOneRoute((navigation) => navigation.routesAsEscape());
+  assert.ok(escaping.includes("escape_relaxed"), "the route set its style rules aside");
+  assert.equal((await eventsOfOneRoute(() => undefined)).includes("escape_relaxed"), false);
+});
+
+/** A 5x5 room (stone floor, walls and ceiling) with the bot in it: a goal outside it has no path, and the search ends fast. */
+function enclosedRoom(routes: RouteOutcomes) {
+  const bot = botFixture({ groundY: 63 });
+  bot.world.getBlockStateId = (p) => {
+    const inside = Math.abs(p.x) <= 2 && Math.abs(p.z) <= 2 && p.y >= 64 && p.y <= 65;
+    return inside ? 0 : bot.registry.blocksByName.stone.defaultState;
+  };
+  Object.assign(bot.world, { getColumn: () => ({ minY: -64, worldHeight: 384, getBlockStateId: bot.world.getBlockStateId }) });
+  return { bot, navigation: createNavigationRuntime(bot, { routes }), movements: createMovementPolicy({ allowDigging: false, allowParkour: false }) };
+}
+
+// Run 15 review: the pinned watch counts a movement action's failure only when its route or movement failed.
+test("the routes of a navigation runtime are recorded: an exhausted search is a failed route, a route stopped by its caller is not", async () => {
+  const routes = new RouteOutcomes();
+  const { bot, navigation, movements } = enclosedRoom(routes);
+  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
+  try {
+    const exhausted = routes.mark();
+    const noPath = await navigation.navigate({ movements, goal: exactBlockGoal({ x: 6, y: 64, z: 0 }) });
+    assert.equal(noPath.status, "stopped", JSON.stringify(noPath));
+    assert.equal(routes.failedSince(exhausted), true);
+    const stopped = routes.mark();
+    const stop = AbortSignal.abort("the pickaxe broke");
+    await navigation.navigate({ movements, goal: exactBlockGoal({ x: 1, y: 64, z: 0 }), stopSignal: stop });
+    assert.equal(routes.failedSince(stopped), false);
+  } finally {
+    clearInterval(ticking);
+    await navigation.close();
   }
 });

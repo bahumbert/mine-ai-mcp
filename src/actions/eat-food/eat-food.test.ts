@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture, type FakeStack } from "../../test-support/bot.js";
 import { parseEatFoodRequest } from "./contract.js";
-import { formatEatFoodResult, eatFood, type EatFoodDependencies } from "./eat-food.js";
+import { beginEatFood, formatEatFoodResult, eatFood, type EatFoodDependencies } from "./eat-food.js";
 
 /** A hungry bot carrying one stack of the named item. */
 function hungryBot(name = "cooked_beef", count = 2) {
@@ -164,4 +164,106 @@ test("reports Mineflayer's refusal and releases an active use", async () => {
   if (result.status === "failed") assert.match(result.error, /Food is full/);
   assert.equal(deactivated, true);
   assert.equal(result.eating.inventoryAfter, 1);
+});
+
+/** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
+function eatRequest(bot: ReturnType<typeof hungryBot>["bot"], dependencies: EatFoodDependencies) {
+  const run = beginEatFood(bot, { foodName: "cooked_beef" }, () => {}, dependencies);
+  return (signal?: AbortSignal) => run({ signal });
+}
+
+test("a bite aborted before the bite ends is eaten once by the resumed attempt", async () => {
+  const { bot, items } = hungryBot();
+  const owner = new AbortController();
+  let bites = 0;
+  const attempt = eatRequest(bot, {
+    equip: async () => {},
+    consume: async () => {
+      bites += 1;
+      if (bites === 1) { owner.abort(new Error("hunger reflex")); return; }
+      items[0]!.count -= 1;
+    },
+  });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(items[0]!.count, 1);
+  assert.equal(result.eating.inventoryBefore, 2);
+  assert.equal(result.eating.inventoryAfter, 1);
+});
+
+test("a bite that landed while the first attempt was aborted in the settle is not eaten twice", async () => {
+  const { bot, items } = hungryBot();
+  const owner = new AbortController();
+  let bites = 0;
+  const attempt = eatRequest(bot, {
+    equip: async () => {},
+    consume: async () => {
+      bites += 1;
+      setTimeout(() => owner.abort(new Error("fall reflex")), 20);
+      setTimeout(() => { items[0]!.count -= 1; bot.food = 18; bot.inventory.emit("updateSlot"); }, 60);
+    },
+  });
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(bites, 1);
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual([result.eating.inventoryBefore, result.eating.inventoryAfter, result.eating.consumed], [2, 1, true]);
+});
+
+test("food a reflex ate between attempts, before our bite was made, is not our bite: the resume eats again", async () => {
+  const { bot, items } = hungryBot("cooked_beef", 2);
+  let bites = 0;
+  const attempt = eatRequest(bot, { equip: async () => {}, consume: async () => { bites += 1; items[0]!.count -= 1; } });
+  const owner = new AbortController();
+  owner.abort(new Error("hunger reflex"));
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  items[0]!.count -= 1; // the hunger reflex's own meal of the same food: one carried fewer, our consume never ran
+  bot.food = 20;
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(bites, 1);
+  assert.equal(result.status, "succeeded");
+  assert.equal(items[0]!.count, 0);
+  assert.equal(result.eating.inventoryBefore, 2);
+  assert.equal(result.eating.inventoryAfter, 0);
+});
+
+test("food that a reflex ate after our bite resolved but was cut in the settle counts as eaten", async () => {
+  const { bot, items } = hungryBot("cooked_beef", 1);
+  let bites = 0;
+  const owner = new AbortController();
+  const attempt = eatRequest(bot, {
+    equip: async () => {},
+    consume: async () => { bites += 1; setTimeout(() => owner.abort(new Error("fall reflex")), 10); },
+  });
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  items.length = 0; // the bite landed (or a reflex ate): the one carried is gone
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(bites, 1);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.eating.inventoryAfter, 0);
+});
+
+test("a second call after a completed bite succeeds without acting", async () => {
+  const { bot, items } = hungryBot();
+  let bites = 0;
+  const attempt = eatRequest(bot, { equip: async () => {}, consume: async () => { bites += 1; items[0]!.count -= 1; } });
+
+  const first = await attempt();
+  const second = await attempt();
+
+  assert.equal(first.status, "succeeded");
+  assert.equal(second.status, "succeeded");
+  assert.equal(bites, 1);
+  assert.equal(items[0]!.count, 1);
+  assert.equal(second.eating.inventoryBefore, 2);
 });

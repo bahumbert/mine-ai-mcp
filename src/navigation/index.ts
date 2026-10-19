@@ -38,6 +38,7 @@ export { SupportedPositionController } from "./execution/supported-position-cont
 export { setSneaking } from "./mineflayer/sneak.js";
 export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/portal-entry.js";
 export { createNavigationRuntime, createMovements } from "./runtime.js";
+export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
 export { type SwimCellReader, swimExitPath } from "./world/swimming.js";
@@ -49,6 +50,7 @@ export { isPassable, isHeadPassable, isSafeSupport } from "./world/block-geometr
 export { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "./navigate.js";
 export type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 export { describeCalculationFailure, type NavigationCalculationFailure } from "./orchestration/process-events.js";
+export { RELAXED_DIG_STRAIGHT_DOWN, RELAXED_FLOWING_WATER } from "./orchestration/escape-policy.js";
 
 // Goals: what a route is asked to satisfy.
 export type { Goal } from "./goals/goal.js";

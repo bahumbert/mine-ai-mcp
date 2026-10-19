@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { botFixture, EQUIPMENT_SLOTS } from "../../test-support/bot.js";
-import { formatEquipResult, equip } from "./equip.js";
+import { beginEquip, formatEquipResult, equip } from "./equip.js";
 import { inferEquipmentDestination, parseEquipRequest } from "./contract.js";
 
 /** A bot whose equip moves the named item into the destination slot, or throws for one named item. */
@@ -139,4 +139,113 @@ test("a matching name alone cannot confirm an explicitly selected item's equip",
   assert.equal(result.status, "failed");
   assert.match(result.equip.equipped[0]!.error!, /EQUIP_NOT_OBSERVED/);
   assert.throws(() => parseEquipRequest({ items: [{ item_name: "shield", source_slot: 0 }] }));
+});
+
+/** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
+function equipAttempts(bot: ReturnType<typeof equipBot>, items: readonly object[]) {
+  const run = beginEquip(bot, parseEquipRequest({ items }), () => {});
+  return (signal?: AbortSignal) => run({ signal });
+}
+
+/** Aborts the request once the named item is equipped (a reflex took the body); returns the names equipped so far. */
+function abortAfterEquipping(bot: ReturnType<typeof equipBot>, owner: AbortController, itemName: string): string[] {
+  const equips: string[] = [];
+  const equipSlot = bot.equip.bind(bot);
+  bot.equip = (async (item: { name: string }, destination: string) => {
+    equips.push(item.name);
+    await equipSlot(item as never, destination as never);
+    if (item.name === itemName) owner.abort(new Error("hunger reflex"));
+  }) as typeof bot.equip;
+  return equips;
+}
+
+test("an equip aborted after the helmet resumes with the rest and equips the helmet once", async () => {
+  const bot = equipBot(["iron_helmet", "iron_chestplate"]);
+  const owner = new AbortController();
+  const equips = abortAfterEquipping(bot, owner, "iron_helmet");
+  const attempt = equipAttempts(bot, [{ item_name: "iron_helmet" }, { item_name: "iron_chestplate" }]);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(equips, ["iron_helmet", "iron_chestplate"]);
+  assert.deepEqual(result.equip.equipped.map((entry) => entry.item), ["iron_helmet", "iron_chestplate"]);
+});
+
+test("a source-slot swap finished before the abort is kept as done and not swapped back", async () => {
+  const bot = equipBot(["shield"]);
+  const worn = { name: "shield", durabilityUsed: 319 };
+  const fresh = { name: "shield", durabilityUsed: 0 };
+  bot.inventory.slots[45] = worn as never;
+  bot.inventory.slots[24] = fresh as never;
+  const owner = new AbortController();
+  const click = bot.clickWindow.bind(bot);
+  let clicks = 0;
+  bot.clickWindow = async (...args: Parameters<typeof click>) => {
+    await click(...args);
+    clicks += 1;
+    if (clicks === 3) owner.abort(new Error("fall reflex"));
+  };
+  const attempt = equipAttempts(bot, [{ item_name: "shield", source_slot: 24 }, { item_name: "iron_sword" }]);
+  bot.inventory.items = () => [{ name: "iron_sword", count: 1 }] as never;
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(clicks, 3, "the resumed attempt must not click the shield again");
+  assert.equal(bot.inventory.slots[45], fresh);
+  assert.equal(result.equip.equipped[0]!.equipped, true);
+  assert.equal(result.equip.equipped[0]!.sourceSlot, 24);
+});
+
+test("a source-slot swap whose abort came before it was observed is recognised in its destination", async () => {
+  const bot = equipBot(["shield"]);
+  const fresh = { name: "shield", durabilityUsed: 0 };
+  bot.inventory.slots[24] = fresh as never;
+  const owner = new AbortController();
+  const click = bot.clickWindow.bind(bot);
+  let clicks = 0;
+  bot.clickWindow = async (...args: Parameters<typeof click>) => {
+    await click(...args);
+    clicks += 1;
+    if (clicks === 2) { owner.abort(new Error("fall reflex")); throw owner.signal.reason; }
+  };
+  const attempt = equipAttempts(bot, [{ item_name: "shield", source_slot: 24 }]);
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(clicks, 3, "attempt 1 clicked three times (its hand restore included); the resumed attempt none");
+  assert.equal(result.status, "succeeded");
+  assert.equal(bot.inventory.slots[45], fresh);
+});
+
+test("armor taken off between attempts is equipped again from the inventory, or reported missing", async () => {
+  const bot = equipBot(["iron_helmet", "iron_chestplate"]);
+  const owner = new AbortController();
+  abortAfterEquipping(bot, owner, "iron_helmet");
+  const attempt = equipAttempts(bot, [{ item_name: "iron_helmet" }, { item_name: "iron_chestplate" }]);
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  bot.inventory.slots[EQUIPMENT_SLOTS.head!] = null;
+  bot.inventory.items = () => [{ name: "iron_chestplate", count: 1 }] as never;
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "partial");
+  assert.match(result.equip.equipped[0]!.error ?? "", /EQUIP_NOT_CARRIED/);
+  assert.equal(result.equip.equipped[1]!.equipped, true);
+});
+
+test("a second call after a completed equip succeeds without touching the inventory", async () => {
+  const bot = equipBot(["iron_sword"]);
+  const attempt = equipAttempts(bot, [{ item_name: "iron_sword" }]);
+  const first = await attempt();
+  bot.equip = async () => { throw new Error("a finished equip must not move anything"); };
+
+  const second = await attempt();
+
+  assert.equal(first.status, "succeeded");
+  assert.equal(second.status, "succeeded");
+  assert.deepEqual(second.equip.equipped, first.equip.equipped);
 });

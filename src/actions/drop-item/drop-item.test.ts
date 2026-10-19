@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import minecraftData from "minecraft-data";
+import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { blockClass } from "../../navigation/mineflayer/world.js";
 import { botFixture, EQUIPMENT_SLOTS, type FakeStack } from "../../test-support/bot.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
-import { formatDropItemResult, dropItem, type DropItemDependencies } from "./drop-item.js";
+import { beginDropItem, formatDropItemResult, dropItem, type DropItemDependencies } from "./drop-item.js";
 
 interface DropBotOptions {
   readonly carried: readonly FakeStack[];
@@ -25,6 +28,9 @@ interface DropBotOptions {
   /** With `returnsAfterMs`: the items come back only if the bot is then within this many blocks of where it tossed them. */
   readonly returnsWithin?: number;
 }
+
+const registry = minecraftData("1.21.4");
+const Block = blockClass({ registry } as Pick<Bot, "registry">);
 
 function dropBot(options: DropBotOptions) {
   const items = options.carried.map((stack) => ({ ...stack }));
@@ -468,4 +474,179 @@ test("a ground drop that cannot walk away still reports the items picked up agai
   assert.equal(tries, 4, "all four sides were tried");
   assert.equal(result.status, "failed");
   assert.ok(result.drop.dropped[0]?.error?.startsWith("[DROP_PICKED_UP]"));
+});
+
+/** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
+function dropAttempts(bot: ReturnType<typeof dropBot>["bot"], input: unknown, dependencies = deps()) {
+  const run = beginDropItem(bot, parseDropItemRequest(input), () => {}, dependencies, createDiscardedItems());
+  return (signal?: AbortSignal) => run({ signal });
+}
+
+/** Aborts the request once the nth toss has resolved (a reflex took the body); later tosses go through. */
+function abortAfterToss(bot: ReturnType<typeof dropBot>["bot"], owner: AbortController, nth: number): { tosses: number } {
+  const count = { tosses: 0 };
+  for (const method of ["tossStack", "toss"] as const) {
+    const original = (bot as unknown as Record<string, (...args: unknown[]) => Promise<void>>)[method]!;
+    (bot as unknown as Record<string, unknown>)[method] = async (...args: unknown[]) => {
+      await original(...args);
+      count.tosses += 1;
+      if (count.tosses === nth) owner.abort(new Error("hunger reflex"));
+    };
+  }
+  return count;
+}
+
+test("a drop of 10 cut off after the first stack of 5 tosses 10 in all, not 5 and not 15", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 5, type: 1 }, { name: "cobblestone", count: 5, type: 1 }] });
+  const owner = new AbortController();
+  abortAfterToss(bot, owner, 1);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(items, []);
+  assert.deepEqual(
+    [result.drop.dropped[0]?.requested, result.drop.dropped[0]?.dropped, result.drop.dropped[0]?.carriedBefore],
+    [10, 10, 10],
+  );
+});
+
+test("a toss of 10 from one stack that resolved just before the abort is not tossed again", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 20, type: 1 }] });
+  const owner = new AbortController();
+  const counted = abortAfterToss(bot, owner, 1);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(counted.tosses, 1);
+  assert.equal(items[0]?.count, 10);
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual([result.drop.dropped[0]?.dropped, result.drop.dropped[0]?.carriedAfter], [10, 10]);
+});
+
+test("food a reflex ate between attempts is not dropped, and the result says fewer were dropped", async () => {
+  const { bot, items } = dropBot({ carried: [
+    { name: "cooked_beef", count: 4, type: 1 }, { name: "cooked_beef", count: 4, type: 1 }, { name: "cooked_beef", count: 4, type: 1 },
+  ] });
+  const owner = new AbortController();
+  abortAfterToss(bot, owner, 2);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cooked_beef", count: 12 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  items[0]!.count -= 1;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual([result.drop.dropped[0]?.dropped, result.drop.dropped[0]?.carriedAfter], [11, 0]);
+  assert.match(formatDropItemResult(result), /1 more left the inventory meanwhile/);
+});
+
+test("an item a reflex held between attempts is still dropped once the drop is under way", async () => {
+  const { bot } = dropBot({ carried: [{ name: "cobblestone", count: 5, type: 1 }, { name: "cobblestone", count: 5, type: 1 }] });
+  const owner = new AbortController();
+  abortAfterToss(bot, owner, 1);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  Object.assign(bot, { heldItem: { name: "cobblestone" } });
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.drop.dropped[0]?.dropped, 10);
+});
+
+test("a second call after a finished drop returns the success without tossing again", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 20, type: 1 }] });
+  const counted = abortAfterToss(bot, new AbortController(), 99);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
+
+  const first = await attempt();
+  const second = await attempt();
+
+  assert.equal(first.status, "succeeded");
+  assert.equal(second.status, "succeeded");
+  assert.equal(counted.tosses, 1);
+  assert.equal(items[0]?.count, 10);
+  assert.equal(second.drop.dropped[0]?.dropped, 10);
+});
+
+test("an item the reflex used up entirely is reported not carried instead of being tossed again", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "cooked_beef", count: 3, type: 1 }] });
+  const owner = new AbortController();
+  owner.abort(new Error("hunger reflex"));
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cooked_beef" }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  items.length = 0;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  assert.match(result.drop.dropped[0]?.error ?? "", /DROP_NOT_CARRIED/);
+});
+
+const dirtBlock = (name: string) => Block.fromStateId(registry.blocksByName[name]!.defaultState, 0);
+
+/** Open ground (dirt below y 64) the dig and the plug change cell by cell; the toss lands an item at the pit's bottom. */
+function pitWorld() {
+  const changed = new Map<string, string>();
+  const { bot, items, entities } = dropBot({
+    carried: [{ name: "dirt", count: 3, type: 1 }, { name: "cobblestone", count: 2, type: 2 }],
+    position: { x: 0.5, y: 64, z: 0.5 },
+  });
+  Object.assign(bot, {
+    blockAt: (position: Vec3) => dirtBlock(changed.get(position.toString()) ?? (position.y < 64 ? "dirt" : "air")),
+  });
+  bot.entity.onGround = true;
+  const tossStack = bot.tossStack.bind(bot);
+  bot.tossStack = async (stack) => {
+    await tossStack(stack);
+    entities[77] = { id: 77, name: "item", position: new Vec3(1.5, 62.2, 0.5), getDroppedItem: () => ({ name: "dirt", count: 3 }) };
+  };
+  const dug: string[] = [];
+  const dependencies = deps({
+    breakInPlace: async ({ position }) => {
+      dug.push(`${position.x},${position.y},${position.z}`);
+      changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+      return { status: "broken" };
+    },
+    placeInto: async (placer, cell, item) => {
+      changed.set(new Vec3(cell.x, cell.y, cell.z).toString(), item?.name ?? "cobblestone");
+      return { kind: "placed", block: placer.blockAt(new Vec3(cell.x, cell.y, cell.z))! } as never;
+    },
+    navigate: async () => {
+      bot.entity.position.set(4.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 0 } as never;
+    },
+  });
+  return { bot, items, changed, dug, dependencies };
+}
+
+test("a pit half dug when a reflex took the body is dug on, filled with the drop and plugged by the next attempt", async () => {
+  const world = pitWorld();
+  const owner = new AbortController();
+  const breakInPlace = world.dependencies.breakInPlace;
+  let breaks = 0;
+  const dependencies = {
+    ...world.dependencies,
+    breakInPlace: async (options: Parameters<typeof breakInPlace>[0]) => {
+      const broken = await breakInPlace(options);
+      if (++breaks === 1) owner.abort(new Error("fall reflex"));
+      return broken;
+    },
+  };
+  const attempt = dropAttempts(world.bot, { items: [{ item_name: "dirt" }], in_a_hole: true }, dependencies);
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  assert.deepEqual([result.drop.hole?.x, result.drop.hole?.y, result.drop.hole?.z], [1, 62, 0]);
+  assert.deepEqual(world.dug, ["1,63,0", "1,62,0"], "each cell of the one pit is dug once");
+  assert.equal(result.drop.holeClosure?.placed, 2);
+  assert.equal(world.changed.get(new Vec3(1, 63, 0).toString()), "cobblestone");
+  assert.equal(world.changed.get(new Vec3(1, 64, 0).toString()), "cobblestone");
 });

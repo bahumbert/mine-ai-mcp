@@ -1,7 +1,8 @@
 import { equipCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
-import { defineAction, type ActionContext } from "../action.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
 import {
   equipAnnotations,
   equipOutcomes,
@@ -72,70 +73,99 @@ export function equipmentSlots(bot: Bot): EquipmentSlots {
   };
 }
 
-/** Equip each requested item in turn and report what every slot holds afterwards. */
-export async function equip(
+type EquipEntry = EquipEvidence["equipped"][number];
+type RequestedEquip = EquipRequest["items"][number];
+
+/** What an equip request keeps across the attempts a reflex splits it into. */
+interface EquipProgress {
+  /** Source-slot items a finished swap put in their destination, by request index: their source slot now holds another item. */
+  readonly swapped: Map<number, EquipEntry>;
+  /** A source-slot item's properties, kept before its swap so a swap cut short is recognised in the destination. */
+  readonly selected: Map<number, ReturnType<typeof itemProperties>>;
+  /** The entries of the attempt running (or last run), read by the progress observer. */
+  attempt: EquipEntry[];
+}
+
+/** Equip one requested item (or find it already done) and say how it went. */
+async function equipRequested(
   bot: Bot,
-  request: EquipRequest,
-  context: ActionContext,
-): Promise<EquipResult> {
-  const equipped: EquipEvidence["equipped"] = [];
-  context.observeProgress?.(() => ({
+  requested: RequestedEquip,
+  index: number,
+  progress: EquipProgress,
+  signal: AbortSignal | undefined,
+): Promise<EquipEntry> {
+  const { itemName, destination, sourceSlot } = requested;
+  const done = progress.swapped.get(index);
+  if (done) return done;
+  if (sourceSlot === undefined && slot(bot, destination) === itemName) return { item: itemName, destination, equipped: true };
+  const kept = progress.selected.get(index);
+  const worn = equippedItem(bot, destination);
+  if (kept && worn && worn.name === itemName && isDeepStrictEqual(itemProperties(worn), kept)) {
+    const entry = { item: itemName, destination, sourceSlot: sourceSlot!, durabilityUsed: worn.durabilityUsed ?? null, equipped: true };
+    progress.swapped.set(index, entry);
+    return entry;
+  }
+  const item = sourceSlot === undefined
+    ? bot.inventory.items().find((candidate) => candidate.name === itemName)
+    : bot.inventory.slots[sourceSlot];
+  if (sourceSlot !== undefined && item?.name !== itemName) {
+    return { item: itemName, destination, sourceSlot, equipped: false,
+      error: equipOutcomes.sourceMismatch(itemName, sourceSlot, item?.name ?? null) };
+  }
+  if (!item) return { item: itemName, destination, equipped: false, error: equipOutcomes.notCarried(itemName) };
+  const selectedProperties = itemProperties(item);
+  const selection = sourceSlot === undefined ? {} : { sourceSlot, durabilityUsed: item.durabilityUsed ?? null };
+  if (sourceSlot !== undefined) progress.selected.set(index, selectedProperties);
+  try {
+    if (sourceSlot === undefined) await bot.equip(item, destination);
+    else await equipFromSlot(bot, sourceSlot, destination);
+  } catch (cause) {
+    signal?.throwIfAborted();
+    return { item: itemName, destination, ...selection, equipped: false, error: equipOutcomes.rejected(itemName, cause) };
+  }
+  const held = equippedItem(bot, destination);
+  if (!held || held.name !== itemName || (sourceSlot !== undefined && !isDeepStrictEqual(itemProperties(held), selectedProperties))) {
+    return { item: itemName, destination, ...selection, equipped: false, error: equipOutcomes.notObserved(itemName, destination) };
+  }
+  const entry = { item: itemName, destination, ...selection, equipped: true };
+  if (sourceSlot !== undefined) progress.swapped.set(index, entry);
+  return entry;
+}
+
+/**
+ * One request's executor: a source-slot swap that finished in an earlier attempt stays done (its source slot holds
+ * another item now), and every other item is looked at again, so the attempt after a reflex does what is left.
+ */
+export function beginEquip(bot: Bot, request: EquipRequest, observe: ObserveRequest): RequestExecution<EquipResult> {
+  const progress: EquipProgress = { swapped: new Map(), selected: new Map(), attempt: [] };
+  observe(() => ({
     baseline: null,
-    checkpoint: { phase: "equipping", completed: equipped.filter((entry) => entry.equipped).length,
+    checkpoint: { phase: "equipping", completed: progress.attempt.filter((entry) => entry.equipped).length,
       requested: request.items.length, equipment: { ...equipmentSlots(bot) } },
-    completion: { kind: "current", observed: equipped.length === request.items.length && equipped.every((entry) => entry.equipped),
+    completion: { kind: "current", observed: progress.attempt.length === request.items.length && progress.attempt.every((entry) => entry.equipped),
       owes: "Every requested equipment operation confirmed in its destination slot." },
   }));
-  for (const { itemName, destination, sourceSlot } of request.items) {
-    context.signal?.throwIfAborted();
-    if (sourceSlot === undefined && slot(bot, destination) === itemName) {
-      equipped.push({ item: itemName, destination, equipped: true });
-      continue;
-    }
-    const item = sourceSlot === undefined
-      ? bot.inventory.items().find((candidate) => candidate.name === itemName)
-      : bot.inventory.slots[sourceSlot];
-    if (sourceSlot !== undefined && item?.name !== itemName) {
-      equipped.push({ item: itemName, destination, sourceSlot, equipped: false,
-        error: equipOutcomes.sourceMismatch(itemName, sourceSlot, item?.name ?? null) });
-      continue;
-    }
-    if (!item) {
-      equipped.push({ item: itemName, destination, equipped: false, error: equipOutcomes.notCarried(itemName) });
-      continue;
-    }
-    const selectedProperties = itemProperties(item);
-    const selection = sourceSlot === undefined ? {} : { sourceSlot, durabilityUsed: item.durabilityUsed ?? null };
-    try {
-      if (sourceSlot === undefined) await bot.equip(item, destination);
-      else await equipFromSlot(bot, sourceSlot, destination);
-    } catch (cause) {
+  return async (context) => {
+    const equipped: EquipEntry[] = [];
+    progress.attempt = equipped;
+    for (const [index, requested] of request.items.entries()) {
       context.signal?.throwIfAborted();
-      equipped.push({ item: itemName, destination, ...selection, equipped: false, error: equipOutcomes.rejected(itemName, cause) });
-      continue;
+      equipped.push(await equipRequested(bot, requested, index, progress, context.signal));
     }
-    const held = equippedItem(bot, destination);
-    if (!held || held.name !== itemName || (sourceSlot !== undefined && !isDeepStrictEqual(itemProperties(held), selectedProperties))) {
-      equipped.push({
-        item: itemName,
-        destination,
-        ...selection,
-        equipped: false,
-        error: equipOutcomes.notObserved(itemName, destination),
-      });
-      continue;
-    }
-    equipped.push({ item: itemName, destination, ...selection, equipped: true });
-  }
-
-  const evidence: EquipEvidence = { equipped, equipment: equipmentSlots(bot) };
-  const failed = equipped.filter((entry) => !entry.equipped).length;
-  if (failed === 0) return { status: "succeeded", equip: evidence };
-  return {
-    status: failed === equipped.length ? "failed" : "partial",
-    error: equipOutcomes.incomplete(failed, equipped.length),
-    equip: evidence,
+    const evidence: EquipEvidence = { equipped, equipment: equipmentSlots(bot) };
+    const failed = equipped.filter((entry) => !entry.equipped).length;
+    if (failed === 0) return { status: "succeeded", equip: evidence };
+    return {
+      status: failed === equipped.length ? "failed" : "partial",
+      error: equipOutcomes.incomplete(failed, equipped.length),
+      equip: evidence,
+    };
   };
+}
+
+/** Equip each requested item in turn and report what every slot holds afterwards. */
+export function equip(bot: Bot, request: EquipRequest, context: ActionContext): Promise<EquipResult> {
+  return beginEquip(bot, request, context.observeProgress ?? (() => {}))(context);
 }
 
 export function formatEquipResult(result: EquipResult): string {
@@ -162,9 +192,9 @@ export function createEquipAction(bot: Bot) {
     inputSchema: equipInputSchema,
     resultSchema: equipResultSchema,
     formatResult: formatEquipResult,
-    execution: { kind: "task" },
+    execution: { kind: "resumable_task" },
     annotations: equipAnnotations,
     parse: parseEquipRequest,
-    execute: (request, context) => equip(bot, request, context),
+    begin: (request, _lifetime, observe) => beginEquip(bot, request, observe),
   });
 }

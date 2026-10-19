@@ -65,6 +65,8 @@ export interface NavigationEvidence {
   readonly start: NavigationObservation;
   readonly final: NavigationObservation;
   readonly goalRevision: string;
+  /** The relaxed rules (`dig_straight_down`, `dig_next_to_flowing_water`) that this run's committed routes used to leave a pocket, empty when they used none. */
+  readonly escapeRelaxed?: readonly string[];
   readonly searches: number;
   readonly searchSlices: number;
   readonly plans: number;

@@ -1,8 +1,23 @@
-import type { BotRuntime, BotSnapshot } from "./runtime-client.ts";
+import type { BotRuntime, BotSnapshot, CarriedStack } from "./runtime-client.ts";
 
 /** The tool classes (and bed, boat) of which the last one carried is never dropped on its own. */
 export const KEPT_KINDS = ["pickaxe", "axe", "shovel", "hoe", "sword", "bed", "boat"] as const;
 export const kindOf = (item: string): (typeof KEPT_KINDS)[number] | null => KEPT_KINDS.find((kind) => item.split("_").at(-1) === kind) ?? null;
+
+/**
+ * The stack to keep among stacks of one tool class: the largest `durability.maximum` (the game's own tier ladder, as the
+ * runtime reports it), then the most durability left; a stack reporting none (an older runtime) ranks last, the first
+ * carried among those.
+ */
+export function bestTool<Stack extends CarriedStack>(stacks: readonly Stack[]): Stack | undefined {
+  const rank = ({ durability }: Stack) => [durability?.maximum ?? -1, durability?.remaining ?? -1] as const;
+  return stacks.reduce<Stack | undefined>((best, stack) => {
+    if (best === undefined) return stack;
+    const [bestMaximum, bestRemaining] = rank(best);
+    const [maximum, remaining] = rank(stack);
+    return maximum > bestMaximum || (maximum === bestMaximum && remaining > bestRemaining) ? stack : best;
+  }, undefined);
+}
 
 /** The failures of a full inventory: a workstation or a craft without room, a pickup or a collect with no free slot. */
 export const FULL_INVENTORY = /WORKSTATION_NO_ROOM|INVENTORY_FULL|no free inventory slot|needs inventory room/u;
@@ -28,9 +43,14 @@ export interface RoomFacts {
 export function neededItems(snapshot: Pick<BotSnapshot, "inventory" | "foods">, facts: RoomFacts = {}): Set<string> {
   const needed = new Set<string>([...(facts.houseBill ?? []), ...(facts.wanted ?? []), ...snapshot.foods.map((food) => food.name)]);
   const named = new Set(facts.objective?.toLowerCase().match(/[a-z][a-z0-9_]*/gu) ?? []);
+  // One tool of each class (and one bed, one boat) is needed: the best one carried ({@link bestTool}); the others are spare (run 15 N5).
+  for (const kind of KEPT_KINDS) {
+    const best = bestTool(snapshot.inventory.filter(({ name }) => kindOf(name) === kind));
+    if (best !== undefined) needed.add(best.name);
+  }
   for (const { name } of snapshot.inventory) {
     const last = name.split("_").at(-1)!;
-    if (kindOf(name) !== null || ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);
+    if (ARMOUR.includes(last) || STATIONS.includes(name) || named.has(name)) needed.add(name);
   }
   return needed;
 }
@@ -45,11 +65,17 @@ export interface JunkStack {
   readonly stacks: readonly number[];
 }
 
-/** The carried kinds not in `needed`, most stacks first, then the biggest count, then by name. */
+/**
+ * The carried kinds not in `needed`, most stacks first, then the biggest count, then by name. The stacks of a needed tool
+ * (bed, boat) beyond the first are junk too: one is kept, the copies can go.
+ */
 export function junkStacks(snapshot: Pick<BotSnapshot, "inventory">, needed: ReadonlySet<string>): JunkStack[] {
   const junk = new Map<string, number[]>();
+  const keptOne = new Set<string>();
   for (const { name, count } of snapshot.inventory) {
-    if (!needed.has(name)) junk.set(name, [...(junk.get(name) ?? []), count]);
+    const copy = needed.has(name) && kindOf(name) !== null && keptOne.has(name);
+    if (needed.has(name) && kindOf(name) !== null) keptOne.add(name);
+    if (!needed.has(name) || copy) junk.set(name, [...(junk.get(name) ?? []), count]);
   }
   return [...junk]
     .map(([name, stacks]) => ({ name, count: stacks.reduce((sum, count) => sum + count, 0), slots: stacks.length, stacks }))

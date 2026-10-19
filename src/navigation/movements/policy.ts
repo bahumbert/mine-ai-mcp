@@ -46,6 +46,18 @@ export type PolicyDecision =
  */
 export const BREAK_OPENS_INTO_LIQUID = "breaking this block would open the route into liquid";
 
+/** The refusal for a block with liquid over it; its comment (owner, 2026-10-02) is at the policy that applies it. */
+export const BREAK_UNDER_WATER = "the block is under water: the bot never mines under water";
+
+/** Why a break was refused, in the words the pinned-bot failure text counts them by. */
+export type BreakRefusalCause = "opens_into_liquid" | "under_water" | "protected";
+
+/** The counted cause of a refused break: the flood rule and the under-water rule by their own mark, anything else is a protection. */
+export function breakRefusalCause(decision: { readonly reason: string; readonly cause?: "opens_into_liquid" }): BreakRefusalCause {
+  if (decision.cause === "opens_into_liquid") return "opens_into_liquid";
+  return decision.reason === BREAK_UNDER_WATER ? "under_water" : "protected";
+}
+
 export interface ScaffoldSelection {
   readonly stateId: number;
   readonly itemType: number;
@@ -78,6 +90,11 @@ export interface MovementPolicy {
   readonly dive?: DiveAdmission;
   /** Absent when the policy already ignores the bot's own regions (a build) or knows none. */
   readonly ownRegionEscape?: OwnRegionEscape;
+  /**
+   * Whether breaking the block at this cell would let in flowing water and nothing else (no source, no lava). Supplied by
+   * the production policy; an escape leg lets such a break through (see `NavigationRun`), a normal search never asks.
+   */
+  opensOnlyIntoFlowingWater?(x: number, y: number, z: number, world: WorldView): boolean;
   readonly allowDigging: boolean;
   readonly allowPlacing: boolean;
   readonly allowDoors: boolean;

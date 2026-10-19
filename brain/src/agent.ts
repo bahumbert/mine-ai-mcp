@@ -115,6 +115,8 @@ interface Work {
   readonly wanted: Set<string>;
   /** Where a level_area around each player (lower-case name) was first aimed in this objective: later steps reuse it (run 13). */
   readonly levelSites: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
+  /** The tool classes whose tool broke in this objective and was not made again: the next fetch makes it first (N7). */
+  readonly toolsLost: Set<string>;
   /**
    * What its time counts for: the objective's purpose, until one of its steps builds, improves a house or farms; from
    * then on that (run 11, 2026-10-14: houses were labelled crafting, mining or woodcutting by the goal tier).
@@ -133,7 +135,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), purpose: objective.purpose };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -564,7 +566,7 @@ export class Agent {
     // The step runs: its earlier refusals are forgotten (rule 2 counts refusals with no run in between).
     work.refused.delete(stepKey(decision.step));
     for (const { item } of targetItems(decision.step)) work.wanted.add(item);
-    if (decision.step.skill === "collect_block") work.wanted.add(decision.step.block);
+    if (decision.step.skill === "collect_block") await this.wantMinedDrops(work, decision.step.block);
     const gain = this.watchGain(decision.step, snapshot, controller);
     this.body.onAction = (tool, input, ms) => {
       gain.alive();
@@ -588,6 +590,7 @@ export class Agent {
         building: this.building,
         areas: this.areas,
         levelSites: work.levelSites,
+        toolsLost: work.toolsLost,
         ...(work.objective.requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
         phase: (activity) => {
           gain.alive();
@@ -872,6 +875,12 @@ export class Agent {
       this.options.log(`could not tell what kind of work that was: ${String(error)}`);
       return { activity: null, spans: [], carried: null, position: null, room: null };
     }
+  }
+
+  /** What mining `block` gives is wanted too (game data): the fresh loot is not buried to make room (run 15 N5). */
+  private async wantMinedDrops(work: Work, block: string): Promise<void> {
+    work.wanted.add(block);
+    for (const drop of (await this.options.runtime.blockDrops([block]).catch(() => ({})))[block] ?? []) work.wanted.add(drop);
   }
 
   /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */

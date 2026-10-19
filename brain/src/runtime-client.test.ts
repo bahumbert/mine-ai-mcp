@@ -169,3 +169,42 @@ test("an unreadable tool listing is asked for once and logged once, not on every
     warn.mock.restore();
   }
 });
+
+function queryClient(rows: readonly (readonly (string | number | null)[])[]): ToolClient & { readonly queries: string[] } {
+  const queries: string[] = [];
+  return {
+    queries,
+    callTool: async (call) => {
+      queries.push(String((call.arguments as { sql: string }).sql));
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", query: { rows } } } } } };
+    },
+    close: async () => {},
+  };
+}
+
+test("knownContainers reads the rows of a real Minecraft username (letters, digits, underscore, 1-16)", async () => {
+  // Review 2026-10-18 #4: the check was /^w{1,16}$/ (the letter w), so every real name got [] and the chest deposit never ran live.
+  const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
+  const runtime = McpBotRuntime.over(client);
+  for (const owner of ["Tester", "Dirk_77", "a", "x".repeat(16)]) {
+    assert.deepEqual(await runtime.knownContainers(owner, { x: 8, y: 64, z: 0 }, 32), [{ x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 }], owner);
+  }
+  assert.equal(client.queries.length, 4);
+  assert.match(client.queries[0]!, /observed_by_bot_id = 'Tester'/u);
+});
+
+test("knownContainers refuses a name that could break the SQL literal, without querying", async () => {
+  const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
+  const runtime = McpBotRuntime.over(client);
+  for (const owner of ["O'Neil", "x'; DROP TABLE observed_containers; --", "", "x".repeat(17), "two words", "a\"b", "a\b"]) {
+    assert.deepEqual(await runtime.knownContainers(owner, { x: 0, y: 64, z: 0 }, 32), [], JSON.stringify(owner));
+  }
+  assert.deepEqual(client.queries, []);
+});
+
+test("knownContainers finds a container stored under either spelling of the overworld", async () => {
+  // `use_container` stores `bot.game.dimension`, which a server may report as `minecraft:overworld`.
+  const client = queryClient([]);
+  await McpBotRuntime.over(client).knownContainers("Tester", { x: 0, y: 64, z: 0 }, 32);
+  assert.match(client.queries[0]!, /dimension IN \('overworld', 'minecraft:overworld'\)/u);
+});

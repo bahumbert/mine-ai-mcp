@@ -172,6 +172,16 @@ function breathTravelTicks(read: SwimCellReader, from: BlockPosition, path: read
   return ticks;
 }
 
+/**
+ * Ticks of held breath on the swim from `feet` to the nearest cell with the head in air (an air pocket counts); 0 when the
+ * head is already in air, null when no such cell is known within the radius (unloaded cells are never swum through).
+ */
+export function swimBreathTicks(read: WorldView["blockAt"], feet: BlockPosition): number | null {
+  const cells = swimCellsOf(read);
+  const path = swimBreathPath(cells, feet);
+  return path === null ? null : breathTravelTicks(cells, feet, path);
+}
+
 /** The way up to air from a submerged cell: the cell where the head breaks the surface, and the ticks the swim takes. */
 export interface SwimAscent {
   readonly surface: BlockPosition;

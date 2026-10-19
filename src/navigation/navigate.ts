@@ -13,7 +13,7 @@
 import type { Goal } from "./goals/goal.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import type { Navigator } from "./orchestration/navigator.js";
-import type { MovementFailure, NavigationOutcome } from "./orchestration/outcome.js";
+import type { MovementFailure, NavigationFailure, NavigationOutcome } from "./orchestration/outcome.js";
 import type { BlockPosition } from "./world/world.js";
 import {
   describeCalculationFailure,
@@ -37,13 +37,17 @@ export const DEFAULT_CONTINUATION_SEARCH_LIMITS = Object.freeze({
 } satisfies SearchLimits);
 
 export type NavigationResult =
-  | { readonly status: "completed"; readonly elapsedMs: number }
+  | { readonly status: "completed"; readonly elapsedMs: number; readonly escapeRelaxed?: readonly string[] }
   | {
       readonly status: "stopped";
       readonly reason: string;
       readonly elapsedMs: number;
+      /** The relaxed rules (`dig_straight_down`, `dig_next_to_flowing_water`) this route's digs used in an escape; absent when none. */
+      readonly escapeRelaxed?: readonly string[];
       /** Set when the route ended because no path (or no usable partial route) was found, whatever was carried. */
       readonly calculationFailed?: true;
+      /** Set when the route or the movement itself failed (no path, no progress, a movement that failed), not a stop, a lost tool or a bad goal. */
+      readonly routeFailed?: true;
       /** With a calculation failure, the planned node nearest the goal: where the search got to. */
       readonly closest?: BlockPosition;
       /** The block whose planned break failed and ended the route, when one did. */
@@ -73,6 +77,8 @@ export interface NavigateOptions {
   readonly onToolSelected?: (itemType: number | null) => void;
   /** Optional search qualification owned by a caller with a more volatile goal. */
   readonly searchLimits?: SearchLimits;
+  /** Starts the route as an escape (see `NavigationRequest.escape`): the caller knows the bot is pinned. */
+  readonly escape?: boolean;
   /**
    * Opts this route out of the runtime's registered step field.
    *
@@ -111,6 +117,11 @@ export function failedBreakOf(outcome: NavigationOutcome): BlockPosition | undef
   return movement?.operation?.kind === "break" ? movement.operation.position : undefined;
 }
 
+/** Whether the route itself ended the run: no path, a search or progress that ran out, a movement that failed. */
+function isRouteFailure(failure: NavigationFailure): boolean {
+  return failure.kind === "no_path" || failure.kind === "search_limit" || failure.kind === "no_progress" || failure.kind === "movement_failed";
+}
+
 /** Plan, execute, and settle one route through the package-local navigator. */
 export async function runNavigation(navigator: Navigator, options: NavigateOptions): Promise<NavigationResult> {
   options.signal?.throwIfAborted();
@@ -128,6 +139,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     ...(options.onCalculationFailure && { onCalculationFailure: options.onCalculationFailure }),
     ...(options.onPlacement && { onPlacement: options.onPlacement }),
     stepField: options.stepField,
+    ...(options.escape && { escape: true }),
     signal,
     // Commit a useful partial route instead of retaining an ever-growing A*
     // frontier. Without this qualified boundary cavern-ore-return expanded
@@ -154,13 +166,16 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
   }
   options.signal?.throwIfAborted();
   const elapsedMs = Date.now() - startedAt;
-  if (outcome.kind === "completed") return { status: "completed", elapsedMs };
+  const escapeRelaxed = outcome.evidence.escapeRelaxed?.length ? { escapeRelaxed: outcome.evidence.escapeRelaxed } : {};
+  if (outcome.kind === "completed") return { status: "completed", elapsedMs, ...escapeRelaxed };
   const failedBreak = failedBreakOf(outcome);
   return {
     status: "stopped",
     reason: [outcomeReason(outcome), pending].filter(Boolean).join(" "),
     elapsedMs,
+    ...escapeRelaxed,
     ...(failedBreak && { failedBreak }),
+    ...(outcome.kind === "failed" && isRouteFailure(outcome.failure) && { routeFailed: true as const }),
     ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && {
       calculationFailed: true as const,
       closest: outcome.failure.kind === "no_path" ? outcome.failure.closest.position : outcome.failure.limit.closest.position,

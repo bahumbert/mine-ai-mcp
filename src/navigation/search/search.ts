@@ -31,6 +31,8 @@ import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./sea
 import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
+import { endsStrandedUnderWater } from "./stranded-segment.js";
+import { countStartRefusals } from "./start-refusals.js";
 import { NodeStore } from "./node-store.js";
 import { OpenSet } from "./open-set.js";
 
@@ -327,7 +329,10 @@ function attemptSegment(
   // end during a detour's initial retreat, where the next search cheaply walks
   // straight back and repeats the same detour forever.
   const plan = buildPlan(options, store, selection.node, visited, false);
-  return plan ? { kind: "segment", plan } : { kind: "stale" };
+  if (!plan) return { kind: "stale" };
+  // Out of one breath of air at its end, under a roof: the search goes on (or fails) rather than commit the dive.
+  if (!plan.complete && endsStrandedUnderWater(options.context.world, options.context.policy, plan)) return { kind: "none" };
+  return { kind: "segment", plan };
 }
 
 /**
@@ -354,6 +359,8 @@ export class IncrementalSearch {
   /** The cheapest goal-satisfying node generated so far, offered first when a partial route is cut. */
   #bestGoal = NO_NODE;
   #visited = 0;
+  /** The largest Chebyshev distance of a visited node's feet cell from the root's (0 while only the root was visited). */
+  #farthestVisited = 0;
   #generated = 1;
   #slices = 0;
   #computeMs = 0;
@@ -415,6 +422,7 @@ export class IncrementalSearch {
       // the scaffold frontier has dominated, is skipped rather than deleted.
       if (store.finish[current] === null && !this.#arrivals.isLive(current)) continue;
       this.#visited += 1;
+      this.#noteFarthest(current);
       expanded += 1;
       this.#noteClosest(current);
       if (
@@ -476,10 +484,11 @@ export class IncrementalSearch {
         evidence: this.#evidence(),
       };
     }
+    const { world, policy } = this.#options.context;
     return {
       kind: "no_path",
       closest: this.#closestEvidence(),
-      evidence: this.#evidence(),
+      evidence: { ...this.#evidence(), startRefusals: countStartRefusals(world, policy, this.#store.feet(this.#root)) },
       checkpoint: this.#slice.checkpoint,
     };
   }
@@ -620,7 +629,16 @@ export class IncrementalSearch {
   }
 
   #evidence(): SearchEvidence {
-    return { queued: this.#open.size, visited: this.#visited, generated: this.#generated, slices: this.#slices, computeMs: this.#computeMs };
+    return {
+      queued: this.#open.size, visited: this.#visited, farthestVisited: this.#farthestVisited, generated: this.#generated,
+      slices: this.#slices, computeMs: this.#computeMs,
+    };
+  }
+
+  #noteFarthest(node: number): void {
+    const root = this.#store.feet(this.#root);
+    const feet = this.#store.feet(node);
+    this.#farthestVisited = Math.max(this.#farthestVisited, Math.abs(feet.x - root.x), Math.abs(feet.y - root.y), Math.abs(feet.z - root.z));
   }
 
   #nodeEvidence(node: number) {

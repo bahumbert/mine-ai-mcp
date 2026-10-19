@@ -35,8 +35,15 @@ function findBedPlacementCandidates(bot: Bot, maxRadius = 4): BedCandidate[] {
   );
 }
 
-/** Select a carried bed and try the nearest valid bed footprints. */
-export async function placeCarriedBed(bot: Bot, signal?: AbortSignal): Promise<BedPlacementResult> {
+/**
+ * Select a carried bed and try the nearest valid bed footprints. `onCellsChosen` hears each footprint (foot and head)
+ * before the bed is placed there, so a caller cut off during the placement still knows where its bed may stand.
+ */
+export async function placeCarriedBed(
+  bot: Bot,
+  signal?: AbortSignal,
+  onCellsChosen?: (cells: readonly Vec3[]) => void,
+): Promise<BedPlacementResult> {
   const bedItem = bot.inventory.items().find((item) => isBedBlock(item.name));
   if (!bedItem) return { kind: "failed", reason: "missing_bed", error: "No bed found in inventory to place." };
 
@@ -55,6 +62,7 @@ export async function placeCarriedBed(bot: Bot, signal?: AbortSignal): Promise<B
     const support = bot.blockAt(candidate.foot.offset(0, -1, 0));
     if (!support || !supportsFlatPlacement(support)) continue;
 
+    onCellsChosen?.([candidate.foot, candidate.head]);
     const result = await placeBlock(bot, {
       item: bedItem,
       support,

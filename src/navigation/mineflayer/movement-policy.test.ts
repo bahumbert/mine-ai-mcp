@@ -392,3 +392,21 @@ test("a cobweb is a block to break at the best carried tool's time, no longer a 
   assert.ok(withSword < byHand, `a sword (${withSword} ticks) is faster than a hand (${byHand})`);
   assert.equal(ticksWith("wooden_sword", "stick"), withSword);
 });
+
+test("an escape may open into flowing water only: a source or lava beside the break keeps the refusal", () => {
+  const bot = botFixture();
+  const policy = createMovements(bot);
+  const water = bot.registry.blocksByName.water;
+  const lava = bot.registry.blocksByName.lava;
+  const at = { x: 2, y: 40, z: 3 };
+  const beside = (block: { minStateId: number }, liquidSource: boolean, liquid: "water" | "lava") => {
+    const world = new MemoryWorld();
+    world.load({ x: 3, y: 40, z: 3 }, { stateId: block.minStateId + (liquidSource ? 0 : 1), traits: { liquid, liquidSource } });
+    // Flowing water that falls on is stable; one with no column under it spreads, which the rule counts as opening in.
+    return policy.opensOnlyIntoFlowingWater!(at.x, at.y, at.z, world);
+  };
+  assert.equal(beside(water, true, "water"), false, "a source stays refused");
+  assert.equal(beside(lava, false, "lava"), false, "lava stays refused");
+  assert.equal(beside(water, false, "water"), true, "flowing water with nothing under it is let through in an escape");
+  assert.equal(policy.opensOnlyIntoFlowingWater!(at.x, at.y, at.z, new MemoryWorld()), false, "nothing opened: no exception needed");
+});

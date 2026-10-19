@@ -11,6 +11,11 @@ import type {
   MovementTick,
 } from "./movement-controller.js";
 
+/** The water rise under open sky: the body may lift this far above the cell's feet before anything is in the way. */
+export const OPEN_WATER_RISE = 0.6;
+/** The standing body's height; a ceiling over the target cell lets the feet float no higher than its underside minus this. */
+const BODY_HEIGHT = 1.8;
+
 /** Water has its own drag and lift; land braking cannot hold a swimming body. */
 export class WaterMovementController implements MovementController {
   cancel() {
@@ -66,7 +71,10 @@ export class WaterMovementController implements MovementController {
       ? position.y < this.#target.y + (this.step.kind === "step_up" ? 0 : this.waterRise)
       : this.execution.swimGrounded && position.y >= this.execution.swimDepth - 0.05
         ? false : holdSwimDepth(position.y, velocity.y, this.execution.swimDepth);
-    const released = { forward: false, back: false, left: false, right: false, sprint: false, sneak: false, jump };
+    // A solid ceiling over the target cell (a shore's lip, run 15 Finn): a body floating too high to fit under it
+    // pushes into the edge for ever. Shift sinks a swimmer, so the head is lowered below the lip while the heading holds.
+    const sneak = this.waterRise < OPEN_WATER_RISE && position.y + BODY_HEIGHT > this.#target.y + 2 + this.waterRise;
+    const released = { forward: false, back: false, left: false, right: false, sprint: false, sneak, jump };
     // A body resting on the landing has nowhere left to swim, and a swimmer
     // already within its own width of the point is holding a column, not
     // crossing water. Facing the residual from there turned the head every

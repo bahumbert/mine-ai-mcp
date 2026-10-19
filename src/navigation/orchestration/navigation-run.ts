@@ -53,9 +53,12 @@ import {
   type RoutePlan,
   stateMatcher,
 } from "../movements/movement.js";
-import type { MovementPolicy, ScaffoldSelection } from "../movements/policy.js";
+import { ESCAPE_RELAXED_RULES, RelaxedRulesUsed, relaxedForEscape } from "./escape-policy.js";
+import type { FailedEdges } from "./failed-edges.js";
+import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movements/policy.js";
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
 import { IncrementalSearch } from "../search/search.js";
+import { neverLeftStart } from "../search/start-refusals.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
@@ -192,6 +195,18 @@ const PIN_RELEASE_TICKS = 40;
 const PIN_RELEASE_LIMIT = 3;
 
 /** Preserve both failures when a resource throws while unwinding another error. */
+const FAILED_EDGE_STEP: PolicyDecision = { kind: "prohibited", reason: "this move failed twice at this place a short while ago" };
+const ALLOWED_MOVEMENT: PolicyDecision = { kind: "allowed" };
+
+/** The refusals at the start an escape can lift: the style rule against digging down, and a dig next to flowing water. */
+const ESCAPE_REFUSALS = ["policy_dig_down", "opens_into_liquid", "under_water"] as const;
+
+/** An exhausted search that never left its start, shut in by refusals an escape sets aside. */
+function isShutInByStyleRule(failure: Extract<NavigationCalculationFailure, { kind: "no_path" }>): boolean {
+  return neverLeftStart(failure.search) &&
+    ESCAPE_REFUSALS.some((cause) => (failure.search.startRefusals?.[cause] ?? 0) > 0);
+}
+
 function describeError(cause: unknown): string {
   if (cause instanceof SuppressedError) {
     return `${describeError(cause.suppressed)}; cleanup failed: ${describeError(cause.error)}`;
@@ -219,6 +234,8 @@ export interface RunContext extends RouteContext {
    * supplies the field or whether the caller opted out.
    */
   readonly stepField: StepFieldProvider | null;
+  /** What this bot's earlier runs failed on, priced as refused by every search here. */
+  readonly failedEdges?: FailedEdges;
 }
 
 export interface NavigationRunDependencies {
@@ -282,10 +299,14 @@ export class NavigationRun {
   #policy: MovementPolicy;
   /** Whether the bot's own protected regions were opened to this run after a search found no route. */
   #ownRegionsOpened = false;
+  /** The style rules set aside for this run only so that the bot can leave a pocket; the request's own policy is never changed. */
+  #relaxedRules: readonly string[] = [];
+  /** The relaxed rules the committed routes used in fact: the result names what the escape dug, not what it was allowed to. */
+  readonly #relaxedRulesUsed = new RelaxedRulesUsed();
   constructor(dependencies: NavigationRunDependencies) {
     this.context = dependencies.context;
     this.request = dependencies.request;
-    this.#policy = Object.freeze({ ...dependencies.request.policy });
+    this.#policy = this.#snapshotPolicy(dependencies.request.policy);
     this.status = dependencies.status;
     this.release = dependencies.release;
     this.#events = forRun(this.context.telemetry, this.context.runId);
@@ -508,11 +529,13 @@ export class NavigationRun {
    */
   async #navigate(): Promise<NavigationOutcome> {
     let searchReason: SearchReason = "initial";
+    if (this.request.escape) this.#relaxStyleRules();
     for (;;) {
       if (this.context.signal.aborted) return this.#stopped();
       // Observe: one fresh look at the world, and the goal frozen against it.
       const observation = this.context.bot.observe();
-      this.#policy = Object.freeze({ ...this.request.policy });
+      this.context.failedEdges?.noteBotAt(blockPosition(observation.position));
+      this.#policy = this.#snapshotPolicy(this.request.policy);
       const resolved = this.#resolveGoal(observation);
       if (resolved.kind === "invalid") return this.#failed(resolved.failure);
       const { goal, node } = resolved;
@@ -618,7 +641,7 @@ export class NavigationRun {
     const field = this.context.stepField?.() ?? null;
     const identity =
       `${goal.revision}|${blockKey(node.feet)}|${observation.worldRevision}|${observation.resourceRevision}` +
-      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|field:${field?.fingerprint ?? "none"}`;
+      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|escape:${this.#relaxedRules.length}|field:${field?.fingerprint ?? "none"}`;
     if (this.#searchIdentities.has(identity))
       return {
         kind: "outcome",
@@ -826,6 +849,7 @@ export class NavigationRun {
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
     this.#planningStall.committed();
     this.#counters.plans += 1;
+    if (this.#relaxedRules.length > 0) this.#relaxedRulesUsed.note(plan.steps, this.request.policy, this.context.world);
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
@@ -877,7 +901,9 @@ export class NavigationRun {
         });
         const held = await this.#releaseOverheadPin(plan);
         if (held) return held;
-        return this.#movementFailureRepeated(goal, result.step)
+        const repeated = this.#movementFailureRepeated(goal, result.step);
+        if (repeated) this.context.failedEdges?.record(result.step.kind, result.step.from, result.step.to, blockPosition(this.context.bot.observe().position));
+        return repeated
           ? {
               kind: "outcome",
               outcome: this.#failed({
@@ -919,6 +945,7 @@ export class NavigationRun {
   #onStepCompleted(goal: ActiveGoal, plan: RoutePlan, step: PlannedStep, arrival: BlockPosition): StepDecision {
     this.#events.emit({ kind: "step_completed", stepId: step.id, movement: step.kind });
     this.#visitedFeet.add(blockKey(arrival));
+    this.context.failedEdges?.succeeded(step.kind, step.from, step.to);
     const revised = this.#resolveGoal(this.context.bot.observe(), arrival);
     if (revised.kind === "invalid") return "goal_revised";
     if (revised.goal.isSatisfied(revised.node, this.context.world)) return "goal_satisfied";
@@ -1059,6 +1086,10 @@ export class NavigationRun {
       this.#events.emit({ kind: "own_regions_opened", start: { x: feet.x, y: feet.y, z: feet.z } });
       return { kind: "retry", reason: "calculation_failure" };
     }
+    if (failure.kind === "no_path" && this.#relaxedRules.length === 0 && isShutInByStyleRule(failure)) {
+      this.#relaxStyleRules();
+      return { kind: "retry", reason: "calculation_failure" };
+    }
     if (!this.request.onCalculationFailure) {
       return { kind: "outcome", outcome: this.#failed(failure) };
     }
@@ -1072,6 +1103,20 @@ export class NavigationRun {
     return result.kind === "continue"
       ? { kind: "retry", reason: "calculation_failure" }
       : { kind: "outcome", outcome: { kind: "completed", evidence: this.#evidence() } };
+  }
+  /** The request's policy as one search reads it, with the escape's relaxations applied on top. */
+  #snapshotPolicy(policy: MovementPolicy): MovementPolicy {
+    const failedEdges = this.context.failedEdges;
+    const base = this.#relaxedRules.length > 0 ? relaxedForEscape(policy) : policy;
+    return Object.freeze({
+      ...base,
+      ...(failedEdges && { decideMovement: (kind, from, to) => failedEdges.isFailed(kind, from, to) ? FAILED_EDGE_STEP : (policy.decideMovement?.(kind, from, to) ?? ALLOWED_MOVEMENT) }),
+    });
+  }
+  /** Set the escape's rules aside for the rest of this run, saying so. */
+  #relaxStyleRules(): void {
+    this.#relaxedRules = ESCAPE_RELAXED_RULES;
+    this.#events.emit({ kind: "escape_relaxed", relaxed: this.#relaxedRules });
   }
   #stopped(): NavigationOutcome {
     return { kind: "stopped", reason: describeAbort(this.context.signal.reason), evidence: this.#evidence() };
@@ -1087,6 +1132,7 @@ export class NavigationRun {
       start: this.#start,
       final: this.context.bot.observe(),
       goalRevision: this.#goalRevision,
+      escapeRelaxed: this.#relaxedRulesUsed.rules,
       ...this.#counters,
       movementAttempts: { ...this.#counters.movementAttempts },
       // Provisional: `execute` measures this again once cleanup has run.

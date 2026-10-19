@@ -411,6 +411,7 @@ export function createExploreFrontierAction(
     resultSchema: exploreFrontierResultSchema,
     queries: EXPLORE_FRONTIER_QUERIES,
     formatResult: formatExploreFrontierResult,
+    movement: "travel",
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: EXPLORE_FRONTIER,

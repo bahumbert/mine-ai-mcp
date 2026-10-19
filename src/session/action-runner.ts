@@ -5,6 +5,8 @@ import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.j
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
 import type { ToolSnapshot } from "../world/tool-tiers.js";
 import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
+import type { RouteOutcomes } from "../navigation/index.js";
+import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -33,7 +35,7 @@ import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
  * like any other, nested separately from action-owned physical evidence.
  */
 import { runWithHighlighter, type BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
-import type { RequestExecution, ActionExecution } from "../actions/action.js";
+import type { RequestExecution, ActionExecution, MovementUse } from "../actions/action.js";
 import {
   type Action,
   type ActionOutput,
@@ -64,6 +66,12 @@ export interface ActionRunnerOptions {
   readonly onPhysicsStall?: (action: string) => void;
   /** The stall watch's clock (default monotonic); tests step it by hand. */
   readonly clock?: StallClock;
+  /** Counts the failures of movement actions against a bot that does not move; unset: no watch. */
+  readonly pinned?: PinnedWatch;
+  /** What a pinned bot's next movement action starts with; without it a pinned bot is only watched. */
+  readonly pinnedEscape?: PinnedEscape;
+  /** How this bot's routes ended: a movement action's failure counts toward `pinned` only when its route failed; unset: none does. */
+  readonly routes?: RouteOutcomes;
 }
 
 // ── Reported outcomes ────────────────────────────────────────────────────────
@@ -143,6 +151,10 @@ interface AdmittedRequest {
   state: RequestState;
   evidence: (() => RequestEvidence) | null;
   readonly progress: RequestProgress;
+  /** The bot was pinned when this movement action was admitted: it runs as an escape. */
+  escaping: boolean;
+  /** `RouteOutcomes.mark()` when the action was admitted: its routes are the ones settled after it. */
+  routeMark: number;
 }
 
 export interface BodyOwnership {
@@ -211,6 +223,9 @@ export class ActionRunner {
   readonly #physicsExpected: () => boolean;
   readonly #onPhysicsStall: (action: string) => void;
   readonly #clock: StallClock;
+  readonly #pinned: PinnedWatch | undefined;
+  readonly #pinnedEscape: PinnedEscape | undefined;
+  readonly #routes: RouteOutcomes | undefined;
   #lastPhysicsTickAt: number;
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
@@ -229,6 +244,9 @@ export class ActionRunner {
     this.#physicsExpected = options.physicsExpected ?? (() => true);
     this.#onPhysicsStall = options.onPhysicsStall ?? (() => {});
     this.#clock = options.clock ?? MONOTONIC_CLOCK;
+    this.#pinned = options.pinned;
+    this.#pinnedEscape = options.pinnedEscape;
+    this.#routes = options.routes;
     this.#lastPhysicsTickAt = this.#clock.now();
   }
 
@@ -318,9 +336,12 @@ export class ActionRunner {
       state: { kind: "admitted" },
       evidence: null,
       progress: new RequestProgress(this.#position(), this.#tools),
+      escaping: false,
+      routeMark: 0,
     };
     try {
       const output = await this.#whileConnected(() => this.#run(definition, input, invocation, signal));
+      this.#countMovement(definition, invocation, output.result);
       return invocation.state.kind === "admitted"
         ? output
         : this.#finishedOutput(output, invocation);
@@ -330,6 +351,7 @@ export class ActionRunner {
         status: "failed",
         error: message(cause),
       });
+      this.#countMovement(definition, invocation, output.result);
       return invocation.state.kind === "admitted"
         ? output
         : this.#finishedOutput(output, invocation);
@@ -388,6 +410,10 @@ export class ActionRunner {
     if (this.#admittedRequest) return refusal(definition.name, outcomes.actionBusy({
       action: this.#admittedRequest.action, startedAt: new Date(this.#admittedRequest.admittedAt).toISOString(),
     }));
+    const pinnedRefusal = definition.movement === "travel" ? this.#pinned?.refusal() : null;
+    if (pinnedRefusal) return refusal(definition.name, pinnedRefusal);
+    invocation.escaping = definition.movement !== undefined && this.#pinned?.isPinned() === true;
+    invocation.routeMark = this.#routes?.mark() ?? 0;
     this.#releaseBaseline();
     invocation.objective = request;
     invocation.evidence = () => ({ baseline: null, checkpoint: { phase: "executing" },
@@ -415,7 +441,7 @@ export class ActionRunner {
       try {
         result = await this.#watchPhysics(definition.name, actionSignal, running.controller, this.#execute(
           definition.execution,
-          (context) => {
+          (context) => this.#asEscapeWhenPinned(invocation, context.signal ?? this.#connection.signal, () => {
             if (execute === null) {
               if (definition.begin)
                 execute = definition.begin(request, invocation.lifetime.signal, observeProgress);
@@ -425,7 +451,7 @@ export class ActionRunner {
               }
             }
             return execute({ ...context, observeProgress });
-          },
+          }),
           actionSignal,
         ));
       } finally {
@@ -460,6 +486,31 @@ export class ActionRunner {
       invocation.state = { kind: "running" };
       invocation.progress.transition("running");
       this.#ownershipChanged();
+    }
+  }
+
+  /** A pinned bot's movement action starts by leaving the water or boat, then routes as an escape until it settles. */
+  async #asEscapeWhenPinned<Value>(invocation: AdmittedRequest, signal: AbortSignal, run: () => Promise<Value>): Promise<Value> {
+    const escape = this.#pinnedEscape;
+    if (!invocation.escaping || escape === undefined) return run();
+    await escape.leave(signal);
+    using _escaping = escape.routesAsEscape();
+    // `await`: a `using` hold is released when the function returns, and `return run()` returns the still-pending promise.
+    return await run();
+  }
+
+  /**
+   * What a movement action did to the pinned watch: a success resets it, a failure counts when the route or the movement
+   * itself failed (not "none usable near", a lost tool, a full inventory), and a failed escape shuts travel actions out.
+   */
+  #countMovement(definition: { readonly movement?: MovementUse }, invocation: AdmittedRequest, result: ActionResult | RuntimeFailure): void {
+    const watch = this.#pinned;
+    // Still "admitted": the request was refused before it ran (busy, bad arguments, [PINNED]), so it says nothing of the bot.
+    if (!definition.movement || !watch || invocation.state.kind === "admitted") return;
+    if (result.status === "succeeded") watch.recordSuccess();
+    else if (result.status === "failed" && this.#routes?.failedSince(invocation.routeMark)) {
+      watch.recordFailure("error" in result ? result.error : "failed");
+      if (invocation.escaping) watch.escapeFailed();
     }
   }
 

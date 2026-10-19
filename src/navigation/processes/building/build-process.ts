@@ -205,9 +205,22 @@ export interface BuildResult {
   readonly scaffold: { readonly placed: number; readonly removed: number; readonly left: readonly BlockPosition[] };
 }
 
-interface PlacedScaffold {
+export interface PlacedScaffold {
   readonly position: BlockPosition;
   readonly stateId: number;
+}
+
+/**
+ * What one build request keeps when a reflex cuts it into attempts (spec 2026-10-18-reflex-continuity, R2): the tally,
+ * the cells given up on, and every scaffold block its routes placed, so the attempt that finishes the structure takes
+ * down the scaffold of all of them. The caller makes one per request and hands it to each `build`.
+ */
+export class BuildProgress {
+  placed = 0;
+  dug = 0;
+  passes = 0;
+  readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
+  readonly scaffold = new Map<number, PlacedScaffold>();
 }
 
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
@@ -284,31 +297,29 @@ function carriedCounts(bot: Bot): Map<string, number> {
  */
 class BuildTargeting {
   readonly #states = new Map<number, BuildCellState>();
-  readonly #refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
   /** The correct cells as packed keys, handed to the movement policy and kept current. */
   readonly protectedCells = new Set<number>();
   readonly #bounds: { readonly min: Vec3; readonly max: Vec3 };
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
-  placed = 0;
-  dug = 0;
-  passes = 0;
 
   constructor(
     private readonly bot: Bot,
     private readonly request: BuildRequest,
     /** Taking scaffold down: the highest cell first, as a pillar is taken down from its top. */
     private readonly highestFirst = false,
+    /** What the request has done and given up on so far, across the attempts a reflex cut it into. */
+    readonly progress: BuildProgress = new BuildProgress(),
   ) {
     this.#bounds = boundsOf(request.cells);
   }
 
   /** Work done or given up on, whose standing still across passes means the run is idle. */
-  get progress(): number {
-    return this.placed + this.dug + this.#refused.size;
+  get workDone(): number {
+    return this.progress.placed + this.progress.dug + this.progress.refused.size;
   }
 
   refuse(cell: BuildCell, reason: string, cause: RefusalCause): void {
-    this.#refused.set(keyOf(cell.position), { reason, cause });
+    this.progress.refused.set(keyOf(cell.position), { reason, cause });
     this.#refreshedAtMs = Number.NEGATIVE_INFINITY;
   }
 
@@ -360,7 +371,7 @@ class BuildTargeting {
     const block = this.bot.blockAt(position);
     if (block === null) return { kind: "unloaded" };
     if (holdsCell(block, cell) || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
-    const refused = this.#refused.get(keyOf(cell.position));
+    const refused = this.progress.refused.get(keyOf(cell.position));
     if (refused !== undefined) return { kind: "refused", ...refused };
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
@@ -481,9 +492,9 @@ class BuildTargeting {
     return {
       status,
       reason,
-      placed: this.placed,
-      dug: this.dug,
-      passes: this.passes,
+      placed: this.progress.placed,
+      dug: this.progress.dug,
+      passes: this.progress.passes,
       cells: this.request.cells.map((cell) => ({ cell, state: this.stateOf(cell) })),
       scaffold: { placed: 0, removed: 0, left: [] },
     };
@@ -514,25 +525,9 @@ async function workInReach(
       .find((cell) => withinReach(bot, cell.position) && targeting.canWorkFrom(cell, bot.entity.position));
     if (!target) return worked;
     const state = targeting.stateOf(target);
-    if (state.kind === "diggable") {
-      const dug = await request.breakInPlace({ movements, position: target.position, signal });
-      if (dug.status === "broken") targeting.dug += 1;
-      else targeting.refuse(target, `${state.holds} there could not be cleared: ${dug.reason}`, dug.cause ?? "placement");
-    } else if (state.kind === "placeable") {
-      const item = bot.inventory.items().find((candidate) => candidate.name === target.blockName)!;
-      const placed = await request.place({
-        item,
-        support: state.support,
-        face: state.face,
-        expectedCells: [target.position],
-        matches: (block) => holdsCell(block, target),
-        ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
-        ...(target.half !== undefined && { half: target.half }),
-        signal,
-      });
-      if (placed.kind === "placed") targeting.placed += 1;
-      else targeting.refuse(target, placed.error, placed.cause ?? "placement");
-    } else {
+    if (state.kind === "diggable") await digCell(bot, request, targeting, movements, target, state.holds, signal);
+    else if (state.kind === "placeable") await placeCell(bot, request, targeting, target, state, signal);
+    else {
       // A cell within reach that still reads as unloaded is nothing to work on.
       return worked;
     }
@@ -541,12 +536,71 @@ async function workInReach(
   }
 }
 
-export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown = false): Promise<BuildResult> {
-  const targeting = new BuildTargeting(bot, request, takingScaffoldDown);
+/**
+ * Break what blocks a cell. A reflex that aborts the attempt after the block came out still gets the dig counted
+ * (spec 2026-10-18 R2: progress is kept before an abort can throw), or the resumed attempt would report less than it did.
+ */
+async function digCell(
+  bot: Bot,
+  request: BuildRequest,
+  targeting: BuildTargeting,
+  movements: MovementPolicy,
+  target: BuildCell,
+  holds: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const heldBefore = bot.blockAt(asVec3(target.position))?.name;
+  try {
+    const dug = await request.breakInPlace({ movements, position: target.position, signal });
+    if (dug.status === "broken") targeting.progress.dug += 1;
+    else targeting.refuse(target, `${holds} there could not be cleared: ${dug.reason}`, dug.cause ?? "placement");
+  } catch (error) {
+    if (bot.blockAt(asVec3(target.position))?.name !== heldBefore) targeting.progress.dug += 1;
+    throw error;
+  }
+}
+
+/** Put the cell's block down; an abort after the block landed still counts the placement (same rule as `digCell`). */
+async function placeCell(
+  bot: Bot,
+  request: BuildRequest,
+  targeting: BuildTargeting,
+  target: BuildCell,
+  state: Extract<BuildCellState, { kind: "placeable" }>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const item = bot.inventory.items().find((candidate) => candidate.name === target.blockName)!;
+  try {
+    const placed = await request.place({
+      item,
+      support: state.support,
+      face: state.face,
+      expectedCells: [target.position],
+      matches: (block) => holdsCell(block, target),
+      ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
+      ...(target.half !== undefined && { half: target.half }),
+      signal,
+    });
+    if (placed.kind === "placed") targeting.progress.placed += 1;
+    else targeting.refuse(target, placed.error, placed.cause ?? "placement");
+  } catch (error) {
+    const block = bot.blockAt(asVec3(target.position));
+    if (block !== null && holdsCell(block, target)) targeting.progress.placed += 1;
+    throw error;
+  }
+}
+
+export async function build(
+  bot: Bot,
+  request: BuildRequest,
+  takingScaffoldDown = false,
+  progress: BuildProgress = new BuildProgress(),
+): Promise<BuildResult> {
+  const targeting = new BuildTargeting(bot, request, takingScaffoldDown, progress);
   const movements = request.movements(targeting.protectedCells);
-  // Every block the routes of this run placed (live 2026-10-11, Theo: a ring of dirt at head height round his new house
-  // shut him in): taken down once the structure is complete.
-  const scaffold = new Map<number, PlacedScaffold>();
+  // Every block the routes of this request placed (live 2026-10-11, Theo: a ring of dirt at head height round his new
+  // house shut him in): taken down once the structure is complete, those of earlier attempts included.
+  const scaffold = progress.scaffold;
   const onPlacement = takingScaffoldDown ? undefined : (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
   let idlePasses = 0;
 
@@ -556,10 +610,10 @@ export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown 
     await nextTurn();
     request.signal?.throwIfAborted();
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
-    targeting.passes += 1;
+    targeting.progress.passes += 1;
     targeting.refresh();
     if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), scaffold);
-    const progressBefore = targeting.progress;
+    const workBefore = targeting.workDone;
 
     // Standing in a cell the structure needs means every placement around it
     // would either be refused or wall the bot into a pit, so step out first;
@@ -596,7 +650,7 @@ export async function build(bot: Bot, request: BuildRequest, takingScaffoldDown 
       }
     }
 
-    idlePasses = targeting.progress === progressBefore ? idlePasses + 1 : 0;
+    idlePasses = targeting.workDone === workBefore ? idlePasses + 1 : 0;
     if (idlePasses >= IDLE_PASSES) {
       return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`);
     }
@@ -638,10 +692,11 @@ async function runRoute(
 const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(asVec3(placed.position))?.stateId === placed.stateId;
 
 /**
- * Takes the scaffold down after a complete build: every block the routes placed that is no cell of the structure and
- * still stands, highest first, through the build's own loop with those cells as air (the structure's cells stay as
- * they are, so they stay protected). One pass: scaffold this pass places itself, or cannot reach, stays and is
- * reported. A failure here never fails the build.
+ * Takes the scaffold down after a complete build: every block the routes placed (in any attempt) that is no cell of
+ * the structure and still stands, highest first, through the build's own loop with those cells as air (the
+ * structure's cells stay as they are, so they stay protected). One pass: scaffold this pass places itself, or cannot
+ * reach, stays and is reported; scaffold already gone (taken down by an earlier attempt, a reflex or another bot) is
+ * skipped and counts as removed. A failure here never fails the build, except an abort, which a resume runs again.
  */
 async function takeScaffoldDown(
   bot: Bot,
@@ -651,10 +706,8 @@ async function takeScaffoldDown(
 ): Promise<BuildResult> {
   if (scaffold.size === 0) return built;
   const structure = new Set(request.cells.map((cell) => keyOf(cell.position)));
-  const standing = [...scaffold.entries()]
-    .filter(([key, placed]) => !structure.has(key) && standsStill(bot, placed))
-    .map(([, placed]) => placed)
-    .sort((a, b) => b.position.y - a.position.y);
+  const temporary = [...scaffold.entries()].filter(([key]) => !structure.has(key)).map(([, placed]) => placed);
+  const standing = temporary.filter((placed) => standsStill(bot, placed)).sort((a, b) => b.position.y - a.position.y);
   if (standing.length > 0) {
     try {
       await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...standing.map(({ position }) => ({ position, blockName: "air" }))] }, true);
@@ -664,5 +717,5 @@ async function takeScaffoldDown(
     }
   }
   const left = standing.filter((placed) => standsStill(bot, placed)).map(({ position }) => position);
-  return { ...built, scaffold: { placed: scaffold.size, removed: standing.length - left.length, left } };
+  return { ...built, scaffold: { placed: scaffold.size, removed: temporary.length - left.length, left } };
 }

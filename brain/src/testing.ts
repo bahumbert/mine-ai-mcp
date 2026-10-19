@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
@@ -301,6 +301,13 @@ export class FakeRuntime implements BotRuntime {
 
   /** Notes saved with `note_save`, oldest first; a test may seed them to stand for an earlier run. */
   notes: { readonly note: string; readonly context: string }[] = [];
+  /** The containers its character opened before (`observed_containers`), as `knownContainers` answers them for any owner and place. */
+  containers: KnownContainer[] = [];
+
+  async knownContainers(): Promise<readonly KnownContainer[]> {
+    return this.containers;
+  }
+
   /** Every SQL statement asked of `queryBotData`. */
   readonly queries: string[] = [];
 

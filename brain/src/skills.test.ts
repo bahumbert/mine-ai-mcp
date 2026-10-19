@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeStep, stepSchema } from "./actions.ts";
+import { describeStep, skillUsage, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import { RARE_DROP_BREAKS } from "./gathering.ts";
+import { DEFAULT_STYLE, STYLES } from "./building/styles.ts";
 import { neededItems } from "./inventory-room.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -1219,7 +1220,7 @@ test("explore walks one compass way from where she stands, in legs, and says whe
   // Only blocks are seen on the way (live 2026-10-07: Ayla explored for "water_source").
   runtime.notBlocks = new Set(["water_source"]);
   const notBlock = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "water_source" }), contextFor(runtime));
-  assert.deepEqual(notBlock, { status: "failed", detail: "water_source is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, explore without \"for\": the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)" });
+  assert.deepEqual(notBlock, { status: "failed", detail: "water_source is not a block: explore looks for a block by its Minecraft name; get_items gets an item. To find animals or monsters, leave \"for\" out to just explore: the new land you reach shows what lives there, and get_items gets what they drop (white_wool from sheep, porkchop from pigs)" });
   assert.equal(runtime.submitted.length, before);
 
   // What is made is not found (live 2026-10-07: Ayla explored for a crafting_table).
@@ -1736,12 +1737,19 @@ test("drop_item keeps the last tool of a class, the last bed and the last boat (
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_pickaxe", count: 2 }] }), contextFor(several));
   assert.deepEqual(several.submitted.map((call) => call.input.items), [[{ item_name: "stone_pickaxe", count: 2 }]], "two of three is fine");
 
-  // Dropping every pickaxe keeps the best one, not the one named first.
+  // Dropping every pickaxe keeps the best one, not the one named first: the best is the one the runtime reports the larger durability maximum for.
   const tiers = new FakeRuntime();
-  tiers.snapshot = { ...tiers.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1 }, { name: "iron_pickaxe", count: 1 }] };
+  tiers.snapshot = { ...tiers.snapshot, inventory: [{ name: "wooden_pickaxe", count: 1, durability: { remaining: 59, maximum: 59 } }, { name: "iron_pickaxe", count: 1, durability: { remaining: 250, maximum: 250 } }] };
   tiers.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "wooden_pickaxe", dropped: 1 }] });
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "wooden_pickaxe" }, { item: "iron_pickaxe" }] }), contextFor(tiers));
   assert.deepEqual(tiers.submitted.map((call) => call.input.items), [[{ item_name: "wooden_pickaxe" }]]);
+
+  // A golden pickaxe wears out sooner than a stone one: dropping both keeps the stone one (review 2026-10-18 #9).
+  const golden = new FakeRuntime();
+  golden.snapshot = { ...golden.snapshot, inventory: [{ name: "golden_pickaxe", count: 1, durability: { remaining: 32, maximum: 32 } }, { name: "stone_pickaxe", count: 1, durability: { remaining: 100, maximum: 131 } }] };
+  golden.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "golden_pickaxe", dropped: 1 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "golden_pickaxe" }, { item: "stone_pickaxe" }] }), contextFor(golden));
+  assert.deepEqual(golden.submitted.map((call) => call.input.items), [[{ item_name: "golden_pickaxe" }]]);
 
   const only = new FakeRuntime();
   only.snapshot = { ...only.snapshot, inventory: [{ name: "stone_axe", count: 1 }] };
@@ -1763,17 +1771,17 @@ test("a failed drop still says which tools it kept (live 2026-10-10 run 9: the k
   assert.match(detail, /kept 1 wooden_hoe: your only hoe/u);
 });
 
-test("a drop of her own work keeps what the work needs (every tool, the house planks); an order drops anything", async () => {
+test("a drop of her own work keeps what the work needs (the best tool of each class, the house planks; a lesser axe is spare, run 15 N5); an order drops anything", async () => {
   const inventory = [{ name: "stone_pickaxe", count: 1 }, { name: "stone_axe", count: 1 }, { name: "wooden_axe", count: 1 }, { name: "oak_planks", count: 16 }, { name: "snowball", count: 40 }];
   const step = stepSchema.parse({ skill: "drop_item", items: [{ item: "stone_axe" }, { item: "wooden_axe" }, { item: "oak_planks" }, { item: "snowball" }] });
   const own = new FakeRuntime();
   own.snapshot = { ...own.snapshot, inventory };
   own.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "snowball", dropped: 40 }] });
   const result = await runStep(step, { ...contextFor(own), needed: (snapshot) => neededItems(snapshot, { houseBill: ["oak_planks"] }) });
-  assert.deepEqual(own.submitted.map((call) => call.input.items), [[{ item_name: "snowball" }]]);
+  assert.deepEqual(own.submitted.map((call) => call.input.items), [[{ item_name: "wooden_axe" }, { item_name: "snowball" }]]);
   const detail = result.status === "done" ? result.detail : "";
   assert.match(detail, /kept all 16 oak_planks: your current work needs them/u);
-  assert.match(detail, /kept all 1 wooden_axe: your current work needs them/u);
+  assert.match(detail, /kept 1 stone_axe: your only axe/u);
 
   const ordered = new FakeRuntime();
   ordered.snapshot = { ...ordered.snapshot, inventory };
@@ -2186,4 +2194,146 @@ test("a crop that is its own seed: get_items names where a first one comes from,
   assert.match(detail, /zombie/u);
   assert.doesNotMatch(detail, /farm it/u);
   assert.deepEqual(runtime.submitted, []);
+});
+
+test("get_items hunts the runtime's first non-hostile source: porkchop with a pig loaded hunts the pig, not the hoglin", async () => {
+  // Run 15: the registry type put hoglin (hostile by the hunt's own category) before pig.
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.mobDrops = { porkchop: [
+    { mob: "pig", chance: 1, hostile: false, spawnsInDimension: true, loaded: 1 },
+    { mob: "hoglin", chance: 1, hostile: true, spawnsInDimension: false, loaded: 0 },
+  ] };
+  const result = await runStep({ skill: "get_items", items: [{ item: "porkchop", count: 2 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.mob_name), ["pig"]);
+});
+
+test("get_items tries the next mob source once after a hunt that finds none loaded, then names both", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.mobDrops = { leather: [
+    { mob: "cow", chance: 1, hostile: false, spawnsInDimension: true, loaded: 0 },
+    { mob: "horse", chance: 1, hostile: false, spawnsInDimension: true, loaded: 0 },
+  ] };
+  runtime.failNext.collect_mob_drop = { error: "[HUNT_TARGET_NOT_LOADED] no cow loaded" };
+  const second = await runStep({ skill: "get_items", items: [{ item: "leather", count: 1 }] }, contextFor(runtime));
+  assert.equal(second.status, "done", JSON.stringify(second));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.mob_name), ["cow", "horse"]);
+
+  const again = new FakeRuntime();
+  again.simulateInventory = true;
+  again.mobDrops = runtime.mobDrops;
+  again.failures.collect_mob_drop = "[HUNT_TARGET_NOT_LOADED] none loaded";
+  const failed = await runStep({ skill: "get_items", items: [{ item: "leather", count: 1 }] }, contextFor(again));
+  assert.equal(failed.status, "failed");
+  assert.match(failed.status === "failed" ? failed.detail : "", /cow.*horse/su, "names both sources tried");
+  assert.deepEqual(again.submitted.map((call) => call.input.mob_name), ["cow", "horse"], "each source once per step");
+});
+
+test("the explore template marks for as optional, and the refusal of a word like none says to leave it out", async () => {
+  // Run 15: 86 explore steps with "for": "none", 6 with "unknown".
+  assert.match(skillUsage("explore", STYLES.get(DEFAULT_STYLE)!), /"for":"<block or creature id, optional: leave it out to just explore>"/u);
+  const runtime = new FakeRuntime();
+  runtime.notBlocks = new Set(["none"]);
+  const refused = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "none" }), contextFor(runtime));
+  assert.equal(refused.status, "failed");
+  assert.match("detail" in refused ? refused.detail : "", /leave "for" out to just explore/u);
+});
+
+/** A pickaxe breaking after `stone` blocks; `then` is what the next collect does (another loss, or nothing: it succeeds). */
+function pickaxeLost(runtime: FakeRuntime, stone: number, then?: () => void) {
+  return {
+    error: `[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains. Broke ${stone} matching blocks.`,
+    result: { collected: { requested: 16, gained: stone, gainedByItem: { cobblestone: stone }, blocksBroken: stone, brokenAt: [], toolLost: { item: "wooden_pickaxe", class: "pickaxe" } } },
+    effect: () => {
+      runtime.addItem("cobblestone", stone);
+      runtime.addItem("wooden_pickaxe", -1);
+      then?.();
+    },
+  };
+}
+
+test("a pickaxe lost twice in one get_items is remade twice and the collect goes on; the third loss stops with the reason", async () => {
+  const twice = new FakeRuntime();
+  twice.recipes = HOUSE_RECIPES;
+  twice.simulateInventory = true;
+  twice.snapshot = { ...twice.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
+  twice.failNext.collect_block = pickaxeLost(twice, 5, () => { twice.failNext.collect_block = pickaxeLost(twice, 5); });
+  const done = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(twice));
+  assert.equal(done.status, "done", JSON.stringify(done));
+  assert.deepEqual(twice.submitted.map(describeCall), ["collect stone", "craft wooden_pickaxe at table", "collect stone", "craft wooden_pickaxe at table", "collect stone"]);
+
+  const thrice = new FakeRuntime();
+  thrice.recipes = HOUSE_RECIPES;
+  thrice.simulateInventory = true;
+  thrice.snapshot = { ...thrice.snapshot, inventory: [{ name: "oak_log", count: 20 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
+  thrice.failNext.collect_block = pickaxeLost(thrice, 2, () => {
+    thrice.failNext.collect_block = pickaxeLost(thrice, 2, () => { thrice.failNext.collect_block = pickaxeLost(thrice, 2); });
+  });
+  const stopped = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(thrice));
+  assert.equal(stopped.status, "failed");
+  assert.match(stopped.status === "failed" ? stopped.detail : "", /pickaxe was lost 3 times in this step \(remade 2 times\)/u);
+  assert.equal(thrice.submitted.filter((call) => call.tool === "craft_item").length, 2, "remade twice, not after the third loss");
+});
+
+test("a tool that broke in one fetch is remembered by the next fetch of the same objective", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = SHOVEL_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
+  const toolsLost = new Set<string>();
+  // It broke on the last dirt (nothing left to dig, so not remade in that call)...
+  runtime.failNext.collect_block = shovelLost(runtime, 16);
+  const first = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime, { toolsLost }));
+  assert.equal(first.status, "done", JSON.stringify(first));
+  runtime.submitted.length = 0;
+  // ...and the next call of the objective makes it before it digs again.
+  const second = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 32 }] }, contextFor(runtime, { toolsLost }));
+  assert.equal(second.status, "done", JSON.stringify(second));
+  assert.deepEqual(runtime.submitted.map(describeCall).slice(0, 2), ["craft wooden_shovel at table", "collect dirt"]);
+});
+
+test("a drop of 4 of 5 wooden swords drops 4 though the work needs a sword; the last one stays (run 15 N5)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_sword", count: 5 }, { name: "dirt", count: 3 }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "wooden_sword", dropped: 4 }] });
+  const needed = (snapshot: Parameters<typeof neededItems>[0]) => neededItems(snapshot);
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "wooden_sword", count: 4 }] }), { ...contextFor(runtime), needed });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "wooden_sword", count: 4 }]]);
+});
+
+/** A chest the runtime remembers as the bot's own (`observed_containers`), 6 blocks from the spawn point. */
+const OWN_CHEST = { x: 6, y: 64, z: 0, blockName: "chest", slotCount: 27, usedSlots: 3 };
+
+test("a drop with an own chest remembered within 32 blocks deposits there; with none (or a full one) it buries as before (run 15 N5)", async () => {
+  const stocked = new FakeRuntime();
+  stocked.snapshot = { ...stocked.snapshot, inventory: [{ name: "cobblestone", count: 64 }, { name: "dirt", count: 30 }] };
+  stocked.containers = [OWN_CHEST];
+  const stored = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(stocked), self: "Ayla" });
+  assert.equal(stored.status, "done", JSON.stringify(stored));
+  assert.match(stored.status === "done" ? stored.detail : "", /stored 64 cobblestone in your chest at 6 64 0/u);
+  assert.deepEqual(stocked.submitted.map((call) => [call.tool, call.input.operation, call.input.x, call.input.y, call.input.z, JSON.stringify(call.input.items)]), [["use_container", "deposit", 6, 64, 0, JSON.stringify([{ item_name: "cobblestone", count: 64 }])]]);
+
+  const none = new FakeRuntime();
+  none.snapshot = { ...none.snapshot, inventory: [{ name: "cobblestone", count: 64 }] };
+  none.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 64 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(none), self: "Ayla" });
+  assert.deepEqual(none.submitted.map((call) => call.tool), ["drop_item"], "no chest known: buried");
+
+  const full = new FakeRuntime();
+  full.snapshot = { ...full.snapshot, inventory: [{ name: "cobblestone", count: 64 }] };
+  full.containers = [{ ...OWN_CHEST, usedSlots: 27 }];
+  full.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 64 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(full), self: "Ayla" });
+  assert.deepEqual(full.submitted.map((call) => call.tool), ["drop_item"], "a full chest is no room: buried");
+
+  const failing = new FakeRuntime();
+  failing.snapshot = { ...failing.snapshot, inventory: [{ name: "cobblestone", count: 64 }] };
+  failing.containers = [OWN_CHEST];
+  failing.failures.use_container = "[CONTAINER_UNREACHABLE] Pathfinder could not reach the container";
+  failing.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 64 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(failing), self: "Ayla" });
+  assert.deepEqual(failing.submitted.map((call) => call.tool), ["use_container", "drop_item"], "a chest that cannot be reached: buried after");
 });

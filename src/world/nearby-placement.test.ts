@@ -3,7 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { botFixture } from "../test-support/bot.js";
 import { cellKey } from "../utils/index.js";
-import { findStandingSpot } from "./nearby-placement.js";
+import { findStandingSpot, placeCarriedBlockNearby } from "./nearby-placement.js";
 import { setProtectedRegionsProvider } from "./protected-regions.js";
 
 /** Every cell of the box becomes `name`; later calls overwrite earlier ones. */
@@ -78,4 +78,26 @@ test("a spot is skipped when no cell can be filled from it", () => {
   fill(cells, "stone", [5, 62, -14], [14, 70, 14]);
   fill(cells, "air", [8, 62, 0], [8, 63, 0]);
   assert.equal(findStandingSpot(botIn(cells)), null);
+});
+
+test("the chosen cell is reported before the block is placed, so an aborted placement still names it", async () => {
+  const cells: Record<string, string> = {};
+  fill(cells, "stone", [-6, 50, -6], [6, 61, 6]);
+  const bot = botFixture({
+    blocks: cells,
+    position: { x: 0.5, y: 62, z: 0.5 },
+    items: [{ name: "crafting_table", count: 1 }],
+  });
+  const controller = new AbortController();
+  controller.abort(new Error("reflex took the body"));
+  let chosen: Vec3 | null = null;
+
+  await assert.rejects(
+    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onCellChosen: (cell) => (chosen = cell) }),
+    /reflex took the body/,
+  );
+
+  assert.ok(chosen, "the cell was reported before placeBlock saw the abort");
+  assert.equal((chosen as Vec3).y, 62, "an air cell on the stone floor");
+  assert.ok((chosen as Vec3).distanceTo(bot.entity.position) <= 4);
 });

@@ -8,6 +8,8 @@ import {
   createMovements,
   nearGoal,
   nearXzGoal,
+  RELAXED_DIG_STRAIGHT_DOWN,
+  RELAXED_FLOWING_WATER,
   type Goal,
   type Navigate,
   type NavigationResult,
@@ -241,6 +243,18 @@ function highestFloor(bot: Bot, x: number, z: number): number | null {
   return null;
 }
 
+const toolLossObservers = new WeakMap<AbortSignal, ReturnType<typeof observeToolTierLoss>>();
+
+/** The one tool-loss observer of a navigate call: its legs (boat crossings, climbs, landings) share it and its listeners. */
+export function toolLossObserverOf(bot: Bot, lifetime: AbortSignal): ReturnType<typeof observeToolTierLoss> {
+  const known = toolLossObservers.get(lifetime);
+  if (known !== undefined) return known;
+  const observer = observeToolTierLoss(bot);
+  toolLossObservers.set(lifetime, observer);
+  lifetime.addEventListener("abort", observer.close, { once: true });
+  return observer;
+}
+
 function beginNavigate(
   bot: Bot,
   request: NavigateRequest,
@@ -251,8 +265,7 @@ function beginNavigate(
   climbed = false,
   unbudgeted = false,
 ) {
-  const toolLoss = request.dig ? observeToolTierLoss(bot) : null;
-  lifetime.addEventListener("abort", () => toolLoss?.close(), { once: true });
+  const toolLoss = request.dig ? toolLossObserverOf(bot, lifetime) : null;
   const start = position(bot.entity.position);
   const startDimension = bot.game.dimension;
   const bucketBefore = bucketDropTotals(bot);
@@ -549,6 +562,7 @@ function beginNavigate(
         navigation: evidence,
       };
     }
+    if (route.escapeRelaxed?.length) evidence.escapeRelaxed = [...route.escapeRelaxed];
     const swum = swim?.exceeded();
     if (swum && route.status === "stopped") {
       return { status: "failed", error: navigateOutcomes.deepWater(request, swum.start, swum.blocks), navigation: evidence };
@@ -630,6 +644,14 @@ function standsAtSea(bot: Bot): boolean {
   return feetAtSea(water, feet, (x, y, z) => bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block");
 }
 
+/** The line that tells the model which rule of its own was set aside once to get it out of a pocket, and what that dug. */
+function describeEscape(relaxed: readonly string[]): string {
+  const flowing = relaxed.includes(RELAXED_FLOWING_WATER);
+  if (!relaxed.includes(RELAXED_DIG_STRAIGHT_DOWN))
+    return "- Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once (a water source and lava still refuse).";
+  return `- Dug down out of a pocket: your rule against digging straight down was set aside once${flowing ? " and a dig next to flowing water was allowed" : ""}.`;
+}
+
 export function formatNavigateResult(result: NavigateResult): string {
   const { navigation } = result;
   const evidence = [
@@ -640,6 +662,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
     ...(navigation.afloat ? ["- Arrived, afloat in its boat at " + Math.round(navigation.end.x) + " " + Math.round(navigation.end.z)] : []),
+    ...(navigation.escapeRelaxed?.length ? [describeEscape(navigation.escapeRelaxed)] : []),
     ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,
     "- Scaffold stocks:",
@@ -666,6 +689,7 @@ export function createNavigateAction(
     inputSchema: navigateInputSchema,
     resultSchema: navigateResultSchema,
     formatResult: formatNavigateResult,
+    movement: "travel",
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: {
       title: NAVIGATE,

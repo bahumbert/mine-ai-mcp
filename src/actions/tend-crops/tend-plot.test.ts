@@ -1,21 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseTendCropsRequest } from "./contract.js";
-import { decideCell, tendPlot, type CellBlock, type CropFacts, type FarmBody, type TillFailure } from "./tend-plot.js";
-
-const block = (name: string, properties: CellBlock["properties"] = {}, traits: Partial<Pick<CellBlock, "liquid" | "empty">> = {}): CellBlock => ({
-  name,
-  properties,
-  liquid: traits.liquid ?? false,
-  breakable: name !== "air" && name !== "water",
-  empty: traits.empty ?? (name === "air" || name === "short_grass" || name === "poppy" || name.startsWith("wheat") || name === "carrots"),
-});
-
-/** Wheat and carrots as the loot tables have them: ripe at age 7, planted from their unripe drop. */
-const CROPS: CropFacts = {
-  isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? cell.properties.age === 7 : null),
-  seedOf: (name) => ({ wheat: "wheat_seeds", carrots: "carrot" })[name] ?? null,
-};
+import { block, CROPS, cutAfter, cutBefore, FakeFarm } from "../../test-support/fake-farm.js";
+import { beginTendPlot, decideCell, tendPlot } from "./tend-plot.js";
 
 test("each cell is decided from its soil and what stands on it", () => {
   const air = block("air");
@@ -38,80 +25,6 @@ test("corners in any order make the same plot; more than 16 a side is refused", 
   assert.throws(() => parseTendCropsRequest({ x1: 0, z1: 0, x2: 16, z2: 0, y: 63 }), /TEND_TOO_LARGE.*17 x 1/u);
 });
 
-/** A world of soil at y 63 and what stands on it at y 64, changed the way the server would. */
-class FakeFarm implements FarmBody {
-  readonly world = new Map<string, CellBlock>();
-  readonly inventory = new Map<string, number>();
-  readonly calls: string[] = [];
-  hoe = true;
-  /** What breaking each crop drops on the ground, picked up by `collectDrops`. */
-  readonly ground: string[] = [];
-  unreachable = new Set<string>();
-  tillable = new Set(["dirt", "grass_block"]);
-  /** The hoe breaks once it has tilled this many cells. */
-  hoeLasts = Infinity;
-  /** Every use fails with this instead of reaching the world (a timeout, a thrown error). */
-  useFails: string | null = null;
-  /** Cells (x,z) where the use went out and the server was not seen to answer in time. */
-  unconfirmed = new Set<string>();
-  private tilledCells = 0;
-
-  set(x: number, z: number, soil: string, above = "air", age?: number): void {
-    this.world.set(`${x},63,${z}`, block(soil, soil === "farmland" ? { moisture: 7 } : {}, { liquid: soil === "water", empty: soil === "water" }));
-    this.world.set(`${x},64,${z}`, block(above, age === undefined ? {} : { age }));
-  }
-
-  read(x: number, y: number, z: number): CellBlock | null {
-    return this.world.get(`${x},${y},${z}`) ?? null;
-  }
-
-  async reach(cell: { x: number; y: number; z: number }): Promise<string | null> {
-    return this.unreachable.has(`${cell.x},${cell.z}`) ? "no route" : null;
-  }
-
-  async breakBlock(cell: { x: number; y: number; z: number }): Promise<string | null> {
-    const broken = this.read(cell.x, cell.y, cell.z)!;
-    this.calls.push(`break ${broken.name} ${cell.x},${cell.z}`);
-    if (broken.name === "wheat") this.ground.push("wheat", "wheat_seeds", "wheat_seeds");
-    this.world.set(`${cell.x},${cell.y},${cell.z}`, block("air"));
-    return null;
-  }
-
-  async till(cell: { x: number; y: number; z: number }): Promise<TillFailure | null> {
-    const soil = this.read(cell.x, cell.y, cell.z)!;
-    if (!this.hasHoe()) return { kind: "no hoe" };
-    this.calls.push(`till ${cell.x},${cell.z}`);
-    if (this.useFails !== null) return { kind: "error", error: this.useFails };
-    if (this.unconfirmed.has(`${cell.x},${cell.z}`)) return { kind: "unconfirmed" };
-    if (!this.tillable.has(soil.name)) return { kind: "unchanged" };
-    this.world.set(`${cell.x},${cell.y},${cell.z}`, block("farmland", { moisture: 7 }));
-    this.tilledCells += 1;
-    return null;
-  }
-
-  async plant(cell: { x: number; y: number; z: number }, item: string): Promise<string | null> {
-    this.calls.push(`plant ${item} ${cell.x},${cell.z}`);
-    // Only seeds take on farmland; the server leaves anything else in the hand.
-    if (item !== "wheat_seeds" && item !== "carrot") return "nothing grew";
-    this.inventory.set(item, (this.inventory.get(item) ?? 0) - 1);
-    this.world.set(`${cell.x},${cell.y + 1},${cell.z}`, block(item === "carrot" ? "carrots" : "wheat", { age: 0 }));
-    return null;
-  }
-
-  async collectDrops(): Promise<{ readonly left: readonly string[] }> {
-    this.calls.push("collect drops");
-    for (const item of this.ground.splice(0)) this.inventory.set(item, (this.inventory.get(item) ?? 0) + 1);
-    return { left: [] };
-  }
-
-  carried(item: string): number {
-    return this.inventory.get(item) ?? 0;
-  }
-
-  hasHoe(): boolean {
-    return this.hoe && this.tilledCells < this.hoeLasts;
-  }
-}
 
 const plot = (input: Record<string, unknown>) => parseTendCropsRequest({ x1: 0, z1: 0, x2: 1, z2: 0, y: 63, ...input });
 
@@ -177,22 +90,37 @@ test("running out of seeds leaves the last farmland empty, said as such", async 
   assert.equal(evidence.after.emptyFarmland, 1);
 });
 
-test("tilling without a hoe is refused before any work; so is planting what is not carried", async () => {
+test("with no hoe the plot is harvested and replanted, the cells needing tilling skipped as no hoe, and a hoe later tills them (G2)", async () => {
   const farm = new FakeFarm();
   farm.set(0, 0, "dirt");
   farm.set(1, 0, "farmland", "wheat", 7);
   farm.hoe = false;
-  assert.match((await tendPlot(plot({}), farm, CROPS)).refused ?? "", /^\[TEND_NO_HOE\] 1 cell need tilling/u);
-  assert.deepEqual(farm.calls, []);
+  farm.inventory.set("wheat_seeds", 4);
+  const first = await tendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  assert.equal(first.refused, null);
+  assert.equal(first.evidence.harvested, 1);
+  assert.equal(first.evidence.planted, 1);
+  assert.deepEqual(first.evidence.skipped, { "no hoe": [{ x: 0, z: 0 }] });
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), []);
+  // Next farm call with a hoe tills the skipped cell.
   farm.hoe = true;
-  assert.match((await tendPlot(plot({ plant: "carrot" }), farm, CROPS)).refused ?? "", /^\[TEND_PLANT_MISSING\] No carrot/u);
-  assert.deepEqual(farm.calls, []);
-  // Without tilling asked, soil is left as it is and nothing needs a hoe.
-  farm.hoe = false;
-  const { evidence, refused } = await tendPlot(plot({ till: false }), farm, CROPS);
+  const second = await tendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  assert.equal(second.evidence.tilled, 1);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), ["till 0,0"]);
+});
+
+test("with the plant item not carried the harvest still goes on and the plantable cells say so (G2)", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland");
+  const { evidence, refused } = await tendPlot(plot({ plant: "carrot" }), farm, CROPS);
   assert.equal(refused, null);
   assert.equal(evidence.harvested, 1);
-  assert.deepEqual(evidence.skipped, { "not farmland": [{ x: 0, z: 0 }] });
+  assert.deepEqual(evidence.skipped, { "no carrot left": [{ x: 1, z: 0 }] });
+  // Without tilling asked, soil is left as it is and nothing needs a hoe.
+  farm.hoe = false;
+  const none = await tendPlot(plot({ till: false }), farm, CROPS);
+  assert.equal(none.refused, null);
 });
 
 test("progress is reported at each phase and each cell farmed", async () => {
@@ -282,4 +210,116 @@ test("a use the server was not seen to answer teaches nothing, beside one it did
   const { evidence } = await tendPlot(plot({ x2: 3 }), farm, CROPS);
   assert.deepEqual(evidence.untillable, { podzol: [{ x: 3, z: 0 }] });
   assert.equal(evidence.skipped["till not confirmed (server behind)"]?.length, 3);
+});
+
+// Reflex continuity (spec 2026-10-18, R2): a reflex that takes the body mid-tend hands it back; the next attempt
+// re-reads the plot and does only what is left, and the evidence covers the whole request.
+const never = () => null;
+
+test("a tend cut while fetching the drops goes on from there: no crop broken twice, the harvested seed replants", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutBefore(farm, "collectDrops");
+  const run = beginTendPlot(plot({}), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence, stop } = await run.attempt(farm, never);
+  assert.equal(stop, null);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("break")), ["break wheat 0,0", "break wheat 1,0"]);
+  assert.deepEqual([evidence.harvested, evidence.planted], [2, 2]);
+  assert.deepEqual(evidence.gained, { wheat: 2, wheat_seeds: 2 }, "the drops of the first attempt are collected by the second");
+  assert.deepEqual(evidence.after.crops, { "wheat age 0": 2 });
+});
+
+test("a crop broken just before the reflex's abort threw is counted as harvested and its seed is the one replanted", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutAfter(farm, "breakBlock", 1);
+  const run = beginTendPlot(plot({}), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("break")), ["break wheat 0,0", "break wheat 1,0"]);
+  assert.deepEqual([evidence.harvested, evidence.planted], [2, 2]);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("plant")), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0"]);
+});
+
+test("a seed planted just before the abort threw is counted once and the cell is not planted again", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland");
+  farm.set(1, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 5);
+  cutAfter(farm, "plant", 1);
+  const run = beginTendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("plant")), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0"]);
+  assert.equal(evidence.planted, 2);
+  assert.deepEqual(evidence.gained, { wheat_seeds: -2 });
+});
+
+test("soil tilled just before the abort threw is counted once, by its block, and is not tilled again", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "dirt");
+  farm.set(1, 0, "grass_block");
+  farm.inventory.set("wheat_seeds", 5);
+  cutAfter(farm, "till", 1);
+  const run = beginTendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("till")), ["till 0,0", "till 1,0"]);
+  assert.deepEqual([evidence.tilled, evidence.planted], [2, 2]);
+  assert.deepEqual(evidence.tilledSoil, { dirt: 1, grass_block: 1 });
+});
+
+test("a crop another bot harvested between the attempts is not counted as ours, and its cell is replanted", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  farm.inventory.set("wheat_seeds", 5);
+  cutAfter(farm, "breakBlock", 1);
+  const run = beginTendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  farm.set(1, 0, "farmland");
+  const { evidence } = await run.attempt(farm, never);
+  assert.equal(evidence.harvested, 1);
+  assert.equal(evidence.planted, 2);
+});
+
+test("cells skipped in a cut attempt are reported once by the attempt that finishes", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "podzol");
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutBefore(farm, "collectDrops");
+  const run = beginTendPlot(plot({}), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never));
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(evidence.skipped, { "not tillable (podzol)": [{ x: 0, z: 0 }] });
+  assert.deepEqual(evidence.untillable, { podzol: [{ x: 0, z: 0 }] });
+});
+
+test("a tend that already finished answers a second attempt with the same evidence and acts on nothing", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 3);
+  const run = beginTendPlot(plot({ plant: "wheat_seeds" }), farm, CROPS);
+  const first = await run.attempt(farm, never);
+  const callsAfterFirst = farm.calls.length;
+  const again = await run.attempt(farm, never);
+  assert.equal(farm.calls.length, callsAfterFirst, "no gesture on the second attempt");
+  assert.deepEqual({ ...again.evidence, skipped: {} }, { ...first.evidence, skipped: {} }, "the whole request totals, not zero");
+  assert.deepEqual(Object.keys(again.evidence.skipped), ["growing"], "the crops it planted are growing, which a farm should be");
+});
+
+test("the hoe broken before the request began stays 'no hoe', not 'no hoe left', across the attempts", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "dirt");
+  farm.set(1, 0, "farmland", "wheat", 7);
+  farm.hoe = false;
+  cutBefore(farm, "collectDrops");
+  const run = beginTendPlot(plot({}), farm, CROPS);
+  await assert.rejects(run.attempt(farm, never));
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(evidence.skipped, { "no hoe": [{ x: 0, z: 0 }] });
 });

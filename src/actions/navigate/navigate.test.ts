@@ -8,7 +8,7 @@ import { createMovements, type NavigationResult } from "../../navigation/index.j
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
-import { createNavigateAction, formatNavigateResult, type NavigateDependencies } from "./navigate.js";
+import { createNavigateAction, formatNavigateResult, toolLossObserverOf, type NavigateDependencies } from "./navigate.js";
 import { EventEmitter } from "node:events";
 import minecraftData from "minecraft-data";
 
@@ -748,4 +748,48 @@ test("the swim to land and a swim with no land in reach are not stopped by the b
   const sea = swimming(open.bot, 40);
   await new ActionRunner().run(createNavigateAction(open.bot, fakeNavigation, dependencies(sea.navigate)), { x: 210, y: 64, z: 0 });
   assert.equal(sea.walk.stoppedAt, null);
+});
+
+test("the legs of one navigate share one tool-loss observer, whose listeners go with the call (C14)", () => {
+  const bot = botFixture().bot as unknown as Bot & EventEmitter;
+  bot.registry = minecraftData("1.21.4") as never;
+  (bot as unknown as { inventory: unknown }).inventory = Object.assign(new EventEmitter(), { items: () => [], count: () => 0 });
+  const lifetime = new AbortController();
+  const listeners = () => bot.listenerCount("heldItemChanged");
+  const first = toolLossObserverOf(bot, lifetime.signal);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(listeners(), 1, "three legs, one observer");
+  lifetime.abort();
+  assert.equal(listeners(), 0);
+  assert.notEqual(toolLossObserverOf(bot, new AbortController().signal), first, "another call has its own");
+});
+
+/** A settled route out of a pocket whose evidence names the rules it used. */
+function escapedResult(escapeRelaxed: readonly string[] | undefined): Parameters<typeof formatNavigateResult>[0] {
+  return {
+    status: "succeeded", navigation: {
+      startDimension: "overworld", endDimension: "overworld", target: { x: 0, y: 55, z: 0 }, range: 1,
+      start: { x: 0, y: 57, z: 0 }, end: { x: 0, y: 55, z: 0 }, remainingDistance: 0, elapsedMs: 10, scaffolding: [],
+      bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], escapeRelaxed,
+    },
+  } as unknown as Parameters<typeof formatNavigateResult>[0];
+}
+
+test("a route that dug down and beside flowing water to leave a pocket says both in its result text", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down", "dig_next_to_flowing_water"]));
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once and a dig next to flowing water was allowed/);
+  assert.doesNotMatch(formatNavigateResult(escapedResult(undefined)), /out of a pocket/);
+});
+
+test("a route that only dug down says nothing of flowing water", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down"]));
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once\./);
+  assert.doesNotMatch(text, /flowing water/);
+});
+
+test("a route that only dug beside flowing water does not claim to have dug down", () => {
+  const text = formatNavigateResult(escapedResult(["dig_next_to_flowing_water"]));
+  assert.match(text, /Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once \(a water source and lava still refuse\)\./);
+  assert.doesNotMatch(text, /Dug down|digging straight down/);
 });

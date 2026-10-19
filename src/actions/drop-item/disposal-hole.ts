@@ -124,10 +124,61 @@ function nearestPitStance(bot: Bot): Vec3 | null {
   return best?.stance ?? null;
 }
 
+/** The pit a request chose, kept across its attempts so one cut short is dug on instead of a second pit started. */
+export interface PitMemory {
+  bottom: Vec3 | null;
+}
+
+/** The pit's bottom cell for a fresh request: beside the feet when one fits, else beside the nearest fit stance. */
+async function choosePit(
+  bot: Bot,
+  context: ActionContext,
+  moveTo?: (stance: Vec3) => Promise<string | undefined>,
+): Promise<Vec3> {
+  const feet = bot.entity.position.floored();
+  const beside =
+    bot.entity.onGround && wall(bot, feet.offset(0, -1, 0)) ? pitBeside(bot, feet, bot.entity.position) : null;
+  if (beside) return beside;
+  const stance = moveTo ? nearestPitStance(bot) : null;
+  if (!stance)
+    throw new DisposalHoleError(
+      `[DROP_HOLE_UNAVAILABLE] No place within ${HOLE_SEARCH_RADIUS} blocks has dry, enclosed ground that can be excavated into a disposal pit outside protected regions.`,
+    );
+  const failure = await moveTo!(stance);
+  context.signal?.throwIfAborted();
+  if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk to a place for the pit: ${failure}`);
+  const arrived = pitBeside(bot, bot.entity.position.floored(), bot.entity.position);
+  if (!arrived) throw new DisposalHoleError("[DROP_HOLE_CHANGED] The place chosen for the pit no longer fits on arrival.");
+  return arrived;
+}
+
+/**
+ * Walk back beside a pit an earlier attempt chose (a reflex may have moved the body) without judging it again: half
+ * dug, it holds the items the digging dropped and no longer passes `pitBeside`.
+ */
+async function returnToPit(
+  bot: Bot,
+  bottom: Vec3,
+  context: ActionContext,
+  moveTo?: (stance: Vec3) => Promise<string | undefined>,
+): Promise<Vec3> {
+  const stances = SIDES.map(([dx, dz]) => bottom.offset(-dx, 2, -dz)).filter((stance) => standable(bot, stance));
+  const here = bot.entity.position.floored();
+  if (stances.some((stance) => stance.equals(here)) && bot.entity.onGround) return bottom;
+  const nearest = stances.sort((a, b) => a.distanceTo(here) - b.distanceTo(here))[0];
+  if (!nearest || !moveTo) throw new DisposalHoleError("[DROP_HOLE_CHANGED] No standable place beside the pit remains.");
+  const failure = await moveTo(nearest);
+  context.signal?.throwIfAborted();
+  if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk back to the pit: ${failure}`);
+  return bottom;
+}
+
 /**
  * Make an enclosed pit beside the body, clearing a tunnel wall above it when needed. When none of the four cells
  * beside the feet fits (or the bot is not on dry ground), the nearest stance within `HOLE_SEARCH_RADIUS` blocks that
  * has one is walked to through `moveTo` (which returns a failure reason, or nothing), and the pit is dug there.
+ * With a `pit` memory the chosen pit is recorded before the digging starts and, when the memory already holds one,
+ * that pit is walked back to and dug on.
  */
 export async function prepareDisposalHole(
   bot: Bot,
@@ -135,22 +186,10 @@ export async function prepareDisposalHole(
   breakInPlace: BreakBlockInPlace,
   context: ActionContext,
   moveTo?: (stance: Vec3) => Promise<string | undefined>,
+  pit?: PitMemory,
 ): Promise<Vec3> {
-  const feet = bot.entity.position.floored();
-  let bottom =
-    bot.entity.onGround && wall(bot, feet.offset(0, -1, 0)) ? pitBeside(bot, feet, bot.entity.position) : null;
-  if (!bottom) {
-    const stance = moveTo ? nearestPitStance(bot) : null;
-    if (!stance)
-      throw new DisposalHoleError(
-        `[DROP_HOLE_UNAVAILABLE] No place within ${HOLE_SEARCH_RADIUS} blocks has dry, enclosed ground that can be excavated into a disposal pit outside protected regions.`,
-      );
-    const failure = await moveTo!(stance);
-    context.signal?.throwIfAborted();
-    if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk to a place for the pit: ${failure}`);
-    bottom = pitBeside(bot, bot.entity.position.floored(), bot.entity.position);
-    if (!bottom) throw new DisposalHoleError("[DROP_HOLE_CHANGED] The place chosen for the pit no longer fits on arrival.");
-  }
+  const bottom = pit?.bottom ? await returnToPit(bot, pit.bottom, context, moveTo) : await choosePit(bot, context, moveTo);
+  if (pit) pit.bottom = bottom;
   const opening = openingCells;
   for (const position of opening(bottom)) {
     context.signal?.throwIfAborted();
@@ -229,6 +268,11 @@ export async function observeHoleDrops(
       },
     )) === true
   );
+}
+
+/** How many of the two cells above the discards hold a block now: the plug, however many attempts placed it. */
+export function pluggedCellCount(bot: Bot, bottom: Vec3): number {
+  return [bottom.offset(0, 1, 0), bottom.offset(0, 2, 0)].filter((cell) => !air(bot, cell)).length;
 }
 
 /** What `sealDisposalHole` reports; the caller adds how far it then stepped back. */

@@ -276,7 +276,7 @@ test("a calculation failure while exploring stops instead of reopening the same 
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 0,
@@ -367,7 +367,7 @@ test("an anticipated drop follows Mineflayer's item entity before its metadata a
         const afterFailure = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 1,
@@ -1532,7 +1532,7 @@ test("a calculation failure blacklists the target nearest the bot's current posi
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 13, y: 64, z: 0 },
               heuristic: 1,
@@ -1574,7 +1574,7 @@ test("an unreachable drop is blacklisted without delaying the remaining block ta
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 1,
@@ -1612,7 +1612,7 @@ test("an unreachable live drop does not wait forever for a packet transition", a
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 3,
@@ -1652,7 +1652,7 @@ test("a failed pickup search waits for a falling log to land before judging its 
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 3,
@@ -1690,7 +1690,7 @@ test("a moving drop in lava does not receive the free-flight wait", async () => 
         const resolution = await options.onCalculationFailure?.({
           failure: {
             kind: "no_path",
-            search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+            search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
             closest: {
               position: { x: 0, y: 64, z: 0 },
               heuristic: 3,
@@ -1725,7 +1725,7 @@ test("a failed block cell does not hide an item that later lands there", async (
           const resolution = await options.onCalculationFailure?.({
             failure: {
               kind: "no_path",
-              search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+              search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
               closest: {
                 position: cell,
                 heuristic: 1,
@@ -1809,7 +1809,7 @@ test("the 64-target goal width is not a lifetime calculation-failure limit", asy
           const resolution = await options.onCalculationFailure?.({
             failure: {
               kind: "no_path",
-              search: { queued: 0, visited: 1, generated: 1, slices: 1, computeMs: 1 },
+              search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
               closest: {
                 position: { x: 0, y: 64, z: 0 },
                 heuristic: 1,

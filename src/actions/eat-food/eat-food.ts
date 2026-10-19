@@ -2,7 +2,8 @@ import { eatCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
 import { carriedCount, settledNow, settleInventoryCount, type SettledInventoryCount } from "../../world/index.js";
-import { defineAction, type ActionContext } from "../action.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
 import { unconfirmedCount } from "../markdown.js";
 import {
   eatFoodAnnotations,
@@ -56,27 +57,66 @@ function evidence(
   };
 }
 
+function eatingBaseline(bot: Bot, request: EatFoodRequest): EatingBefore {
+  return { inventory: carriedCount(bot, request.foodName), hunger: bot.food, saturation: bot.foodSaturation };
+}
+
+function observeEating(observe: ObserveRequest | undefined, bot: Bot, request: EatFoodRequest, before: EatingBefore): void {
+  observe?.(() => ({ baseline: { ...before },
+    checkpoint: { phase: "eating", item: request.foodName, inventory: carriedCount(bot, request.foodName), hunger: bot.food, saturation: bot.foodSaturation },
+    completion: { kind: "event", observed: false, owes: "Consumption and its inventory/hunger evidence must be confirmed by the eating executor." },
+  }));
+}
+
+function defaultDependencies(bot: Bot): EatFoodDependencies {
+  return { equip: bot.equip.bind(bot), consume: bot.consume.bind(bot) };
+}
+
 /** Equip and consume exactly one named carried food item. */
 export async function eatFood(
   bot: Bot,
   request: EatFoodRequest,
   context: ActionContext,
-  dependencies: EatFoodDependencies = {
-    equip: bot.equip.bind(bot),
-    consume: bot.consume.bind(bot),
-  },
+  dependencies: EatFoodDependencies = defaultDependencies(bot),
 ): Promise<EatFoodResult> {
   context.signal?.throwIfAborted();
-  const before: EatingBefore = {
-    inventory: carriedCount(bot, request.foodName),
-    hunger: bot.food,
-    saturation: bot.foodSaturation,
-  };
-  context.observeProgress?.(() => ({ baseline: { ...before },
-    checkpoint: { phase: "eating", item: request.foodName, inventory: carriedCount(bot, request.foodName), hunger: bot.food, saturation: bot.foodSaturation },
-    completion: { kind: "event", observed: false, owes: "Consumption and its inventory/hunger evidence must be confirmed by the eating executor." },
-  }));
+  const before = eatingBaseline(bot, request);
+  observeEating(context.observeProgress, bot, request, before);
+  return eatAgainstBaseline(bot, request, before, context, dependencies);
+}
 
+/**
+ * One request's executor: the baseline is taken once, so an attempt a reflex interrupted is followed by one that sees
+ * the bite already landed (one carried fewer) and succeeds without a second bite. Only a bite whose consume call
+ * resolved can have landed: one carried fewer with no consume of ours is the hunger reflex's own meal of the same food
+ * (review 2026-10-19), so the request eats again.
+ */
+export function beginEatFood(
+  bot: Bot,
+  request: EatFoodRequest,
+  observe: ObserveRequest,
+  dependencies: EatFoodDependencies = defaultDependencies(bot),
+): RequestExecution<EatFoodResult> {
+  const before = eatingBaseline(bot, request);
+  observeEating(observe, bot, request, before);
+  let consumeResolved = false;
+  return async (context) => {
+    context.signal?.throwIfAborted();
+    if (consumeResolved && carriedCount(bot, request.foodName) < before.inventory) {
+      return { status: "succeeded", eating: evidence(bot, request, before, true) };
+    }
+    return eatAgainstBaseline(bot, request, before, context, dependencies, () => { consumeResolved = true; });
+  };
+}
+
+async function eatAgainstBaseline(
+  bot: Bot,
+  request: EatFoodRequest,
+  before: EatingBefore,
+  context: ActionContext,
+  dependencies: EatFoodDependencies,
+  onConsumeResolved: () => void = () => {},
+): Promise<EatFoodResult> {
   if (!bot.registry.foodsByName[request.foodName]) {
     return {
       status: "failed",
@@ -94,6 +134,8 @@ export async function eatFood(
     };
   }
 
+  // The bite is judged against what is carried as this attempt starts: a meal the hunger reflex ate before it is not ours.
+  const carriedAtStart = carriedCount(bot, request.foodName);
   using resources = new DisposableStack();
   let consuming = false;
   let cancelWait: ((reason: unknown) => void) | null = null;
@@ -115,6 +157,7 @@ export async function eatFood(
     // remains handled by the race; it performs no further body effects.
     const cancelled = new Promise<never>((_resolve, reject) => { cancelWait = reject; });
     await Promise.race([dependencies.consume(), cancelled]);
+    onConsumeResolved();
     cancelWait = null;
     context.signal?.throwIfAborted();
   } catch (cause) {
@@ -127,7 +170,7 @@ export async function eatFood(
     };
   }
 
-  const after = await settleInventoryCount(bot, request.foodName, before.inventory - 1, {
+  const after = await settleInventoryCount(bot, request.foodName, carriedAtStart - 1, {
     timeoutMs: dependencies.settleMs ?? CONSUMPTION_SETTLE_MS,
     signal: context.signal,
   });
@@ -166,9 +209,9 @@ export function createEatFoodAction(bot: Bot) {
     inputSchema: eatFoodInputSchema,
     resultSchema: eatFoodResultSchema,
     formatResult: formatEatFoodResult,
-    execution: { kind: "task" },
+    execution: { kind: "resumable_task" },
     annotations: eatFoodAnnotations,
     parse: parseEatFoodRequest,
-    execute: (request, context) => eatFood(bot, request, context),
+    begin: (request, _lifetime, observe) => beginEatFood(bot, request, observe),
   });
 }

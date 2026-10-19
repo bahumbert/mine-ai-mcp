@@ -47,21 +47,43 @@ export function cropFacts(bot: Pick<Bot, "registry" | "version">): CropFacts {
 
 /** Server ticks that must pass after a use for an unchanged block to count as the server's answer (the server may be far behind). */
 export const TILL_CONFIRM_TICKS = 20;
+/** The hoe's wait: the world age moving this far past the use, bounded by the wall clock (a stopped server clock never answers). */
+const TILL_SERVER_TICKS = 40;
+const TILL_WALL_MS = 10_000;
+
+interface UseFailure {
+  readonly error: string;
+  readonly serverTicksWaited: number | null;
+  /** The wait ended on the wall clock with the server clock not moved far enough: no answer was seen. */
+  readonly timedOut?: boolean;
+}
 
 /**
  * A failed hoe use as the plot sees it. The block is "unchanged" only once the server clock moved on by
  * {@link TILL_CONFIRM_TICKS} after the use with no block update (packets arrive in order: ours would have come first)
  * and the hoe is still carried; a wait that ended earlier is "unconfirmed", an error or a broken hoe teaches nothing.
  */
-export function tillFailure(failure: { readonly error: string; readonly serverTicksWaited: number | null }, hoeCarried: boolean): TillFailure {
+export function tillFailure(failure: UseFailure, hoeCarried: boolean): TillFailure {
   if (failure.serverTicksWaited === null || !hoeCarried) return { kind: "error", error: failure.error };
+  if (failure.timedOut === true) return { kind: "unconfirmed" };
   return failure.serverTicksWaited >= TILL_CONFIRM_TICKS ? { kind: "unchanged" } : { kind: "unconfirmed" };
 }
 
-export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal): FarmBody {
-  const baseline = snapshotEntityIds(bot);
-  /** Drops it could not get (a full inventory, no route): left, so the others are still fetched. */
-  const leftBehind = new Set<number>();
+/**
+ * What the drops of one tend request are measured against, made once per request so a resumed attempt fetches what an
+ * earlier one dropped: the entities that lay about before it began, and the drops no attempt could get (a full
+ * inventory, no route), which are left so the others are still fetched.
+ */
+export interface DropLedger {
+  readonly baseline: ReadonlySet<number>;
+  readonly leftBehind: Set<number>;
+}
+
+export function dropLedger(bot: Bot): DropLedger {
+  return { baseline: snapshotEntityIds(bot), leftBehind: new Set() };
+}
+
+export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal, drops = dropLedger(bot)): FarmBody {
   const vec = (cell: FarmCell) => new Vec3(cell.x, cell.y, cell.z);
   // Routes never dig the farmland they work, nor drop scaffold onto the plot.
   const movements = () => createMovements(bot, { protectedBlockNames: ["farmland"], scaffolding: false });
@@ -73,7 +95,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
   };
 
   /** Right-click the top face of the block at `cell` holding `item`, until `watched` reads differently. */
-  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell): Promise<{ readonly error: string; readonly serverTicksWaited: number | null } | null> => {
+  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell, serverWait = false): Promise<UseFailure | null> => {
     const block = bot.blockAt(vec(cell));
     if (block === null) return { error: "the cell is not loaded", serverTicksWaited: null };
     const before = bot.blockAt(vec(watched))?.stateId;
@@ -83,9 +105,10 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       on: { block, face: { x: 0, y: 1, z: 0 } },
       expectedCells: [{ position: watched, matches: (current) => current.stateId !== before }],
       timeoutTicks: USE_TIMEOUT_TICKS,
+      ...(serverWait && { serverWait: { ticks: TILL_SERVER_TICKS, wallMs: TILL_WALL_MS } }),
       ...(signal && { signal }),
     });
-    return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null };
+    return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null, ...(result.timedOut && { timedOut: true }) };
   };
 
   return {
@@ -124,7 +147,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
     async till(soil) {
       const item = hoe();
       if (item === null) return { kind: "no hoe" };
-      const failure = await useOnTop(soil, item, soil);
+      const failure = await useOnTop(soil, item, soil, true);
       if (failure === null) return null;
       return tillFailure(failure, hoe() !== null);
     },
@@ -139,7 +162,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
         position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
         position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
         position.y >= request.y - 1 && position.y <= request.y + 3;
-      const dropped = () => Object.values(bot.entities).filter((entity) => !baseline.has(entity.id) && entity.name === "item" && inPlot(entity.position));
+      const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && entity.name === "item" && inPlot(entity.position));
       // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
       // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
       // 2 picked up; the rest lay on the plot).
@@ -147,7 +170,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       while (quiet < QUIET_LOOKS) {
         signal?.throwIfAborted();
         const target = dropped()
-          .filter((entity) => !leftBehind.has(entity.id) && droppedItemName(entity) !== null)
+          .filter((entity) => !drops.leftBehind.has(entity.id) && droppedItemName(entity) !== null)
           .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
         if (target === undefined) {
           quiet += 1;
@@ -168,7 +191,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
             hasArrived: () => collected,
             ...(signal && { signal }),
           });
-          if (result.kind !== "collected") leftBehind.add(target.id);
+          if (result.kind !== "collected") drops.leftBehind.add(target.id);
         } finally {
           bot.off("playerCollect", onCollect);
         }

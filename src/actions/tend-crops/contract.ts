@@ -92,8 +92,6 @@ export const tendCropsAnnotations = {
 export const tendCropsOutcomes = {
   tooLarge: (width: number, depth: number) =>
     `[TEND_TOO_LARGE] The plot is ${width} x ${depth}; at most ${MAX_TEND_SIDE} x ${MAX_TEND_SIDE} cells per call.`,
-  noHoe: (cells: number) => `[TEND_NO_HOE] ${cells} cell${cells === 1 ? "" : "s"} need tilling and no hoe is carried.`,
-  plantMissing: (item: string) => `[TEND_PLANT_MISSING] No ${item} is carried to plant.`,
   stalled: (seconds: number, walked: number) =>
     `[TEND_STALLED] No cell changed for ${seconds} s (walked ${walked} blocks meanwhile).`,
   incomplete: (skipped: number) =>

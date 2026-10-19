@@ -544,3 +544,53 @@ test("a closest node 3 blocks from the start is within the minimum route distanc
   assert.deepEqual(far.closest.position, { x: 6, y: 63, z: 0 });
   assert.equal(far.closest.withinStartBlocks, undefined);
 });
+
+/** Edges between the listed (x, z) cells of the origin's level, each step one block in any of the four directions. */
+function roomOf(cells: readonly (readonly [number, number])[]): MovementCatalogue {
+  const inRoom = (x: number, z: number) => cells.some(([cx, cz]) => cx === x && cz === z);
+  return stubCatalogue((state) => {
+    const { x, z } = state.node.feet;
+    return ([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).flatMap(([dx, dz]) => (inRoom(x + dx, z + dz) ? [graphMovement(state, x + dx, z + dz, 1)] : []));
+  });
+}
+
+const NOWHERE = goalOf("nowhere", () => 50);
+
+test("an exhausted search in a two-cell pocket reports the farthest visited node at 1 block (Dirk, run 15 P2)", () => {
+  const update = searchOver(NOWHERE, roomOf([[0, 0], [1, 0]]), { id: "pocket" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "no_path");
+  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [2, 1]);
+});
+
+test("a search that visited only its root reports the farthest visited node at 0", () => {
+  const update = searchOver(NOWHERE, roomOf([[0, 0]]), { id: "cell" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "no_path");
+  assert.equal(update.evidence.farthestVisited, 0);
+});
+
+test("a 3x3 room entered at its edge reports the farthest visited node at 2", () => {
+  const room = [-1, 0, 1].flatMap((z) => [0, 1, 2].map((x) => [x, z] as const));
+  const update = searchOver(NOWHERE, roomOf(room), { id: "room" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "no_path");
+  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [9, 2]);
+});
+
+test("the farthest visited node counts height as well as the level, and a search that succeeds or hits a limit reports it", () => {
+  const corridor = stubCatalogue((state) => (state.node.feet.x < 4 ? [graphMovement(state, state.node.feet.x + 1, 0, 1)] : []));
+  const complete = searchOver(goalOf("east", (node) => Math.abs(node.feet.x - 3) * 4, (node) => node.feet.x === 3), corridor, { id: "east" })
+    .advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(complete.kind, "complete");
+  assert.equal(complete.evidence.farthestVisited, 3);
+  const clock = perExpansionClock(corridor);
+  const limited = searchOver(NOWHERE, clock.catalogue, { id: "limit", limits: { failureTimeoutMs: clock.atExpansion(3) }, now: clock.now })
+    .advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(limited.kind, "limit");
+  assert.equal(limited.evidence.farthestVisited, 2);
+  const climb = stubCatalogue((state) => (state.node.feet.y < 66 ? [{
+    ...graphMovement(state, 0, 0, 1),
+    to: { x: 0, y: state.node.feet.y + 1, z: 0 },
+    state: { node: { ...state.node, feet: { x: 0, y: state.node.feet.y + 1, z: 0 } }, overlay: state.overlay },
+  }] : []));
+  const tall = searchOver(NOWHERE, climb, { id: "tall" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+  assert.equal(tall.evidence.farthestVisited, 3);
+});
