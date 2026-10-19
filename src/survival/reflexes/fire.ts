@@ -7,9 +7,41 @@ import { decideFireResponse, type FireFacts } from "../policy/environment.js";
 import { FIRE_ESCAPE_RADIUS, nearbyFireEscape, type FireEscapeReason } from "../positioning/fire-escape.js";
 import { escapeFire } from "../responses/fire.js";
 
+/**
+ * Whether an escape is reachable, searched once per body position, world revision and danger: the search reads up to
+ * a few thousand cells and the reflex senses every tick (20 burning bots). The exact position is the key: a hop
+ * from the edge of a bank is admitted or refused by where the body's width reaches (live 2026-10-19).
+ */
+function escapeAvailability(bot: Bot, world: WorldView) {
+  let memo: { key: string; available: boolean } | null = null;
+  return (reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean => {
+    const key = `${bot.entity.position}|${world.revision}|${reason}|${inLava}|${inFire}`;
+    if (memo?.key !== key) memo = { key, available: nearbyFireEscape(bot, world, reason) !== null };
+    return memo.available;
+  };
+}
+
+/** The facts a fire escape reads: exactly the primitive's search volume (floor and head included), the body, the blocks carried. */
+function fireEscapeFacts(bot: Bot) {
+  const origin = bot.entity.position.floored();
+  const cells: (number | null)[] = [];
+  for (let x = -FIRE_ESCAPE_RADIUS; x <= FIRE_ESCAPE_RADIUS; x++)
+    for (let z = -FIRE_ESCAPE_RADIUS; z <= FIRE_ESCAPE_RADIUS; z++)
+      for (let y = -2; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
+  return {
+    cells,
+    body: { inLava: isInLava(bot), inFire: isInFire(bot), onGround: bot.entity.onGround },
+    blocks: bot.inventory
+      .items()
+      .filter((item) => bot.registry.blocksByName[item.name])
+      .map((item) => ({ name: item.name, count: item.count })),
+  };
+}
+
 /** Fire owns its environmental authority; combat policy cannot prohibit escape. */
 export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
   let advancing = false;
+  const escapeAvailable = escapeAvailability(bot, world);
   const blockUpdate = (before: ReturnType<Bot["blockAt"]>, after: ReturnType<Bot["blockAt"]>) => {
     if (
       after?.name === "lava" &&
@@ -34,7 +66,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
         inLava,
         inFire,
         burning,
-        escapeAvailable: nearbyFireEscape(bot, world, reason) !== null,
+        escapeAvailable: escapeAvailable(reason, inLava, inFire),
       };
       return { kind: "observed", danger: facts, evidence: { ...facts } };
     },
@@ -46,21 +78,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
         response: "escape_fire",
         scope: `cell:${origin}`,
         permissions: () => null,
-        facts: () => {
-          // This is exactly the primitive's search volume, including floor and head.
-          const cells: (number | null)[] = [];
-          for (let x = -FIRE_ESCAPE_RADIUS; x <= FIRE_ESCAPE_RADIUS; x++)
-            for (let z = -FIRE_ESCAPE_RADIUS; z <= FIRE_ESCAPE_RADIUS; z++)
-              for (let y = -2; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
-          return {
-            cells,
-            body: { inLava: isInLava(bot), inFire: isInFire(bot), onGround: bot.entity.onGround },
-            blocks: bot.inventory
-              .items()
-              .filter((item) => bot.registry.blocksByName[item.name])
-              .map((item) => ({ name: item.name, count: item.count })),
-          };
-        },
+        facts: () => fireEscapeFacts(bot),
       };
     },
     act: async (reason, signal) => {

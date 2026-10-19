@@ -14,11 +14,19 @@ type ScenarioResult = Awaited<ReturnType<MineAiScenario>>;
 type MinecraftRuntime = Awaited<ReturnType<typeof createMinecraftRuntime>>;
 
 const OBSIDIAN_ONE = { block_name: "obsidian", count: 1, scaffold: false };
+/** The next action from the water after the lava-escape scenario: east over the bank, 4 blocks past the water. */
+const WALK_EAST_FROM_WATER = { x: 6, y: -59, z: 0, range: 0 };
 
 function findCollectBlockAction(runtime: MinecraftRuntime) {
   const collect = runtime.actions.find((action) => action.name === "collect_block");
   if (!collect) throw new Error("Collect action missing");
   return collect;
+}
+
+function findNavigateAction(runtime: MinecraftRuntime) {
+  const navigate = runtime.actions.find((action) => action.name === "navigate");
+  if (!navigate) throw new Error("Navigate action missing");
+  return navigate;
 }
 
 function countObsidian(bot: ScenarioContext["bot"]): number {
@@ -124,8 +132,14 @@ async function runLavaEscape(
   }
   bot.off("physicsTick", inject);
   const result = await mining;
+  // Mode lava only: the body is left in the water, so the next action starts from there and must finish.
+  const walked =
+    !digObsidian && escaped >= 10 && bot.health > 0
+      ? await runtime.run(findNavigateAction(runtime), WALK_EAST_FROM_WATER, signal)
+      : null;
+  const walkSucceeded = digObsidian || walked?.result.status === "succeeded";
   return {
-    status: sawLava && escaped >= 10 && bot.health > 0 && !bot.targetDigBlock ? "succeeded" : "failed",
+    status: sawLava && escaped >= 10 && bot.health > 0 && !bot.targetDigBlock && walkSucceeded ? "succeeded" : "failed",
     detail: JSON.stringify({
       sawLava,
       injected,
@@ -135,6 +149,7 @@ async function runLavaEscape(
       lava: isInLava(bot),
       burning: isBurning(bot),
       mining: result?.result,
+      walked: walked?.result,
     }),
   };
 }
