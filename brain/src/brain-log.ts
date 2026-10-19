@@ -6,6 +6,7 @@ import type { ChatTurn } from "./chat-model.ts";
 import type { ConversationKind, EndReason, PlannedLength } from "./conversation/state.ts";
 import type { Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
+import type { RelationEvent, TradeEvent } from "./relations/types.ts";
 import type { ActivityTotal } from "./time-spent.ts";
 
 /**
@@ -118,6 +119,9 @@ export type BrainEvent =
     readonly minutes?: number;
     readonly gist?: string;
   }
+  /** A step of a trade, and a feeling the model set (spec 2026-10-19-relations-trading-design). */
+  | TradeEvent
+  | RelationEvent
   /** What it is doing now: the stack (top last), the step running, if any. */
   | { readonly kind: "state"; readonly stack: readonly StackEntry[]; readonly step: string | null }
   /** Written once when the brain starts: who the character is (the monitor's character card; the session starts here). */

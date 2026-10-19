@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConversationFacts, OpeningInput } from "../mind.ts";
 import { testPersona } from "../testing.ts";
-import { conversationBlock, describeOpening, openingSystemPrompt } from "./prompts.ts";
+import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./prompts.ts";
 
 const facts = (overrides: Partial<ConversationFacts> = {}): ConversationFacts => ({
   kind: "chance", others: ["Theo"], opener: "Ayla", topic: "the mine", planned: "short", lines: 2, minutes: 1, iAmOpener: true, sayGoodbye: false, lastGists: [], ...overrides,
@@ -56,4 +56,21 @@ test("a call is said to be shouted only where localized chat makes it so", () =>
 
 test("the opening prompt tells the model to name those it speaks to", () => {
   assert.match(openingSystemPrompt(testPersona()), /name those you speak to/iu);
+});
+
+test("the gist prompt asks for partners only when relations are given", () => {
+  const input = { persona: testPersona(), others: ["Theo"], topic: "iron", lines: [] };
+  assert.doesNotMatch(gistSystemPrompt(testPersona()), /partners/u);
+  assert.match(gistSystemPrompt(testPersona(), true), /"partners"/u);
+  assert.doesNotMatch(describeGist(input), /You and/u);
+  assert.match(describeGist({ ...input, relations: [{ name: "Theo", block: "You and Theo: friend (+2)." }] }), /You and Theo: friend \(\+2\)/u);
+});
+
+test("the opening shows the relation lines of those near", () => {
+  const input: OpeningInput = {
+    persona: testPersona(), kind: "social", near: [{ username: "Theo", distance: 3, lastTalk: null }], activity: "idle", lately: [], lastFailed: null, calling: false,
+    relations: ["You and Theo: friend (+2)."],
+  };
+  assert.match(describeOpening(input), /You and Theo: friend \(\+2\)/u);
+  assert.doesNotMatch(describeOpening({ ...input, relations: undefined }), /You and Theo/u);
 });

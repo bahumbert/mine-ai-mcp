@@ -1003,7 +1003,7 @@ test("the chat request carries the conversation block only inside a conversation
 test("sumUpConversation returns the gist", async () => {
   const { chat, mind } = scriptedMind();
   chat.reply({ gist: "Talked with Theo about the mine." });
-  assert.equal(await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [{ speaker: "Theo", text: "hi" }] }, signal), "Talked with Theo about the mine.");
+  assert.deepEqual(await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [{ speaker: "Theo", text: "hi" }] }, signal), { gist: "Talked with Theo about the mine.", partners: [] });
   assert.match(chat.requests[0]?.[1]?.content ?? "", /Theo: "hi"/u);
 });
 
@@ -1119,4 +1119,80 @@ test("a line that answers someone else is never claimed, even read as a greeting
   const input = { ...chatInput("sups boys ?", false), history: [{ speaker: "Bob", text: "Steve, did you restart?", to: ["Steve"], at: Date.now() }], claimEveryoneLine: () => (claims += 1) > 0 };
   assert.equal((await mind.chat(input, signal)).route, "ignore");
   assert.equal(claims, 0);
+});
+
+const TRADE = { action: "propose", give: [{ item: "oak_log", count: 5 }], get: [{ item: "bread", count: 3 }], first: "me" };
+const TALK = { spoken_to: ["Ayla"], asks: "", language: "English", say: "Deal?", route: "talk", request: "" };
+const withRelations = (tradeOn: boolean): ChatInput => ({ ...chatInput("Ayla, logs for bread?"), relations: { block: "Your relations:\nYou and Steve: friend (+2).", tradeOn } });
+
+test("chat reads a trade and shows the relations block", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...TALK, trade: TRADE });
+  const decision = await mind.chat(withRelations(true), signal);
+  assert.deepEqual(decision.trade, { action: "propose", give: [{ item: "oak_log", count: 5 }], get: [{ item: "bread", count: 3 }], first: "me" });
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /You and Steve: friend \(\+2\)/u);
+});
+
+test("a reply without trade still stands", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(TALK);
+  const decision = await mind.chat(withRelations(true), signal);
+  assert.equal(decision.say, "Deal?");
+  assert.equal("trade" in decision, false);
+});
+
+test("a malformed trade is dropped, the say is kept", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...TALK, trade: { ...TRADE, give: [{ item: "oak_log", count: 99 }] } });
+  const decision = await mind.chat(withRelations(true), signal);
+  assert.equal(decision.say, "Deal?");
+  assert.equal(decision.trade, undefined);
+});
+
+test("no trade paragraph and no trade read when tradeOn is false", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...TALK, trade: TRADE }, { ...TALK, trade: TRADE });
+  const off = await mind.chat(withRelations(false), signal);
+  assert.equal(off.trade, undefined);
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /"trade"/u);
+  await mind.chat(withRelations(true), signal);
+  assert.match(chat.requests[1]?.[0]?.content ?? "", /"trade"/u);
+});
+
+test("the gist returns the partners when relations are given", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 1, word: "friend", why: "fair", has: ["iron_ingot"], needs: [] }] });
+  const gist = await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "iron", lines: [], relations: [{ name: "Theo", block: "You and Theo: new." }] }, signal);
+  assert.equal(gist.gist, "Talked iron.");
+  assert.deepEqual(gist.partners, [{ name: "Theo", judged: { feeling: 1, word: "friend", why: "fair" }, has: ["iron_ingot"], needs: [] }]);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"partners"/u);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /You and Theo: new\./u);
+});
+
+test("the gist without relations asks no partners and returns []", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 3 }] });
+  const gist = await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "iron", lines: [] }, signal);
+  assert.deepEqual(gist, { gist: "Talked iron.", partners: [] });
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /partners/u);
+});
+
+test("judgeRelation parses the judgment, and a bad reply is null", async () => {
+  const { chat, mind } = scriptedMind();
+  const trade = { id: "t", partner: "Theo", give: [], get: [], first: "me" as const, state: "broken" as const, createdAt: 0, agreedAt: 0, gaveAt: 0, received: [], endedAt: 1, brokenBy: "them" as const, late: false, note: "they paid 0 of 5 iron_ingot" };
+  const input = { persona: testPersona(), partner: "Theo", block: "You and Theo: new.", trade };
+  chat.reply({ feeling: -2, word: "wary", why: "did not pay" }, { feeling: "lots" });
+  assert.deepEqual(await mind.judgeRelation(input, signal), { feeling: -2, word: "wary", why: "did not pay" });
+  assert.equal(await mind.judgeRelation(input, signal), null);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /they paid 0 of 5 iron_ingot/u);
+});
+
+test("the goal tier is told what it knows of the others only when there is something", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "mine iron" }, { objective: "mine iron" });
+  const input = { persona: testPersona({ goal: "build a base" }), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [] };
+  await mind.chooseObjective(input, signal);
+  assert.doesNotMatch(planner.requests[0]?.[1]?.content ?? "", /What you know of the others/u);
+  await mind.chooseObjective({ ...input, relations: ["You and Theo: friend (+2)."] }, signal);
+  assert.match(planner.requests[1]?.[1]?.content ?? "", /What you know of the others:\n- You and Theo: friend \(\+2\)\./u);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ChatLine, OpeningDecision } from "../mind.ts";
+import type { ChatLine, GistPartner, OpeningDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { ConversationBudget, ConversationController, maxConversations, type ControllerDeps, type ConversationEvent, type ConversationMemory } from "./controller.ts";
@@ -8,7 +8,7 @@ import { ConversationBudget, ConversationController, maxConversations, type Cont
 const signal = new AbortController().signal;
 const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "short", say: "Theo! How's the mine?" };
 
-function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"] } = {}) {
+function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"]; relations?: ControllerDeps["relations"] } = {}) {
   const { chat, mind: scripted } = scriptedMind();
   const mind = options.decision === undefined ? scripted : Object.assign(Object.create(scripted) as typeof scripted, { openConversation: async () => options.decision as OpeningDecision });
   const clock = { now: 1_000_000 };
@@ -19,7 +19,7 @@ function setup(options: { random?: number; budget?: ConversationBudget; modelFre
   const budget = options.budget ?? new ConversationBudget(2);
   const draw = { value: options.random ?? 0.1 };
   const controller = new ConversationController({
-    self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), talkRange: 64,
+    self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), ...(options.relations !== undefined && { relations: options.relations }), talkRange: 64,
     ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now,
     speak: (text, to, whisperTo, shout) => spoken.push({ text, to, whisperTo, shout }),
     journal: (event) => journal.push(event), memorize: (memory) => memories.push(memory), log: (line) => logs.push(line),
@@ -440,4 +440,35 @@ test("two controllers: both openings resolve before either line is heard, one op
   assert.equal(p.theo.controller.current?.opener, "Ayla");
   assert.equal(p.ayla.budget.active, 1);
   assert.equal(p.theo.budget.active, 0);
+});
+
+test("gist partners reach the book, and the gist prompt carries the records", async () => {
+  const ended: GistPartner[][] = [];
+  const t = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations: { blocksFor: (names) => names.map((name) => ({ name, block: `You and ${name}: new.` })), openingLines: () => [], ended: (partners) => ended.push([...partners]) } });
+  t.chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 1, word: "friend", why: "fair", has: ["iron_ingot"], needs: [] }] });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.clock.now += 5_000;
+  t.controller.said(true);
+  await t.controller.finished();
+  assert.deepEqual(ended, [[{ name: "Theo", judged: { feeling: 1, word: "friend", why: "fair" }, has: ["iron_ingot"], needs: [] }]]);
+  assert.match(t.chat.requests[0]?.[0]?.content ?? "", /"partners"/u);
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /You and Theo: new\./u);
+  assert.equal(t.memories[0]?.talk.gist, "Talked iron.");
+});
+
+test("a gist with no partners leaves the feelings alone, and the fallback gist never reaches the book", async () => {
+  const ended: GistPartner[][] = [];
+  const relations = { blocksFor: () => [], openingLines: () => [], ended: (partners: readonly GistPartner[]) => ended.push([...partners]) };
+  const plain = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations });
+  plain.chat.reply({ gist: "Talked iron." });
+  plain.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  plain.clock.now += 5_000;
+  plain.controller.said(true);
+  await plain.controller.finished();
+  assert.deepEqual(ended, [], "no partners in the reply");
+  const busy = setup({ modelFree: () => false, relations });
+  busy.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  busy.controller.said(true);
+  await busy.controller.finished();
+  assert.deepEqual(ended, [], "no model call, no judgment");
 });

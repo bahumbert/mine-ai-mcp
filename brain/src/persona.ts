@@ -128,6 +128,20 @@ export const personaSchema = z.strictObject({
       /** Vanilla servers (no localized chat): the distance a member may stay at (Manhattan). */
       stayingDistance: z.number().int().min(1).max(512).default(32),
     }).prefault({}),
+    /** Relationship records and trading between characters (spec 2026-10-19-relations-trading-design). */
+    relations: z.strictObject({
+      enabled: z.boolean().default(true),
+      /** Minutes after I hand my side over before an unpaid trade is broken. */
+      payBackMinutes: z.number().positive().max(1_440).default(10),
+      /** Minutes before an unanswered proposal is cancelled, and before "nobody has given yet" is told. */
+      startMinutes: z.number().positive().max(1_440).default(3),
+      /** A gain in the inventory may come from a partner at most this many blocks away (Manhattan). */
+      handoffDistance: z.number().int().min(1).max(64).default(4),
+      /** Minutes after which what a partner said it has or needs is forgotten. */
+      offersForgetMinutes: z.number().positive().max(10_080).default(60),
+      /** Trades open at once, one per partner. */
+      maxOpenTrades: z.number().int().min(1).max(20).default(3),
+    }).prefault({}),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
   models: z.strictObject({ chat: modelId.optional(), action: modelId.optional(), planner: modelId.optional() }).default({}),

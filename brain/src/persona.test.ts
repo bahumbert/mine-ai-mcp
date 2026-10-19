@@ -86,3 +86,12 @@ test("conversation settings default", () => {
   assert.deepEqual(personaSchema.parse({ ...base, settings: { conversation: { sociability: 0.6 } } }).settings.conversation, { ...defaults, sociability: 0.6 });
   assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { groupReplyJitterMs: [5, 1] } } }).success, false);
 });
+
+test("relations settings default", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const defaults = { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 };
+  assert.deepEqual(personaSchema.parse(base).settings.relations, defaults);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { payBackMinutes: 0 } } }).success, false);
+  assert.deepEqual(personaSchema.parse({ ...base, settings: { relations: { payBackMinutes: 20 } } }).settings.relations, { ...defaults, payBackMinutes: 20 });
+  assert.equal(personaSchema.parse({ ...base, settings: { relations: { enabled: false } } }).settings.relations.enabled, false);
+});

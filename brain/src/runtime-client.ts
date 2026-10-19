@@ -103,7 +103,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
   | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
-  | "tend_crops" | "use_bucket" | "raw_action";
+  | "tend_crops" | "use_bucket" | "pick_up_items" | "raw_action";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }

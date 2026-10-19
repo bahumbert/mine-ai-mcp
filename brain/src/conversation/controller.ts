@@ -1,7 +1,7 @@
 import type { BrainEvent } from "../brain-log.ts";
 import { namesWord } from "../llm-mind.ts";
 import type { Memory } from "../memory.ts";
-import type { ChatLine, ConversationFacts, Mind, Nearby, OpeningDecision, OpeningInput, PastTalk } from "../mind.ts";
+import type { ChatLine, ConversationFacts, GistPartner, Mind, Nearby, OpeningDecision, OpeningInput, PastTalk } from "../mind.ts";
 import type { Persona } from "../persona.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import {
@@ -41,6 +41,16 @@ export class ConversationBudget {
 export type ConversationEvent = Extract<BrainEvent, { kind: "conversation" }>;
 export type ConversationMemory = Extract<Memory, { kind: "conversation" }>;
 
+/** What the relations feature adds to a conversation (spec 2026-10-19-relations-trading-design): records in, judgments out. */
+export interface ConversationRelations {
+  /** Each named member's record text, given to the gist call (which then also judges them). */
+  readonly blocksFor: (names: readonly string[]) => readonly { readonly name: string; readonly block: string }[];
+  /** One line per nearby partner for an opening call. */
+  readonly openingLines: (names: readonly string[]) => readonly string[];
+  /** The gist's judgment of the members, once a gist call returned them. */
+  readonly ended: (partners: readonly GistPartner[]) => void;
+}
+
 export interface ControllerDeps {
   readonly self: string;
   readonly persona: Persona;
@@ -61,6 +71,8 @@ export interface ControllerDeps {
   readonly memorize: (memory: ConversationMemory) => void;
   readonly log: (line: string) => void;
   readonly history: () => readonly ChatLine[];
+  /** Absent: the feature is off, the gist and the opening are as before. */
+  readonly relations?: ConversationRelations;
 }
 
 export interface OpenFacts {
@@ -196,6 +208,7 @@ export class ConversationController {
     try {
       decision = await this.deps.mind.openConversation({
         persona: this.deps.persona, kind, near, activity: o.activity, lately: o.lately, lastFailed: o.lastFailed, calling,
+        ...(this.deps.relations !== undefined && { relations: this.deps.relations.openingLines(near.map((n) => n.username)) }),
       }, signal);
     } catch (error) {
       this.deps.budget.give();
@@ -299,8 +312,12 @@ export class ConversationController {
       return;
     }
     const stop = signal ?? new AbortController().signal;
-    const sumUp = (): Promise<void> => this.deps.mind.sumUpConversation({ persona: this.deps.persona, others, topic: c.topic, lines }, stop)
-      .then((gist) => finish(gist === "" ? fallback : gist), () => finish(fallback));
+    const { relations } = this.deps;
+    const sumUp = (): Promise<void> => this.deps.mind.sumUpConversation({ persona: this.deps.persona, others, topic: c.topic, lines, ...(relations !== undefined && { relations: relations.blocksFor(others) }) }, stop)
+      .then(({ gist, partners }) => {
+        finish(gist === "" ? fallback : gist);
+        if (partners.length > 0) relations?.ended(partners);
+      }, () => finish(fallback));
     let task: Promise<void>;
     if (this.deps.modelFree()) task = sumUp();
     else if (this.deps.waitForModel === undefined) {

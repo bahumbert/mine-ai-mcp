@@ -1643,3 +1643,104 @@ test("a bot that does not hear the greeting is no candidate: the one that heard 
   await sleep(300);
   assert.deepEqual([ayla.runtime.said, vex.runtime.said], [["Hey!"], []]);
 });
+
+const MIN = 60_000;
+const ACCEPT = { spoken_to: ["Ayla"], asks: "", language: "English", say: "Deal.", route: "talk", request: "", trade: { action: "accept", give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "me" } };
+
+/** A runtime with Theo two blocks away and 10 bread carried, for the trade tests. */
+function tradingRuntime(): FakeRuntime {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "bread", count: 10 }], players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }] };
+  return runtime;
+}
+
+/** The relation notes of the runtime, newest first, read back the way a restart does. */
+function savedRelations(runtime: FakeRuntime) {
+  return recall(runtime.notes.map((note) => note.context).reverse(), { places: 8, lately: 5, farms: 4, times: 3 }).relations;
+}
+
+test("work resumes after a trade hand-off", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await until(() => action.requests.length === 2, 4_000);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log/u, "the earlier objective's next step is asked for");
+  assert.equal(runtime.cancelled.length, 1, "its running step was set aside for the give");
+  assert.deepEqual(events.filter((event) => event.kind === "trade").map((event) => event.event), ["agreed", "gave"]);
+  const trade = savedRelations(runtime)[0]?.trades[0];
+  assert.deepEqual([trade?.state, trade?.first], ["i_gave", "me"]);
+  await until(() => agent.activity === "idle");
+});
+
+test("shelter keeps the trade due: a stop during the give drops the hand-off, the trade stays open and is given later, then broken at its deadline", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.drop_item = 100_000;
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT, { say: "Okay.", route: "stop", request: "" });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await agent.handle(say("Steve", "Ayla, stop"));
+  await until(() => runtime.cancelled.length === 1);
+  await sleep(100);
+  assert.equal(agent.activity, "idle");
+  assert.deepEqual([savedRelations(runtime)[0]?.trades[0]?.state, savedRelations(runtime)[0]?.trades[0]?.gaveAt], ["agreed", null], "the trade is still due");
+  delete runtime.durations.drop_item;
+  offset = 31_000;
+  await sleep(300);
+  assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "i_gave", "taken again later and given");
+  offset += 11 * MIN;
+  await sleep(300);
+  const broken = savedRelations(runtime)[0]?.trades[0];
+  assert.deepEqual([broken?.state, broken?.brokenBy], ["broken", "them"]);
+  clock.mock.restore();
+});
+
+test("a player's give_item request outside a trade is unchanged, and keeps no relation", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "give Steve 2 dirt" }, { say: "Here you go!" });
+  action.reply({ step: { skill: "give_item", player: "Steve", item: "dirt", count: 2 } }, { done: "Steve has 2 dirt" });
+  await agent.handle(say("Steve", "could you give me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(bodyCalls(runtime), ["navigate", "drop_item"]);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+test("a trade the checks refuse goes back to the chat tier once with the reason and is then not made", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  const unaffordable = { ...ACCEPT, say: "Deal, all my iron!", trade: { ...ACCEPT.trade, give: [{ item: "iron_ingot", count: 5 }], get: [{ item: "bread", count: 1 }] } };
+  chat.reply(unaffordable, { ...ACCEPT, say: "Sorry, I have none.", trade: undefined });
+  await agent.handle(say("Theo", "Ayla, bread for iron?"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Your relations:\nYou have not dealt with Theo before\./u);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /you carry 0 iron_ingot, not 5/u);
+  assert.deepEqual(runtime.said, ["Sorry, I have none."]);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+test("relations off: no relation block, no trade paragraph, no trade", async (t) => {
+  const runtime = tradingRuntime();
+  const persona = testPersona();
+  const { agent, chat } = agentFor(t, runtime, { settings: { ...persona.settings, relations: { ...persona.settings.relations, enabled: false } } });
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.said.length === 1);
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /"trade"/u);
+  assert.doesNotMatch(chat.requests[0]?.[1]?.content ?? "", /Your relations/u);
+  await sleep(100);
+  assert.deepEqual(bodyCalls(runtime), []);
+  assert.deepEqual(savedRelations(runtime), []);
+});

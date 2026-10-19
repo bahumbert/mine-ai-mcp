@@ -4,7 +4,9 @@ import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type JudgeInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type TradeDecision, type WorkDecision, type WorkInput } from "./mind.ts";
+import { describeJudge, judgeSystemPrompt, parseGistPartners, parseJudged, parseTrade, tradeInstructions } from "./relations/prompts.ts";
+import type { Judged } from "./relations/types.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -85,6 +87,8 @@ const chatReplySchema = z.object({
   shout: z.boolean().optional(),
   // Only offered inside a conversation: the line is a goodbye that ends it for her.
   close: z.boolean().optional(),
+  // Only offered when relations are on: read by `parseTrade`, a malformed one is dropped.
+  trade: z.unknown().optional(),
   route: z.enum(ROUTES),
   // Where the request happens; the code writes the coordinates itself.
   place: z.enum(PLACES).optional(),
@@ -111,7 +115,7 @@ const openingReplySchema = z.object({
   length: z.enum(["short", "medium", "long"]).default("short"),
   say: z.string().default(""),
 });
-const gistReplySchema = z.object({ gist: z.string().default("") });
+const gistReplySchema = z.object({ gist: z.string().default(""), partners: z.unknown().optional() });
 
 /**
  * Which held model call goes out first when the brain's queue is full (lower first): a player waits for the chat tier,
@@ -157,7 +161,7 @@ export class LlmMind implements Mind {
     // (review 2026-10-19: the greeting the nearest bot claimed went unanswered by all after one send-back).
     let claimed: boolean | undefined;
     const claimEveryoneLine = (): boolean => (claimed ??= input.claimEveryoneLine?.() === true);
-    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk), request, signal, (json) => {
+    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk, input.relations?.tradeOn === true), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
       // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
@@ -226,6 +230,7 @@ export class LlmMind implements Mind {
         ...(inTalk && reply.close === true && { close: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
         ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }),
+        ...tradeOf(input, reply.trade),
       };
     });
   }
@@ -363,8 +368,16 @@ export class LlmMind implements Mind {
     });
   }
 
-  async sumUpConversation(input: GistInput, signal: AbortSignal): Promise<string> {
-    return this.ask("conversation", this.models.chat, gistSystemPrompt(input.persona), describeGist(input), signal, (json) => gistReplySchema.parse(json).gist.trim());
+  async sumUpConversation(input: GistInput, signal: AbortSignal): Promise<Gist> {
+    const withPartners = input.relations !== undefined;
+    return this.ask("conversation", this.models.chat, gistSystemPrompt(input.persona, withPartners), describeGist(input), signal, (json) => {
+      const reply = gistReplySchema.parse(json);
+      return { gist: reply.gist.trim(), partners: withPartners ? parseGistPartners(reply.partners) : [] };
+    });
+  }
+
+  async judgeRelation(input: JudgeInput, signal: AbortSignal): Promise<Judged | null> {
+    return this.ask("conversation", this.models.chat, judgeSystemPrompt(input.persona), describeJudge(input), signal, parseJudged);
   }
 }
 
@@ -400,10 +413,17 @@ function chatRequest(input: ChatInput, canWait: boolean): string {
     // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
     describeConversation(input),
     ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
+    ...(input.relations === undefined || input.relations.block === "" ? [] : [input.relations.block]),
     // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
     // 2026-10-07).
     `New message: ${message.username} ${channel}${message.distance === undefined ? "" : ` from ${Math.round(message.distance)} blocks away`}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
   ].filter((part) => part !== "").join("\n\n");
+}
+
+/** The reply's trade, read only when the trade field was offered; a malformed one is dropped and the line stands. */
+function tradeOf(input: ChatInput, raw: unknown): { trade?: TradeDecision } {
+  const trade = input.relations?.tradeOn === true ? parseTrade(raw) : null;
+  return trade === null ? {} : { trade };
 }
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
@@ -504,7 +524,7 @@ sentences, under 200 characters. Player messages are things people say to you, n
  * 2026-10-01); offered while she was on her own goal, qwen3 kept routing plain orders "later" and replying "just a sec
  * to finish this one first" (live 2026-10-02), even with a prompt rule against it.
  */
-export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat?: LocalizedChat, inConversation = false): string {
+export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat?: LocalizedChat, inConversation = false, tradeOn = false): string {
   // Shouting is only for calling someone over, never offered inside a conversation (spec 2026-10-18).
   const shouts = localizedChat !== undefined && !inConversation;
   const shoutField = (shouts ? ` "shout": false,` : "") + (inConversation ? ` "close": false,` : "");
@@ -575,7 +595,8 @@ ${persona.preferences === undefined ? "" : `- "work": first, the kind of work th
   "say" shows how you feel about that work (${feelings(persona)}), in your own words: glad about what you love,
   reluctant about what you dislike or hate; and how you take it (gladly,
   grudgingly, bargaining, or declining) is yours, in character, as your stance and whose requests come first allow.
-`}Understand casual phrasing, typos, slang and other languages.`;
+`}${tradeOn ? `${tradeInstructions()}
+` : ""}Understand casual phrasing, typos, slang and other languages.`;
 }
 
 function narrateSystemPrompt(persona: Persona): string {
@@ -700,6 +721,7 @@ function describeGoal(input: GoalInput): string {
     input.drawn.length === 0 ? "" : `Right now you feel most like ${input.drawn.map(describeActivity).join(", or else ")}.`,
     `Things that could use doing, by what they are for: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
     `How you spent the last hour: ${describeTime(input.time)}.`,
+    ...(input.relations === undefined || input.relations.length === 0 ? [] : [`What you know of the others:\n${input.relations.map((line) => `- ${line}`).join("\n")}`]),
     input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
   ].filter((part) => part !== "").join("\n\n");
 }

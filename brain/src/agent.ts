@@ -15,7 +15,10 @@ import { namesWord, type LocalizedChat } from "./llm-mind.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatInput, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
+import { AgentRelations } from "./relations/agent-relations.ts";
+import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
+import { describeHandoff, type Handoff } from "./relations/handoff.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -225,6 +228,10 @@ export class Agent {
 
   /** Its conversations; null when the brain runs without them. */
   private readonly talks: ConversationController | null;
+  /** Its relations and trades (spec 2026-10-19-relations-trading-design); null when `settings.relations.enabled` is false. */
+  private readonly relations: AgentRelations | null;
+  /** The items the running step is out to get: what it gains is its own work, never a partner's payment. */
+  private stepYields: ReadonlySet<string> = new Set();
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
@@ -240,6 +247,12 @@ export class Agent {
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
     const { conversations, persona, localizedChat } = options;
+    this.relations = !persona.settings.relations.enabled ? null : new AgentRelations({
+      persona, mind: options.mind, runtime: options.runtime, body: this.body, takeHandoff: (h) => this.takeHandoff(h),
+      modelSlotFree: conversations?.modelFree ?? (() => true), inConversationWith: (name) => this.talks?.isMember(name) === true,
+      lacks: (inventory) => describeLacks(this.stack.at(-1)?.wanted ?? [], inventory ?? this.lastLook?.inventory ?? []),
+      journal: (event) => options.journal?.(event), log: (line) => options.log(line),
+    });
     this.talks = conversations === undefined ? null : new ConversationController({
       self: persona.username,
       persona,
@@ -256,6 +269,7 @@ export class Agent {
       memorize: (talk) => this.memorize(talk),
       log: (line) => options.log(line),
       history: () => this.history,
+      ...(this.relations !== null && { relations: this.relations.forConversations() }),
     });
   }
 
@@ -309,6 +323,7 @@ export class Agent {
             // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
+            this.relations?.trades.heardLine(message.username, Date.now());
             if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
             this.inbox.push(message);
             this.wakeChat?.();
@@ -319,6 +334,7 @@ export class Agent {
           unreadable = true;
         }
         this.lookAtConversations();
+        this.relations?.look(this.stepYields, new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [work.objective.handoff.tradeId])), signal);
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -367,11 +383,14 @@ export class Agent {
     if (!(await this.conversationGate(message, heard, named))) return;
     let decision;
     let conversation;
+    let snapshot: BotSnapshot;
     try {
-      const snapshot = await this.options.runtime.status();
+      snapshot = await this.options.runtime.status();
       conversation = this.talks?.facts();
       const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
-      decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }) }, this.runSignal);
+      const input: ChatInput = { persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+      decision = await mind.chat(input, this.runSignal);
+      if (this.relations !== null && decision.trade !== undefined) decision = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal });
     } catch (error) {
       log(`chat tier failed on "${message.message}": ${String(error)}`);
       return;
@@ -413,6 +432,7 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
+    if (decision.trade !== undefined) await this.relations?.decided(decision, message.username, snapshot);
     if (conversation !== undefined) this.spokeInConversation(decision);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
@@ -569,6 +589,33 @@ export class Agent {
     this.wake?.();
   }
 
+  /** A trade's hand-off goes on top of what it does, like an order that takes the body; its own decision, so no authority is asked. */
+  private takeHandoff(h: Handoff): void {
+    this.stack.at(-1)?.step?.abort();
+    this.sheltering?.abort();
+    const objective = { text: describeHandoff(h), requester: null, purpose: null, handoff: h };
+    this.stack.push(newWork(objective));
+    this.journalObjective("taken", objective);
+    this.wake?.();
+  }
+
+  /** The step of a hand-off objective: the routine in relations/handoff.ts; a stop or a shelter drops it and the trade stays due. */
+  private async handoffStep(work: Work, h: Handoff): Promise<void> {
+    const { runtime, persona } = this.options;
+    const controller = new AbortController();
+    work.step = controller;
+    this.journalState(describeHandoff(h));
+    let end = { outcome: "dropped", detail: "" };
+    try {
+      end = await this.relations!.runHandoff(h, { runtime, body: this.body, signal: AbortSignal.any([controller.signal, this.runSignal]), self: persona.username });
+    } finally {
+      work.step = null;
+      this.journalState(null);
+    }
+    if (end.outcome !== "dropped") this.finish(work, end.outcome === "done" ? "done" : "failed", end.detail);
+    else if (this.stack.includes(work)) this.stack.splice(this.stack.indexOf(work), 1);
+  }
+
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
   private queue(objective: Objective, whisperTo: string | null = null): void {
     const work = newWork(objective, whisperTo);
@@ -681,7 +728,7 @@ export class Agent {
     const chances = activityChances(availableActivities(personaSkills(persona), snapshot, this.partners()), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
     const opportunities = await this.opportunities(snapshot, drawn);
-    const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
+    const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}${purpose === null ? " (no kind of work named for it)" : ` (for ${purpose})`}`);
@@ -694,6 +741,7 @@ export class Agent {
   /** Takes one step towards `work`: one model call, then the chosen skill. */
   private async advance(work: Work): Promise<void> {
     const { persona, mind, runtime, log } = this.options;
+    if (work.objective.handoff !== undefined) return this.handoffStep(work, work.objective.handoff);
     if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     if (work.objective.requester === null && work.objective.purpose === "socialising") return this.socialiseStep(work);
@@ -748,6 +796,7 @@ export class Agent {
     };
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
+    this.stepYields = itemsYieldedBy(decision.step);
     try {
       result = await runStep(decision.step, {
         runtime,
@@ -783,6 +832,7 @@ export class Agent {
     } finally {
       gain.stop();
       work.step = null;
+      this.stepYields = new Set();
       this.body.onAction = null;
     }
     const ended = Date.now();
@@ -1258,6 +1308,7 @@ export class Agent {
       this.lately.push(...recalled.lately);
       this.farms.push(...recalled.farms);
       this.talks?.recalled(recalled.conversations);
+      this.relations?.load(recalled);
       for (const time of recalled.times) this.spent(time, false);
       this.building.unfinished = recalled.unfinished;
       this.savedUnfinished = JSON.stringify(recalled.unfinished);

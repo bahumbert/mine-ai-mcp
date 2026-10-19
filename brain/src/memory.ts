@@ -5,6 +5,8 @@ import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
 import type { EndReason } from "./conversation/state.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
+import { describeRelation, relationNote, relationSchema } from "./relations/record.ts";
+import type { Relation } from "./relations/types.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 
 /**
@@ -34,7 +36,9 @@ export type Memory =
   /** One finished step's activity and time (spec 2026-10-03-specialisations-preferences): the time per activity. */
   | { readonly kind: "activity_time"; readonly time: ActivityTime }
   /** A finished conversation (spec 2026-10-18-conversations-design): `members` are the others, not the character. */
-  | { readonly kind: "conversation"; readonly talk: PastConversation };
+  | { readonly kind: "conversation"; readonly talk: PastConversation }
+  /** What this character knows of one partner (spec 2026-10-19-relations-trading-design): one note per partner, replaced on change. */
+  | { readonly kind: "relation"; readonly relation: Relation };
 
 export interface PastConversation {
   readonly id: string;
@@ -60,7 +64,16 @@ export interface Recalled {
   readonly farms: readonly KnownFarm[];
   /** Oldest first. */
   readonly times: readonly ActivityTime[];
+  /** One per partner (the newest note wins), most recently dealt first, at most {@link RELATIONS_RECALLED}. */
+  readonly relations: readonly Relation[];
+  /** Relation notes that did not parse (the agent logs them). */
+  readonly skipped: number;
 }
+
+/** The most relation notes read back. */
+const RELATIONS_RECALLED = 30;
+/** Relation notes read by the query: room for a stale duplicate of each partner. */
+const RELATION_NOTES_READ = 2 * RELATIONS_RECALLED;
 
 /** How many of each kind are read back; the agent keeps no more than this in its prompts anyway. */
 export interface RecallLimits {
@@ -72,7 +85,7 @@ export interface RecallLimits {
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time", "conversation"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time", "conversation", "relation:"] as const;
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
@@ -118,11 +131,14 @@ const memorySchema = z.discriminatedUnion("kind", [
       reason: z.enum(["goodbye", "out_of_range", "silence", "cap", "taken_over"]),
     }),
   }),
+  z.object({ kind: z.literal("relation"), relation: relationSchema }),
 ]);
 
 /** The note and context `note_save` stores for one memory. */
 export function memoryNote(memory: Memory): { readonly note: string; readonly context: string } {
-  return { note: describe(memory), context: `${PREFIX}: ${memory.kind} ${JSON.stringify(memory)}` };
+  // A relation's context names its partner (`relation:Theo`), so the book finds the old note of that partner to replace.
+  const kind = memory.kind === "relation" ? relationNote(memory.relation).context : memory.kind;
+  return { note: describe(memory), context: `${PREFIX}: ${kind} ${JSON.stringify(memory)}` };
 }
 
 function describe(memory: Memory): string {
@@ -140,6 +156,7 @@ function describe(memory: Memory): string {
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
     }
     case "conversation": return `I talked with ${memory.talk.members.join(", ")} about ${memory.talk.topic}: ${memory.talk.gist} (${memory.talk.endedAt}).`;
+    case "relation": return describeRelation(memory.relation, memory.relation.partner, memory.relation.lastDealt);
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }
 }
@@ -150,12 +167,13 @@ function describe(memory: Memory): string {
  */
 export function recallQuery(username: string, limits: RecallLimits): string {
   const latest = (kind: (typeof KINDS)[number], limit: number) => {
-    const prefix = `${PREFIX}: ${kind} `;
+    // "relation:" is followed by the partner's name, the other kinds by a space.
+    const prefix = `${PREFIX}: ${kind}${kind === "relation:" ? "" : " "}`;
     return `SELECT * FROM (SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
       `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC LIMIT ${limit})`;
   };
   // A farm is noted at every tend: read enough notes to find the latest of each of the farms kept.
-  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times), latest("conversation", CONVERSATIONS_RECALLED)].join(" UNION ALL ")} ORDER BY note_id DESC`;
+  return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times), latest("conversation", CONVERSATIONS_RECALLED), latest("relation:", RELATION_NOTES_READ)].join(" UNION ALL ")} ORDER BY note_id DESC`;
 }
 
 /** Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. */
@@ -166,9 +184,15 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
   const farms = new Map<string, KnownFarm>();
   const times: ActivityTime[] = [];
   const conversations: Recalled["conversations"][number][] = [];
+  const relations = new Map<string, Relation>();
+  let skipped = 0;
   for (const context of contexts) {
     const memory = parse(context);
-    if (memory === null) continue;
+    if (memory === null) {
+      if (context.startsWith(`${PREFIX}: relation:`)) skipped += 1;
+      continue;
+    }
+    if (memory.kind === "relation" && !relations.has(memory.relation.partner.toLowerCase())) relations.set(memory.relation.partner.toLowerCase(), memory.relation);
     if (memory.kind === "place" && !places.has(memory.place.name) && places.size < limits.places) places.set(memory.place.name, memory.place);
     if (memory.kind === "own_objective" && lately.length < limits.lately) lately.push(memory.outcome);
     if (memory.kind === "unfinished_house" && unfinished === undefined) unfinished = memory.house;
@@ -182,7 +206,8 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
       conversations.push({ members, topic, gist, endedAt });
     }
   }
-  return { conversations, places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse() };
+  const recent = [...relations.values()].sort((a, b) => b.lastDealt - a.lastDealt).slice(0, RELATIONS_RECALLED);
+  return { conversations, places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse(), relations: recent, skipped };
 }
 
 function parse(context: string): Memory | null {
@@ -194,6 +219,18 @@ function parse(context: string): Memory | null {
   } catch {
     return null;
   }
+}
+
+/** What the context of every relation note of this partner starts with. */
+export function relationContextPrefix(partner: string): string {
+  return `${PREFIX}: relation:${partner} `;
+}
+
+/** This bot's relation notes of one partner, newest first, as `note_id` and `context` (a name is letters, digits and underscores). */
+export function relationNotesQuery(username: string, partner: string): string {
+  const prefix = relationContextPrefix(partner);
+  return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
+    `AND substr(context, 1, ${prefix.length}) = '${prefix.replaceAll("'", "''")}' ORDER BY note_id DESC`;
 }
 
 /** This bot's activity-time notes, newest first, as `note_id` and `context` (for {@link staleActivityNotes}). */

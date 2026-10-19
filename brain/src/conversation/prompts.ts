@@ -38,6 +38,7 @@ export function describeOpening(input: OpeningInput, localizedChat?: LocalizedCh
     `${input.calling ? "You want to call over" : "Near you"}:\n${input.near.map(describeNearby).join("\n")}`,
     `You are doing: ${input.activity}.`,
     ...(input.lately.length === 0 ? [] : [`Lately:\n${input.lately.slice(-3).map((line) => `- ${line}`).join("\n")}`]),
+    ...(input.relations === undefined || input.relations.length === 0 ? [] : [`What you know of them:\n${input.relations.map((line) => `- ${line}`).join("\n")}`]),
     ...(input.lastFailed === null ? [] : [`Your last objective "${input.lastFailed.objective}" failed: ${input.lastFailed.reason}.`]),
     ...(input.calling ? [localizedChat === undefined ? "calling: they are out of earshot, your line is plain talk and may not reach them." : "calling: they are out of earshot, your line is shouted to call them over."] : []),
     input.kind === "social" ? "You chose to go and talk with them." : "You meet them while you work.",
@@ -62,14 +63,18 @@ export function conversationBlock(facts: ConversationFacts): string {
   return `This conversation:\n${lines.join("\n")}`;
 }
 
-export function gistSystemPrompt(persona: Persona): string {
+export function gistSystemPrompt(persona: Persona, withPartners = false): string {
   return `${personaPrompt(persona)}
 
 A conversation you were in has ended. Sum it up for your memory in one sentence, first person: what was talked about and anything agreed (who does what for whom).
-Reply with only a JSON object {"gist": "..."}.`;
+${withPartners ? `Then say how you feel about each of the others now, from what you know of them and what they said and did, and note what they said they have or need.
+Reply with only a JSON object {"gist": "...", "partners": [{"name": "...", "feeling": 0, "word": "...", "why": "...", "has": ["item_id"], "needs": ["item_id"]}]}.
+- "feeling": a whole number from -3 (dislike, distrust) to +3 (fondness, trust); 0 is neutral. "word": one word. "why": one sentence in your own words.
+- "has" and "needs": Minecraft item ids they said they have or need in this conversation; [] when they said none.` : `Reply with only a JSON object {"gist": "..."}.`}`;
 }
 
 export function describeGist(input: GistInput): string {
   const lines = input.lines.map((line) => `${line.speaker}: ${JSON.stringify(line.text)}`).join("\n");
-  return `You talked with ${input.others.join(", ")}${input.topic === "" ? "" : ` about ${input.topic}`}.\n\nWhat was said:\n${lines === "" ? "(nothing)" : lines}`;
+  const known = (input.relations ?? []).map((r) => r.block).join("\n");
+  return `You talked with ${input.others.join(", ")}${input.topic === "" ? "" : ` about ${input.topic}`}.\n\n${known === "" ? "" : `What you knew of them:\n${known}\n\n`}What was said:\n${lines === "" ? "(nothing)" : lines}`;
 }

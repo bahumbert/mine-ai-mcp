@@ -76,6 +76,8 @@ export class FakeRuntime implements BotRuntime {
   fuels: Readonly<Record<string, number>> = { coal: 8, charcoal: 8, oak_planks: 1.5, spruce_planks: 1.5, oak_log: 1.5, spruce_log: 1.5, stick: 0.5 };
   /** Successful `collect_block`, `craft_item` and `smelt_item` calls change the snapshot's inventory. */
   simulateInventory = false;
+  /** Dropped items on the ground a successful `pick_up_items` takes (with `simulateInventory`), by item. */
+  groundItems: { item: string; count: number }[] = [];
   /** Every foreground call, plus chat lines as `send_message` (they do not take the body). */
   readonly submitted: { readonly tool: ForegroundTool | "send_message" | "protect_region" | "unprotect_region"; readonly input: Readonly<Record<string, unknown>> }[] = [];
   readonly cancelled: string[] = [];
@@ -404,6 +406,10 @@ export class FakeRuntime implements BotRuntime {
       if (input.x !== undefined) this.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "air");
       this.addItem(FAKE_DROPS[block] ?? block, Number(input.count ?? 1));
     }
+    if (tool === "pick_up_items") {
+      for (const dropped of this.groundItems.filter((g) => input.item === undefined || g.item === input.item)) this.addItem(dropped.item, dropped.count);
+      this.groundItems = this.groundItems.filter((g) => input.item !== undefined && g.item !== input.item);
+    }
     if (tool === "collect_mob_drop") this.addItem(String(input.drop_name), Number(input.count ?? 1));
     if (tool === "use_bucket") {
       const full = `${String(input.liquid ?? "water")}_bucket`;
@@ -486,7 +492,7 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 } },
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 }, relations: { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 } },
     models: {},
     ...overrides,
   };
