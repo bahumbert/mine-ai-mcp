@@ -12,7 +12,7 @@ const MAX_COUNT = 64;
 /** The chat system prompt's trade paragraph: the field and its mechanics, no rule on whom to trust or what to accept. */
 export function tradeInstructions(): string {
   return `- "trade": optional, after "route": only when your line proposes, accepts, declines or cancels a swap of items with someone: {"action": "propose" | "accept" | "decline" | "cancel", "give": [{"item": "oak_log", "count": 5}], "get": [{"item": "bread", "count": 3}], "first": "me" | "them"}.
-  "give" is what you hand over and "get" what you receive: item ids (as in "Inventory") with counts of 1 to 64, at most ${MAX_SIDE_ENTRIES} entries each. "first" says who hands over first, you or them. A gift is "get": []. Say your offer in "say", in your own words: a trade exists only once both of you agreed in talk, and "accept" answers a "propose" you heard.
+  "give" is what you hand over and "get" what you receive: item ids (as in "Inventory") with counts of 1 to 64, at most ${MAX_SIDE_ENTRIES} entries each. "first" says who hands over first, you or them. A gift is "get": []. Say your offer in "say", in your own words: a trade exists only once both of you agreed in talk. If you agree to an offer you heard in someone's line, answer "accept" with the terms from your side: "give" is what they ask of you and "get" is what they offer you. "propose" is only for an offer of your own, or a counter-offer with different terms.
   You may refuse, ask for something else back, or ask them to give first; that is your choice, from what you know of them ("You and <name>" tells what you have been through together). Trade what you can spare: what your current objective lacks is listed, and you cannot hand over what you do not carry. Items are handed over by the one who gives; the other's side is seen arriving in their inventory. What was agreed and not paid is a broken promise you will remember.
   Leave "trade" out when your line is no part of a swap.`;
 }
@@ -70,7 +70,7 @@ export function judgeSystemPrompt(persona: Persona): string {
 
 A trade with someone has ended. Judge how you feel about them now, in character: what you know of them and what happened.
 Reply with only a JSON object {"feeling": 0, "word": "...", "why": "..."}.
-- "feeling": a whole number from -3 (dislike, distrust) to +3 (fondness, trust); 0 is neutral.
+- "feeling": a whole number from -3 (dislike, distrust) to +3 (fondness, trust); 0 is neutral. How far it moves from what you felt is your own, from your traits: a forgiving character moves less (a little, or not at all), a resentful or grudge-holding one more (several steps).
 - "word": one word for how you see them. "why": one sentence, in your own words.`;
 }
 

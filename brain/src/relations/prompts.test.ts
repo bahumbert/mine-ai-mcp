@@ -47,6 +47,22 @@ test("tradeInstructions give the tools and no rule on whom to trust", () => {
   assert.doesNotMatch(text, /(always|never)[^.\n]*trust|trust[^.\n]*(always|never)/iu);
 });
 
+test("tradeInstructions say that agreeing to an offer heard in a line is accept, with the terms from my side", () => {
+  const text = tradeInstructions();
+  assert.match(text, /agree[^.\n]*offer[^.\n]*(heard|line)[^.\n]*"accept"/iu);
+  assert.match(text, /"give"[^.\n]*what they ask of you[^.\n]*"get"[^.\n]*what they offer/iu);
+  assert.match(text, /"propose"[^.\n]*(only|your own)[^.\n]*counter/iu);
+  assert.doesNotMatch(text, /answers a "propose" you heard/u, "the model hears chat lines, never a propose");
+});
+
+test("the judge prompt says how far the feeling moves is the character's own, from its traits", () => {
+  const text = judgeSystemPrompt(testPersona());
+  assert.match(text, /how (far|much)[^.\n]*(moves|changes)[^.\n]*(your own|traits)/iu);
+  assert.match(text, /forgiving[^.\n]*less/iu);
+  assert.match(text, /resentful[^.\n]*more/iu);
+  assert.doesNotMatch(text, /(always|never)[^.\n]*trust|trust[^.\n]*(always|never)/iu);
+});
+
 test("parseGistPartners keeps good entries and drops bad ones", () => {
   const parsed = parseGistPartners([
     { name: "Theo", feeling: 2, word: "friend", why: "paid back", has: ["iron_ingot"], needs: ["white_wool"] },
