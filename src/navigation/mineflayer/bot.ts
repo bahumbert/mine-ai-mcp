@@ -52,6 +52,7 @@ import {
   type Position3,
   type WorldView,
 } from "../world/world.js";
+import { longestBreakDurationMs } from "./break-duration.js";
 import { CLIMBABLES, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
 
 const NETHER_VINES = new Set(["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"]);
@@ -124,6 +125,8 @@ export interface MineflayerBotSurface {
   look?(yaw: number, pitch: number, force?: boolean): Promise<void>;
   bucketDrop?(target: BlockPosition, signal: AbortSignal): Promise<boolean>;
   stopDigging(): void;
+  /** The longest the body can take to dig the block at `position` with the item type `toolType`; see `longestBreakDurationMs`. Optional so fakes need no change. */
+  longestBreakDurationMs?(position: Position3, toolType: number | null): number | null;
   /** Place against a face. The port has already aimed; the surface must not re-aim. */
   placementObstacle(position: Position3): string | null;
   placeBlock(support: unknown, face: Position3): Promise<void>;
@@ -202,6 +205,7 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
       );
     },
     stopDigging: () => bot.stopDigging(),
+    longestBreakDurationMs: (position, toolType) => longestBreakDurationMs(bot, position, toolType),
     placementObstacle: (position) => occupiedCell(bot, position),
     placeBlock: (support, face) => placeWithoutLooking(bot, support as WorldBlock, new Vec3(face.x, face.y, face.z)),
     activateBlock: (target) => bot.activateBlock(block(target)),
@@ -686,6 +690,9 @@ export class MineflayerBot implements NavigationBot {
     return null;
   }
 
+  longestBreakDurationMs(operation: Extract<PlannedOperation, { kind: "break" }>): number | null {
+    return this.bot.longestBreakDurationMs?.(operation.position, operation.toolType) ?? null;
+  }
   startEffect(
     operation: Exclude<PlannedOperation, { kind: "move" }>,
     _token: AttemptToken,

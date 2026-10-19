@@ -38,6 +38,14 @@ import { SupportedPositionController } from "./supported-position-controller.js"
 
 export type StepDecision = "continue" | "goal_satisfied" | "goal_revised";
 
+/** The least time the server gets to confirm an effect, however cheap the plan priced it. */
+const MINIMUM_CONFIRMATION_MS = 5_000;
+
+/** The longest the body can take to dig a break operation from its state now (0 for any other operation, an unloaded block or a bot that cannot tell). */
+function longestDigTime(bot: NavigationBot, operation: PlannedOperation): number {
+  return operation.kind === "break" ? (bot.longestBreakDurationMs?.(operation) ?? 0) : 0;
+}
+
 export type RouteExecutionResult =
   | {
       readonly kind: "exhausted";
@@ -377,6 +385,8 @@ export class RouteExecutor {
           ];
     // Each brought block takes a fall and a second swing beyond the dig time.
     const settling = operation.kind === "break" ? operation.brings.length * 3_000 : 0;
+    const { bot } = this.request.context;
+    const plannedMs = step.cost.expectedTicks * 50;
     const opened = operation.kind === "activate" ? this.request.passages.closedAt(position) : null;
     this.#state = { kind: "awaiting_effect", stepIndex, operationIndex, token };
     this.request.phase(step, "confirming");
@@ -385,8 +395,10 @@ export class RouteExecutor {
       token,
       operation,
       targets,
-      // Scale confirmation to the work, including the falling column.
-      deadlineMs: Date.now() + Math.max(5_000, step.cost.expectedTicks * 50 * 2) + settling,
+      // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
+      // it plans, so a body hovering in water over a solid cell is priced as standing and digs 25 times slower), and the
+      // falling column.
+      deadlineMs: Date.now() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);
