@@ -35,3 +35,25 @@ export function advancingLavaAt(bot: Bot, position = bot.entity.position, source
       }
   return false;
 }
+
+/** World-age ticks between two steps of lava spreading: the Nether's lava flows 3 times as fast as the Overworld's. */
+export function lavaFlowDelayTicks(bot: Bot): number {
+  return bot.game.dimension === "the_nether" ? 10 : 30;
+}
+
+/**
+ * Did a block update change lava (it was lava, or became lava, with another state) within `radius` cells of the body
+ * horizontally and two cells above or below it? The volume is the one the fire reflex scans.
+ */
+export function lavaChangedNear(
+  bot: Bot,
+  before: ReturnType<Bot["blockAt"]>,
+  after: ReturnType<Bot["blockAt"]>,
+  radius: number,
+): boolean {
+  const cell = (after ?? before)?.position;
+  if (!cell || before?.stateId === after?.stateId) return false;
+  if (before?.name !== "lava" && after?.name !== "lava") return false;
+  const origin = bot.entity.position.floored();
+  return Math.abs(cell.x - origin.x) <= radius && Math.abs(cell.z - origin.z) <= radius && Math.abs(cell.y - origin.y) <= 2;
+}
