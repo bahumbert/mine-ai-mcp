@@ -229,8 +229,7 @@ export class LlmMind implements Mind {
         ...(this.localizedChat !== undefined && !inTalk && reply.shout === true && { shout: true }),
         ...(inTalk && reply.close === true && { close: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
-        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }),
-        ...tradeOf(input, reply.trade),
+        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...tradeOf(input, reply.trade),
       };
     });
   }

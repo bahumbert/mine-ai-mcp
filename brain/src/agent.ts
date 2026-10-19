@@ -446,15 +446,17 @@ export class Agent {
       return;
     }
     if (routed === "act") this.take(asked, whisperTo);
-    if (routed === "later") {
-      // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
-      // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
-      // only waits behind work done for someone.
-      const top = this.stack.at(-1);
-      const objective = asked;
-      if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
-      else this.queue(objective, whisperTo);
-    }
+    if (routed === "later") this.takeAfterOwnGoal(asked, whisperTo);
+  }
+
+  /** A "later" request: taken at once over the character's own goal, queued behind work done for someone. */
+  private takeAfterOwnGoal(objective: Objective, whisperTo: string | null): void {
+    // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
+    // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
+    // only waits behind work done for someone.
+    const top = this.stack.at(-1);
+    if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
+    else this.queue(objective, whisperTo);
   }
 
   /** Whether the message's speaker went on, or in a conversation any member spoke, since it was taken (its reply answers a state that is gone). */
@@ -616,6 +618,17 @@ export class Agent {
     else if (this.stack.includes(work)) this.stack.splice(this.stack.indexOf(work), 1);
   }
 
+  /** The step runs: its controller stops it, and the items it is out to get are its own work, never a partner's payment. */
+  private startStep(work: Work, controller: AbortController, step: Step): void {
+    work.step = controller;
+    this.stepYields = itemsYieldedBy(step);
+  }
+
+  private endStep(work: Work): void {
+    work.step = null;
+    this.stepYields = new Set();
+  }
+
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
   private queue(objective: Objective, whisperTo: string | null = null): void {
     const work = newWork(objective, whisperTo);
@@ -634,7 +647,7 @@ export class Agent {
       const work = this.stack.at(-1);
       try {
         if (await this.shelterIfNight(work)) continue;
-        if (work !== undefined) await this.advance(work);
+        if (work !== undefined) await (work.objective.handoff === undefined ? this.advance(work) : this.handoffStep(work, work.objective.handoff));
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
         repeated = { error: "", count: 0 };
       } catch (error) {
@@ -741,7 +754,6 @@ export class Agent {
   /** Takes one step towards `work`: one model call, then the chosen skill. */
   private async advance(work: Work): Promise<void> {
     const { persona, mind, runtime, log } = this.options;
-    if (work.objective.handoff !== undefined) return this.handoffStep(work, work.objective.handoff);
     if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     if (work.objective.requester === null && work.objective.purpose === "socialising") return this.socialiseStep(work);
@@ -779,7 +791,7 @@ export class Agent {
     const label = describeStep(decision.step);
     log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
     const controller = new AbortController();
-    work.step = controller;
+    this.startStep(work, controller, decision.step);
     this.journalState(label);
     const started = Date.now();
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
@@ -796,7 +808,6 @@ export class Agent {
     };
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
-    this.stepYields = itemsYieldedBy(decision.step);
     try {
       result = await runStep(decision.step, {
         runtime,
@@ -831,8 +842,7 @@ export class Agent {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       gain.stop();
-      work.step = null;
-      this.stepYields = new Set();
+      this.endStep(work);
       this.body.onAction = null;
     }
     const ended = Date.now();
