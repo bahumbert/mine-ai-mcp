@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { outranksReflex } from "../survival/control/priority.js";
-import { BodyAbort, type BodyAbortCause, type Continuation } from "./abort.js";
+import { BodyAbort, type BodyAbortCause, type Continuation, type ReflexLimitKind } from "./abort.js";
 import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.js";
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
 import type { ToolSnapshot } from "../world/tool-tiers.js";
 import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
 import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
+import { measured, message, outcomes, refusal } from "./runner-outcomes.js";
+import { watchBodyOwner, type BodyLimitHit, type BodyWatchOptions } from "./body-watch.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -64,6 +66,12 @@ export interface ActionRunnerOptions {
    * turns physics back on where the bot is, so the stopped action can settle before the body is released.
    */
   readonly onPhysicsStall?: (action: string) => void;
+  /**
+   * Called once when a reflex claim runs into one of its limits (no physics tick, its ceiling, no progress), after its
+   * signal is aborted. Default: `onPhysicsStall` for `physics_stalled`, nothing else. The runtime records the
+   * incident and turns physics back on where the bot is.
+   */
+  readonly onBodyLimit?: (owner: string, limit: ReflexLimitKind) => void;
   /** The stall watch's clock (default monotonic); tests step it by hand. */
   readonly clock?: StallClock;
   /** Counts the failures of movement actions against a bot that does not move; unset: no watch. */
@@ -72,23 +80,6 @@ export interface ActionRunnerOptions {
   readonly pinnedEscape?: PinnedEscape;
   /** How this bot's routes ended: a movement action's failure counts toward `pinned` only when its route failed; unset: none does. */
   readonly routes?: RouteOutcomes;
-}
-
-// ── Reported outcomes ────────────────────────────────────────────────────────
-
-const outcomes = {
-  actionBusy: (activeAction: { action: string; startedAt: string }) =>
-    `[ACTION_BUSY] ${activeAction.action} has been running since ${activeAction.startedAt}; no new action started.`,
-  invalidArguments: (cause: unknown) => `[INVALID_ARGUMENTS] ${message(cause)}`,
-  executionError: message,
-  physicsStalled: (action: string, stalledMs: number) =>
-    `[RUNTIME_PHYSICS_STALLED] ${action} owned the body for ${Math.round(stalledMs / 1000)} s with no physics tick; it was stopped, physics restarted where it stands, and the body released.`,
-  cancelledWithoutTicks: (action: string, reason: string) =>
-    `${reason} (${action} did not stop: no physics tick since the cancel; the body was released and the next action may start)`,
-} as const;
-
-function message(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
 }
 
 export interface ActionRunnerStatus {
@@ -105,6 +96,16 @@ export type ForegroundCancellation =
       readonly reason: string;
     }
   | { readonly kind: "idle"; readonly reason: string };
+
+/**
+ * What a reflex claim is held to besides the physics-stall limit, on the wall clock: the longest it may hold the body,
+ * and how long `progressMarks()` (a count that rises when the reflex makes progress) may stay unchanged.
+ */
+export interface ClaimLimits {
+  readonly ceilingMs: number;
+  readonly noProgressMs: number;
+  readonly progressMarks: () => number;
+}
 
 /** What a reflex reports when it releases the body. */
 export interface ClaimSettlement<Value> {
@@ -192,27 +193,6 @@ function activeAction(action: string): ActiveAction {
   };
 }
 
-/** A request that never reached the bot: nothing ran, so nothing was spent. */
-function refusal<Name extends string, Result extends ActionResult>(
-  action: Name,
-  error: string,
-): ActionOutput<Name, Result> {
-  const result: RuntimeFailure = { kind: "runtime_failure", status: "failed", error };
-  return { action, durationMs: 0, result };
-}
-
-function measured<Name extends string, Result extends ActionResult>(
-  action: Name,
-  startedAtMs: number,
-  result: Result | RuntimeFailure,
-  interruptions: readonly string[] = [],
-): ActionOutput<Name, Result> {
-  // The wall clock can step back (WSL resyncing its clock, live 2026-10-07): a negative duration failed the output
-  // schema and every view_status call with it.
-  const output: ActionOutput<Name, Result> = { action, durationMs: Math.max(0, Date.now() - startedAtMs), result };
-  return interruptions.length > 0 ? { ...output, interruptions: [...interruptions] } : output;
-}
-
 export class ActionRunner {
   readonly #highlighter: BlockHighlighter | undefined;
   readonly #position: () => ProgressPosition | null;
@@ -222,6 +202,7 @@ export class ActionRunner {
   readonly #cancelGraceMs: number;
   readonly #physicsExpected: () => boolean;
   readonly #onPhysicsStall: (action: string) => void;
+  readonly #onBodyLimit: (owner: string, limit: ReflexLimitKind) => void;
   readonly #clock: StallClock;
   readonly #pinned: PinnedWatch | undefined;
   readonly #pinnedEscape: PinnedEscape | undefined;
@@ -243,6 +224,7 @@ export class ActionRunner {
     this.#cancelGraceMs = options.cancelGraceMs ?? 5_000;
     this.#physicsExpected = options.physicsExpected ?? (() => true);
     this.#onPhysicsStall = options.onPhysicsStall ?? (() => {});
+    this.#onBodyLimit = options.onBodyLimit ?? ((owner, limit) => { if (limit === "physics_stalled") this.#onPhysicsStall(owner); });
     this.#clock = options.clock ?? MONOTONIC_CLOCK;
     this.#pinned = options.pinned;
     this.#pinnedEscape = options.pinnedEscape;
@@ -255,55 +237,35 @@ export class ActionRunner {
     this.#lastPhysicsTickAt = this.#clock.now();
   }
 
+  /** What every watch of this runner shares; the caller adds its limits and what a limit does. */
+  #bodyWatch(owner: string, signal: AbortSignal, controller: AbortController): Pick<BodyWatchOptions, "owner" | "signal" | "controller" | "clock" | "cancelGraceMs" | "lastPhysicsTickAt" | "physicsExpected" | "cancelledWithoutTicks"> {
+    return {
+      owner, signal, controller,
+      clock: this.#clock,
+      cancelGraceMs: this.#cancelGraceMs,
+      lastPhysicsTickAt: () => this.#lastPhysicsTickAt,
+      physicsExpected: this.#physicsExpected,
+      cancelledWithoutTicks: outcomes.cancelledWithoutTicks,
+    };
+  }
+
   /**
-   * Settles with `run`, or earlier when the action owns the body and no physics tick comes: a cancelled action is given
-   * up on after the grace, any action after the stall limit (live run 14: twelve bots left mounted at sea never ticked
-   * again, their navigate never returned and ignored its cancel). A stalled action is stopped (its controller aborted)
-   * and physics is restarted through `onPhysicsStall`; it then has the cancel grace to settle on the returning ticks
-   * before the body is released (run 14b: left running, the old navigate held the navigation for good). Clock only,
-   * monotonic: every limit that waits for a tick is blind in exactly this case.
+   * An action that owns the body is held to the physics-stall limit (`watchBodyOwner`); unset limit: no watch. A
+   * stalled or unstoppable action ends as a failure that names why, whatever its own run does after.
    */
-  #watchPhysics<Value>(action: string, signal: AbortSignal, controller: AbortController, run: Promise<Value | RuntimeFailure>): Promise<Value | RuntimeFailure> {
+  async #watchPhysics<Value>(action: string, signal: AbortSignal, controller: AbortController, run: Promise<Value | RuntimeFailure>): Promise<Value | RuntimeFailure> {
     const stallMs = this.#physicsStallMs;
     if (stallMs === undefined) return run;
-    const clock = this.#clock;
-    const startedAt = clock.now();
-    let cancelledAt: number | null = null;
-    let stalled: { readonly failure: RuntimeFailure; readonly at: number } | null = null;
-    return new Promise((resolve, reject) => {
-      const settle = (value: Value | RuntimeFailure) => {
-        stop();
-        resolve(value);
-      };
-      const stop = clock.every(() => {
-        const now = clock.now();
-        if (stalled !== null) {
-          if (now - stalled.at >= this.#cancelGraceMs) settle(stalled.failure);
-          return;
-        }
-        if (signal.aborted && cancelledAt === null) cancelledAt = now;
-        const lastTick = Math.max(this.#lastPhysicsTickAt, startedAt);
-        if (cancelledAt !== null && now - Math.max(lastTick, cancelledAt) >= this.#cancelGraceMs) {
-          const reason = signal.reason instanceof Error ? signal.reason.message : "cancelled";
-          settle({ kind: "runtime_failure", status: "cancelled", error: outcomes.cancelledWithoutTicks(action, reason) });
-        } else if (now - lastTick >= stallMs && this.#physicsExpected()) {
-          const error = outcomes.physicsStalled(action, now - lastTick);
-          stalled = { failure: { kind: "runtime_failure", status: "failed", error }, at: now };
-          controller.abort(new BodyAbort({ kind: "cancelled", by: "runtime" }, error));
-          this.#onPhysicsStall(action);
-        }
-      }, Math.max(10, Math.min(250, Math.floor(stallMs / 4))));
-      run.then(
-        (value) => settle(stalled?.failure ?? value),
-        (cause: unknown) => {
-          if (stalled !== null) settle(stalled.failure);
-          else {
-            stop();
-            reject(cause);
-          }
-        },
-      );
+    const end = await watchBodyOwner(run, {
+      ...this.#bodyWatch(action, signal, controller),
+      stallMs,
+      abortFor: (_limit, elapsedMs) => new BodyAbort({ kind: "cancelled", by: "runtime" }, outcomes.physicsStalled(action, elapsedMs)),
+      onLimit: () => this.#onPhysicsStall(action),
     });
+    if (end.hit) return { kind: "runtime_failure", status: "failed", error: end.hit.abort.message };
+    if (end.kind === "threw") throw end.cause;
+    if (end.kind === "settled") return end.value;
+    return { kind: "runtime_failure", status: "cancelled", error: end.cancelled ?? "cancelled" };
   }
 
   #currentAction(): ActiveAction | null {
@@ -638,6 +600,7 @@ export class ActionRunner {
     reason: string,
     work: (signal: AbortSignal) => Promise<ClaimSettlement<Value>>,
     releaseAfterAdmission?: () => void,
+    limits?: ClaimLimits,
   ): BodyClaim<Value> => {
     if (this.#connection.signal.aborted) return { kind: "closed", cause: { kind: "connection_lost" } };
     const interrupted = this.#currentAction();
@@ -675,50 +638,86 @@ export class ActionRunner {
     }
     this.#ownershipChanged();
 
-    const outcome = (async () => {
-      try {
-        // Admission must precede release. This may terminate a navigation
-        // cleanup that needs the successor to establish a landing, but cannot steer.
-        let releaseFailure: { cause: unknown } | null = null;
-        try {
-          if (interrupted) releaseAfterAdmission?.();
-        } catch (cause) {
-          releaseFailure = { cause };
-        }
-        const settlement = await this.#whileConnected(async () => {
-          if (interrupted) await interrupted.settled;
-          this.#connection.signal.throwIfAborted();
-          // A higher owner may already be reserved while this one releases.
-          if (this.#currentAction() === takeover) this.#state = { kind: "takeover", action: takeover };
-          this.#ownershipChanged();
-          if (releaseFailure) throw releaseFailure.cause;
-          return work(AbortSignal.any([takeover.controller.signal, this.#connection.signal]));
-        });
-        const aborted = takeover.controller.signal.reason;
-        settleContinuation(
-          aborted instanceof BodyAbort && aborted.detail.kind === "dimension_changed"
-            ? { kind: "resume" }
-            : settlement.continuation,
-        );
-        return settlement.value;
-      } catch (cause) {
-        const aborted = takeover.controller.signal.reason;
-        settleContinuation(
-          aborted instanceof BodyAbort && aborted.detail.kind === "dimension_changed"
-            ? { kind: "resume" }
-            : { kind: "return", reason: null },
-        );
-        throw cause;
-      } finally {
-        if (this.#state.kind === "takeover" && this.#state.action === takeover) this.#state = { kind: "idle" };
-        takeover.settle();
-        takeover.released = true;
-        this.#ownershipChanged();
-      }
-    })();
-
+    const outcome = this.#runClaim(takeover, interrupted, work, settleContinuation, releaseAfterAdmission, limits);
     return { kind: "claimed", interrupted: interrupted?.metadata ?? null, outcome };
   };
+
+  /** A claim is held to the physics-stall limit and to the limits its reflex asked for; none given: no watch. */
+  #claimWatch(takeover: ActiveAction, signal: AbortSignal, limits: ClaimLimits | undefined): BodyWatchOptions {
+    const owner = takeover.metadata.action;
+    return {
+      ...this.#bodyWatch(owner, signal, takeover.controller),
+      stallMs: this.#physicsStallMs,
+      ceilingMs: limits?.ceilingMs,
+      noProgress: limits && { ms: limits.noProgressMs, marks: limits.progressMarks },
+      abandon: this.#connection.signal,
+      abortFor: (limit, elapsedMs) => new BodyAbort(
+        { kind: "reflex_limit", reflex: owner, limit, elapsedMs },
+        limit === "physics_stalled" ? outcomes.physicsStalled(owner, elapsedMs) : outcomes.reflexLimit(owner, limit, elapsedMs),
+      ),
+      onLimit: (hit) => this.#onBodyLimit(owner, hit.limit),
+    };
+  }
+
+  /**
+   * The physical side of a claim: wait for the interrupted owner to release, run `work` with the body, settle the
+   * interrupted request's continuation, release the body. The claim's own bookkeeping stays in `claim`.
+   */
+  async #runClaim<Value>(
+    takeover: ActiveAction,
+    interrupted: ActiveAction | null,
+    work: (signal: AbortSignal) => Promise<ClaimSettlement<Value>>,
+    settleContinuation: (result: Continuation) => void,
+    releaseAfterAdmission?: () => void,
+    limits?: ClaimLimits,
+  ): Promise<Value> {
+    // Assigned inside the connection race and read in the catch below: a holder, so the compiler does not narrow it to null.
+    const watched: { hit: BodyLimitHit | null } = { hit: null };
+    try {
+      // Admission must precede release. This may terminate a navigation
+      // cleanup that needs the successor to establish a landing, but cannot steer.
+      let releaseFailure: { cause: unknown } | null = null;
+      try {
+        if (interrupted) releaseAfterAdmission?.();
+      } catch (cause) {
+        releaseFailure = { cause };
+      }
+      const settlement = await this.#whileConnected(async () => {
+        if (interrupted) await interrupted.settled;
+        this.#connection.signal.throwIfAborted();
+        // A higher owner may already be reserved while this one releases.
+        if (this.#currentAction() === takeover) this.#state = { kind: "takeover", action: takeover };
+        this.#ownershipChanged();
+        if (releaseFailure) throw releaseFailure.cause;
+        const signal = AbortSignal.any([takeover.controller.signal, this.#connection.signal]);
+        const end = await watchBodyOwner((async () => work(signal))(), this.#claimWatch(takeover, signal, limits));
+        watched.hit = end.hit;
+        if (end.kind === "settled") return end.value;
+        // A work that did not stop is left to finish: its late settle changes no state (the body is released below).
+        throw end.kind === "threw" ? end.cause : (end.hit?.abort ?? signal.reason);
+      });
+      const aborted = takeover.controller.signal.reason;
+      settleContinuation(
+        aborted instanceof BodyAbort && aborted.detail.kind === "dimension_changed"
+          ? { kind: "resume" }
+          : settlement.continuation,
+      );
+      return settlement.value;
+    } catch (cause) {
+      const aborted = takeover.controller.signal.reason;
+      settleContinuation(
+        aborted instanceof BodyAbort && aborted.detail.kind === "dimension_changed"
+          ? { kind: "resume" }
+          : { kind: "return", reason: watched.hit?.abort.message ?? null },
+      );
+      throw cause;
+    } finally {
+      if (this.#state.kind === "takeover" && this.#state.action === takeover) this.#state = { kind: "idle" };
+      takeover.settle();
+      takeover.released = true;
+      this.#ownershipChanged();
+    }
+  }
 
   requestContext() {
     return {

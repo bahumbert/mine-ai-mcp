@@ -263,3 +263,40 @@ test("a physics stall is captured with the mount, the server's passenger lists a
   assert.match(text, /"trigger":"physics_stalled".*"action":"navigate".*"vehicleId":null/);
   await observer.close();
 });
+
+// SRV-01: a reflex that held the body past its ceiling or without progress is released; the incident says which and who.
+test("a reflex that hit its limit is captured with the reflex and the limit", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bot = Object.assign(new EventEmitter(), {
+    version: "1.21.4",
+    health: 20,
+    registry: { entitiesByName: { player: { metadataKeys: [] } } },
+    game: { dimension: "overworld" },
+    entity: { id: 5, position: new Vec3(0.5, 62.96, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, yaw: 0, pitch: 0, metadata: [], vehicle: null as unknown },
+    vehicle: null as unknown,
+    entities: {},
+    inventory: { slots: [] },
+    _client: new EventEmitter(),
+    getControlState: () => false,
+  });
+  const references: IncidentReference[] = [];
+  const observer = observeIncidents(bot as unknown as Bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
+    directory,
+    identity: { worldId: "test" },
+    published: (reference) => references.push(reference),
+    owner: () => ({
+      requestId: 3,
+      precedingRequestId: null,
+      session: { owner: "takeover", busy: true, activeAction: { action: "breath_reflex", startedAt: "test" } },
+      combat: { targetId: null, position: null },
+    }),
+  });
+  observer.reflexLimit("breath_reflex", "no_progress");
+  await observer.recorder.flush();
+  assert.equal(references[0]?.trigger, "reflex_limit");
+  const artifact = references[0]!.artifact;
+  if (artifact.kind !== "written") return assert.fail("not written");
+  assert.match(await readFile(artifact.path, "utf8"), /"trigger":"reflex_limit".*"reflex":"breath_reflex".*"limit":"no_progress"/);
+  await observer.close();
+});

@@ -34,6 +34,7 @@ import { ExecutionScope, observeExecution } from "../execution/execution-scope.j
 import { createNavigationRuntime, RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
 import type { StepFieldProvider } from "../navigation/step-field.js";
 import { ActionRunner, type ActionRunnerStatus } from "../session/action-runner.js";
+import type { ReflexLimitKind } from "../session/abort.js";
 import { createPinnedEscape } from "../session/pinned-escape.js";
 import { PinnedWatch } from "../session/pinned-watch.js";
 import { attachIdleWaterControl } from "../survival/baseline/idle-water.js";
@@ -303,12 +304,19 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
   }
 }
 
+/** What the runner records into the incident log when it stops a body owner. */
+interface BodyIncidents {
+  physicsStalled: (action: string) => void;
+  reflexLimit: (reflex: string, limit: ReflexLimitKind) => void;
+}
+
 /**
  * `routesAsEscape` reaches the navigation built after the runner, which needs it only once a pinned bot escapes.
  * The action runner and the body observations it reads: physics ticks (the stall watch's clock), server repositions,
- * and the vehicle the server lets her off. A stall is recorded and physics turned back on where she is (run 14b).
+ * and the vehicle the server lets her off. A stall or a reflex limit is recorded and physics turned
+ * back on where she is (run 14b).
  */
-function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, recordStall: (action: string) => void): { readonly runner: ActionRunner; readonly routes: RouteOutcomes } {
+function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, record: BodyIncidents): { readonly runner: ActionRunner; readonly routes: RouteOutcomes } {
   const position = () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null;
@@ -324,7 +332,13 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
     physicsStallMs: PHYSICS_STALL_MS,
     physicsExpected: () => currentVehicle(bot) === null,
     onPhysicsStall: (action) => {
-      recordStall(action);
+      record.physicsStalled(action);
+      recoverPhysics(bot);
+    },
+    // A reflex held to a limit: the same recovery as a stalled action, and an incident that names the reflex and the limit.
+    onBodyLimit: (owner, limit) => {
+      if (limit === "physics_stalled") record.physicsStalled(owner);
+      else record.reflexLimit(owner, limit);
       recoverPhysics(bot);
     },
     tools: () => snapshotTools(bot),
@@ -367,8 +381,9 @@ export async function createMinecraftRuntime(
   setProtectedRegionsProvider(bot, () => protectedRegions.list());
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
   // Set once the incident observer exists: no action, so no stall, comes before the runtime is built.
-  let recordStall: (action: string) => void = () => {};
-  const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, (action) => recordStall(action));
+  // The incident observer is built after the runner and reads it: the runner records through this until it exists.
+  const bodyIncidents: BodyIncidents = { physicsStalled: () => {}, reflexLimit: () => {} };
+  const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, bodyIncidents);
   const reflexes = resources.use(new ReflexDriver(bot, runner));
   const navigation = resources.use(createNavigationRuntime(bot, { routes }));
   installMinecraftKnowledge(botData, bot.registry);
@@ -419,7 +434,8 @@ export async function createMinecraftRuntime(
     }),
     (observer) => observer.close(),
   );
-  recordStall = incidents.physicsStalled;
+  bodyIncidents.physicsStalled = incidents.physicsStalled;
+  bodyIncidents.reflexLimit = incidents.reflexLimit;
   resources.use(
     attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation, (receipt) =>
       incidents.recorder.record("survival_receipt", { receipt }),

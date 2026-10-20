@@ -13,6 +13,7 @@ export const bodyAbortCauseSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("connection_lost") }),
   z.strictObject({ kind: z.literal("death") }),
   z.strictObject({ kind: z.literal("dimension_changed"), from: z.string(), to: z.string() }),
+  z.strictObject({ kind: z.literal("reflex_limit"), reflex: z.string(), limit: z.enum(["physics_stalled", "ceiling", "no_progress"]), elapsedMs: z.number() }),
 ]);
 
 export const requestSchema = z.strictObject({
