@@ -1,0 +1,60 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-at-sea-two-boats-then-navigate
+tags: [regression]
+description: >-
+  Run 16, Cleo (backlog 76): the get-off wrote the shift as player_input, which a 1.21.4 server does not read for a
+  get-off; with a second boat carried nothing broke the boat she left, so the server kept her seated while her client
+  walked free, and the next navigate failed "could not put the boat in the water here". The first navigate rides out
+  onto a 100-block sea and stays at sea in its boat with one more boat carried; the second must reach the far land
+  and end with both boats carried.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea three deep and 100 long, 81 wide, from the bot's shore (x 0) to the far land (x 101).
+  - fill: { block: water, from: [ 1, -63, -40 ], to: [ 100, -61, 40 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 2
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  actions:
+    # The ride ends at the target (40 blocks out, open water): it succeeds afloat in its boat and stays at sea.
+    - { action: navigate, input: { x: 40, y: -61, z: 0, range: 2 } }
+    - { action: navigate, input: { x: 105, y: -60, z: 0, range: 2 } }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: reach
+      who: Rower
+      pos: [ 105.5, -60, 0.5 ]
+      radius: 3.0
+    - kind: hasItem
+      who: Rower
+      item: oak_boat
+      count: 2
+    - kind: completion
+      who: Rower

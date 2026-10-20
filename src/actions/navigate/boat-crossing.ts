@@ -8,8 +8,8 @@
  * Mineflayer's `moveVehicle` only sends key presses, so the moves are sent here, at a boat's speed. Facts from the
  * 2026-10-04 prototype on 1.21.4: the boat is placed by `use_item` with the look aimed at the water 2.5 blocks or more
  * out (closer, it would touch the shore and is not placed); moves into the shore are refused ("moved wrongly"); the
- * server lets a passenger off on the `player_input` shift flag and tells her nothing (run 14b, Mine Labs 2026-10-17),
- * so the get-off ends with the vehicle forgotten and physics resumed here ({@link getOff}).
+ * server lets a passenger off on the shift it reads from `entity_action` and tells her nothing (run 14b, Mine Labs
+ * 2026-10-17), so the get-off ends with the vehicle forgotten and physics resumed ({@link getOff}, in boat-get-off.ts).
  */
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -18,8 +18,8 @@ import { Vec3 } from "vec3";
 import type { MineflayerBlock } from "../../navigation/index.js";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
+import { getOff } from "./boat-get-off.js";
 import { waitForWorldAge } from "../../world/world-age.js";
-import { currentVehicle, forgetVehicle, letsHerOff, resumePhysics } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
 const BOAT_STEP = 0.35;
@@ -36,6 +36,8 @@ const LANDING_SEARCH = 48;
 const DROP_REACH = 10;
 /** How far along the straight way the water is looked for. */
 const LINE_REACH = 160;
+/** How far from where she stands a boat is still hers to break: the one she got off. */
+export const BOAT_REACH = 6;
 
 export interface DeepWaterLine {
   /** The last dry surface column before the deep water, where the boat goes in; null when the bot is already on it. */
@@ -159,7 +161,7 @@ function boatsCarried(bot: Bot): number {
 export const isBoatEntity = (entity: Entity | null | undefined): boolean =>
   entity?.name !== undefined && (entity.name.endsWith("_boat") || entity.name.endsWith("_raft") || entity.name === "boat");
 
-function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: Entity) => boolean = () => true): Entity | null {
+export function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (entity: Entity) => boolean = () => true): Entity | null {
   const boats = Object.values(bot.entities).filter((entity) =>
     entity !== bot.entity && isBoatEntity(entity) && entity.position.distanceTo(around) <= within && accept(entity));
   boats.sort((a, b) => a.position.distanceTo(around) - b.position.distanceTo(around));
@@ -205,7 +207,7 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   }
   const { answered } = await getOff(bot, timing.getOffWallMs === undefined ? {} : { wallMs: timing.getOffWallMs });
 
-  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), 6), signal);
+  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), BOAT_REACH), signal);
   const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
   const seated = answered ? "" : "; the server did not answer the get-off, she may still be seated in the boat";
@@ -284,7 +286,7 @@ async function launchBoat(bot: Bot, item: Item, heading: { readonly x: number; r
     // Put in the water: a new boat by her, or one boat fewer carried (live 2026-10-07 on a modded server: the count
     // never dropped while her inventory was misread, and the boat placed went unseen).
     const appeared = nearestBoat(bot, bot.entity.position, 6, (entity) => !known.has(entity.id));
-    const boat = appeared ?? (boatsCarried(bot) < before ? nearestBoat(bot, bot.entity.position, 6) : null);
+    const boat = appeared ?? (boatsCarried(bot) < before ? nearestBoat(bot, bot.entity.position, BOAT_REACH) : null);
     if (boat !== null) return boat;
   }
   return null;
@@ -409,86 +411,6 @@ class BoatRide {
   }
 }
 
-/** Longest a get-off holds shift on the wall clock (a server far behind answers in seconds; a stopped one never does). */
-const DISMOUNT_WALL_MS = 15_000;
-/** Server ticks that pass after the shift before the server is taken to have handled it. */
-const DISMOUNT_SERVER_TICKS = 40;
-
-/**
- * Shift down or up, which is what lets a passenger off a boat. Mineflayer's `dismount` sends the jump input instead,
- * which only a horse reads: the server kept the bot in its boat (run 14) while the client forgot the vehicle, and
- * Mineflayer, which switches physics off at a mount and back on only at a server position, never ticked again.
- */
-function pressShift(bot: Bot, down: boolean): void {
-  if (bot.supportFeature("newPlayerInputPacket")) bot._client.write("player_input", { inputs: { shift: down } });
-  else bot._client.write("entity_action", { entityId: bot.entity.id, actionId: down ? 0 : 1, jumpBoost: 0 });
-}
-
-/**
- * Off the vehicle she rides, physics on again; returns it, and whether a server answered. A vanilla 1.21.4 server lets
- * her off on the shift and tells her nothing: no position, and its passenger list goes only to the other players (Mine
- * Labs 2026-10-17, the server put her down where her next route started). So shift is held for the whole wait (a
- * server behind by seconds, run 14b: 3 to 8 s, can read a short press and its release in one tick and keep her
- * riding), or until another server answers (her boat's passenger list without her, the boat gone, a position); then
- * the vehicle is forgotten and physics resumed, unless a position did it (run 14b: eight bots froze after a get-off
- * without this).
- */
-export async function getOff(bot: Bot, options: { readonly wallMs?: number } = {}): Promise<{ readonly vehicle: Entity | null; readonly answered: boolean }> {
-  const vehicle = currentVehicle(bot);
-  let repositioned = false;
-  let answered = false;
-  let died = false;
-  const done = () => {
-    answered = true;
-  };
-  const onPosition = () => {
-    repositioned = true;
-    done();
-  };
-  const onPassengers = (packet: { readonly entityId: number; readonly passengers: readonly number[] }) => {
-    if (letsHerOff(bot, vehicle, packet)) done();
-  };
-  const onGone = (entity: Entity) => {
-    if (vehicle !== null && entity.id === vehicle.id) done();
-  };
-  const onDeath = () => {
-    died = true;
-  };
-  bot.once("dismount", done);
-  bot.once("forcedMove", onPosition);
-  bot.on("entityGone", onGone);
-  bot.once("death", onDeath);
-  bot.once("respawn", onDeath);
-  bot._client.on("set_passengers", onPassengers);
-  let ended: Awaited<ReturnType<typeof waitForWorldAge>>;
-  try {
-    pressShift(bot, true);
-    ended = await waitForWorldAge(bot, DISMOUNT_SERVER_TICKS, { wallMs: options.wallMs ?? DISMOUNT_WALL_MS, until: () => answered || died || currentVehicle(bot) === null });
-  } finally {
-    bot.off("dismount", done);
-    bot.off("forcedMove", onPosition);
-    bot.off("entityGone", onGone);
-    bot.off("death", onDeath);
-    bot.off("respawn", onDeath);
-    bot._client.off("set_passengers", onPassengers);
-    pressShift(bot, false);
-  }
-  // A death or respawn ends it here: the respawn brings its own position and physics.
-  if (died) return { vehicle, answered: false };
-  // Already forgotten when the runtime's vehicle watch saw the answer first: it resumed physics too.
-  if (forgetVehicle(bot) !== null && !repositioned) resumePhysics(bot);
-  // The world age moved past the shift (or an answer came): the server handled it. Only the wall clock leaves it unknown.
-  return { vehicle, answered: answered || ended !== "timeout" };
-}
-
-/**
- * Gets off the boat she rides (the next movement after a ride that stayed at sea starts here) and returns it, as
- * {@link getOff} does.
- */
-export async function leaveBoat(bot: Bot): Promise<Entity | null> {
-  return (await getOff(bot)).vehicle;
-}
-
 /**
  * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when a boat is carried
  * after.
@@ -523,6 +445,16 @@ export function boatUnderFeetAtSea(bot: Bot, justLeft?: Entity | null): Entity |
   const [x, z] = [Math.floor(boat.position.x), Math.floor(boat.position.z)];
   const surface = waterSurface(bot, x, z, Math.floor(feet.y));
   return surface !== null && isDeepOpenWater((wx, wy, wz) => isWater(bot, wx, wy, wz), x, surface, z) ? boat : null;
+}
+
+/**
+ * The boat to break after a get-off: the one she just left while it is within reach, whatever she carries (live
+ * 2026-10-19, Cleo: with a second boat carried nothing broke the one she left, and the server kept her seated); else a
+ * boat under her feet at sea ({@link boatUnderFeetAtSea}).
+ */
+export function boatToTakeBack(bot: Bot, justLeft: Entity | null): Entity | null {
+  const stillThere = justLeft !== null && bot.entities[justLeft.id] !== undefined && justLeft.position.distanceTo(bot.entity.position) <= BOAT_REACH;
+  return stillThere ? justLeft : boatUnderFeetAtSea(bot, justLeft);
 }
 
 /**

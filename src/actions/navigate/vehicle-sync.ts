@@ -40,7 +40,7 @@ export function forgetVehicle(bot: Bot): Entity | null {
 }
 
 /** Marks of a teleport id the server never sent: it ignores the confirmation. */
-const NO_TELEPORT = 2_147_483_647;
+export const NO_TELEPORT = 2_147_483_647;
 
 /**
  * Switches Mineflayer's physics back on where the bot stands. Physics is off from a mount until the server sends a
