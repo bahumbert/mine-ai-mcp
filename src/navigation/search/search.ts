@@ -368,6 +368,8 @@ export class IncrementalSearch {
   #cancelled = false;
   /** Set the first time a timeout finds nothing worth walking, so that checkpoint is reported once. */
   #unavailablePartialRouteReported = false;
+  /** Selected nodes `attemptSegment` refused, with what selected them: the refusal is read from the node, so it stays until the search ends. */
+  readonly #refused = new Map<number, ProgressSelection["selectedBy"]>();
   /** When the current slice began, and the checkpoint it will report if a timeout found no candidate. */
   #slice: { began: number; checkpoint: PartialRouteCheckpoint | undefined } = { began: 0, checkpoint: undefined };
 
@@ -464,7 +466,7 @@ export class IncrementalSearch {
     const maximumRadius = this.#options.limits?.maximumRadius;
     if (maximumRadius !== undefined && this.#outsideRadius !== null) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "stale") return { kind: "stale", evidence: this.#evidence() };
       if (attempt.kind === "segment")
         return {
@@ -504,7 +506,7 @@ export class IncrementalSearch {
     const primary = limits.primaryTimeoutMs;
     if (this.#candidates.hasTravelled && primary !== undefined && spent >= primary) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "segment") {
         return this.#finish(() => ({
           kind: "segment_ready",
@@ -522,7 +524,7 @@ export class IncrementalSearch {
     const failure = limits.failureTimeoutMs;
     if (failure !== undefined && spent >= failure) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "stale") return this.#finish(() => ({ kind: "stale", evidence: this.#evidence() }));
       const checkpoint = this.#partialRouteCheckpoint(
         failure,
@@ -545,6 +547,18 @@ export class IncrementalSearch {
       }));
     }
     return undefined;
+  }
+
+  /**
+   * `attemptSegment` for the selection, remembering a refusal. Past the primary budget the limit check asks for every
+   * expanded node, usually about the same selected node, and a refusal costs a plan build plus a swim search; a
+   * `segment` or `stale` answer ends the slice or the search, so only `none` is kept.
+   */
+  #attemptSelected(selection: ProgressSelection): SegmentAttempt {
+    if (this.#refused.get(selection.node) === selection.selectedBy) return { kind: "none" };
+    const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+    if (attempt.kind === "none") this.#refused.set(selection.node, selection.selectedBy);
+    return attempt;
   }
 
   #noteClosest(current: number): void {

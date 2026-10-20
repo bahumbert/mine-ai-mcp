@@ -72,3 +72,87 @@ test("a segment's end is stranded when the way back to the pocket plus the reser
   assert.equal(endsStrandedUnderWater(world, withAir(10_000), swimPlan(25)), true, "beyond the search radius no air is known: stranded whatever the air");
   assert.equal(endsStrandedUnderWater(world, createMovementPolicy(), swimPlan(25)), false, "no dive admission: not a dive");
 });
+
+/** What the search asked of the stranded check: the head cell of each plan end it was shown. */
+interface StrandedProbe {
+  armed: boolean;
+  readonly checks: string[];
+}
+
+/** Whether `endsStrandedUnderWater` is the function reading this (call sites, not a stack string; the policy is read once per expansion). */
+function readByStrandedCheck(): boolean {
+  const { prepareStackTrace, stackTraceLimit } = Error;
+  Error.stackTraceLimit = 4;
+  Error.prepareStackTrace = (_error, sites) => sites[2]?.getFunctionName() ?? "";
+  const caller = new Error().stack as unknown as string;
+  Error.prepareStackTrace = prepareStackTrace;
+  Error.stackTraceLimit = stackTraceLimit;
+  return caller === "endsStrandedUnderWater";
+}
+
+/** The world records the first read after the stranded check opened its policy: the head cell of the end it judges. */
+class ProbedWorld extends MemoryWorld {
+  constructor(readonly probe: StrandedProbe) {
+    super();
+  }
+  override blockAt(x: number, y: number, z: number) {
+    if (this.probe.armed) {
+      this.probe.armed = false;
+      this.probe.checks.push(`${x},${y},${z}`);
+    }
+    return super.blockAt(x, y, z);
+  }
+}
+
+/**
+ * A policy whose dive admission lets the search swim anywhere in the room but leaves no breath when
+ * `endsStrandedUnderWater` asks, so every partial route it is shown is refused (the rare case where a refusal's cost matters).
+ */
+function refusingPolicy(origin: { x: number; y: number; z: number }, probe: StrandedProbe) {
+  const policy = createMovementPolicy({ allowDigging: false, allowPlacing: false, dive: { origin, airTicks: 10_000 } });
+  const stranded = { origin, airTicks: 0 };
+  return Object.create(policy, {
+    dive: {
+      get() {
+        if (!readByStrandedCheck()) return policy.dive;
+        probe.armed = true;
+        return stranded;
+      },
+    },
+  }) as typeof policy;
+}
+
+/** A roofed flooded room east of the air pocket, closed before the goal: the search spreads over it and fails. */
+function floodedRoom(probe: StrandedProbe): MemoryWorld {
+  const world = new ProbedWorld(probe);
+  for (let x = -4; x <= 42; x++)
+    for (let z = -14; z <= 14; z++)
+      for (let y = FLOOR; y <= ROOF + 1; y++) {
+        const hollow = y > FLOOR && y < ROOF && ((z === 0 && x <= 0) || (x > 0 && x < 31 && Math.abs(z) <= 12) || (x >= 39 && z === 0));
+        world.load({ x, y, z }, !hollow
+          ? { stateId: 1 }
+          : x <= 0 || x >= 39 ? { stateId: 0 } : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true, safeToBreak: false } });
+      }
+  return world;
+}
+
+test("past the primary budget a refused selection is judged once, not once per expanded node", () => {
+  const probe: StrandedProbe = { armed: false, checks: [] };
+  const world = floodedRoom(probe);
+  const start = { x: 0, y: FLOOR + 1, z: 0 };
+  const goal = exactBlockGoal({ x: 40, y: FLOOR + 1, z: 0 }).resolve(observation(0, start.y, 0));
+  if (goal.kind !== "active") throw new Error(goal.observation);
+  const update = new IncrementalSearch({
+    id: "flooded-room", start: planningStart(start), goal, now: () => 0,
+    limits: { primaryTimeoutMs: 0, failureTimeoutMs: 1_000 },
+    context: {
+      world,
+      policy: refusingPolicy(start, probe),
+      player: WELL_FED, catalogue: createMovementCatalogue(),
+    },
+  }).advance({ maximumExpansions: 100_000, maximumMilliseconds: 5_000 });
+  assert.equal(update.kind, "no_path", update.kind);
+  assert.ok(probe.checks.length > 1, "the room refuses selections: the stranded check ran");
+  const repeated = probe.checks.filter((cell, index) => probe.checks.indexOf(cell) !== index);
+  assert.deepEqual(repeated, [], "each refused end cell is judged once");
+});
