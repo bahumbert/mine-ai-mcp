@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
+import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
@@ -519,10 +519,22 @@ export class ScriptedModel implements ChatModel {
     return release;
   }
 
+  private unavailableCalls = 0;
+
+  /** The next `times` calls (after any hold) find the model server away, as the real client reports it. */
+  unavailable(times = 1): this {
+    this.unavailableCalls += times;
+    return this;
+  }
+
   async complete(turns: readonly ChatTurn[]): Promise<ChatReply> {
     this.requests.push([...turns]);
     const hold = this.holds.shift();
     if (hold !== undefined) await hold;
+    if (this.unavailableCalls > 0) {
+      this.unavailableCalls -= 1;
+      throw new ModelUnavailable(`[LLM_UNAVAILABLE] ${this.name}: the model server did not answer`);
+    }
     const reply = this.replies.shift();
     if (reply === undefined) throw new Error(`${this.name}: no scripted reply left`);
     return { text: reply, promptTokens: null, contextTokens: null };

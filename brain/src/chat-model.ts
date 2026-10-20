@@ -14,9 +14,26 @@ export interface ChatReply {
   readonly contextTokens: number | null;
 }
 
+/**
+ * The model server did not give an answer: the request timed out, the connection was refused or reset, the status was
+ * not ok, or the body was not a completion. Says nothing about the model's reply, so callers wait and ask again; they
+ * must not count it as a bad reply. Never thrown for a call its caller aborted.
+ */
+export class ModelUnavailable extends Error {
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super(message, options);
+    this.name = "ModelUnavailable";
+  }
+}
+
 /** A text-in, text-out model. One per tier: chat, action, planner (ADR-008). */
 export interface ChatModel {
   readonly name: string;
+  /**
+   * Any implementation throws {@link ModelUnavailable} when the server gave no usable answer (timeout, network error,
+   * error status, unreadable body), and the caller's own abort reason when `signal` aborted: the agent waits for the
+   * first and stops on the second, and counts neither as a bad reply.
+   */
   complete(turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply>;
 }
 
@@ -68,6 +85,16 @@ export class OpenAiCompatibleModel implements ChatModel {
   }
 
   async complete(turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply> {
+    try {
+      return await this.request(turns, signal);
+    } catch (error) {
+      // The caller's own abort passes as it is: it is a stop, not a server that went away.
+      if (signal.aborted || error instanceof ModelUnavailable) throw error;
+      throw new ModelUnavailable(`[LLM_UNAVAILABLE] ${this.config.model}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+
+  private async request(turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey !== null) headers.authorization = `Bearer ${this.config.apiKey}`;
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -83,7 +110,7 @@ export class OpenAiCompatibleModel implements ChatModel {
       signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]),
     });
     if (!response.ok) {
-      throw new Error(`[LLM_HTTP_${response.status}] ${this.config.model}: ${(await response.text()).slice(0, 300)}`);
+      throw new ModelUnavailable(`[LLM_HTTP_${response.status}] ${this.config.model}: ${(await response.text()).slice(0, 300)}`);
     }
     const completion = completionSchema.parse(await response.json());
     if (!this.contextAsked) {
