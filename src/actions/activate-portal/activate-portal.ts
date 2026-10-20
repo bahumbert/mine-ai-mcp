@@ -42,15 +42,31 @@ function result(
   return { ...evidence, status: progressed ? "partial" : "failed", error };
 }
 
+/**
+ * What one request keeps across the attempts a reflex cuts it into: the counts it first saw (null until the first
+ * attempt reads them) and whether its own use was sent, so a portal found lit on a resume is credited to the request
+ * only when the request lit it.
+ */
+export interface PortalProgress {
+  portalBefore: number | null;
+  eyesBefore: number | null;
+  usedOwnItem: boolean;
+}
+
+function newPortalProgress(): PortalProgress {
+  return { portalBefore: null, eyesBefore: null, usedOwnItem: false };
+}
+
 async function activateNether(
   bot: Bot,
   request: ActivatePortalRequest,
   frame: NetherPortalFrame,
   context: ActionContext,
   dependencies: ActivatePortalDependencies,
+  progress: PortalProgress,
 ): Promise<ActivatePortalResult> {
   const interior = interiorCells(frame);
-  const before = portalCount(bot, interior, "nether_portal");
+  const before = (progress.portalBefore ??= portalCount(bot, interior, "nether_portal"));
   context.observeProgress?.(() => ({ baseline: { target: { ...request } },
     checkpoint: { phase: "igniting_nether_frame", block: bot.blockAt(new Vec3(request.x, request.y, request.z))?.name ?? null,
       portalCells: portalCount(bot, interior, "nether_portal"), requiredPortalCells: interior.length },
@@ -67,12 +83,12 @@ async function activateNether(
         frame,
         portalBefore: before,
         portalAfter: after,
-        activated: before < interior.length && after === interior.length,
+        activated: before < interior.length && after === interior.length && progress.usedOwnItem,
       },
       error,
     );
   };
-  if (before === interior.length) return finish(null);
+  if (portalCount(bot, interior, "nether_portal") === interior.length) return finish(null);
   if (bot.game.dimension === "the_end")
     return finish("[PORTAL_WRONG_DIMENSION] Nether portals cannot activate in the End.");
   const item = bot.inventory.items().find((candidate) => candidate.name === "flint_and_steel");
@@ -101,6 +117,9 @@ async function activateNether(
     lookAt: floorCell.offset(0.5, 1.01, 0.5),
     on: { block: floor, face: { x: 0, y: 1, z: 0 } },
     expectedCells: interior.map((position) => ({ position, matches: (block) => block.name === "nether_portal" })),
+    onSent: () => {
+      progress.usedOwnItem = true;
+    },
     signal: context.signal,
   });
   context.signal?.throwIfAborted();
@@ -110,51 +129,31 @@ async function activateNether(
   );
 }
 
-async function activateEnd(
-  bot: Bot,
-  request: ActivatePortalRequest,
-  frame: EndPortalFrame,
-  context: ActionContext,
-  dependencies: ActivatePortalDependencies,
-): Promise<ActivatePortalResult> {
-  const filled = () => frame.sockets.filter(({ position }) => hasEye(bot.blockAt(position))).length;
-  const eyesBefore = filled();
-  const before = portalCount(bot, frame.interior, "end_portal");
+function filledSocketCount(bot: Bot, frame: EndPortalFrame): number {
+  return frame.sockets.filter(({ position }) => hasEye(bot.blockAt(position))).length;
+}
+
+function observeEndProgress(bot: Bot, request: ActivatePortalRequest, frame: EndPortalFrame, context: ActionContext) {
   context.observeProgress?.(() => ({ baseline: { target: { ...request } },
     checkpoint: { phase: "filling_end_sockets", block: bot.blockAt(new Vec3(request.x, request.y, request.z))?.name ?? null,
-      filledSockets: filled(), portalCells: portalCount(bot, frame.interior, "end_portal"), requiredPortalCells: 9 },
+      filledSockets: filledSocketCount(bot, frame), portalCells: portalCount(bot, frame.interior, "end_portal"), requiredPortalCells: 9 },
     completion: { kind: "current", observed: portalCount(bot, frame.interior, "end_portal") === 9,
       owes: "All nine end portal cells are currently observed." },
   }));
-  const finish = (error: string | null) => {
-    const after = portalCount(bot, frame.interior, "end_portal");
-    return result(
-      bot,
-      request,
-      {
-        kind: "end",
-        center: frame.center,
-        eyesBefore,
-        eyesAfter: filled(),
-        portalBefore: before,
-        portalAfter: after,
-        activated: before < 9 && after === 9,
-      },
-      error,
-    );
-  };
-  if (before === 9) return finish(null);
-  const carried = bot.inventory
-    .items()
-    .filter((item) => item.name === "ender_eye")
-    .reduce((sum, item) => sum + item.count, 0);
-  const missing = 12 - eyesBefore;
-  if (carried < missing) return finish(`[PORTAL_MISSING_EYES] ${missing} empty sockets; ${carried} ender_eye carried.`);
+}
 
-  while (filled() < 12) {
+/** Walk to each empty socket and put an eye in it until all twelve hold one; the error text when a step cannot go on. */
+async function fillEndSockets(
+  bot: Bot,
+  frame: EndPortalFrame,
+  context: ActionContext,
+  dependencies: ActivatePortalDependencies,
+  progress: PortalProgress,
+): Promise<string | null> {
+  while (filledSocketCount(bot, frame) < 12) {
     context.signal?.throwIfAborted();
     if (!endFrameIntact(bot, frame))
-      return finish("[PORTAL_FRAME_CHANGED] The twelve inward-facing frame blocks are no longer observed.");
+      return "[PORTAL_FRAME_CHANGED] The twelve inward-facing frame blocks are no longer observed.";
     const socket = frame.sockets
       .filter(({ position }) => !hasEye(bot.blockAt(position)))
       .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0]!;
@@ -165,13 +164,13 @@ async function activateEnd(
       context,
       dependencies,
     );
-    if (approachError) return finish(approachError);
-    if (!endFrameIntact(bot, frame)) return finish("[PORTAL_FRAME_CHANGED] The End frame changed during approach.");
+    if (approachError) return approachError;
+    if (!endFrameIntact(bot, frame)) return "[PORTAL_FRAME_CHANGED] The End frame changed during approach.";
     const block = bot.blockAt(socket.position);
     if (hasEye(block)) continue;
-    if (!block) return finish("[PORTAL_TARGET_UNLOADED] The chosen socket is no longer loaded.");
+    if (!block) return "[PORTAL_TARGET_UNLOADED] The chosen socket is no longer loaded.";
     const item = bot.inventory.items().find((candidate) => candidate.name === "ender_eye");
-    if (!item) return finish("[PORTAL_MISSING_EYES] No ender_eye remains for the empty socket.");
+    if (!item) return "[PORTAL_MISSING_EYES] No ender_eye remains for the empty socket.";
     const use = await dependencies.useItem(bot, {
       item,
       lookAt: socket.position.offset(0.5, 0.8, 0.5),
@@ -179,20 +178,62 @@ async function activateEnd(
       expectedCells: [
         { position: socket.position, matches: hasEye },
         // The last insertion must also observe the portal creation packet.
-        ...(filled() === 11
+        ...(filledSocketCount(bot, frame) === 11
           ? frame.interior.map((position) => ({
               position,
               matches: (cell: NonNullable<typeof block>) => cell.name === "end_portal",
             }))
           : []),
       ],
+      onSent: () => {
+        progress.usedOwnItem = true;
+      },
       signal: context.signal,
     });
     context.signal?.throwIfAborted();
-    if (use.kind === "failed") return finish(`[PORTAL_FAILED] ${use.error}`);
-    if (!hasEye(bot.blockAt(socket.position)))
-      return finish("[PORTAL_FAILED] The clicked socket did not acquire an eye.");
+    if (use.kind === "failed") return `[PORTAL_FAILED] ${use.error}`;
+    if (!hasEye(bot.blockAt(socket.position))) return "[PORTAL_FAILED] The clicked socket did not acquire an eye.";
   }
+  return null;
+}
+
+async function activateEnd(
+  bot: Bot,
+  request: ActivatePortalRequest,
+  frame: EndPortalFrame,
+  context: ActionContext,
+  dependencies: ActivatePortalDependencies,
+  progress: PortalProgress,
+): Promise<ActivatePortalResult> {
+  const eyesBefore = (progress.eyesBefore ??= filledSocketCount(bot, frame));
+  const before = (progress.portalBefore ??= portalCount(bot, frame.interior, "end_portal"));
+  observeEndProgress(bot, request, frame, context);
+  const finish = (error: string | null) => {
+    const after = portalCount(bot, frame.interior, "end_portal");
+    return result(
+      bot,
+      request,
+      {
+        kind: "end",
+        center: frame.center,
+        eyesBefore,
+        eyesAfter: filledSocketCount(bot, frame),
+        portalBefore: before,
+        portalAfter: after,
+        activated: before < 9 && after === 9 && progress.usedOwnItem,
+      },
+      error,
+    );
+  };
+  if (portalCount(bot, frame.interior, "end_portal") === 9) return finish(null);
+  const carried = bot.inventory
+    .items()
+    .filter((item) => item.name === "ender_eye")
+    .reduce((sum, item) => sum + item.count, 0);
+  const missing = 12 - filledSocketCount(bot, frame);
+  if (carried < missing) return finish(`[PORTAL_MISSING_EYES] ${missing} empty sockets; ${carried} ender_eye carried.`);
+  const fillError = await fillEndSockets(bot, frame, context, dependencies, progress);
+  if (fillError) return finish(fillError);
   return finish(
     portalCount(bot, frame.interior, "end_portal") === 9
       ? null
@@ -205,6 +246,7 @@ export async function activatePortal(
   request: ActivatePortalRequest,
   context: ActionContext,
   dependencies: ActivatePortalDependencies,
+  progress: PortalProgress = newPortalProgress(),
 ): Promise<ActivatePortalResult> {
   context.signal?.throwIfAborted();
   const target = new Vec3(request.x, request.y, request.z);
@@ -222,15 +264,21 @@ export async function activatePortal(
   if (block.name === "end_portal_frame") {
     const frame = findEndFrame(bot, target);
     return frame
-      ? activateEnd(bot, request, frame, context, dependencies)
+      ? activateEnd(bot, request, frame, context, dependencies, progress)
       : fail(
           "[PORTAL_NO_FRAME] No complete ring of twelve inward-facing End frame blocks is loaded around the named socket.",
         );
   }
   const found = findNetherFrame(bot, target);
   return "frame" in found
-    ? activateNether(bot, request, found.frame, context, dependencies)
+    ? activateNether(bot, request, found.frame, context, dependencies, progress)
     : fail(`[PORTAL_NO_FRAME] ${found.reason}`);
+}
+
+/** Start an activate_portal request: its progress record lives here, so each attempt a reflex cuts it into shares it. */
+export function beginActivatePortal(bot: Bot, request: ActivatePortalRequest, dependencies: ActivatePortalDependencies) {
+  const progress = newPortalProgress();
+  return (context: ActionContext) => activatePortal(bot, request, context, dependencies, progress);
 }
 
 export function formatActivatePortalResult(output: ActivatePortalResult): string {
@@ -267,6 +315,6 @@ export function createActivatePortalAction(
     annotations: activatePortalAnnotations,
     parse: parseActivatePortalRequest,
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
-    begin: (request) => (context) => activatePortal(bot, request, context, dependencies),
+    begin: (request) => beginActivatePortal(bot, request, dependencies),
   });
 }

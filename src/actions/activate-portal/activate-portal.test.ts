@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { activatePortal, type ActivatePortalDependencies } from "./activate-portal.js";
+import {
+  activatePortal,
+  beginActivatePortal,
+  formatActivatePortalResult,
+  type ActivatePortalDependencies,
+} from "./activate-portal.js";
 import { parseActivatePortalRequest, activatePortalResultSchema } from "./contract.js";
 import { endFrameAt, findEndFrame, outsideEndOpening } from "./end-frame.js";
 import { findNetherFrame } from "./nether-frame.js";
@@ -47,6 +52,7 @@ function world() {
     },
     useItem: async (_bot, use) => {
       const block = use.on!.block;
+      use.onSent?.(); // as useItemAt does, right before the click goes out
       uses.push(block.position.clone());
       if (block.name === "end_portal_frame") {
         assert.ok(outsideEndOpening(frame, bot.entity.position), "never insert an eye from inside the opening");
@@ -229,6 +235,135 @@ test("only observed portal blocks establish an active portal, never a use acknow
     if (output.portal.kind === "end") assert.equal(output.portal.eyesAfter, row.eyesAfter, row.name);
     if (!row.acknowledgeOnly) assert.equal(w.uses.length, 0, `${row.name}: nothing is spent`);
   }
+});
+
+/** A cut attempt keeps what its own use did: the request's baselines and "we lit it" outlive the attempt. */
+function abortingAfterUse(w: ReturnType<typeof world>, stop: AbortController): ActivatePortalDependencies {
+  return {
+    ...w.dependencies,
+    useItem: async (...args) => {
+      const used = await w.dependencies.useItem(...args);
+      stop.abort();
+      return used;
+    },
+  };
+}
+
+function abortingBeforeUse(w: ReturnType<typeof world>, stop: AbortController): ActivatePortalDependencies {
+  return {
+    ...w.dependencies,
+    useItem: async () => {
+      stop.abort();
+      stop.signal.throwIfAborted();
+      return { kind: "used" };
+    },
+  };
+}
+
+const NETHER_REQUEST = { x: 10, y: 63, z: 0 };
+const litByElse = (w: ReturnType<typeof world>) => {
+  for (const along of [10, 11]) for (const y of [64, 65, 66]) w.put(new Vec3(along, y, 0), "nether_portal");
+};
+
+test("a frame lit just before the reflex's abort reports activated after the resume", async () => {
+  const w = world();
+  w.nether("x");
+  const stop = new AbortController();
+  const run = beginActivatePortal(w.bot, NETHER_REQUEST, abortingAfterUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  const resumed = await run({});
+  assert.equal(resumed.status, "succeeded");
+  assert.ok(resumed.portal.kind === "nether" && resumed.portal.portalBefore === 0 && resumed.portal.portalAfter === 6);
+  assert.ok(resumed.portal.kind === "nether" && resumed.portal.activated, "our own flint lit it, the cut attempt saw it");
+  assert.equal(w.uses.length, 1, "the resume did not light it again");
+});
+
+test("eyes set by the cut attempt count in eyesBefore -> eyesAfter of the request", async () => {
+  const w = world();
+  w.end(8);
+  w.items[0]!.count = 4;
+  w.bot.entity.position = w.frame.center.offset(2.1, 0, 0.5);
+  const request = { ...w.frame.sockets[0]!.position };
+  const stop = new AbortController();
+  const run = beginActivatePortal(w.bot, request, abortingAfterUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  const resumed = await run({});
+  activatePortalResultSchema.parse(resumed);
+  assert.equal(resumed.status, "succeeded");
+  assert.ok(resumed.portal.kind === "end" && resumed.portal.eyesBefore === 8 && resumed.portal.eyesAfter === 12);
+  assert.ok(resumed.portal.kind === "end" && resumed.portal.activated && resumed.portal.portalAfter === 9);
+});
+
+test("a frame lit by someone else between attempts is already active, not activated", async () => {
+  const w = world();
+  w.nether("x");
+  const stop = new AbortController();
+  const run = beginActivatePortal(w.bot, NETHER_REQUEST, abortingBeforeUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  litByElse(w);
+  const resumed = await run({});
+  assert.equal(resumed.status, "succeeded");
+  assert.ok(resumed.portal.kind === "nether" && resumed.portal.portalBefore === 0 && resumed.portal.portalAfter === 6);
+  assert.ok(resumed.portal.kind === "nether" && !resumed.portal.activated, "the use was never sent by this request");
+  assert.match(formatActivatePortalResult(resumed), /already active/);
+});
+
+test("an End portal opened by someone else between attempts is already active, not activated", async () => {
+  const w = world();
+  w.end(11);
+  const stop = new AbortController();
+  const request = { ...w.frame.sockets[0]!.position };
+  const run = beginActivatePortal(w.bot, request, abortingBeforeUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  w.end(12);
+  for (const cell of w.frame.interior) w.put(cell, "end_portal");
+  const resumed = await run({});
+  assert.equal(resumed.status, "succeeded");
+  assert.ok(resumed.portal.kind === "end" && resumed.portal.eyesBefore === 11 && !resumed.portal.activated);
+});
+
+test("a death between attempts (no flint carried) fails naming the missing item, nothing credited", async () => {
+  const w = world();
+  w.nether("x");
+  const stop = new AbortController();
+  const run = beginActivatePortal(w.bot, NETHER_REQUEST, abortingBeforeUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  w.items[1]!.count = 0;
+  const resumed = await run({});
+  assert.equal(resumed.status, "failed");
+  assert.match(resumed.error, /PORTAL_NO_FLINT_AND_STEEL/);
+  assert.ok(resumed.portal.kind === "nether" && !resumed.portal.activated);
+  assert.equal(w.uses.length, 0);
+});
+
+test("a death between attempts (no eyes carried) fails naming the missing eyes", async () => {
+  const w = world();
+  w.end(4);
+  const stop = new AbortController();
+  const request = { ...w.frame.sockets[0]!.position };
+  const run = beginActivatePortal(w.bot, request, abortingBeforeUse(w, stop));
+  await assert.rejects(run({ signal: stop.signal }), { name: "AbortError" });
+  w.items[0]!.count = 0;
+  const resumed = await run({});
+  assert.equal(resumed.status, "failed");
+  assert.match(resumed.error, /PORTAL_MISSING_EYES/);
+});
+
+test("two requests on two bots keep their own baselines", async () => {
+  const lit = world();
+  const other = world();
+  lit.nether("x");
+  other.nether("x");
+  const stopLit = new AbortController();
+  const stopOther = new AbortController();
+  const runLit = beginActivatePortal(lit.bot, NETHER_REQUEST, abortingAfterUse(lit, stopLit));
+  const runOther = beginActivatePortal(other.bot, NETHER_REQUEST, abortingBeforeUse(other, stopOther));
+  await assert.rejects(runLit({ signal: stopLit.signal }), { name: "AbortError" });
+  await assert.rejects(runOther({ signal: stopOther.signal }), { name: "AbortError" });
+  litByElse(other);
+  const [a, b] = await Promise.all([runLit({}), runOther({})]);
+  assert.ok(a.portal.kind === "nether" && a.portal.activated);
+  assert.ok(b.portal.kind === "nether" && !b.portal.activated);
 });
 
 test("an insertion followed by a failed use reports partial socket progress", async () => {

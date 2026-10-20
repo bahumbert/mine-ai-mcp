@@ -121,6 +121,72 @@ test("an item that acts on a block is used on the named face", async () => {
   assert.equal(calls.filter((call) => call === "use").length, 1);
 });
 
+test("onSent fires once, after the equip and the look, right before the use goes out", async () => {
+  const { bot, calls } = usingBot(1);
+  const result = await useItemAt(bot, {
+    item: { name: "bucket" } as InventoryItem,
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    onSent: () => calls.push("sent"),
+  });
+  assert.deepEqual(result, { kind: "used" });
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "sent", "use", "release"]);
+});
+
+test("onSent also fires before a use on a block, and not when the look throws or the signal aborts before the send", async () => {
+  const onBlock = usingBot(1);
+  Object.assign(onBlock.bot, {
+    activateBlock: async () => {
+      onBlock.calls.push("activateBlock");
+    },
+  });
+  await useItemAt(onBlock.bot, {
+    item: { name: "flint_and_steel" } as InventoryItem,
+    lookAt: { x: 3.5, y: 63.01, z: 0.5 },
+    on: { block: { name: "obsidian" } as never, face: { x: 0, y: 1, z: 0 } },
+    onSent: () => onBlock.calls.push("sent"),
+    timeoutTicks: 1,
+  });
+  assert.deepEqual(
+    onBlock.calls.filter((call) => call === "sent" || call === "activateBlock"),
+    ["sent", "activateBlock"],
+  );
+
+  let sent = 0;
+  const countSent = () => {
+    sent += 1;
+  };
+  const lookThrows = usingBot(1);
+  Object.assign(lookThrows.bot, {
+    lookAt: async () => {
+      throw new Error("look failed");
+    },
+  });
+  const failed = await useItemAt(lookThrows.bot, {
+    item: { name: "bucket" } as InventoryItem,
+    lookAt: { x: 0, y: 0, z: 0 },
+    onSent: countSent,
+  });
+  assert.equal(failed.kind, "failed");
+
+  const stop = new AbortController();
+  const abortBeforeSend = usingBot(1);
+  Object.assign(abortBeforeSend.bot, {
+    lookAt: async () => {
+      stop.abort();
+    },
+  });
+  await assert.rejects(
+    useItemAt(abortBeforeSend.bot, {
+      item: { name: "bucket" } as InventoryItem,
+      lookAt: { x: 0, y: 0, z: 0 },
+      signal: stop.signal,
+      onSent: countSent,
+    }),
+    { name: "AbortError" },
+  );
+  assert.equal(sent, 0);
+});
+
 test("a hand that need not change is not waited on", async () => {
   const { bot, target } = usingBot(2);
   const result = await useItemAt(bot, {

@@ -38,6 +38,8 @@ export interface ItemUse {
   readonly timeoutTicks?: number;
   /** Wait on the server's world age (and the wall clock) instead of client ticks: a server far behind still gets its time. */
   readonly serverWait?: { readonly ticks: number } & Pick<WorldAgeOptions, "wallMs" | "now" | "sleep">;
+  /** Called right before the use packet is sent: an abort after it may still leave the world changed. */
+  readonly onSent?: () => void;
   readonly signal?: AbortSignal;
 }
 
@@ -82,6 +84,7 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
     use.signal?.throwIfAborted();
     await bot.lookAt(asVec3(use.lookAt), true);
     use.signal?.throwIfAborted();
+    use.onSent?.();
     if (use.on) await bot.activateBlock(use.on.block, asVec3(use.on.face));
     else bot.activateItem();
     const ageAtUse = bot.time?.age;
