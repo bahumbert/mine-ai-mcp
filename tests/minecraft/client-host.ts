@@ -59,6 +59,14 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
       await bot.waitForTicks(ticks);
       session.signal.throwIfAborted();
     },
+    physics: {
+      pause: () => {
+        bot.physicsEnabled = false;
+      },
+      resume: () => {
+        bot.physicsEnabled = true;
+      },
+    },
     call: (action, input) => callScenarioAction(runtime, session, action, input),
   };
 

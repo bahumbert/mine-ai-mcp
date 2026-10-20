@@ -15,6 +15,11 @@ export interface ScenarioContext {
   readonly scenario: ScenarioDefinition;
   /** Let a fixture settle after the trial starts, before taking action. */
   waitForTicks(ticks: number): Promise<void>;
+  /**
+   * Stop and restart the bot's client physics, as a ride or an unloaded chunk does: no physics tick is emitted
+   * while paused, so `waitForTicks` never ends. A driver that pauses uses wall-clock delays.
+   */
+  readonly physics: { pause(): void; resume(): void };
   /** Run a registered action; the host owns cancellation, recording and cleanup. */
   call(action: string, input: Record<string, unknown>): Promise<ScenarioCall>;
 }

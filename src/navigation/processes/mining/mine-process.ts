@@ -34,7 +34,7 @@ import { botEyesInWater } from "../../../world/eyes-in-water.js";
 import { isSafeSupport, isWater } from "../../world/block-geometry.js";
 import { admitsDive, openWaterSurface } from "../../world/swimming.js";
 import { holdWaterPosition } from "../../steering/hold-water-position.js";
-import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { physicsTicksUntil } from "../../../utils/physics-ticks.js";
 import { DIG_REACH } from "../../movements/excavation.js";
 import { branchMiningGoal } from "./block-exploration.js";
 import { carriesWaterBucket, CAST_REACH, castOntoPool } from "./cast-obsidian.js";
@@ -567,8 +567,7 @@ async function sealAndBreakInReach(
     const release = holdWaterPosition(bot, signal, (control, active) =>
       bot.setControlState(control, control === "jump" ? false : active));
     try {
-      for (let tick = 0; tick < 60 && !bot.entity.onGround; tick++)
-        await waitForPhysicsTicks(bot, 1, signal ?? new AbortController().signal);
+      await physicsTicksUntil(bot, () => bot.entity.onGround, 60, signal ?? new AbortController().signal);
     } finally { release(); }
     if (!bot.entity.onGround) return false;
   }

@@ -65,6 +65,7 @@ import { navigationFeet } from "../world/block-geometry.js";
 import { overheadPinningCell } from "../world/overhead-pin.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
 import { PlanningStall } from "./planning-stall.js";
+import { awaitLanding } from "./landing-wait.js";
 import {
   blockKey,
   blockLabel,
@@ -550,7 +551,8 @@ export class NavigationRun {
       if (planningStall) return this.#failed(planningStall);
       if (observation.stance === "airborne") {
         this.status({ kind: "stabilizing", runId: this.context.runId, reason: "airborne" });
-        const stable = await this.context.bot.stabilize(this.context.signal);
+        const stable = await awaitLanding(this.context.bot, this.context.signal);
+        if (stable.kind === "stopped") return this.#stopped();
         if (stable.kind === "failed")
           return this.#failed({
             kind: "movement_failed",
@@ -702,11 +704,9 @@ export class NavigationRun {
       return await this.#search(goal, node, reason, signal, field, null);
     } finally {
       try {
-        // An impulse can invalidate the search's start mid-flight. Keep its
-        // supported hold through the existing bounded landing observation,
-        // including cancellation, before another search or owner takes over.
-        if (this.context.bot.observe().stance === "airborne")
-          await this.context.bot.stabilize(new AbortController().signal);
+        // An impulse can invalidate the search's start mid-flight. Keep its hold through the
+        // wall-bounded landing wait, cancel included, before another owner takes over.
+        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, null);
       } finally {
         release();
       }

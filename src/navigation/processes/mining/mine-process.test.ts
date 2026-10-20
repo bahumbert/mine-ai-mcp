@@ -1961,3 +1961,36 @@ test("target observers see block removal and pickup during a route without an ar
     },
   }));
 });
+
+test("a swimmer waiting to settle while physics has stopped gives up on the arrival dig within seconds", async () => {
+  const target = new Vec3(1, 64, 0);
+  const feet = new Vec3(0.5, 64, 0.5);
+  const bot = fakeBot({ blocks: [target], feet, onGround: false, isInWater: true });
+  // The fake never emits a physics tick: before the wall bound this wait ended only with the caller's abort.
+  // The eye cell, floored: the fake keys cells by their exact coordinates and the eyes rule reads whole cells.
+  (bot as FakeWorld).addWater(feet.offset(0, 1.62, 0).floored());
+  let breakAttempts = 0;
+  let arrival: string | undefined;
+  const startedAt = performance.now();
+  await mine(
+    bot,
+    request(bot, {
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      isSatisfied: () => arrival !== undefined,
+      breakInPlace: async () => {
+        breakAttempts += 1;
+        return { status: "broken" };
+      },
+      route: async (options) => {
+        const observation = { position: bot.entity.position, entities: new Map() } as never;
+        const node = { feet: bot.entity.position.floored(), remainingScaffolds: 0, overlayId: "overlay:0" };
+        arrival = (await options.onArrival?.({ goalRevision: "test", node, observation, signal: new AbortController().signal }))
+          ?.kind;
+        return { status: "completed", elapsedMs: 0 };
+      },
+    }),
+  );
+  assert.notEqual(arrival, undefined, "the arrival work ended instead of waiting for ticks that never come");
+  assert.equal(breakAttempts, 0);
+  assert.ok(performance.now() - startedAt < 3_000);
+});

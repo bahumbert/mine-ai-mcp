@@ -84,7 +84,7 @@ export class FakeNavigationBot implements NavigationBot {
       cancel: () => undefined,
     };
   }
-  async stabilize() {
+  async stabilize(_signal?: AbortSignal): Promise<Awaited<ReturnType<NavigationBot["stabilize"]>>> {
     return { kind: "stable" } as const;
   }
   async centerOnCell(cell: Position3) {

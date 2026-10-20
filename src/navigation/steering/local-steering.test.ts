@@ -89,3 +89,44 @@ test("local steering settles from the caller's arrival fact", async () => {
   assert.deepEqual(outcome, { kind: "arrived" });
   assert.equal(held.size, 0);
 });
+
+/** A port whose physics stopped: no tick ever comes. */
+function silentPort() {
+  const { port, held, asserted } = steeringPort({ x: 0, y: 64, z: 0 }, () => undefined);
+  port.waitForTick = () => new Promise<void>(() => undefined);
+  return { port, held, asserted };
+}
+
+test("an abort while no tick comes ends the drive at once", async () => {
+  const { port, held, asserted } = silentPort();
+  const abort = new AbortController();
+  const driving = driveHorizontalSteering(port, {
+    target: () => ({ x: 5, y: 64, z: 0 }),
+    arrived: () => false,
+    maximumTicks: 100,
+    signal: abort.signal,
+  });
+  setTimeout(() => abort.abort(new Error("run stopped")), 20);
+  const startedAt = performance.now();
+  await assert.rejects(driving, /run stopped/);
+  assert.ok(performance.now() - startedAt < 500);
+  assert.ok(asserted.length > 0, "the drive had taken controls");
+  assert.equal(held.size, 0);
+});
+
+test("a drive whose ticks stop ends exhausted within its wall bound, every control released", async () => {
+  const { port, held, asserted } = silentPort();
+  const startedAt = performance.now();
+  const outcome = await driveHorizontalSteering(port, {
+    target: () => ({ x: 5, y: 64, z: 0 }),
+    arrived: () => false,
+    maximumTicks: 2,
+    signal: new AbortController().signal,
+  });
+  const waited = performance.now() - startedAt;
+  assert.deepEqual(outcome, { kind: "exhausted", ticks: 2 });
+  // 2 ticks are 100 ms of physics; the drive adds one second of slack before it reads physics as stopped.
+  assert.ok(waited >= 1_000 && waited < 2_500, `ended after ${waited} ms`);
+  assert.ok(asserted.length > 0);
+  assert.equal(held.size, 0);
+});

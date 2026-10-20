@@ -34,6 +34,7 @@ import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
 import type { OpenedPassages } from "./opened-passages.js";
+import { armNoTickCancel } from "./no-tick-cancel.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
 
 export type StepDecision = "continue" | "goal_satisfied" | "goal_revised";
@@ -130,6 +131,8 @@ export class RouteExecutor {
   #state: RouteExecutionState = { kind: "starting_step", stepIndex: 0 };
   #invalidated = false;
   #latestMovementSnapshot: MovementSnapshot | null = null;
+  /** The monotonic time of the last physics tick; the executor starts it so a bot that never ticks reads as silent from the start. */
+  #lastTickAt = performance.now();
   readonly #invalidatedResult: Promise<{ readonly kind: "invalidated" }>;
   readonly #resolveInvalidated: () => void;
 
@@ -151,6 +154,13 @@ export class RouteExecutor {
   async execute(): Promise<RouteExecutionResult> {
     using resources = new DisposableStack();
     resources.defer(this.request.context.bot.subscribePhysicsTick(() => this.#onPhysicsTick()));
+    resources.use(
+      armNoTickCancel({
+        signal: this.request.context.signal,
+        lastTickAt: () => this.#lastTickAt,
+        settle: () => this.#settleMovement({ kind: "cancelled" }),
+      }),
+    );
     try {
       return await this.#executeSteps();
     } catch (cause) {
@@ -498,6 +508,7 @@ export class RouteExecutor {
   }
 
   #onPhysicsTick(): void {
+    this.#lastTickAt = performance.now();
     // A deadline needs a clock, not traffic. `expire` is otherwise only
     // reachable through `classify`, which requires a world change, so a lost
     // server acknowledgement over a quiet world left the run waiting in

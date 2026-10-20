@@ -5,11 +5,15 @@ import type { ActionResult } from "@aibengineering/mine-ai-mcp";
 import { run } from "./drivers/single-action.ts";
 import { run as runSequence } from "./drivers/action-sequence.ts";
 
+/** These drivers never stop physics. */
+const NO_PHYSICS = { pause: () => {}, resume: () => {} };
+
 test("a sequence stops before later actions when a step does not succeed", async () => {
   for (const status of ["partial", "failed", "cancelled"] as const) {
     const called: string[] = [];
     const completion = await runSequence({
       waitForTicks: async () => {},
+      physics: NO_PHYSICS,
       scenario: scenarioDefinitionSchema.parse({
         params: { actions: ["first", "stop", "never"].map((action) => ({ action, input: {} })) },
         goal: { kind: "completion" },
@@ -29,6 +33,7 @@ test("an interruption expectation cannot pass on success alone or a different re
   for (const interruptions of [undefined, ["Equip an available shield"], ["[HOSTILE_CONTACT] fight response"]]) {
     const completion = await run({
       waitForTicks: async () => {},
+      physics: NO_PHYSICS,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "succeeded", interruptionContains: "[HOSTILE_CONTACT]" } },
         goal: { kind: "completion" },
@@ -45,6 +50,7 @@ test("partial, failed and cancelled actions cannot satisfy successful completion
     const result: ActionResult = { status, error: "not completed" };
     const completion = await run({
       waitForTicks: async () => {},
+      physics: NO_PHYSICS,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: { block_name: "coal_ore", count: 5 } },
         goal: { kind: "completion" },
@@ -69,6 +75,7 @@ test("explicit expectations require both the action status and literal error tex
     const result: ActionResult = status === "succeeded" ? { status } : { status, error };
     const completion = await run({
       waitForTicks: async () => {},
+      physics: NO_PHYSICS,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: expected, errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
@@ -88,6 +95,7 @@ test("expected failure cannot accept runtime failures or cancellations", async (
   ] as const) {
     const completion = await run({
       waitForTicks: async () => {},
+      physics: NO_PHYSICS,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "failed", errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
@@ -101,6 +109,7 @@ test("expected failure cannot accept runtime failures or cancellations", async (
 test("ordinary single-action scenarios still pass without an expectation", async () => {
   const completion = await run({
     waitForTicks: async () => {},
+    physics: NO_PHYSICS,
     scenario: scenarioDefinitionSchema.parse({
       params: { action: "view_status", input: {} }, goal: { kind: "completion" },
     }),

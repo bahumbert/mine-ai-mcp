@@ -1100,3 +1100,58 @@ test("the opening lasts one run: the same policy refuses its own region again, a
   assert.ok(refuses(), "refused again after the run");
   assert.equal((await leaveCage(bot, policy)).openings, 1, "opened again by the second run");
 });
+
+/** A bot whose physics stopped: its landing wait settles only on the signal it is given, as one with no physics tick does. */
+function stabilizeUntilAborted(bot: FakeNavigationBot) {
+  bot.stabilize = (signal: AbortSignal) =>
+    new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+}
+
+test("an airborne start with physics stopped fails unstable within about two seconds", async () => {
+  const bot = new FakeNavigationBot();
+  bot.current = { ...bot.current, stance: "airborne" };
+  stabilizeUntilAborted(bot);
+  const startedAt = performance.now();
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot }), {
+    goal: exactBlockGoal({ x: 3, y: 63, z: 0 }),
+    policy: walking(),
+  });
+  const waited = performance.now() - startedAt;
+  assert.equal(outcome.kind, "failed");
+  assert.ok(waited >= 1_800 && waited < 3_000, `failed after ${waited} ms`);
+  if (outcome.kind === "failed" && outcome.failure.kind === "movement_failed" && outcome.failure.movement.kind === "unstable")
+    assert.match(outcome.failure.movement.observation, /No physics tick for 2 s while airborne/);
+  else assert.fail(`expected an unstable movement failure, got ${JSON.stringify(outcome)}`);
+  assert.equal(outcome.evidence.cleanup.listeners, 0);
+});
+
+test("a search overtaken by an impulse with physics stopped still releases its hold", async () => {
+  const bot = new FakeNavigationBot();
+  let holding = false;
+  let hit = false;
+  bot.holdPosition = () => {
+    holding = true;
+    return () => {
+      holding = false;
+    };
+  };
+  stabilizeUntilAborted(bot);
+  const navigator = createNavigator({
+    world: flatWorld(),
+    bot,
+    telemetry: onEvent((event) => {
+      if (!hit && event.kind === "search_started") {
+        hit = true;
+        bot.current = { ...bot.current, stance: "airborne" };
+      }
+    }),
+  });
+  const outcome = await settle(navigator, { goal: nearGoal({ x: 5, y: 63, z: 0 }, 0), policy: walking() });
+  assert.equal(hit, true);
+  assert.notEqual(outcome.kind, "completed");
+  assert.equal(holding, false, "the hold is released although the landing could not be observed");
+  assert.equal(outcome.evidence.cleanup.listeners, 0);
+  assert.equal(navigator.active, null);
+});
