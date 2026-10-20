@@ -2337,3 +2337,47 @@ test("a drop with an own chest remembered within 32 blocks deposits there; with 
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(failing), self: "Ayla" });
   assert.deepEqual(failing.submitted.map((call) => call.tool), ["use_container", "drop_item"], "a chest that cannot be reached: buried after");
 });
+
+/** A drop of 64 cobblestone against a runtime whose bot remembers `containers`, in `dimension`; the tools it then submitted. */
+async function dropWithChests(containers: FakeRuntime["containers"], dimension = "minecraft:overworld"): Promise<{ readonly runtime: FakeRuntime; readonly tools: string[] }> {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, dimension, inventory: [{ name: "cobblestone", count: 64 }] };
+  runtime.containers = containers;
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "cobblestone", dropped: 64 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "cobblestone" }] }), { ...contextFor(runtime), self: "Ayla" });
+  return { runtime, tools: runtime.submitted.map((call) => call.tool) };
+}
+
+test("a drop in the Nether with an overworld chest remembered buries, no use_container (review #8)", async () => {
+  const { runtime, tools } = await dropWithChests([OWN_CHEST], "the_nether");
+  assert.deepEqual(tools, ["drop_item"]);
+  assert.deepEqual(runtime.containerQueries, [{ owner: "Ayla", dimension: "the_nether" }], "the chest question names the dimension the bot is in");
+});
+
+test("a chest in the Nether the bot placed there takes the deposit", async () => {
+  const { tools } = await dropWithChests([{ ...OWN_CHEST, dimension: "the_nether" }], "the_nether");
+  assert.deepEqual(tools, ["use_container"]);
+});
+
+test("a placed chest never opened takes the deposit (its room is unknown: the deposit's own answer is the truth)", async () => {
+  const { tools } = await dropWithChests([{ ...OWN_CHEST, slotCount: null, usedSlots: 0 }]);
+  assert.deepEqual(tools, ["use_container"]);
+});
+
+test("a chest another bot placed, which this bot only withdrew from, is not used", async () => {
+  const { tools } = await dropWithChests([{ ...OWN_CHEST, placedBy: "Mira" }]);
+  assert.deepEqual(tools, ["drop_item"]);
+});
+
+test("in the Nether, logs seen in the overworld are named as the overworld's, not offered as a walk; Nether places are walked to", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, dimension: "the_nether" };
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  runtime.seen = { dark_oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  const elsewhere = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
+  assert.match(elsewhere.status === "failed" ? elsewhere.detail : "", /you saw some in overworld around 700 8/u);
+  runtime.seen = { dark_oak_log: { dimension: "the_nether", x: 700, z: 8 } };
+  const here = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
+  assert.match(here.status === "failed" ? here.detail : "", /you saw some 700 blocks east, around 700 64 8: go_to there yourself/u);
+});

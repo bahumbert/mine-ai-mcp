@@ -3,6 +3,7 @@ import { describeMaterials, shortfall } from "./building/blueprint.ts";
 import { MAX_TOOL_LOSSES, toolToMake } from "./building/tool-loss.ts";
 import { boatsOfWood } from "./boats.ts";
 import type { ActOutcome, Body } from "./body.ts";
+import { sameDimension } from "./bot-data-sql.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
@@ -921,14 +922,14 @@ const COMPASS = ["east", "south-east", "south", "south-west", "west", "north-wes
 export async function notNear(context: Pick<GatherContext, "runtime">, block: string, detail: string): Promise<string> {
   const code = errorCode(detail);
   if (code !== "NO_TARGET_IN_RANGE" && code !== "NO_LOADED_MATCHING_TARGETS") return detail;
-  const here = (await context.runtime.status()).position;
+  const { position: here, dimension } = await context.runtime.status();
   await forgetEmptyNear(context.runtime, block, here);
   // A place she may still take from in this world, else one seen in another dimension.
   const elsewhere = await context.runtime.seenAt(block, here, FETCH_RANGE).catch(() => null);
-  const seen = (await knownPlaces(context.runtime, block, here))[0] ?? (elsewhere?.dimension === "overworld" ? null : elsewhere);
+  const seen = (await knownPlaces(context.runtime, block, here))[0] ?? (elsewhere !== null && sameDimension(elsewhere.dimension, dimension) ? null : elsewhere);
   const near = `no ${block} within ${FETCH_RANGE} blocks`;
   if (seen === null) return `${near}, and you know of none farther away: explore for it (toward land you have not seen), use another material, or say so (${detail})`;
-  if (seen.dimension !== "overworld") return `${near}; you saw some in ${seen.dimension.replaceAll("_", " ")} around ${seen.x} ${seen.z} (${detail})`;
+  if (!sameDimension(seen.dimension, dimension)) return `${near}; you saw some in ${seen.dimension.replaceAll("_", " ")} around ${seen.x} ${seen.z} (${detail})`;
   // Across water she knows (the explored chunks on the straight way are mostly water): a trip by boat (spec 2026-10-04).
   const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
   if (water !== null && water.share > 0.5) {

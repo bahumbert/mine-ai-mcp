@@ -4,6 +4,7 @@ import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
+import { sameDimension } from "./bot-data-sql.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -32,6 +33,7 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
 export class FakeRuntime implements BotRuntime {
   snapshot: BotSnapshot = {
     position: { x: 0, y: 64, z: 0 },
+    dimension: "minecraft:overworld",
     health: 20,
     food: 20,
     inventory: [],
@@ -237,13 +239,13 @@ export class FakeRuntime implements BotRuntime {
   async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
     const seen = this.seen[block];
     const places = [...(seen === undefined ? [] : [seen]), ...(this.alsoSeen[block] ?? [])];
-    return places.filter((place) => place.dimension === "overworld" && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit);
+    return places.filter((place) => sameDimension(place.dimension, this.snapshot.dimension) && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit);
   }
 
   async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {
     const seen = this.seen[block];
     if (seen === undefined) return null;
-    return seen.dimension !== "overworld" || Math.hypot(seen.x - from.x, seen.z - from.z) > beyond ? seen : null;
+    return !sameDimension(seen.dimension, this.snapshot.dimension) || Math.hypot(seen.x - from.x, seen.z - from.z) > beyond ? seen : null;
   }
 
   /** Names that are no block (`blockKinds` leaves them out). */
@@ -303,11 +305,19 @@ export class FakeRuntime implements BotRuntime {
 
   /** Notes saved with `note_save`, oldest first; a test may seed them to stand for an earlier run. */
   notes: { readonly note: string; readonly context: string }[] = [];
-  /** The containers its character opened before (`observed_containers`), as `knownContainers` answers them for any owner and place. */
-  containers: KnownContainer[] = [];
+  /**
+   * The containers its character placed (`placed_containers`) or keeps in its own protected regions, as `knownContainers`
+   * answers them: `dimension` (default overworld) and `placedBy` (default: the owner asked) are what the runtime's SQL
+   * filters on (proved in `runtime-client.test.ts`), the nearest first is not simulated.
+   */
+  containers: (KnownContainer & { readonly dimension?: string; readonly placedBy?: string })[] = [];
+  /** Every `knownContainers` question, in order. */
+  readonly containerQueries: { readonly owner: string; readonly dimension: string }[] = [];
 
-  async knownContainers(): Promise<readonly KnownContainer[]> {
-    return this.containers;
+  async knownContainers(owner: string, _near: Position, _within: number, dimension: string): Promise<readonly KnownContainer[]> {
+    this.containerQueries.push({ owner, dimension });
+    const bare = (name: string) => name.replace(/^minecraft:/u, "");
+    return this.containers.filter((known) => bare(known.dimension ?? "overworld") === bare(dimension) && (known.placedBy ?? owner) === owner);
   }
 
   /** Every SQL statement asked of `queryBotData`. */

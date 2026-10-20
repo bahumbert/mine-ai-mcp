@@ -312,13 +312,14 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
 const CHEST_REACH = 32;
 
 /**
- * Deposits what a drop gives up into the nearest own chest the runtime remembers within {@link CHEST_REACH} blocks that
- * has a slot free (`use_container`: it walks there itself). Null when there is none or the deposit did not succeed: the
- * items are then buried as ever (run 15 N5: 378 cobblestone buried while a chest stood by the house).
+ * Deposits what a drop gives up into the nearest own chest (one she placed, or one in her own protected region) in the
+ * dimension she is in, within {@link CHEST_REACH} blocks, that has a slot free or was never opened (`use_container`: it
+ * walks there itself). Null when there is none or the deposit did not succeed: the items are then buried as ever (run 15
+ * N5: 378 cobblestone buried while a chest stood by the house; review 2026-10-19 #8: a village chest, the Nether).
  */
 async function storeInChest(context: SkillContext, entries: readonly { item: string; count?: number }[], before: BotSnapshot, why: string): Promise<SkillResult | null> {
   if (context.self === undefined) return null;
-  const chest = (await context.runtime.knownContainers(context.self, before.position, CHEST_REACH).catch(() => [])).find((known) => known.usedSlots < known.slotCount);
+  const chest = (await context.runtime.knownContainers(context.self, before.position, CHEST_REACH, before.dimension).catch(() => [])).find((known) => known.slotCount === null || known.usedSlots < known.slotCount);
   if (chest === undefined) return null;
   const carried = (item: string) => before.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const items = entries.map((entry) => ({ item_name: entry.item, count: Math.min(entry.count ?? carried(entry.item), carried(entry.item)) })).filter((entry) => entry.count > 0);
