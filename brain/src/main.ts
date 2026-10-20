@@ -17,7 +17,8 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
                      a sentence with one of these names and a comma or colon is read as spoken to them.
   --<tier>-model     Model id for that tier, for every agent (overrides personas and environment).
   --model-slots      How many model calls the server runs at once (Ollama's OLLAMA_NUM_PARALLEL; default: env MODEL_SLOTS,
-                     else unknown). Only used to tell the monitor's "Model queue" panel how many calls wait.
+                     else unknown). Once known, a call takes a slot before it is sent and waits in the brain beyond them, so
+                     the model timeout covers inference only; the monitor's "Model queue" panel shows how many wait.
   --start-gap        Seconds between one agent's start and the next one's (default 0: all at once). The model server
                      queues first calls from many bots at once for a minute or more.
   --start-when-free  Also start the next agent only once a model slot is free (needs --model-slots).
@@ -33,13 +34,14 @@ LLM environment (Bun also reads a .env file in the working directory):
   MINE_AI_LLM_<TIER>_BASE_URL   per-tier provider, e.g. a fast host for CHAT (falls back to MINE_AI_LLM_BASE_URL)
   MINE_AI_LLM_<TIER>_API_KEY    key for that provider (falls back to MINE_AI_LLM_API_KEY)
   MINE_AI_LLM_JSON_MODE         "false" if the provider rejects response_format json_object (default true)
-  MINE_AI_LLM_TIMEOUT_MS        per request, default 30000
+  MINE_AI_LLM_TIMEOUT_MS        per request, default 90000: with --model-slots it times the inference only (a call waits for a slot
+                                in the brain first), without it the server's queue wait counts too
   MINE_AI_LLM_CONTEXT_TOKENS    the model's context window (also per tier), for the monitor's "context full" warning;
                                 unset: read from Ollama (its OpenAI API cuts a longer prompt silently)
   MINE_AI_LLM_REASONING_EFFORT  thinking models (also per tier): sent as reasoning_effort, "none" turns thinking off
                                 (much faster; recent Ollama models think by default); unset: the model's default`;
 
-const DEFAULT_LLM_TIMEOUT_MS = 30_000;
+const DEFAULT_LLM_TIMEOUT_MS = 90_000;
 // Chat routes as well as it speaks: at 0.7 the same line was read as for another player one time and as an order the
 // next (addressee bench, 2026-10-04: the "Opus" lines 10/18 at 0.7, 14/18 at 0.4).
 const TIER_TEMPERATURE: Readonly<Record<Tier, number>> = { chat: 0.4, action: 0.2, planner: 0.3 };
