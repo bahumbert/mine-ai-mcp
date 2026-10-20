@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
-import { pourAim } from "./liquid.js";
+import { botFixture, registry } from "../test-support/bot.js";
+import { FULL_CUBE, NO_SHAPE, type FakeBlock } from "../test-support/world.js";
+import { observeFormations, pourAim, settledFormations, watchFormations } from "./liquid.js";
 
 /**
  * The vanilla rule these tests encode, measured in the `pour-through-lava`
@@ -75,4 +76,95 @@ test("the highest-scoring landing wins, and the shortest ray breaks a tie", () =
   // score still beats it, and with the scores level it wins.
   assert.deepEqual(pourAim(bot, score(source))?.landing, source);
   assert.deepEqual(pourAim(bot, score(underfoot))?.landing, underfoot);
+});
+
+/** A world whose cells the test changes between observations: air where nothing is named. */
+function changingWorld(initial: Record<string, string>) {
+  const named = new Map(Object.entries(initial));
+  const bot = botFixture({
+    blocks: (position): FakeBlock => {
+      const name = named.get(`${position.x},${position.y},${position.z}`) ?? "air";
+      const definition = registry.blocksByName[name]!;
+      const solid = definition.boundingBox === "block";
+      return {
+        name,
+        stateId: definition.defaultState,
+        position,
+        boundingBox: solid ? "block" : "empty",
+        shapes: solid ? FULL_CUBE : NO_SHAPE,
+        getProperties: () => ({}),
+      };
+    },
+  });
+  return { bot, named };
+}
+
+test("lava flowing onto water forms stone and it is counted by name", () => {
+  const { bot, named } = changingWorld({ "0,0,0": "water", "1,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  named.set("0,0,0", "stone");
+
+  assert.deepEqual(observeFormations(bot, watch), { stone: 1 });
+});
+
+test("water on lava counts each block it made under its own name", () => {
+  const { bot, named } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava", "2,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  named.set("0,0,0", "obsidian");
+  named.set("1,0,0", "obsidian");
+  named.set("2,0,0", "cobblestone");
+
+  assert.deepEqual(observeFormations(bot, watch), { obsidian: 2, cobblestone: 1 });
+});
+
+test("a block placed where air was is not formed by a liquid", () => {
+  const { bot, named } = changingWorld({ "0,0,0": "water" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  named.set("1,0,0", "dirt");
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("air a liquid flowed into and that then hardened is counted", () => {
+  const { bot, named } = changingWorld({ "0,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  named.set("1,0,0", "lava");
+  assert.deepEqual(observeFormations(bot, watch), {});
+  named.set("1,0,0", "cobblestone");
+
+  assert.deepEqual(observeFormations(bot, watch), { cobblestone: 1 });
+});
+
+test("a block that stood there before the pour is not counted", () => {
+  const { bot } = changingWorld({ "0,0,0": "lava", "1,0,0": "obsidian" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("a cell beyond the formation radius is not watched", () => {
+  const { bot, named } = changingWorld({ "0,0,0": "lava", "11,0,0": "water" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  named.set("11,0,0", "stone");
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("a pour is settled when the blocks it made stop changing, and the last count is returned", async () => {
+  const { bot, named } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+  let ticks = 0;
+  bot.waitForTicks = async () => {
+    ticks += 1;
+    if (ticks === 3) named.set("0,0,0", "obsidian");
+    if (ticks === 5) named.set("1,0,0", "obsidian");
+  };
+
+  assert.deepEqual(await settledFormations(bot, watch, undefined), { obsidian: 2 });
+  assert.ok(ticks >= 15, "waited for ten quiet ticks after the last change");
 });

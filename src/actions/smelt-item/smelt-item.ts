@@ -7,6 +7,7 @@ import type { ObserveRequest, RequestEvidence } from "../../session/request.js";
 import { carriedCount, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
 import { startOwnPlacement } from "../../world/own-placement.js";
 import { fuelCapacity } from "../../world/smelting.js";
+import { SMELTING_STATION } from "../../world/workstations.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
 import {
@@ -266,7 +267,7 @@ async function openRequestedFurnace(
   if (routeFailure !== null) return stop(smeltItemOutcomes.routeStopped(routeFailure));
   const block = bot.blockAt(new Vec3(request.x, request.y, request.z));
   if (!block) return stop(smeltItemOutcomes.blockUnloaded);
-  if (block.name !== "furnace") return stop(smeltItemOutcomes.furnaceMissing(block.name));
+  if (block.name !== SMELTING_STATION) return stop(smeltItemOutcomes.furnaceMissing(block.name));
   try {
     return { kind: "open", furnace: await dependencies.openFurnace(bot, block) };
   } catch (cause) {
@@ -489,7 +490,7 @@ export function beginSmeltItem(
   return (context) =>
     useTemporaryWorkstation(
       bot,
-      "furnace",
+      SMELTING_STATION,
       context,
       operations,
       (block) =>

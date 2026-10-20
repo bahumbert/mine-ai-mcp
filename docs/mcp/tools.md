@@ -774,8 +774,9 @@ is checked before the walk rather than after it, so a wrong cell fails in a
 millisecond; a fill named at a flowing cell scoops the source feeding it when
 one is within a few cells. Success proves the bot navigated within reach, the
 bucket in its hand changed, and for a pour the cell holds the liquid; a pour
-also reports how many lava sources became obsidian and how much flowing lava
-became cobblestone. A full bucket's ray stops at a solid face and the liquid
+also reports the blocks the liquid made within ten blocks of it, by name
+(`formed`: obsidian from lava sources, cobblestone from flowing lava, stone
+where lava met water), counting only cells that held liquid. A full bucket's ray stops at a solid face and the liquid
 lands in the cell in front of it, so a pour needs a face the bot can actually
 see from where it stands. To obtain obsidian, ask `collect_block` for it while
 carrying a water bucket — casting is part of mining, not of the bucket.

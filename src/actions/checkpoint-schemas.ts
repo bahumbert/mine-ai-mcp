@@ -40,7 +40,7 @@ export const containerCheckpointSchema = z.strictObject({ phase, inventory: z.re
 export const tendCheckpointSchema = z.strictObject({ phase, cells: count, harvested: count, cleared: count, tilled: count, planted: count });
 export const placeCheckpointSchema = z.strictObject({ phase, inventory: count, target: position.nullable(), currentBlock: z.string().nullable() });
 export const bucketCheckpointSchema = z.strictObject({ phase, held: z.string().nullable(), target: position.nullable(),
-  targetBlock: z.string().nullable(), used: z.boolean(), obsidianFormed: count, cobblestoneFormed: count });
+  targetBlock: z.string().nullable(), used: z.boolean(), formed: z.record(z.string(), count) });
 export const exploreCheckpointSchema = z.strictObject({ phase, expandedChunks: count, requested: count, enteredBiome: position.nullable() });
 export const strongholdCheckpointSchema = z.strictObject({ phase, throwIds: z.array(z.string()),
   estimate: z.strictObject({ x: count, z: count }).nullable(), confirmed: z.boolean() });

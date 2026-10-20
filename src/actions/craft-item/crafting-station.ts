@@ -15,6 +15,7 @@ import {
   type WorldBlock,
 } from "../../world/index.js";
 import { executeCraftPlan } from "../../world/crafting.js";
+import { CRAFTING_STATION } from "../../world/workstations.js";
 import { craftItemOutcomes } from "./contract.js";
 
 type CraftingStation =
@@ -41,7 +42,7 @@ interface StationOptions {
 }
 
 /** The table a craft request sets down and the temporary workstation holds: the item the request credits and recovers. */
-export const CRAFTING_TABLE_ITEM = "crafting_table" as const;
+export const CRAFTING_TABLE_ITEM = CRAFTING_STATION;
 
 export function startTableHold(): TableHold {
   return { own: startOwnPlacement(), usedCarried: 0 };

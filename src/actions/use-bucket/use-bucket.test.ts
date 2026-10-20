@@ -303,9 +303,8 @@ test("pour aims where the ray actually lands in the named cell, and counts the o
   assert.equal(use.item, "water_bucket");
   assert.deepEqual(use.lookAt, new Vec3(7.5, 64, 0.5));
   assert.deepEqual(result.bucket.aimedAt, { x: 7, y: 63, z: 0 });
-  assert.equal(result.bucket.obsidianFormed, 2);
-  assert.equal(result.bucket.cobblestoneFormed, 0);
-  assert.match(formatUseBucketResult(result), /Formed: 2 obsidian, 0 cobblestone/);
+  assert.deepEqual(result.bucket.formed, { obsidian: 2 });
+  assert.match(formatUseBucketResult(result), /Formed: 2 obsidian$/m);
 });
 
 test("pour refuses an occupied cell and reports the missing bucket", async () => {
@@ -455,7 +454,7 @@ test("a pour cut off right after the water landed is not poured again and still 
   assert.equal(result.status, "succeeded");
   assert.equal(world.uses.length, 1);
   assert.equal(world.count("water_bucket").count, 0);
-  assert.equal(result.bucket.obsidianFormed, 2);
+  assert.deepEqual(result.bucket.formed, { obsidian: 2 });
   assert.deepEqual(result.bucket.aimedAt, { x: 7, y: 63, z: 0 });
   assert.equal(result.bucket.used, true);
 });
@@ -612,6 +611,7 @@ test("a lava cover cut after the cast whose cell turned to stone is not poured a
   assert.equal(world.uses.length, 1, "one cast in total");
   assert.equal(result.bucket.targetBefore, "lava");
   assert.equal(result.bucket.targetAfter, "stone");
+  assert.deepEqual(result.bucket.formed, { obsidian: 2, stone: 1 }, "the resumed attempt counts from the cut attempt's watch");
 });
 
 test("a pour cut after the cast whose lava cell still holds lava is cast again", async () => {

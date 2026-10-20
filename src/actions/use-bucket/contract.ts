@@ -67,9 +67,8 @@ export const bucketUseEvidenceSchema = z.strictObject({
   aimedAt: positionSchema.optional(),
   heldBefore: z.string().nullable(),
   heldAfter: z.string().nullable(),
-  /** Lava sources that became obsidian, and flowing lava that became cobblestone, within ten blocks of a pour. */
-  obsidianFormed: z.number().int().nonnegative(),
-  cobblestoneFormed: z.number().int().nonnegative(),
+  /** The solid blocks a pour made out of liquid within ten blocks of it, by name (obsidian, cobblestone, stone...). */
+  formed: z.record(z.string(), z.number().int().positive()),
   used: z.boolean(),
   /** Whether the fill had to explore beyond the loaded scan to find a source. */
   explored: z.boolean().optional(),

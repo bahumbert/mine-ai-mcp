@@ -21,11 +21,11 @@ import { asVec3, cellKey } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { isLiquidSource } from "../../../world/liquid.js";
 import {
-  countFormations,
   HORIZONTAL,
   isReplaceableForPlacement,
   pourAim,
   settledFormations,
+  watchFormations,
   USE_RAY_REACH,
   type PourAim,
   type useItemAt,
@@ -46,6 +46,9 @@ export const CAST_REACH = 2;
 const EXPOSING_BREAKS = 3;
 /** The scoop is retried once: the poured cell spends a moment under its own flow. */
 const SCOOP_ATTEMPTS = 2;
+
+/** The one block a cast makes: water poured onto lava sources. A code-only fact: the game's recipe, not a data file. */
+export const CAST_BLOCK = "obsidian";
 
 /** The physical effects a cast needs, which the mine request already owns. */
 export interface CastPhysics {
@@ -192,7 +195,7 @@ export async function castOntoPool(
   // settle, leaving both the original scoop ray and the bucket out of reach.
   const releaseStance = holdWaterPosition(bot, physics.signal);
   try {
-    const before = countFormations(bot, aim.landing);
+    const watch = watchFormations(bot, aim.landing);
     const use = await physics.useItem(bot, {
       item,
       lookAt: aim.lookAt,
@@ -203,11 +206,11 @@ export async function castOntoPool(
     if (use.kind === "failed") return { kind: "failed", reason: use.error };
     // Water spreads for a while and turns every source it reaches; counting the
     // obsidian is this step's evidence that the pour was worth anything.
-    const after = await settledFormations(bot, aim.landing, physics.signal);
+    const formed = await settledFormations(bot, watch, physics.signal);
     return {
       kind: "cast",
       landing: aim.landing,
-      obsidianFormed: Math.max(0, after.obsidian - before.obsidian),
+      obsidianFormed: formed[CAST_BLOCK] ?? 0,
       waterRecovered: await scoopBack(bot, physics, aim),
     };
   } finally {

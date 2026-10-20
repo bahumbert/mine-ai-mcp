@@ -5,6 +5,7 @@ import { isDryPlacementSite, isLiquid, supportsFlatPlacement } from "./block-cla
 import { placeBlock, findPlacementSupport, type WorldBlock } from "./placement.js";
 import { chestOpeningObstruction } from "./chest-clearance.js";
 import { protectedRegionAt, readProtectedRegions } from "./protected-regions.js";
+import { CRAFTING_STATION } from "./workstations.js";
 
 /** Vanilla block-interaction reach, measured from the bot's feet cell like every other placement here. */
 const NEARBY_PLACEMENT_REACH = 4;
@@ -91,7 +92,7 @@ function canStandAt(bot: Bot, feet: Vec3): boolean {
  * Live 2026-10-02: a bot logged in standing in water, and a bot leveling inside its own cut had no free cell either;
  * a player takes a few steps to open dry ground first. The caller walks there and places again.
  */
-export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, itemName = "crafting_table"): Vec3 | null {
+export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, itemName: string = CRAFTING_STATION): Vec3 | null {
   const origin = bot.entity.position.floored();
   const spots: { readonly feet: Vec3; readonly distance: number }[] = [];
   for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {

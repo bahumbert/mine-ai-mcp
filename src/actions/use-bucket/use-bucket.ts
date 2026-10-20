@@ -32,7 +32,6 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import {
   bucketItem,
   carriedCount,
-  countFormations,
   isLiquidSource,
   isReplaceableForPlacement,
   observedEyeHeight,
@@ -41,7 +40,9 @@ import {
   sourceFeeding,
   useItemAt,
   type ItemUseResult,
-  type LiquidFormations,
+  watchFormations,
+  type Formed,
+  type FormationWatch,
 } from "../../world/index.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
@@ -179,11 +180,10 @@ interface BucketProgress {
   target: Vec3 | null;
   targetBefore: string | null;
   readonly heldBefore: string | null;
-  /** The formations around a pour's cell before the water or lava landed. */
-  formationsBefore: LiquidFormations | null;
+  /** The cells around a pour's cell that were open before the water or lava landed. */
+  watch: FormationWatch | null;
   aimedAt?: Vec3;
-  obsidian: number;
-  cobblestone: number;
+  formed: Formed;
   used: boolean;
   explored?: boolean;
 }
@@ -199,8 +199,7 @@ function evidence(bot: Bot, progress: BucketProgress): BucketUseEvidence {
     ...(progress.aimedAt && { aimedAt: coordinates(progress.aimedAt.floored()) }),
     heldBefore: progress.heldBefore,
     heldAfter: bot.heldItem?.name ?? null,
-    obsidianFormed: progress.obsidian,
-    cobblestoneFormed: progress.cobblestone,
+    formed: progress.formed,
     used: progress.used,
     ...(progress.explored !== undefined && { explored: progress.explored }),
   };
@@ -350,11 +349,7 @@ function bucketUseAlreadyMade(bot: Bot, progress: BucketProgress, before: Bucket
 
 /** The use is made and seen in the inventory: count what a pour formed, then report it. */
 async function confirmBucketUsed(bot: Bot, progress: BucketProgress, context: ActionContext): Promise<UseBucketResult> {
-  if (progress.target && progress.formationsBefore) {
-    const after = await settledFormations(bot, progress.target, context.signal);
-    progress.obsidian = Math.max(0, after.obsidian - progress.formationsBefore.obsidian);
-    progress.cobblestone = Math.max(0, after.cobblestone - progress.formationsBefore.cobblestone);
-  }
+  if (progress.watch) progress.formed = await settledFormations(bot, progress.watch, context.signal);
   progress.used = true;
   return { status: "succeeded", bucket: evidence(bot, progress) };
 }
@@ -398,7 +393,7 @@ async function castBucket(
   const stepped = await aimWithCloserSteps(bot, target, context, dependencies);
   if ("error" in stepped) return refused(stepped.error);
   progress.aimedAt = stepped.aim.surface;
-  progress.formationsBefore = countFormations(bot, target);
+  progress.watch = watchFormations(bot, target);
   return dependencies.useItem(bot, {
     item,
     lookAt: stepped.aim.lookAt,
@@ -426,16 +421,15 @@ export function beginUseBucket(
     target: request.cell ? new Vec3(request.cell.x, request.cell.y, request.cell.z) : null,
     targetBefore: null,
     heldBefore: bot.heldItem?.name ?? null,
-    formationsBefore: null,
-    obsidian: 0,
-    cobblestone: 0,
+    watch: null,
+    formed: {},
     used: false,
   };
   observe(() => ({ baseline: { held: progress.heldBefore },
     checkpoint: { phase: progress.used ? "confirmed" : filling ? "finding_and_filling" : "approaching_and_pouring", held: bot.heldItem?.name ?? null,
       target: progress.target ? { x: progress.target.x, y: progress.target.y, z: progress.target.z } : null,
       targetBlock: progress.target ? bot.blockAt(progress.target)?.name ?? null : null, used: progress.used,
-      obsidianFormed: progress.obsidian, cobblestoneFormed: progress.cobblestone },
+      formed: progress.formed },
     completion: { kind: "event", observed: progress.used, owes: "Both the bucket inventory and the selected world cell must confirm the use." },
   }));
   return async (context) => {
@@ -482,7 +476,8 @@ export function formatUseBucketResult(result: UseBucketResult): string {
   ];
   if (bucket.aimedAt) lines.push(`- Aimed at: \`${bucket.aimedAt.x}, ${bucket.aimedAt.y}, ${bucket.aimedAt.z}\``);
   if (bucket.action === "pour" && bucket.used) {
-    lines.push(`- Formed: ${bucket.obsidianFormed} obsidian, ${bucket.cobblestoneFormed} cobblestone`);
+    const formed = Object.entries(bucket.formed).map(([name, count]) => `${count} ${name}`);
+    lines.push(`- Formed: ${formed.length > 0 ? formed.join(", ") : "nothing"}`);
   }
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");

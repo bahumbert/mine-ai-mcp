@@ -50,7 +50,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     if (fill.status !== "succeeded") return { status: "failed", detail: steps.join("; ") };
     const pour = await step("pour", { action: "pour", liquid: "water", ...params.pour }, bucket);
     if (pour.status !== "succeeded") return { status: "failed", detail: steps.join("; ") };
-    const formed = (pour as { bucket?: { obsidianFormed?: number } }).bucket?.obsidianFormed ?? 0;
+    const formed = (pour as { bucket?: { formed?: Record<string, number> } }).bucket?.formed?.obsidian ?? 0;
     context.log(`obsidian formed: ${formed}`);
     const refill = await step("refill", { action: "fill", liquid: "water", ...(params.refill ?? params.pour) }, bucket);
     if (refill.status !== "succeeded") return { status: "failed", detail: steps.join("; ") };

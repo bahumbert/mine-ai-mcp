@@ -22,6 +22,7 @@ import {
   type MineResult,
   type MineTarget,
 } from "../../navigation/processes/mining/mine-process.js";
+import { CAST_BLOCK } from "../../navigation/processes/mining/cast-obsidian.js";
 import { evaluateMineTarget, type MineTargetDecision } from "../../navigation/processes/mining/target-safety.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { isInWater } from "../../survival/perception/body.js";
@@ -33,6 +34,7 @@ import { createDiscardedItems, type DiscardedItems } from "../../world/discarded
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
 import { observeToolTierLoss, type ToolTierLoss } from "../../world/tool-loss.js";
+import { bucketItems } from "../../world/buckets.js";
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { watchForStall } from "../stall-watch.js";
@@ -54,12 +56,6 @@ import {
   type CollectBlockRequest,
   type CollectBlockResult,
 } from "./contract.js";
-
-/**
- * The one block the bot makes rather than finds (water onto a lava source, then scooped back): a request that selects
- * it enables casting and the bucket check. A code-only fact of the game, named once here.
- */
-const CAST_BLOCK = "obsidian";
 
 const sumValues = (record: Record<string, number>): number => Object.values(record).reduce((total, n) => total + n, 0);
 
@@ -450,7 +446,7 @@ export function settle(
   const gained = sumValues(gainedByItem);
   // Quantity is observed here; the process also owns completing any cast's
   // pending water recovery. Inventory alone must not hide that failed work.
-  const bucketNames = ["bucket", "water_bucket", "lava_bucket"];
+  const bucketNames = bucketItems();
   const bucketsBefore = bucketNames.reduce((count, name) => count + (inventoryBefore[name] ?? 0), 0);
   const after = inventoryCounts(bot);
   const bucketsAfter = bucketNames.reduce((count, name) => count + (after[name] ?? 0), 0);
