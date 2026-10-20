@@ -3,6 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { waterFixture } from "../../test-support/water.js";
 import { type SurvivalTransition } from "../control/contract.js";
+import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
 import { attachBreathReflex } from "./breath.js";
 
 test("an owned dive uses its escape floor and preserves the failed budget after ownership transfers", async (t) => {
@@ -185,7 +186,7 @@ test("claims the body at half air and records the surfacing", async (t) => {
 });
 
 /** A sealed pocket: every cell around the bot is the roof block, so no swim reaches open air. */
-function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean) {
+function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean, diggable = true) {
   const digs: string[] = [];
   const equipped: string[] = [];
   const pickaxe = { name: "stone_pickaxe", type: 1, count: 1 };
@@ -193,7 +194,7 @@ function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean
     name: "stone",
     getProperties: () => ({}),
     boundingBox: "block",
-    diggable: true,
+    diggable,
     shapes: [[0, 0, 0, 1, 1, 1]],
     // Only the pickaxe breaks it fast; a bare hand is slow.
     digTime: (item: number | null) => (item === pickaxe.type ? 300 : 3000),
@@ -347,5 +348,35 @@ test("an owned dive with the air metadata missing reports unknown and does not f
   for (let tick = 0; tick < 10; tick++) fixture.bot.emit("physicsTick");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fixture.reflex.runner.status().owner, "idle");
+  await control[Symbol.asyncDispose]();
+});
+
+test("a stuck surfacing in still water is tried again 2 s later", async (t) => {
+  let clock = 0;
+  const fixture = waterFixture(t, { now: () => clock });
+  sealedPocket(fixture, true, false);
+  const claims: number[] = [];
+  fixture.reflex.onTransition((event) => {
+    if (event.kind === "claim") claims.push(clock);
+  });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  const ticks = async (count: number) => {
+    for (let tick = 0; tick < count; tick++) {
+      fixture.bot.emit("physicsTick");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  await ticks(5);
+  assert.equal(claims.length, 1);
+  await ticks(SURFACE_MAXIMUM_TICKS + 5);
+  assert.equal(fixture.reflex.answered.snapshot()[0]?.failure.kind, "stuck", "no way to air: the surfacing ended stuck");
+  await ticks(10);
+  assert.equal(claims.length, 1, "the same cells within 2 s: still answered");
+  clock = 1_999;
+  await ticks(10);
+  assert.equal(claims.length, 1);
+  clock = 2_001;
+  await ticks(10);
+  assert.equal(claims.length, 2, "the bot is still drowning in the same cells: it tries again");
   await control[Symbol.asyncDispose]();
 });

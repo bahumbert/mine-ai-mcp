@@ -3,9 +3,9 @@ import { EventEmitter } from "node:events";
 import { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner } from "../session/action-runner.js";
-import { ReflexDriver } from "../survival/control/driver.js";
+import { ReflexDriver, type ReflexDriverOptions } from "../survival/control/driver.js";
 
-export function waterFixture(t: TestContext) {
+export function waterFixture(t: TestContext, driverOptions: ReflexDriverOptions = {}) {
   let moving = false;
   const controls: Array<readonly [control: string, state: boolean]> = [];
   const entity = { isInWater: false, position: new Vec3(0, 64, 0), yaw: 0, onGround: true };
@@ -14,7 +14,7 @@ export function waterFixture(t: TestContext) {
     registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
     setControlState: (control: string, state: boolean) => controls.push([control, state]),
   }) as unknown as Bot;
-  const reflex = new ReflexDriver(bot, new ActionRunner());
+  const reflex = new ReflexDriver(bot, new ActionRunner(), driverOptions);
   t.after(() => reflex[Symbol.asyncDispose]());
   Object.assign(entity, { metadata: [] });
   Object.defineProperty(bot, "oxygenLevel", {

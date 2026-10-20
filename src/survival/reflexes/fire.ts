@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
+import { LETHAL_REFLEX_RETRY_MS } from "../control/contract.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
@@ -70,34 +71,52 @@ function fireEscapeFailure(kind: ReturnType<typeof reflexOutcomeKind> | ReturnTy
     : null;
 }
 
-/** Fire owns its environmental authority; combat policy cannot prohibit escape. */
-export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
-  let advancing = false;
-  // World age of the latest lava change in the escape's scan volume: the action resumes once it is old enough.
-  let lastLavaChangeAge: number | null = null;
-  const escapeAvailable = escapeAvailability(bot, world);
-  const blockUpdate = (before: ReturnType<Bot["blockAt"]>, after: ReturnType<Bot["blockAt"]>) => {
-    if (lavaChangedNear(bot, before, after, FIRE_ESCAPE_RADIUS)) lastLavaChangeAge = bot.time.age;
-    if (
+/** What the block updates told the fire reflex: lava spreading toward the body, and when lava last changed nearby. */
+interface LavaWatch {
+  advancing: boolean;
+  /** World age of the latest lava change in the escape's scan volume: the action resumes once it is old enough. */
+  lastChangeAge: number | null;
+}
+
+/**
+ * A packet handler: a throw (an unloaded chunk read while the world changes) must not leave the emit, and changes no
+ * state; the next tick's sense reads the world again.
+ */
+function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["blockAt"]>, after: ReturnType<Bot["blockAt"]>) {
+  try {
+    const changedAge = lavaChangedNear(bot, before, after, FIRE_ESCAPE_RADIUS) ? bot.time.age : lava.lastChangeAge;
+    const nowAdvancing =
       after?.name === "lava" &&
       before?.stateId !== after.stateId &&
-      advancingLavaAt(bot, bot.entity.position, after.position)
-    )
-      advancing = true;
-  };
+      advancingLavaAt(bot, bot.entity.position, after.position);
+    lava.lastChangeAge = changedAge;
+    if (nowAdvancing) lava.advancing = true;
+  } catch {
+    // Nothing assigned yet: the state is as before the update.
+  }
+}
+
+/** Fire owns its environmental authority; combat policy cannot prohibit escape. */
+export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
+  const lava: LavaWatch = { advancing: false, lastChangeAge: null };
+  const escapeAvailable = escapeAvailability(bot, world);
+  const blockUpdate = (before: ReturnType<Bot["blockAt"]>, after: ReturnType<Bot["blockAt"]>) =>
+    observeLavaUpdate(bot, lava, before, after);
   bot.on("blockUpdate", blockUpdate);
   const registration = driver.register({
     name: "fire_reflex",
+    // Static lava never changes the cells the answer reads, while the body burns: try the escape again.
+    retryAfterFailureMs: LETHAL_REFLEX_RETRY_MS,
     sense: () => {
-      advancing &&= advancingLavaAt(bot);
+      lava.advancing &&= advancingLavaAt(bot);
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
       const burning = isBurning(bot);
-      if (!advancing && !inLava && !inFire && !burning) return null;
-      const reason: FireEscapeReason = advancing ? "advancing_lava" : "contact";
+      if (!lava.advancing && !inLava && !inFire && !burning) return null;
+      const reason: FireEscapeReason = lava.advancing ? "advancing_lava" : "contact";
       const facts: FireFacts = {
         reason,
-        advancing,
+        advancing: lava.advancing,
         inLava,
         inFire,
         burning,
@@ -122,7 +141,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
       // On dry ground the interrupted action would re-plan at once, while released lava is still spreading.
       const kind =
         outcome === "escaped"
-          ? lavaWaitOutcomeKind(await awaitLavaSettled(bot, signal, () => lastLavaChangeAge))
+          ? lavaWaitOutcomeKind(await awaitLavaSettled(bot, signal, () => lava.lastChangeAge))
           : reflexOutcomeKind(outcome);
       return {
         kind,

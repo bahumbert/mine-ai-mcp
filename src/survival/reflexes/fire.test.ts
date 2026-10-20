@@ -340,3 +340,36 @@ test("an endangered body during the wait returns the action with the danger mess
   assert.equal(scene.attempts.count, 1);
   assert.match((finished.interruptions ?? []).join("|"), /in danger again/);
 });
+
+test("no escape in static lava is tried again 2 s later", async () => {
+  const bot = botFixture({}, { stopDigging() {}, deactivateItem() {}, clearControlStates() {} });
+  Object.assign(bot.entity, { isInLava: true, onGround: false });
+  let clock = 0;
+  const runner = new ActionRunner();
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: () => clock }));
+  resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
+  const observe = async () => {
+    for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  await observe();
+  const first = driver.answered.snapshot()[0];
+  assert.equal(first?.failure.kind, "no_escape");
+  clock = 1_999;
+  await observe();
+  assert.equal(driver.answered.snapshot()[0]?.id, first?.id, "the same lava within 2 s: still answered");
+  clock = 2_001;
+  await observe();
+  assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "still burning in the same cells: tried again");
+  assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
+});
+
+test("a throwing blockUpdate handler does not throw out of the emit", async () => {
+  const bot = botFixture({}, { stopDigging() {}, deactivateItem() {}, clearControlStates() {} });
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, new ActionRunner()));
+  resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
+  const hostile = { name: "lava", stateId: 1, get position(): never { throw new Error("chunk unloaded"); } } as never;
+  assert.doesNotThrow(() => bot.emit("blockUpdate", null, hostile));
+});

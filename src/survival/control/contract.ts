@@ -23,6 +23,9 @@ export type ResponseDecision<Response> =
     }
   | { readonly kind: "handled"; readonly by: string };
 
+/** How soon a reflex that fights a lethal, growing danger (drowning, burning) tries again after a failed attempt. */
+export const LETHAL_REFLEX_RETRY_MS = 2_000;
+
 export interface ReflexDefinition<Danger, Response, Outcome> {
   readonly name: ReflexName;
   readonly intervalTicks?: number;
@@ -35,8 +38,15 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   continuation(outcome: Outcome): Continuation;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
-  /** An actual temporal dependency, never an automatic retry delay. */
+  /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureMs`. */
   temporal?(outcome: Outcome): AnsweredEntry["temporal"];
+  /**
+   * For a danger that grows while the scene stays equal (air running out in still water, burning in static lava): the
+   * driver remembers every failure of this reflex (its `failure()` and an exception) as `retry_after_failure`, which
+   * expires after this long. The facts still apply: a changed scene reopens the scope sooner. Without it a failure
+   * stands until its facts change.
+   */
+  readonly retryAfterFailureMs?: number;
   releaseAfterAdmission?(): void;
   settled?(response: Response, outcome: Outcome, interrupted: { action: string; startedAt: string } | null): void;
 }
