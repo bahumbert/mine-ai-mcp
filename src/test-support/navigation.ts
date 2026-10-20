@@ -87,6 +87,8 @@ export class FakeNavigationBot implements NavigationBot {
   async stabilize(_signal?: AbortSignal): Promise<Awaited<ReturnType<NavigationBot["stabilize"]>>> {
     return { kind: "stable" } as const;
   }
+  /** Unset, as for a bot with no server to ask; a test sets what the "server" answers and records the asks. */
+  requestCellResync?: NavigationBot["requestCellResync"];
   async centerOnCell(cell: Position3) {
     this.current = { ...this.current, position: { x: cell.x + 0.5, y: this.current.position.y, z: cell.z + 0.5 } };
     return true;

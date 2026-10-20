@@ -29,6 +29,9 @@ export interface DigTimeEstimator {
   estimate(block: BlockObservation, tool: ToolSelection, context: DigContext): number;
 }
 
+/** The refusal of a step into a cell lava is about to flow into; an escape leg prices it (`relaxedForEscape`). */
+export const LAVA_SPREAD_REASON = "lava beside or above this cell can flow into it";
+
 export type PolicyDecision =
   | { readonly kind: "allowed" }
   | { readonly kind: "prohibited"; readonly reason: string; readonly cause?: "opens_into_liquid" }

@@ -35,6 +35,8 @@ export interface BlockTraits {
   readonly empty: boolean;
   readonly liquid: "water" | "lava" | null;
   readonly liquidSource: boolean;
+  /** The fluid level of a liquid block: 0 a source, 1-7 flowing, 8 falling. Absent for a block that is no liquid and for test doubles. */
+  readonly liquidLevel?: number;
   /**
    * Water held inside a block the body cannot enter: a waterlogged stair, slab or fence. A block with no collision box
    * that holds water (a water plant, a waterlogged plant) is `liquid` water and a source instead: the body swims there.
@@ -188,6 +190,14 @@ export function blockLabel(position: BlockPosition): string {
 
 export function blockPosition(position: Position3): BlockPosition {
   return { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+}
+
+/**
+ * The cell that holds a body up: the one half a block under the feet. At the feet's own cell the body would be inside the
+ * support while it sinks 0.08 into it, as a body does over ghost air (`y` cycles N, N-0.08, N-0.23).
+ */
+export function supportCellOf(position: Position3): BlockPosition {
+  return blockPosition({ x: position.x, y: position.y - 0.5, z: position.z });
 }
 
 export function samePosition(left: BlockPosition, right: BlockPosition): boolean {

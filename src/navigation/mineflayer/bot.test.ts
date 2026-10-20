@@ -684,6 +684,86 @@ test("a mob entering the scaffold cell while aiming prevents the placement packe
   assert.equal(packets, 0);
 });
 
+/**
+ * Mineflayer's `dig` resolves when its own timer ends and it has written air into the client world itself, whether or not
+ * the server broke the block (ghost air, run 16). The surface's `watchServerChange` stands for the server's packets.
+ */
+function serverWatchedDig(answer: () => Promise<boolean>) {
+  const order: string[] = [];
+  const asked: Position3[] = [];
+  let disposed = 0;
+  const bot = surface({
+    blockAt: () => ({ name: "stone" }),
+    dig: async () => {
+      order.push("dig");
+    },
+    watchServerChange: () => {
+      order.push("watch");
+      return {
+        answer: async () => {
+          order.push("answer");
+          return answer();
+        },
+        dispose: () => {
+          disposed += 1;
+        },
+      };
+    },
+    requestCellResync: async (cell) => {
+      asked.push(cell);
+      return "resent";
+    },
+  });
+  const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] },
+    { runId: "run", planId: "plan", stepId: "downward", attempt: 1 },
+    new AbortController().signal,
+  );
+  return { effect, order, asked, disposed: () => disposed };
+}
+
+test("a break is accepted only once the server has answered for its cell, and the watch began before the dig", async () => {
+  let answered!: (value: boolean) => void;
+  const run = serverWatchedDig(() => new Promise<boolean>((resolve) => (answered = resolve)));
+  let settled = false;
+  void run.effect.completion.then(() => (settled = true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "mineflayer's own air write is not the server's answer");
+  answered(true);
+  assert.deepEqual(await run.effect.completion, { kind: "accepted" });
+  assert.deepEqual(run.order, ["watch", "dig", "answer"]);
+  assert.deepEqual(run.asked, []);
+  assert.equal(run.disposed(), 1);
+});
+
+test("a break the server never answers fails after asking it to resend the cell", async () => {
+  const run = serverWatchedDig(async () => false);
+  const completion = await run.effect.completion;
+  assert.equal(completion.kind, "failed");
+  assert.match(completion.kind === "failed" ? completion.observation : "", /server did not confirm breaking the block at 0,\s?62,\s?0/);
+  assert.match(completion.kind === "failed" ? completion.observation : "", /asked it to resend the cell/);
+  assert.deepEqual(run.asked, [{ x: 0, y: 62, z: 0 }]);
+  assert.equal(run.disposed(), 1);
+});
+
+test("a dig that throws still removes the server watch", async () => {
+  const bot = surface({
+    blockAt: () => ({ name: "stone" }),
+    dig: async () => {
+      throw new Error("dig interrupted");
+    },
+    watchServerChange: () => ({ answer: async () => true, dispose: () => void (disposed += 1) }),
+  });
+  let disposed = 0;
+  const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] },
+    { runId: "run", planId: "plan", stepId: "downward", attempt: 1 },
+    new AbortController().signal,
+  );
+  assert.equal((await effect.completion).kind, "failed");
+  assert.equal(disposed, 1);
+});
+
 test("a water stance held through the bot surface is counted on the raw bot the runtime asks (review 2026-10-19 #2)", () => {
   const raw = Object.assign(new EventEmitter(), {
     entity: { position: new Vec3(0.5, 64, 0.5), isInWater: true, onGround: true, yaw: 0 },

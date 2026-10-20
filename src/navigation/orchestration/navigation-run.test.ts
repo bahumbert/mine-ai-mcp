@@ -1127,6 +1127,27 @@ test("an airborne start with physics stopped fails unstable within about two sec
   assert.equal(outcome.evidence.cleanup.listeners, 0);
 });
 
+test("a body the server holds in the air has its cell resent through the run, lands, and walks to the goal", async () => {
+  const world = flatWorld();
+  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
+  const bot = new FakeNavigationBot();
+  bot.current = { ...bot.current, stance: "airborne" };
+  let asked = 0;
+  bot.requestCellResync = async () => {
+    asked += 1;
+    world.load({ x: 0, y: 62, z: 0 }, { stateId: 1 });
+    return "resent";
+  };
+  bot.stabilize = async () => {
+    if (asked === 0) return { kind: "failed", observation: "No stable stance was observed; last position 0.50,63.00,0.50, stance=airborne." };
+    bot.current = observation();
+    return { kind: "stable" };
+  };
+  const outcome = await settle(createNavigator({ world, bot }), { goal: exactBlockGoal({ x: 3, y: 63, z: 0 }), policy: walking() });
+  assert.equal(outcome.kind, "completed", JSON.stringify(outcome.kind === "failed" ? outcome.failure : outcome));
+  assert.equal(asked, 1, "the cell was asked for once");
+});
+
 test("a search overtaken by an impulse with physics stopped still releases its hold", async () => {
   const bot = new FakeNavigationBot();
   let holding = false;

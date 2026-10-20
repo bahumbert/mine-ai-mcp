@@ -28,6 +28,7 @@ import type { ResolvedGoal } from "../goals/goal.js";
 import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
+import { lavaWatchCells } from "../world/lava-watch.js";
 import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
@@ -284,6 +285,8 @@ function buildPlan(
       }
     }
   }
+  // Lava that flows in beside a route cell makes the route unsafe: its neighbours are dependencies too.
+  for (const step of steps) for (const cell of lavaWatchCells(options.context.world, step.to)) dependencies.add(blockKey(cell));
   const endState = store.state[endpoint]!;
   return Object.freeze({
     id: `${options.id}:route:${visited}`,

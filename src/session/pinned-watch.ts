@@ -140,7 +140,11 @@ export class PinnedWatch {
 
 /** What the runtime does to get a pinned bot out; the runner calls it for a movement action while the bot is pinned. */
 export interface PinnedEscape {
-  /** Gets the body out of a boat, or swims it to the nearest breathable cell; best effort, bounded on the wall clock. */
+  /**
+   * Gets the body out of a boat, swims it to the nearest breathable cell, or asks the server to resend the cell under a
+   * body it holds in the air; nothing to do from a supported or climbing stance, so a first move exists from every stance
+   * the watch pins. Best effort, bounded on the wall clock.
+   */
   readonly leave: (signal: AbortSignal) => Promise<void>;
   /** While the handle is open, every route of this bot starts as an escape (`escape: true`). */
   readonly routesAsEscape: () => Disposable;

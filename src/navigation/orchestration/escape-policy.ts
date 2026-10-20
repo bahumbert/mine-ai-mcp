@@ -1,11 +1,13 @@
 /**
  * The policy of an escape leg (run 15: Dirk and Sana pinned for hours). Two rules are set aside, for that leg only, and
  * every safety rule stays: the bot's own style rule against digging straight down, and the refusal to dig where the
- * only liquid a break opens into is flowing water (owner, 2026-10-18; a water source and any lava still refuse).
+ * only liquid a break opens into is flowing water (owner, 2026-10-18; a water source and any lava still refuse). A cell lava
+ * will flow into on its next update is priced, not refused, on this leg: the way out may cross it as the last resort
+ * (owner, 2026-10-19), while an ordinary route goes round it.
  */
 import { standsFree } from "../movements/catalogue.js";
 import type { PlannedStep } from "../movements/movement.js";
-import { BREAK_UNDER_WATER, type BreakEvaluation, type MovementPolicy, type PolicyDecision } from "../movements/policy.js";
+import { BREAK_UNDER_WATER, LAVA_SPREAD_REASON, type BreakEvaluation, type MovementPolicy, type PolicyDecision } from "../movements/policy.js";
 import { countStartRefusals, neverLeftStart, type StartRefusals } from "../search/start-refusals.js";
 import type { BlockObservation, BlockPosition, WorldView } from "../world/world.js";
 import type { NavigationCalculationFailure } from "./process-events.js";
@@ -16,6 +18,18 @@ export const RELAXED_FLOWING_WATER = "dig_next_to_flowing_water";
 export const ESCAPE_RELAXED_RULES: readonly string[] = [RELAXED_DIG_STRAIGHT_DOWN, RELAXED_FLOWING_WATER];
 
 const ALLOWED: PolicyDecision = { kind: "allowed" };
+/** Ticks an escape pays to stand where lava is about to flow: dearer than a detour of twenty seconds, so it is the last resort. */
+export const LAVA_SPREAD_ESCAPE_COST = 400;
+
+/** `decideStep` as the escape leg sees it: the lava-spread refusal becomes a price. */
+function pricedLavaSpread(policy: MovementPolicy): MovementPolicy["decideStep"] {
+  return (x, y, z, world) => {
+    const decision = policy.decideStep(x, y, z, world);
+    return decision.kind === "prohibited" && decision.reason === LAVA_SPREAD_REASON
+      ? { kind: "penalized", reason: decision.reason, cost: LAVA_SPREAD_ESCAPE_COST }
+      : decision;
+  };
+}
 
 const isLiquidRefusal = (decision: PolicyDecision): boolean =>
   decision.kind === "prohibited" && (decision.cause === "opens_into_liquid" || decision.reason === BREAK_UNDER_WATER);
@@ -23,10 +37,11 @@ const isLiquidRefusal = (decision: PolicyDecision): boolean =>
 /** `policy` as the escape leg sees it. A policy that cannot tell flowing from source water keeps its liquid rules whole. */
 export function relaxedForEscape(policy: MovementPolicy): MovementPolicy {
   const flowingOnly = policy.opensOnlyIntoFlowingWater;
-  if (flowingOnly === undefined) return Object.freeze({ ...policy, allowDownward: true });
+  if (flowingOnly === undefined) return Object.freeze({ ...policy, allowDownward: true, decideStep: pricedLavaSpread(policy) });
   return Object.freeze({
     ...policy,
     allowDownward: true,
+    decideStep: pricedLavaSpread(policy),
     confirmBreak: (block: BlockObservation, position: BlockPosition, world: WorldView): PolicyDecision => {
       const decision = policy.confirmBreak(block, position, world);
       return isLiquidRefusal(decision) && flowingOnly(position.x, position.y, position.z, world) ? ALLOWED : decision;

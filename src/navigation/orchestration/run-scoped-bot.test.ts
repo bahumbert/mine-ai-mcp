@@ -92,3 +92,22 @@ test("a release that throws still leaves the view withdrawn", () => {
   assert.throws(() => scoped.revoke(), /release failed/);
   assert.equal(scoped.revoked, true);
 });
+
+test("a run asks the server for a cell through its view, and an abandoned run asks nothing", async () => {
+  const shared = new CountingBot();
+  const asked: unknown[] = [];
+  shared.requestCellResync = async (cell) => {
+    asked.push(cell);
+    return "resent";
+  };
+  const scoped = createRunScopedBot(shared);
+  const cell = { x: 1, y: 62, z: 0 };
+  assert.equal(await scoped.bot.requestCellResync?.(cell, new AbortController().signal), "resent");
+  scoped.revoke();
+  assert.equal(await scoped.bot.requestCellResync?.(cell, new AbortController().signal), "unavailable");
+  assert.deepEqual(asked, [cell]);
+});
+
+test("a shared bot without the resync gives the run none", () => {
+  assert.equal(createRunScopedBot(new CountingBot()).bot.requestCellResync, undefined);
+});

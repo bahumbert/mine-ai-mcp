@@ -538,7 +538,7 @@ export class NavigationRun {
       if (planningStall) return this.#failed(planningStall);
       if (observation.stance === "airborne") {
         this.status({ kind: "stabilizing", runId: this.context.runId, reason: "airborne" });
-        const stable = await awaitLanding(this.context.bot, this.context.signal);
+        const stable = await awaitLanding(this.context.bot, this.context.signal, { world: this.context.world });
         if (stable.kind === "stopped") return this.#stopped();
         if (stable.kind === "failed")
           return this.#failed({

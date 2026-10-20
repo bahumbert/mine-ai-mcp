@@ -1,0 +1,49 @@
+template: ../../templates/flat-single-action.yaml
+
+name: dig-down-under-lag
+tags: [regression]
+description: >-
+  Run 16 finding 2 (hypothesis from the server's source): with the server seconds behind, "start digging" and "finish
+  digging" land in one server tick and a dig can be dropped, while Mineflayer has already written air into the client
+  world and reported the break done. A bot digs straight down four blocks of stone on a server running at 4 ticks a
+  second. Every break must end only on the server's own block packet, and the bot must stand supported on the floor
+  below the shaft (a dropped dig is asked to be resent and dug again, never left as air in the client only).
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+setup:
+  - "tick rate 4"
+
+geometry:
+  - fill: { block: stone, from: [-5, -63, -5], to: [5, -56, 5] }
+
+players:
+  - name: Actor
+    pos: [0.5, -55, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+params:
+  action: navigate
+  input: { x: 0, y: -60, z: 0, range: 0 }
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [0.5, -60, 0.5]
+      radius: 1.0
+    - { kind: completion }

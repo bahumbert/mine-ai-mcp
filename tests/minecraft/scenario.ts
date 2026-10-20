@@ -23,6 +23,16 @@ export interface ScenarioContext {
    * while paused, so `waitForTicks` never ends. A driver that pauses uses wall-clock delays.
    */
   readonly physics: { pause(): void; resume(): void };
+  /**
+   * The bot's own copy of the world, for a scenario that makes it disagree with the server (ghost air): a write here changes
+   * only what the client believes, the server keeps its block.
+   */
+  readonly client: {
+    setCell(cell: readonly [number, number, number], stateId: number): Promise<void>;
+    body(): { readonly x: number; readonly y: number; readonly z: number; readonly onGround: boolean };
+    /** Container windows the server opened for the bot since the trial started. */
+    windowsOpened(): number;
+  };
   /** Run a registered action; the host owns cancellation, recording and cleanup. */
   call(action: string, input: Record<string, unknown>): Promise<ScenarioCall>;
 }

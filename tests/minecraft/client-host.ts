@@ -4,6 +4,7 @@ import { mkdtempDisposable } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 import { runNodeClient, type ClientCompletion, type NodeClientSession } from "mine-labs/client";
 import {
   createMinecraftRuntime,
@@ -53,6 +54,10 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
   await using overlay = await openScenarioHighlighter(bot, session);
   await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter });
   overlay?.follow(runtime.navigation);
+  let windowsOpened = 0;
+  bot.on("windowOpen", () => {
+    windowsOpened += 1;
+  });
   const context: ScenarioContext = {
     scenario: session.scenario,
     bot,
@@ -67,6 +72,11 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
       resume: () => {
         bot.physicsEnabled = true;
       },
+    },
+    client: {
+      setCell: async ([x, y, z], stateId) => bot.world.setBlockStateId(new Vec3(x, y, z), stateId),
+      body: () => ({ ...bot.entity.position, onGround: bot.entity.onGround }),
+      windowsOpened: () => windowsOpened,
     },
     call: (action, input) => callScenarioAction(runtime, session, action, input),
   };

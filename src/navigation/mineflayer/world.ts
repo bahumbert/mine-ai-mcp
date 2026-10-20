@@ -110,6 +110,7 @@ function traits(block: MineflayerBlock): BlockTraits {
     // Prismarine models water's integer-looking `level` property as the
     // registry enum string "0". Accept a numeric zero as well for older
     // registries and test doubles.
+    ...(liquid !== null && Number.isFinite(Number(properties.level)) && { liquidLevel: Number(properties.level) }),
     liquidSource: swimWater || (liquid !== null && (properties.level === "0" || properties.level === 0)),
     waterlogged: heldWater && !swimWater,
     // The registry gives a waterloggable block the property whatever its

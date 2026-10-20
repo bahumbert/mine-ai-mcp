@@ -14,11 +14,12 @@ import { sealedPitRefusal } from "./sealed-pit-refusal.js";
  * to save a corner.
  */
 import type { Bot } from "mineflayer";
+import { lavaSpreadsIntoBody } from "../../world/lava-flow.js";
 import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
-import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
+import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
 import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
@@ -398,6 +399,8 @@ export const MAXIMUM_BUCKET_DROP = 80;
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };
 const DEEP_WATER_STEP: PolicyDecision = { kind: "prohibited", reason: DEEP_WATER_REASON };
 const AVOIDED_STEP: PolicyDecision = { kind: "prohibited", reason: "movement policy avoids this block" };
+/** Lava beside or above the cell flows into it on its next update; an escape leg prices this instead (`relaxedForEscape`). */
+const LAVA_SPREAD_STEP: PolicyDecision = { kind: "prohibited", reason: LAVA_SPREAD_REASON };
 const OPENS_INTO_LIQUID: PolicyDecision = {
   kind: "prohibited",
   cause: "opens_into_liquid",
@@ -577,6 +580,7 @@ export function createMineflayerMovementPolicy(
         const observation = world.blockAt(x, y + dy, z);
         if (avoids(observation)) return AVOIDED_STEP;
       }
+      if (lavaSpreadsIntoBody(world, x, y, z, bot.game.dimension)) return LAVA_SPREAD_STEP;
       if (!allowDeepWater && isDeepOpenWater(waterIn(world), x, y, z) && !atSea(world)) return DEEP_WATER_STEP;
       return ALLOWED_STEP;
     },

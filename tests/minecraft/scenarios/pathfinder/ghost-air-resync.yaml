@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+
+name: ghost-air-resync
+tags: [regression]
+description: >-
+  Run 16 finding 2: four bots hung in the air for 23-53 minutes over cells their own world showed as air while the server
+  kept a block there, and every route failed at the landing wait. Here the driver writes air into the client's copy of the
+  cell under a bot standing on a chest, then of a stone cell, while the server keeps both. The stance must read airborne
+  at the same height for 20 ticks first. Then a navigate five blocks east must complete (the landing wait asks the server
+  to resend the cell with a sneaking, empty-off-hand use), and the chest must not open.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -10 -63 -10 28 -40 10 air"
+
+geometry:
+  - fill: { block: stone, from: [-9, -63, -9], to: [27, -61, 9] }
+  - fill: { block: chest, from: [0, -61, 0], to: [0, -61, 0] }
+
+players:
+  - name: Held
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/ghost-air-resync.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Held,gamemode=!spectator]"
+
+params:
+  holdTicks: 20
+  cases:
+    - { target: [5, -60, 0] }
+    - { target: [10, -60, 0] }
+  openedWindowsAllowed: 0
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Held }

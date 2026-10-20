@@ -31,6 +31,9 @@ export function createRunScopedBot(shared: NavigationBot): RunScopedBot {
       return shared.ownedControlCount;
     },
     ...(shared.longestBreakDurationMs && { longestBreakDurationMs: (operation) => shared.longestBreakDurationMs!(operation) }),
+    ...(shared.requestCellResync && {
+      requestCellResync: async (cell, signal) => (revoked ? "unavailable" : shared.requestCellResync!(cell, signal)),
+    }),
     prepareMovement: async (...args): Promise<MovementPreparation> =>
       revoked ? { kind: "failed", observation: REVOKED } : shared.prepareMovement(...args),
     startEffect: (...args) =>
