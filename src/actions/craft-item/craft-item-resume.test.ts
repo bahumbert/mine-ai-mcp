@@ -91,7 +91,7 @@ test("two reflexes in a row make three attempts and one total", async () => {
   assert.equal(count(counts, bot, "oak_planks"), 12);
 });
 
-test("materials taken between attempts end the request with the plan's own shortfall, nothing crafted twice", async () => {
+test("a resume short of materials after earlier crafts is partial, with the plan's own shortfall, nothing crafted twice", async () => {
   const { bot, counts, craftCalls } = craftingBot({ oak_log: 2 });
   const [first] = reflexAfterCrafts(bot, [1]);
   const run = beginCraftItem(bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
@@ -100,7 +100,7 @@ test("materials taken between attempts end the request with the plan's own short
   counts.set(bot.registry.itemsByName.oak_log!.id, 0);
   const result = await run(freshAttempt());
 
-  assert.equal(result.status, "failed");
+  assert.equal(result.status, "partial", "the first attempt's planks are a result the model must keep");
   assert.match(result.error, /CRAFT_MATERIALS_MISSING/);
   assert.deepEqual(craftCalls, ["oak_planks"]);
   assert.equal(result.craft.items[0]!.gained, 4, "the first attempt's planks still count");
@@ -200,4 +200,101 @@ test("an abort right after a craft call resolved still credits that craft to the
   assert.equal(result.status, "succeeded");
   assert.deepEqual(craftCalls, ["oak_planks", "oak_planks"], "no third application");
   assert.equal(count(counts, bot, "oak_planks"), 8);
+});
+
+test("sticks picked up between attempts are not gained: gained is what the request crafted", async () => {
+  // 8 sticks = two applications; the first made 4, then 4 lay on the ground and were picked up (carried 8 = the target).
+  const { bot, counts, craftCalls } = craftingBot({ oak_planks: 4 });
+  const [first] = reflexAfterCrafts(bot, [1]);
+  const run = beginCraftItem(bot, navigation, { items: [{ itemName: "stick", count: 8 }] }, () => {});
+
+  await assert.rejects(run(first!), /reflex took the body/);
+  const stickId = bot.registry.itemsByName.stick!.id;
+  counts.set(stickId, (counts.get(stickId) ?? 0) + 4);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.deepEqual(craftCalls, ["stick", "stick"]);
+  assert.equal(count(counts, bot, "stick"), 12);
+  assert.equal(result.craft.items[0]!.gained, 8, "the picked-up sticks are not the request's work");
+});
+
+test("a death between attempts (inventory emptied) ends failed with nothing gained", async () => {
+  const { bot, counts, craftCalls } = craftingBot({ oak_log: 2 });
+  const [first] = reflexAfterCrafts(bot, [1]);
+  const run = beginCraftItem(bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
+
+  await assert.rejects(run(first!), /reflex took the body/);
+  counts.clear();
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "failed", "the planks crafted before the death are gone: nothing is left to keep");
+  assert.deepEqual(craftCalls, ["oak_planks"]);
+  assert.equal(result.craft.items[0]!.gained, 0);
+});
+
+test("two craft requests on two bots keep their own credit", async () => {
+  const a = craftingBot({ oak_log: 2 });
+  const b = craftingBot({ oak_log: 2 });
+  const [firstA] = reflexAfterCrafts(a.bot, [1]);
+  const [firstB] = reflexAfterCrafts(b.bot, [1]);
+  const runA = beginCraftItem(a.bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
+  const runB = beginCraftItem(b.bot, navigation, { items: [{ itemName: "oak_planks", count: 8 }] }, () => {});
+
+  await assert.rejects(runA(firstA!), /reflex took the body/);
+  await assert.rejects(runB(firstB!), /reflex took the body/);
+  b.counts.set(b.bot.registry.itemsByName.oak_log!.id, 0);
+  const resultA = await runA(freshAttempt());
+  const resultB = await runB(freshAttempt());
+
+  assert.equal(resultA.status, "succeeded", resultA.status === "succeeded" ? "" : resultA.error);
+  assert.equal(resultA.craft.items[0]!.gained, 8);
+  assert.equal(resultB.status, "partial", "bot B's own planks are kept as partial, whatever bot A did");
+  assert.equal(resultB.craft.items[0]!.gained, 4);
+  assert.deepEqual(a.craftCalls, ["oak_planks", "oak_planks"]);
+  assert.deepEqual(b.craftCalls, ["oak_planks"]);
+});
+
+test("a resume whose temporary table is gone after earlier crafts is partial, with the table's own refusal", async () => {
+  const { bot, counts, craftCalls } = craftingBot({ crafting_table: 1, oak_log: 2, cobblestone: 3 });
+  const calls: string[] = [];
+  const operations = tableOperations(bot, counts, calls);
+  const [first] = reflexAfterCrafts(bot, [1]);
+  const request: CraftItemRequest = {
+    items: [{ itemName: "oak_planks", count: 4 }, { itemName: "stone_pickaxe", count: 1 }],
+    temporaryWorkstation: true,
+  };
+  const run = beginCraftItem(bot, navigation, request, () => {}, undefined, operations);
+
+  await assert.rejects(run(first!), /reflex took the body/);
+  assert.deepEqual(craftCalls, ["oak_planks"]);
+  // The table was broken and the carried one lost while the reflex held the body.
+  Object.assign(bot, { blockAt: () => ({ name: "air", position: new Vec3(1, 64, 0) }) as WorldBlock });
+  counts.set(bot.registry.itemsByName.crafting_table!.id, 0);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "partial", "the planks made before are a result");
+  assert.match(result.error, /WORKSTATION_NOT_CARRIED/);
+  assert.equal(result.craft.items[0]!.gained, 4);
+  assert.equal(result.craft.items[1]!.gained, 0);
+});
+
+test("a resume whose station cannot make its table after earlier crafts is partial", async () => {
+  // The request: 4 planks and a pickaxe. The first attempt makes the planks; the logs then vanish and 1 plank is
+  // left over, so the pickaxe alone is plannable but the table it needs as well (4 + 2 planks) is not.
+  const { bot, counts, craftCalls } = craftingBot({ oak_log: 3, cobblestone: 3 });
+  const [first] = reflexAfterCrafts(bot, [1]);
+  const request: CraftItemRequest = {
+    items: [{ itemName: "oak_planks", count: 4 }, { itemName: "stone_pickaxe", count: 1 }],
+  };
+  const run = beginCraftItem(bot, navigation, request, () => {});
+
+  await assert.rejects(run(first!), /reflex took the body/);
+  assert.deepEqual(craftCalls, ["oak_planks"]);
+  counts.set(bot.registry.itemsByName.oak_log!.id, 0);
+  counts.set(bot.registry.itemsByName.oak_planks!.id, 5);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "partial");
+  assert.equal(result.craft.items[0]!.gained, 4);
 });

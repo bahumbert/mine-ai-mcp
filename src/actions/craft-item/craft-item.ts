@@ -36,7 +36,10 @@ import {
   type CraftItemRequest,
   type CraftItemResult,
 } from "./contract.js";
-import { prepareCraftingStation, reachCraftingTable, type TableHold } from "./crafting-station.js";
+import { CRAFTING_TABLE_ITEM, prepareCraftingStation, reachCraftingTable, type TableHold } from "./crafting-station.js";
+
+/** A result that stopped short of the request. */
+type ShortCraftResult = Exclude<CraftItemResult, { readonly status: "succeeded" }>;
 
 type FailedCraftPreparation = Exclude<CraftPreparation, { readonly kind: "ready" }>;
 
@@ -51,6 +54,8 @@ interface CraftItemObservation {
   /** Omitted only when no preparation or crafting changed inventory. */
   readonly after?: SettledInventoryCount;
   readonly usedForWorkstation?: number;
+  /** What this request's own craft calls made of the item: the most its `gained` can show. */
+  readonly crafted: number;
 }
 
 interface CraftEvidenceInput {
@@ -75,10 +80,11 @@ function craftEvidence({
         inventoryBefore,
         after = { count: inventoryBefore, confirmed: true },
         usedForWorkstation = 0,
+        crafted,
       }) => ({
         item,
         requested,
-        gained: Math.max(0, after.count - inventoryBefore + usedForWorkstation),
+        gained: creditedGain(after.count - inventoryBefore + usedForWorkstation, crafted),
         usedForWorkstation,
         inventoryBefore,
         inventoryAfter: after.count,
@@ -90,11 +96,22 @@ function craftEvidence({
   };
 }
 
+/** What of an item the request made and still carries: the carried change, capped by what its own crafts produced. */
+function creditedGain(carriedChange: number, crafted: number): number {
+  return Math.max(0, Math.min(carriedChange, crafted));
+}
+
+/** A failure after earlier attempts crafted part of the request is partial: that work is kept, the error is unchanged. */
+function failureAfterEarlierCrafts(result: ShortCraftResult): ShortCraftResult {
+  const kept = result.status === "failed" && result.craft.items.some(({ gained }) => gained > 0);
+  return kept ? { ...result, status: "partial" } : result;
+}
+
 function preparationFailureResult(
   preparation: FailedCraftPreparation,
   evidence: CraftEvidenceInput,
   version: string,
-): Extract<CraftItemResult, { status: "failed" }> {
+): ShortCraftResult {
   let error: string;
 
   switch (preparation.kind) {
@@ -115,11 +132,11 @@ function preparationFailureResult(
       break;
   }
 
-  return {
+  return failureAfterEarlierCrafts({
     status: "failed",
     error,
     craft: craftEvidence({ ...evidence, preparation }),
-  };
+  });
 }
 
 /** What one craft request has done so far, kept across the attempts a reflex splits it into. */
@@ -134,6 +151,39 @@ interface CraftProgress {
 
 function newCraftProgress(): CraftProgress {
   return { baselines: new Map(), table: { placedAt: null, usedCarried: 0 }, crafted: new Map() };
+}
+
+/** The recorder every craft call of the request reports to, so an aborted attempt still leaves its credit. */
+function recordCrafted(progress: CraftProgress) {
+  return ({ id, count }: { readonly id: number; readonly count: number }): void => {
+    progress.crafted.set(id, (progress.crafted.get(id) ?? 0) + count);
+  };
+}
+
+/** Tables the request put down, as part of the carried change of a requested table. */
+function tablesUsedFor(name: string, progress: CraftProgress): number {
+  return name === CRAFTING_TABLE_ITEM ? progress.table.usedCarried : 0;
+}
+
+/**
+ * What of `item` this request made and still carries now: the carried change since the begin baseline (plus tables it
+ * set down), capped by what its own craft calls produced.
+ */
+function creditedCraft(bot: Bot, { id, name, inventoryBefore }: ResolvedCraftItem, progress: CraftProgress): number {
+  return creditedGain(carriedCount(bot, name) - inventoryBefore + tablesUsedFor(name, progress), progress.crafted.get(id) ?? 0);
+}
+
+/** One requested item as the evidence shows it; `after` is the settled count when the caller waited for the server. */
+function observeItem(item: ResolvedCraftItem, progress: CraftProgress, after?: SettledInventoryCount): CraftItemObservation {
+  const { id, name, count, inventoryBefore } = item;
+  return {
+    item: name,
+    requested: count,
+    inventoryBefore,
+    ...(after && { after }),
+    usedForWorkstation: tablesUsedFor(name, progress),
+    crafted: progress.crafted.get(id) ?? 0,
+  };
 }
 
 interface CraftTargets {
@@ -151,28 +201,26 @@ function resolveCraftTargets(bot: Bot, request: CraftItemRequest, progress: Craf
     const target = bot.registry.itemsByName[requested.itemName];
     if (!target) {
       unknownItems.push(unknownItemAnswer(requested.itemName, Object.keys(bot.registry.itemsByName), bot.registry.entitiesByName, bot.version));
-      requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0 });
+      requestedItems.push({ item: requested.itemName, requested: requested.count, inventoryBefore: 0, crafted: 0 });
       continue;
     }
     const inventoryBefore = progress.baselines.get(target.name) ?? carriedCount(bot, target.name);
     progress.baselines.set(target.name, inventoryBefore);
-    items.push({ id: target.id, name: target.name, count: requested.count, inventoryBefore });
-    requestedItems.push({ item: target.name, requested: requested.count, inventoryBefore, after: settledNow(bot, target.name) });
+    const resolved = { id: target.id, name: target.name, count: requested.count, inventoryBefore };
+    items.push(resolved);
+    requestedItems.push(observeItem(resolved, progress, settledNow(bot, target.name)));
   }
   return { items, requestedItems, unknownItems };
 }
 
 /**
- * The targets still short of the request, each with the count left. What earlier attempts crafted is credited as the
- * smaller of the carried change and what this request's craft calls made: planks picked up from the ground or a
- * hunger reflex's meal are not crafting (review 2026-10-19).
+ * The targets still short of the request, each with the count left. What earlier attempts crafted is credited by
+ * `creditedCraft`: planks picked up from the ground or a hunger reflex's meal are not crafting (review 2026-10-19).
  */
 function stillToCraft(bot: Bot, items: readonly ResolvedCraftItem[], progress: CraftProgress): CraftTarget[] {
-  return items.flatMap(({ id, name, count, inventoryBefore }) => {
-    const usedForTable = name === "crafting_table" ? progress.table.usedCarried : 0;
-    const carriedChange = carriedCount(bot, name) - inventoryBefore + usedForTable;
-    const left = count - Math.max(0, Math.min(carriedChange, progress.crafted.get(id) ?? 0));
-    return left > 0 ? [{ id, name, count: left }] : [];
+  return items.flatMap((item) => {
+    const left = item.count - creditedCraft(bot, item, progress);
+    return left > 0 ? [{ id: item.id, name: item.name, count: left }] : [];
   });
 }
 
@@ -184,15 +232,10 @@ async function settleCraftedGains(
   signal?: AbortSignal,
 ): Promise<CraftItemObservation[]> {
   return Promise.all(
-    items.map(async ({ name, count, inventoryBefore }) => {
-      const usedForWorkstation = name === "crafting_table" ? progress.table.usedCarried : 0;
-      return {
-        item: name,
-        requested: count,
-        inventoryBefore,
-        usedForWorkstation,
-        after: await settleInventoryMinimum(bot, name, inventoryBefore + count - usedForWorkstation, { signal }),
-      };
+    items.map(async (item) => {
+      const { name, count, inventoryBefore } = item;
+      const target = inventoryBefore + count - tablesUsedFor(name, progress);
+      return observeItem(item, progress, await settleInventoryMinimum(bot, name, target, { signal }));
     }),
   );
 }
@@ -212,11 +255,11 @@ function craftOutcome(
     craftingTablePlaced: progress.table.placedAt ?? undefined,
   });
   if (execution?.kind === "failed") {
-    return {
+    return failureAfterEarlierCrafts({
       status: execution.completedSteps > 0 ? "partial" : "failed",
       error: craftItemOutcomes.executionFailed(execution.cause, carriedCount(bot, "unknown")),
       craft: observed,
-    };
+    });
   }
   const shortfalls = observed.items.filter(({ gained, requested }) => gained < requested);
   if (shortfalls.length > 0) {
@@ -242,6 +285,7 @@ async function stationForBatch(
         hold: progress.table,
         signal: context.signal,
         planOptions,
+        onCrafted: recordCrafted(progress),
       });
   // A reflex may have moved the bot away from a table that is still ours (also the temporary one).
   if (station.kind === "ready" && station.craftingTable && (providedTable || progress.table.placedAt)) {
@@ -281,32 +325,23 @@ async function craftBatch(
       error: `No crafting table is in reach or carried. Preparing one for this batch: ${failure.error}`,
     };
   }
-  const unsettled = (usedForTable: boolean) =>
-    items.map(({ name, count, inventoryBefore }) => ({
-      item: name,
-      requested: count,
-      inventoryBefore,
-      after: settledNow(bot, name),
-      usedForWorkstation: usedForTable && name === "crafting_table" ? progress.table.usedCarried : 0,
-    }));
+  const unsettled = () => items.map((item) => observeItem(item, progress, settledNow(bot, item.name)));
   if (station.kind === "failed") {
-    return {
+    return failureAfterEarlierCrafts({
       status: "failed",
       error: station.error,
-      craft: craftEvidence({ items: unsettled(false), preparation: initialPlan }),
-    };
+      craft: craftEvidence({ items: unsettled(), preparation: initialPlan }),
+    });
   }
   // Workstation preparation can consume materials; plan the batch against what remains.
   const preparation = planCraftingFromInventory(bot, stillToCraft(bot, items, progress), planOptions);
   if (preparation.kind !== "ready") {
     return preparationFailureResult(preparation, {
       craftingTablePlaced: progress.table.placedAt ?? undefined,
-      items: unsettled(true),
+      items: unsettled(),
     }, bot.version);
   }
-  const execution = await executeCraftPlan(bot, preparation.applications, station.craftingTable, context.signal, ({ id, count }) =>
-    progress.crafted.set(id, (progress.crafted.get(id) ?? 0) + count),
-  );
+  const execution = await executeCraftPlan(bot, preparation.applications, station.craftingTable, context.signal, recordCrafted(progress));
   const settled = await settleCraftedGains(bot, items, progress, context.signal);
   return craftOutcome(bot, settled, execution, preparation, progress);
 }
@@ -328,33 +363,28 @@ export function beginCraftItem(
   if (!request.temporaryWorkstation) {
     return (context) => craftBatch(bot, navigation, request, context, progress, undefined, seen);
   }
-  const tablesBefore = carriedCount(bot, "crafting_table");
+  const tablesBefore = carriedCount(bot, CRAFTING_TABLE_ITEM);
   const hold: WorkstationHold = { placedAt: null };
   return async (context) => {
     const result = await useTemporaryWorkstation(
       bot,
-      "crafting_table",
+      CRAFTING_TABLE_ITEM,
       context,
       operations,
       (table) => craftBatch(bot, navigation, request, context, progress, table, seen),
-      (error) => ({
-        status: "failed",
-        error,
-        craft: craftEvidence({
-          items: request.items.map(({ itemName, count }) => ({
-            item: itemName,
-            requested: count,
-            inventoryBefore: progress.baselines.get(itemName) ?? carriedCount(bot, itemName),
-          })),
+      (error) =>
+        failureAfterEarlierCrafts({
+          status: "failed",
+          error,
+          craft: craftEvidence({ items: resolveCraftTargets(bot, request, progress).requestedItems }),
         }),
-      }),
       hold,
     );
     // The batch's baseline was taken after placement. Restore the caller's baseline
     // and final count without counting the recovered table as newly crafted output.
     if (result.workstation) {
       for (const item of result.craft.items) {
-        if (item.item !== "crafting_table") continue;
+        if (item.item !== result.workstation.block) continue;
         item.inventoryBefore = tablesBefore;
         item.inventoryAfter = carriedCount(bot, item.item);
         item.usedForWorkstation = result.workstation.recovered ? 0 : 1;

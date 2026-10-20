@@ -117,3 +117,18 @@ test("an abort before the table landed: the next attempt finds the cell empty an
   assert.equal(station.kind, "ready");
   assert.deepEqual(f.placed, ["place"]);
 });
+
+test("a table made for the batch is reported as crafted and counted as put down, so a table target is not under-credited", async () => {
+  const f = stationFixture({ oak_planks: 4 });
+  const crafted: Array<{ id: number; count: number }> = [];
+
+  const station = await prepareCraftingStation(f.bot, noItems, true, {
+    hold: f.hold,
+    place: f.place,
+    onCrafted: ({ id, count }) => crafted.push({ id, count }),
+  });
+
+  assert.equal(station.kind, "ready");
+  assert.deepEqual(crafted, [{ id: f.bot.registry.itemsByName.crafting_table!.id, count: 1 }]);
+  assert.equal(f.hold.usedCarried, 1, "the table it made and set down is spent: it is no gain for a table target");
+});

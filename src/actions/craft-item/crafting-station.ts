@@ -15,7 +15,7 @@ type CraftingStation =
 /** The table one craft request set down, kept across attempts so a resume goes back to it instead of making another. */
 export interface TableHold {
   placedAt: Position3 | null;
-  /** Carried tables the request put down (counted as gained when the request asks for a `crafting_table`). */
+  /** Tables the request put down, carried or crafted for the batch (counted as gained when it asks for a table). */
   usedCarried: number;
 }
 
@@ -23,9 +23,14 @@ interface StationOptions {
   readonly hold: TableHold;
   readonly signal?: AbortSignal;
   readonly planOptions?: CraftPlanOptions;
+  /** Hears each craft call the station makes for itself (its table), so a request that asks for that item credits it. */
+  readonly onCrafted?: Parameters<typeof executeCraftPlan>[4];
   /** Replaced in tests: setting a block down needs a world. */
   readonly place?: typeof placeCarriedBlockNearby;
 }
+
+/** The table a craft request sets down and the temporary workstation holds: the item the request credits and recovers. */
+export const CRAFTING_TABLE_ITEM = "crafting_table" as const;
 
 /** Within this many blocks of a table a craft opens it (the same bound `findBlock` uses to look for one). */
 const TABLE_REACH = 4;
@@ -53,7 +58,7 @@ export async function prepareCraftingStation(
   bot: Bot,
   items: readonly CraftTarget[],
   required: boolean,
-  { hold, signal, planOptions = {}, place = placeCarriedBlockNearby }: StationOptions,
+  { hold, signal, planOptions = {}, onCrafted, place = placeCarriedBlockNearby }: StationOptions,
 ): Promise<CraftingStation> {
   if (!required) return { kind: "ready", craftingTable: null };
   const kept = keptTable(bot, hold);
@@ -68,7 +73,7 @@ export async function prepareCraftingStation(
     if (joint.kind !== "ready") return { kind: "plan_failed", preparation: joint };
     const bootstrap = planCraftingFromInventory(bot, [table], planOptions);
     if (bootstrap.kind !== "ready") return { kind: "plan_failed", preparation: bootstrap };
-    const made = await executeCraftPlan(bot, bootstrap.applications, null, signal);
+    const made = await executeCraftPlan(bot, bootstrap.applications, null, signal, onCrafted);
     if (made.kind === "failed") return { kind: "failed", error: craftItemOutcomes.executionFailed(made.cause, carriedCount(bot, "unknown")) };
     const observed = await settleInventoryCount(bot, table.name, 1, { signal });
     if (observed.count < 1)
@@ -84,8 +89,8 @@ export async function prepareCraftingStation(
     return { kind: "failed", error: craftItemOutcomes.craftingTableRequired };
   }
   hold.placedAt = { x: placement.position.x, y: placement.position.y, z: placement.position.z };
-  // Counted before the wait below can throw an abort.
-  hold.usedCarried += carriedBefore > 0 ? 1 : 0;
+  // Counted before the wait below can throw an abort (a table crafted just now was carried for a moment too).
+  hold.usedCarried += 1;
   await settleInventoryCount(bot, "crafting_table", Math.max(0, carriedBefore - 1), { signal });
   return { kind: "ready", craftingTable: placement.block };
 }
