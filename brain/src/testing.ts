@@ -55,6 +55,8 @@ export class FakeRuntime implements BotRuntime {
   refuseNext: Extract<ForegroundState, { state: "refused" }> | null = null;
   /** The next call of that tool fails once with this error, after `effect` (what it got done before failing). */
   failNext: Partial<Record<ForegroundTool, { readonly error: string; readonly effect?: () => void; readonly result?: Readonly<Record<string, unknown>> }>> = {};
+  /** What a tool does to the fake world when a call of it settles as succeeded (a shelter test moves the bot down on each dig). */
+  succeedEffects: Partial<Record<ForegroundTool, (input: Readonly<Record<string, unknown>>) => void>> = {};
   /** Recipes known to the fake crafting planner; items without one are uncraftable. */
   recipes: Readonly<Record<string, FakeRecipe>> = {};
   /** Items whose recipes the fake planner cannot plan (Minecraft: coal, iron ingots, made back from their blocks). */
@@ -468,6 +470,7 @@ export class FakeRuntime implements BotRuntime {
       return { state: "settled", actionId, status: "failed", error: failure, ...(result !== undefined && { result }) };
     }
     this.applyEffects(action.tool, action.input);
+    this.succeedEffects[action.tool]?.(action.input);
     if (action.tool === "navigate" && this.walkOnNavigate) {
       // It reaches the ground asked for, at the height it stands.
       this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
