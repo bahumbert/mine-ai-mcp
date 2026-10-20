@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
+import { waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
@@ -28,6 +29,14 @@ interface DiveSession {
 const FULL_AIR_TICKS = 300;
 /** How long a submerged bot with no air metadata is watched before the air is taken as unchanged. */
 const AIR_OBSERVATION_TICKS = 40;
+
+/** Minecraft refills a breathing body's air by 4 a tick (`LivingEntity.increaseAirSupply`). */
+const AIR_REFILL_PER_TICK = 4;
+/** World ticks past the refill time a server answer may take (session rules: "a wait is not a server answer"). */
+const SERVER_ANSWER_TICKS = 40;
+/** Longest wall-clock wait for full air at a breathing stop, whatever the server's clock does. */
+const BREATHING_STOP_WALL_MS = 15_000;
+const FULL_AIR_NOT_OBSERVED = "Full air was not observed at the breathing stop: the server's clock passed the refill time, or 15 s went by, without it";
 
 /** Longest wall-clock wait for the swim back, whatever the air says. */
 const SWIM_BACK_TIMEOUT_MS = 15_000;
@@ -145,14 +154,8 @@ export class Diving {
         const returned = await navigate({ movements, goal: exactBlockGoal(surface), signal: options.signal,
           stopSignal: returnStop, timeoutMs: 15_000 });
         if (returned.status !== "completed") return returned;
-        for (let ticks = 0; (airSupplyTicks(this.bot) ?? 0) < 300 && ticks < 100; ticks++) {
-          options.signal?.throwIfAborted();
-          if (returnStop?.aborted) return { status: "stopped" as const, reason: "Request stopped while breathing", elapsedMs: Date.now() - started };
-          this.bot.setControlState("jump", true);
-          await waitForPhysicsTicks(this.bot, 1, lifetime);
-        }
-        this.bot.setControlState("jump", false);
-        if (airSupplyTicks(this.bot) !== 300) return { status: "stopped" as const, reason: "Full air was not observed at the breathing stop", elapsedMs: Date.now() - started };
+        const breath = await waitForFullAir(this.bot, lifetime, returnStop);
+        if (breath !== "full") return { status: "stopped" as const, reason: breath === "stopped" ? "Request stopped while breathing" : FULL_AIR_NOT_OBSERVED, elapsedMs: Date.now() - started };
         session.returning = false;
         session.stop = new AbortController();
         this.report("resumed");
@@ -246,4 +249,29 @@ export class Diving {
       this.bot.off("respawn", onEnd);
     }
   }
+}
+
+/**
+ * Holds jump at a breathing stop until the server reports full air, or its world age moved the refill time and an
+ * answer's margin, or the wall clock ran out (NAVP-13, run 15: a server 2.5-4.6 s behind refilled the air after the 100
+ * client ticks the stop used to count). "stopped": the return was stopped by its own stop signal; the run's lifetime
+ * ending rethrows.
+ */
+async function waitForFullAir(bot: Bot, lifetime: AbortSignal, returnStop: AbortSignal | undefined): Promise<"full" | "short" | "stopped"> {
+  const air = airSupplyTicks(bot) ?? 0;
+  bot.setControlState("jump", true);
+  try {
+    await waitForWorldAge(bot, Math.ceil((FULL_AIR_TICKS - air) / AIR_REFILL_PER_TICK) + SERVER_ANSWER_TICKS, {
+      wallMs: BREATHING_STOP_WALL_MS,
+      until: () => airSupplyTicks(bot) === FULL_AIR_TICKS,
+      signal: AbortSignal.any([lifetime, ...(returnStop ? [returnStop] : [])]),
+    });
+  } catch (cause) {
+    lifetime.throwIfAborted();
+    if (returnStop?.aborted) return "stopped";
+    throw cause;
+  } finally {
+    bot.setControlState("jump", false);
+  }
+  return airSupplyTicks(bot) === FULL_AIR_TICKS ? "full" : "short";
 }

@@ -10,6 +10,7 @@
 import { EscapeHolds } from "./escape-holds.js";
 import type { RouteOutcomes } from "./route-outcomes.js";
 import { Diving } from "./diving.js";
+import { botEyesInWater } from "../world/eyes-in-water.js";
 import type { Bot } from "mineflayer";
 import { breakBlockInPlace, type BreakBlockInPlace } from "./execution/in-place-break.js";
 import { MineflayerBot, installNetherVinePhysics, mineflayerBotSurface } from "./mineflayer/bot.js";
@@ -100,16 +101,16 @@ function endNavigationWhenBotIsLost(bot: Bot, diving: Diving, navigator: Navigat
   };
 }
 
-/** Breaks the block in place unless the dive cannot spare the air for it, and tells the dive when the work is done. */
+/** Breaks the block in place unless the runtime is closed or the dive cannot spare the air, and tells the dive when the work is done. */
 async function breakInPlaceWithinDive(
-  { bot, world, navigationBot, diving }: { bot: Bot; world: WorldView; navigationBot: MineflayerBot; diving: Diving },
+  { bot, world, navigationBot, diving, requireOpen }: { bot: Bot; world: WorldView; navigationBot: MineflayerBot; diving: Diving; requireOpen: () => void },
   options: Parameters<BreakBlockInPlace>[0],
 ): ReturnType<BreakBlockInPlace> {
+  requireOpen();
   const block = world.blockAt(options.position.x, options.position.y, options.position.z);
   const evaluation = options.movements.evaluateBreak(block, options.position, world);
-  const head = bot.blockAt(bot.entity.position.offset(0, 1.62, 0));
   const ticks = options.movements.digTimeEstimator.estimate(block, evaluation.tool, {
-    submergedAtEyes: head?.name === "water", onGround: bot.entity.onGround,
+    submergedAtEyes: botEyesInWater(bot), onGround: bot.entity.onGround,
     ...navigationBot.observe().player,
   });
   const refused = diving.beforeWork(ticks);
@@ -224,7 +225,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
       }
     },
     routesAsEscape: () => escapes.hold(),
-    breakBlockInPlace: (options) => breakInPlaceWithinDive({ bot, world, navigationBot, diving }, options),
+    breakBlockInPlace: (options) => breakInPlaceWithinDive({ bot, world, navigationBot, diving, requireOpen }, options),
     setStepFieldProvider: (provider) => navigator.setStepFieldProvider(provider),
     get active() {
       return diving.active || navigator.active !== null;

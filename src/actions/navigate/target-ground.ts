@@ -40,12 +40,6 @@ function cellsWithin(centre: Vec3, range: number): Vec3[] {
 /** How far around a watery target the existing shore search looks. */
 export const SHORE_SEARCH_RADIUS = 8;
 
-/**
- * How far from a bot at sea, without a boat, dry land is looked for before the asked route (run 10: Ayla, left
- * standing in the water, swam ~1500 blocks because the planner allows deep water for a bot already out on it).
- */
-export const LAND_SEARCH = 32;
-
 type SurfaceObservation =
   | { readonly kind: "surface"; readonly y: number; readonly name: string; readonly solid: boolean }
   | { readonly kind: "ambiguous"; readonly observation: string; readonly floors: readonly number[] };

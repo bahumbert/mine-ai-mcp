@@ -5,6 +5,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import {
   canOccupyWater,
+  dryLandGoal,
   isWater,
   liveBlockReader,
   createMovements,
@@ -26,7 +27,7 @@ import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
-import { groundBelow, highestFloor, LAND_SEARCH, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
+import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
 
 /** Deep-water crossings one request makes by boat: there and on to the far side, then once more at most. */
 const MAX_CROSSINGS = 2;
@@ -255,41 +256,47 @@ function portalProblem(leg: NavigateLeg): string | null {
     : null;
 }
 
-/** What the swim to land before the asked route came to. */
+/** What the swim to land before the asked route came to: nothing to do or no land found, land reached, or a leg that failed. */
 type LandLegOutcome =
   | { readonly kind: "none" }
   | { readonly kind: "reached"; readonly spot: Vec3; readonly elapsedMs: number }
-  | { readonly kind: "failed"; readonly result: NavigateResult };
+  | { readonly kind: "failed"; readonly reason: string; readonly elapsedMs: number };
 
 /** The route, led by a swim to the nearest land when the bot starts at sea with no boat. */
 async function navigateLeg(leg: NavigateLeg, context: ActionContext): Promise<NavigateResult> {
   const land = await swimToLandFirst(leg, context);
-  if (land.kind === "failed") return land.result;
   const result = await routeToDestination(leg, context);
   if (land.kind === "none") return result;
-  const swam = `swam to land at ${land.spot.x}, ${land.spot.y}, ${land.spot.z} first`;
-  const navigation = { ...result.navigation, start: leg.start, landLeg: { x: land.spot.x, y: land.spot.y, z: land.spot.z }, elapsedMs: result.navigation.elapsedMs + land.elapsedMs };
+  const navigation = { ...result.navigation, start: leg.start, elapsedMs: result.navigation.elapsedMs + land.elapsedMs };
+  const before = land.kind === "reached"
+    ? `swam to land at ${land.spot.x}, ${land.spot.y}, ${land.spot.z} first`
+    : `the swim to land first stopped: ${land.reason}`;
+  const landed = land.kind === "reached" ? { ...navigation, landLeg: { x: land.spot.x, y: land.spot.y, z: land.spot.z } } : navigation;
   return result.status === "failed" || result.status === "partial"
-    ? { ...result, error: `${result.error} (${swam})`, navigation }
-    : { ...result, navigation };
+    ? { ...result, error: `${result.error} (${before})`, navigation: landed }
+    : { ...result, navigation: landed };
 }
 
-/** At sea with no boat, the swim to the nearest land within {@link LAND_SEARCH}; with none in reach the route swims free. */
+/**
+ * At sea with no boat, the route to the nearest dry ground first, by a search bounded by its own limits, never by a
+ * radius (backlog 62; run 16 Yuki: land 41 blocks away, past the old 32-block scan; run 10 Ayla swam ~1500 blocks). No
+ * land within those limits: the asked route swims free, as before. A leg that failed on the way: the asked route still
+ * runs, under the swim budget, and its failure names the leg's (backlog 50: the leg's failure used to end the call).
+ */
 async function swimToLandFirst(leg: NavigateLeg, context: ActionContext): Promise<LandLegOutcome> {
-  const { bot, request } = leg;
+  const { bot, request, dependencies } = leg;
   if (leg.crossings !== 0 || carriesBoat(bot) || !standsAtSea(bot)) return { kind: "none" };
-  const land = shoreNear(bot, bot.entity.position.floored(), LAND_SEARCH);
-  const ground = land === null ? null : surfaceAt(bot, land.x, land.z);
-  if (land === null || ground?.kind !== "surface") {
+  const swim = await dependencies.navigate({
+    movements: dependencies.createMovements(bot, { scaffolding: request.scaffold, allowDigging: request.dig }),
+    goal: dryLandGoal(Math.floor(bot.entity.position.y)),
+    signal: context.signal,
+  });
+  if (swim.status === "completed") return { kind: "reached", spot: bot.entity.position.floored(), elapsedMs: swim.elapsedMs };
+  if (swim.calculationFailed) {
     leg.swimFree = true;
     return { kind: "none" };
   }
-  const spot = new Vec3(land.x, ground.y + 1, land.z);
-  const swim = await nextLeg(leg, { ...request, ...spot, range: 1 }, { crossings: MAX_CROSSINGS, unbudgeted: true }, context);
-  if (swim.status !== "succeeded") {
-    return { kind: "failed", result: { ...swim, error: `${swim.error} (the swim to land at ${spot.x}, ${spot.y}, ${spot.z} came first)`, navigation: { ...swim.navigation, start: leg.start } } };
-  }
-  return { kind: "reached", spot, elapsedMs: swim.navigation.elapsedMs };
+  return { kind: "failed", reason: swim.reason, elapsedMs: swim.elapsedMs };
 }
 
 /** The asked route: refused before it starts, crossed by boat first, or planned, walked and judged. */
@@ -499,7 +506,8 @@ async function judgeRoute(
  */
 async function climbOutFirst(leg: NavigateLeg, stopped: NavigateResult, context: ActionContext): Promise<NavigateResult | null> {
   const { bot, request } = leg;
-  if (leg.climbed || !request.dig || context.signal?.aborted) return null;
+  context.signal?.throwIfAborted();
+  if (leg.climbed || !request.dig) return null;
   const feet = bot.entity.position;
   const above = highestFloor(bot, Math.floor(feet.x), Math.floor(feet.z));
   const goal = leg.destination?.y ?? request.y;
@@ -522,7 +530,8 @@ async function crossDeepWater(
   context: ActionContext,
 ): Promise<NavigateResult> {
   const { bot, request } = leg;
-  if (leg.crossings >= MAX_CROSSINGS || context.signal?.aborted) return stopped;
+  context.signal?.throwIfAborted();
+  if (leg.crossings >= MAX_CROSSINGS) return stopped;
   const here = bot.entity.position.clone();
   const water = deepWaterOnTheWay(bot, here, request);
   if (water === null) return stopped;
@@ -583,7 +592,7 @@ async function crossByBoatFromHere(
   const length = Math.hypot(request.x - from.x, request.z - from.z);
   // At most to the target: across to it, not on over open sea; with no land by then she stays there, in her boat.
   const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length);
-  if (context.signal?.aborted) return stopped;
+  context.signal?.throwIfAborted();
   if (crossed.status !== "crossed") {
     // Where the ride left her, not where the route had stopped before it.
     const navigation = { ...stopped.navigation, end: position(bot.entity.position), boatBlocks: crossed.blocks };

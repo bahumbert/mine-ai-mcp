@@ -95,14 +95,15 @@ test("close cancels roof digging and waits for its controls to settle", async (t
   });
   let stops = 0;
   Object.assign(fixture.entity, { isInWater: true, position: new Vec3(0.5, -59, 0.5) });
-  const roof = { name: "stone", getProperties: () => ({}), boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]], digTime: () => 1000 };
+  const roof = { name: "stone", position: new Vec3(0, -57, 0), getProperties: () => ({}), boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]], digTime: () => 1000 };
   Object.assign(fixture.bot, {
     oxygenLevel: 8,
     health: 20,
     username: "Diver",
     blockAt: () => roof,
     game: { gameMode: "survival" },
-    inventory: { items: () => [] },
+    inventory: { items: () => [], slots: [] },
+    getEquipmentDestSlot: () => 5,
     targetDigBlock: roof,
     dig: () => {
       announceDig();
@@ -165,7 +166,7 @@ test("claims the body at half air and records the surfacing", async (t) => {
 
   fixture.entity.isInWater = true;
   for (let tick = 0; tick < 5; tick += 1) fixture.bot.emit("physicsTick");
-  assert.deepEqual(claims, ["breath_reflex [BREATH] surface at air 8."]);
+  assert.deepEqual(claims, ["breath_reflex [BREATH] surface at air 8 of 20: the bot rises to breathe; work that keeps its head under water here is cut again each time the air runs short, so do it from a spot with air above the head."]);
   Object.assign(fixture.bot, { oxygenLevel: 20 });
   fixture.bot.emit("physicsTick");
   await outcome;
@@ -192,6 +193,7 @@ function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean
   const pickaxe = { name: "stone_pickaxe", type: 1, count: 1 };
   const roof = {
     name: "stone",
+    position: new Vec3(0, -57, 0),
     getProperties: () => ({}),
     boundingBox: "block",
     diggable,
@@ -207,7 +209,8 @@ function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean
     blockAt: () => roof,
     heldItem: null,
     game: { gameMode: "survival" },
-    inventory: { items: () => [pickaxe] },
+    inventory: { items: () => [pickaxe], slots: [] },
+    getEquipmentDestSlot: () => 5,
     equip: async (item: { name: string }) => {
       equipped.push(item.name);
     },

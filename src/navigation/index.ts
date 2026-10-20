@@ -72,6 +72,8 @@ export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
 
 // Movement policy: what a route may do, and what it costs.
 export { STANDARD_SCAFFOLD_ITEMS, TERRAIN_BREAK_PENALTY } from "./mineflayer/movement-policy.js";
+export { longestBreakDurationMs } from "./mineflayer/break-duration.js";
+export { SWIM_UP_TICKS } from "./world/swimming.js";
 export { liveBlockReader, observeMineflayerBlock } from "./mineflayer/world.js";
 export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
@@ -83,3 +85,4 @@ export type { NavigationEvent } from "./telemetry/index.js";
 export { canOccupyWater } from "./mineflayer/water.js";
 
 export { canAccessLiquid, liquidAccessGoal } from "./goals/liquid-access.js";
+export { dryLandGoal } from "./goals/dry-land.js";

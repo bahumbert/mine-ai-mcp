@@ -308,3 +308,17 @@ test("each bot's working mode follows its own water", async (t) => {
   await Promise.all(actions.map((action) => action.end()));
   for (const control of controls) await control[Symbol.dispose]();
 });
+
+test("on dry land the working mode reads no cell on the ticks of a foreground action (backlog: idle-water eye cell)", async (t) => {
+  const fixture = waterFixture(t);
+  let reads = 0;
+  Object.assign(fixture.bot, { blockAt: () => { reads += 1; return { name: "air", getProperties: () => ({}) }; } });
+  fixture.entity.isInWater = false;
+  const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
+  const action = await foregroundAction(fixture.reflex.runner);
+  reads = 0;
+  for (let tick = 0; tick < 20; tick++) fixture.bot.emit("physicsTick");
+  assert.equal(reads, 0);
+  await action.end();
+  await control[Symbol.dispose]();
+});

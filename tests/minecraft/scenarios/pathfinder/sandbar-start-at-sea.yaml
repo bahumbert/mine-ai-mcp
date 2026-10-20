@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+
+name: sandbar-start-at-sea
+tags: [regression]
+description: >-
+  External review NAVP-03: a bot standing in shallow water ringed by deep sea (a reef, a sandbar) was not "at sea", so
+  the movement policy refused every deep cell and the bot was stranded. A 1x1 sandbar, one water cell deep, stands six
+  blocks out in a sea three deep and 25 across, no boat carried. The owner's rule (2026-10-19): a start with deep open
+  water within three water cells may swim it; navigate swims to the nearest land first, then on to the target there.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # The sea, three deep, from the west shore (x 0) to the east shore (x 26).
+  - fill: { block: water, from: [ 1, -63, -12 ], to: [ 25, -61, 12 ] }
+  # The sandbar: stone up to one block under the surface, six blocks out.
+  - fill: { block: stone, from: [ 6, -63, 0 ], to: [ 6, -62, 0 ] }
+
+players:
+  - name: Wader
+    pos: [ 6.5, -61, 0.5 ]
+
+tick:
+  - "gamemode spectator @a[name=!Wader,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: -4
+    y: -60
+    z: 0
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: Wader
+      pos: [ -3.5, -60, 0.5 ]
+      radius: 2.0
+    - kind: health
+      who: Wader
+      health: 20
+    - kind: completion
+      who: Wader

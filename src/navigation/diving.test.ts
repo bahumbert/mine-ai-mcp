@@ -321,3 +321,58 @@ test("the backstop of a roofed dive does not ask a rescue while the eyes are in 
 test("the backstop of a roofed dive still asks an immediate rescue with the eyes under a source and no ascent", async () => {
   assert.equal(await backstopUnderRoof({ liquidSource: true, level: 0 }), 300);
 });
+
+/** Emits `count` physics ticks, one per millisecond: the client's clock running while the server lags behind it. */
+function pumpTicks(bot: Bot, count: number): void {
+  let left = count;
+  const timer = setInterval(() => {
+    bot.emit("physicsTick");
+    if (--left <= 0) clearInterval(timer);
+  }, 1);
+}
+
+// NAVP-13 (run 15: the server 2.5-4.6 s behind): the breathing stop counted 100 client ticks for full air.
+test("a server behind the client still completes the breathing stop: full air reported late is waited for", async () => {
+  const { world, bot } = fixture();
+  const diving = new Diving(bot, world);
+  const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
+  let calls = 0;
+  const result = await diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      Reflect.set(bot.entity.metadata, 0, 60);
+      bot.emit("physicsTick");
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    if (calls === 2) {
+      bot.entity.position.y = 63.5;
+      pumpTicks(bot, 150);
+      setTimeout(() => Reflect.set(bot.entity.metadata, 0, 300), 300);
+    }
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 3);
+});
+
+test("the breathing stop ends once the server's clock has moved the refill time with no full air", async () => {
+  const { world, bot } = fixture();
+  Object.assign(bot, { time: { age: 1000 } });
+  const diving = new Diving(bot, world);
+  let calls = 0;
+  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      Reflect.set(bot.entity.metadata, 0, 60);
+      bot.emit("physicsTick");
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    bot.entity.position.y = 63.5;
+    const ageing = setInterval(() => { (bot as unknown as { time: { age: number } }).time.age += 20; }, 5);
+    setTimeout(() => clearInterval(ageing), 1000);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "stopped");
+  assert.match(result.status === "stopped" ? result.reason : "", /Full air was not observed at the breathing stop/u);
+  assert.equal(calls, 2);
+});

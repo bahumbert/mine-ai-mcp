@@ -43,7 +43,8 @@ export function attachIdleWaterControl(
       anchor = null;
       return;
     }
-    if (botEyesInWater(bot)) holdPlace(true);
+    // The body cell first: on land, every tick of every foreground action, the eye cell need not be read.
+    if (isInWater(bot) && botEyesInWater(bot)) holdPlace(true);
     else release();
   };
   const idle = () => {

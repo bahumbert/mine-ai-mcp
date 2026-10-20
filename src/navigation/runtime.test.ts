@@ -193,3 +193,12 @@ test("the routes of a navigation runtime are recorded: an exhausted search is a 
     await navigation.close();
   }
 });
+
+test("an in-place break asked of a closed runtime is refused as closed (review 2026-10-19 #7)", async () => {
+  const navigation = createNavigationRuntime(botFixture());
+  await navigation.close();
+  await assert.rejects(
+    navigation.breakBlockInPlace({ position: { x: 1, y: 64, z: 0 }, movements: createMovementPolicy() } as never),
+    /closed/,
+  );
+});

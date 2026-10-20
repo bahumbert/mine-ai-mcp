@@ -1,4 +1,7 @@
-import { installNetherVinePhysics, MineflayerBot, type MineflayerBotSurface } from "./bot.js";
+import { installNetherVinePhysics, MineflayerBot, mineflayerBotSurface, type MineflayerBotSurface } from "./bot.js";
+import type { Bot } from "mineflayer";
+import { EventEmitter } from "node:events";
+import { waterStancesHeld } from "../steering/hold-water-position.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
@@ -14,6 +17,7 @@ function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface
     entities: {},
     inventory: { items: () => [] },
     setControlState: () => undefined,
+    holdWaterStance: () => () => undefined,
     waitForTicks: async () => undefined,
     lookAt: async () => undefined,
     equip: async () => undefined,
@@ -678,4 +682,15 @@ test("a mob entering the scaffold cell while aiming prevents the placement packe
   assert.deepEqual(await effect.completion, { kind: "failed", observation: "Placement cell overlaps enderman #77" });
   assert.equal(effect.issued, false);
   assert.equal(packets, 0);
+});
+
+test("a water stance held through the bot surface is counted on the raw bot the runtime asks (review 2026-10-19 #2)", () => {
+  const raw = Object.assign(new EventEmitter(), {
+    entity: { position: new Vec3(0.5, 64, 0.5), isInWater: true, onGround: true, yaw: 0 },
+    setControlState: () => {},
+  }) as unknown as Bot;
+  const release = mineflayerBotSurface(raw).holdWaterStance(undefined, () => {});
+  assert.equal(waterStancesHeld(raw), 1, "runtime.steering asks with the raw bot");
+  release();
+  assert.equal(waterStancesHeld(raw), 0);
 });

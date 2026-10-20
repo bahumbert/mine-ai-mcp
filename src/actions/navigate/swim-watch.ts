@@ -1,8 +1,8 @@
 /** The deep-water swim budget of a route with no boat, and whether the bot's feet are out at sea. */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { feetAtSea } from "../../navigation/mineflayer/movement-policy.js";
-import { holdsWater } from "../../navigation/world/deep-water.js";
+import { liveBlockReader } from "../../navigation/index.js";
+import { feetAtSea } from "../../navigation/world/deep-water.js";
 
 /**
  * More than this many blocks swum in a row through deep open water with no boat stops the route (run 10: Ayla swam
@@ -50,10 +50,5 @@ export function watchSwim(bot: Bot) {
 
 /** Whether the bot's feet are in deep open water, by the same test the movement policy's sea exception uses. */
 export function standsAtSea(bot: Bot): boolean {
-  const water = (x: number, y: number, z: number) => {
-    const block = bot.blockAt(new Vec3(x, y, z));
-    return block !== null && holdsWater(block.name, block.getProperties?.() ?? {});
-  };
-  const feet = bot.entity.position.floored();
-  return feetAtSea(water, feet, (x, y, z) => bot.blockAt(new Vec3(x, y, z))?.boundingBox === "block");
+  return feetAtSea(liveBlockReader(bot), bot.entity.position.floored());
 }

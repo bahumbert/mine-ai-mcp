@@ -19,8 +19,7 @@ import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
-import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
-import { OPEN_COLUMN_REACH } from "../world/swimming.js";
+import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
   packKey,
   type BlockObservation,
@@ -30,30 +29,6 @@ import {
 } from "../world/world.js";
 import { blockClass, observeMineflayerBlock } from "./world.js";
 import { tagsOf } from "../../world/block-tags.js";
-
-/**
- * Whether a bot with its feet in this cell is out on deep open water. The sea above counts as much as the sea under
- * the feet: a bot on the sea floor stands in water too shallow to be "deep" by its own cell alone (live 2026-10-10:
- * stranded on the floor, every way up refused as a swim across deep water). So the whole water column over the feet is
- * asked. Already swimming (feet and head in water) under a roof is at sea too: a 1-wide roofed pocket fails the
- * open-water span test (live 2026-10-10), and refusing the sea there leaves no way out. With open air over the water
- * (a river mouth, a shore) it is not: run 7 swam ~130 blocks out to sea that way. `solidAt` says whether a cell holds
- * something solid (false when not loaded).
- */
-export function feetAtSea(water: WaterAt, feet: BlockPosition, solidAt: (x: number, y: number, z: number) => boolean): boolean {
-  const roofed = (): boolean => {
-    for (let y = feet.y; y <= feet.y + OPEN_COLUMN_REACH; y++) {
-      if (water(feet.x, y, feet.z)) continue;
-      return solidAt(feet.x, y, feet.z);
-    }
-    return false;
-  };
-  let answer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z) ||
-    (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z) && roofed());
-  for (let y = feet.y; !answer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
-    answer = isDeepOpenWater(water, feet.x, y, feet.z);
-  return answer;
-}
 
 /** The only carried blocks standard navigation may spend to create a route: the cheap, plentiful block of each terrain. */
 export const STANDARD_SCAFFOLD_ITEMS = DEFAULT_SCAFFOLD_BLOCKS;
@@ -536,10 +511,7 @@ export function createMineflayerMovementPolicy(
     (observation.kind === "loaded" && avoidedStates[observation.stateId] === 1);
 
   const allowDeepWater = options.allowDeepWater ?? false;
-  const waterIn = (world: WorldView): WaterAt => (x, y, z) => {
-    const block = world.blockAt(x, y, z);
-    return block.kind === "loaded" && (block.traits.liquid === "water" || block.traits.waterlogged);
-  };
+  const waterIn = (world: WorldView): WaterAt => waterAtOf((x, y, z) => world.blockAt(x, y, z));
   // Whether the bot itself is out on deep water, read once per cell it stands in (search asks of every step).
   let seaCell = "";
   let seaAnswer = false;
@@ -548,10 +520,7 @@ export function createMineflayerMovementPolicy(
     const key = `${feet.x},${feet.y},${feet.z}`;
     if (key !== seaCell) {
       seaCell = key;
-      seaAnswer = feetAtSea(waterIn(world), feet, (x, y, z) => {
-        const block = world.blockAt(x, y, z);
-        return block.kind === "loaded" && block.collisionShapes.length > 0;
-      });
+      seaAnswer = feetAtSea((x, y, z) => world.blockAt(x, y, z), feet);
     }
     return seaAnswer;
   };

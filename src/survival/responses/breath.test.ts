@@ -8,7 +8,8 @@ import { waterFixture } from "../../test-support/water.js";
 import { Budgets } from "../state/budgets.js";
 import { surface } from "./breath.js";
 
-type Cell = "water" | "air" | "stone";
+/** What a test cell holds; leaves are a roof dug by hand within a breath, stone is not (owner 2026-10-19: Q2). */
+type Cell = "water" | "air" | "stone" | "oak_leaves";
 const registry = minecraftData("1.21.4");
 const Block = prismarineBlock("1.21.4");
 const SPEED = 0.1;
@@ -17,7 +18,7 @@ const SPEED = 0.1;
  * A swimmer in a hand-made world. `seen` is what the bot reads; `physical` is what stops the body (they differ when a
  * block the bot cannot see blocks the way). Controls move the body 0.1 per tick; air refills when the head is in air.
  */
-function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: number, z: number) => Cell, start: Vec3, physical = seen) {
+function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: number, z: number) => Cell, start: Vec3, physical = seen, speed = SPEED) {
   const fixture = waterFixture(t);
   const held = new Set<string>();
   const digs: string[] = [];
@@ -31,20 +32,22 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
     heldItem: null,
     targetDigBlock: null,
     game: { gameMode: "survival" },
-    inventory: { items: () => [] },
+    inventory: { items: () => [], slots: [] },
+    getEquipmentDestSlot: () => 5,
     equip: async () => {},
     dig: async () => {
       digs.push("roof");
       bot.oxygenLevel = 20;
     },
-    blockAt: (p: Vec3) => Block.fromStateId(registry.blocksByName[at(seen, p)]!.defaultState, 0),
+    blockAt: (p: Vec3) => Object.assign(Block.fromStateId(registry.blocksByName[at(seen, p)]!.defaultState, 0), { position: p.floored() }),
     setControlState: (control: string, state: boolean) => (state ? held.add(control) : held.delete(control)),
   });
   const step = () => {
     const p = fixture.entity.position;
-    const dy = held.has("jump") ? SPEED : held.has("sneak") ? -SPEED : 0;
-    const free = (q: Vec3) => at(physical, q) !== "stone" && at(physical, q.offset(0, 1.79, 0)) !== "stone";
-    const sideways = p.offset(((held.has("right") ? 1 : 0) - (held.has("left") ? 1 : 0)) * SPEED, 0, ((held.has("back") ? 1 : 0) - (held.has("forward") ? 1 : 0)) * SPEED);
+    const dy = held.has("jump") ? speed : held.has("sneak") ? -speed : 0;
+    const open = (cell: Cell) => cell === "water" || cell === "air";
+    const free = (q: Vec3) => open(at(physical, q)) && open(at(physical, q.offset(0, 1.79, 0)));
+    const sideways = p.offset(((held.has("right") ? 1 : 0) - (held.has("left") ? 1 : 0)) * speed, 0, ((held.has("back") ? 1 : 0) - (held.has("forward") ? 1 : 0)) * speed);
     if (free(sideways)) fixture.entity.position = sideways;
     const vertical = fixture.entity.position.offset(0, dy, 0);
     if (free(vertical)) fixture.entity.position = vertical;
@@ -88,6 +91,10 @@ async function surfaceWithShortAir(world: ReturnType<typeof swimWorld>, ticks: n
 /** A roofed stream along x (y 0-1), floor below, stone roof at y 2. */
 const tunnel = (x: number, y: number, z: number): Cell => (z === 0 && y >= 0 && y <= 1 && x >= -20 && x <= 20 ? "water" : "stone");
 
+/** `cells` with the tunnel's roof (y 2) of leaves, which a bare hand digs within a breath (owner 2026-10-19: Q2). */
+const leavesRoofed = (cells: (x: number, y: number, z: number) => Cell) => (x: number, y: number, z: number): Cell =>
+  y === 2 && z === 0 && cells(x, y, z) === "stone" ? "oak_leaves" : cells(x, y, z);
+
 test("a roofed stream with an air pocket five cells back: the reflex swims to the pocket and breathes", async (t) => {
   const pocket = (x: number, y: number, z: number): Cell => (x <= -5 && x >= -6 && y === 1 && z === 0 ? "air" : tunnel(x, y, z));
   const world = swimWorld(t, pocket, new Vec3(0.5, 0.2, 0.5));
@@ -123,8 +130,8 @@ test("a path that stalls on a block the bot cannot see is given up for the next 
 });
 
 test("two stalled paths and no third way: the reflex digs up through the roof", async (t) => {
-  const seen = (x: number, y: number, z: number): Cell =>
-    z === 0 && y === 1 && (x === -4 || x === 6) ? "air" : tunnel(x, y, z);
+  const seen = leavesRoofed((x: number, y: number, z: number): Cell =>
+    z === 0 && y === 1 && (x === -4 || x === 6) ? "air" : tunnel(x, y, z));
   const physical = (x: number, y: number, z: number): Cell =>
     (x === -2 || x === 2) && z === 0 && y <= 1 ? "stone" : seen(x, y, z);
   const world = swimWorld(t, seen, new Vec3(0.5, 0.2, 0.5), physical);
@@ -134,7 +141,7 @@ test("two stalled paths and no third way: the reflex digs up through the roof", 
 });
 
 test("cells that were never loaded are no way to air", async (t) => {
-  const world = swimWorld(t, tunnel, new Vec3(0.5, 0.2, 0.5));
+  const world = swimWorld(t, leavesRoofed(tunnel), new Vec3(0.5, 0.2, 0.5));
   const unloaded = world.bot.blockAt;
   Object.assign(world.bot, { blockAt: (p: Vec3) => (Math.floor(p.x) < -1 ? null : unloaded(p)) });
   const { outcome, digs } = await world.run(300);
@@ -165,7 +172,7 @@ test("a death during the surfacing ends it with the controls released", async (t
 // asked for again, so a bot that bobbed back under the roof with air still short only jumped.
 test("the head in air, then under water again with the air short and no pocket left: the reflex digs within a second", async (t) => {
   let flooded = false;
-  const seen = (x: number, y: number, z: number): Cell => (!flooded && x >= -6 && x <= -5 && y === 1 && z === 0 ? "air" : tunnel(x, y, z));
+  const seen = leavesRoofed((x: number, y: number, z: number): Cell => (!flooded && x >= -6 && x <= -5 && y === 1 && z === 0 ? "air" : tunnel(x, y, z)));
   const world = swimWorld(t, seen, new Vec3(-4.5, 0.2, 0.5));
   await surfaceWithShortAir(world, 25, (tick) => {
     if (tick === 5) flooded = true;
@@ -195,4 +202,69 @@ test("a route walked to its last cell, then the pocket floods: a new route is as
   });
   assert.ok(position.x > -3, `walked to the pocket (x -4), then swam east after it flooded, ended at x ${position.x}`);
   assert.deepEqual(world.digs, []);
+});
+
+/** A sealed one-cell water pocket at x 0, z 0 (feet y 0, head y 1); everything round it `wall`, the roof included. */
+const sealedPocket = (wall: Cell) => (x: number, y: number, z: number): Cell => (x === 0 && z === 0 && y >= 0 && y <= 1 ? "water" : wall);
+
+// Run 16, Yuki: a stone roof dug by hand under water and off the ground takes about 190 s; the dig ran to her death.
+test("a roof dig that would outlast the air and half the health is not started: the attempt ends stuck, controls released", async (t) => {
+  const world = swimWorld(t, sealedPocket("stone"), new Vec3(0.5, 0.2, 0.5));
+  const { outcome, digs } = await world.run(700, 600);
+  assert.deepEqual(digs, []);
+  assert.equal(outcome.kind, "stuck");
+  assert.equal(outcome.roofDig, "too_slow");
+  assert.equal(world.held.size, 0);
+});
+
+/** The pocket under a leaves roof whose dig hangs until it is stopped; counts the stops. */
+function hangingDig(t: Parameters<typeof waterFixture>[0]) {
+  const world = swimWorld(t, leavesRoofed(sealedPocket("stone")), new Vec3(0.5, 0.2, 0.5));
+  let stops = 0;
+  let stop: ((cause: Error) => void) | undefined;
+  Object.assign(world.bot, {
+    dig: () => new Promise<void>((_resolve, reject) => {
+      stop = reject;
+      world.digs.push("roof");
+    }),
+    stopDigging: () => {
+      stops += 1;
+      stop?.(new Error("Digging aborted"));
+    },
+  });
+  return { world, stops: () => stops };
+}
+
+test("the attempt's wall clock stops a dig in progress when physics ticks have stopped", async (t) => {
+  const { world, stops } = hangingDig(t);
+  const outcome = await surface(world.bot, new AbortController().signal, new Budgets(), 2);
+  assert.deepEqual(world.digs, ["roof"]);
+  assert.equal(outcome.kind, "stuck");
+  assert.equal(stops(), 1);
+});
+
+test("the tick budget running out stops a dig in progress", async (t) => {
+  const { world, stops } = hangingDig(t);
+  const { outcome } = await world.run(80, 20);
+  assert.equal(outcome.kind, "stuck");
+  assert.equal(stops(), 1);
+});
+
+test("a death during a dig stops it and the attempt ends bot_died", async (t) => {
+  const { world, stops } = hangingDig(t);
+  const done = surface(world.bot, new AbortController().signal, new Budgets(), 600);
+  await new Promise((resolve) => setImmediate(resolve));
+  Object.assign(world.bot, { health: 0 });
+  world.bot.emit("death");
+  assert.equal((await done).kind, "bot_died");
+  assert.equal(stops(), 1);
+});
+
+// Run 16, Yuki: she moved half a block in two seconds toward air and both ways were closed as stalled.
+test("a way the body swims toward slowly is not given up: the slow swimmer reaches the pocket instead of digging", async (t) => {
+  const seen = (x: number, y: number, z: number): Cell => (z === 0 && y === 1 && x === -3 ? "air" : tunnel(x, y, z));
+  const world = swimWorld(t, seen, new Vec3(0.5, 0.2, 0.5), seen, 0.03);
+  const { outcome, digs } = await world.run(900, 600);
+  assert.equal(outcome.kind, "air_full");
+  assert.deepEqual(digs, []);
 });

@@ -99,6 +99,8 @@ export interface MineflayerBotSurface {
   /** Undefined until the bot has spawned. */
   readonly food?: number;
   setControlState(control: "forward" | "back" | "left" | "right" | "jump" | "sprint" | "sneak", state: boolean): void;
+  /** Holds a water stance counted on the connected bot itself, the bot `runtime.steering` asks (review 2026-10-19 #2). */
+  holdWaterStance(signal: AbortSignal | undefined, setControl: NonNullable<Parameters<typeof holdWaterPosition>[2]>): () => void;
   getControlState?(control: "jump" | "sneak"): boolean;
   waitForTicks(ticks: number): Promise<void>;
   lookAt(position: Position3, force?: boolean): Promise<void>;
@@ -170,6 +172,7 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
       return bot.food;
     },
     setControlState: (control, state) => bot.setControlState(control, state),
+    holdWaterStance: (signal, setControl) => holdWaterPosition(bot, signal, setControl),
     bucketDrop: async (target, signal) => {
       const result = await saveWaterLanding(bot, { target, signal, permitted: () => readNavigationPolicy(bot).bucket_drops });
       const at = bot.entity.position;
@@ -740,7 +743,7 @@ export class MineflayerBot implements NavigationBot {
           const digStartedAt = Date.now();
           const airborne = !this.bot.entity.onGround;
           const inWater = this.bot.entity.isInWater;
-          const releaseStance = holdWaterPosition(this.bot, signal, (control, active) =>
+          const releaseStance = this.bot.holdWaterStance(signal, (control, active) =>
             this.#control(control, active),
           );
           try {

@@ -1,14 +1,19 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { waitForWorldAge } from "../../../world/world-age.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { HORIZONTAL, sourceFeeding, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
 import { holdWaterPosition } from "../../steering/hold-water-position.js";
 import type { BlockPosition } from "../../world/world.js";
-import { liveBlockReader, observeMineflayerBlock } from "../../mineflayer/world.js";
+import { liveBlockReader } from "../../mineflayer/world.js";
 import { isWater } from "../../world/block-geometry.js";
 import { waterMiningStance } from "../../world/water.js";
+
+/** World ticks a removed source's spread takes to drain (seven cells, a water update every 5 ticks, and a margin). */
+const DRAIN_TICKS = 40;
+/** Longest wall-clock wait for that drain, whatever the server's clock does. */
+const DRAIN_WALL_MS = 5_000;
 
 const touching = (cell: Vec3) => [
   cell.offset(0, 1, 0),
@@ -28,12 +33,8 @@ export async function clearMiningWater(
   const read = liveBlockReader(bot);
   const holdsWaterAt = (cell: Vec3) => isWater(read(cell.x, cell.y, cell.z));
   if (waterMiningStance(read, bot.entity.position.floored(), bot.entity.onGround)) return null;
-  const wetFaces = () => {
-    const above = bot.blockAt(target.offset(0, 1, 0));
-    const connected = above && observeMineflayerBlock(above).traits.empty
-      ? HORIZONTAL.map((offset) => target.plus(offset).offset(0, 1, 0)) : [];
-    return [...touching(target), ...connected].filter(holdsWaterAt);
-  };
+  // The target's own faces: water beside the cell over it reaches the target only through that cell, sealed first.
+  const wetFaces = () => touching(target).filter(holdsWaterAt);
   const seeds = [...wetFaces(), bot.entity.position.floored()];
   if (!seeds.some(holdsWaterAt)) return null;
   const release = holdWaterPosition(bot, signal);
@@ -64,12 +65,10 @@ export async function clearMiningWater(
       const plugged = await place(bot, source, { ...(signal && { signal }) });
       if (plugged.kind !== "failed") removedSource = true;
     }
-    // A removed source takes successive scheduled water updates to drain its
-    // seven-cell horizontal spread. Observe those updates before sealing what
-    // is still being fed; never infer drained water from bucket inventory alone.
-    for (let ticks = 0; removedSource && ticks < 40 &&
-      (wetFaces().length > 0 || holdsWaterAt(bot.entity.position.floored())); ticks++)
-      await waitForPhysicsTicks(bot, 1, lifetime);
+    // A removed source drains its spread on the server's scheduled water updates: wait on the world age, bounded on
+    // the wall clock, never on client ticks, which stop with physics.
+    if (removedSource) await waitForWorldAge(bot, DRAIN_TICKS, { wallMs: DRAIN_WALL_MS, signal: lifetime,
+      until: () => wetFaces().length === 0 && !holdsWaterAt(bot.entity.position.floored()) });
     for (const cell of wetFaces()) {
       const placed = await place(bot, cell, { ...(signal && { signal }) });
       if (placed.kind === "failed") return `water at ${cell} could not be isolated: ${placed.error}`;
