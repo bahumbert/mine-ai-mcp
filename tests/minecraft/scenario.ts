@@ -4,6 +4,7 @@
  * a test without managing the bot, runtime, cancellation or recording themselves.
  */
 import type { ClientCompletion, ScenarioDefinition } from "mine-labs/client";
+import type { Bot } from "mineflayer";
 import type { ActionOutput, ActionResult } from "@aibengineering/mine-ai-mcp";
 
 /** Action evidence, independent of the test's expectation. */
@@ -13,6 +14,8 @@ export interface ScenarioCall extends ActionOutput<string, ActionResult> {
 
 export interface ScenarioContext {
   readonly scenario: ScenarioDefinition;
+  /** The bot, for reading state only (vehicle, position, inventory); every action goes through `call`. */
+  readonly bot: Bot;
   /** Let a fixture settle after the trial starts, before taking action. */
   waitForTicks(ticks: number): Promise<void>;
   /**

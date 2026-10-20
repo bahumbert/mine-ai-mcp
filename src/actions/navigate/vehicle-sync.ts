@@ -79,10 +79,18 @@ export function watchVehicle(bot: Bot): () => void {
     const vehicle = currentVehicle(bot);
     if (vehicle !== null && entity.id === vehicle.id) letOff();
   };
+  // A death ends the ride on the server too, and the respawn brings its own position: forgotten, no fake one fed.
+  const onDeath = () => {
+    forgetVehicle(bot);
+  };
   bot._client.on("set_passengers", onPassengers);
   bot.on("entityGone", onGone);
+  bot.on("death", onDeath);
+  bot.on("respawn", onDeath);
   return () => {
     bot._client.off("set_passengers", onPassengers);
     bot.off("entityGone", onGone);
+    bot.off("death", onDeath);
+    bot.off("respawn", onDeath);
   };
 }

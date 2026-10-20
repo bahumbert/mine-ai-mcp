@@ -20,6 +20,7 @@ import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
 import { getOff } from "./boat-get-off.js";
 import { waitForWorldAge } from "../../world/world-age.js";
+import { currentVehicle } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
 const BOAT_STEP = 0.35;
@@ -149,6 +150,8 @@ export interface CrossingResult {
   readonly detail: string;
   /** Still in the boat, out at sea where the ride stopped for want of land: no get-off, no ride back (owner, run 13). */
   readonly atSea?: boolean;
+  /** Stopped by an abort, still seated in the stopped boat; the next movement gets off. */
+  readonly interrupted?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -186,20 +189,33 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   }
 
   const ride = new BoatRide(bot, boat, heading, origin, signal);
+  try {
+    return await rideAndLand(bot, ride, signal, maxBlocks, timing);
+  } finally {
+    ride.close();
+  }
+}
+
+/** The ride itself, from the seat to the far bank (or the stop), and the get-off; the caller closes the ride. */
+async function rideAndLand(bot: Bot, ride: BoatRide, signal: AbortSignal | undefined, maxBlocks: number, timing: CrossingTiming): Promise<CrossingResult> {
+  const interrupted = () => ride.died || signal?.aborted === true;
   const across = await ride.across(Math.min(maxBlocks, MAX_CROSSING));
   let stoppedBy = across.stoppedBy;
   // Stopped over water that is not deep (live 2026-10-04: shallows one or two deep, with stone islets): no bank is
   // needed, she gets off and the route wades on.
-  if (stoppedBy === "" && ride.deepUnder()) stoppedBy = await ride.toBank();
+  if (stoppedBy === "" && !interrupted() && ride.deepUnder()) stoppedBy = await ride.toBank();
   // No land by the distance asked for, on deep water: she stays there, in her boat (owner, run 13: bots rode back to their
   // start; the target is where the model's next order starts from). Any other stop that is not ashore and is out on deep
   // water (the water ahead not loaded, a bank step that could not be cut) goes back the way it came, to where the boat
   // went in, rather than stranded there.
   const staysAtSea = across.noLand && ride.deepUnder();
-  if (!staysAtSea && stoppedBy !== "" && stoppedBy !== "stopped" && ride.deepUnder()) {
+  if (!staysAtSea && stoppedBy !== "" && stoppedBy !== "stopped" && !interrupted() && ride.deepUnder()) {
     await ride.back();
     stoppedBy += "; rode back to where the boat went in";
   }
+  // A cancel or a death ends the ride where it is, in the boat: a get-off in deep water would leave her swimming without
+  // it (the next movement gets off and takes the boat back), and a boat she left in a death is nobody's to stop.
+  if (interrupted()) return interruptedRide(ride, signal);
   const { x, y, z } = await ride.end();
   const ridden = Math.round(ride.ridden);
   if (staysAtSea) {
@@ -213,6 +229,16 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
   const seated = answered ? "" : "; the server did not answer the get-off, she may still be seated in the boat";
   const detail = `rode ${ridden} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}${seated}`;
   return { status: stoppedBy === "" ? "crossed" : "failed", blocks: ridden, detail };
+}
+
+/** The result of a ride an abort or a death cut short: still seated in the stopped boat, or dead. */
+async function interruptedRide(ride: BoatRide, signal: AbortSignal | undefined): Promise<CrossingResult> {
+  const blocks = Math.round(ride.ridden);
+  if (ride.died) return { status: "failed", blocks, detail: `rode ${blocks} blocks by boat and died during the ride` };
+  const { x, z } = await ride.end();
+  const reason = signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason);
+  const detail = `rode ${blocks} blocks by boat and was stopped (${reason}); still seated in its boat at ${Math.floor(x)} ${Math.floor(z)}, the next movement gets off and takes the boat back`;
+  return { status: "failed", blocks, atSea: ride.deepUnder(), interrupted: true, detail };
 }
 
 /** Test knobs: the wall-clock bounds of the two waits of a crossing. */
@@ -237,7 +263,8 @@ async function mountBoat(bot: Bot, boat: Entity, wallMs: number, signal?: AbortS
   } finally {
     bot.off("mount", onMount);
   }
-  return mounted;
+  // A seat the server gave after the wait (the vehicle shows it) is a ride: hitting the boat she sits in would eject her.
+  return mounted || currentVehicle(bot)?.id === boat.id;
 }
 
 /**
@@ -307,9 +334,13 @@ class BoatRide {
   readonly #position: { x: number; y: number; z: number };
   readonly #launch: { readonly x: number; readonly z: number };
   readonly #surfaceLevel: number;
+  #died = false;
   #corrected = false;
   /** Counted from where she stood, not from where the boat went in (2.5 to 4 blocks out). */
   ridden: number;
+  readonly #onDeath = () => {
+    this.#died = true;
+  };
   readonly #onCorrection = (packet: { readonly x: number; readonly y: number; readonly z: number }) => {
     this.#position.x = packet.x;
     this.#position.y = packet.y;
@@ -327,6 +358,18 @@ class BoatRide {
     this.#surfaceLevel = waterSurface(bot, Math.floor(boat.position.x), Math.floor(boat.position.z), Math.floor(boat.position.y) + 1) ?? Math.floor(boat.position.y);
     this.ridden = Math.hypot(boat.position.x - origin.x, boat.position.z - origin.z);
     bot._client.on("vehicle_move", this.#onCorrection);
+    bot.on("death", this.#onDeath);
+  }
+
+  /** She died in the ride: the boat is hers no more, and nothing more is sent for it. */
+  get died(): boolean {
+    return this.#died;
+  }
+
+  /** The ride's listeners removed; every exit of a crossing ends here ({@link end} does it too). */
+  close(): void {
+    this.#bot._client.removeListener("vehicle_move", this.#onCorrection);
+    this.#bot.off("death", this.#onDeath);
   }
 
   /** Straight on until the shore is close ahead, the distance asked for is ridden, or she is stopped. */
@@ -335,7 +378,7 @@ class BoatRide {
       // No land by the distance asked for: never out on open sea with no end (live 2026-10-04: Vex, exploring 64 blocks,
       // rode 518 blocks of ocean and was stranded at its far side).
       if (this.ridden >= maxBlocks) return { stoppedBy: `no land within ${Math.round(this.ridden)} blocks that way`, noLand: true };
-      if (this.#signal?.aborted) return { stoppedBy: "stopped", noLand: false };
+      if (this.#signal?.aborted || this.#died) return { stoppedBy: "stopped", noLand: false };
       const open = this.#waterAhead(SHORE_LOOKAHEAD);
       if (open === null) return { stoppedBy: "the water ahead is not loaded", noLand: false };
       if (!open) return { stoppedBy: "", noLand: false };
@@ -372,7 +415,7 @@ class BoatRide {
    * its item 16 blocks out from where she got off). Returns where the boat is.
    */
   async end(): Promise<{ readonly x: number; readonly y: number; readonly z: number }> {
-    this.#bot._client.removeListener("vehicle_move", this.#onCorrection);
+    this.close();
     const { x, y, z } = this.#position;
     for (let tick = 0; tick < 4; tick += 1) {
       this.#bot._client.write("vehicle_move", { x, y, z, yaw: yawOf(this.#heading), pitch: 0, onGround: false });
@@ -396,7 +439,7 @@ class BoatRide {
   /** One leg toward `way`, a boat step a tick while `more(blocks gone)`, until the server puts the boat back or she is stopped. */
   async #steer(way: { readonly x: number; readonly z: number }, more: (gone: number) => boolean): Promise<void> {
     this.#corrected = false;
-    for (let gone = 0; more(gone) && !this.#corrected && !this.#signal?.aborted; gone += BOAT_STEP) await this.#step(way);
+    for (let gone = 0; more(gone) && !this.#corrected && !this.#signal?.aborted && !this.#died; gone += BOAT_STEP) await this.#step(way);
   }
 
   async #step(way: { readonly x: number; readonly z: number }): Promise<void> {
@@ -411,22 +454,37 @@ class BoatRide {
   }
 }
 
+/** Waits `ms`, or until `signal` aborts: a cancel does not wait out a pause. Never rejects. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
 /**
  * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when a boat is carried
- * after.
+ * after. A cancel stops the hits, the pauses and the swim at once, whatever the boat's state.
  */
 export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: AbortSignal, settleMs = 1500): Promise<boolean> {
   let hits = 0;
   while (boat !== null && bot.entities[boat.id] !== undefined && hits < 15) {
+    if (signal?.aborted) return boatsCarried(bot) > 0;
     await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
     bot.attack(boat);
     hits += 1;
-    await sleep(300);
+    await pause(300, signal);
   }
-  await sleep(settleMs);
+  await pause(settleMs, signal);
   // Its item floated off before it was picked up: swum after, a few blocks of the water by the bank.
   if (boatsCarried(bot) === 0 && !signal?.aborted) {
-    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > 0, 15_000);
+    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > 0 || signal?.aborted === true, 15_000);
   }
   return boatsCarried(bot) > 0;
 }

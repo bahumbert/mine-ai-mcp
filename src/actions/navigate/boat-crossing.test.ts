@@ -3,11 +3,12 @@ import test, { describe } from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { boatUnderFeetAtSea, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
-import { getOff } from "./boat-get-off.js";
-import { EventEmitter } from "node:events";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { openSeaBot, shifts } from "../../test-support/boat-bot.js";
+import { getOff } from "./boat-get-off.js";
 import { freeHeldSeat, watchServerSeat } from "./server-seat-watch.js";
+import { watchVehicle } from "./vehicle-sync.js";
 
 /** Land (stone up to y 62) with a sea from x 10 to 40 (water y 50 to 62), as Mineflayer's `blockAt` reports it. */
 function seaBot(items: { name: string; count: number }[] = []): Bot {
@@ -91,134 +92,6 @@ test("a boat taken back is broken by hand and its item picked up", async () => {
   assert.equal(entities[7], undefined);
 });
 
-type ServerClock = "ticking" | "frozen" | { readonly frozenMs: number } | { readonly burstOnPress: number };
-
-/**
- * The world age the client reads: 20 ticks per 50 ms (a jump of 20, as a server catching up reports it); "frozen" never
- * moves, `frozenMs` stands still that long and then jumps 200, `burstOnPress` jumps that many ticks at the shift press
- * (a client whose event loop was blocked reads its queued packets late). The clock counts from the press.
- */
-function worldClock(clock: ServerClock) {
-  let startedAt = performance.now();
-  let pressed = false;
-  const time = {
-    get age() {
-      const elapsed = performance.now() - startedAt;
-      if (clock === "frozen") return 1_000;
-      if (clock === "ticking") return 1_000 + Math.floor(elapsed / 50) * 20;
-      if ("burstOnPress" in clock) return 1_000 + (pressed ? clock.burstOnPress : 0) + Math.floor(elapsed / 50) * 20;
-      return 1_000 + (elapsed < clock.frozenMs ? 0 : 200 + Math.floor((elapsed - clock.frozenMs) / 50) * 20);
-    },
-  };
-  return { time, press: () => { startedAt = performance.now(); pressed = true; } };
-}
-
-/**
- * Whether a 1.21.4 server still has her seated. It reads the shift from entity_action only (player_input is for minecart
- * steering), and only at a server tick (50 ms): a press released within the same tick does nothing. It tells the rider
- * nothing. Breaking the boat she sits in ejects her. `ignoresShift` is a server that never reads it (a held seat).
- */
-function seatOnTheServer(ignoresShift: boolean) {
-  let seated = false;
-  let pressedTick: number | null = null;
-  const tick = () => Math.floor(performance.now() / 50);
-  const heldATick = () => pressedTick !== null && tick() > pressedTick && !ignoresShift;
-  return {
-    mount: () => { seated = true; },
-    press: () => { pressedTick = tick(); },
-    release: () => {
-      if (heldATick()) seated = false;
-      pressedTick = null;
-    },
-    /** The boat she sits in broke: true when it was holding her. */
-    eject: () => {
-      const was = seated;
-      seated = false;
-      return was;
-    },
-    seated: () => seated && !heldATick(),
-  };
-}
-
-/**
- * A bot at the edge of a flat open sea (water y 50 to 62, stone under it), with one boat carried; the server is played
- * by the mock: it puts the boat in the water when the item is used, follows `vehicle_move` and records every packet.
- */
-function openSeaBot(options: { readonly loadedTo?: number; readonly answerShiftMs?: number; readonly serverClock?: ServerClock; readonly neverMounts?: boolean; readonly correctFromZ?: number; readonly boatsCarried?: number; readonly ignoresShift?: boolean } = {}) {
-  const clock = worldClock(options.serverClock ?? "ticking");
-  const seat = seatOnTheServer(options.ignoresShift === true);
-  const carried = Array.from({ length: options.boatsCarried ?? 1 }, () => ({ name: "oak_boat", count: 1 }));
-  const written: { name: string; packet: Record<string, unknown>; at: number }[] = [];
-  const attacks: number[] = [];
-  const self = { id: 1, position: new Vec3(0.5, 63, 0.5), yaw: 0, pitch: 0, onGround: false, vehicle: null as unknown };
-  const entities: Record<number, unknown> = { 1: self };
-  const client = Object.assign(new EventEmitter(), {
-    write: (name: string, packet: Record<string, unknown>) => {
-      written.push({ name, packet, at: performance.now() });
-      const boat = entities[7] as { position: Vec3 } | undefined;
-      if (name === "entity_action" && packet.actionId === 1) seat.release();
-      if (name === "entity_action" && packet.actionId === 0) {
-        seat.press();
-        clock.press();
-        if (options.answerShiftMs !== undefined && boat !== undefined) {
-          setTimeout(() => client.emit("set_passengers", { entityId: 7, passengers: [] }), options.answerShiftMs);
-        }
-      }
-      if (name === "vehicle_move" && boat !== undefined) boat.position = new Vec3(Number(packet.x), Number(packet.y), Number(packet.z));
-      // The server puts the boat back when a move runs it into something.
-      if (name === "vehicle_move" && options.correctFromZ !== undefined && Number(packet.z) > options.correctFromZ) {
-        setImmediate(() => client.emit("vehicle_move", { x: Number(packet.x), y: Number(packet.y), z: options.correctFromZ }));
-      }
-    },
-  });
-  const bot = Object.assign(new EventEmitter(), {
-    entity: self,
-    entities,
-    time: clock.time,
-    vehicle: null as unknown,
-    _client: client,
-    inventory: { items: () => carried },
-    blockAt: (at: Vec3) => {
-      if (options.loadedTo !== undefined && at.z > options.loadedTo) return null;
-      if (at.y < 50) return { name: "stone", boundingBox: "block" };
-      if (at.y <= 62) return { name: "water", boundingBox: "empty" };
-      return { name: "air", boundingBox: "empty" };
-    },
-    equip: async () => undefined,
-    dig: async () => undefined,
-    lookAt: async () => undefined,
-    activateItem: () => {
-      carried.shift();
-      entities[7] = { id: 7, name: "oak_boat", position: new Vec3(0.5, 62.5, 3.5), passengers: [] };
-    },
-    deactivateItem: () => undefined,
-    mount: (boat: unknown) => {
-      bot.vehicle = boat;
-      self.vehicle = boat;
-      seat.mount();
-      if (!options.neverMounts) setImmediate(() => bot.emit("mount"));
-    },
-    // Mineflayer emits no "dismount" for a passenger list that no longer names the bot.
-    dismount: () => undefined,
-    attack: (target: { id: number }) => {
-      attacks.push(target.id);
-      const top = (entities[target.id] as { position: Vec3 }).position;
-      delete entities[target.id];
-      carried.push({ name: "oak_boat", count: 1 });
-      // The server brings the ejected rider a position.
-      if (seat.eject()) setImmediate(() => client.emit("position", { x: top.x, y: top.y + 0.5, z: top.z, yaw: 0, pitch: 0, flags: { x: false, y: false, z: false, yaw: false, pitch: false }, teleportId: 5 }));
-    },
-    clearControlStates: () => undefined,
-    closeWindow: () => undefined,
-    currentWindow: null,
-    isSleeping: false,
-    version: "1.21.4",
-  });
-  return { bot: bot as unknown as Bot, raw: bot, written, attacks, entities, client, carried, serverSeated: seat.seated };
-}
-
-/** The shift presses (true) and releases (false) written, in order: a 1.21.4 server reads them from entity_action. */
-const shifts = (written: readonly { name: string; packet: Record<string, unknown> }[]): boolean[] => written.filter((entry) => entry.name === "entity_action").map((entry) => entry.packet.actionId === 0);
 
 test("a ride over open sea with no land stops at the distance asked for and stays mounted there: no ride back, the boat not broken", async () => {
   // Live 2026-10-16 (run 13): Vex explored 4 chunks north, rode 103 blocks, then back to where the boat went in.
@@ -291,55 +164,6 @@ test("a ride end the server does not answer releases shift after the wait, forge
   assert.equal(raw.vehicle, null);
 });
 
-/** Mounted in the mock's boat, as a ride leaves her. */
-async function mountedBot(options: Parameters<typeof openSeaBot>[0] = {}) {
-  const world = openSeaBot(options);
-  const boat = { id: 7, name: "oak_boat", position: new Vec3(0.5, 62.5, 3.5), passengers: [] };
-  world.entities[7] = boat;
-  world.raw.mount(boat);
-  await new Promise((resolve) => setImmediate(resolve));
-  return world;
-}
-
-// Review focus 4 (run 15 L): the server seconds behind.
-test("a get-off holds shift while the world age stands still, and lets go only once it moved 40 ticks", { timeout: 30_000 }, async () => {
-  const { bot, raw, written, client } = await mountedBot({ serverClock: { frozenMs: 800 } });
-  const positions: unknown[] = [];
-  client.on("position", (packet: unknown) => positions.push(packet));
-  const startedAt = performance.now();
-  const result = await getOff(bot);
-  assert.ok(performance.now() - startedAt >= 700, "shift stayed down while the server clock was stopped");
-  assert.equal(result.answered, true, "the server clock moved past the send: it handled the shift");
-  assert.deepEqual(shifts(written), [true, false]);
-  assert.equal(positions.length, 1);
-  assert.equal(raw.vehicle, null);
-});
-
-test("a get-off the server clock never answers fails on the wall clock, with shift released and physics on", { timeout: 30_000 }, async () => {
-  const { bot, raw, written, client } = await mountedBot({ serverClock: "frozen" });
-  const positions: unknown[] = [];
-  client.on("position", (packet: unknown) => positions.push(packet));
-  const result = await getOff(bot, { wallMs: 300 });
-  assert.equal(result.answered, false);
-  assert.deepEqual(shifts(written), [true, false]);
-  assert.equal(positions.length, 1, "physics is back on");
-  assert.equal(raw.vehicle, null, "the vehicle is forgotten");
-  assert.equal(raw.entity.vehicle, null);
-});
-
-test("a death during the get-off ends it at once, shift released, nothing resumed", { timeout: 30_000 }, async () => {
-  const { bot, raw, written, client } = await mountedBot({ serverClock: "frozen" });
-  const positions: unknown[] = [];
-  client.on("position", (packet: unknown) => positions.push(packet));
-  setTimeout(() => raw.emit("death"), 50);
-  const startedAt = performance.now();
-  const result = await getOff(bot, { wallMs: 5_000 });
-  assert.ok(performance.now() - startedAt < 1_000);
-  assert.equal(result.answered, false);
-  assert.deepEqual(shifts(written), [true, false]);
-  assert.equal(positions.length, 0);
-  assert.equal(raw.listenerCount("dismount") + raw.listenerCount("death") + raw.listenerCount("respawn") + raw.listenerCount("forcedMove"), 0, "no listener is left");
-});
 
 test("a ride whose get-off went unanswered says she may still be seated", { timeout: 30_000 }, async () => {
   const { bot } = openSeaBot({ loadedTo: 12, serverClock: "frozen" });
@@ -361,36 +185,6 @@ test("a ride stops where the server put the boat back, as a leg does", { timeout
   const { bot } = openSeaBot({ correctFromZ: 6 });
   const result = await crossByBoat(bot, { x: 0, z: 1 }, undefined, 30);
   assert.ok(result.blocks < 15, `rode ${String(result.blocks)} blocks past the correction at 6`);
-});
-
-// Backlog 76 (Cleo, run 16): a 1.21.4 server reads the shift from entity_action, never from player_input.
-test("a get-off on 1.21.4 holds entity_action shift until the server lets her off, and writes no player_input", { timeout: 30_000 }, async () => {
-  const { bot, written, serverSeated } = await mountedBot();
-  assert.equal(serverSeated(), true);
-  const result = await getOff(bot);
-  assert.deepEqual(shifts(written), [true, false]);
-  assert.equal(written.some((entry) => entry.name === "player_input"), false);
-  assert.equal(serverSeated(), false, "the server read the held shift at one of its ticks");
-  assert.equal(result.answered, true);
-  assert.equal(result.ended, "world_age");
-});
-
-test("a press and release read in one server tick do not let her off: the release waits for the world age", { timeout: 30_000 }, async () => {
-  const { bot, written, serverSeated } = await mountedBot({ serverClock: { frozenMs: 800 } });
-  await getOff(bot);
-  const [down, up] = written.filter((entry) => entry.name === "entity_action");
-  assert.ok(up!.at - down!.at >= 700, `shift was released ${String(up!.at - down!.at)} ms after the press, before the server clock moved`);
-  assert.equal(serverSeated(), false);
-});
-
-test("a world age that jumps 40 in the first 250 ms after the press is not the server's answer", { timeout: 30_000 }, async () => {
-  // Run 16: the server ran ~30 % behind and Cleo's get-off "answered" in ~1.1 s: a client whose event loop was blocked
-  // reads its queued time packets after the press, so the age it sees jump says nothing about the server reading the shift.
-  const { bot, written, serverSeated } = await mountedBot({ serverClock: { burstOnPress: 40 } });
-  await getOff(bot);
-  const [down, up] = written.filter((entry) => entry.name === "entity_action");
-  assert.ok(up!.at - down!.at >= 300, `shift was released ${String(up!.at - down!.at)} ms after the press: the burst counted as 40 server ticks`);
-  assert.equal(serverSeated(), false);
 });
 
 // B4: with a second boat carried nothing broke the boat she left, and the server kept her seated while her client walked.
@@ -437,4 +231,159 @@ describe("a seat the server still holds", () => {
     );
     watch.stop();
   });
+});
+
+describe("a ride that is interrupted stays seated (ACT-01)", () => {
+  /** Aborts `controller` once `count` vehicle_move packets were written (a ride cancelled mid-water). */
+  function abortAfterMoves(world: ReturnType<typeof openSeaBot>, count: number, reason: Error): AbortController {
+    const controller = new AbortController();
+    const write = world.client.write;
+    let moves = 0;
+    world.client.write = (name: string, packet: Record<string, unknown>) => {
+      write(name, packet);
+      if (name === "vehicle_move" && (moves += 1) === count) controller.abort(reason);
+    };
+    return controller;
+  }
+  const stillSeated = (world: ReturnType<typeof openSeaBot>) => {
+    assert.equal(world.raw.vehicle, world.entities[7], "still in the boat");
+    assert.equal(world.written.some((entry) => entry.name === "player_input" || entry.name === "entity_action"), false, "no shift");
+    assert.deepEqual(world.attacks, [], "the boat is not hit");
+    const moves = world.written.filter((entry) => entry.name === "vehicle_move").map((entry) => JSON.stringify(entry.packet));
+    assert.equal(new Set(moves.slice(-4)).size, 1, "the last 4 moves are the same stopped place");
+  };
+
+  test("a ride cancelled over deep water stops the boat and stays seated: no shift, no hit, the boat where it stopped", { timeout: 30_000 }, async () => {
+    const world = openSeaBot();
+    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, controller.signal, 100);
+    assert.equal(result.status, "failed");
+    assert.equal(result.atSea, true);
+    assert.equal(result.interrupted, true);
+    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
+    assert.match(result.detail, /cancelled by the brain/u);
+    stillSeated(world);
+  });
+
+  test("a ride cancelled in shallows stays seated too", { timeout: 30_000 }, async () => {
+    const world = openSeaBot({ waterDepth: 2 });
+    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, controller.signal, 100);
+    assert.equal(result.status, "failed");
+    assert.equal(result.atSea, false);
+    assert.equal(result.interrupted, true);
+    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
+    stillSeated(world);
+  });
+
+  test("a cancel during the ride back still stays seated", { timeout: 30_000 }, async () => {
+    const world = openSeaBot({ loadedTo: 12 });
+    // The water ahead is not loaded at z 9: about 17 moves out, then the ride turns back; the 25th move is on the way back.
+    const controller = abortAfterMoves(world, 25, new Error("cancelled by the brain"));
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, controller.signal, 40);
+    assert.equal(result.interrupted, true);
+    assert.match(result.detail, /still seated in its boat/u);
+    stillSeated(world);
+  });
+
+  test("a death during the ride ends it at once: no stop moves for a boat she left, no get-off", { timeout: 30_000 }, async () => {
+    const world = openSeaBot();
+    const write = world.client.write;
+    let moves = 0;
+    let movesAtDeath = -1;
+    world.client.write = (name: string, packet: Record<string, unknown>) => {
+      write(name, packet);
+      if (name === "vehicle_move" && (moves += 1) === 10) {
+        movesAtDeath = world.written.filter((entry) => entry.name === "vehicle_move").length;
+        world.raw.emit("death");
+      }
+    };
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 100);
+    assert.equal(result.status, "failed");
+    assert.match(result.detail, /died during the ride/u);
+    assert.equal(world.written.filter((entry) => entry.name === "vehicle_move").length, movesAtDeath, "no move after the death");
+    assert.equal(world.written.some((entry) => entry.name === "player_input" || entry.name === "entity_action"), false);
+    assert.equal(world.raw.listenerCount("death"), 0, "no death listener is left");
+    assert.equal(world.client.listenerCount("vehicle_move"), 0);
+  });
+
+  test("a seat the vehicle shows after the wait gave up is still a ride, never hit", { timeout: 30_000 }, async () => {
+    // The server seated her (bot.vehicle shows it) but the `mount` event only came after the 100 ms wait.
+    const world = openSeaBot({ mountEventAfterMs: 400 });
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 10, { mountWallMs: 100 });
+    assert.equal(result.atSea, true, "the ride went on and stayed at sea");
+    assert.deepEqual(world.attacks, [], "the boat she sits in is not hit");
+    assert.equal(world.raw.vehicle, world.entities[7]);
+  });
+
+  test("the next movement takes back the boat she just left, in shallows too", { timeout: 30_000 }, async () => {
+    const world = openSeaBot({ waterDepth: 2 });
+    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+    await crossByBoat(world.bot, { x: 0, z: 1 }, controller.signal, 100);
+    assert.deepEqual(shifts(world.written), [], "a cancelled ride does not get off");
+    await prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime);
+    assert.deepEqual(shifts(world.written), [true, false], "the preparation gets off with shift");
+    assert.deepEqual(world.attacks, [7]);
+    assert.equal(carriesBoat(world.bot), true);
+    assert.equal(world.raw.vehicle, null);
+  });
+
+  test("after a cancelled ride at sea, prepareBotForMovement then a crossing reaches the far side", { timeout: 60_000 }, async () => {
+    const world = openSeaBot({ landFromZ: 40 });
+    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+    await crossByBoat(world.bot, { x: 0, z: 1 }, controller.signal, 100);
+    await prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime);
+    assert.equal(carriesBoat(world.bot), true);
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 100);
+    assert.equal(result.status, "crossed", result.detail);
+  });
+
+  test("a preparation cancelled between hits stops hitting: the boat stays, the result says so", { timeout: 30_000 }, async () => {
+    const controller = new AbortController();
+    const boat = { id: 7, name: "oak_boat", position: new Vec3(20.5, 62.49, 0.5) };
+    const bot = standingBot(new Vec3(20.5, 63.05, 0.5), boat.position) as unknown as Record<string, unknown>;
+    const attacks: number[] = [];
+    bot.lookAt = async () => undefined;
+    // A boat that takes many hits: the first one cancels the preparation.
+    bot.attack = (target: { id: number }) => {
+      attacks.push(target.id);
+      controller.abort(new Error("cancelled"));
+    };
+    const startedAt = performance.now();
+    assert.equal(await takeBoatBack(bot as unknown as Bot, boat as never, controller.signal, 0), false);
+    assert.deepEqual(attacks, [7], "one hit, then it stops");
+    assert.ok(performance.now() - startedAt < 1_000, "no more hits and no swim after the cancel");
+  });
+});
+
+test("a cancel during the swim after the boat item ends it within 200 ms", { timeout: 30_000 }, async () => {
+  // The boat broke and its item floated off: swum after, up to 15 s; a cancel ends the swim at its next look.
+  const controller = new AbortController();
+  const boat = { id: 7, name: "oak_boat", position: new Vec3(20.5, 62.49, 0.5) };
+  const bot = standingBot(new Vec3(20.5, 63.05, 0.5), boat.position) as unknown as Record<string, unknown>;
+  const entities = bot.entities as Record<number, unknown>;
+  bot.lookAt = async () => undefined;
+  bot.setControlState = () => undefined;
+  bot.clearControlStates = () => undefined;
+  bot.attack = () => {
+    delete entities[7];
+    entities[9] = { id: 9, name: "item", position: new Vec3(24.5, 62.5, 0.5), getDroppedItem: () => ({ name: "oak_boat" }) };
+  };
+  // The one hit and its 300 ms pause come first: the cancel lands while the swim is on.
+  setTimeout(() => controller.abort(new Error("cancelled")), 500);
+  const startedAt = performance.now();
+  assert.equal(await takeBoatBack(bot as unknown as Bot, boat as never, controller.signal, 0), false);
+  assert.ok(performance.now() - startedAt < 700, `the swim ended ${String(Math.round(performance.now() - startedAt - 500))} ms after the cancel`);
+});
+
+test("the next preparation after a respawn sends no shift", { timeout: 30_000 }, async () => {
+  const world = openSeaBot();
+  const stop = watchVehicle(world.bot);
+  await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 10);
+  assert.equal(world.raw.vehicle, world.entities[7], "seated at sea");
+  world.raw.emit("death");
+  world.raw.emit("respawn");
+  await prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime);
+  assert.deepEqual(shifts(world.written), [], "she rides nothing: no get-off, no shift");
+  stop();
 });

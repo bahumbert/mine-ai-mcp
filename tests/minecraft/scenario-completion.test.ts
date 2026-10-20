@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { Bot } from "mineflayer";
 import { scenarioDefinitionSchema } from "mine-labs";
 import type { ActionResult } from "@aibengineering/mine-ai-mcp";
 import { run } from "./drivers/single-action.ts";
@@ -7,6 +8,8 @@ import { run as runSequence } from "./drivers/action-sequence.ts";
 
 /** These drivers never stop physics. */
 const NO_PHYSICS = { pause: () => {}, resume: () => {} };
+/** ...and never read the bot. */
+const NO_BOT = {} as Bot;
 
 test("a sequence stops before later actions when a step does not succeed", async () => {
   for (const status of ["partial", "failed", "cancelled"] as const) {
@@ -14,6 +17,7 @@ test("a sequence stops before later actions when a step does not succeed", async
     const completion = await runSequence({
       waitForTicks: async () => {},
       physics: NO_PHYSICS,
+      bot: NO_BOT,
       scenario: scenarioDefinitionSchema.parse({
         params: { actions: ["first", "stop", "never"].map((action) => ({ action, input: {} })) },
         goal: { kind: "completion" },
@@ -34,6 +38,7 @@ test("an interruption expectation cannot pass on success alone or a different re
     const completion = await run({
       waitForTicks: async () => {},
       physics: NO_PHYSICS,
+      bot: NO_BOT,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "succeeded", interruptionContains: "[HOSTILE_CONTACT]" } },
         goal: { kind: "completion" },
@@ -51,6 +56,7 @@ test("partial, failed and cancelled actions cannot satisfy successful completion
     const completion = await run({
       waitForTicks: async () => {},
       physics: NO_PHYSICS,
+      bot: NO_BOT,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: { block_name: "coal_ore", count: 5 } },
         goal: { kind: "completion" },
@@ -76,6 +82,7 @@ test("explicit expectations require both the action status and literal error tex
     const completion = await run({
       waitForTicks: async () => {},
       physics: NO_PHYSICS,
+      bot: NO_BOT,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: expected, errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
@@ -96,6 +103,7 @@ test("expected failure cannot accept runtime failures or cancellations", async (
     const completion = await run({
       waitForTicks: async () => {},
       physics: NO_PHYSICS,
+      bot: NO_BOT,
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "failed", errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
@@ -110,6 +118,7 @@ test("ordinary single-action scenarios still pass without an expectation", async
   const completion = await run({
     waitForTicks: async () => {},
     physics: NO_PHYSICS,
+    bot: NO_BOT,
     scenario: scenarioDefinitionSchema.parse({
       params: { action: "view_status", input: {} }, goal: { kind: "completion" },
     }),

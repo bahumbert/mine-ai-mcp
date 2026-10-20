@@ -78,3 +78,25 @@ test("a stall's recovery resumes physics where she is, only when she rides nothi
   assert.equal(positions.length, 1);
   stop();
 });
+
+// A death ends the ride on the server too: the respawn brings its own position, so no fake one is fed, and the next
+// movement must not find her still "riding" and send a shift for a boat she left.
+test("a death while seated forgets the vehicle without a fake position", () => {
+  const { bot, self, boat, positions, dismounts, stop } = ridingBot();
+  bot.emit("death");
+  assert.equal(bot.vehicle, null);
+  assert.equal(self.vehicle, null);
+  assert.deepEqual(dismounts, [boat]);
+  bot.emit("respawn");
+  assert.equal(positions.length, 0, "the respawn's own position turns physics on");
+  stop();
+});
+
+test("a respawn while seated forgets the vehicle too, and the listeners go with the watch", () => {
+  const { bot, dismounts, stop } = ridingBot();
+  bot.emit("respawn");
+  assert.equal(bot.vehicle, null);
+  assert.equal(dismounts.length, 1);
+  stop();
+  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn"), 0);
+});

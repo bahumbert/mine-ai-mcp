@@ -25,7 +25,7 @@ export async function prepareBotForMovement(bot: Bot, navigation: NavigationRunt
   // The boat she just left is taken back whatever she carries, or one she stands on out at sea with none carried (got off
   // it at a login or a stop): or every way on is refused "no boat is carried" (live 2026-10-10: Vex, a whole run).
   const boat = boatToTakeBack(bot, justLeft);
-  if (boat !== null) await takeBoatBack(bot, boat);
+  if (boat !== null) await takeBoatBack(bot, boat, signal);
   // A web in the feet or head cell keeps the body from jumping, so every step up the route fails (live 2026-10-10:
   // Tom, five routes in a row "No observed settled arrival"). Every movement action starts here, not only navigate.
   await clearBodyWebs(bot, signal);
