@@ -978,7 +978,8 @@ whispers the message to that one player instead, with at most 233 characters so
 it fits one `/tell` command. The player must be online (matched without regard
 to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
 and the result's `to` repeats the name asked for (on success, the name as the
-server spells it).
+server spells it). A message holding `§` or a control character (U+0000-U+001F, U+007F) is refused before anything is sent, because the
+server disconnects a client for it and the bot does not reconnect; the refusal tells the model to remove them and send again.
 Success proves the message was sent and the bot observed its own chat echo
 returned by the server (for a whisper, the server's
 `commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground
