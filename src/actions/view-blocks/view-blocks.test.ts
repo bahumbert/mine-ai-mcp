@@ -29,6 +29,7 @@ function fakeBot(placed: Record<string, Placed>, feet = new Vec3(0.5, 64, 0.5)) 
   return botFixture(
     { position: feet },
     {
+      version: "1.21.4",
       world: { getColumns: () => [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections } }] },
       blockAt: (at: Vec3) => {
         if (at.x < 0 || at.x > 15 || at.z < 0 || at.z > 15 || at.y < 0 || at.y >= 80) return null;
@@ -102,6 +103,32 @@ test("a name Minecraft has no block for fails the view rather than finding nothi
   const result = viewBlocks(fakeBot({}), { find: { blockNames: ["unobtainium"], limit: 12 }, box: null, cells: [] });
   assert.equal(result.status, "failed");
   assert.match((result as { error: string }).error, /no block named unobtainium/);
+});
+
+test("find takes a block tag as it takes a block name: every member of the tag is found", () => {
+  const bot = fakeBot({
+    [key(3, 64, 0)]: { name: "oak_log" },
+    [key(5, 64, 0)]: { name: "birch_log" },
+    [key(7, 64, 0)]: { name: "stripped_oak_log" },
+    [key(9, 64, 0)]: { name: "oak_planks" },
+  });
+  const result = viewBlocks(bot, { find: { blockNames: ["overworld_natural_logs"], limit: 12 }, box: null, cells: [] });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(result.blocks.find![0]!.listed.map((hit) => hit.name), ["oak_log", "birch_log"]);
+});
+
+test("find with the singular log fails as an unknown name; logs finds natural logs only", () => {
+  const bot = fakeBot({ [key(3, 64, 0)]: { name: "oak_log" }, [key(5, 64, 0)]: { name: "stripped_oak_log" } });
+  const singular = viewBlocks(bot, { find: { blockNames: ["log"], limit: 12 }, box: null, cells: [] });
+  assert.equal(singular.status, "failed");
+  const plural = viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] });
+  assert.deepEqual(plural.blocks.find![0]!.listed.map((hit) => hit.name), ["oak_log"]);
+});
+
+test("find on a version with no shipped tags knows block names only", () => {
+  const bot = Object.assign(fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }), { version: "1.19.4" });
+  assert.equal(viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] }).status, "failed");
+  assert.equal(viewBlocks(bot, { find: { blockNames: ["oak_log"], limit: 12 }, box: null, cells: [] }).status, "succeeded");
 });
 
 test("kinds give each named block's game data, harvest tools cheapest tier first, without reading the world", () => {

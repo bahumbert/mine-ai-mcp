@@ -3,8 +3,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { collectBlockInputSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
 import type { Bot } from "mineflayer";
-import { breakBudget, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
+import { breakBudget, collectBlock, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
 import { botFixture } from "../../test-support/bot.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
+import { sourcesOf } from "../../world/block-drops.js";
 
 test("capacity admission allows a clearing break with free space or a compatible partial stack", () => {
   let empty = 4;
@@ -220,4 +222,68 @@ test("max_breaks caps the break budget whatever the drop chance asks for", () =>
   assert.equal(breakBudget(5, 0.005), 2004, "no cap: twice the expected breaks");
   assert.equal(breakBudget(5, 0.005, 12), 12);
   assert.equal(breakBudget(5, 1, 12), 9, "a sure drop needs fewer breaks than the cap: the cap does not raise it");
+});
+
+// ── An unknown name is refused before any movement (ACT-02) ────────────────────────────────
+
+/** A navigation runtime that fails the test on any use: an unknown name must never reach it. */
+const untouchedNavigation = new Proxy({}, {
+  get: (_target, property) => { throw new Error(`the refusal reached navigation.${String(property)}`); },
+}) as unknown as NavigationRuntime;
+
+function refusedBot(version = "1.21.4") {
+  return Object.assign(botFixture(), { version });
+}
+
+async function refusal(selector: string, version = "1.21.4", extra: Record<string, unknown> = {}) {
+  const request = parseCollectBlockRequest({ block_name: selector, count: 3, ...extra });
+  return collectBlock(refusedBot(version), untouchedNavigation, request, {});
+}
+
+test("a name that is an item, not a block, fails at once naming the blocks that drop it", async () => {
+  const result = await refusal("coal");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named coal\./u);
+  const droppers = sourcesOf("coal", "1.21.4").slice(0, 5).map((source) => source.block);
+  assert.ok(droppers.length > 0);
+  assert.ok((result.error ?? "").includes(`Blocks that drop it: ${droppers.join(", ")}. Name one of them as block_name.`));
+  assert.equal(result.collected.blocksBroken, 0);
+  assert.equal(result.collected.gained, 0);
+});
+
+test("an item no block drops but a recipe makes fails at once saying craft or smelt", async () => {
+  for (const item of ["iron_ingot", "iron_pickaxe", "bread"]) {
+    assert.equal(sourcesOf(item, "1.21.4").length, 0, `${item} must have no block source for this test`);
+    const result = await refusal(item);
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /No block drops it: craft it or smelt it \(view_crafting_requirements, view_smelting_recipes\)\./u);
+  }
+});
+
+test("a name that is nothing fails with the closest registry names", async () => {
+  const result = await refusal("deepslat_coal_ore");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named deepslat_coal_ore\./u);
+  assert.match(result.error ?? "", /Closest names: [^.]*deepslate_coal_ore/u);
+});
+
+test("the singular log is unknown and its refusal suggests the logs", async () => {
+  const result = await refusal("log");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named log\./u);
+  const closest = /Closest names: ([^.]*)\./u.exec(result.error ?? "")?.[1] ?? "";
+  assert.match(closest, /\blogs\b/u);
+  assert.match(closest, /oak_log/u);
+});
+
+test("a version with no shipped tags matches exact names only: logs is the unknown-name refusal, not an exploration", async () => {
+  const result = await refusal("logs", "1.19.4");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
+});
+
+test("a refusal with coordinates names the unknown block, not a cell mismatch", async () => {
+  const result = await refusal("coal", "1.21.4", { count: 1, x: 3, y: 64, z: 3 });
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
 });

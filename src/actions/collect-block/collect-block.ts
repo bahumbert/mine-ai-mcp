@@ -18,6 +18,7 @@ import { LOADED_SEARCH_RADIUS } from "../../navigation/processes/mining/block-ex
 import {
   mine,
   type MinecraftBlock,
+  type MineRequest,
   type MineResult,
   type MineTarget,
 } from "../../navigation/processes/mining/mine-process.js";
@@ -35,7 +36,7 @@ import { observeToolTierLoss, type ToolTierLoss } from "../../world/tool-loss.js
 import { carriedSolidBlocks, placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { watchForStall } from "../stall-watch.js";
-import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains } from "./collection-facts.js";
+import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains, selectorKnown, unknownSelectorStop } from "./collection-facts.js";
 import { createCollectionMovements } from "./collection-movements.js";
 import {
   cellLabel,
@@ -54,6 +55,12 @@ import {
   type CollectBlockResult,
 } from "./contract.js";
 
+/**
+ * The one block the bot makes rather than finds (water onto a lava source, then scooped back): a request that selects
+ * it enables casting and the bucket check. A code-only fact of the game, named once here.
+ */
+const CAST_BLOCK = "obsidian";
+
 const sumValues = (record: Record<string, number>): number => Object.values(record).reduce((total, n) => total + n, 0);
 
 // ── Action preparation ────────────────────────────────────────────────────────────────────
@@ -64,6 +71,8 @@ const sumValues = (record: Record<string, number>): number => Object.values(reco
  * read once with the tool the bot is actually holding.
  */
 interface CollectionTarget {
+  /** The registry's blocks the selector names (a block, its ore twin, or a tag's members); none when it names nothing. */
+  readonly blockNames: ReadonlySet<string>;
   readonly itemNames: ReadonlySet<string>;
   readonly blockStateIds: ReadonlySet<number>;
   /** How often one break yields a collectable item (`collectionChance`). */
@@ -72,9 +81,9 @@ interface CollectionTarget {
 
 function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTarget {
   const matching = Object.keys(bot.registry?.blocksByName ?? {}).filter((name) =>
-    blockMatchesSelector(name, request.selector),
+    blockMatchesSelector(name, request.selector, bot),
   );
-  const names = matching.length > 0 ? matching : [request.selector];
+  const names = matching;
   // The block's own name is kept alongside its drop because a silk-touch break
   // yields the block itself, and the gain filter must accept either.
   const itemNames = new Set(names.flatMap((name) => [name, expectedDropName(bot, name)]));
@@ -83,7 +92,7 @@ function collectionTarget(bot: Bot, request: CollectBlockRequest): CollectionTar
     const block = bot.registry.blocksByName[name]!;
     for (let stateId = block.minStateId; stateId <= block.maxStateId; stateId += 1) blockStateIds.add(stateId);
   }
-  return { itemNames, blockStateIds, chance: collectionChance(bot, names, itemNames) };
+  return { blockNames: new Set(matching), itemNames, blockStateIds, chance: collectionChance(bot, names, itemNames) };
 }
 
 /**
@@ -172,12 +181,13 @@ export function pursuedInventoryStop(
 function exactTargetStop(
   bot: Bot,
   request: CollectBlockRequest,
+  blockNames: ReadonlySet<string>,
   canMine: (block: MinecraftBlock) => MineTargetDecision,
 ): string | null {
   if (!request.exactTarget) return null;
   const target = asVec3(request.exactTarget).floored();
   const block = bot.blockAt(target);
-  if (!block || !blockMatchesSelector(block.name, request.selector)) {
+  if (!block || !blockNames.has(block.name)) {
     return outcomes.targetMismatch(request.exactTarget, block?.name ?? "unloaded", request.selector);
   }
   const decision = canMine(block);
@@ -198,6 +208,21 @@ export async function collectBlock(
   finally { lifetime.abort("Collection request settled."); }
 }
 
+/** What one collection attempt reads and records; it outlives a reflex's interruption and the resume that follows. */
+interface CollectionAttempt {
+  readonly bot: Bot;
+  readonly navigation: NavigationRuntime;
+  readonly request: CollectBlockRequest;
+  readonly discarded: DiscardedItems;
+  readonly target: CollectionTarget;
+  readonly inventoryBefore: Record<string, number>;
+  readonly start: Vec3;
+  readonly broken: MineResult["broken"][number][];
+  readonly toolLoss: ReturnType<typeof observeToolTierLoss>;
+  /** Net inventory gain of the collectable items since the request began. */
+  readonly gained: () => number;
+}
+
 function beginCollectBlock(
   bot: Bot,
   navigation: NavigationRuntime,
@@ -207,139 +232,157 @@ function beginCollectBlock(
   lifetime?: AbortSignal,
 ) {
   const inventoryBefore = inventoryCounts(bot);
-  const start = bot.entity.position.clone();
   const target = collectionTarget(bot, request);
-  const collectable = target.itemNames;
-  const broken: MineResult["broken"][number][] = [];
-  const toolLoss = observeToolTierLoss(bot);
-  lifetime?.addEventListener("abort", () => toolLoss.close(), { once: true });
+  const attempt: CollectionAttempt = {
+    bot, navigation, request, discarded, target, inventoryBefore,
+    start: bot.entity.position.clone(),
+    broken: [],
+    toolLoss: observeToolTierLoss(bot),
+    gained: () => sumValues(inventoryGains(bot, inventoryBefore, target.itemNames)),
+  };
+  lifetime?.addEventListener("abort", () => attempt.toolLoss.close(), { once: true });
   observe(() => ({
     baseline: { ...inventoryBefore },
-    checkpoint: {
-      broken: broken.length,
-      gained: sumValues(inventoryGains(bot, inventoryBefore, collectable)),
-      requested: request.requested,
-    },
+    checkpoint: { broken: attempt.broken.length, gained: attempt.gained(), requested: request.requested },
     completion: {
       kind: "current",
-      observed: sumValues(inventoryGains(bot, inventoryBefore, collectable)) >= request.requested,
+      observed: attempt.gained() >= request.requested,
       owes: `Net inventory gain of ${request.requested} collectible items still carried at settlement.`,
     },
   }));
-  const run = async (context: ActionContext): Promise<CollectBlockResult> => {
-    context.signal?.throwIfAborted();
-    const gained = () => sumValues(inventoryGains(bot, inventoryBefore, collectable));
-    if (gained() >= request.requested) {
-      return settle(bot, request, inventoryBefore, collectable, start, { status: "satisfied", broken, reason: null });
-    }
-    const movements = collectionMovements(bot, request, target);
-    // Preparation and its lava-face budget use the same live material selection.
-    // Items counted toward this request are reserved, just as they are for scaffold.
-    const buildingBlocks = () => carriedSolidBlocks(bot).filter((item) => !collectable.has(item.name));
-    const canMine = (block: MinecraftBlock) =>
-      evaluateMineTarget(
-        bot,
-        movements,
-        block,
-        navigation.world,
-        buildingBlocks().reduce((count, item) => count + item.count, 0),
-      );
-    const stop = inventoryStop(bot, request, collectable) ?? exactTargetStop(bot, request, canMine);
-    if (stop) {
-      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: stop });
-    }
+  return async (context: ActionContext): Promise<CollectBlockResult> =>
+    reportToolLoss(await runCollection(attempt, context), attempt.toolLoss.loss());
+}
 
-    const exactCell = request.exactTarget ? asVec3(request.exactTarget).floored() : null;
-
-    // Admission can leave only part of the requested quantity free. Once pickups
-    // fill that space, release the route instead of waiting at a live drop until
-    // Minecraft despawns it. Check on physics ticks after inventory packets
-    // settle, against the drop the process is actually walking to.
-    const capacity = new AbortController();
-    let capacityReason: string | null = null;
-    let pursued: readonly MineTarget[] = [];
-    const checkCapacity = () => {
-      if (gained() >= request.requested || capacity.signal.aborted) return;
-      capacityReason = pursuedInventoryStop(bot, request, collectable, pursued);
-      if (capacityReason !== null) capacity.abort(new Error(capacityReason));
-    };
-    bot.on("physicsTick", checkCapacity);
-    // Whatever inner loop keeps the run alive, no break and no gain for this
-    // long means it is going nowhere: settle with what it got.
-    const stall = watchForStall({
-      work: () => `${broken.length}:${gained()}`,
-      position: () => bot.entity.position,
-      inWater: () => isInWater(bot),
-      stallMs: COLLECT_STALL_MS,
-      describe: ({ seconds, walked }) =>
-        outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(start))),
-    });
-    // Target highlights are live state, retained until replaced or this attempt ends.
-    const highlights = new AbortController();
-    // The viewer reads this lazily: no polling viewer means no display work.
-    const highlighter = getAmbientHighlighterContext()?.highlighter;
-    let shown: readonly MineTarget[] | undefined;
-    let frame: HighlightFrame = { label: "", blocks: [], entities: [] };
-    highlighter?.followHighlights(() => {
-      if (shown !== pursued) {
-        shown = pursued;
-        frame = targetHighlights(pursued);
-      }
-      return frame;
-    }, highlights.signal);
-    try {
-      const result = await mine(bot, {
-        ignoredDropIds: discarded.ignored(),
-        route: (options) => navigation.navigate({ ...options, onToolSelected: toolLoss.select }),
-        breakInPlace: (options) => navigation.breakBlockInPlace({ ...options, onToolSelected: toolLoss.select }),
-        placeInto: (placementBot, cell, options) =>
-          placeSolidBlockInto(placementBot, cell, buildingBlocks()[0] ?? null, options),
-        // Obsidian is the one block the bot can make rather than find: water onto
-        // a lava source. The process makes pools targets only when it has nothing
-        // to mine and water in the bucket.
-        cast: blockMatchesSelector("obsidian", request.selector) ? useItemAt : null,
-        // Under max_distance a block beyond the range is no target (one with no position is a palette entry).
-        matches: (block: MinecraftBlock) =>
-          blockMatchesSelector(block.name, request.selector) && (block.position == null || withinRange(request, start, block.position)),
-        canMine,
-        matchingStateIds: target.blockStateIds,
-        ...(exactCell !== null && { exactTarget: exactCell }),
-        collects: (itemName) => collectable.has(itemName),
-        isSatisfied: () => gained() >= request.requested,
-        observedInventoryGain: gained,
-        movements,
-        castSearchRadius: LOADED_SEARCH_RADIUS,
-        // Exploring for a block is what walks a run across the map: never under max_distance.
-        explore: exactCell === null && request.maxDistance === null,
-        maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance, request.maxBreaks) - broken.length),
-        signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
-        ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
-        onTargets: (targets) => {
-          pursued = targets;
-        },
-        onBroken: (position) => broken.push(position),
-      });
-
-      const stopped = capacityReason ?? stall.reason();
-      return settle(
-        bot, request, inventoryBefore, collectable, start,
-        stopped === null ? { ...result, broken } : { status: "stopped", broken, reason: stopped },
-      );
-    } catch (error) {
-      context.signal?.throwIfAborted();
-      const stopped =
-        capacityReason !== null && error === capacity.signal.reason ? capacityReason
-        : error === stall.signal.reason ? stall.reason()
-        : null;
-      if (stopped === null) throw error;
-      return settle(bot, request, inventoryBefore, collectable, start, { status: "stopped", broken, reason: stopped });
-    } finally {
-      stall.close();
-      highlights.abort();
-      bot.off("physicsTick", checkCapacity);
-    }
+/**
+ * The capacity check while the run is walking to drops: admission can leave only part of the requested quantity free.
+ * Once pickups fill that space, release the route instead of waiting at a live drop until Minecraft despawns it. Checked
+ * on physics ticks after inventory packets settle, against the drop the process is actually walking to.
+ */
+function watchCapacity(attempt: CollectionAttempt, pursued: () => readonly MineTarget[]) {
+  const { bot, request, target } = attempt;
+  const controller = new AbortController();
+  let reason: string | null = null;
+  const check = () => {
+    if (attempt.gained() >= request.requested || controller.signal.aborted) return;
+    reason = pursuedInventoryStop(bot, request, target.itemNames, pursued());
+    if (reason !== null) controller.abort(new Error(reason));
   };
-  return async (context: ActionContext): Promise<CollectBlockResult> => reportToolLoss(await run(context), toolLoss.loss());
+  bot.on("physicsTick", check);
+  return { signal: controller.signal, reason: () => reason, close: () => bot.off("physicsTick", check) };
+}
+
+/** Target highlights are live state, retained until replaced or `signal` aborts. The viewer reads them lazily: no polling viewer means no display work. */
+function showTargets(pursued: () => readonly MineTarget[], signal: AbortSignal): void {
+  let shown: readonly MineTarget[] | undefined;
+  let frame: HighlightFrame = { label: "", blocks: [], entities: [] };
+  getAmbientHighlighterContext()?.highlighter?.followHighlights(() => {
+    if (shown !== pursued()) {
+      shown = pursued();
+      frame = targetHighlights(shown);
+    }
+    return frame;
+  }, signal);
+}
+
+async function runCollection(attempt: CollectionAttempt, context: ActionContext): Promise<CollectBlockResult> {
+  const { bot, navigation, request, target, broken, gained } = attempt;
+  const collectable = target.itemNames;
+  const finish = (result: MineResult) => settle(bot, request, attempt.inventoryBefore, collectable, attempt.start, result);
+  context.signal?.throwIfAborted();
+  // A name that is no block and no tag has nothing to find: refuse before any walking, digging or exploring.
+  if (!selectorKnown(bot, request.selector)) {
+    return finish({ status: "stopped", broken, reason: unknownSelectorStop(bot, request.selector) });
+  }
+  if (gained() >= request.requested) return finish({ status: "satisfied", broken, reason: null });
+  const movements = collectionMovements(bot, request, target);
+  // Preparation and its lava-face budget use the same live material selection.
+  // Items counted toward this request are reserved, just as they are for scaffold.
+  const buildingBlocks = () => carriedSolidBlocks(bot).filter((item) => !collectable.has(item.name));
+  const canMine = (block: MinecraftBlock) =>
+    evaluateMineTarget(bot, movements, block, navigation.world, buildingBlocks().reduce((count, item) => count + item.count, 0));
+  const stop = inventoryStop(bot, request, collectable) ?? exactTargetStop(bot, request, target.blockNames, canMine);
+  if (stop) return finish({ status: "stopped", broken, reason: stop });
+
+  let pursued: readonly MineTarget[] = [];
+  const capacity = watchCapacity(attempt, () => pursued);
+  // Whatever inner loop keeps the run alive, no break and no gain for this
+  // long means it is going nowhere: settle with what it got.
+  const stall = watchForStall({
+    work: () => `${broken.length}:${gained()}`,
+    position: () => bot.entity.position,
+    inWater: () => isInWater(bot),
+    stallMs: COLLECT_STALL_MS,
+    describe: ({ seconds, walked }) =>
+      outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(attempt.start))),
+  });
+  const highlights = new AbortController();
+  showTargets(() => pursued, highlights.signal);
+  try {
+    const result = await mine(bot, mineRequest(attempt, {
+      movements, canMine, buildingBlocks,
+      signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
+      onTargets: (targets) => { pursued = targets; },
+    }));
+    const stopped = capacity.reason() ?? stall.reason();
+    return finish(stopped === null ? { ...result, broken } : { status: "stopped", broken, reason: stopped });
+  } catch (error) {
+    context.signal?.throwIfAborted();
+    const stopped =
+      capacity.reason() !== null && error === capacity.signal.reason ? capacity.reason()
+      : error === stall.signal.reason ? stall.reason()
+      : null;
+    if (stopped === null) throw error;
+    return finish({ status: "stopped", broken, reason: stopped });
+  } finally {
+    stall.close();
+    highlights.abort();
+    capacity.close();
+  }
+}
+
+/** The mine process's request for this attempt: what matches, what may be broken or placed, and when it is satisfied. */
+function mineRequest(
+  attempt: CollectionAttempt,
+  live: {
+    readonly movements: ReturnType<typeof collectionMovements>;
+    readonly canMine: (block: MinecraftBlock) => MineTargetDecision;
+    readonly buildingBlocks: () => ReturnType<typeof carriedSolidBlocks>;
+    readonly signal: AbortSignal;
+    readonly onTargets: (targets: readonly MineTarget[]) => void;
+  },
+): MineRequest {
+  const { navigation, request, discarded, target, toolLoss, start, broken, gained } = attempt;
+  const exactCell = request.exactTarget ? asVec3(request.exactTarget).floored() : null;
+  return {
+    ignoredDropIds: discarded.ignored(),
+    route: (options) => navigation.navigate({ ...options, onToolSelected: toolLoss.select }),
+    breakInPlace: (options) => navigation.breakBlockInPlace({ ...options, onToolSelected: toolLoss.select }),
+    placeInto: (placementBot, cell, options) =>
+      placeSolidBlockInto(placementBot, cell, live.buildingBlocks()[0] ?? null, options),
+    // Obsidian is the one block the bot can make rather than find: water onto
+    // a lava source. The process makes pools targets only when it has nothing
+    // to mine and water in the bucket.
+    cast: target.blockNames.has(CAST_BLOCK) ? useItemAt : null,
+    // Under max_distance a block beyond the range is no target (one with no position is a palette entry).
+    matches: (block: MinecraftBlock) =>
+      target.blockNames.has(block.name) && (block.position == null || withinRange(request, start, block.position)),
+    canMine: live.canMine,
+    matchingStateIds: target.blockStateIds,
+    ...(exactCell !== null && { exactTarget: exactCell }),
+    collects: (itemName) => target.itemNames.has(itemName),
+    isSatisfied: () => gained() >= request.requested,
+    observedInventoryGain: gained,
+    movements: live.movements,
+    castSearchRadius: LOADED_SEARCH_RADIUS,
+    // Exploring for a block is what walks a run across the map: never under max_distance.
+    explore: exactCell === null && request.maxDistance === null,
+    maximumBreaks: Math.max(0, breakBudget(request.requested, target.chance, request.maxBreaks) - broken.length),
+    signal: live.signal,
+    ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
+    onTargets: live.onTargets,
+    onBroken: (position) => broken.push(position),
+  };
 }
 
 /** `result`, with the tool that broke during the run (if one did) as a field, so a caller need not read the stop reason. */
@@ -411,7 +454,7 @@ export function settle(
   const bucketsBefore = bucketNames.reduce((count, name) => count + (inventoryBefore[name] ?? 0), 0);
   const after = inventoryCounts(bot);
   const bucketsAfter = bucketNames.reduce((count, name) => count + (after[name] ?? 0), 0);
-  const missingBucket = blockMatchesSelector("obsidian", request.selector) && bucketsAfter < bucketsBefore;
+  const missingBucket = bucketsAfter < bucketsBefore && blockMatchesSelector(CAST_BLOCK, request.selector, bot);
   const met = gained >= request.requested && result.status === "satisfied" && !missingBucket;
   const status = met ? "succeeded" : gained > 0 || result.broken.length > 0 ? "partial" : "failed";
   // Where the blocks came from is the one thing a count cannot say. The

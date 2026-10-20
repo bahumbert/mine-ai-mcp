@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { botFixture, registry } from "../../test-support/bot.js";
 
-import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains } from "./collection-facts.js";
+import { tagsOf } from "../../world/block-tags.js";
+import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains, selectorKnown } from "./collection-facts.js";
 
 function factsBot(
   items: Array<{ name: string; count: number; type: number }> = [],
@@ -12,12 +13,55 @@ function factsBot(
   return Object.assign(botFixture({ items }, { heldItem }), { version: "1.21.4" });
 }
 
-test("matches only Collect's supported resource families", () => {
-  assert.equal(blockMatchesSelector("oak_log", "logs"), true);
-  assert.equal(blockMatchesSelector("stripped_oak_log", "log"), true);
-  assert.equal(blockMatchesSelector("oak_wood", "logs"), false);
-  assert.equal(blockMatchesSelector("deepslate_iron_ore", "iron_ore"), true);
-  assert.equal(blockMatchesSelector("deepslate", "stone"), false);
+test("a block name selects itself, and an ore also its deepslate twin", () => {
+  const bot = factsBot();
+  assert.equal(blockMatchesSelector("oak_log", "oak_log", bot), true);
+  assert.equal(blockMatchesSelector("stripped_oak_log", "oak_log", bot), false);
+  assert.equal(blockMatchesSelector("deepslate_iron_ore", "iron_ore", bot), true);
+  assert.equal(blockMatchesSelector("deepslate", "stone", bot), false);
+});
+
+test("the tag logs selects the game's natural logs: no stripped log, no wood block, no stem", () => {
+  const bot = factsBot();
+  const natural = Object.keys(registry.blocksByName).filter((name) => tagsOf(name, "1.21.4").includes("overworld_natural_logs"));
+  assert.ok(natural.includes("oak_log") && natural.includes("mangrove_log"));
+  const selected = Object.keys(registry.blocksByName).filter((name) => blockMatchesSelector(name, "logs", bot));
+  assert.deepEqual(selected.sort(), natural.sort());
+  for (const name of ["stripped_oak_log", "oak_wood", "crimson_stem"]) assert.equal(blockMatchesSelector(name, "logs", bot), false);
+});
+
+test("any other game tag selects its members: the tag name is the selector", () => {
+  const bot = factsBot();
+  const members = Object.keys(registry.blocksByName).filter((name) => tagsOf(name, "1.21.4").includes("wool"));
+  assert.ok(members.length > 10);
+  assert.deepEqual(
+    Object.keys(registry.blocksByName).filter((name) => blockMatchesSelector(name, "wool", bot)),
+    members,
+  );
+});
+
+test("a block name that is also a tag name selects only that block", () => {
+  const bot = factsBot();
+  assert.ok(Object.keys(registry.blocksByName).some((name) => tagsOf(name, "1.21.4").includes("dirt")));
+  assert.equal(blockMatchesSelector("dirt", "dirt", bot), true);
+  assert.equal(blockMatchesSelector("podzol", "dirt", bot), false);
+  assert.equal(blockMatchesSelector("grass_block", "dirt", bot), false);
+});
+
+test("the singular log selects nothing: it is no block and no tag", () => {
+  const bot = factsBot();
+  assert.equal(Object.keys(registry.blocksByName).some((name) => blockMatchesSelector(name, "log", bot)), false);
+  assert.equal(selectorKnown(bot, "log"), false);
+  assert.equal(selectorKnown(bot, "logs"), true);
+  assert.equal(selectorKnown(bot, "oak_log"), true);
+  assert.equal(selectorKnown(bot, "mineable/pickaxe"), true);
+});
+
+test("a version with no shipped tags matches exact names only", () => {
+  const bot = Object.assign(factsBot(), { version: "1.19.4" });
+  assert.equal(blockMatchesSelector("oak_log", "logs", bot), false);
+  assert.equal(selectorKnown(bot, "logs"), false);
+  assert.equal(blockMatchesSelector("oak_log", "oak_log", bot), true);
 });
 
 test("chooses the equipped tool's drop: cobblestone, or stone with silk touch; seeds from grass, string from cobweb", () => {

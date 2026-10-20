@@ -161,7 +161,7 @@ dragon or crystals have been killed.
 ### `view_blocks`
 
 Use `view_blocks` to read blocks without moving. `find` names up to
-eight block kinds and lists, for each, the nearest matches across every loaded
+eight block kinds (block names, or block tags: `logs` is the natural logs) and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
 reported whatever the `limit`, which defaults to twelve per name, up to a thousand (`more` says there are
 more: counting every stone loaded once stalled the runtime). `box` reads every cell
@@ -493,7 +493,8 @@ Recovery refuses after five minutes of wall time as a conservative boundary. Min
 ### `collect_block`
 
 Use `collect_block` to mine blocks and pick up their dropped items.
-Important arguments are `block_name`, the requested `count` of drops to gather,
+Important arguments are `block_name` (an exact block name, or a block tag such as `logs`, which means the
+natural logs of the trees; any other tag selects all its members, from the server jar's tags per version), the requested `count` of drops to gather,
 optional specific coordinates `x`, `y`, and `z`, and `scaffold` permission.
 With exact coordinates, omit `count` or set it to `1`. Larger counts are rejected
 before the action starts; omit all three coordinates to collect multiple blocks.
@@ -505,7 +506,9 @@ they are, including blocks the bot placed itself; navigate to the area first
 when a particular deposit matters. `max_distance` keeps the whole run within that
 many blocks (horizontally) of where it started: no farther target, no exploring;
 with none left in range it stops `[NO_TARGET_IN_RANGE]`, naming the nearest
-loaded one beyond the range and its distance. `max_breaks` caps the blocks the run may
+loaded one beyond the range and its distance. A `block_name` that is no block and no tag (an item such as
+`coal`, a misspelling, the singular `log`) fails at once with `[COLLECT_UNKNOWN_BLOCK]`, before any walking or digging:
+it lists the blocks that drop the item, or says to craft or smelt it, or lists the closest names. `max_breaks` caps the blocks the run may
 break (otherwise the drop chance sets the budget: a rare drop may break hundreds). The best carried tool for each block is
 equipped automatically. The response lists every cell broken with its distance
 from where the run started, so the model can see which deposit was mined.

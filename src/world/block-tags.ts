@@ -37,3 +37,8 @@ export function tagsOf(block: string, version: string): readonly string[] {
   }
   return index.get(block) ?? [];
 }
+
+/** Every block tag `version` has (its own data, else the nearest shipped one), sorted; none when no data is shipped. */
+export function tagNamesOf(version: string): readonly string[] {
+  return Object.keys(nearestShipped(version, SHIPPED)?.tags ?? {}).sort();
+}

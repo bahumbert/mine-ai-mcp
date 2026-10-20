@@ -51,7 +51,7 @@ export const findRequestSchema = z.strictObject({
     .min(1)
     .max(MAX_FIND_NAMES)
     .describe(
-      "Block registry names to look for, such as obsidian or chest; log and ore names also match their deepslate or wood variants.",
+      "Block registry names to look for, such as obsidian or chest, or a block tag such as logs (every natural log); an ore name also matches its deepslate twin.",
     ),
   limit: z
     .number()
