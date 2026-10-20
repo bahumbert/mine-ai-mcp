@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SourceIdentity } from "../diagnostics/incident-recorder.js";
 import { parseHostOptions, type HostOptions } from "./config.js";
+import { formatProcessFault, reportUnhandledRejections, type ProcessFault } from "./process-faults.js";
 import { startMcpSupervisor } from "./runtime-supervisor.js";
 
 /** Private parent-to-child bootstrap, written only by this package's host. */
@@ -18,6 +19,8 @@ export interface RuntimeBootstrap {
 
 export interface Host extends AsyncDisposable {
   readonly address: AddressInfo;
+  /** Records a fault of this host process as a `process_fault` incident (the runtime's own arrive over IPC). */
+  reportProcessFault(fault: ProcessFault): void;
   close(): Promise<void>;
 }
 
@@ -62,7 +65,7 @@ export async function startHost(
     process.off("exit", exit);
   };
   const stop = () => {
-    void close();
+    void close().catch(writeHostFailure);
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -70,12 +73,22 @@ export async function startHost(
   process.stdout.write(
     `[mine-ai-mcp] ${configuration.instanceId} host listening at http://${configuration.listenHost}:${address.port}/mcp; runtime starting.\n`,
   );
-  return { address, close, [Symbol.asyncDispose]: close };
+  return { address, reportProcessFault: supervisor.reportProcessFault, close, [Symbol.asyncDispose]: close };
 }
 
-if (import.meta.main) {
-  void startHost().catch((cause) => {
-    process.stderr.write(`[mine-ai-mcp] ${cause instanceof Error ? cause.stack : String(cause)}\n`);
-    process.exitCode = 1;
-  });
+function writeHostFailure(cause: unknown): void {
+  process.stderr.write(`[mine-ai-mcp] ${cause instanceof Error ? cause.stack : String(cause)}\n`);
+  process.exitCode = 1;
 }
+
+/** The host as a process: its own unhandled rejections are recorded as incidents instead of ending it. */
+function runHostProcess(): void {
+  let host: Host | null = null;
+  reportUnhandledRejections((fault) => {
+    process.stderr.write(formatProcessFault("mine-ai-mcp host", fault));
+    host?.reportProcessFault(fault); // before the host is up there is no recorder yet: stderr only
+  });
+  void startHost().then((started) => (host = started), writeHostFailure);
+}
+
+if (import.meta.main) runHostProcess();

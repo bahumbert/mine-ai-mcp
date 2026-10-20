@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_RESTART_WINDOW_MS } from "./runtime-liveness.js";
-import { startMcpSupervisor } from "./runtime-supervisor.js";
+import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervisor.js";
 
 const executable = process.execPath;
 const args = [...process.execArgv, fileURLToPath(new URL("../test-support/wedged-runtime.ts", import.meta.url))];
@@ -25,23 +25,27 @@ async function supervised(
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
-  const supervisor = await startMcpSupervisor({
-    ...child,
-    host: "127.0.0.1",
-    port: 0,
-    instanceId,
-    source: { kind: "unavailable", reason: "test fixture" },
-    incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
-    deadlines,
-    restartWindowMs,
-  });
+  // The child's own property descriptors, so a launch with a getter is read again at every start, as a real option is.
+  const options = Object.defineProperties(
+    {
+      host: "127.0.0.1",
+      port: 0,
+      instanceId,
+      source: { kind: "unavailable", reason: "test fixture" },
+      incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
+      deadlines,
+      restartWindowMs,
+    },
+    Object.getOwnPropertyDescriptors(child),
+  ) as McpSupervisorOptions;
+  const supervisor = await startMcpSupervisor(options);
   t.after(async () => {
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
   });
   const address = supervisor.server.address();
   assert.ok(address && typeof address !== "string");
-  return { supervisor, url: `http://127.0.0.1:${address.port}` };
+  return { supervisor, url: `http://127.0.0.1:${address.port}`, directory };
 }
 
 /** Every test acts only once the runtime is answering for itself. */
@@ -251,4 +255,120 @@ test("a supervisor stopped during a restart leaves no runtime behind", { timeout
   const restarted = supervisor.child;
   await supervisor.close();
   assert.ok(restarted.exitCode !== null || restarted.signalCode !== null, "close must reap the restarted runtime");
+});
+
+const faultingRuntime = (...mode: string[]) => (): { executable: string; args: string[] } => ({
+  executable,
+  args: [...process.execArgv, fileURLToPath(new URL("../test-support/faulting-runtime.ts", import.meta.url)), ...mode],
+});
+const aFault = (message: string) => ({ kind: "unhandled_rejection" as const, message, stack: null, observedAt: new Date().toISOString(), repeats: 0 });
+
+type IncidentRecord = Record<string, any>;
+/** The records of each incident file in the directory that holds a `process_fault` record, waited for up to 5 s. */
+async function processFaultIncidents(directory: string, wanted = 1): Promise<IncidentRecord[][]> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const incidents: IncidentRecord[][] = [];
+    for (const name of await readdir(directory).catch(() => [] as string[])) {
+      const records: IncidentRecord[] = (await readFile(path.join(directory, name), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      if (records.some((row) => row.kind === "process_fault")) incidents.push(records);
+    }
+    if (incidents.length >= wanted || Date.now() > deadline) return incidents;
+    await delay(50);
+  }
+}
+
+test("a fault message from the runtime records a process_fault incident", { timeout: 15_000 }, async (t) => {
+  const { url, directory } = await supervised(t, "fault-ready", faultingRuntime());
+  await whenHealthy(url);
+  await fetch(`${url}/fault`);
+
+  const [incident] = await processFaultIncidents(directory);
+  assert.ok(incident, "an incident with a process_fault record was written");
+  const record = incident.find((row) => row.kind === "process_fault")!;
+  assert.equal(record.fault.message, "raised while ready");
+  assert.equal(record.origin, "runtime");
+  assert.equal((await fetch(`${url}/health`)).status, 200, "a fault is recorded, the runtime keeps serving");
+  assert.equal(await stateOf(url), "ready");
+});
+
+test("a fault while an action runs names that request in the incident", { timeout: 15_000 }, async (t) => {
+  const { url, directory } = await supervised(t, "fault-request", faultingRuntime());
+  await whenHealthy(url);
+  await fetch(`${url}/fault-during-request`);
+
+  const [incident] = await processFaultIncidents(directory);
+  assert.equal(incident?.[0]?.requestId, 812);
+});
+
+test("a fault reported before the runtime is ready is recorded without a request", { timeout: 15_000 }, async (t) => {
+  const { url, directory } = await supervised(t, "fault-start", faultingRuntime("before-ready"));
+  await whenHealthy(url);
+
+  const [incident] = await processFaultIncidents(directory);
+  assert.equal(incident?.[0]?.requestId, null);
+  assert.equal(incident?.find((row) => row.kind === "process_fault")?.fault.message, "raised before ready");
+  assert.equal(await stateOf(url), "ready");
+});
+
+test("two distinct faults are both recorded", { timeout: 15_000 }, async (t) => {
+  const { url, directory } = await supervised(t, "fault-twice", faultingRuntime());
+  await whenHealthy(url);
+  await fetch(`${url}/fault-twice`);
+
+  await delay(500);
+  const messages = (await processFaultIncidents(directory)).flat().filter((row) => row.kind === "process_fault").map((row) => row.fault.message);
+  assert.ok(messages.includes("first distinct fault"), `recorded: ${messages.join(", ")}`);
+});
+
+test("a fault reported by the supervisor's own process is recorded as such", { timeout: 15_000 }, async (t) => {
+  const { supervisor, url, directory } = await supervised(t, "fault-own", faultingRuntime());
+  await whenHealthy(url);
+  supervisor.reportProcessFault(aFault("host promise rejected"));
+
+  const [incident] = await processFaultIncidents(directory);
+  const record = incident?.find((row) => row.kind === "process_fault");
+  assert.equal(record?.origin, "supervisor");
+  assert.equal(record?.fault.message, "host promise rejected");
+});
+
+test("a fault reported after the supervisor closed writes no new incident", { timeout: 15_000 }, async (t) => {
+  const { supervisor, url, directory } = await supervised(t, "fault-closed", faultingRuntime());
+  await whenHealthy(url);
+  await supervisor.close();
+  const before = (await readdir(directory).catch(() => [] as string[])).length;
+  assert.doesNotThrow(() => supervisor.reportProcessFault(aFault("late")));
+  await delay(300);
+  assert.equal((await readdir(directory).catch(() => [] as string[])).length, before);
+});
+
+test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RESTART_FAILED, not failing", { timeout: 25_000 }, async (t) => {
+  let starts = 0;
+  const { url } = await supervised(
+    t,
+    "restart-spawn-throws",
+    () => ({
+      // The first start is the wedged runtime; the restart gets an executable Node refuses to spawn (it throws, it does not emit).
+      get executable() { return starts++ === 0 ? executable : (42 as unknown as string); },
+      args,
+    }),
+    fastDeadlines,
+    RUNTIME_RESTART_WINDOW_MS,
+  );
+  await whenHealthy(url);
+  assert.match(await (await mcpCall(url, 96, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
+
+  let body: string;
+  do {
+    await delay(50);
+    body = await (await fetch(`${url}/health`)).text();
+  } while (body.includes('"state":"failing"') || body.includes('"state":"starting"'));
+  assert.match(body, /"state":"failed"/);
+  assert.match(body, /RUNTIME_RESTART_FAILED/);
+  const afterwards = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 97, method: "tools/list" }),
+  });
+  assert.match(await afterwards.text(), /RUNTIME_RESTART_FAILED/, "later calls get the restart failure, not a hang");
 });

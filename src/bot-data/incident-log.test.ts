@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { recordIncident, writeIncidentArtifact, type IncidentReference } from "./incident-log.js";
+import { incidentTriggerSchema, recordIncident, writeIncidentArtifact, type IncidentReference } from "./incident-log.js";
 import { recordActionRequest, recordActionResponse } from "./action-call-log.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
 
@@ -60,4 +60,9 @@ test("incident references join responses regardless of write order without unrea
     assert.deepEqual(JSON.parse(String(row.response_json)).incidentReferences, [incident]);
   }
   assert.equal(data.read("SELECT * FROM events").length, 0);
+});
+
+test("the process_fault trigger is accepted and every earlier trigger still parses", () => {
+  for (const trigger of ["process_fault", "death", "runtime_unresponsive", "physics_stalled", "combat_waiting"])
+    assert.equal(incidentTriggerSchema.parse(trigger), trigger);
 });

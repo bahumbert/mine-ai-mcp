@@ -5,7 +5,7 @@ import { test, type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMinecraftMcpHttpApplication } from "./http.js";
+import { closeIdleClientSessions, createMinecraftMcpHttpApplication } from "./http.js";
 
 async function host(t: TestContext, health = () => ({ connected: true })) {
   const application = createMinecraftMcpHttpApplication({
@@ -78,4 +78,21 @@ test("HTTP boundary rejects foreign origins and invalid sessions and reports dis
       headers: { "mcp-session-id": "unknown" },
     })).status, 404);
   }
+});
+
+test("an expiring client session whose close rejects does not reject the reaper", async () => {
+  const log: string[] = [];
+  const sessions = new Map([
+    ["rejects", { lastActiveAt: 0, server: { connect: async () => {}, close: async () => { throw new Error("close refused"); } } }],
+    ["throws", { lastActiveAt: 0, server: { connect: async () => {}, close: () => { throw new Error("close threw"); } } }],
+    ["fresh", { lastActiveAt: 1_000, server: { connect: async () => {}, close: async () => {} } }],
+  ]);
+  assert.doesNotThrow(() => closeIdleClientSessions(sessions, 500, (message) => log.push(message)));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual([...sessions.keys()], ["fresh"], "both expired sessions left the map, the fresh one stayed");
+  assert.deepEqual(
+    log.filter((line) => /close (refused|threw)/.test(line)).length,
+    2,
+    `each failed close is logged once: ${log.join(" | ")}`,
+  );
 });
