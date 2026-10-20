@@ -9,7 +9,8 @@ import { z } from "zod";
 import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
-import { ActionRunner } from "../../session/action-runner.js";
+import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import { handClock } from "../../test-support/hand-clock.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
@@ -137,10 +138,13 @@ test("an automatic target disappearing resumes the original request without clai
   }
 });
 
-function reflexFixture(
-  engage: CombatController["engage"],
-  navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }),
-) {
+/** A runner configured and a clock for the reflex driver, for a test that steps time by hand. */
+interface FixtureOptions {
+  readonly runner?: ActionRunnerOptions;
+  readonly now?: () => number;
+}
+
+function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
   const bot = Object.assign(new EventEmitter(), {
     username: "ReflexBot",
     _client: new EventEmitter(),
@@ -166,7 +170,7 @@ function reflexFixture(
     storage: { kind: "temporary" },
     identity: { worldId: "reflex-test", scope: { kind: "bot", botId: "reflex-bot" } },
   });
-  const runner = new ActionRunner();
+  const runner = new ActionRunner(options.runner);
   const navigation = {
     onEvent: () => () => {},
     active: false,
@@ -194,7 +198,7 @@ function reflexFixture(
     canRecover: () => false,
     activeEngagement: () => null,
   };
-  const driver = new ReflexDriver(bot, runner);
+  const driver = new ReflexDriver(bot, runner, { now: options.now });
   const perception = new CombatPerception(bot);
   const attached = attachHostileReflex(bot, driver, navigation, controller, perception);
   const status = new SurvivalObserver(bot, runner, driver, controller);
@@ -211,6 +215,7 @@ function reflexFixture(
   };
   return {
     bot,
+    driver,
     runner,
     navigation,
     controller,
@@ -1370,3 +1375,118 @@ for (const inUse of [false, true]) {
     }
   });
 }
+
+/** A fight neither side can win: the engage waits for its abort, then reports itself cancelled. The clock is a hand clock. */
+function standoffScene(...zombies: number[]) {
+  const time = handClock();
+  const engaged: number[] = [];
+  const fixture = reflexFixture(
+    async (targetId, signal) => {
+      engaged.push(targetId);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { ...died(targetId), kind: "cancelled", attacks: 0 };
+    },
+    undefined,
+    { runner: { clock: time.clock, cancelGraceMs: 500 }, now: time.clock.now },
+  );
+  for (const [index, id] of zombies.entries()) fixture.bot.entities[id] = hostile(id, "zombie", 3 + index);
+  /** Time passes in 50 ms ticks, with a physics tick at each. */
+  const pass = async (ms: number) => {
+    for (let passed = 0; passed < ms; passed += 50) {
+      fixture.tick();
+      await time.advance(50);
+    }
+  };
+  const decision = () => JSON.stringify(fixture.driver.snapshot()[0]?.decision ?? null);
+  const active = () => fixture.runner.status().activeAction?.action === "hostile_reflex";
+  const close = async () => {
+    await fixture.observer[Symbol.asyncDispose]();
+    fixture.data.close();
+  };
+  return { ...fixture, engaged, pass, active, decision, close, time };
+}
+
+test("a fight with no damage, no movement and no threat gone is released after 30 s and its target stands down 10 s", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(29_000);
+    assert.ok(scene.active(), "29 s: the window is open");
+    await scene.pass(2_000);
+    assert.equal(scene.active(), false, "released at 30 s");
+    assert.deepEqual(scene.engaged, [7]);
+    await scene.pass(8_000);
+    assert.deepEqual(scene.engaged, [7], "no new fight on target 7 within the stand-down");
+    await scene.pass(3_000);
+    assert.deepEqual(scene.engaged, [7, 7], "after 10 s the reflex fights target 7 again");
+  } finally {
+    await scene.close();
+  }
+});
+
+test("after the stand-down of its fight the decision picks evade, and target A is not fought again", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(31_000);
+    assert.equal(scene.active(), false);
+    await scene.pass(500);
+    assert.ok(scene.recorded().some((outcome) => outcome.startsWith("evade ->")), `an evade ran: ${scene.recorded().join(", ")}`);
+    assert.deepEqual(scene.engaged, [7], "the standoff is not fought again while it stands down");
+    assert.match(scene.decision(), /"answered"/, "the fight stays excluded as answered");
+  } finally {
+    await scene.close();
+  }
+});
+
+/** Runs a standoff for 100 s, giving `mark` at second 20, 40, 60, 80; true when the fight is never released. */
+async function keptAlive(mark: (scene: ReturnType<typeof standoffScene>) => void) {
+  const scene = standoffScene(7);
+  try {
+    for (let second = 1; second <= 100; second++) {
+      if (second % 20 === 0) mark(scene);
+      await scene.pass(1_000);
+      if (!scene.active()) return false;
+    }
+    return true;
+  } finally {
+    await scene.close();
+  }
+}
+
+test("blocked hits keep a shielded fight alive past 30 s", async () => {
+  assert.equal(await keptAlive((scene) => scene.bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 })), true);
+});
+
+test("an answered swing resets the clock", async () => {
+  assert.equal(await keptAlive((scene) => scene.bot.emit("entityHurt", scene.bot.entities[7]!, undefined as never)), true);
+});
+
+test("a target that moves resets the clock", async () => {
+  let x = 3;
+  // Back and forth inside contact range: each move is 1.5 blocks from the last mark.
+  assert.equal(await keptAlive((scene) => { x = x === 3 ? 1.5 : 3; scene.bot.entities[7]!.position = new Vec3(x, 64, 0); }), true);
+});
+
+test("a threat that dies resets the clock", async () => {
+  assert.equal(await keptAlive((scene) => scene.bot.emit("entityDead", scene.bot.entities[7]!)), true);
+});
+
+test("a standoff with no mark at all is released inside 100 s", async () => {
+  assert.equal(await keptAlive(() => {}), false);
+});
+
+test("the probes of a limited fight are off after it: no listener is left on the bot or its connection", async () => {
+  const scene = standoffScene(7);
+  try {
+    const before = [scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")];
+    await scene.pass(31_000);
+    assert.equal(scene.active(), false);
+    assert.deepEqual([scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")], before);
+  } finally {
+    await scene.close();
+  }
+});
+
+test("a closed-shelter hold is progress", async () => {
+  const closed = (() => ({ name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], hardness: 1.5, position: new Vec3(0, 0, 0) })) as unknown as Bot["blockAt"];
+  assert.equal(await keptAlive((scene) => { scene.bot.blockAt = closed; }), true);
+});

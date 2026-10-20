@@ -1,0 +1,135 @@
+import type { Bot } from "mineflayer";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import test from "node:test";
+import { Vec3 } from "vec3";
+import { observeCombatProgress } from "./combat-progress.js";
+import { ReflexProgress } from "./reflex-progress.js";
+
+const SELF = 1;
+const ZOMBIE = 7;
+const BYSTANDER = 9;
+
+/** A bot with a server connection, a world that is open or a closed shelter, and a zombie in the response's threats. */
+function fixture() {
+  const client = new EventEmitter();
+  const zombie = { id: ZOMBIE, position: new Vec3(5.5, 64, 0.5), isValid: true };
+  const world = { shelter: false };
+  const emitter = new EventEmitter();
+  const bot = Object.assign(emitter, {
+    _client: client,
+    health: 20,
+    entity: { id: SELF, position: new Vec3(0.5, 64, 0.5), onGround: true, isInWater: false },
+    entities: { [ZOMBIE]: zombie } as Record<number, unknown>,
+    blockAt: () => (world.shelter ? { name: "stone", shapes: [[0, 0, 0, 1, 1, 1]], boundingBox: "block" } : null),
+  }) as unknown as Bot;
+  const progress = new ReflexProgress();
+  const tick = () => bot.emit("physicsTick");
+  const watch = () => observeCombatProgress(bot, [ZOMBIE], progress.mark);
+  return { bot, emitter, client, zombie, world, progress, tick, watch };
+}
+
+test("damage to the bot or to a threat of the response is progress; damage to anyone else is not", () => {
+  const { bot, progress, watch } = fixture();
+  const stop = watch();
+  bot.emit("entityHurt", { id: BYSTANDER } as never, undefined as never);
+  assert.equal(progress.marks, 0);
+  bot.emit("entityHurt", { id: SELF } as never, undefined as never);
+  bot.emit("entityHurt", { id: ZOMBIE } as never, undefined as never);
+  assert.equal(progress.marks, 2);
+  assert.equal(progress.lastReason, "hurt");
+  stop();
+});
+
+test("a threat that dies or leaves is progress", () => {
+  const { bot, progress, watch } = fixture();
+  const stop = watch();
+  bot.emit("entityDead", { id: BYSTANDER } as never);
+  bot.emit("entityGone", { id: BYSTANDER } as never);
+  assert.equal(progress.marks, 0);
+  bot.emit("entityDead", { id: ZOMBIE } as never);
+  assert.equal(progress.lastReason, "threat_dead");
+  bot.emit("entityGone", { id: ZOMBIE } as never);
+  assert.equal(progress.lastReason, "threat_gone");
+  assert.equal(progress.marks, 2);
+  stop();
+});
+
+test("a target that moves a block marks; jitter does not; each block moved marks again", () => {
+  const { zombie, progress, tick, watch } = fixture();
+  const stop = watch();
+  tick();
+  zombie.position = new Vec3(5.9, 64, 0.5);
+  tick();
+  assert.equal(progress.marks, 0, "0.4 blocks");
+  zombie.position = new Vec3(6.6, 64, 0.5);
+  tick();
+  assert.equal(progress.marks, 1);
+  assert.equal(progress.lastReason, "target_moved");
+  tick();
+  assert.equal(progress.marks, 1, "standing still after the move");
+  zombie.position = new Vec3(7.7, 64, 0.5);
+  tick();
+  assert.equal(progress.marks, 2);
+  stop();
+});
+
+test("a target that has left the entity list does not break the sampling", () => {
+  const { bot, progress, tick, watch } = fixture();
+  const stop = watch();
+  tick();
+  delete (bot.entities as Record<number, unknown>)[ZOMBIE];
+  assert.doesNotThrow(tick);
+  assert.equal(progress.marks, 0);
+  stop();
+});
+
+test("a blocked hit (entity status 29 on the bot) is progress; other statuses and other entities are not", () => {
+  const { client, progress, watch } = fixture();
+  const stop = watch();
+  client.emit("entity_status", { entityId: SELF, entityStatus: 2 });
+  client.emit("entity_status", { entityId: BYSTANDER, entityStatus: 29 });
+  assert.equal(progress.marks, 0);
+  client.emit("entity_status", { entityId: SELF, entityStatus: 29 });
+  assert.equal(progress.lastReason, "shield_block");
+  assert.equal(progress.marks, 1);
+  stop();
+});
+
+test("every tick inside a closed shelter is progress: a hold is protected waiting", () => {
+  const { world, progress, tick, watch } = fixture();
+  const stop = watch();
+  tick();
+  tick();
+  assert.equal(progress.marks, 0, "in the open");
+  world.shelter = true;
+  tick();
+  tick();
+  assert.equal(progress.marks, 2);
+  assert.equal(progress.lastReason, "enclosed");
+  stop();
+});
+
+test("a world that cannot be read marks nothing and does not throw out of the tick", () => {
+  const { bot, progress, tick, watch } = fixture();
+  Object.assign(bot, {
+    blockAt: () => {
+      throw new Error("chunk unloaded");
+    },
+  });
+  const stop = watch();
+  assert.doesNotThrow(tick);
+  assert.equal(progress.marks, 0);
+  stop();
+});
+
+test("detach removes every listener from the bot and its connection, for any number of bots", () => {
+  for (let bots = 0; bots < 20; bots++) {
+    const { emitter, client, watch } = fixture();
+    const before = [emitter.eventNames().length, client.eventNames().length];
+    const stop = watch();
+    stop();
+    assert.deepEqual([emitter.eventNames().length, client.eventNames().length], before);
+    assert.equal(emitter.listenerCount("physicsTick"), 0);
+  }
+});

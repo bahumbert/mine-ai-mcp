@@ -81,6 +81,17 @@ export function risesOver(read: () => number | null): () => boolean {
   };
 }
 
+/** A sampler that says true when `read` returns something other than at the previous reading. */
+export function changes(read: () => unknown): () => boolean {
+  let before: { readonly value: unknown } | undefined;
+  return () => {
+    const now = read();
+    const changed = before !== undefined && before.value !== now;
+    before = { value: now };
+    return changed;
+  };
+}
+
 /** A sampler that says true when `read` returns less than at the previous reading (a count that was spent). */
 export function fallsUnder(read: () => number | null): () => boolean {
   return risesOver(() => {

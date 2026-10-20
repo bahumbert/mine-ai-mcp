@@ -4,6 +4,7 @@ import type { CombatController } from "../control/combat/contract.js";
 import { incomingDragonFireballs, readDragonBreathHazards } from "../../world/dragon-hazards.js";
 import { dragonPhase } from "../../world/end-fight.js";
 import type { ReflexLimits } from "../control/contract.js";
+import { observeCombatProgress } from "../control/combat-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { decideEndResponse } from "../policy/combat/end-decision.js";
 import { responsePermissions } from "../policy/combat/permissions.js";
@@ -69,6 +70,8 @@ export function attachDragonReflex(
       }),
     }),
     limits: () => DRAGON_LIMITS,
+    // No threat list: the dragon is hurt-and-dodge, so the bot's own damage, a blocked hit and travel are the marks.
+    progress: (_response, mark) => observeCombatProgress(bot, [], mark),
     act: (_response, signal) => combat.runEnd({ kind: "evade" }, signal),
     continuation: (outcome) =>
       outcome.outcome === "evaded" && !combat.endDanger()
