@@ -454,3 +454,166 @@ test("a sealed-in bot with nothing to eat and hunger below the regeneration bar 
   assert.equal(result.ate, null);
   assert.match(result.error ?? "", /no food, and hunger 13 is below the regeneration bar/);
 });
+
+const LIQUID_BODIES = [
+  ["water", "isInWater"],
+  ["lava", "isInLava"],
+] as const;
+
+/** Physics ticks as the game delivers them, one per timer turn: a hide that never awaits one starves the timers. */
+function tickEvery(bot: Bot, intervalMs = 1): { readonly stop: () => void; readonly ticks: () => number } {
+  const events = new EventEmitter();
+  let count = 0;
+  bot.on = (event, listener) => {
+    events.on(event, listener);
+    return bot;
+  };
+  bot.off = (event, listener) => {
+    events.off(event, listener);
+    return bot;
+  };
+  const timer = setInterval(() => {
+    count += 1;
+    events.emit("physicsTick");
+  }, intervalMs);
+  return { stop: () => clearInterval(timer), ticks: () => count };
+}
+
+function hideBounded(bot: Bot, options: { readonly signal?: AbortSignal; readonly maximumMs: number }) {
+  return hideInPlace(bot, {
+    threatContext: {
+      ...combatTestContext(bot),
+      resolvedIds: new Set(),
+      attackerIds: new Set(),
+      unreachableIds: new Set(),
+    },
+    signal: options.signal ?? AbortSignal.timeout(2_000),
+    recoverTo: 18,
+    maximumMs: options.maximumMs,
+  });
+}
+
+for (const [liquid, flag] of LIQUID_BODIES) {
+  test(`hideInPlace in ${liquid} fails at once with [SHELTER]`, async () => {
+    const bot = botIn({
+      health: 7,
+      blockAt: (position) => (position.y < 64 ? stone() : air()),
+      items: [{ name: "cobblestone", count: 32 }],
+    });
+    Reflect.set(bot.entity, flag, true);
+    let equips = 0;
+    bot.equip = async () => {
+      equips += 1;
+    };
+    const result = await hide(bot);
+    assert.equal(result.kind, "failed");
+    assert.match(result.error ?? "", /^\[SHELTER\].*liquid/);
+    assert.equal(equips, 0, "nothing is dug or placed in a liquid");
+    assert.equal(result.dug + result.walled, 0);
+  });
+}
+
+test("a sealed-in bot in water is not held in its shelter", async () => {
+  const bot = botIn({ health: 18, blockAt: () => stone() });
+  Reflect.set(bot.entity, "isInWater", true);
+  const result = await hide(bot);
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /^\[SHELTER\]/);
+});
+
+test("a hide whose body is pushed into water while it waits to land stops at the next pass", async () => {
+  const bot = botIn({
+    health: 7,
+    blockAt: (position) => (position.y < 64 ? stone() : air()),
+    items: [{ name: "cobblestone", count: 32 }],
+  });
+  bot.entity.onGround = false;
+  const clock = tickEvery(bot);
+  bot.on("physicsTick", () => {
+    Reflect.set(bot.entity, "isInWater", true);
+  });
+  try {
+    const result = await hideBounded(bot, { signal: AbortSignal.timeout(500), maximumMs: 60_000 });
+    assert.equal(result.kind, "failed");
+    assert.match(result.error ?? "", /^\[SHELTER\]/);
+  } finally {
+    clock.stop();
+  }
+});
+
+test("an intruder that cannot be struck does not starve the event loop", async () => {
+  const bot = botIn({
+    health: 20,
+    blockAt: (position) => (position.y < 64 ? stone() : air()),
+    items: [{ name: "cobblestone", count: 32 }],
+  });
+  // Standing in the shell but shielded from the bot's eye: shelter contact the bot cannot answer.
+  bot.world.raycast = () => ({ position: new Vec3(0, 65, 0) }) as never;
+  bot.entities[2] = closeMob("wither_skeleton");
+  const clock = tickEvery(bot);
+  const abort = new AbortController();
+  let looks = 0;
+  bot.lookAt = async () => {
+    // A hide that spins without awaiting a tick never lets the timer below run; stop it so the test fails, not hangs.
+    if (++looks > 2_000) abort.abort(new Error("the hide spun without yielding"));
+  };
+  let timerFired = false;
+  setTimeout(() => {
+    timerFired = true;
+    abort.abort(new Error("stopped by the test"));
+  }, 0);
+  try {
+    await assert.rejects(hideBounded(bot, { signal: abort.signal, maximumMs: 60_000 }), /stopped by the test/);
+    assert.equal(timerFired, true);
+    assert.ok(looks <= 5, `${looks} passes ran before the first timer turn`);
+    assert.ok(clock.ticks() >= 1, "every pass awaits a physics tick");
+  } finally {
+    clock.stop();
+  }
+});
+
+test("an intruder that leaves while the bot turns to it does not stop the shelter being built", async () => {
+  const bot = botIn({
+    health: 20,
+    blockAt: (position) => (position.y < 64 ? stone() : air()),
+    items: [{ name: "cobblestone", count: 32 }],
+    equipError: "placement boundary",
+  });
+  bot.entities[2] = closeMob("wither_skeleton");
+  bot.lookAt = async () => {
+    delete bot.entities[2];
+  };
+  bot.attack = () => {
+    throw new Error("nothing was left to attack");
+  };
+  const result = await hide(bot);
+  assert.equal(result.swings, 0);
+  assert.match(result.error ?? "", /placement boundary/);
+});
+
+test("the construction deadline ends a hide whose body never lands", async () => {
+  const bot = botIn({ health: 7, blockAt: (position) => (position.y < 64 ? stone() : air()) });
+  bot.entity.onGround = false;
+  const clock = tickEvery(bot);
+  try {
+    const started = Date.now();
+    const result = await hideBounded(bot, { signal: AbortSignal.timeout(1_000), maximumMs: 40 });
+    assert.equal(result.kind, "failed");
+    assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
+    assert.ok(Date.now() - started < 500);
+  } finally {
+    clock.stop();
+  }
+});
+
+test("the construction deadline runs on the wall clock when the physics stream has stopped", async () => {
+  const bot = botIn({ health: 7, blockAt: (position) => (position.y < 64 ? stone() : air()) });
+  bot.entity.onGround = false;
+  bot.on = () => bot;
+  bot.off = () => bot;
+  const started = Date.now();
+  const result = await hideBounded(bot, { signal: AbortSignal.timeout(1_000), maximumMs: 40 });
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
+  assert.ok(Date.now() - started < 500);
+});

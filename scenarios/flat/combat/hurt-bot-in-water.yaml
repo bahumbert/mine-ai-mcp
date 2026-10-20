@@ -1,0 +1,62 @@
+name: hurt-bot-in-water
+description: "A hurt bot swimming in two-deep water with a zombie coming does not hide (a
+  shelter needs ground): the hostile reflex fights or evades, and a status read answers
+  throughout (CMB-01, reflex-limits D4). Survival is the server's timing, not asserted."
+
+# hurt-bot-hides with the pool in the way: below the hide bar the reflex used to
+# choose a hide whose cell was water, and the hide spun in microtasks. A pool two
+# deep east of the spawn, the zombie on the far bank, the bot afloat in the pool.
+
+minecraft:
+  version: "1.21.4"
+
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "kill @e[type=!minecraft:player]"
+
+setup:
+  - "difficulty easy"
+  - "fill 2 -62 -4 8 -61 4 minecraft:water"
+
+entities:
+  - type: zombie
+    pos: [12.5, -60, 0.5]
+    nbt: "{PersistenceRequired:1b}"
+
+players:
+  - name: SwimmingBot
+    pos: [4.5, -61, 0.5]
+    op: true
+    inventory:
+      - { item: iron_pickaxe, count: 1 }
+      - { item: iron_sword, count: 1 }
+      - { item: cobblestone, count: 16 }
+      - { item: bread, count: 4 }
+
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./hurt-bot-in-water.ts"]
+
+params:
+  hurtTo: 6
+  waitTicks: 300
+  statusLimitMs: 2000
+
+tick:
+  - "gamemode spectator @a[name=!SwimmingBot,gamemode=!spectator]"
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - kind: completion
+      who: SwimmingBot
