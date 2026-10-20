@@ -3,6 +3,7 @@ import { ActionRunner, createRawAction } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { scenarioBotData } from "../../src/scenario-bot-data.ts";
 
 const paramsSchema = z.object({
   wedge: z.tuple([z.number(), z.number(), z.number()]),
@@ -64,7 +65,7 @@ export async function run({
 }: MineAiScenarioContext): Promise<ClientCompletion> {
   const [x, y, z] = paramsSchema.parse(scenario.params).dig;
   const runner = new ActionRunner();
-  const action = createRawAction(bot);
+  const action = createRawAction(bot, scenarioBotData({ bot }));
   const digOutput = await runner.run(
     action,
     { operation: "dig", x, y, z },

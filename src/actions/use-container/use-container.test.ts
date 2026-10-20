@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
-import { recordContainerObservation } from "../../bot-data/index.js";
+import { recordContainerObservation, recordPlacedContainer } from "../../bot-data/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { botFixture, registry } from "../../test-support/bot.js";
 import { parseUseContainerRequest } from "./contract.js";
@@ -526,6 +526,17 @@ test("a loaded non-container removes stale memory for that exact location", asyn
   assert.equal(result.status, "failed");
   assert.match(result.error, /CONTAINER_NOT_PRESENT/);
   assert.equal(data.read("SELECT COUNT(*) AS count FROM observed_containers")[0]?.count, 0);
+});
+
+test("a chest the bot placed and found gone is forgotten as a placed container too", async (t) => {
+  const { data, use } = scene(t, { block: "stone" });
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 1, y: 64, z: 1 } });
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 5, y: 64, z: 5 } });
+
+  const result = await use({ operation: "inspect", x: 1, y: 64, z: 1 });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(data.read("SELECT container_key FROM placed_containers"), [{ container_key: "overworld|5|64|5" }]);
 });
 
 /** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */

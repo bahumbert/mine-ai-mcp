@@ -2,6 +2,7 @@ export * from "./block-classification.js";
 export * from "./block-visibility.js";
 export * from "./buckets.js";
 export * from "./chunks.js";
+export * from "./containers.js";
 export * from "./daylight.js";
 export * from "./enchantments.js";
 export * from "./inventory-count.js";

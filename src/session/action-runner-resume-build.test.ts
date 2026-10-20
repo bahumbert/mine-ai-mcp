@@ -1,11 +1,13 @@
 // The runner gives a reflex-interrupted build_structure back to its caller as one request (spec 2026-10-18, R2, task T4).
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createBuildStructureAction } from "../actions/build-structure/build-structure.js";
 import type { NavigationRuntime } from "../navigation/index.js";
+import { temporaryBotData } from "../test-support/bot-data.js";
 import { structureWorld } from "../test-support/structure-world.js";
 import { ActionRunner } from "./action-runner.js";
+const botData = temporaryBotData();after(() => botData.close());
 
 const WALL = { blocks: [2, 3, 4, 5].map((x) => ({ x, y: 64, z: 0, block_name: "cobblestone" })) };
 
@@ -29,7 +31,7 @@ function buildCutAtSecondPlacement() {
       return world.physics.place(placement);
     },
   };
-  return { ...world, action: createBuildStructureAction(world.bot as Bot, navigation, physics), atSecond };
+  return { ...world, action: createBuildStructureAction(world.bot as Bot, navigation, botData, physics), atSecond };
 }
 
 test("a build the hunger reflex interrupts finishes as one request that names the interruption", async () => {
@@ -69,7 +71,7 @@ test("two reflexes in a row on one build give two interruptions and one success"
   let placed = 0;
   const arrivals: (() => void)[] = [];
   const waiting = [0, 1].map(() => new Promise<void>((resolve) => arrivals.push(resolve)));
-  const action = createBuildStructureAction(world.bot as Bot, navigation, {
+  const action = createBuildStructureAction(world.bot as Bot, navigation, botData, {
     ...world.physics,
     place: async (placement) => {
       placed += 1;

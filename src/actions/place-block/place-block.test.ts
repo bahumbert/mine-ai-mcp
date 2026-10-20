@@ -2,6 +2,7 @@ import { MemoryWorld as GoalTestWorld } from "../../navigation/world/memory-worl
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { temporaryBotData } from "../../test-support/bot-data.js";
 import { botFixture, type FakeStack } from "../../test-support/bot.js";
 import { startServerClock } from "../../test-support/server-clock.js";
 import { parsePlaceBlockRequest } from "./contract.js";
@@ -13,13 +14,13 @@ function key(position: Vec3): string {
   return `${position.x},${position.y},${position.z}`;
 }
 
-function testWorld(targetName = "air", carried = 2) {
+function testWorld(targetName = "air", carried = 2, carriedBlock = "cobblestone") {
   const target = new Vec3(2, 64, 0);
   const blocks = new Map<string, any>([
     [key(target), { name: targetName, boundingBox: targetName === "air" ? "empty" : "block", position: target }],
     [key(target.offset(0, -1, 0)), { name: "stone", boundingBox: "block", position: target.offset(0, -1, 0) }],
   ]);
-  const items: FakeStack[] = carried > 0 ? [{ name: "cobblestone", count: carried }] : [];
+  const items: FakeStack[] = carried > 0 ? [{ name: carriedBlock, count: carried }] : [];
   const bot = botFixture(
     { items, position: { x: 0, y: 64, z: 0 } },
     { version: "1.21.4", blockAt: (position: Vec3) => blocks.get(key(position)) ?? { name: "air", boundingBox: "empty", position } },
@@ -38,7 +39,7 @@ function testWorld(targetName = "air", carried = 2) {
       assert.deepEqual(placement.support.position, target.offset(0, -1, 0));
       assert.deepEqual(placement.face, new Vec3(0, 1, 0));
       takeOneFromInventory();
-      const placed = { name: "cobblestone", boundingBox: "block", position: target };
+      const placed = { name: carriedBlock, boundingBox: "block", position: target };
       blocks.set(key(target), placed);
       return { kind: "placed", block: placed } as never;
     },
@@ -46,7 +47,7 @@ function testWorld(targetName = "air", carried = 2) {
       const chosen = new Vec3(1, 64, 0);
       options?.onPlacementSent?.([chosen]); // the real one calls it right before the packet
       takeOneFromInventory();
-      const placed = { name: "cobblestone", boundingBox: "block", position: chosen };
+      const placed = { name: carriedBlock, boundingBox: "block", position: chosen };
       blocks.set(key(chosen), placed);
       return { kind: "placed", position: chosen, block: placed as never };
     },
@@ -553,4 +554,91 @@ test("two place requests on two bots keep their own cells", async () => {
 
   assert.deepEqual(results.map((result) => result.placement.target), [{ x: 1, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }]);
   assert.deepEqual(results.map((result) => result.placement.placed), [true, true]);
+});
+
+const placedContainerKeys = (data: ReturnType<typeof temporaryBotData>) =>
+  data.read("SELECT container_key, block_name, placed_by_bot_id FROM placed_containers ORDER BY container_key");
+
+test("a chest placed by place_block is recorded as placed by the bot, in its dimension", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainerKeys(data), [
+    { container_key: "overworld|2|64|0", block_name: "chest", placed_by_bot_id: bot.username },
+  ]);
+});
+
+test("a chest put beside the bot, no target given, is recorded where it went", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: null }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    placedContainerKeys(data).map((row) => row.container_key),
+    ["overworld|1|64|0"],
+  );
+});
+
+test("a placed block that is no container records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld();
+
+  await executePlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a chest that was already at the target, or that a reflex put there, is not recorded as ours", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("chest", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.placement.placed, false);
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a failed placement of a chest records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(
+    bot,
+    { blockName: "chest", target: { x: 2, y: 64, z: 0 } },
+    {},
+    { ...dependencies, placeBlock: async () => ({ kind: "failed", error: "no packet answer" }) },
+    data,
+  );
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a chest that landed just before the reflex's abort threw is recorded once, when the resume credits it", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeBlock: async (...args) => {
+      await dependencies.placeBlock(...args);
+      throw cutByReflex().reason;
+    },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, cutting, () => {}, data);
+  await assert.rejects(run({ signal: new AbortController().signal }), /HUNGER/);
+  assert.deepEqual(placedContainerKeys(data), [], "nothing is credited while the attempt is cut");
+
+  const result = await run({ signal: new AbortController().signal });
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    placedContainerKeys(data).map((row) => row.container_key),
+    ["overworld|2|64|0"],
+  );
 });

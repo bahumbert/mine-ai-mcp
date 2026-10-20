@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { z } from "zod";
+import { temporaryBotData } from "../../test-support/bot-data.js";
 import { botFixture } from "../../test-support/bot.js";
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
@@ -241,4 +242,78 @@ test("control releases only its owned state when cancellation interrupts the tic
     ["forward", false],
   ]);
   assert.equal(bot.listenerCount("physicsTick"), 0);
+});
+
+/** A bot beside a stone support, carrying `carried`, whose placeBlock puts `appears` on top of it (or nothing). */
+function placingBot(carried: string, appears: string | null) {
+  const target = new Vec3(1, 65, 0);
+  let placed = false;
+  return botFixture(
+    {
+      position: new Vec3(0.5, 65, 0.5),
+      items: [{ name: carried, count: 1 }],
+      blocks: (cell) =>
+        cell.equals(target) && placed && appears !== null
+          ? ({ name: appears, position: cell, boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]] } as never)
+          : cell.equals(new Vec3(1, 64, 0))
+            ? ({ name: "stone", position: cell, boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]] } as never)
+            : ({ name: "air", position: cell, boundingBox: "empty", shapes: [] } as never),
+    },
+    {
+      equip: async () => {},
+      placeBlock: async () => {
+        placed = true;
+      },
+    },
+  );
+}
+const rawPlace = (blockName: string) => ({
+  operation: "place" as const,
+  blockName,
+  support: { x: 1, y: 64, z: 0 },
+  face: "up" as const,
+});
+const rawPlacedContainers = (data: ReturnType<typeof temporaryBotData>) =>
+  data.read("SELECT container_key, block_name, placed_by_bot_id FROM placed_containers");
+
+test("raw_action place of a barrel is recorded as a container the bot placed", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const bot = placingBot("barrel", "barrel");
+
+  const result = await executeRawAction(bot, rawPlace("barrel"), {}, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(rawPlacedContainers(data), [
+    { container_key: "overworld|1|65|0", block_name: "barrel", placed_by_bot_id: bot.username },
+  ]);
+});
+
+test("raw_action place of dirt records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+
+  await executeRawAction(placingBot("dirt", "dirt"), rawPlace("dirt"), {}, data);
+
+  assert.deepEqual(rawPlacedContainers(data), []);
+});
+
+test("raw_action place whose block never appears at the target records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+
+  const result = await executeRawAction(placingBot("chest", null), rawPlace("chest"), {}, data);
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(rawPlacedContainers(data), []);
+});
+
+test("raw_action place onto a chest that was already at the target is not recorded as placed by the bot", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const bot = placingBot("chest", "chest");
+  const target = new Vec3(1, 65, 0);
+  const placedAfter = bot.blockAt.bind(bot);
+  (bot as { blockAt: unknown }).blockAt = (cell: Vec3) =>
+    cell.equals(target) ? ({ name: "chest", position: cell, boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]] } as never) : placedAfter(cell);
+
+  await executeRawAction(bot, rawPlace("chest"), {}, data);
+
+  assert.deepEqual(rawPlacedContainers(data), []);
 });

@@ -11,6 +11,7 @@ import { buildCheckpointSchema } from "../checkpoint-schemas.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { DIG_REACH } from "../../navigation/movements/excavation.js";
@@ -86,6 +87,18 @@ function productionPhysics(
       return visibleBlockAim(bot.world, eye, target, DIG_REACH, observeMineflayerBlock(block).collisionShapes) !== null;
     },
     place: (placement) => placeBlock(bot, placement),
+  };
+}
+
+/** The physics with every placement it confirms also remembered when the block is a container the bot just put down. */
+function recordingPlacements(bot: Bot, botData: SqlBotData, physics: BuildStructurePhysics): BuildStructurePhysics {
+  return {
+    ...physics,
+    place: async (placement) => {
+      const result = await physics.place(placement);
+      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block);
+      return result;
+    },
   };
 }
 
@@ -336,6 +349,7 @@ export function formatBuildStructureResult(result: BuildStructureResult): string
 export function createBuildStructureAction(
   bot: Bot,
   navigation: NavigationRuntime,
+  botData: SqlBotData,
   physics?: BuildStructurePhysics,
 ) {
   return defineAction({
@@ -349,6 +363,6 @@ export function createBuildStructureAction(
     annotations: buildStructureAnnotations,
     parse: parseBuildStructureRequest,
     begin: (request, lifetime, observe) =>
-      beginBuildStructure(bot, request, physics ?? productionPhysics(bot, navigation, request), observe, lifetime),
+      beginBuildStructure(bot, request, recordingPlacements(bot, botData, physics ?? productionPhysics(bot, navigation, request)), observe, lifetime),
   });
 }

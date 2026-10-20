@@ -9,6 +9,7 @@ import {
   type NavigationResult,
   type NavigationRuntime,
 } from "../../navigation/index.js";
+import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { cellIntersectsPlayerBody, cellKey } from "../../utils/index.js";
@@ -360,6 +361,12 @@ async function placeAttempt(run: PlaceRun, context: ActionContext): Promise<Plac
   return placeAtTarget(run, new Vec3(request.target.x, request.target.y, request.target.z), context);
 }
 
+/** A container this request's own packet put down is remembered as the bot's; one already there, or a refusal, is not. */
+function recordPlacedContainerOf(botData: SqlBotData, bot: Bot, result: PlaceBlockResult): void {
+  if (result.status !== "succeeded" || !result.placement.placed || result.placement.afterBlock === null) return;
+  recordPlacedContainer(botData, bot, { name: result.placement.afterBlock, position: result.placement.target });
+}
+
 /**
  * Take the request: the carried count (the baseline a resume measures what it put down against) and the cell chosen
  * beside the bot are kept here, and the executor it returns runs one attempt each time the runner calls it.
@@ -369,6 +376,7 @@ export function beginPlaceBlock(
   request: PlaceBlockRequest,
   dependencies: PlaceBlockDependencies,
   observe: ObserveRequest = () => {},
+  botData?: SqlBotData,
 ): RequestExecution<PlaceBlockResult> {
   const run: PlaceRun = {
     bot, request, dependencies, beforeBlock: null, chosen: null, own: startOwnPlacement(),
@@ -385,7 +393,11 @@ export function beginPlaceBlock(
     completion: { kind: "current", observed: progressTarget() !== null && blockAtProgressTarget() === request.blockName,
       owes: "Observed placement of the requested block in the selected cell." },
   }));
-  return (context) => placeAttempt(run, context);
+  return async (context) => {
+    const result = await placeAttempt(run, context);
+    if (botData) recordPlacedContainerOf(botData, bot, result);
+    return result;
+  };
 }
 
 /** Place one carried block, at the exact cell asked for or on a cell chosen nearby, and report only what was observed. */
@@ -394,8 +406,9 @@ export function executePlaceBlock(
   request: PlaceBlockRequest,
   context: ActionContext,
   dependencies: PlaceBlockDependencies,
+  botData?: SqlBotData,
 ): Promise<PlaceBlockResult> {
-  return beginPlaceBlock(bot, request, dependencies, context.observeProgress)(context);
+  return beginPlaceBlock(bot, request, dependencies, context.observeProgress, botData)(context);
 }
 
 export function formatPlaceBlockResult(result: PlaceBlockResult): string {
@@ -424,6 +437,7 @@ export function formatPlaceBlockResult(result: PlaceBlockResult): string {
 export function createPlaceBlockAction(
   bot: Bot,
   navigation: NavigationRuntime,
+  botData: SqlBotData,
   dependencies: PlaceBlockDependencies = productionDependencies(navigation.navigate),
 ) {
   return defineAction({
@@ -436,6 +450,6 @@ export function createPlaceBlockAction(
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: placeBlockAnnotations,
     parse: parsePlaceBlockRequest,
-    begin: (request, _lifetime, observe) => beginPlaceBlock(bot, request, dependencies, observe),
+    begin: (request, _lifetime, observe) => beginPlaceBlock(bot, request, dependencies, observe, botData),
   });
 }

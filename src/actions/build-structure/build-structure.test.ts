@@ -3,7 +3,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { structureWorld } from "../../test-support/structure-world.js";
 import { parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
-import { formatBuildStructureResult, buildStructure, beginBuildStructure } from "./build-structure.js";
+import { formatBuildStructureResult, buildStructure, beginBuildStructure, createBuildStructureAction } from "./build-structure.js";
+import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { packKey } from "../../navigation/index.js";
 
@@ -377,4 +378,40 @@ test("scaffold that another bot already took down is skipped, not dug twice", as
   const result = await run({ signal: fresh().signal });
   assert.equal(result.status, "succeeded");
   assert.deepEqual(dug, ["9,65,2"]);
+});
+
+/** The action as the catalog builds it (a fake world's physics under the real wrapper), run to the end. */
+async function buildAsAction(world: ReturnType<typeof structureWorld>, data: ReturnType<typeof temporaryBotData>, list: StructureCell[]) {
+  (world.bot as { username: string }).username = "Builder";
+  const action = createBuildStructureAction(world.bot, {} as never, data, world.physics);
+  const run = action.begin({ cells: list, removeWrongBlocks: false }, new AbortController().signal, () => {});
+  return run({ signal: new AbortController().signal });
+}
+const placedContainers = (data: ReturnType<typeof temporaryBotData>) =>
+  data.read("SELECT container_key, block_name, placed_by_bot_id FROM placed_containers ORDER BY container_key");
+
+test("a house's chest placed by build_structure is recorded, and the walls around it are not", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const world = structureWorld({ carried: { chest: 1, cobblestone: 4 } });
+
+  const result = await buildAsAction(world, data, [
+    ...cells([[2, 64, 0], [3, 64, 0]]),
+    { x: 4, y: 64, z: 0, blockName: "chest" },
+  ]);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainers(data), [
+    { container_key: "overworld|4|64|0", block_name: "chest", placed_by_bot_id: "Builder" },
+  ]);
+});
+
+test("a chest already standing in the plan is not recorded: the bot did not place it", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const world = structureWorld({ carried: { cobblestone: 4 } });
+  world.put(new Vec3(4, 64, 0), "chest");
+
+  const result = await buildAsAction(world, data, [{ x: 4, y: 64, z: 0, blockName: "chest" }]);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainers(data), []);
 });

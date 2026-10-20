@@ -6,6 +6,7 @@ import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { chestOpeningObstruction } from "../../world/chest-clearance.js";
+import { isLocationOwnedContainer } from "../../world/containers.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -85,18 +86,6 @@ function target(bot: Bot, request: UseContainerRequest): ContainerTarget {
     operation: request.operation,
     items: request.items.map(({ itemName: item, count: requested }) => ({ item, requested })),
   };
-}
-
-function isLocationOwnedContainer(blockName: string): boolean {
-  return (
-    blockName === "chest" ||
-    blockName === "trapped_chest" ||
-    blockName === "barrel" ||
-    blockName === "hopper" ||
-    blockName === "dropper" ||
-    blockName === "dispenser" ||
-    blockName.endsWith("_shulker_box")
-  );
 }
 
 function requestedItemNames(request: UseContainerRequest): readonly string[] {

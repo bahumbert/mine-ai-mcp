@@ -30,6 +30,7 @@ import {
 
 import { standStill } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { scenarioBotData } from "../../src/scenario-bot-data.ts";
 
 const paramsSchema = z.strictObject({
   /**
@@ -119,7 +120,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     // itself, which is the only placement a fixture can ask for on terrain it
     // has not surveyed.
     const put = await runner.run(
-      createPlaceBlockAction(bot, context.navigation),
+      createPlaceBlockAction(bot, context.navigation, scenarioBotData(context)),
       { block_name: params.block },
       context.signal,
     );
