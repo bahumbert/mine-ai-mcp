@@ -9,6 +9,7 @@ import {
   DROPPED_ITEM_OBSERVATION_EVENTS,
   droppedItemName,
   findNewItemEntity,
+  isItemEntity,
   pickupObservedItem,
   snapshotEntityIds,
 } from "./item-pickup.js";
@@ -129,4 +130,16 @@ test("attributes only a new matching item near the source, and unread metadata i
     findNewItemEntity(bot, { baseline, itemName: "white_wool", source: new Vec3(2, 64, 0), maxDistance: 4 }),
     { id: 2, position: DROP },
   );
+});
+
+test("an item entity is one even before its stack metadata arrives; a mob is not", () => {
+  const entity = (name: string, getDroppedItem: () => unknown) => ({ id: 1, name, getDroppedItem }) as unknown as Bot["entity"];
+  const unreadable = () => {
+    throw new Error("metadata not arrived");
+  };
+  assert.equal(isItemEntity(entity("item", unreadable)), true);
+  assert.equal(isItemEntity(entity("item", () => ({ name: "dirt" }))), true);
+  assert.equal(isItemEntity(entity("zombie", () => null)), false);
+  assert.equal(isItemEntity(entity("arrow", () => null)), false);
+  assert.equal(isItemEntity({ id: 2 } as unknown as Bot["entity"]), false);
 });

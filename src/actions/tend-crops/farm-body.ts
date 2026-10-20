@@ -1,5 +1,5 @@
 /**
- * The live bot's farming gestures (`FarmBody`) and the crop facts of its version (`CropFacts`).
+ * The live bot's farming gestures (`FarmBody`) and the plot facts of its version (`PlotFacts`).
  *
  * A hoe on soil and a seed on farmland are a right-click on the block's top face, exactly as a player does it
  * (`useItemAt`), each confirmed by the cell changing. A crop or a tuft of grass breaks at once by hand, so it is dug
@@ -10,11 +10,12 @@ import type { Bot, BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { createMovements, nearGoal, observeMineflayerBlock, type NavigationRuntime } from "../../navigation/index.js";
 import { ripeState, seedOf } from "../../world/block-drops.js";
-import { droppedItemName, pickupObservedItem, snapshotEntityIds } from "../../world/item-pickup.js";
+import { tagsOf } from "../../world/block-tags.js";
+import { droppedItemName, isItemEntity, pickupObservedItem, snapshotEntityIds } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
 import { snapshotTools } from "../../world/tool-tiers.js";
 import type { TendCropsRequest } from "./contract.js";
-import type { CellBlock, CropFacts, FarmBody, FarmCell, TillFailure } from "./tend-plot.js";
+import type { CellBlock, PlotFacts, FarmBody, FarmCell, TillFailure } from "./tend-plot.js";
 
 /** A player's block reach is 4.5 from the eyes; a little less keeps the use from failing at the edge. */
 const FARM_REACH = 4.2;
@@ -30,8 +31,28 @@ function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** Crops as the version's loot tables describe them: ripe in the state their crop drops in, planted from their unripe drop. */
-export function cropFacts(bot: Pick<Bot, "registry" | "version">): CropFacts {
+/**
+ * Ground cover is what the version's tags say a player clears off soil without a thought: the replaceable plants (grass,
+ * ferns, snow layers) and the flowers, saplings never (the flowers tag holds the mangrove propagule too). A version
+ * or a modded block with no shipped tag is no ground cover: it is left and reported.
+ */
+export function isGroundCover(name: string, version: string): boolean {
+  const tags = tagsOf(name, version);
+  return !tags.includes("saplings") && (tags.includes("replaceable") || tags.includes("flowers"));
+}
+
+/** Tilled soil is a block whose state has moisture (registry states; farmland in 1.21.4): no block name needed. */
+export function isTilledSoil(block: CellBlock): boolean {
+  return block.properties.moisture !== undefined;
+}
+
+/** The registry blocks that can be tilled soil: the ones whose states hold moisture. */
+export function tilledSoilNames(bot: Pick<Bot, "registry">): string[] {
+  return bot.registry.blocksArray.filter((entry) => entry.states?.some((state) => state.name === "moisture")).map((entry) => entry.name);
+}
+
+/** The plot as the game data describes it: crops ripe in the state their crop drops in and planted from their unripe drop, ground cover by tag, tilled soil by state. */
+export function plotFacts(bot: Pick<Bot, "registry" | "version">): PlotFacts {
   return {
     isRipe(block) {
       if (block.properties.age === undefined) return null;
@@ -42,6 +63,8 @@ export function cropFacts(bot: Pick<Bot, "registry" | "version">): CropFacts {
       return ages !== undefined && Number(block.properties.age) === ages - 1;
     },
     seedOf: (name) => seedOf(name, bot.version),
+    isGroundCover: (name) => isGroundCover(name, bot.version),
+    isTilledSoil,
   };
 }
 
@@ -86,7 +109,7 @@ export function dropLedger(bot: Bot): DropLedger {
 export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal, drops = dropLedger(bot)): FarmBody {
   const vec = (cell: FarmCell) => new Vec3(cell.x, cell.y, cell.z);
   // Routes never dig the farmland they work, nor drop scaffold onto the plot.
-  const movements = () => createMovements(bot, { protectedBlockNames: ["farmland"], scaffolding: false });
+  const movements = () => createMovements(bot, { protectedBlockNames: tilledSoilNames(bot), scaffolding: false });
   const inReach = (cell: FarmCell) => bot.entity.position.offset(0, 1.62, 0).distanceTo(vec(cell).offset(0.5, 0.5, 0.5)) <= FARM_REACH;
   const stack = (item: string) => bot.inventory.items().find((candidate) => candidate.name === item) ?? null;
   const hoe = () => {
@@ -162,7 +185,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
         position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
         position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
         position.y >= request.y - 1 && position.y <= request.y + 3;
-      const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && entity.name === "item" && inPlot(entity.position));
+      const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && isItemEntity(entity) && inPlot(entity.position));
       // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
       // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
       // 2 picked up; the rest lay on the plot).

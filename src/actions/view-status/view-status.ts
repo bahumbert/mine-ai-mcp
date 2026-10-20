@@ -28,6 +28,7 @@ import {
   predictedLandingHeadPosition,
 } from "../../world/end-fight.js";
 import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../world/index.js";
+import { isItemEntity } from "../../world/item-pickup.js";
 import { observeMobAge } from "../../world/mob-age.js";
 import { currentVehicle } from "../navigate/vehicle-sync.js";
 import { defineAction } from "../action.js";
@@ -318,7 +319,7 @@ const DROPPED_ITEM_LIMIT = 16;
  */
 function observeDroppedItems(bot: Bot, origin: Position3): LiveNearby["droppedItems"] {
   return Object.values(bot.entities ?? {})
-    .filter((entity) => entity.name === "item" && entity.position)
+    .filter((entity) => isItemEntity(entity) && entity.position)
     .flatMap((entity) => {
       const item = readableDroppedItem(entity);
       if (!item) return [];

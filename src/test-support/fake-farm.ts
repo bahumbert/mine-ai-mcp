@@ -1,19 +1,38 @@
 // A fake farm body for the tend_crops tests: soil at y 63 and what stands on it at y 64, changed the way the server would.
-import type { CellBlock, CropFacts, FarmBody, TillFailure } from "../actions/tend-crops/tend-plot.js";
+import type { CellBlock, PlotFacts, FarmBody, TillFailure } from "../actions/tend-crops/tend-plot.js";
+import { isGroundCover, isTilledSoil } from "../actions/tend-crops/farm-body.js";
+import { registry } from "./bot.js";
 
+/** The properties of a block's default state, as the registry's states list them (the order the state ids are laid out in). */
+function defaultProperties(name: string): CellBlock["properties"] {
+  const entry = registry.blocksByName[name];
+  if (entry?.states === undefined) return {};
+  const properties: Record<string, string | number | boolean> = {};
+  let offset = entry.defaultState - entry.minStateId;
+  for (const state of [...entry.states].reverse()) {
+    const index = offset % state.num_values;
+    offset = Math.floor(offset / state.num_values);
+    properties[state.name] = state.type === "bool" ? index === 0 : state.type === "int" ? index : String(state.values?.[index] ?? index);
+  }
+  return properties;
+}
+
+/** A block as the live bot reads it: collision box and diggable from the registry, state properties from the default state unless given. */
 export const block = (name: string, properties: CellBlock["properties"] = {}, traits: Partial<Pick<CellBlock, "liquid" | "empty">> = {}): CellBlock => ({
   name,
-  properties,
+  properties: { ...defaultProperties(name), ...properties },
   liquid: traits.liquid ?? false,
-  breakable: name !== "air" && name !== "water",
-  empty: traits.empty ?? (name === "air" || name === "short_grass" || name === "poppy" || name.startsWith("wheat") || name === "carrots"),
+  breakable: registry.blocksByName[name]?.diggable ?? false,
+  empty: traits.empty ?? registry.blocksByName[name]?.boundingBox === "empty",
 });
 
 
-/** Wheat and carrots as the loot tables have them: ripe at age 7, planted from their unripe drop. */
-export const CROPS: CropFacts = {
+/** Wheat and carrots as the loot tables have them (ripe at age 7, planted from their unripe drop); ground cover and tilled soil as the real facts answer. */
+export const PLOT_FACTS: PlotFacts = {
   isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? cell.properties.age === 7 : null),
   seedOf: (name) => ({ wheat: "wheat_seeds", carrots: "carrot" })[name] ?? null,
+  isGroundCover: (name) => isGroundCover(name, "1.21.4"),
+  isTilledSoil,
 };
 
 

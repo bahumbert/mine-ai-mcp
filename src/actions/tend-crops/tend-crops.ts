@@ -19,8 +19,8 @@ import {
   type TendCropsResult,
   type TendEvidence,
 } from "./contract.js";
-import { cropFacts, dropLedger, mineflayerFarmBody } from "./farm-body.js";
-import { beginTendPlot, type CropFacts, type FarmBody, type TendProgress } from "./tend-plot.js";
+import { plotFacts, dropLedger, mineflayerFarmBody } from "./farm-body.js";
+import { beginTendPlot, type PlotFacts, type FarmBody, type TendProgress } from "./tend-plot.js";
 
 /**
  * Settle a run: succeeded when no cell was left for a reason that needs the caller (cells still growing, and water,
@@ -50,7 +50,7 @@ export interface TendStallSettings {
 export function beginTendCrops(
   bot: Bot,
   request: TendCropsRequest,
-  crops: CropFacts,
+  facts: PlotFacts,
   bodyFor: (signal?: AbortSignal) => FarmBody,
   observe: ObserveRequest = () => {},
   stall: TendStallSettings = { stallMs: TEND_STALL_MS },
@@ -69,7 +69,7 @@ export function beginTendCrops(
     checkpoint: { cells, ...progress },
     completion: { kind: "current", observed: false, owes: "Every cell of the plot harvested, tilled and planted, or reported skipped." },
   }));
-  const plot = beginTendPlot(request, bodyFor(), crops, (next) => {
+  const plot = beginTendPlot(request, bodyFor(), facts, (next) => {
     progress = next;
   });
   return async (context) => {
@@ -94,11 +94,11 @@ export function tendCrops(
   bot: Bot,
   request: TendCropsRequest,
   body: FarmBody,
-  crops: CropFacts,
+  facts: PlotFacts,
   context: ActionContext,
   stallMs = TEND_STALL_MS,
 ): Promise<TendCropsResult> {
-  return beginTendCrops(bot, request, crops, () => body, context.observeProgress, { stallMs })(context);
+  return beginTendCrops(bot, request, facts, () => body, context.observeProgress, { stallMs })(context);
 }
 
 export function formatTendCropsResult(result: TendCropsResult): string {
@@ -126,7 +126,7 @@ export function createTendCropsAction(bot: Bot, navigation: NavigationRuntime) {
     parse: parseTendCropsRequest,
     begin: (request, _lifetime, observe) => {
       const drops = dropLedger(bot);
-      return beginTendCrops(bot, request, cropFacts(bot), (signal) => mineflayerFarmBody(bot, navigation, request, signal, drops), observe);
+      return beginTendCrops(bot, request, plotFacts(bot), (signal) => mineflayerFarmBody(bot, navigation, request, signal, drops), observe);
     },
   });
 }

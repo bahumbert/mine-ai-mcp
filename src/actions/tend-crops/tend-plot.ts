@@ -17,12 +17,16 @@ export interface CellBlock {
   readonly breakable: boolean;
 }
 
-/** What the game data says of crops (`src/world/block-drops.ts`). */
-export interface CropFacts {
+/** What the game data says of the plot: crops (`src/world/block-drops.ts`), ground cover, tilled soil. */
+export interface PlotFacts {
   /** Whether the crop is ripe; null when the block is not a crop. */
   isRipe(block: CellBlock): boolean | null;
   /** The item a crop is planted from (an unripe crop's drop); null when not a crop. */
   seedOf(blockName: string): string | null;
+  /** Whether a player clears this plant off soil (the game's replaceable plants and flowers, never a sapling). */
+  isGroundCover(name: string): boolean;
+  /** Whether the soil is already tilled (its state holds moisture). */
+  isTilledSoil(block: CellBlock): boolean;
 }
 
 export interface FarmCell {
@@ -54,15 +58,16 @@ export interface FarmBody {
 export type CellDecision = "harvest" | "clear" | "till" | "plant" | { readonly skip: string };
 
 /** What the cell needs, from its soil (at the plot's level) and what stands on it. */
-export function decideCell(soil: CellBlock | null, above: CellBlock | null, crops: CropFacts): CellDecision {
+export function decideCell(soil: CellBlock | null, above: CellBlock | null, facts: PlotFacts): CellDecision {
   if (soil === null || above === null) return { skip: "unloaded" };
   if (soil.liquid) return { skip: "water" };
   if (above.liquid) return { skip: "under water" };
-  const ripe = crops.isRipe(above);
+  const ripe = facts.isRipe(above);
   if (ripe === true) return "harvest";
   if (ripe === false) return { skip: "growing" };
-  if (above.breakable) return above.empty ? "clear" : { skip: `occupied by ${above.name}` };
-  return soil.name === "farmland" ? "plant" : "till";
+  if (above.breakable && above.empty && facts.isGroundCover(above.name)) return "clear";
+  if (above.breakable) return { skip: `occupied by ${above.name}` };
+  return facts.isTilledSoil(soil) ? "plant" : "till";
 }
 
 /** Where a run is, for the action's progress checkpoint. */
@@ -102,7 +107,7 @@ function serpentine(request: TendCropsRequest): TendCell[] {
 interface TendState {
   readonly request: TendCropsRequest;
   readonly cells: readonly TendCell[];
-  readonly crops: CropFacts;
+  readonly facts: PlotFacts;
   readonly observe: (progress: TendProgress) => void;
   readonly counts: { harvested: number; cleared: number; tilled: number; planted: number };
   readonly hoeCarriedAtStart: boolean;
@@ -133,7 +138,7 @@ const cellKey = (cell: TendCell) => `${cell.x},${cell.z}`;
 const soilOf = (state: TendState, cell: TendCell): FarmCell => ({ x: cell.x, y: state.request.y, z: cell.z });
 const aboveOf = (state: TendState, cell: TendCell): FarmCell => ({ x: cell.x, y: state.request.y + 1, z: cell.z });
 const decide = (a: TendAttempt, cell: TendCell) =>
-  decideCell(a.body.read(cell.x, a.state.request.y, cell.z), a.body.read(cell.x, a.state.request.y + 1, cell.z), a.state.crops);
+  decideCell(a.body.read(cell.x, a.state.request.y, cell.z), a.body.read(cell.x, a.state.request.y + 1, cell.z), a.state.facts);
 
 function report(state: TendState, next: TendProgress["phase"] = state.phase): void {
   state.phase = next;
@@ -158,7 +163,7 @@ function evidenceOf(a: TendAttempt): TendEvidence {
     gained: Object.fromEntries([...state.inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
     skipped: state.skipped,
     dropsLeft: [...state.dropsLeft],
-    after: plotAfter(state.request, state.cells, body, state.crops),
+    after: plotAfter(state.request, state.cells, body, state.facts),
   };
 }
 
@@ -169,11 +174,11 @@ function evidenceOf(a: TendAttempt): TendEvidence {
 export function beginTendPlot(
   request: TendCropsRequest,
   body: FarmBody,
-  crops: CropFacts,
+  facts: PlotFacts,
   observe: (progress: TendProgress) => void = () => {},
 ): { attempt(body: FarmBody, stop?: () => string | null): Promise<TendOutcome> } {
   const state: TendState = {
-    request, crops, observe,
+    request, facts, observe,
     cells: serpentine(request),
     counts: { harvested: 0, cleared: 0, tilled: 0, planted: 0 },
     hoeCarriedAtStart: body.hasHoe(),
@@ -199,11 +204,11 @@ export function beginTendPlot(
 export function tendPlot(
   request: TendCropsRequest,
   body: FarmBody,
-  crops: CropFacts,
+  facts: PlotFacts,
   stop: () => string | null = () => null,
   observe: (progress: TendProgress) => void = () => {},
 ): Promise<TendOutcome> {
-  return beginTendPlot(request, body, crops, observe).attempt(body, stop);
+  return beginTendPlot(request, body, facts, observe).attempt(body, stop);
 }
 
 async function tendAttempt(a: TendAttempt): Promise<TendOutcome> {
@@ -245,7 +250,7 @@ function recordBreak(a: TendAttempt, cell: TendCell, decision: "clear" | "harves
     return;
   }
   state.counts.harvested += 1;
-  const seed = state.crops.seedOf(crop);
+  const seed = state.facts.seedOf(crop);
   if (seed !== null) {
     state.seedFor.set(cellKey(cell), seed);
     remember(state, body, seed);
@@ -343,7 +348,8 @@ async function tillOne(a: TendAttempt, cell: TendCell): Promise<boolean> {
   try {
     failure = await tillCell(body, soilOf(state, cell), () => decide(a, cell) === "till");
   } catch (error) {
-    if (body.read(cell.x, state.request.y, cell.z)?.name === "farmland") countTilled();
+    const now = body.read(cell.x, state.request.y, cell.z);
+    if (now !== null && state.facts.isTilledSoil(now)) countTilled();
     throw error;
   }
   if (failure !== null) {
@@ -369,7 +375,7 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
       failed = await body.plant(soilOf(state, cell), item);
     } catch (error) {
       const above = body.read(cell.x, state.request.y + 1, cell.z);
-      if (above !== null && state.crops.isRipe(above) !== null) state.counts.planted += 1;
+      if (above !== null && state.facts.isRipe(above) !== null) state.counts.planted += 1;
       throw error;
     }
     if (failed === null) {
@@ -405,16 +411,16 @@ async function tillCell(body: FarmBody, soil: FarmCell, needsTill: () => boolean
 }
 
 /** The plot as it stands now: crops by block and age, empty and dry farmland, water. */
-function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, crops: CropFacts): TendEvidence["after"] {
+function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, facts: PlotFacts): TendEvidence["after"] {
   const after = { crops: {} as Record<string, number>, emptyFarmland: 0, dryFarmland: 0, water: 0 };
   for (const cell of cells) {
     const soil = body.read(cell.x, request.y, cell.z);
     const above = body.read(cell.x, request.y + 1, cell.z);
     if (soil === null || above === null) continue;
     if (soil.liquid) after.water += 1;
-    if (soil.name !== "farmland") continue;
+    if (!facts.isTilledSoil(soil)) continue;
     if (Number(soil.properties.moisture ?? 7) < 7) after.dryFarmland += 1;
-    const ripe = crops.isRipe(above);
+    const ripe = facts.isRipe(above);
     if (ripe === null) {
       if (!above.breakable) after.emptyFarmland += 1;
       continue;
