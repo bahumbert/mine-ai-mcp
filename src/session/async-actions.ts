@@ -61,20 +61,50 @@ function execution(record: RecordData): Execution {
   if (record.terminal) settle();
   return { record, settled, settle, persistenceError: null, listeners: new Set(), dirty: false };
 }
+/** The output as it will be stored: a copy the store can hold, or an error saying it cannot be. */
+function storableOutput(output: Output): Output {
+  const copy = structuredClone(output);
+  JSON.stringify(copy);
+  return copy;
+}
+function lookupFailed(error: unknown, retry: string): Refusal {
+  return refused("EXECUTION_LOOKUP_FAILED", `${reason(error)} ${retry}; the execution itself is unchanged.`);
+}
 function reason(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function refused(code: string, error: string): Refusal { return { state: "refused", code, error }; }
+
+/** Settled executions whose result was retrieved stay in memory up to this many; older ones are read back from the store. */
+export const SETTLED_EXECUTIONS_IN_MEMORY = 50;
+
+function parseExecutionRecord(json: unknown): RecordData {
+  // Earlier development records used a caller acknowledgement and receipt.
+  const { acknowledged, terminal, ...record } = JSON.parse(String(json));
+  return { ...record, resultRetrieved: record.resultRetrieved ?? acknowledged ?? false,
+    terminal: terminal ? { output: terminal.output } : null } as RecordData;
+}
 
 /** Durable execution rows are separate from the log of individual MCP calls. */
 export class ExecutionStore {
   constructor(private readonly data: SqlBotData, private readonly botId: string) {}
+  /** Every row of the bot, settled ones included: for tests and tooling, never for a start (its cost grows with the history). */
   load(): RecordData[] {
     return this.data.read("SELECT record_json FROM action_executions WHERE bot_id = ? ORDER BY rowid", this.botId)
-      .map((row) => {
-        // Earlier development records used a caller acknowledgement and receipt.
-        const { acknowledged, terminal, ...record } = JSON.parse(String(row.record_json));
-        return { ...record, resultRetrieved: record.resultRetrieved ?? acknowledged ?? false,
-          terminal: terminal ? { output: terminal.output } : null } as RecordData;
-      });
+      .map((row) => parseExecutionRecord(row.record_json));
+  }
+  /** Rows still open: not settled, or settled with a result nobody retrieved. Settled rows are filtered in SQL and never parsed. */
+  loadOpen(): RecordData[] {
+    return this.data.read(`SELECT record_json FROM action_executions WHERE bot_id = ?
+      AND (json_type(record_json, '$.terminal') IS NOT 'object'
+        OR COALESCE(json_type(record_json, '$.resultRetrieved'), json_type(record_json, '$.acknowledged'), 'false') IN ('false', 'null'))
+      ORDER BY rowid`, this.botId).map((row) => parseExecutionRecord(row.record_json));
+  }
+  findByAction(actionId: string): RecordData | undefined {
+    const row = this.data.read("SELECT record_json FROM action_executions WHERE bot_id = ? AND action_id = ?", this.botId, actionId)[0];
+    return row ? parseExecutionRecord(row.record_json) : undefined;
+  }
+  findBySubmission(submissionId: string): RecordData | undefined {
+    const row = this.data.read("SELECT record_json FROM action_executions WHERE bot_id = ? AND submission_id = ?", this.botId, submissionId)[0];
+    return row ? parseExecutionRecord(row.record_json) : undefined;
   }
   write(records: readonly RecordData[]): void {
     this.data.transaction((db) => {
@@ -85,30 +115,37 @@ export class ExecutionStore {
   }
 }
 
+/** A row left unsettled by a previous runtime: its world effects are unknown and it is never replayed. */
+function interruptedTerminal(record: RecordData): { output: Output } {
+  const last = record.checkpoint?.progress;
+  return {
+    output: {
+      action: record.action, durationMs: last?.elapsedMs ?? 0,
+      result: { kind: "runtime_failure", status: "failed", error: "[RUNTIME_INTERRUPTED] Previous runtime ended before recording settlement. World effects are unknown; execution was not replayed." },
+      ...(last ? { progress: { ...last, state: "settled",
+        positionAgeMs: last.positionSampledAt ? Math.max(0, Date.now() - Date.parse(last.positionSampledAt)) : null,
+        movementCoverage: { complete: false, discontinuities: [...last.movementCoverage.discontinuities, "runtime_interrupted"] } } } : {}),
+    },
+  };
+}
+
 /** One logical execution service per bot, shared by disposable MCP connections. */
 export class AsyncActions {
   readonly #records = new Map<string, Execution>();
   readonly #submissions = new Map<string, Execution>();
+  /** Retrieved, settled executions in memory, least recently used first. */
+  readonly #recent = new Set<string>();
   #active: Execution | null = null;
   #checkpointTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     readonly runner: ActionRunner,
     private readonly run: ActionRunner["run"],
-    private readonly store?: Pick<ExecutionStore, "load" | "write">,
+    private readonly store?: Pick<ExecutionStore, "loadOpen" | "findByAction" | "findBySubmission" | "write">,
   ) {
-    for (const record of store?.load() ?? []) {
+    for (const record of store?.loadOpen() ?? []) {
       if (!record.terminal) {
-        const last = record.checkpoint?.progress;
-        record.terminal = {
-          output: {
-            action: record.action, durationMs: last?.elapsedMs ?? 0,
-            result: { kind: "runtime_failure", status: "failed", error: "[RUNTIME_INTERRUPTED] Previous runtime ended before recording settlement. World effects are unknown; execution was not replayed." },
-            ...(last ? { progress: { ...last, state: "settled",
-              positionAgeMs: last.positionSampledAt ? Math.max(0, Date.now() - Date.parse(last.positionSampledAt)) : null,
-              movementCoverage: { complete: false, discontinuities: [...last.movementCoverage.discontinuities, "runtime_interrupted"] } } } : {}),
-          },
-        };
+        record.terminal = interruptedTerminal(record);
         store?.write([record]);
       }
       const retained = execution(record);
@@ -121,22 +158,15 @@ export class AsyncActions {
     let parsed: unknown;
     try { parsed = action.parse(input); }
     catch (error) { return refused("INVALID_ARGUMENTS", reason(error)); }
-    const previous = this.#submissions.get(metadata.submission_id);
+    const previous = this.#findBySubmission(metadata.submission_id);
+    if (previous && "state" in previous) return previous;
     if (previous) {
       return previous.record.action === action.name && isDeepStrictEqual(previous.record.arguments, parsed)
         ? this.#acceptance(previous.record)
         : refused("SUBMISSION_CONFLICT", "This submission_id already identifies different action arguments.");
     }
-    if (!this.runner.ownership().connected) return refused("RUNTIME_UNAVAILABLE", "The bot connection has ended.");
-    if (this.#active || this.runner.status().busy) return {
-      ...refused("ACTION_BUSY", `No new action started; body owner: ${this.runner.ownership().current ?? "request settling"}. ${this.#active ? "Call wait_for_action with activeActionId to retrieve its result." : "Wait for physical ownership to become available."}`),
-      ...(this.#active ? { activeActionId: this.#active.record.actionId } : {}),
-    };
-    const owed = [...this.#records.values()].find((item) => !item.record.resultRetrieved);
-    if (owed) return {
-      ...refused("RESULT_NOT_RETRIEVED", "No new action started. Call wait_for_action with unretrievedActionId to retrieve the preceding full result."),
-      unretrievedActionId: owed.record.actionId,
-    };
+    const refusal = this.#admissionRefusal();
+    if (refusal) return refusal;
     const record: RecordData = {
       actionId: randomUUID(), submissionId: metadata.submission_id, action: action.name,
       arguments: structuredClone(parsed), admittedAt: new Date().toISOString(), requestId, rationale,
@@ -153,47 +183,19 @@ export class AsyncActions {
     record.checkpoint = this.#live(admitted);
     admitted.dirty = true;
     this.#persist(admitted);
-    this.#checkpointTimer = setInterval(() => {
-      record.checkpoint = this.#live(admitted);
-      admitted.dirty = true;
-      this.#persist(admitted);
-    }, 5000);
-    this.#checkpointTimer.unref();
-    void outcome.then((output) => action.outputSchema.parse(output)).catch((error): Output => ({
-      action: action.name, durationMs: this.runner.progress()?.elapsedMs ?? 0,
-      result: { kind: "runtime_failure", status: "failed", error: `[EXECUTION_FAILED] ${reason(error)}` },
-    })).then((output) => {
-      if (this.#checkpointTimer) clearInterval(this.#checkpointTimer);
-      this.#checkpointTimer = null;
-      record.terminal = { output: structuredClone(output) };
-      admitted.dirty = true;
-      this.#persist(admitted);
-      this.#active = null;
-      admitted.settle();
-      for (const listener of admitted.listeners) listener();
-      admitted.listeners.clear();
-    });
+    this.#startCheckpoints(admitted);
+    void this.#settleWhenDone(admitted, action, outcome);
     return this.#acceptance(record);
   }
 
   async wait(actionId: string, timeoutMs: number, signal?: AbortSignal): Promise<WaitOutcome> {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 120000) return refused("INVALID_ARGUMENTS", "timeout_ms must be an integer from 0 to 120000.");
-    const retained = this.#records.get(actionId);
+    const retained = this.#findByAction(actionId, "Retry wait_for_action");
     if (!retained) return refused("ACTION_NOT_FOUND", "No execution with this action ID exists for this bot.");
+    if ("state" in retained) return retained;
     signal?.throwIfAborted();
     const before = this.#live(retained);
-    if (!retained.record.terminal && timeoutMs > 0) {
-      await new Promise<void>((resolve, reject) => {
-        const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); retained.listeners.delete(finish); };
-        const finish = () => { cleanup(); resolve(); };
-        const abort = () => { cleanup(); reject(signal?.reason); };
-        const timer = setTimeout(finish, timeoutMs);
-        signal?.addEventListener("abort", abort, { once: true });
-        retained.listeners.add(finish);
-        if (retained.record.terminal) finish();
-        if (signal?.aborted) abort();
-      });
-    }
+    if (!retained.record.terminal && timeoutMs > 0) await this.#untilSettled(retained, timeoutMs, signal);
     signal?.throwIfAborted();
     const terminal = retained.record.terminal;
     if (terminal) {
@@ -207,6 +209,7 @@ export class AsyncActions {
         retained.record.resultRetrieved = true;
         retained.persistenceError = null;
       }
+      this.#keepRecent(retained);
       return { state: "settled", wakeReason: "settled", actionId, output: structuredClone(terminal.output) };
     }
     const after = this.#live(retained);
@@ -218,8 +221,9 @@ export class AsyncActions {
   }
 
   cancel(actionId: string, reason: string) {
-    const retained = this.#records.get(actionId);
+    const retained = this.#findByAction(actionId, "Retry cancel_action");
     if (!retained) return refused("ACTION_NOT_FOUND", "No execution with this action ID exists for this bot.");
+    if ("state" in retained) return retained;
     if (retained.record.terminal) return { state: "settled" as const, actionId };
     return { state: "cancellation_requested" as const, actionId, cancellation: this.runner.cancelRequest(actionId, reason) };
   }
@@ -235,6 +239,108 @@ export class AsyncActions {
 
   async settled(): Promise<void> { await this.#active?.settled; }
 
+  #admissionRefusal(): Refusal | null {
+    if (!this.runner.ownership().connected) return refused("RUNTIME_UNAVAILABLE", "The bot connection has ended.");
+    if (this.#active || this.runner.status().busy) return {
+      ...refused("ACTION_BUSY", `No new action started; body owner: ${this.runner.ownership().current ?? "request settling"}. ${this.#active ? "Call wait_for_action with activeActionId to retrieve its result." : "Wait for physical ownership to become available."}`),
+      ...(this.#active ? { activeActionId: this.#active.record.actionId } : {}),
+    };
+    const owed = [...this.#records.values()].find((item) => !item.record.resultRetrieved);
+    if (owed) return {
+      ...refused("RESULT_NOT_RETRIEVED", "No new action started. Call wait_for_action with unretrievedActionId to retrieve the preceding full result."),
+      unretrievedActionId: owed.record.actionId,
+    };
+    return null;
+  }
+  #startCheckpoints(admitted: Execution): void {
+    this.#checkpointTimer = setInterval(() => {
+      admitted.record.checkpoint = this.#live(admitted);
+      admitted.dirty = true;
+      this.#persist(admitted);
+    }, 5000);
+    this.#checkpointTimer.unref();
+  }
+  /** Settles the execution whatever goes wrong: the timer, the body and the waiters are released even if storing the output throws. */
+  async #settleWhenDone(admitted: Execution, action: Action, outcome: ReturnType<ActionRunner["run"]>): Promise<void> {
+    let output: Output;
+    try { output = action.outputSchema.parse(await outcome); }
+    catch (error) { output = this.#failedOutput(action, "EXECUTION_FAILED", error); }
+    try {
+      try { admitted.record.terminal = { output: storableOutput(output) }; }
+      catch (error) { admitted.record.terminal = { output: this.#failedOutput(action, "EXECUTION_OUTPUT_UNSTORABLE", error) }; }
+      admitted.dirty = true;
+      this.#persist(admitted);
+    } finally {
+      if (this.#checkpointTimer) clearInterval(this.#checkpointTimer);
+      this.#checkpointTimer = null;
+      this.#active = null;
+      admitted.settle();
+      this.#notifyWaiters(admitted);
+    }
+  }
+  #failedOutput(action: Action, code: string, cause: unknown): Output {
+    return { action: action.name, durationMs: this.runner.progress()?.elapsedMs ?? 0,
+      result: { kind: "runtime_failure", status: "failed", error: `[${code}] ${reason(cause)}` } };
+  }
+  /** A waiter whose listener throws never stops the others. */
+  #notifyWaiters(admitted: Execution): void {
+    const listeners = [...admitted.listeners];
+    admitted.listeners.clear();
+    for (const listener of listeners) {
+      try { listener(); } catch { /* that waiter's own cleanup failed; its wait still ends by its timeout */ }
+    }
+  }
+  #untilSettled(retained: Execution, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); retained.listeners.delete(finish); signal?.removeEventListener("abort", abort); };
+      const finish = () => { try { cleanup(); } finally { resolve(); } };
+      const abort = () => { try { cleanup(); } finally { reject(signal?.reason); } };
+      const timer = setTimeout(finish, timeoutMs);
+      signal?.addEventListener("abort", abort, { once: true });
+      retained.listeners.add(finish);
+      if (retained.record.terminal) finish();
+      if (signal?.aborted) abort();
+    });
+  }
+  #findByAction(actionId: string, retry: string): Execution | Refusal | undefined {
+    const cached = this.#records.get(actionId);
+    if (cached) return cached;
+    try {
+      const record = this.store?.findByAction(actionId);
+      return record ? this.#cacheStored(record) : undefined;
+    } catch (error) { return lookupFailed(error, retry); }
+  }
+  #findBySubmission(submissionId: string): Execution | Refusal | undefined {
+    const cached = this.#submissions.get(submissionId);
+    if (cached) return cached;
+    try {
+      const record = this.store?.findBySubmission(submissionId);
+      return record ? this.#cacheStored(record) : undefined;
+    } catch (error) { return lookupFailed(error, "Retry the same submission"); }
+  }
+  /** A settled execution read back from the store re-enters memory as the most recent one. */
+  #cacheStored(record: RecordData): Execution {
+    const cached = this.#records.get(record.actionId);
+    if (cached) return cached;
+    const stored = execution(record);
+    this.#records.set(record.actionId, stored);
+    this.#submissions.set(record.submissionId, stored);
+    this.#keepRecent(stored);
+    return stored;
+  }
+  /** With a store, only the most recent retrieved executions stay in memory; older ones are looked up on demand. */
+  #keepRecent(retained: Execution): void {
+    if (!this.store || !retained.record.terminal || !retained.record.resultRetrieved) return;
+    this.#recent.delete(retained.record.actionId);
+    this.#recent.add(retained.record.actionId);
+    while (this.#recent.size > SETTLED_EXECUTIONS_IN_MEMORY) {
+      const oldest = this.#recent.values().next().value as string;
+      this.#recent.delete(oldest);
+      const evicted = this.#records.get(oldest);
+      this.#records.delete(oldest);
+      if (evicted) this.#submissions.delete(evicted.record.submissionId);
+    }
+  }
   #acceptance(record: RecordData): Acceptance {
     return { state: "accepted", actionId: record.actionId, action: record.action, admittedAt: record.admittedAt };
   }
