@@ -53,7 +53,7 @@ import {
   type WorldView,
 } from "../world/world.js";
 import { longestBreakDurationMs } from "./break-duration.js";
-import { CLIMBABLES, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
+import { CLIMBABLES, isSwimWater, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
 
 const NETHER_VINES = new Set(["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"]);
 // Prismarine applies gravity and drag after assigning its 0.2 climb impulse;
@@ -519,7 +519,7 @@ export class MineflayerBot implements NavigationBot {
       const completed = await this.bot.bucketDrop?.(step.to, signal);
       return completed ? { kind: "completed", arrival: step.to } : { kind: "failed", observation: "The planned bucket drop did not confirm landing and water recovery." };
     }
-    if (this.ownsDive() && (this.bot.blockAt({ ...step.to, y: step.to.y + 1 }) as MineflayerBlock | null)?.name === "water") {
+    if (this.ownsDive() && isSwimWater(this.bot.blockAt({ ...step.to, y: step.to.y + 1 }) as MineflayerBlock | null)) {
       const support = this.bot.blockAt({ ...step.to, y: step.to.y - 1 }) as MineflayerBlock | null;
       execution = { ...execution, swimDepth: step.to.y + (support?.boundingBox === "block" ? 0 : 0.2),
         swimGrounded: support?.boundingBox === "block" };

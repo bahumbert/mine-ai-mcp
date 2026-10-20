@@ -24,6 +24,8 @@ import {
   loadedObservation,
   packKey,
 } from "../world/world.js";
+import { holdsWater } from "../world/deep-water.js";
+import { isWater } from "../world/block-geometry.js";
 
 export type MineflayerBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 
@@ -85,6 +87,10 @@ function traits(block: MineflayerBlock): BlockTraits {
   const empty = block.boundingBox === "empty";
   const liquid = block.name === "water" ? "water" : block.name === "lava" ? "lava" : null;
   const properties = block.getProperties() as Readonly<Record<string, unknown>>;
+  // A water plant or a waterlogged block with no collision box is a water source to the body, as the game's fluid state
+  // and prismarine-physics both say: the planner swims it instead of reading it as air (run 16, Lena and Yuki).
+  const heldWater = liquid === null && holdsWater(block.name, properties);
+  const swimWater = heldWater && empty;
   const bottomSlab = block.name.endsWith("_slab") && properties.type === "bottom";
   const parkourTakeoff =
     liquid !== null || CLIMBABLES.has(block.name) || block.name.endsWith("_stairs") || bottomSlab
@@ -100,15 +106,12 @@ function traits(block: MineflayerBlock): BlockTraits {
     !block.name.startsWith("iron_") && (block.name.endsWith("_door") || block.name.endsWith("_fence_gate"));
   return {
     empty,
-    liquid,
+    liquid: swimWater ? "water" : liquid,
     // Prismarine models water's integer-looking `level` property as the
     // registry enum string "0". Accept a numeric zero as well for older
     // registries and test doubles.
-    liquidSource: liquid !== null && (properties.level === "0" || properties.level === 0),
-    waterlogged:
-      properties.waterlogged === true ||
-      properties.waterlogged === "true" ||
-      ["seagrass", "tall_seagrass", "kelp", "kelp_plant", "bubble_column"].includes(block.name),
+    liquidSource: swimWater || (liquid !== null && (properties.level === "0" || properties.level === 0)),
+    waterlogged: heldWater && !swimWater,
     // The registry gives a waterloggable block the property whatever its
     // current value, so the key alone answers whether water would sink in.
     waterloggable: "waterlogged" in properties,
@@ -121,6 +124,7 @@ function traits(block: MineflayerBlock): BlockTraits {
     yielding: block.name === "big_dripleaf",
     damaging: DAMAGING.has(block.name) || liquid === "lava",
     entangling: block.name === "cobweb",
+    current: "drag" in properties,
     interactive:
       INTERACTIVE.has(block.name) ||
       openable ||
@@ -142,6 +146,38 @@ export function observeMineflayerBlock(block: MineflayerBlock): LoadedBlock {
     ),
     Object.freeze(traits(block)),
   );
+}
+
+/** Whether a Mineflayer block is water the body swims in, a water plant's included; nothing (not loaded) is not. */
+export function isSwimWater(block: MineflayerBlock | null): boolean {
+  return block !== null && isWater(observeMineflayerBlock(block));
+}
+
+/** Observations of block states, per registry: a state's observation never changes (`MineflayerWorldView` keeps one too). */
+const liveObservations = new WeakMap<object, Map<number, LoadedBlock>>();
+
+/**
+ * The live world as observations, read through `bot.blockAt` at each call, each state observed once per registry: how
+ * runtime code outside a search asks what a cell holds, so every caller reads water, dry ground and support by the same
+ * traits (a navigate shore scan reads a million cells: 290 ms -> 3.9 s when each was observed anew). Unloaded is
+ * `UNLOADED`.
+ */
+export function liveBlockReader(bot: Pick<Bot, "blockAt"> & { readonly registry?: object }): WorldView["blockAt"] {
+  const known = bot.registry === undefined ? undefined : observationsOf(bot.registry);
+  return (x, y, z) => {
+    const block = bot.blockAt(new Vec3(x, y, z));
+    if (block === null) return UNLOADED;
+    if (known === undefined || typeof block.stateId !== "number") return observeMineflayerBlock(block);
+    let observation = known.get(block.stateId);
+    if (observation === undefined) known.set(block.stateId, (observation = observeMineflayerBlock(block)));
+    return observation;
+  };
+}
+
+function observationsOf(registry: object): Map<number, LoadedBlock> {
+  let known = liveObservations.get(registry);
+  if (known === undefined) liveObservations.set(registry, (known = new Map()));
+  return known;
 }
 
 /** Building the class walks the whole registry, so each registry builds it once. */

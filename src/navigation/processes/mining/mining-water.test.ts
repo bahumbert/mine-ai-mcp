@@ -47,3 +47,27 @@ test("a dry mining site with no sealing material is refused without waiting for 
   const result = await clearMiningWater(bot, new Vec3(1, 64, 0), async () => ({ kind: "failed", error: "No building material" }), null);
   assert.match(result!, /could not be isolated.*No building material/);
 });
+
+test("a target touched by a kelp cell is sealed like one touched by water", async () => {
+  const bot = botFixture();
+  bot.entity.position = new Vec3(0.5, 64, 0.5);
+  bot.entity.onGround = true;
+  const target = new Vec3(1, 64, 0);
+  const face = target.plus(new Vec3(1, 0, 0));
+  const blocks = blockClass(bot);
+  let sealed = false;
+  bot.blockAt = (position) => {
+    const name = position.equals(face) && !sealed ? "kelp" : position.equals(target) || position.y < 64 ? "stone" : "air";
+    const block = blocks.fromStateId(bot.registry.blocksByName[name]!.minStateId, 0);
+    block.position = position;
+    return block;
+  };
+  bot.world.raycast = () => null;
+  const result = await clearMiningWater(bot, target, async (_bot, position) => {
+    assert.deepEqual(position, face);
+    sealed = true;
+    return { kind: "placed", block: bot.blockAt(face)! };
+  }, null);
+  assert.equal(result, null);
+  assert.equal(sealed, true);
+});

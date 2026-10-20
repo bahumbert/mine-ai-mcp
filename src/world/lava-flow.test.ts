@@ -31,6 +31,8 @@ test("new adjacent lava threatens a dry stance before contact, respecting flow r
   assert.equal(advancingLavaAt(bot), false, "a separating solid blocks flow");
   body = "water";
   assert.equal(advancingLavaAt(bot), false, "water reacts with lava instead of admitting its flow");
+  body = "kelp";
+  assert.equal(advancingLavaAt(bot), false, "a water plant holds water, which reacts with lava too");
 });
 
 /** A bot at (0.5, 64, 0.5); `lavaChangedNear` reads only its position. */

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import minecraftData from "minecraft-data";
+import type { Bot } from "mineflayer";
+import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { createMovementCatalogue } from "./catalogue.js";
 import { createMovementPolicy } from "./policy.js";
@@ -48,4 +51,19 @@ test("a fall into one-deep water is refused", () => {
 
 test("a dry fall of five is still refused", () => {
   assert.deepEqual(dropsEast(pillarOverPool(6, 0), 6), []);
+});
+
+const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+
+/** As {@link pillarOverPool}, the pool filled with kelp: kelp plant cells topped by a kelp cell, on the stone floor. */
+function pillarOverKelpPool(top: number, depth: number): MemoryWorld {
+  const world = pillarOverPool(top, 0);
+  for (let x = 1; x <= 3; x += 1)
+    for (let z = -2; z <= 2; z += 1)
+      for (let y = 1; y <= depth; y += 1) loadNamedBlock(world, registryBot, { x, y, z }, y === depth ? "kelp" : "kelp_plant");
+  return world;
+}
+
+test("a perch over a kelp-filled pool plans a water landing in the kelp, not a fall to the seabed", () => {
+  assert.deepEqual(dropsEast(pillarOverKelpPool(30, 3), 30), [{ y: 3, kind: "drop" }]);
 });

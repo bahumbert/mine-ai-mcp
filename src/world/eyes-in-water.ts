@@ -16,10 +16,14 @@ export interface WaterCell {
 }
 export type WaterCellAt = (x: number, y: number, z: number) => WaterCell | null;
 
-/** How many ninths of its cell the water of this block fills: a source or falling water 8, flowing level 1-7 `8 - level`. */
+/**
+ * How many ninths of its cell the water of this block fills: a source, falling water, a plant or a waterlogged block 8,
+ * flowing level 1-7 `8 - level`. Only the water block's own `level` is a flow level: a waterloggable block's (a light
+ * block's) is not.
+ */
 function fluidAmount(cell: WaterCell): number {
-  if (cell.name !== "water") return FULL_FLUID_AMOUNT;
-  const level = Number(cell.properties?.level ?? 0);
+  const properties = cell.properties ?? {};
+  const level = "waterlogged" in properties ? 0 : Number(properties.level ?? 0);
   return level >= 1 && level < FULL_FLUID_AMOUNT ? FULL_FLUID_AMOUNT - level : FULL_FLUID_AMOUNT;
 }
 

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import minecraftData from "minecraft-data";
+import type { Bot } from "mineflayer";
+import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "./memory-world.js";
+
+const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
 import { admitsDive, holdSwimDepth, openWaterSurface, swimAscent, swimBreathPath, swimExitPath, swimTravelTicks } from "./swimming.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";
@@ -71,7 +76,7 @@ test("a newly dug pickup hole retains its verified ascent as air becomes flowing
   assert.deepEqual(openWaterSurface(read, hole), { x: 0, y: 63, z: 0 });
   world.load(hole, { stateId: 3, traits: { empty: true, liquid: "water", liquidSource: false } });
   assert.deepEqual(openWaterSurface(read, hole), { x: 0, y: 63, z: 0 });
-  world.load(hole, { stateId: 4, traits: { empty: true, waterlogged: true } });
+  loadNamedBlock(world, registryBot, hole, "bubble_column");
   assert.equal(openWaterSurface(read, hole), null, "a bubble column is not the transient air in a pickup hole");
 });
 
@@ -139,4 +144,12 @@ test("a flooded roofed cell reaches the one-cell air pocket in reach, and breath
   assert.deepEqual(swimBreathPath(pocket, { x: 4, y: 2, z: 0 }), [], "head already dry: nothing to swim");
   const sealed = slice(["#####", "#~~~#", "#~~~#", "#####"]);
   assert.equal(swimBreathPath(sealed, { x: 2, y: 1, z: 0 }), null, "no air in reach, no breathing cell");
+});
+
+test("an ascent column through kelp reaches the surface", () => {
+  const world = new MemoryWorld();
+  loadNamedBlock(world, registryBot, { x: 0, y: 59, z: 0 }, "dirt");
+  const cells = ["kelp_plant", "kelp_plant", "kelp_plant", "kelp"];
+  for (let y = 60; y <= 75; y++) loadNamedBlock(world, registryBot, { x: 0, y, z: 0 }, cells[y - 60] ?? "air");
+  assert.deepEqual(openWaterSurface((x, y, z) => world.blockAt(x, y, z), { x: 0, y: 60, z: 0 }), { x: 0, y: 63, z: 0 });
 });

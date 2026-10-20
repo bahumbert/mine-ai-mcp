@@ -1,0 +1,60 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-drop-into-kelp
+tags: [regression]
+description: >-
+  Leave a one-block pillar twenty blocks over a three-deep pool grown full of kelp by dropping into it, then swim out to
+  a point beside the pool. Run 16 (2026-10-19): the planner read kelp as dry air, so a column of it was an air shaft to
+  the pool floor and no water landing was planned. Kelp holds water: untouched health proves the kelp's water took the
+  fall.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The sealed pool: walls round x 1..6, z -3..3, kelp three deep over the floor (its cells hold water).
+  - fill: { block: stone, from: [ 0, -60, -4 ], to: [ 7, -58, 4 ] }
+  - fill: { block: kelp_plant, from: [ 1, -60, -3 ], to: [ 6, -59, 3 ] }
+  - fill: { block: kelp, from: [ 1, -58, -3 ], to: [ 6, -58, 3 ] }
+  # The perch, one block wide, twenty blocks above the water surface.
+  - fill: { block: stone, from: [ 0, -57, 0 ], to: [ 0, -39, 0 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 0.5, -38, 0.5 ]
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 9
+    y: -60
+    z: 0
+    range: 1.5
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: PerchBot
+      pos: [ 9.5, -60, 0.5 ]
+      radius: 2.0
+    - kind: health
+      who: PerchBot
+      health: 20
+    - kind: completion
+      who: PerchBot

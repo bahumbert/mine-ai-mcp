@@ -27,6 +27,7 @@ function botFixture(groundY = 64) {
         : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) },
     entity: { position: new Vec3(0.5, 64, 0.5), vehicle: null },
     game: { dimension: "overworld", minY: -64, height: 384 },
+    version: "1.21.4",
     pathfinder: { movements: {}, setGoal: () => {} },
     clearControlStates: () => {},
     deactivateItem: () => {},
@@ -618,10 +619,10 @@ test("a route with no path is not replanned with a fallback when the policy list
 function wideSeaBot(seaFrom = -30, seaTo = 9) {
   const { bot, inventory } = botFixture();
   bot.blockAt = ((cell: Vec3) => {
-    if (cell.x >= seaFrom && cell.x <= seaTo && cell.y >= 50 && cell.y <= 63) return { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+    if (cell.x >= seaFrom && cell.x <= seaTo && cell.y >= 50 && cell.y <= 63) return { name: "water", stateId: 86, boundingBox: "empty", shapes: [], getProperties: () => ({}) };
     return cell.y < 64
-      ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-      : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
+      ? { name: "stone", stateId: 1, boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
+      : { name: "air", stateId: 0, boundingBox: "empty", shapes: [], getProperties: () => ({}) };
   }) as unknown as Bot["blockAt"];
   bot.entity.position.set(0.5, 63, 0.5);
   return { bot, inventory };
@@ -646,6 +647,77 @@ test("at sea with no boat the bot swims to the nearest land first, then the deep
   const error = "error" in output.result ? String(output.result.error) : "";
   assert.match(error, /\[NAVIGATION_DEEP_WATER\]/u);
   assert.match(error, /swam to land at 10, 64, 0 first/u);
+});
+
+/** Puts a kelp column in the sea at x, z, from the floor to the surface (run 16, Yuki: kelp beside her at sea). */
+function withKelpColumn(bot: Bot, x: number, z: number): void {
+  const blockAt = bot.blockAt.bind(bot);
+  bot.blockAt = ((cell: Vec3) =>
+    cell.x === x && cell.z === z && cell.y >= 50 && cell.y <= 63
+      ? { name: cell.y === 63 ? "kelp" : "kelp_plant", stateId: cell.y === 63 ? 13773 : 13799, boundingBox: "empty", shapes: [], getProperties: () => ({}) }
+      : blockAt(cell)) as Bot["blockAt"];
+}
+
+test("a kelp column beside a bot at sea is not land: the swim goes to the real shore", async () => {
+  const { bot } = wideSeaBot();
+  withKelpColumn(bot, 1, 0);
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.set(10.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 5 };
+    }
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.match("error" in output.result ? String(output.result.error) : "", /swam to land at 10, 64, 0 first/u);
+});
+
+test("a target column topped by kelp resolves to the shore, not to the sea floor under the kelp", async () => {
+  const { bot } = wideSeaBot();
+  withKelpColumn(bot, 3, 0);
+  bot.entity.position.set(20.5, 64, 0.5);
+  let revision = "";
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async (options) => {
+    const resolved = options.goal.resolve(undefined as never);
+    revision = resolved.kind === "active" ? resolved.revision : resolved.observation;
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  await new ActionRunner().run(action, { x: 3, z: 0 });
+  assert.match(revision, /^near:10,64,0/u);
+});
+
+test("a target on the top of a kelp column is admitted water, not a mid-air target", async () => {
+  const { bot } = wideSeaBot();
+  withKelpColumn(bot, 3, 0);
+  bot.entity.position.set(20.5, 64, 0.5);
+  let routes = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    routes++;
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: 3, y: 63, z: 0, range: 0 });
+  assert.doesNotMatch("error" in output.result ? String(output.result.error) : "", /NAVIGATION_TARGET_UNSUPPORTED/u);
+  assert.equal(routes, 1);
+});
+
+test("from a seagrass shallow, the next navigate goes straight to dry land: no swim to land first", async () => {
+  const { bot } = botFixture(64);
+  const blockAt = bot.blockAt;
+  bot.blockAt = ((cell: Vec3) =>
+    cell.x === 0 && cell.y === 64 && cell.z === 0
+      ? { name: "seagrass", stateId: 2051, boundingBox: "empty", shapes: [], getProperties: () => ({}) }
+      : blockAt(cell)) as Bot["blockAt"];
+  let routes = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    routes++;
+    bot.entity.position.set(10.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: 10, y: 64, z: 0 });
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(routes, 1);
 });
 
 test("at sea with no land within the search range the route goes as before", async () => {

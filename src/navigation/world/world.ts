@@ -35,7 +35,10 @@ export interface BlockTraits {
   readonly empty: boolean;
   readonly liquid: "water" | "lava" | null;
   readonly liquidSource: boolean;
-  /** Water held by a plant or waterlogged solid, independently of its collision. */
+  /**
+   * Water held inside a block the body cannot enter: a waterlogged stair, slab or fence. A block with no collision box
+   * that holds water (a water plant, a waterlogged plant) is `liquid` water and a source instead: the body swims there.
+   */
   readonly waterlogged: boolean;
   /**
    * The state carries a `waterlogged` property, so poured water enters this
@@ -68,6 +71,8 @@ export interface BlockTraits {
    * through it, so it is a block to dig, never a free cell.
    */
   readonly entangling?: boolean;
+  /** Water that drags the body up or down whatever it presses: a bubble column (its state has a `drag` property). */
+  readonly current?: boolean;
   /** Right-clicking this block opens or operates it instead of placing against it. */
   readonly interactive: boolean;
   /** How far a parkour jump can start from this block's top. */

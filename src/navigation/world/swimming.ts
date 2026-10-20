@@ -18,7 +18,8 @@ export function openWaterSurface(read: WorldView["blockAt"], feet: BlockPosition
     const body = read(feet.x, y, feet.z);
     const head = read(feet.x, y + 1, feet.z);
     if (body.kind !== "loaded" || head.kind !== "loaded") return null;
-    if (body.traits.waterlogged || head.traits.waterlogged) return null;
+    // A bubble column drags the body (down over magma): never an ascent, though it is water.
+    if (body.traits.current || head.traits.current) return null;
     const pickupHole = y === feet.y && isSafeSupport(read(feet.x, y - 1, feet.z)) &&
       head.traits.liquid === "water" && head.traits.liquidSource;
     // A mined floor is briefly air before its source-water neighbour flows in.

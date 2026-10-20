@@ -41,10 +41,9 @@ export { createNavigationRuntime, createMovements } from "./runtime.js";
 export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
-export { type SwimCellReader, swimExitPath } from "./world/swimming.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
 export { hasSupportedCorridor } from "./world/block-geometry.js";
-export { isPassable, isHeadPassable, isSafeSupport } from "./world/block-geometry.js";
+export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
 
 // The navigation transaction.
 export { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "./navigate.js";
@@ -73,7 +72,7 @@ export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
 
 // Movement policy: what a route may do, and what it costs.
 export { STANDARD_SCAFFOLD_ITEMS, TERRAIN_BREAK_PENALTY } from "./mineflayer/movement-policy.js";
-export { observeMineflayerBlock } from "./mineflayer/world.js";
+export { liveBlockReader, observeMineflayerBlock } from "./mineflayer/world.js";
 export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";

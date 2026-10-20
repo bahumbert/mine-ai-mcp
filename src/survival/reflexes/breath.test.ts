@@ -94,7 +94,7 @@ test("close cancels roof digging and waits for its controls to settle", async (t
   });
   let stops = 0;
   Object.assign(fixture.entity, { isInWater: true, position: new Vec3(0.5, -59, 0.5) });
-  const roof = { boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]], digTime: () => 1000 };
+  const roof = { name: "stone", getProperties: () => ({}), boundingBox: "block", diggable: true, shapes: [[0, 0, 0, 1, 1, 1]], digTime: () => 1000 };
   Object.assign(fixture.bot, {
     oxygenLevel: 8,
     health: 20,
@@ -190,6 +190,8 @@ function sealedPocket(fixture: ReturnType<typeof waterFixture>, inWater: boolean
   const equipped: string[] = [];
   const pickaxe = { name: "stone_pickaxe", type: 1, count: 1 };
   const roof = {
+    name: "stone",
+    getProperties: () => ({}),
     boundingBox: "block",
     diggable: true,
     shapes: [[0, 0, 0, 1, 1, 1]],

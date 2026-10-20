@@ -29,9 +29,9 @@ import {
   type Navigate,
   type NavigationResult,
 } from "../../index.js";
-import { observeMineflayerBlock } from "../../mineflayer/world.js";
-import { UNLOADED } from "../../world/world.js";
-import { isSafeSupport } from "../../world/block-geometry.js";
+import { liveBlockReader, observeMineflayerBlock } from "../../mineflayer/world.js";
+import { botEyesInWater } from "../../../world/eyes-in-water.js";
+import { isSafeSupport, isWater } from "../../world/block-geometry.js";
 import { admitsDive, openWaterSurface } from "../../world/swimming.js";
 import { holdWaterPosition } from "../../steering/hold-water-position.js";
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
@@ -256,10 +256,7 @@ function isDropTarget(
  */
 function workingCells(bot: Bot, target: MineBlockTarget, movements: MovementPolicy): readonly BlockPosition[] {
   const position = target.position;
-  const read = (x: number, y: number, z: number) => {
-    const block = bot.blockAt(new Vec3(x, y, z));
-    return block ? observeMineflayerBlock(block) : UNLOADED;
-  };
+  const read = liveBlockReader(bot);
   return [
     { x: position.x + 1, y: position.y - 1, z: position.z },
     { x: position.x - 1, y: position.y - 1, z: position.z },
@@ -277,9 +274,9 @@ function workingCells(bot: Bot, target: MineBlockTarget, movements: MovementPoli
   ].filter((cell) => {
     // Obsidian takes longer than a breath when the eye is submerged. A pickup
     // may dip into its hole; the next mining stance must return to the surface.
-    const head = bot.blockAt(new Vec3(cell.x, cell.y + 1, cell.z));
-    if (!head || target.excludedStances.has(cellKey(cell))) return false;
-    if (head.name !== "water") return true;
+    const head = read(cell.x, cell.y + 1, cell.z);
+    if (head.kind !== "loaded" || target.excludedStances.has(cellKey(cell))) return false;
+    if (!isWater(head)) return true;
     if (!movements.allowSwimming || !isSafeSupport(read(cell.x, cell.y - 1, cell.z))) return false;
     const surface = openWaterSurface(read, cell);
     if (!surface) return false;
@@ -552,11 +549,8 @@ async function sealAndBreakInReach(
   if (targeting.targets().some(isDropTarget)) return false;
   const feet = bot.entity.position.floored();
   const eye = bot.entity.position.offset(0, STANDING_EYE_HEIGHT, 0);
-  const currentNeedsPreparation = bot.blockAt(feet)?.name === "water" &&
-    !waterMiningStance((x, y, z) => {
-      const block = bot.blockAt(new Vec3(x, y, z));
-      return block ? observeMineflayerBlock(block) : UNLOADED;
-    }, feet, bot.entity.onGround);
+  const read = liveBlockReader(bot);
+  const currentNeedsPreparation = isWater(read(feet.x, feet.y, feet.z)) && !waterMiningStance(read, feet, bot.entity.onGround);
   const target = targeting
     .targets()
     .find(
@@ -569,7 +563,7 @@ async function sealAndBreakInReach(
   if (!target) return false;
   // A goal can become satisfied during a speculative search as the swimmer
   // enters this cell. Mining needs the actual floor, not the floored Y alone.
-  if (!bot.entity.onGround && bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name === "water") {
+  if (!bot.entity.onGround && botEyesInWater(bot)) {
     const release = holdWaterPosition(bot, signal, (control, active) =>
       bot.setControlState(control, control === "jump" ? false : active));
     try {
@@ -1017,7 +1011,7 @@ export async function mine(bot: Bot, request: MineRequest): Promise<MineResult> 
 
     if (await recoverWaterInReach(bot, request, targeting, request.signal)) continue;
     // Submerged work must occur inside navigation's scoped dive, including work already in reach.
-    if (bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name !== "water" &&
+    if (!botEyesInWater(bot) &&
       await sealAndBreakInReach(bot, request, targeting, request.signal)) continue;
     if (await castInReach(bot, request, targeting, request.signal)) continue;
 

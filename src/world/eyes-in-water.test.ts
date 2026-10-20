@@ -60,3 +60,8 @@ test("botEyesInWater reads the bot's own position at eye height, or a given feet
   assert.equal(botEyesInWater(bot), true);
   assert.equal(botEyesInWater(bot, new Vec3(0.5, 0, 0.5)), false);
 });
+
+test("a waterlogged light block fills 8/9 of its cell whatever its light level: only water's own level is a flow level", () => {
+  const light = { name: "light", properties: { level: 15, waterlogged: true } };
+  assert.equal(eyesInWater(column({ 1: light }), 0.3 + EYE, 0.5, 0.5), true);
+});

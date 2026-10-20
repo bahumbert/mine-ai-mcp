@@ -29,6 +29,8 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
 import { waterMiningStance } from "../../world/water.js";
+import { isDryAir, isLava } from "../../world/block-geometry.js";
+import { liveBlockReader } from "../../mineflayer/world.js";
 import { MAXIMUM_BUCKET_DROP } from "../../mineflayer/movement-policy.js";
 import {
   observeMineflayerBlock,
@@ -77,12 +79,12 @@ const DROP_FALL_DEPTH = 24;
  * catches the drop.
  */
 function dropFloorOf(bot: Bot, position: BlockPosition): BlockPosition | null {
+  const read = liveBlockReader(bot);
   for (let depth = 2; depth <= DROP_FALL_DEPTH + 1; depth++) {
-    const above = bot.blockAt(new Vec3(position.x, position.y - depth + 1, position.z), false);
-    if (!above || above.boundingBox !== "empty" || above.name === "lava" || above.name === "water" ||
-      above.name === "bubble_column") return null;
-    const block = bot.blockAt(new Vec3(position.x, position.y - depth, position.z), false);
-    if (block?.name === "lava") return { x: position.x, y: position.y - 1, z: position.z };
+    const above = read(position.x, position.y - depth + 1, position.z);
+    if (!isDryAir(above)) return null;
+    const block = read(position.x, position.y - depth, position.z);
+    if (isLava(block)) return { x: position.x, y: position.y - 1, z: position.z };
   }
   return null;
 }

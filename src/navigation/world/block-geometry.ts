@@ -275,6 +275,22 @@ export function isDry(block: BlockObservation): boolean {
   return block.kind === "loaded" && (block.bits & TRAIT_LIQUID) === 0 && !block.traits.waterlogged;
 }
 
+/** A loaded cell with no collision box and nothing wet in it: air, or a plant that holds no water. */
+export function isDryAir(block: BlockObservation): boolean {
+  return block.kind === "loaded" && block.traits.empty && isDry(block);
+}
+
+/**
+ * Whether a body stands here on dry ground, as routes judge cells: feet and head dry and passable (a carpet or snow
+ * layer is walked on at floor level), safe support below. Unloaded cells are never dry ground.
+ */
+export function standsOnDryGround(read: WorldView["blockAt"], feet: BlockPosition): boolean {
+  const body = read(feet.x, feet.y, feet.z);
+  const head = read(feet.x, feet.y + 1, feet.z);
+  return isPassable(body) && isDry(body) && isHeadPassable(head) && isDry(head) &&
+    isSafeSupport(read(feet.x, feet.y - 1, feet.z));
+}
+
 export function isFalling(block: BlockObservation): boolean {
   return (block.bits & TRAIT_FALLING) !== 0;
 }

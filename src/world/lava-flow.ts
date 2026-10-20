@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { holdsWater } from "../navigation/world/deep-water.js";
 
 /** Prismarine state properties may be numeric strings (including falling level "8"). */
 export function lavaLevel(block: NonNullable<ReturnType<Bot["blockAt"]>>): number {
@@ -14,7 +15,7 @@ export function advancingLavaAt(bot: Bot, position = bot.entity.position, source
       for (let y = Math.floor(position.y); y <= Math.floor(position.y + (bot.entity.height ?? 1.8) - 0.001); y++) {
         const cell = new Vec3(x, y, z);
         const body = bot.blockAt(cell);
-        if (!body || body.boundingBox === "block" || body.name === "water") continue;
+        if (!body || body.boundingBox === "block" || holdsWater(body.name, body.getProperties?.() ?? {})) continue;
         for (const [dx, dy, dz] of [
           [-1, 0, 0],
           [1, 0, 0],

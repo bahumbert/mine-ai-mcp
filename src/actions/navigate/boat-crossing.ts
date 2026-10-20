@@ -15,6 +15,7 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
+import type { MineflayerBlock } from "../../navigation/index.js";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
 import { waitForWorldAge } from "../../world/world-age.js";
@@ -556,7 +557,7 @@ export function lowBankAlong(bot: Bot, from: { readonly x: number; readonly z: n
 
 /** A dry column a swimmer at this water surface steps onto: its top at the water's level or one above, room over it. */
 function climbable(bot: Bot, x: number, z: number, surface: number): boolean {
-  const passable = (block: { readonly boundingBox: string; readonly name: string } | null) => block !== null && block.boundingBox === "empty" && block.name !== "water";
+  const passable = (block: MineflayerBlock | null) => block !== null && block.boundingBox === "empty" && !holdsWater(block.name, block.getProperties?.() ?? {});
   for (const top of [surface, surface + 1]) {
     const ground = bot.blockAt(new Vec3(x, top, z));
     if (ground?.boundingBox === "block" && passable(bot.blockAt(new Vec3(x, top + 1, z))) && passable(bot.blockAt(new Vec3(x, top + 2, z)))) return true;

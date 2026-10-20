@@ -1,4 +1,6 @@
-import { MineflayerWorldView, observeMineflayerBlock } from "./world.js";
+import { blockClass, isSwimWater, MineflayerWorldView, observeMineflayerBlock } from "./world.js";
+import { WATER_ONLY_BLOCKS } from "../world/deep-water.js";
+import { isSolid, isWater } from "../world/block-geometry.js";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
@@ -124,4 +126,54 @@ test("block traits are read from Prismarine's own property strings", () => {
   assert.equal(upper.traits.activationGroup, "oak_door");
   assert.equal(upper.traits.upperHalf, true);
   assert.equal(upper.traits.openable, true);
+});
+
+const Block = blockClass({ registry } as Pick<Bot, "registry">);
+/** The real Prismarine block of `name`, in its default state or with these properties. */
+const realBlock = (name: string, properties?: Record<string, string | number | boolean>) =>
+  properties === undefined
+    ? Block.fromStateId(registry.blocksByName[name]!.defaultState, 0)
+    : Block.fromProperties(registry.blocksByName[name]!.id, properties as Record<string, string | number>, 0);
+
+test("every water-only plant is source water with no collision, and stays breakable", () => {
+  for (const name of WATER_ONLY_BLOCKS) {
+    const observation = observeMineflayerBlock(realBlock(name));
+    assert.equal(observation.collisionShapes.length, 0, name);
+    assert.equal(observation.traits.liquid, "water", name);
+    assert.equal(observation.traits.liquidSource, true, name);
+    assert.equal(observation.traits.waterlogged, false, name);
+    assert.equal(observation.traits.safeToBreak, true, name);
+    assert.equal(isWater(observation), true, name);
+  }
+});
+
+test("a waterlogged block with no collision box is source water, while a waterlogged stair stays a solid holding water", () => {
+  const lichen = observeMineflayerBlock(realBlock("glow_lichen", { waterlogged: true }));
+  assert.equal(lichen.traits.liquid, "water");
+  assert.equal(lichen.traits.liquidSource, true);
+  const dryLichen = observeMineflayerBlock(realBlock("glow_lichen", { waterlogged: false }));
+  assert.equal(dryLichen.traits.liquid, null);
+  const stair = observeMineflayerBlock(realBlock("oak_stairs", { waterlogged: true }));
+  assert.equal(stair.traits.liquid, null);
+  assert.equal(stair.traits.waterlogged, true);
+  assert.equal(isSolid(stair), true);
+});
+
+test("the water block's own traits are unchanged: flowing water is water, not a source, not waterlogged", () => {
+  const flowing = observeMineflayerBlock(realBlock("water", { level: 3 }));
+  assert.equal(flowing.traits.liquid, "water");
+  assert.equal(flowing.traits.liquidSource, false);
+  assert.equal(flowing.traits.waterlogged, false);
+  assert.equal(flowing.traits.safeToBreak, false);
+});
+
+test("a bubble column carries a current that drags the body; a water plant does not", () => {
+  assert.equal(observeMineflayerBlock(realBlock("bubble_column")).traits.current, true);
+  assert.equal(observeMineflayerBlock(realBlock("kelp")).traits.current, false);
+});
+
+test("a kelp block is water the body swims in; air and a cell not loaded are not", () => {
+  assert.equal(isSwimWater(realBlock("kelp")), true);
+  assert.equal(isSwimWater(realBlock("air")), false);
+  assert.equal(isSwimWater(null), false);
 });
