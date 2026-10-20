@@ -1155,3 +1155,258 @@ test("a search overtaken by an impulse with physics stopped still releases its h
   assert.equal(outcome.evidence.cleanup.listeners, 0);
   assert.equal(navigator.active, null);
 });
+
+// ── Arrival is judged once, in the foreground ────────────────────────────────
+
+/** A bot whose first step carries the body to `landing` at once (a push, a current), then takes `walkMs` to report it done. */
+class CarriedBot extends FakeNavigationBot {
+  inFlight = false;
+  carried = false;
+  constructor(
+    readonly landing: { readonly x: number; readonly y: number; readonly z: number },
+    readonly walkMs: number,
+  ) {
+    super();
+  }
+  override async prepareMovement(step: PlannedStep) {
+    if (this.carried) {
+      this.arrive(step.to);
+      return { kind: "completed", arrival: step.to } as const;
+    }
+    this.carried = true;
+    this.arrive(this.landing);
+    this.inFlight = true;
+    await new Promise((resolve) => setTimeout(resolve, this.walkMs));
+    this.inFlight = false;
+    return { kind: "completed", arrival: step.to } as const;
+  }
+}
+
+test("the plan-ahead search never runs the arrival work while a segment is walked", async () => {
+  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 200);
+  actuator.current = observation(-5);
+  const arrivals: boolean[] = [];
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot: actuator }), {
+    goal: exactBlockGoal({ x: 5, y: 63, z: 0 }),
+    policy: walking(),
+    searchLimits: EARLY_COMMIT,
+    onArrival: () => {
+      arrivals.push(actuator.inFlight);
+      return { kind: "completed" };
+    },
+  });
+  assert.equal(outcome.kind, "completed");
+  assert.deepEqual(arrivals, [false], "the arrival work ran once, with no movement in flight");
+});
+
+test("a goal reached at a step's end drains the plan-ahead search before the arrival work", async () => {
+  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 0);
+  actuator.current = observation(-5);
+  const real = createMovementCatalogue();
+  let continuationId: string | null = null;
+  const finished = new Set<string>();
+  // Each expansion of the continuation costs more than a slice's budget, so it is still running when the step ends.
+  const catalogue: MovementCatalogue = {
+    generate(state, context, digContext) {
+      const until = performance.now() + 20;
+      while (performance.now() < until) {
+        /* burn one slice */
+      }
+      return real.generate(state, context, digContext);
+    },
+  };
+  const order: string[] = [];
+  const outcome = await settle(
+    createNavigator({
+      world: flatWorld(),
+      bot: actuator,
+      catalogue,
+      telemetry: onEvent((event) => {
+        if (event.kind === "search_started" && event.reason === "segment_continuation" && continuationId === null)
+          continuationId = event.searchId;
+        if (event.kind === "search_finished") finished.add(event.searchId);
+      }),
+    }),
+    {
+      goal: exactBlockGoal({ x: 5, y: 63, z: 0 }),
+      policy: walking(),
+      searchLimits: EARLY_COMMIT,
+      continuationSearchLimits: { primaryTimeoutMs: 60_000, failureTimeoutMs: 60_000 },
+      onArrival: () => {
+        order.push(continuationId !== null && finished.has(continuationId) ? "drained" : "running");
+        return { kind: "completed" };
+      },
+    },
+  );
+  assert.equal(outcome.kind, "completed");
+  assert.notEqual(continuationId, null, "expected a continuation to have started");
+  assert.deepEqual(order, ["drained"]);
+});
+
+// ── Loops the pinned watch cannot end ────────────────────────────────────────
+
+test("a swimmer carried by a current with searches slower than the drift settles drifting instead of looping", async () => {
+  const actuator = new FakeNavigationBot();
+  actuator.current = observation(-5);
+  let carriedTo = -5;
+  // Every slice the current moves the body one block on: each search starts from a cell the body has already left.
+  const navigator = createNavigator({
+    world: flatWorld(),
+    bot: actuator,
+    now: steppingClock(4_000),
+    telemetry: onEvent((event) => {
+      if (event.kind === "search_slice") actuator.current = observation(++carriedTo);
+    }),
+  });
+  const outcome = await settle(navigator, { goal: nearGoal({ x: 5, y: 63, z: 5 }, 0), policy: walking() });
+  assert.equal(outcome.kind, "failed");
+  if (outcome.kind === "failed" && outcome.failure.kind === "no_progress") {
+    assert.equal(outcome.failure.reason, "drifting");
+    assert.match(outcome.failure.observation, /^Carried \d+ blocks in \d+ s/);
+  } else assert.fail(`expected a drifting failure, got ${JSON.stringify(outcome.kind)}`);
+});
+
+/** A monotonic clock that reads `stepMs` later at every look, so a run's "twenty seconds" take a few looks. */
+function steppingClock(stepMs: number): () => number {
+  let now = 0;
+  return () => (now += stepMs);
+}
+
+test("after drifting the next navigate plans from where the body is", async () => {
+  const actuator = new FakeNavigationBot();
+  actuator.current = observation(-5);
+  let carriedTo = -5;
+  let carrying = true;
+  const navigator = createNavigator({
+    world: flatWorld(),
+    bot: actuator,
+    now: steppingClock(4_000),
+    telemetry: onEvent((event) => {
+      if (carrying && event.kind === "search_slice") actuator.current = observation(++carriedTo);
+    }),
+  });
+  const first = await settle(navigator, { goal: nearGoal({ x: 5, y: 63, z: 5 }, 0), policy: walking() });
+  assert.equal(first.kind, "failed");
+  carrying = false;
+  const goalCell = { x: carriedTo + 1, y: 63, z: 0 };
+  const next = await settle(navigator, { goal: exactBlockGoal(goalCell), policy: walking() });
+  assert.equal(next.kind, "completed");
+  assert.equal(actuator.current.position.x, goalCell.x + 0.5);
+});
+
+/** An arrival that waits a moment, as work with a physics tick does, then asks to go on. */
+const idleArrival = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  return { kind: "continue" } as const;
+};
+
+test("an airborne body at a satisfied stance whose arrival never acts fails repeated_arrival within six seconds", async () => {
+  const actuator = new FakeNavigationBot();
+  actuator.current = { ...observation(), stance: "airborne" };
+  let calls = 0;
+  const navigator = createNavigator({ world: flatWorld(), bot: actuator, now: steppingClock(1_000) });
+  const outcome = await settle(navigator, {
+    goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
+    policy: walking(),
+    onArrival: () => {
+      calls += 1;
+      return idleArrival();
+    },
+  });
+  assert.equal(outcome.kind, "failed");
+  if (outcome.kind === "failed" && outcome.failure.kind === "no_progress") {
+    assert.equal(outcome.failure.reason, "repeated_arrival");
+    assert.match(outcome.failure.observation, /changed nothing for \d+ s in the airborne stance/);
+  } else assert.fail(`expected repeated_arrival, got ${outcome.kind}`);
+  assert.ok(calls >= 3 && calls < 20, `${calls} arrival calls`);
+});
+
+test("after repeated_arrival the next navigate elsewhere starts", async () => {
+  const actuator = new FakeNavigationBot();
+  actuator.current = { ...observation(), stance: "airborne" };
+  const navigator = createNavigator({ world: flatWorld(), bot: actuator, now: steppingClock(1_000) });
+  const first = await settle(navigator, {
+    goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
+    policy: walking(),
+    onArrival: idleArrival,
+  });
+  assert.equal(first.kind, "failed");
+  actuator.current = observation();
+  const next = await settle(navigator, { goal: exactBlockGoal({ x: 3, y: 63, z: 0 }), policy: walking() });
+  assert.equal(next.kind, "completed");
+  assert.equal(actuator.current.position.x, 3.5);
+});
+
+test("a mining arrival that digs each time is not cut", async () => {
+  const world = flatWorld();
+  const navigator = createNavigator({ world, bot: new FakeNavigationBot(), now: steppingClock(1_000) });
+  let digs = 0;
+  const outcome = await settle(navigator, {
+    goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
+    policy: walking(),
+    onArrival: async () => {
+      digs += 1;
+      // The block beside the bot changes every time, as a dig does.
+      world.load({ x: 1, y: 64, z: 0 }, { stateId: digs % 2 });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return digs < 8 ? ({ kind: "continue" } as const) : ({ kind: "completed" } as const);
+    },
+  });
+  assert.equal(outcome.kind, "completed");
+  assert.equal(digs, 8);
+});
+
+// ── An abandoned run cannot touch the next run's body ────────────────────────
+
+test("an abandoned run that wakes later does not clear the next run's controls", async () => {
+  class WalkingBot extends FakeNavigationBot {
+    controls = new Set<string>();
+    calls = 0;
+    gates: Array<() => void> = [];
+    entered: Array<() => void> = [];
+    override get ownedControlCount() {
+      return this.controls.size;
+    }
+    override clearOwnedControls() {
+      this.controls.clear();
+    }
+    /** The first movement of each run holds `forward` until the test lets it finish, as a walk in flight does. */
+    override async prepareMovement(step: PlannedStep) {
+      this.calls += 1;
+      if (this.calls <= 2) {
+        this.controls.add("forward");
+        this.entered.shift()?.();
+        await new Promise<void>((resolve) => this.gates.push(resolve));
+      }
+      // The abandoned run's body is not moved by its wake-up: only the new run's walk arrives.
+      if (this.calls !== 1) this.arrive(step.to);
+      return { kind: "completed", arrival: step.to } as const;
+    }
+  }
+  const actuator = new WalkingBot();
+  const navigator = createNavigator({ world: flatWorld(), bot: actuator });
+  const entered = () => new Promise<void>((resolve) => actuator.entered.push(resolve));
+
+  const firstWalking = entered();
+  const first = navigator.startRun({ goal: exactBlockGoal({ x: 3, y: 63, z: 0 }), policy: walking() });
+  assert.equal(first.kind, "started");
+  if (first.kind !== "started") return;
+  await firstWalking;
+  navigator.abandonActive("its owner is gone");
+  assert.equal(actuator.controls.size, 0, "the abandoned run's controls are cleared when it is abandoned");
+
+  const secondWalking = entered();
+  const next = navigator.startRun({ goal: exactBlockGoal({ x: -2, y: 63, z: 0 }), policy: walking() });
+  assert.equal(next.kind, "started");
+  if (next.kind !== "started") return;
+  await secondWalking;
+  assert.equal(actuator.controls.has("forward"), true);
+
+  // The old run wakes (its tick came back) and unwinds: it must not clear what the new run holds.
+  actuator.gates.shift()?.();
+  assert.equal((await first.handle.outcome).kind, "stopped");
+  assert.equal(actuator.controls.has("forward"), true, "the new run still holds its control");
+
+  actuator.gates.shift()?.();
+  assert.equal((await next.handle.outcome).kind, "completed");
+});

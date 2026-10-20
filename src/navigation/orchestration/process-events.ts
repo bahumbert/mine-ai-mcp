@@ -47,6 +47,9 @@ function describeStartRefusals(refusals: Readonly<Record<string, number>> | unde
   return named.length === 0 ? "" : `; shut in at the start: ${named.join(", ")}`;
 }
 
+/** What a model reads after a search that ran out of time or radius: the next move it has. */
+const SEARCH_LIMIT_NEXT_STEP = "Try a nearer target, or walk part of the way first and ask again.";
+
 /** The one sentence every caller reports for a failed calculation: what ran out, how close it got, and what it was replanning around. */
 export function describeCalculationFailure(failure: NavigationCalculationFailure): string {
   const closest = failure.kind === "no_path" ? failure.closest : failure.limit.closest;
@@ -71,5 +74,7 @@ export function describeCalculationFailure(failure: NavigationCalculationFailure
       : `; the node nearest the goal is within ${near} blocks of where the bot stands, so no route found gets it more than ${near} blocks nearer` +
         (shutIn !== "" ? shutIn : failure.kind === "no_path" ? "; every reachable place was searched, so this direction is a dead end from here" : "");
   const what = `${stopped}; ${work}; ${where}${standing}`;
-  return failure.after ? `${what}, while replanning after a movement failure: ${failure.after.observation}` : what;
+  const replanning = failure.after ? `${what}, while replanning after a movement failure: ${failure.after.observation}` : what;
+  // A search that ran out of time or radius says nothing about the goal's reachability; the model's move is a shorter ask.
+  return failure.kind === "search_limit" ? `${replanning}${replanning.endsWith(".") ? "" : "."} ${SEARCH_LIMIT_NEXT_STEP}` : replanning;
 }

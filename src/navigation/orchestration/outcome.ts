@@ -116,6 +116,10 @@ export type NavigationFailure =
         | "repeated_execution_checkpoint"
         | "repeated_movement_failure"
         | "planning_stalled"
+        /** Every search was overtaken because something kept carrying the body away; no route was committed for the stall time. */
+        | "drifting"
+        /** The goal was reached and the arrival work changed nothing, again and again, from the same stance. */
+        | "repeated_arrival"
         /** The body is held under a ceiling it does not fit beneath and this route may not break it. */
         | "pinned_body";
       readonly observation: string;

@@ -15,6 +15,7 @@ import type { StepFieldProvider } from "../step-field.js";
 import { silentTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
 import { NavigationRun, type RunContext } from "./navigation-run.js";
+import { createRunScopedBot } from "./run-scoped-bot.js";
 import type { NavigationOutcome, NavigationStatus } from "./outcome.js";
 import type {
   NavigationArrival,
@@ -101,6 +102,42 @@ export interface Navigator {
   abandonActive(reason: string): void;
 }
 
+/** What every run of one navigator shares: one per bot, so what one bot's routes failed on is not another's to avoid. */
+interface SharedRunState {
+  readonly catalogue: MovementCatalogue;
+  readonly ledger: ExpectedMutationLedger;
+  readonly failedEdges: FailedEdges;
+  readonly telemetry: TelemetrySink;
+  readonly stepFieldProvider: StepFieldProvider | null;
+}
+
+function createRunContext(
+  dependencies: { readonly world: WorldView; readonly bot: NavigationBot; readonly now?: () => number },
+  shared: SharedRunState,
+  request: NavigationRequest,
+  runId: string,
+  control: AbortController,
+): { readonly context: RunContext; readonly revoke: () => void } {
+  const scoped = createRunScopedBot(dependencies.bot);
+  const context: RunContext = {
+    runId,
+    world: dependencies.world,
+    bot: scoped.bot,
+    isRevoked: () => scoped.revoked,
+    catalogue: shared.catalogue,
+    ledger: shared.ledger,
+    failedEdges: shared.failedEdges,
+    now: dependencies.now,
+    telemetry: shared.telemetry,
+    signal: request.signal ? AbortSignal.any([request.signal, control.signal]) : control.signal,
+    // The request either opted out with an explicit null, or said nothing
+    // and gets whatever is registered - which is itself null until the
+    // session registers one.
+    stepField: request.stepField === null ? null : shared.stepFieldProvider,
+  };
+  return { context, revoke: scoped.revoke };
+}
+
 export function createNavigator(dependencies: {
   readonly world: WorldView;
   readonly bot: NavigationBot;
@@ -110,8 +147,8 @@ export function createNavigator(dependencies: {
   /** The monotonic clock the failed-edge memory expires by; tests move it. */
   readonly now?: () => number;
 }): Navigator {
-  let activeRun: NavigationRun | undefined;
-  let activeControl: AbortController | undefined;
+  /** The one run holding admission: it, its own stop, and the withdrawal of its view of the bot. */
+  let active: { readonly run: NavigationRun; readonly control: AbortController; readonly revoke: () => void } | undefined;
   let activeStatus: NavigationStatus | null = null;
   let sequence = 0;
   const ledger = new ExpectedMutationLedger();
@@ -129,56 +166,49 @@ export function createNavigator(dependencies: {
       stepFieldProvider = provider;
     },
     startRun(request: NavigationRequest): NavigationAdmission {
-      if (activeRun) return { kind: "busy", activeRunId: activeRun.context.runId };
+      if (active) return { kind: "busy", activeRunId: active.run.context.runId };
       const runId = createId();
       // The navigator's own stop, composed with the caller's: the run sees one
       // signal and never learns who aborted it.
       const control = new AbortController();
-      const context: RunContext = {
+      const { context, revoke } = createRunContext(
+        dependencies,
+        { catalogue, ledger, failedEdges, telemetry, stepFieldProvider },
+        request,
         runId,
-        world: dependencies.world,
-        bot: dependencies.bot,
-        catalogue,
-        ledger,
-        failedEdges,
-        telemetry,
-        signal: request.signal ? AbortSignal.any([request.signal, control.signal]) : control.signal,
-        // The request either opted out with an explicit null, or said nothing
-        // and gets whatever is registered - which is itself null until the
-        // session registers one.
-        stepField: request.stepField === null ? null : stepFieldProvider,
-      };
+        control,
+      );
       const run = new NavigationRun({
         context,
         request,
         status: (status) => {
-          if (activeRun === run) activeStatus = status;
+          if (active?.run === run) activeStatus = status;
         },
         release: () => {
-          if (activeRun === run) {
-            activeRun = undefined;
-            activeControl = undefined;
-          }
+          if (active?.run === run) active = undefined;
         },
       });
-      activeRun = run;
-      activeControl = control;
+      active = { run, control, revoke };
       const outcome = run.execute();
       return { kind: "started", handle: { runId, outcome, cancel: (reason = "cancelled") => control.abort(reason) } };
     },
     cancelActive(reason = "cancelled") {
-      activeControl?.abort(reason);
+      active?.control.abort(reason);
     },
     terminateActive(reason) {
-      activeControl?.abort(reason);
-      activeRun?.terminate();
+      active?.control.abort(reason);
+      active?.run.terminate();
     },
     abandonActive(reason) {
-      activeControl?.abort(reason);
-      activeRun?.terminate();
-      activeRun = undefined;
-      activeControl = undefined;
-      activeStatus = null;
+      active?.control.abort(reason);
+      active?.run.terminate();
+      try {
+        // Before admission is freed: the old run's holds go and its later writes become no-ops, so the next run's body is its own.
+        active?.revoke();
+      } finally {
+        active = undefined;
+        activeStatus = null;
+      }
     },
   };
 }

@@ -6,7 +6,9 @@
 import { standsFree } from "../movements/catalogue.js";
 import type { PlannedStep } from "../movements/movement.js";
 import { BREAK_UNDER_WATER, type BreakEvaluation, type MovementPolicy, type PolicyDecision } from "../movements/policy.js";
+import { countStartRefusals, neverLeftStart, type StartRefusals } from "../search/start-refusals.js";
 import type { BlockObservation, BlockPosition, WorldView } from "../world/world.js";
+import type { NavigationCalculationFailure } from "./process-events.js";
 
 /** The rule names an escape reports (events, evidence, the action's result text). */
 export const RELAXED_DIG_STRAIGHT_DOWN = "dig_straight_down";
@@ -36,6 +38,25 @@ export function relaxedForEscape(policy: MovementPolicy): MovementPolicy {
         : evaluation;
     },
   });
+}
+
+const refused = (refusals: StartRefusals): number => Object.values(refusals).reduce((sum, count) => sum + count, 0);
+
+/**
+ * An exhausted search that never left its start, whose first digs the escape's own policy refuses less often than the
+ * run's: only then can an escape search get out. What the escape lifts is defined above and nowhere else, so a refusal
+ * it leaves in place (lava) never starts a search that cannot succeed, and a rule it relaxes later is counted at once.
+ */
+export function isShutInByEscapableRefusals(
+  failure: Extract<NavigationCalculationFailure, { readonly kind: "no_path" }>,
+  world: WorldView,
+  policy: MovementPolicy,
+  feet: BlockPosition,
+): boolean {
+  return (
+    neverLeftStart(failure.search) &&
+    refused(countStartRefusals(world, relaxedForEscape(policy), feet)) < refused(countStartRefusals(world, policy, feet))
+  );
 }
 
 /** Whether `policy` (the bot's own, not the escape's) refuses this break as a flood that only the flowing-water exception lets through. */

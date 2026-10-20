@@ -136,6 +136,8 @@ test("lava beside the opened cell is never let through", async () => {
     edit: (world, bot) => loadNamedBlock(world, bot, { x: -454, y: 57, z: 100 }, "lava"),
   });
   assert.ok(!kinds(run.events).includes("route_committed"));
+  // The escape lifts no lava refusal, so the start is not "shut in by what an escape sets aside": no escape search is started.
+  assert.ok(!kinds(run.events).includes("escape_relaxed"), "an escape search that cannot succeed was started");
 });
 
 /**
