@@ -12,7 +12,7 @@ import type { Position3 } from "../../utils/index.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { executeCraftPlan, type CraftExecution } from "../../world/crafting.js";
 import { recipesFor } from "../../world/smelting.js";
-import { carriedCount, settledNow, settleInventoryMinimum, type SettledInventoryCount } from "../../world/index.js";
+import { carriedCount, settledNow, settleInventoryMinimum, startOwnPlacement, type SettledInventoryCount } from "../../world/index.js";
 import type { WorldBlock } from "../../world/placement.js";
 import { unknownItemAnswer } from "../../world/mob-drops.js";
 import { defineAction, type ActionContext } from "../action.js";
@@ -21,7 +21,6 @@ import {
   formatWorkstation,
   useTemporaryWorkstation,
   workstationOperations,
-  type WorkstationHold,
   type WorkstationOperations,
 } from "../temporary-workstation.js";
 import {
@@ -36,7 +35,7 @@ import {
   type CraftItemRequest,
   type CraftItemResult,
 } from "./contract.js";
-import { CRAFTING_TABLE_ITEM, prepareCraftingStation, reachCraftingTable, type TableHold } from "./crafting-station.js";
+import { CRAFTING_TABLE_ITEM, placedTableAt, prepareCraftingStation, reachCraftingTable, startTableHold, type TableHold } from "./crafting-station.js";
 
 /** A result that stopped short of the request. */
 type ShortCraftResult = Exclude<CraftItemResult, { readonly status: "succeeded" }>;
@@ -150,7 +149,7 @@ interface CraftProgress {
 }
 
 function newCraftProgress(): CraftProgress {
-  return { baselines: new Map(), table: { placedAt: null, usedCarried: 0 }, crafted: new Map() };
+  return { baselines: new Map(), table: startTableHold(), crafted: new Map() };
 }
 
 /** The recorder every craft call of the request reports to, so an aborted attempt still leaves its credit. */
@@ -252,7 +251,7 @@ function craftOutcome(
     items: settled,
     completedSteps: execution?.completedSteps,
     preparation,
-    craftingTablePlaced: progress.table.placedAt ?? undefined,
+    craftingTablePlaced: placedTableAt(progress.table),
   });
   if (execution?.kind === "failed") {
     return failureAfterEarlierCrafts({
@@ -288,7 +287,7 @@ async function stationForBatch(
         onCrafted: recordCrafted(progress),
       });
   // A reflex may have moved the bot away from a table that is still ours (also the temporary one).
-  if (station.kind === "ready" && station.craftingTable && (providedTable || progress.table.placedAt)) {
+  if (station.kind === "ready" && station.craftingTable && (providedTable || placedTableAt(progress.table))) {
     await reachCraftingTable(bot, navigation, station.craftingTable, context.signal);
   }
   return station;
@@ -337,7 +336,7 @@ async function craftBatch(
   const preparation = planCraftingFromInventory(bot, stillToCraft(bot, items, progress), planOptions);
   if (preparation.kind !== "ready") {
     return preparationFailureResult(preparation, {
-      craftingTablePlaced: progress.table.placedAt ?? undefined,
+      craftingTablePlaced: placedTableAt(progress.table),
       items: unsettled(),
     }, bot.version);
   }
@@ -364,7 +363,7 @@ export function beginCraftItem(
     return (context) => craftBatch(bot, navigation, request, context, progress, undefined, seen);
   }
   const tablesBefore = carriedCount(bot, CRAFTING_TABLE_ITEM);
-  const hold: WorkstationHold = { placedAt: null };
+  const hold = startOwnPlacement();
   return async (context) => {
     const result = await useTemporaryWorkstation(
       bot,

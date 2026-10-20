@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { z } from "zod";
 import { createMovements, exactBlockGoal, type NavigationRuntime } from "../navigation/index.js";
 import { carriedCount } from "../world/inventory-count.js";
+import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement, type OwnPlacement } from "../world/own-placement.js";
 import {
   findStandingSpot,
   placeCarriedBlockNearby,
@@ -32,8 +33,8 @@ type WorkstationEvidence = z.output<typeof workstationEvidenceSchema>;
 type WorkstationName = WorkstationEvidence["block"];
 
 export interface WorkstationOperations {
-  /** `onCellChosen` fires before the block is set: an abort in the wait for the server still leaves the cell known. */
-  place(name: WorkstationName, signal?: AbortSignal, onCellChosen?: (cell: Vec3) => void): Promise<NearbyPlacement>;
+  /** `onPlacementSent` fires right before the placement packet: an abort in the wait for the server still leaves the cell known. */
+  place(name: WorkstationName, signal?: AbortSignal, onPlacementSent?: (cells: readonly Vec3[]) => void): Promise<NearbyPlacement>;
   /** Walk to the nearest spot where a player can stand and set the block down; false when there is none. */
   moveToOpenGround(name: WorkstationName, context: ActionContext): Promise<boolean>;
   collect(
@@ -49,7 +50,7 @@ export function workstationOperations(
   dropClock?: DropClock,
 ): WorkstationOperations {
   return {
-    place: (name, signal, onCellChosen) => placeCarriedBlockNearby(bot, name, { signal, onCellChosen }),
+    place: (name, signal, onPlacementSent) => placeCarriedBlockNearby(bot, name, { signal, onPlacementSent }),
     moveToOpenGround: async (name, context) => {
       const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name);
       if (!spot) return false;
@@ -90,11 +91,6 @@ export function workstationOperations(
   };
 }
 
-/** Where an earlier attempt of one request set its temporary workstation down: a resume reuses it, never places a second. */
-export interface WorkstationHold {
-  placedAt: Vec3 | null;
-}
-
 interface WorkstationSetDown {
   readonly position: Vec3;
   /** Null when the block stands but the placement was not confirmed: nothing may start, the block is still recovered. */
@@ -102,16 +98,28 @@ interface WorkstationSetDown {
   readonly placementError: string;
 }
 
-/** The block an earlier attempt placed, while it still stands; a string is the refusal when it cannot be told. */
-function heldWorkstation(bot: Bot, name: WorkstationName, hold: WorkstationHold): WorkstationSetDown | string | null {
-  if (!hold.placedAt) return null;
-  const there = bot.blockAt(hold.placedAt);
-  if (there === null) {
-    return `[WORKSTATION_NOT_LOADED] The temporary ${name} set down at ${hold.placedAt} is not in a loaded chunk; go back near it.`;
+/**
+ * The block this request's own packet put down earlier, as the server answered it, while it still stands; a string is
+ * the refusal when it cannot be told. A block of that name that our packet did not put there is not the request's.
+ */
+async function heldWorkstation(
+  bot: Bot,
+  name: WorkstationName,
+  hold: OwnPlacement,
+  signal?: AbortSignal,
+): Promise<WorkstationSetDown | string | null> {
+  const seen = await awaitOwnPlacement(bot, hold, (block) => block.name === name, signal);
+  switch (seen.kind) {
+    case "landed":
+      return { position: seen.cell, block: seen.block, placementError: "" };
+    case "unloaded":
+      return `[WORKSTATION_NOT_LOADED] The temporary ${name} set down at ${seen.cell} is not in a loaded chunk; go back near it.`;
+    case "not_landed":
+      forgetPlacement(hold);
+      return null;
+    case "none":
+      return null;
   }
-  if (there.name === name) return { position: hold.placedAt, block: there as WorldBlock, placementError: "" };
-  hold.placedAt = null;
-  return null;
 }
 
 /** Reuse the held workstation, or place the carried one (once walking to open ground if there is no cell); a string is the refusal. */
@@ -120,9 +128,9 @@ async function setWorkstationDown(
   name: WorkstationName,
   context: ActionContext,
   operations: WorkstationOperations,
-  hold: WorkstationHold,
+  hold: OwnPlacement,
 ): Promise<WorkstationSetDown | string> {
-  const held = heldWorkstation(bot, name, hold);
+  const held = await heldWorkstation(bot, name, hold, context.signal);
   if (held !== null) return held;
   if (carriedCount(bot, name) < 1) return `[WORKSTATION_NOT_CARRIED] No ${name} is carried for temporary use.`;
   // Picking it back up needs a free slot: the slot it leaves may fill with what it makes (live 2026-10-02: a full
@@ -130,15 +138,13 @@ async function setWorkstationDown(
   if (bot.inventory.emptySlotCount?.() === 0) {
     return `[WORKSTATION_NO_ROOM] ${name}: no free inventory slot to pick it back up afterwards; make room first.`;
   }
-  const keepCell = (cell: Vec3) => {
-    hold.placedAt = cell;
-  };
-  let placement = await operations.place(name, context.signal, keepCell);
+  const sent = (cells: readonly Vec3[]) => recordPlacementSent(hold, cells, bot.time?.age);
+  let placement = await operations.place(name, context.signal, sent);
   // A player standing in water, or in a tunnel too tight to set anything down, takes a few steps first (live
   // 2026-10-02: a bot logged in standing in water; 2026-10-10 run 9: Yuki, no_cell twice). Once.
   if (placement.kind === "no_cell" && (await operations.moveToOpenGround(name, context))) {
     context.signal?.throwIfAborted();
-    placement = await operations.place(name, context.signal, keepCell);
+    placement = await operations.place(name, context.signal, sent);
   }
   if (placement.kind === "no_item") return `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_item.`;
   if (placement.kind === "no_cell") {
@@ -147,10 +153,9 @@ async function setWorkstationDown(
   // A placement may report unsettled inventory even though the block appeared.
   // That cell is still ours to recover, but no crafting/cooking may begin.
   if (bot.blockAt(placement.position)?.name !== name) {
-    hold.placedAt = null;
+    forgetPlacement(hold);
     return `[WORKSTATION_PLACEMENT_FAILED] ${name}: ${placement.kind === "failed" ? placement.error : "placed block was not observed"}.`;
   }
-  hold.placedAt = placement.position;
   return placement.kind === "placed"
     ? { position: placement.position, block: placement.block, placementError: "" }
     : { position: placement.position, block: null, placementError: placement.error };
@@ -167,7 +172,7 @@ export async function useTemporaryWorkstation<Evidence extends object>(
   operations: WorkstationOperations,
   execute: (block: WorldBlock) => Promise<ActionResult & Evidence>,
   failure: (error: string) => ActionResult & Evidence,
-  hold: WorkstationHold = { placedAt: null },
+  hold: OwnPlacement = startOwnPlacement(),
 ): Promise<ActionResult & Evidence & { workstation?: WorkstationEvidence }> {
   context.signal?.throwIfAborted();
   const setDown = await setWorkstationDown(bot, name, context, operations, hold);
@@ -196,7 +201,7 @@ export async function useTemporaryWorkstation<Evidence extends object>(
         recoveryError = cause instanceof Error ? cause.message : String(cause);
       }
       // The request ends here whatever the recovery found: nothing is left for a later attempt to reuse.
-      if (!context.signal?.aborted) hold.placedAt = null;
+      if (!context.signal?.aborted) forgetPlacement(hold);
     }
   }
   context.signal?.throwIfAborted();

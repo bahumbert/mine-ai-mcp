@@ -3,13 +3,17 @@ import type { Bot } from "mineflayer";
 import { createMovements, nearGoal, type NavigationRuntime } from "../../navigation/index.js";
 import { waitForSignal } from "../../utils/index.js";
 import {
+  awaitOwnPlacement,
   findLoadedBlockPositions,
+  forgetPlacement,
   isBedSleepTime,
+  recordPlacementSent,
+  startOwnPlacement,
   ticksToMinutes,
   ticksUntilNight,
+  type OwnPlacement,
   type WorldBlock,
 } from "../../world/index.js";
-import { Vec3 } from "vec3";
 import type { ObserveRequest } from "../../session/request.js";
 import { defineAction, type RequestExecution } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -28,7 +32,8 @@ import {
   type SleepRequest,
 } from "./contract.js";
 
-const BED_SEARCH_DISTANCE = 32;
+/** Bed blocks examined, nearest first, for a free one: the scan is bounded by this work, not by a radius. */
+const BED_SCAN_BUDGET = 64;
 const BED_USE_DISTANCE = 3.2;
 const BED_ROUTE_TIMEOUT_MS = 30_000;
 const MORNING_WAIT_MS = 30_000;
@@ -68,58 +73,38 @@ function findUnoccupiedBed(bot: Bot): WorldBlock | null {
     if (!isBedBlock(block.name)) continue;
     for (let state = block.minStateId; state <= block.maxStateId; state += 1) stateIds.add(state);
   }
-  // Mineflayer's nearest-section search missed a diagonal section containing
-  // the camp bed. Scan loaded columns, then enforce the spherical reach below.
-  const positions = findLoadedBlockPositions(bot, {
-    center: bot.entity.position,
-    radius: BED_SEARCH_DISTANCE,
-    stateIds,
-    limit: Number.POSITIVE_INFINITY,
-  });
+  // Mineflayer's nearest-section search missed a diagonal section containing the camp bed. Scan the loaded columns
+  // nearest first; the route to the bed (approachBed) has its own time bound.
+  const positions = findLoadedBlockPositions(bot, { center: bot.entity.position, stateIds, limit: BED_SCAN_BUDGET });
 
   for (const position of positions) {
-    if (position.distanceTo(bot.entity.position) > BED_SEARCH_DISTANCE) continue;
     const block = bot.blockAt(position);
     if (block && isBedBlock(block.name) && !isBedOccupied(block)) return block;
   }
   return null;
 }
 
-/** The bed a request placed from the inventory, kept across attempts so a resumed sleep uses it and never places another. */
-interface RequestBed {
-  /** The two cells (foot and head) of the bed this request placed or was placing when it was cut off; empty before. */
-  placedCells: readonly Vec3[];
-}
-
-function startRequestBed(): RequestBed {
-  return { placedCells: [] };
-}
-
-/** The bed this request placed, when it still stands free in one of its cells. */
-function ownFreeBed(bot: Bot, ownBed: RequestBed): WorldBlock | null {
-  for (const cell of ownBed.placedCells) {
-    const block = bot.blockAt(cell);
-    if (block && isBedBlock(block.name) && !isBedOccupied(block)) return block;
-  }
-  return null;
-}
 
 /**
  * The bed to sleep in: the request's own, any other free one nearby, or one placed from the inventory. `placed` is true
  * only for a bed standing in the request's own cells: a free bed found instead is not ours, whatever the carried count
  * says (review 2026-10-19: carried fewer beds because a reflex or another action used one).
  */
-async function findOrPlaceBed(bot: Bot, ownBed: RequestBed, signal?: AbortSignal): Promise<BedAvailability> {
-  const own = ownFreeBed(bot, ownBed);
-  if (own) return { kind: "available", bed: { block: own, placed: true } };
+async function findOrPlaceBed(bot: Bot, ownBed: OwnPlacement, signal?: AbortSignal): Promise<BedAvailability> {
+  // The bed this request's own packet put down (foot and head cells, recorded at the send), kept across attempts so a
+  // resumed sleep uses it and never places another; a bed in those cells that our packet did not put there is not ours.
+  const sent = await awaitOwnPlacement(bot, ownBed, (block) => isBedBlock(block.name), signal);
+  if (sent.kind === "landed" && !isBedOccupied(sent.block)) {
+    return { kind: "available", bed: { block: sent.block, placed: true } };
+  }
+  if (sent.kind === "unloaded") return { kind: "failed", error: sleepOutcomes.placedBedNotLoaded(sent.cell) };
+  if (sent.kind === "not_landed") forgetPlacement(ownBed);
   const existing = findUnoccupiedBed(bot);
   if (existing) return { kind: "available", bed: { block: existing, placed: false } };
 
-  const placement = await placeCarriedBed(bot, signal, (cells) => {
-    ownBed.placedCells = cells.map((cell) => cell.clone());
-  });
+  const placement = await placeCarriedBed(bot, signal, (cells) => recordPlacementSent(ownBed, cells, bot.time?.age));
   if (placement.kind === "placed") return { kind: "available", bed: { block: placement.block, placed: true } };
-  ownBed.placedCells = []; // no bed went down: a bed another player puts there later is not ours
+  forgetPlacement(ownBed); // no bed went down: a bed another player puts there later is not ours
   return {
     kind: "failed",
     error:
@@ -340,7 +325,7 @@ export async function executeSleep(
   navigation: NavigationRuntime,
   _request: SleepRequest,
   signal?: AbortSignal,
-  ownBed: RequestBed = startRequestBed(),
+  ownBed: OwnPlacement = startOwnPlacement(),
 ): Promise<SleepResult> {
   signal?.throwIfAborted();
   if (bot.game.dimension !== "overworld") {
@@ -439,7 +424,7 @@ export function beginSleep(
   observe: ObserveRequest,
 ): RequestExecution<SleepResult> {
   const timeBefore = bot.time.timeOfDay;
-  const ownBed = startRequestBed();
+  const ownBed = startOwnPlacement();
   let succeeded: SleepResult | null = null;
   observe(() => ({ baseline: { timeOfDay: timeBefore },
     checkpoint: { phase: bot.isSleeping ? "sleeping" : "finding_or_entering_bed", asleep: bot.isSleeping, timeOfDay: bot.time.timeOfDay },

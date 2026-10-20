@@ -13,13 +13,19 @@ import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { cellIntersectsPlayerBody, cellKey } from "../../utils/index.js";
 import {
+  awaitOwnPlacement,
   carriedCount,
+  forgetPlacement,
   isReplaceableForPlacement,
   placeBlock,
   placeCarriedBlockNearby,
+  recordPlacementSent,
   settledNow,
   settleInventoryCount,
+  startOwnPlacement,
   type BlockPlacementResult,
+  type InventoryItem,
+  type OwnPlacement,
   type SettledInventoryCount,
   type WorldBlock,
 } from "../../world/index.js";
@@ -153,31 +159,14 @@ interface PlaceRun {
   readonly bot: Bot;
   readonly request: PlaceBlockRequest;
   readonly dependencies: PlaceBlockDependencies;
-  /** The count of the block carried when the request was taken: a resume that finds fewer knows a block was put down. */
+  /** The count of the block carried when the request was taken: the evidence's baseline, and what the settle expects to fall by one. */
   readonly inventoryBefore: number;
-  /** What the target cell held before this request put anything there, for the evidence of a resumed attempt. */
+  /** What the placed cell held before this request put anything there, for the evidence of a resumed attempt. */
   beforeBlock: string | null;
-  /** The cell a block put down beside the bot went to, once an attempt has seen it (the progress checkpoint reads it too). */
+  /** The cell this request's placement went to (the progress checkpoint reads it too). */
   chosen: Vec3 | null;
-  /** Where the bot stood when the first nearby placement began, and the cells around it that already held the block. */
-  nearby: { readonly origin: Vec3; readonly alreadyHolding: ReadonlySet<string> } | null;
-}
-
-/** How far around the first nearby placement's origin a block it put down is looked for after an abort. */
-const NEARBY_SEARCH_RADIUS = 5;
-
-const cellId = (cell: Vec3) => `${cell.x},${cell.y},${cell.z}`;
-
-/** The cells around `origin` (feet level, one down and one up) that hold `blockName` now. */
-function cellsHolding(bot: Bot, blockName: string, origin: Vec3): Vec3[] {
-  const found: Vec3[] = [];
-  for (let dx = -NEARBY_SEARCH_RADIUS; dx <= NEARBY_SEARCH_RADIUS; dx += 1)
-    for (let dz = -NEARBY_SEARCH_RADIUS; dz <= NEARBY_SEARCH_RADIUS; dz += 1)
-      for (let dy = -1; dy <= 1; dy += 1) {
-        const cell = origin.offset(dx, dy, dz);
-        if (bot.blockAt(cell)?.name === blockName) found.push(cell);
-      }
-  return found;
+  /** The cells this request's own placement packet went to: the only block a resume may call its own. */
+  readonly own: OwnPlacement;
 }
 
 function supportBelow(bot: Bot, cell: Vec3): { block: WorldBlock; face: Vec3 } | undefined {
@@ -185,39 +174,57 @@ function supportBelow(bot: Bot, cell: Vec3): { block: WorldBlock; face: Vec3 } |
   return block ? { block, face: new Vec3(0, 1, 0) } : undefined;
 }
 
-/**
- * The block an earlier, aborted attempt put down beside the bot, as a success: the carried count fell from the baseline
- * and a cell that did not hold the block before now does. Null when no earlier attempt put one down.
- */
-async function nearbyBlockAlreadyPlaced(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult | null> {
-  const { bot, request, inventoryBefore, nearby } = run;
-  if (nearby === null || carriedCount(bot, request.blockName) >= inventoryBefore) return null;
-  const cell = run.chosen ?? cellsHolding(bot, request.blockName, nearby.origin)
-    .filter((candidate) => !nearby.alreadyHolding.has(cellId(candidate)))
-    .sort((a, b) => a.distanceTo(nearby.origin) - b.distanceTo(nearby.origin))[0] ?? null;
-  if (cell === null) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.failed("An earlier attempt used a block, but no placed block was found beside the bot."),
-      placement: evidence(bot, request, bot.entity.position.floored(), inventoryBefore, null),
-    };
-  }
-  run.chosen = cell;
-  return {
-    status: "succeeded",
-    placement: evidence(bot, request, cell, inventoryBefore, "air", supportBelow(bot, cell), true,
-      await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal })),
+/** Heard right before each placement packet: record the cells, what they held and where the block is going. */
+function recordSent(run: PlaceRun): (cells: readonly Vec3[]) => void {
+  return (cells) => {
+    recordPlacementSent(run.own, cells, run.bot.time?.age);
+    run.beforeBlock ??= run.bot.blockAt(cells[0]!)?.name ?? null;
+    run.chosen = cells[0]!.clone();
   };
+}
+
+/** The carried count settled to one fewer, counting the server's answer from the moment the packet went out. */
+function settledAfterSend(run: PlaceRun, context: ActionContext): Promise<SettledInventoryCount> {
+  return settleInventoryCount(run.bot, run.request.blockName, run.inventoryBefore - 1, {
+    ...(context.signal && { signal: context.signal }),
+    ...(run.own.sentAtAge !== undefined && { sentAtAge: run.own.sentAtAge }),
+  });
+}
+
+/**
+ * What an earlier attempt's placement packet became, as the server answered it: the block it put down is a success of
+ * this request, a cell out of loaded chunks is a failure that says where to go, and a packet that never landed is
+ * forgotten so this attempt places again. Null when nothing is left to credit. A block that is in the world without
+ * our packet having gone to its cell (a reflex's, another player's) is never credited.
+ */
+async function earlierPlacement(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult | null> {
+  const { bot, request, inventoryBefore } = run;
+  const seen = await awaitOwnPlacement(bot, run.own, (block) => block.name === request.blockName, context.signal);
+  switch (seen.kind) {
+    case "none":
+      return null;
+    case "not_landed":
+      forgetPlacement(run.own);
+      return null;
+    case "unloaded":
+      return failedPlacement(run, placeBlockOutcomes.placementNotLoaded(seen.cell), seen.cell, null);
+    case "landed":
+      run.chosen = seen.cell.clone();
+      return {
+        status: "succeeded",
+        placement: evidence(bot, request, seen.cell, inventoryBefore, run.beforeBlock, supportBelow(bot, seen.cell), true,
+          await settledAfterSend(run, context)),
+      };
+  }
 }
 
 /** Put one carried block on a cell chosen around the bot, without moving. */
 async function placeNearby(run: PlaceRun, context: ActionContext): Promise<PlaceBlockResult> {
   const { bot, request, inventoryBefore, dependencies } = run;
-  const placedBefore = await nearbyBlockAlreadyPlaced(run, context);
-  if (placedBefore !== null) return placedBefore;
+  const earlier = await earlierPlacement(run, context);
+  if (earlier !== null) return earlier;
   const feet = bot.entity.position.floored();
-  run.nearby ??= { origin: feet, alreadyHolding: new Set(cellsHolding(bot, request.blockName, feet).map(cellId)) };
-  const result = await dependencies.placeNearby(bot, request.blockName, { signal: context.signal });
+  const result = await dependencies.placeNearby(bot, request.blockName, { signal: context.signal, onPlacementSent: recordSent(run) });
   switch (result.kind) {
     case "placed":
       run.chosen = result.position;
@@ -228,32 +235,20 @@ async function placeNearby(run: PlaceRun, context: ActionContext): Promise<Place
           request,
           result.position,
           inventoryBefore,
-          "air",
+          run.beforeBlock,
           { block: bot.blockAt(result.position.offset(0, -1, 0)) ?? result.block, face: new Vec3(0, 1, 0) },
           true,
           // The block update resolved the placement; the slot that loses the
           // block is broadcast after it.
-          await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal }),
+          await settledAfterSend(run, context),
         ),
       };
     case "failed":
-      return {
-        status: "failed",
-        error: placeBlockOutcomes.failed(result.error),
-        placement: evidence(bot, request, result.position, inventoryBefore, "air"),
-      };
+      return failedPlacement(run, placeBlockOutcomes.failed(result.error), result.position, bot.blockAt(result.position)?.name ?? null);
     case "no_item":
-      return {
-        status: "failed",
-        error: placeBlockOutcomes.noItem(request.blockName, 0),
-        placement: evidence(bot, request, feet, inventoryBefore, null),
-      };
+      return failedPlacement(run, placeBlockOutcomes.noItem(request.blockName, 0), feet, null);
     case "no_cell":
-      return {
-        status: "failed",
-        error: placeBlockOutcomesNearby.noFreeCell,
-        placement: evidence(bot, request, feet, inventoryBefore, null),
-      };
+      return failedPlacement(run, placeBlockOutcomesNearby.noFreeCell, feet, null);
   }
 }
 
@@ -279,67 +274,59 @@ async function reachTarget(run: PlaceRun, target: Vec3, context: ActionContext):
   return null;
 }
 
-/** The target already holds the requested block: ours when an earlier attempt took one from the inventory, else it was there. */
-async function targetAlreadyHoldsBlock(run: PlaceRun, target: Vec3, context: ActionContext): Promise<PlaceBlockResult> {
-  const { bot, request, inventoryBefore } = run;
-  if (carriedCount(bot, request.blockName) >= inventoryBefore) {
-    return { status: "succeeded", placement: evidence(bot, request, target, inventoryBefore, request.blockName) };
+/** The target holds the requested block and no placement of ours put it there: it was already present. */
+function targetAlreadyHoldsBlock(run: PlaceRun, target: Vec3): PlaceBlockResult {
+  return { status: "succeeded", placement: evidence(run.bot, run.request, target, run.inventoryBefore, run.request.blockName) };
+}
+
+/** A failed attempt: the text the model reads and the evidence of the cell it was about. */
+function failedPlacement(
+  run: PlaceRun,
+  error: string,
+  cell: Vec3,
+  beforeBlock: string | null,
+  support?: { block: WorldBlock; face: Vec3 },
+): PlaceBlockResult {
+  return { status: "failed", error, placement: evidence(run.bot, run.request, cell, run.inventoryBefore, beforeBlock, support) };
+}
+
+/** What placing at the target needs once the bot is in reach: the cell, a face to place against, and the carried item. */
+interface TargetPlan {
+  readonly targetBlock: WorldBlock;
+  readonly support: { block: WorldBlock; face: Vec3 };
+  readonly item: InventoryItem;
+}
+
+/** The target's plan, or the failure that says what is missing; a target already holding the block is answered here. */
+function planTarget(run: PlaceRun, target: Vec3): TargetPlan | PlaceBlockResult {
+  const { bot, request } = run;
+  const targetBlock = bot.blockAt(target);
+  if (!targetBlock) return failedPlacement(run, placeBlockOutcomes.targetUnloaded, target, null);
+  if (targetBlock.name === request.blockName) return targetAlreadyHoldsBlock(run, target);
+  run.beforeBlock ??= targetBlock.name;
+  if (!isReplaceableForPlacement(targetBlock)) {
+    return failedPlacement(run, placeBlockOutcomes.targetOccupied(targetBlock.name), target, targetBlock.name);
   }
-  return {
-    status: "succeeded",
-    placement: evidence(bot, request, target, inventoryBefore, run.beforeBlock ?? "air", supportBelow(bot, target), true,
-      await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal })),
-  };
+  const support = findSupport(bot, target);
+  if (!support) return failedPlacement(run, placeBlockOutcomes.noSupport, target, targetBlock.name);
+  const item = bot.inventory.items().find((candidate) => candidate.name === request.blockName);
+  if (!item) return failedPlacement(run, placeBlockOutcomes.noItem(request.blockName, 0), target, targetBlock.name, support);
+  return { targetBlock, support, item };
 }
 
 /** Place one carried block at the exact cell asked for. */
 async function placeAtTarget(run: PlaceRun, target: Vec3, context: ActionContext): Promise<PlaceBlockResult> {
   const { bot, request, inventoryBefore, dependencies } = run;
   if (inventoryBefore < 1) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.noItem(request.blockName, inventoryBefore),
-      placement: evidence(bot, request, target, inventoryBefore, bot.blockAt(target)?.name ?? null),
-    };
+    return failedPlacement(run, placeBlockOutcomes.noItem(request.blockName, inventoryBefore), target, bot.blockAt(target)?.name ?? null);
   }
   const unreached = await reachTarget(run, target, context);
   if (unreached !== null) return unreached;
-
-  const targetBlock = bot.blockAt(target);
-  if (!targetBlock) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.targetUnloaded,
-      placement: evidence(bot, request, target, inventoryBefore, null),
-    };
-  }
-  if (targetBlock.name === request.blockName) return targetAlreadyHoldsBlock(run, target, context);
-  run.beforeBlock ??= targetBlock.name;
-  if (!isReplaceableForPlacement(targetBlock)) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.targetOccupied(targetBlock.name),
-      placement: evidence(bot, request, target, inventoryBefore, targetBlock.name),
-    };
-  }
-
-  const support = findSupport(bot, target);
-  if (!support) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.noSupport,
-      placement: evidence(bot, request, target, inventoryBefore, targetBlock.name),
-    };
-  }
-
-  const item = bot.inventory.items().find((candidate) => candidate.name === request.blockName);
-  if (!item) {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.noItem(request.blockName, 0),
-      placement: evidence(bot, request, target, inventoryBefore, targetBlock.name, support),
-    };
-  }
+  const earlier = await earlierPlacement(run, context);
+  if (earlier !== null) return earlier;
+  const plan = planTarget(run, target);
+  if (!("targetBlock" in plan)) return plan;
+  const { targetBlock, support, item } = plan;
 
   const result = await dependencies.placeBlock(bot, {
     item,
@@ -348,27 +335,14 @@ async function placeAtTarget(run: PlaceRun, target: Vec3, context: ActionContext
     expectedCells: [target],
     matches: (block) => block.name === request.blockName,
     signal: context.signal,
+    onSent: () => recordSent(run)([target]),
   });
   if (result.kind === "failed") {
-    return {
-      status: "failed",
-      error: placeBlockOutcomes.failed(result.error),
-      placement: evidence(bot, request, target, inventoryBefore, targetBlock.name, support),
-    };
+    return failedPlacement(run, placeBlockOutcomes.failed(result.error), target, targetBlock.name, support);
   }
-
   return {
     status: "succeeded",
-    placement: evidence(
-      bot,
-      request,
-      target,
-      inventoryBefore,
-      targetBlock.name,
-      support,
-      true,
-      await settleInventoryCount(bot, request.blockName, inventoryBefore - 1, { signal: context.signal }),
-    ),
+    placement: evidence(bot, request, target, inventoryBefore, targetBlock.name, support, true, await settledAfterSend(run, context)),
   };
 }
 
@@ -397,7 +371,7 @@ export function beginPlaceBlock(
   observe: ObserveRequest = () => {},
 ): RequestExecution<PlaceBlockResult> {
   const run: PlaceRun = {
-    bot, request, dependencies, beforeBlock: null, chosen: null, nearby: null,
+    bot, request, dependencies, beforeBlock: null, chosen: null, own: startOwnPlacement(),
     inventoryBefore: carriedCount(bot, request.blockName),
   };
   const progressTarget = () => run.chosen ?? request.target;

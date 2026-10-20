@@ -5,6 +5,7 @@ import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest, RequestEvidence } from "../../session/request.js";
 import { carriedCount, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
+import { startOwnPlacement } from "../../world/own-placement.js";
 import { fuelCapacity } from "../../world/smelting.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -12,7 +13,6 @@ import {
   formatWorkstation,
   useTemporaryWorkstation,
   workstationOperations,
-  type WorkstationHold,
   type WorkstationOperations,
 } from "../temporary-workstation.js";
 import type { ExistingFurnaceRequest } from "./contract.js";
@@ -484,7 +484,7 @@ export function beginSmeltItem(
   if (request.temporaryWorkstation !== true) {
     return (context) => smeltAttempt(bot, request, progress, context, dependencies);
   }
-  const hold: WorkstationHold = { placedAt: null };
+  const hold = startOwnPlacement();
   const { itemName, count, fuelItemName } = request;
   return (context) =>
     useTemporaryWorkstation(

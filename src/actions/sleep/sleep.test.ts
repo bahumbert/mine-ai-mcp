@@ -5,6 +5,7 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { Vec3 } from "vec3";
 import minecraftData from "minecraft-data";
 import { botFixture, registry } from "../../test-support/bot.js";
+import { startServerClock } from "../../test-support/server-clock.js";
 import { createRequire } from "node:module";
 import { parseSleepRequest, sleepOutcomes } from "./contract.js";
 import { beginSleep, executeSleep, formatSleepResult } from "./sleep.js";
@@ -351,7 +352,7 @@ function bedPlacingBot() {
   const state = { placedAt: null as Vec3 | null, placements: 0, taken: false, occupied: false };
   // The bot ends up eight blocks from the bed it places (placement walked it off), so every sleep has a route to take.
   const bot = mockBot({
-    time: { timeOfDay: 15000 },
+    time: { timeOfDay: 15000, age: 24_000 },
     beds: [],
     inventory: Object.assign(new EventEmitter(), {
       slots: {},
@@ -439,8 +440,9 @@ test("a bed placed just before the abort is found again by the next attempt, not
   assert.equal(result.sleep?.placedBed, true);
 });
 
-test("a bed that was taken between attempts is reported missing, and no second bed is placed", async () => {
+test("a bed that was taken between attempts is reported missing, and no second bed is placed", async (t) => {
   const { bot, state } = bedPlacingBot();
+  t.after(startServerClock(bot)); // the placement was sent a moment ago: "gone" is the answer once the world age moved 40 ticks
   const owner = new AbortController();
   const navigation = walkToPlacedBed(bot, state, owner);
   const attempt = sleepAttempts(bot, navigation);
@@ -502,4 +504,60 @@ test("a bed another player now occupies is not ours: the free bed found instead 
   assert.equal(state.placements, 1);
   assert.deepEqual(result.sleep?.bedPosition, { x: otherBed.x, y: otherBed.y, z: otherBed.z });
   assert.equal(result.sleep?.placedBed, false, "the bed slept in is not the one this request put down");
+});
+
+test("a bed a reflex set down in the footprint before the send is not ours", async (t) => {
+  // Where the request's bed would go: learned from a complete run on an identical world.
+  const dry = bedPlacingBot();
+  await executeSleep(dry.bot, walkToPlacedBed(dry.bot, dry.state), {});
+  const footprint = dry.state.placedAt!;
+
+  const { bot, state } = bedPlacingBot();
+  t.after(startServerClock(bot));
+  const owner = new AbortController();
+  bot.look = async () => {
+    owner.abort(new Error("hunger reflex")); // during the look: nothing was sent
+    owner.signal.throwIfAborted();
+  };
+  const attempt = sleepAttempts(bot, walkToPlacedBed(bot, state));
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  assert.equal(state.placements, 0);
+
+  // The reflex sets a bed down in that very footprint (the world now shows one), and the resume goes to sleep.
+  state.placedAt = footprint;
+  loadBedColumn(bot, footprint);
+  bot.look = async () => undefined;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(state.placements, 0, "the free bed found is used; this request placed none");
+  assert.equal(result.sleep?.placedBed, false, "the reflex's bed is not reported as the one this request put down");
+});
+
+test("the bed this request placed, in a chunk that is no longer loaded, fails naming the cell and places no second bed", async () => {
+  const { bot, state } = bedPlacingBot();
+  const owner = new AbortController();
+  const attempt = sleepAttempts(bot, walkToPlacedBed(bot, state, owner));
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const placedAt = state.placedAt!;
+  const blockAt = bot.blockAt;
+  bot.blockAt = (pos: Vec3) => (pos.distanceTo(placedAt) <= 1 ? null : blockAt(pos));
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  if (result.status === "failed") assert.match(result.error, /BED_NOT_LOADED.*go back near it/su);
+  assert.equal(state.placements, 1);
+});
+
+test("two sleep requests on two bots keep their own beds", async () => {
+  const requests = [bedPlacingBot(), bedPlacingBot()];
+  const owners = requests.map(() => new AbortController());
+  const attempts = requests.map(({ bot, state }, index) => sleepAttempts(bot, walkToPlacedBed(bot, state, owners[index])));
+  await Promise.all(attempts.map((attempt, index) => assert.rejects(attempt(owners[index]!.signal), /hunger reflex/)));
+
+  const results = await Promise.all(attempts.map((attempt) => attempt(new AbortController().signal)));
+
+  assert.deepEqual(results.map((result) => result.status), ["succeeded", "succeeded"]);
+  assert.deepEqual(requests.map(({ state }) => state.placements), [1, 1]);
+  assert.deepEqual(results.map((result) => result.sleep?.placedBed), [true, true]);
 });

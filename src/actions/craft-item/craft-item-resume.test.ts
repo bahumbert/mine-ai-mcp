@@ -4,6 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { craftingBot } from "../../test-support/crafting.js";
+import { startServerClock } from "../../test-support/server-clock.js";
 import type { WorldBlock } from "../../world/placement.js";
 import type { WorkstationOperations } from "../temporary-workstation.js";
 import { beginCraftItem, type CraftItemRequest } from "./index.js";
@@ -135,8 +136,9 @@ function tableOperations(
     blockAt: () => (standing ? table : ({ name: "air", position } as WorldBlock)),
   });
   return {
-    place: async () => {
+    place: async (_name, _signal, onPlacementSent) => {
       calls.push("place");
+      onPlacementSent?.([position]); // the real placement calls it right before the packet
       standing = true;
       counts.set(id, (counts.get(id) ?? 0) - 1);
       return { kind: "placed", block: table, position };
@@ -255,8 +257,9 @@ test("two craft requests on two bots keep their own credit", async () => {
   assert.deepEqual(b.craftCalls, ["oak_planks"]);
 });
 
-test("a resume whose temporary table is gone after earlier crafts is partial, with the table's own refusal", async () => {
+test("a resume whose temporary table is gone after earlier crafts is partial, with the table's own refusal", async (t) => {
   const { bot, counts, craftCalls } = craftingBot({ crafting_table: 1, oak_log: 2, cobblestone: 3 });
+  t.after(startServerClock(bot)); // "gone" is the server's answer once the world age moved 40 ticks past the send
   const calls: string[] = [];
   const operations = tableOperations(bot, counts, calls);
   const [first] = reflexAfterCrafts(bot, [1]);

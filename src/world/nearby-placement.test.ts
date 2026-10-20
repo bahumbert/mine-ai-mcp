@@ -80,24 +80,50 @@ test("a spot is skipped when no cell can be filled from it", () => {
   assert.equal(findStandingSpot(botIn(cells)), null);
 });
 
-test("the chosen cell is reported before the block is placed, so an aborted placement still names it", async () => {
+function craftingTableBot() {
   const cells: Record<string, string> = {};
   fill(cells, "stone", [-6, 50, -6], [6, 61, 6]);
-  const bot = botFixture({
+  return botFixture({
     blocks: cells,
     position: { x: 0.5, y: 62, z: 0.5 },
     items: [{ name: "crafting_table", count: 1 }],
   });
+}
+
+test("the cell is reported right before the placement packet, so an aborted placement still names it", async () => {
+  const bot = craftingTableBot();
   const controller = new AbortController();
-  controller.abort(new Error("reflex took the body"));
-  let chosen: Vec3 | null = null;
+  let reported: readonly Vec3[] | null = null;
+  let reportedBeforePacket = false;
+  Object.assign(bot, {
+    placeBlock: async () => {
+      reportedBeforePacket = reported !== null;
+      controller.abort(new Error("reflex took the body"));
+      throw controller.signal.reason;
+    },
+  });
 
   await assert.rejects(
-    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onCellChosen: (cell) => (chosen = cell) }),
+    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onPlacementSent: (cells) => (reported = cells) }),
     /reflex took the body/,
   );
 
-  assert.ok(chosen, "the cell was reported before placeBlock saw the abort");
-  assert.equal((chosen as Vec3).y, 62, "an air cell on the stone floor");
-  assert.ok((chosen as Vec3).distanceTo(bot.entity.position) <= 4);
+  assert.equal(reportedBeforePacket, true);
+  assert.equal(reported!.length, 1);
+  assert.equal(reported![0]!.y, 62, "an air cell on the stone floor");
+  assert.ok(reported![0]!.distanceTo(bot.entity.position) <= 4);
+});
+
+test("a placement cut before the packet is sent reports no cell: nothing of it is ours", async () => {
+  const bot = craftingTableBot();
+  const controller = new AbortController();
+  controller.abort(new Error("reflex took the body"));
+  let reported = false;
+
+  await assert.rejects(
+    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onPlacementSent: () => (reported = true) }),
+    /reflex took the body/,
+  );
+
+  assert.equal(reported, false);
 });

@@ -127,8 +127,8 @@ export async function placeCarriedBlockNearby(
   options: {
     readonly maxRadius?: number;
     readonly signal?: AbortSignal;
-    /** Told the cell before the block is placed, so a caller cut off during the placement still knows where it may stand. */
-    readonly onCellChosen?: (position: Vec3) => void;
+    /** Told the cell right before the placement packet goes out (not at the choice): a caller cut off after it knows where its block may stand. */
+    readonly onPlacementSent?: (cells: readonly Vec3[]) => void;
   } = {},
 ): Promise<NearbyPlacement> {
   const item = bot.inventory.items().find((candidate) => candidate.name === itemName);
@@ -137,7 +137,6 @@ export async function placeCarriedBlockNearby(
   // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside one only when nothing else is free.
   const cell = chooseCell(bot, itemName, options.maxRadius ?? 3, false) ?? chooseCell(bot, itemName, options.maxRadius ?? 3, true);
   if (!cell) return { kind: "no_cell" };
-  options.onCellChosen?.(cell.position);
   const result = await placeBlock(bot, {
     item,
     support: cell.support,
@@ -145,6 +144,7 @@ export async function placeCarriedBlockNearby(
     expectedCells: [cell.position],
     matches: (block) => block.name === itemName,
     signal: options.signal,
+    onSent: () => options.onPlacementSent?.([cell.position]),
   });
   if (result.kind === "placed") return { kind: "placed", position: cell.position, block: result.block };
   return { kind: "failed", position: cell.position, error: result.error };

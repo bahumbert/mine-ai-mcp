@@ -220,8 +220,9 @@ function furnaceOperations(fixture: Fixture, calls: string[]): WorkstationOperat
   const standing = fixture.bot.blockAt;
   const items = fixture.bot.inventory.items() as { name: string; count: number }[];
   return {
-    place: async () => {
+    place: async (_name, _signal, onPlacementSent) => {
       calls.push("place");
+      onPlacementSent?.([block.position]); // the real placement calls it right before the packet
       items.splice(items.findIndex((item) => item.name === "furnace"), 1);
       return { kind: "placed", block, position: block.position };
     },
