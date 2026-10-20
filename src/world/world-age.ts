@@ -56,3 +56,21 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
     await sleep(Math.min(pollMs, Math.max(1, options.wallMs - (now() - startedAt))));
   }
 }
+
+/** World age a request waits past its send before "no answer" is the answer (one time packet per 20 ticks: two packets). */
+export const SERVER_ANSWER_TICKS = 40;
+
+/**
+ * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, or `wallMs` passed.
+ * `sentAtAge` is the age when the request went out (undefined: the age now), so a caller that looked away for a while
+ * does not wait the 40 ticks again.
+ */
+export function waitForServerAnswer(
+  bot: Pick<Bot, "time">,
+  sentAtAge: number | undefined,
+  options: Omit<WorldAgeOptions, "until"> & { readonly until: () => boolean },
+): Promise<WorldAgeWait> {
+  const ageNow = bot.time?.age;
+  const ticksLeft = sentAtAge === undefined || ageNow === undefined ? SERVER_ANSWER_TICKS : sentAtAge + SERVER_ANSWER_TICKS - ageNow;
+  return waitForWorldAge(bot, Math.max(0, ticksLeft), options);
+}

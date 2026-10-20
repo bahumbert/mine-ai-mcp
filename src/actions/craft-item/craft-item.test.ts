@@ -3,6 +3,7 @@ import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { craftingBot } from "../../test-support/crafting.js";
+import { startServerClock } from "../../test-support/server-clock.js";
 import {
   createCraftItemAction,
   formatCraftItemResult,
@@ -195,8 +196,9 @@ test("temporary crafting requires a carried table even with a nearby table and b
   assert.deepEqual(craftCalls, []);
 });
 
-test("a native crafting failure claims no output and still asks for the inventory window to close", async () => {
+test("a native crafting failure claims no output and still asks for the inventory window to close", async (t) => {
   const { bot } = craftingBot({ oak_log: 1 });
+  t.after(startServerClock(bot)); // the count that never comes is settled by the server answer: its world age must move
   const closed: unknown[] = [];
   Object.assign(bot, {
     closeWindow: (window: unknown) => {

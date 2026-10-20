@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { botFixture, type FakeStack } from "../../test-support/bot.js";
+import { startServerClock } from "../../test-support/server-clock.js";
 import { parsePlaceBlockRequest } from "./contract.js";
 import { formatPlaceBlockResult, executePlaceBlock, beginPlaceBlock, type PlaceBlockDependencies } from "./place-block.js";
 
@@ -187,8 +188,9 @@ test("waits for the slot update the server sends after the block update", async 
   );
 });
 
-test("says so rather than presenting a placement count the server never confirmed", async () => {
+test("says so rather than presenting a placement count the server never confirmed", async (t) => {
   const { bot, blocks, dependencies, target } = testWorld();
+  t.after(startServerClock(bot)); // the answer is "no count": the server's world age must move 40 ticks
 
   const result = await executePlaceBlock(
     bot,

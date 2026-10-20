@@ -84,6 +84,7 @@ export function craftingBot(
     inventory,
     currentWindow: null,
     closeWindow: () => undefined,
+    time: { age: 24_000 },
     waitForTicks: async () => undefined,
     findBlock: () => (tableAvailable ? { name: "crafting_table" } : null),
     recipesAll: (itemType: number, _metadata: number | null, craftingTable: boolean | object | null) =>

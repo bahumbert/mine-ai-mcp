@@ -6,6 +6,7 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { botFixture, registry, type FakeStack } from "../../test-support/bot.js";
 import { observedFurnace } from "../../test-support/furnace.js";
+import { startServerClock } from "../../test-support/server-clock.js";
 import { createSmeltItemAction, parseSmeltItemRequest, smeltItem, type SmeltItemDependencies } from "./index.js";
 
 test("a named furnace and a temporary one are exclusive, and a temporary one must be carried", async () => {
@@ -210,8 +211,9 @@ test("distinguishes exhausted fuel from a cook stall", async () => {
   assert.equal(fixture.now, 1_000);
 });
 
-test("reports only the raw count removed from a partially recovered furnace slot", async () => {
+test("reports only the raw count removed from a partially recovered furnace slot", async (t) => {
   const fixture = observedFurnace({ cookMs: 2_000, stopAfter: 1, recoverInputCount: 1 });
+  t.after(startServerClock(fixture.bot));
   const result = await smeltItem(
     fixture.bot,
     navigation,
@@ -357,8 +359,9 @@ test("refuses furnace output recovery before clicking when inventory has no room
   assert.equal(clicks, 0);
 });
 
-test("does not start a multi-click raw recovery after output consumes the last inventory slot", async () => {
+test("does not start a multi-click raw recovery after output consumes the last inventory slot", async (t) => {
   const { bot, dependencies } = smeltingBot();
+  t.after(startServerClock(bot));
   let loaded = false;
   let outputRemoved = false;
   let freeSlots = 1;
@@ -434,8 +437,9 @@ test("a 64-ingot smelt puts ingots in the inventory as they cook and counts each
   assert(Math.max(...gaps) <= 80_000, `longest wait between rises ${Math.max(...gaps)} ms`);
 });
 
-test("a full inventory mid-cook leaves the output in the furnace and reports it without throwing", async () => {
+test("a full inventory mid-cook leaves the output in the furnace and reports it without throwing", async (t) => {
   const fixture = observedFurnace({ cookMs: 10_000, raw: 16, coal: 2, full: true });
+  t.after(startServerClock(fixture.bot));
   const result = await smeltItem(fixture.bot, navigation, { ...BIG_SMELT, count: 16 }, {}, fixture.dependencies);
 
   assert.equal(result.status, "failed");
