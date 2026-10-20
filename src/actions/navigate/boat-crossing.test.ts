@@ -4,8 +4,8 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { boatUnderFeetAtSea, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
-import { prepareBotForMovement } from "../../session/prepare-body.js";
-import { openSeaBot, shifts } from "../../test-support/boat-bot.js";
+import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
+import { mountedBot, openSeaBot, shifts } from "../../test-support/boat-bot.js";
 import { getOff } from "./boat-get-off.js";
 import { freeHeldSeat, watchServerSeat } from "./server-seat-watch.js";
 import { watchVehicle } from "./vehicle-sync.js";
@@ -386,4 +386,68 @@ test("the next preparation after a respawn sends no shift", { timeout: 30_000 },
   await prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime);
   assert.deepEqual(shifts(world.written), [], "she rides nothing: no get-off, no shift");
   stop();
+});
+
+describe("navigate rides on from the seat (B5)", () => {
+  test("a crossing that starts seated rides on: no launch, no mount, no hit", { timeout: 30_000 }, async () => {
+    const world = await mountedBot();
+    const placed = world.carried.length;
+    const result = await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 10);
+    assert.equal(result.atSea, true, "the ride went on and stayed at sea");
+    assert.equal(world.carried.length, placed, "no second boat was launched");
+    assert.equal(world.raw.vehicle, world.entities[7], "the same boat");
+    assert.deepEqual(world.attacks, []);
+    assert.deepEqual(shifts(world.written), []);
+    assert.ok(world.written.some((entry) => entry.name === "vehicle_move"));
+  });
+
+  test("prepareBotForMovement with keepBoatSeat stays seated: no shift", { timeout: 30_000 }, async () => {
+    const world = await mountedBot();
+    await prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime, undefined, { keepBoatSeat: true });
+    assert.equal(world.raw.vehicle, world.entities[7]);
+    assert.deepEqual(shifts(world.written), []);
+    assert.deepEqual(world.attacks, []);
+  });
+
+  test("leaveBoatSeat in shallows takes back the boat just left", { timeout: 30_000 }, async () => {
+    const world = await mountedBot({ waterDepth: 2 });
+    await leaveBoatSeat(world.bot);
+    assert.deepEqual(shifts(world.written), [true, false]);
+    assert.deepEqual(world.attacks, [7]);
+    assert.equal(world.raw.vehicle, null);
+    assert.equal(world.carried.length, 2, "the boat she carried and the one taken back");
+  });
+});
+
+test("a crossing that starts seated and reaches the far bank takes the same boat back", { timeout: 60_000 }, async () => {
+  const world = await mountedBot({ landFromZ: 40 });
+  const result = await crossByBoat(world.bot, { x: 0, z: 1 }, undefined, 100);
+  assert.equal(result.status, "crossed", result.detail);
+  assert.deepEqual(world.attacks, [7], "the boat she rode is broken at the bank");
+  assert.equal(world.carried.length, 2, "the boat she carried and the one she rode");
+  assert.equal(world.raw.vehicle, null);
+});
+
+test("a boat taken back is swum after when its item floated off, though another boat is carried", { timeout: 30_000 }, async () => {
+  // Live 2026-10-20 (boat-at-sea-two-boats scenario): with a second boat carried, "no boat carried" never held, so the
+  // item that drifted off the bank was never swum after and the ridden boat was lost.
+  const items = [{ name: "oak_boat", count: 1 }];
+  const boat = { id: 7, name: "oak_boat", position: new Vec3(20.5, 62.49, 0.5) };
+  const bot = standingBot(new Vec3(20.5, 63.05, 0.5), boat.position, items) as unknown as Record<string, unknown>;
+  const entities = bot.entities as Record<number, unknown>;
+  bot.lookAt = async () => undefined;
+  bot.clearControlStates = () => undefined;
+  bot.attack = () => {
+    delete entities[7];
+    entities[9] = { id: 9, name: "item", position: new Vec3(24.5, 62.5, 0.5), getDroppedItem: () => ({ name: "oak_boat" }) };
+  };
+  // Swimming toward the item picks it up.
+  bot.setControlState = (control: string, state: boolean) => {
+    if (control === "forward" && state && entities[9] !== undefined) {
+      delete entities[9];
+      items.push({ name: "oak_boat", count: 1 });
+    }
+  };
+  assert.equal(await takeBoatBack(bot as unknown as Bot, boat as never, undefined, 0), true);
+  assert.equal(items.length, 2, "the item was swum after and picked up");
 });

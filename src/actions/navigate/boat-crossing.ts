@@ -19,7 +19,7 @@ import type { MineflayerBlock } from "../../navigation/index.js";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
 import { getOff } from "./boat-get-off.js";
-import { waitForWorldAge } from "../../world/world-age.js";
+import { MOUNT_WALL_MS, mountBoat } from "./boat-mount.js";
 import { currentVehicle } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
@@ -177,12 +177,15 @@ export function nearestBoat(bot: Bot, around: Vec3, within: number, accept: (ent
  */
 export async function crossByBoat(bot: Bot, heading: { readonly x: number; readonly z: number }, signal?: AbortSignal, maxBlocks = MAX_CROSSING, timing: CrossingTiming = {}): Promise<CrossingResult> {
   const item = bot.inventory.items().find((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
-  if (item === undefined) return { status: "failed", blocks: 0, detail: "no boat is carried" };
+  // Already in a boat (a ride cancelled, a stay at sea): ridden on from where it floats, with no launch and no mount.
+  const seat = currentVehicle(bot);
+  const riding = seat !== null && isBoatEntity(seat) ? seat : null;
+  if (item === undefined && riding === null) return { status: "failed", blocks: 0, detail: "no boat is carried" };
   const origin = bot.entity.position.clone();
-  const boat = await launchBoat(bot, item, heading);
+  const boat = riding ?? (item === undefined ? null : await launchBoat(bot, item, heading));
   if (boat === null) return { status: "failed", blocks: 0, detail: "could not put the boat in the water here" };
 
-  if (!(await mountBoat(bot, boat, timing.mountWallMs ?? MOUNT_WALL_MS, signal))) {
+  if (riding === null && !(await mountBoat(bot, boat, timing.mountWallMs ?? MOUNT_WALL_MS, signal))) {
     // The boat she put in the water is hers to take back (a boat left floating is lost to the next bot, and to her).
     await takeBoatBack(bot, boat, signal);
     return { status: "failed", blocks: 0, detail: "could not get into the boat" };
@@ -223,9 +226,9 @@ async function rideAndLand(bot: Bot, ride: BoatRide, signal: AbortSignal | undef
   }
   const { answered } = await getOff(bot, timing.getOffWallMs === undefined ? {} : { wallMs: timing.getOffWallMs });
 
-  await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), BOAT_REACH), signal);
+  const pickedUp = await takeBoatBack(bot, nearestBoat(bot, new Vec3(x, y, z), BOAT_REACH), signal);
   const lost = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
-  const kept = boatsCarried(bot) > 0 ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
+  const kept = pickedUp ? "" : `; the boat was not picked back up${lost === undefined ? "" : ` (an item ${Math.round(lost.position.distanceTo(bot.entity.position))} blocks off)`}`;
   const seated = answered ? "" : "; the server did not answer the get-off, she may still be seated in the boat";
   const detail = `rode ${ridden} blocks by boat${stoppedBy === "" ? "" : ` (${stoppedBy})`}${kept}${seated}`;
   return { status: stoppedBy === "" ? "crossed" : "failed", blocks: ridden, detail };
@@ -245,26 +248,6 @@ async function interruptedRide(ride: BoatRide, signal: AbortSignal | undefined):
 export interface CrossingTiming {
   readonly mountWallMs?: number;
   readonly getOffWallMs?: number;
-}
-
-/** Longest wait for the server to seat her in the boat, on the wall clock, next to the 40 server ticks. */
-const MOUNT_WALL_MS = 8_000;
-
-/** Seat her in `boat`; false when no `mount` came within 40 server ticks or the wall bound. The listener never outlives the wait. */
-async function mountBoat(bot: Bot, boat: Entity, wallMs: number, signal?: AbortSignal): Promise<boolean> {
-  let mounted = false;
-  const onMount = () => {
-    mounted = true;
-  };
-  bot.once("mount", onMount);
-  try {
-    bot.mount(boat);
-    await waitForWorldAge(bot, 40, { wallMs, until: () => mounted, ...(signal && { signal }) });
-  } finally {
-    bot.off("mount", onMount);
-  }
-  // A seat the server gave after the wait (the vehicle shows it) is a ride: hitting the boat she sits in would eject her.
-  return mounted || currentVehicle(bot)?.id === boat.id;
 }
 
 /**
@@ -327,19 +310,20 @@ const yawOf = (way: { readonly x: number; readonly z: number }) => (Math.atan2(-
  * boat floats on. The server puts the boat back when a move runs it into something (live 2026-10-04: three "moved
  * wrongly" at a bank): taken as where the boat is, and the leg under way ends there.
  */
-class BoatRide {
+export class BoatRide {
   readonly #bot: Bot;
   readonly #heading: { readonly x: number; readonly z: number };
   readonly #signal: AbortSignal | undefined;
   readonly #position: { x: number; y: number; z: number };
   readonly #launch: { readonly x: number; readonly z: number };
   readonly #surfaceLevel: number;
-  #died = false;
+  /** She died in the ride: the boat is hers no more, and nothing more is sent for it. */
+  died = false;
   #corrected = false;
   /** Counted from where she stood, not from where the boat went in (2.5 to 4 blocks out). */
   ridden: number;
   readonly #onDeath = () => {
-    this.#died = true;
+    this.died = true;
   };
   readonly #onCorrection = (packet: { readonly x: number; readonly y: number; readonly z: number }) => {
     this.#position.x = packet.x;
@@ -361,11 +345,6 @@ class BoatRide {
     bot.on("death", this.#onDeath);
   }
 
-  /** She died in the ride: the boat is hers no more, and nothing more is sent for it. */
-  get died(): boolean {
-    return this.#died;
-  }
-
   /** The ride's listeners removed; every exit of a crossing ends here ({@link end} does it too). */
   close(): void {
     this.#bot._client.removeListener("vehicle_move", this.#onCorrection);
@@ -378,7 +357,7 @@ class BoatRide {
       // No land by the distance asked for: never out on open sea with no end (live 2026-10-04: Vex, exploring 64 blocks,
       // rode 518 blocks of ocean and was stranded at its far side).
       if (this.ridden >= maxBlocks) return { stoppedBy: `no land within ${Math.round(this.ridden)} blocks that way`, noLand: true };
-      if (this.#signal?.aborted || this.#died) return { stoppedBy: "stopped", noLand: false };
+      if (this.#signal?.aborted || this.died) return { stoppedBy: "stopped", noLand: false };
       const open = this.#waterAhead(SHORE_LOOKAHEAD);
       if (open === null) return { stoppedBy: "the water ahead is not loaded", noLand: false };
       if (!open) return { stoppedBy: "", noLand: false };
@@ -402,6 +381,18 @@ class BoatRide {
     await this.#steer(heading, (closer) => closer < SHORE_LOOKAHEAD + 4 && this.#waterAhead(LANDING_GAP) === true);
     const cut = await cutStep(this.#bot, this.#position, heading, this.#surfaceLevel);
     return cut !== "" && this.deepUnder() ? cut : "";
+  }
+
+  /** Open water {@link SHORE_LOOKAHEAD} blocks ahead on the way (false at a shore, or where it is not loaded). */
+  waterAheadOpen(): boolean {
+    return this.#waterAhead(SHORE_LOOKAHEAD) === true;
+  }
+
+  /** Rows up to `blocks` straight on while the water ahead is open; returns why it stopped ("" at the distance). */
+  async row(blocks: number): Promise<string> {
+    await this.#steer(this.#heading, (gone) => gone < blocks && this.waterAheadOpen() && currentVehicle(this.#bot) !== null);
+    if (this.died) return "she died";
+    return this.#signal?.aborted ? "stopped" : this.#corrected ? "the server put the boat back (a bank)" : this.waterAheadOpen() ? "" : "a shore ahead";
   }
 
   /** Back the way it came, to where the boat went in. */
@@ -439,7 +430,7 @@ class BoatRide {
   /** One leg toward `way`, a boat step a tick while `more(blocks gone)`, until the server puts the boat back or she is stopped. */
   async #steer(way: { readonly x: number; readonly z: number }, more: (gone: number) => boolean): Promise<void> {
     this.#corrected = false;
-    for (let gone = 0; more(gone) && !this.#corrected && !this.#signal?.aborted && !this.#died; gone += BOAT_STEP) await this.#step(way);
+    for (let gone = 0; more(gone) && !this.#corrected && !this.#signal?.aborted && !this.died; gone += BOAT_STEP) await this.#step(way);
   }
 
   async #step(way: { readonly x: number; readonly z: number }): Promise<void> {
@@ -469,13 +460,14 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when a boat is carried
- * after. A cancel stops the hits, the pauses and the swim at once, whatever the boat's state.
+ * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. True when one more boat is
+ * carried than before (counted: another boat may be carried). A cancel stops the hits, the pauses and the swim at once.
  */
 export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: AbortSignal, settleMs = 1500): Promise<boolean> {
   let hits = 0;
+  const before = boatsCarried(bot);
   while (boat !== null && bot.entities[boat.id] !== undefined && hits < 15) {
-    if (signal?.aborted) return boatsCarried(bot) > 0;
+    if (signal?.aborted) return boatsCarried(bot) > before;
     await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
     bot.attack(boat);
     hits += 1;
@@ -483,10 +475,10 @@ export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: Abort
   }
   await pause(settleMs, signal);
   // Its item floated off before it was picked up: swum after, a few blocks of the water by the bank.
-  if (boatsCarried(bot) === 0 && !signal?.aborted) {
-    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > 0 || signal?.aborted === true, 15_000);
+  if (boatsCarried(bot) <= before && !signal?.aborted) {
+    await swimToDrop(bot, (item) => item.name.endsWith("_boat") || item.name.endsWith("_raft"), DROP_REACH, () => boatsCarried(bot) > before || signal?.aborted === true, 15_000);
   }
-  return boatsCarried(bot) > 0;
+  return boatsCarried(bot) > before;
 }
 
 /**

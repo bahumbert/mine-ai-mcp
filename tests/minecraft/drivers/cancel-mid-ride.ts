@@ -41,7 +41,24 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const dropped = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   if (drift > 1) return { status: "failed", detail: `the boat moved ${drift.toFixed(1)} blocks after the stop, or the bot left it: ${settled.summary}` };
   if (dropped !== undefined) return { status: "failed", detail: `an item entity lies ${Math.round(dropped.position.distanceTo(bot.entity.position))} blocks off after the cancel: ${settled.summary}` };
-  const next = await context.call("navigate", { x, y, z, range: 2 });
+  // The second navigate rides on from the seat: the same boat all the way, never broken and put in again.
+  const secondRide = context.call("navigate", { x, y, z, range: 2 });
+  let broken: string | null = null;
+  const watchBoat = async () => {
+    let done = false;
+    secondRide.finally(() => { done = true; });
+    while (!done) {
+      // Only while seated: the boat is taken back at the far bank, where an item lies for a moment.
+      const seat = bot.entity.vehicle;
+      const item = seat === null ? undefined : Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
+      if (item !== undefined) broken ??= "a boat item lay on the water";
+      else if (seat !== null && seat !== boat) broken ??= "the bot sat in another boat";
+      else if (seat === null && bot.entity.position.x < 90) broken ??= "the bot left the boat before the far bank";
+      await delay(100);
+    }
+  };
+  const [next] = await Promise.all([secondRide, watchBoat()]);
+  if (broken !== null) return { status: "failed", detail: `the second navigate did not ride on from the seat (${broken}): ${next.summary}` };
   if (next.result.status !== "succeeded") return { status: "failed", detail: `the navigate after the cancel read ${next.result.status}: ${next.summary}; first: ${settled.summary}` };
   const carried = bot.inventory.items().filter((item) => boatNamed(item.name)).reduce((sum, item) => sum + item.count, 0);
   return carried > 0

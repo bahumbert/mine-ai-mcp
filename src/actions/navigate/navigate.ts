@@ -26,6 +26,7 @@ import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
+import { startFromSeat } from "./seated-leg.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
 import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
 
@@ -264,6 +265,9 @@ type LandLegOutcome =
 
 /** The route, led by a swim to the nearest land when the bot starts at sea with no boat. */
 async function navigateLeg(leg: NavigateLeg, context: ActionContext): Promise<NavigateResult> {
+  const fromSeat = await startFromSeat(leg.bot, leg.request, context.signal, (water) =>
+    crossByBoatFromHere(leg, { status: "failed", error: navigateOutcomes.deepWater(leg.request, water.start, water.length), navigation: legEvidence(leg) }, water, context));
+  if (fromSeat !== null) return fromSeat;
   const land = await swimToLandFirst(leg, context);
   const result = await routeToDestination(leg, context);
   if (land.kind === "none") return result;
@@ -654,7 +658,7 @@ export function createNavigateAction(
     resultSchema: navigateResultSchema,
     formatResult: formatNavigateResult,
     movement: "travel",
-    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal, { keepBoatSeat: true }) },
     annotations: {
       title: NAVIGATE,
       destructiveHint: true,

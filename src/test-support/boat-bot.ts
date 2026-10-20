@@ -75,6 +75,10 @@ export interface OpenSeaOptions {
   readonly waterDepth?: number;
   /** Dry land (stone to the water's level) from this z on. */
   readonly landFromZ?: number;
+  /** Dry land (stone to the water's level) up to this z (and below). */
+  readonly landUntilZ?: number;
+  /** Other items carried (a sword for the strike tests). */
+  readonly carries?: readonly string[];
 }
 
 export function openSeaBot(options: OpenSeaOptions = {}) {
@@ -83,6 +87,8 @@ export function openSeaBot(options: OpenSeaOptions = {}) {
   const carried = Array.from({ length: options.boatsCarried ?? 1 }, () => ({ name: "oak_boat", count: 1 }));
   const written: { name: string; packet: Record<string, unknown>; at: number }[] = [];
   const attacks: number[] = [];
+  const equips: string[] = [];
+  const extras = (options.carries ?? []).map((name) => ({ name, count: 1 }));
   const self = { id: 1, position: new Vec3(0.5, 63, 0.5), yaw: 0, pitch: 0, onGround: false, vehicle: null as unknown };
   const entities: Record<number, unknown> = { 1: self };
   const client = Object.assign(new EventEmitter(), {
@@ -110,15 +116,12 @@ export function openSeaBot(options: OpenSeaOptions = {}) {
     time: clock.time,
     vehicle: null as unknown,
     _client: client,
-    inventory: { items: () => carried },
-    blockAt: (at: Vec3) => {
-      if (options.loadedTo !== undefined && at.z > options.loadedTo) return null;
-      if (options.landFromZ !== undefined && at.z >= options.landFromZ && at.y <= 62) return { name: "stone", boundingBox: "block" };
-      if (at.y < 63 - (options.waterDepth ?? 13)) return { name: "stone", boundingBox: "block" };
-      if (at.y <= 62) return { name: "water", boundingBox: "empty" };
-      return { name: "air", boundingBox: "empty" };
+    inventory: { items: () => [...carried, ...extras], slots: {} },
+    heldItem: null,
+    blockAt: seaBlockAt(options),
+    equip: async (item: { name: string }) => {
+      equips.push(item.name);
     },
-    equip: async () => undefined,
     dig: async () => undefined,
     lookAt: async () => undefined,
     activateItem: () => {
@@ -138,6 +141,8 @@ export function openSeaBot(options: OpenSeaOptions = {}) {
     dismount: () => undefined,
     attack: (target: { id: number }) => {
       attacks.push(target.id);
+      // Anything but a boat is just struck: only a boat breaks and drops its item.
+      if (!String((entities[target.id] as { name?: string } | undefined)?.name).endsWith("_boat")) return;
       const top = (entities[target.id] as { position: Vec3 }).position;
       delete entities[target.id];
       carried.push({ name: "oak_boat", count: 1 });
@@ -150,7 +155,7 @@ export function openSeaBot(options: OpenSeaOptions = {}) {
     isSleeping: false,
     version: "1.21.4",
   });
-  return { bot: bot as unknown as Bot, raw: bot, written, attacks, entities, client, carried, serverSeated: seat.seated };
+  return { bot: bot as unknown as Bot, raw: bot, written, attacks, equips, entities, client, carried, serverSeated: seat.seated };
 }
 
 /** The shift presses (true) and releases (false) written, in order: a 1.21.4 server reads them from entity_action. */
@@ -164,4 +169,15 @@ export async function mountedBot(options: OpenSeaOptions = {}) {
   world.raw.mount(boat);
   await new Promise((resolve) => setImmediate(resolve));
   return world;
+}
+
+/** The block at a cell of the sea: stone under it, water to y 62, air above; land and unloaded parts per the options. */
+function seaBlockAt(options: OpenSeaOptions) {
+  const stone = { name: "stone", boundingBox: "block" };
+  return (at: Vec3) => {
+    if (options.loadedTo !== undefined && at.z > options.loadedTo) return null;
+    const land = (options.landUntilZ !== undefined && at.z <= options.landUntilZ) || (options.landFromZ !== undefined && at.z >= options.landFromZ);
+    if ((land && at.y <= 62) || at.y < 63 - (options.waterDepth ?? 13)) return stone;
+    return at.y <= 62 ? { name: "water", boundingBox: "empty" } : { name: "air", boundingBox: "empty" };
+  };
 }
