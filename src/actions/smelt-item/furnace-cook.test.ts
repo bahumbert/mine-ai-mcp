@@ -112,3 +112,21 @@ test("every loaded item consumed with an ingot still in the output slot: the tak
   assert.equal(waited.verdict, "completed");
   assert.equal(harvest.credited(), 1, "3 requested, 1 taken, 1 in the slot: one went uncounted");
 });
+
+test("the safety deadline follows the recipe's cooking ticks: a slower cook is given proportionally longer", async () => {
+  const endOf = async (cookTicks: number) => {
+    // Always cooking, never done: only the deadline ends the wait.
+    const { window, clock, state } = cooking((now, furnace) => {
+      furnace.input = 1;
+      furnace.cook = ((now / 100) % 50) / 50 + 0.01;
+    });
+    state.input = 1;
+    const waited = await waitForCook(window, 3, clock, undefined, undefined, undefined, cookTicks);
+    return { verdict: waited.verdict, endedAt: clock.now() };
+  };
+  const standard = await endOf(200);
+  const slow = await endOf(400);
+  assert.equal(standard.verdict, "safety_timeout");
+  assert.equal(slow.verdict, "safety_timeout");
+  assert.ok(slow.endedAt > standard.endedAt * 1.5, `standard ${standard.endedAt} ms, slow ${slow.endedAt} ms`);
+});

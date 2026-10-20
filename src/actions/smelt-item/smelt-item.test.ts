@@ -73,7 +73,7 @@ function smeltingBot() {
     takeOutput: async () => take(output),
     close: () => undefined,
   };
-  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } });
+  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } }, { version: "1.21.4" });
   bot.clickWindow = async (slot) => {
     if (slot !== 2 || !output) return;
     adjust(output.name, output.count);

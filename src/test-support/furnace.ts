@@ -5,10 +5,12 @@
 import { EventEmitter } from "node:events";
 import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
-import { fuelCapacity } from "../world/smelting.js";
+import { fuelCapacity as capacityIn } from "../world/smelting.js";
 import { botFixture, registry, type FakeStack } from "./bot.js";
 
 /** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
+const fuelCapacity = (fuel: string) => capacityIn(fuel, registry.version.minecraftVersion!);
+
 class FakeBurn {
   #msLeft = 0;
   constructor(readonly fuel: string, readonly cookMs: number) {}
@@ -74,7 +76,7 @@ export function observedFurnace(options: { readonly cookMs: number; readonly sto
     },
     close: () => undefined,
   });
-  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } });
+  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } }, { version: "1.21.4" });
   if (options.full) (bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
   bot.clickWindow = async (slot) => {
     if (slot !== 2 || output === 0) return;

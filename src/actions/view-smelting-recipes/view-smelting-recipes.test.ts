@@ -38,3 +38,14 @@ test("a newer server uses the nearest older data; unknown items and versions wit
   assert.equal(older.status, "failed");
   assert.match(older.error ?? "", /^\[SMELTING_DATA_UNAVAILABLE\]/u);
 });
+
+test("the fuels line names each worth once with a few examples, and the lava bucket is among them", async () => {
+  const result = await viewSmeltingRecipes(bot("1.21.4"), parseViewSmeltingRecipesRequest({ items: ["glass"] }), {});
+  assert.ok(result.smelting.fuels.length > 100, "the evidence keeps every fuel item for the brain's choice");
+  const line = formatViewSmeltingRecipesResult(result).split("\n").find((entry) => entry.startsWith("- Fuels"))!;
+  assert.ok(line.length < 700, `${line.length} characters: ${line}`);
+  assert.match(line, /100: lava_bucket/u);
+  assert.match(line, /8: .*coal/u);
+  assert.match(line, /and \d+ more/u);
+  assert.doesNotMatch(line, /crimson_planks/u);
+});

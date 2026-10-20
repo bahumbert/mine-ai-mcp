@@ -3,8 +3,8 @@ import type { Bot } from "mineflayer";
 import type { FurnaceProperties } from "./furnace-properties.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { waitForSignal } from "../../utils/signals.js";
+import { STANDARD_COOK_TICKS } from "../../world/smelting.js";
 
-const COOK_MS_PER_ITEM = 10_000;
 const COOK_STALL_MS = 15_000;
 const FUEL_START_SETTLEMENT_MS = 1_000;
 /** How long a reopened furnace has to report the fuel still burning in it: ten server ticks. */
@@ -197,9 +197,9 @@ type WithProperties = FurnaceWindow & { readonly properties?: () => FurnacePrope
  * fuel slot at once and burns on, so a resumed attempt that has put its last coal in still has fuel (scenario
  * busy-smelt-interrupted). A window that has not reported its burn time counts as none.
  */
-export function burningItems(window: FurnaceWindow): number {
+export function burningItems(window: FurnaceWindow, cookTicks = STANDARD_COOK_TICKS): number {
   const ticks = (window as WithProperties).properties?.()?.litTicks;
-  return typeof ticks === "number" ? Math.floor((ticks * TICK_MS) / COOK_MS_PER_ITEM) : 0;
+  return typeof ticks === "number" ? Math.floor(ticks / cookTicks) : 0;
 }
 
 /**
@@ -237,9 +237,11 @@ export async function waitForCook(
   signal?: AbortSignal,
   observe?: (observation: FurnaceObservation, stalledForMs: number) => void,
   harvest?: Harvest,
+  cookTicks = STANDARD_COOK_TICKS,
 ): Promise<{ readonly verdict: CookVerdict; readonly observation: FurnaceObservation }> {
   const startedAt = dependencies.now();
-  const safetyDeadline = startedAt + Math.max(60_000, requested * COOK_MS_PER_ITEM * 4 + COOK_STALL_MS);
+  // Four times the time the recipe says the cook takes, so a lagging server does not end a cook that is going on.
+  const safetyDeadline = startedAt + Math.max(60_000, requested * cookTicks * TICK_MS * 4 + COOK_STALL_MS);
   let lastAdvanceAt = startedAt;
   let previous = furnaceObservation(window);
   let sawInput = false;
