@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { onBodyTick, type BodyTick } from "../../runtime/body-ticks.js";
 import { BodyAbort } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
 import { Answered } from "../state/answered.js";
@@ -47,17 +48,18 @@ export class ReflexDriver implements AsyncDisposable {
     for (const observer of this.#observers) observer(transition);
   }
 
-  /** The one place the driver learns that the body ticked: a body-tick source (boat plan D1) replaces this body. */
-  #listen(listener: () => void): () => void {
-    this.bot.on("physicsTick", listener);
-    return () => {
-      this.bot.off("physicsTick", listener);
-    };
+  /** The one place the driver learns that the body ticked: a physics tick, or while seated a wall-clock pace tick. */
+  #listen(listener: (tick: BodyTick) => void): () => void {
+    return onBodyTick(this.bot, listener);
   }
 
-  readonly #tick = (): void => {
+  /** A seated tick (the bot is a passenger, physics is off) reaches only the reflexes that can act from a seat. */
+  readonly #tick = (tick: BodyTick): void => {
     if (this.#closed || this.bot.health <= 0 || !this.runner.ownership().connected) return;
-    for (const name of REFLEX_PRIORITY) this.#registrations.get(name)?.tick();
+    for (const name of REFLEX_PRIORITY) {
+      const registration = this.#registrations.get(name);
+      if (registration && (!tick.seated || registration.seated)) registration.tick();
+    }
   };
 
   readonly #death = (): void => {
@@ -89,6 +91,7 @@ export class ReflexDriver implements AsyncDisposable {
     if (this.#closed) throw new Error("The survival driver is closed.");
     if (this.#registrations.has(definition.name)) throw new Error(`Duplicate reflex: ${definition.name}`);
     const registration = new ReflexRegistration(definition, {
+      bot: this.bot,
       runner: this.runner,
       answered: this.answered,
       publish: (transition) => this.#publish(transition),

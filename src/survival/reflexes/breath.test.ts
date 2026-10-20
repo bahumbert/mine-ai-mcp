@@ -3,6 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { waterFixture } from "../../test-support/water.js";
 import { type SurvivalTransition } from "../control/contract.js";
+import { handClock } from "../../test-support/hand-clock.js";
 import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
 import { attachBreathReflex } from "./breath.js";
 
@@ -381,5 +382,79 @@ test("a stuck surfacing in still water is tried again 2 s later", async (t) => {
   clock = 2_001;
   await ticks(10);
   assert.equal(claims.length, 2, "the bot is still drowning in the same cells: it tries again");
+  await control[Symbol.asyncDispose]();
+});
+
+test("under an undiggable roof the surfacing is released after 5 s without progress and tried again 2 s later", async (t) => {
+  const time = handClock();
+  const fixture = waterFixture(t, { now: time.clock.now }, { clock: time.clock, cancelGraceMs: 500 });
+  sealedPocket(fixture, true, false);
+  const outcomes: Array<{ outcome: { kind?: string; limit?: string } }> = [];
+  const claims: number[] = [];
+  let releasedAt: number | undefined;
+  fixture.reflex.onTransition((event) => {
+    if (event.kind === "claim") claims.push(time.clock.now());
+    if (event.kind === "outcome") {
+      outcomes.push(event.evidence as never);
+      releasedAt ??= time.clock.now();
+    }
+  });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  const pass = async (ms: number) => {
+    for (let passed = 0; passed < ms; passed += 50) {
+      fixture.bot.emit("physicsTick");
+      await time.advance(50);
+    }
+  };
+  await pass(4_800);
+  assert.equal(claims.length, 1, "claimed once, still within the 5 s window");
+  assert.equal(outcomes.length, 0);
+  await pass(1_000);
+  assert.equal(outcomes[0]?.outcome.limit, "no_progress", "the 600-tick budget would have held it 30 s");
+  assert.equal(fixture.reflex.runner.status().owner, "idle");
+  const released = releasedAt!;
+  await pass(Math.max(0, released + 1_900 - time.clock.now()));
+  assert.equal(claims.length, 1, "within the 2 s stand-down");
+  await pass(400);
+  assert.equal(claims.length, 2, "the bot is still drowning: it surfaces again");
+  assert.ok(claims[1]! - released >= 2_000);
+  await control[Symbol.asyncDispose]();
+});
+
+test("a rising swimmer keeps the surfacing alive past the 5 s window", async (t) => {
+  const time = handClock();
+  const fixture = waterFixture(t, { now: time.clock.now }, { clock: time.clock, cancelGraceMs: 500 });
+  sealedPocket(fixture, true, false);
+  const outcomes: unknown[] = [];
+  fixture.reflex.onTransition((event) => {
+    if (event.kind === "outcome") outcomes.push(event.evidence);
+  });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  for (let tick = 0; tick < 240; tick++) {
+    // A block of climb every 2 s, as a swimmer working up through a long shaft.
+    if (tick > 0 && tick % 40 === 0) Object.assign(fixture.entity, { position: fixture.entity.position.offset(0, 1, 0) });
+    fixture.bot.emit("physicsTick");
+    await time.advance(50);
+  }
+  assert.equal(outcomes.length, 0, "12 s of steady climbing: no limit");
+  await control[Symbol.asyncDispose]();
+});
+
+test("the air rising is progress, and a dug block is progress", async (t) => {
+  const time = handClock();
+  const fixture = waterFixture(t, { now: time.clock.now }, { clock: time.clock, cancelGraceMs: 500 });
+  sealedPocket(fixture, true, false);
+  const outcomes: unknown[] = [];
+  fixture.reflex.onTransition((event) => {
+    if (event.kind === "outcome") outcomes.push(event.evidence);
+  });
+  const control = attachBreathReflex(fixture.bot, fixture.reflex);
+  for (let tick = 0; tick < 240; tick++) {
+    if (tick === 60) fixture.bot.oxygenLevel = 9;
+    if (tick === 140) fixture.bot.emit("diggingCompleted", {} as never);
+    fixture.bot.emit("physicsTick");
+    await time.advance(50);
+  }
+  assert.equal(outcomes.length, 0, "a rise at 3 s and a dug block at 7 s keep a 5 s window open for 12 s");
   await control[Symbol.asyncDispose]();
 });

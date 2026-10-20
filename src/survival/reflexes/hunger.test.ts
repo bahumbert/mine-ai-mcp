@@ -166,3 +166,69 @@ test("revoking raw food releases the active bite without waiting for its native 
     await driver[Symbol.asyncDispose]();
   }
 });
+
+/** The probes of one meal, driven by hand: the reflex's definition is captured instead of run on a driver. */
+function mealProbe(bot: Bot, food = "bread") {
+  let definition: { progress: (food: string, mark: (reason: string) => void) => () => void; limits: (food: string) => unknown } | undefined;
+  const driver = {
+    bot,
+    runner: { status: () => ({ owner: "idle" }) },
+    register: (captured: typeof definition) => {
+      definition = captured;
+      return { [Symbol.asyncDispose]: async () => {} };
+    },
+  };
+  attachHungerReflex(bot, driver as never, { activeEngagement: () => null }, new SurvivalPolicyState(bot));
+  const marks: string[] = [];
+  const detach = definition!.progress(food, (reason) => marks.push(reason));
+  return { marks, detach, limits: definition!.limits(food), tick: () => bot.emit("physicsTick") };
+}
+
+function eatingBot(overrides: Record<string, unknown> = {}) {
+  const items = [{ name: "bread", count: 3 }];
+  return Object.assign(new EventEmitter(), {
+    health: 20,
+    food: 10,
+    foodSaturation: 0,
+    usingHeldItem: false,
+    entity: { position: { x: 0, y: 64, z: 0 }, isInWater: false },
+    registry: minecraftData("1.21.4"),
+    inventory: { items: () => items },
+    ...overrides,
+  }) as unknown as Bot & { food: number; foodSaturation: number; usingHeldItem: boolean };
+}
+
+test("a bite in progress is progress", () => {
+  const bot = eatingBot();
+  const { marks, tick, detach } = mealProbe(bot);
+  tick();
+  assert.deepEqual(marks, []);
+  bot.usingHeldItem = true;
+  tick();
+  tick();
+  assert.deepEqual(marks, ["biting", "biting"], "every tick of the bite counts, so a 1.6 s meal never nears the 8 s window");
+  detach();
+});
+
+test("food or saturation rising and a spent stack are progress", () => {
+  const bot = eatingBot();
+  const { marks, tick, detach } = mealProbe(bot);
+  tick();
+  bot.food = 14;
+  tick();
+  bot.foodSaturation = 2;
+  tick();
+  Reflect.set(bot, "inventory", { items: () => [{ name: "bread", count: 2 }] });
+  tick();
+  assert.deepEqual(marks, ["food_rose", "saturation_rose", "food_spent"]);
+  detach();
+});
+
+test("a meal that does nothing for the window is not progress, and its limits are the owner's", () => {
+  const bot = eatingBot();
+  const { marks, tick, limits, detach } = mealProbe(bot);
+  for (let count = 0; count < 100; count++) tick();
+  assert.deepEqual(marks, []);
+  assert.deepEqual(limits, { ceilingMs: 20_000, noProgressMs: 8_000, standDownMs: 2_000 });
+  detach();
+});

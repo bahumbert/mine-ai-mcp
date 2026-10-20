@@ -332,7 +332,11 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
   );
   assert.equal(bot.listenerCount("chat"), 1);
   assert.equal(bot.listenerCount("whisper"), 1);
-  assert.equal(bot.listenerCount("death"), 9, "the server-seat watch forgets its place at a death too");
+  assert.equal(
+    bot.listenerCount("death"),
+    10,
+    "eight owners, the server-seat watch (it forgets its place at a death too) and the body-tick pacer the reflex loop ticks through",
+  );
   assert.deepEqual(
     runtime.actions.map((action) => action.name),
     [

@@ -7,6 +7,8 @@ import { ActionRunner } from "../../session/action-runner.js";
 import { type SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
 
+/** Limits far beyond any test: a claim that is not under test never runs into them. */
+const TEST_LIMITS = { ceilingMs: 600_000, noProgressMs: 600_000, standDownMs: 2_000 };
 const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
 const botFixture = () =>
   Object.assign(new EventEmitter(), { health: 20, game: { dimension: "overworld" } }) as unknown as Bot;
@@ -29,6 +31,7 @@ test("a failed moving response answers its final arrangement before another tick
     failure: () => ({ kind: "exhausted", why: "The attacker kept pace." }),
     continuation: () => ({ kind: "return", reason: "Escape exhausted." }),
     describe: () => null,
+    limits: () => TEST_LIMITS,
   });
   bot.emit("physicsTick");
   await settled();
@@ -64,6 +67,7 @@ test("an execution exception is answered once and only declared premises rearm i
     failure: () => null,
     continuation: () => ({ kind: "resume" }),
     describe: () => null,
+    limits: () => TEST_LIMITS,
   });
   bot.emit("physicsTick");
   await settled();
@@ -96,6 +100,7 @@ for (const cause of ["policy", "death"] as const)
       failure: () => ({ kind: "failed", why: "must never be recorded for cancellation" }),
       continuation: () => ({ kind: "resume" }),
       describe: () => null,
+      limits: () => TEST_LIMITS,
     });
     bot.emit("physicsTick");
     await settled();
@@ -126,6 +131,7 @@ function throwingEscape(retryAfterFailureMs: number | undefined) {
     failure: () => null,
     continuation: () => ({ kind: "resume" as const }),
     describe: () => null,
+    limits: () => TEST_LIMITS,
   };
   return { attempts, definition };
 }

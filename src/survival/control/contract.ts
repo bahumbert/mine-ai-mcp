@@ -26,14 +26,34 @@ export type ResponseDecision<Response> =
 /** How soon a reflex that fights a lethal, growing danger (drowning, burning) tries again after a failed attempt. */
 export const LETHAL_REFLEX_RETRY_MS = 2_000;
 
+/** The two wall-clock limits of a reflex claim, and how long the reflex stands down after hitting one. */
+export interface ReflexLimits {
+  /** The longest the claim may hold the body, however well it progresses. */
+  readonly ceilingMs: number;
+  /** How long the claim may go without a progress mark (the base probe's or the reflex's own). */
+  readonly noProgressMs: number;
+  /** After a limit the scope stays answered this long, whatever the facts do (time only). */
+  readonly standDownMs: number;
+}
+
 export interface ReflexDefinition<Danger, Response, Outcome> {
   readonly name: ReflexName;
   readonly intervalTicks?: number;
+  /** Still senses and responds while the bot is a passenger (hunger eats seated); others read a physics state that is stale then. */
+  readonly seated?: boolean;
   sense(): DangerObservation<Danger>;
   decide(danger: Danger): ResponseDecision<Response>;
   /** Captured only on a changed decision, so physics updates cannot flood receipts. */
   decisionFacts?(danger: Danger): Facts;
   facts(response: Response): AnsweredScope;
+  /** What this response may hold the body for: the runner releases a claim that runs into either limit. */
+  limits(response: Response): ReflexLimits;
+  /**
+   * The reflex's own progress probes for one claim, besides the base probe (the body travelled a block, its health
+   * changed, it died): call `mark(reason)` when the response gets somewhere. Returns the unsubscribe, called when the
+   * claim ends.
+   */
+  progress?(response: Response, mark: (reason: string) => void): () => void;
   act(response: Response, signal: AbortSignal): Promise<Outcome>;
   continuation(outcome: Outcome): Continuation;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;

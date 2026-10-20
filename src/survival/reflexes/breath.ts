@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
-import { LETHAL_REFLEX_RETRY_MS } from "../control/contract.js";
+import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
+import { climbsBy, risesOver, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { airSupplyPoints, isInWater } from "../perception/body.js";
 import { decideBreathResponse, needsBreathResponse } from "../policy/environment.js";
@@ -9,6 +10,13 @@ import { airSupplyTicks } from "../../world/air-supply.js";
 
 /** What the runner reports as the body's owner while the bot surfaces for air. */
 export const BREATH_REFLEX = "breath_reflex" as const;
+/**
+ * A surfacing may hold the body 40 s (the 600-tick budget is 30 s at full speed, plus 10 s for a server 30 % behind) and
+ * 5 s without the air rising, the body climbing a block or a block dug; then the reflex pauses 2 s (owner 2026-10-19).
+ */
+const BREATH_LIMITS: ReflexLimits = { ceilingMs: 40_000, noProgressMs: 5_000, standDownMs: 2_000 };
+/** The body rising this far (in water too) toward air is progress. */
+const CLIMB_BLOCKS = 1;
 /** Check air every quarter second while another action or idle buoyancy owns movement. */
 const CHECK_INTERVAL_TICKS = 5;
 /** Air ticks on the server's meter while the bot breathes. */
@@ -17,6 +25,20 @@ const FULL_AIR_TICKS = 300;
 const REPEAT_FIRINGS = 3;
 const REPEAT_WINDOW_MS = 3 * 60_000;
 const REPEAT_RADIUS = 4;
+
+/** What counts as getting somewhere while surfacing: the air rose, the body climbed a block (in water too), a block was dug. */
+function surfacingProgress(bot: Bot, mark: (reason: string) => void): () => void {
+  const dug = () => mark("dug");
+  bot.on("diggingCompleted", dug);
+  const stopTicks = watchBodyTicks(bot, mark, {
+    air_rose: risesOver(() => airSupplyPoints(bot)),
+    climbed: climbsBy(() => bot.entity.position.y, CLIMB_BLOCKS),
+  });
+  return () => {
+    stopTicks();
+    bot.off("diggingCompleted", dug);
+  };
+}
 
 /** The breathing response owns only its registration; runtime attaches idle buoyancy separately. */
 export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop: () => number | null = () => null, now: () => number = Date.now): AsyncDisposable {
@@ -61,6 +83,8 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
         permissions: () => null,
       };
     },
+    limits: () => BREATH_LIMITS,
+    progress: (_response, mark) => surfacingProgress(bot, mark),
     act: async ({ airBefore, maximumTicks, ownedDive }, signal) => {
       const healthBefore = bot.health;
       return {

@@ -13,6 +13,7 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { BodyAbort } from "../../session/abort.js";
 import { observeCombatDecision } from "../control/combat/observation.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
+import type { ReflexLimits } from "../control/contract.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { incomingFireball } from "../perception/combat/fireball.js";
 import { HOSTILE_OBSERVATION_RANGE, isHostile, observeHostileContact } from "../perception/combat/threats.js";
@@ -39,6 +40,11 @@ type ShieldPreparation = { readonly kind: "prepare_shield" };
 type ShieldPrepared = { readonly kind: "shield_prepared"; readonly equipped: boolean; readonly error: string | null };
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
+
+/** A fight, evade, hide or deflect may hold the body 10 min; 30 s without a combat progress mark ends it; its target (or cell) then stands down 10 s (owner 2026-10-19). */
+const COMBAT_LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 30_000, standDownMs: 10_000 };
+/** Equipping a shield is one inventory move: 10 s at most, 5 s without the off-hand changing. */
+const SHIELD_LIMITS: ReflexLimits = { ceilingMs: 10_000, noProgressMs: 5_000, standDownMs: 10_000 };
 
 export interface HostileReflex extends AsyncDisposable {
   readonly threats: ResponseContext;
@@ -205,6 +211,7 @@ export function attachHostileReflex(
               shields: bot.inventory.items().filter((item) => item.name === "shield").map((item) => item.slot) }),
             permissions: () => ({ shield: policy.combat.shield }) }
         : responseScope(bot, () => policy.effective, response.kind, "targetId" in response ? response.targetId : undefined),
+    limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
     act: async (directive, signal): Promise<HostileSettlement | ShieldPrepared> => {
       if (directive.kind === "prepare_shield") {
         let error: string | null = null;

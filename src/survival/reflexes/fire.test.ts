@@ -5,7 +5,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { actionResultSchema, defineAction } from "../../actions/index.js";
-import { ActionRunner } from "../../session/action-runner.js";
+import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import { handClock } from "../../test-support/hand-clock.js";
 import { observeMineflayerBlock, type WorldView } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { botFixture } from "../../test-support/bot.js";
@@ -177,11 +178,11 @@ test("a walk that outlasts the 15 s wall clock is reported as out of time, not a
  * reflex claims the body, the escape ends on the first tick after `leavePit()`, then it waits for the lava. World
  * ages move in jumps of 20, as the server's time packets do.
  */
-function lavaWaitScene(resources: AsyncDisposableStack) {
+function lavaWaitScene(resources: AsyncDisposableStack, runnerOptions: ActionRunnerOptions = {}) {
   const { bot, world, memory } = burningBesidePit(false);
   Object.assign(bot.entity, { isInLava: true });
   Object.assign(bot.time, { age: 1000 });
-  const runner = new ActionRunner();
+  const runner = new ActionRunner(runnerOptions);
   const driver = resources.use(new ReflexDriver(bot, runner));
   resources.use(attachFireReflex(bot, driver, world));
   const attempts = { count: 0 };
@@ -415,4 +416,58 @@ test("lava that keeps advancing past the 10 s clock returns the action with the 
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action was not resumed");
   assert.equal(finished.result.status, "cancelled");
+});
+
+/** The lava-wait scene on a hand clock: `pass(ms)` moves time in 50 ms ticks, with a physics tick at each unless `ticking` is false. */
+function limitedLavaScene(resources: AsyncDisposableStack) {
+  const time = handClock();
+  const scene = lavaWaitScene(resources, { clock: time.clock, cancelGraceMs: 500 });
+  const pass = async (ms: number, ticking = true) => {
+    for (let passed = 0; passed < ms; passed += 50) {
+      if (ticking) scene.bot.emit("physicsTick");
+      await time.advance(50);
+    }
+  };
+  return { ...scene, pass };
+}
+
+test("waiting on dry ground for lava to settle is progress: not cut at 6 s", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  await using resources = new AsyncDisposableStack();
+  const scene = limitedLavaScene(resources);
+  const { output } = await scene.startInterrupted();
+  scene.lavaChanges();
+  await scene.leavePit();
+  await scene.pass(8_000);
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still waiting at 8 s of the lava wait");
+  assert.equal(scene.attempts.count, 1);
+  scene.bot.time.age += 200;
+  await scene.pass(100);
+  assert.equal((await output).result.status, "succeeded", "the lava settled: the action resumes");
+});
+
+test("the same wait with the body off the ground is cut at 6 s without progress", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  await using resources = new AsyncDisposableStack();
+  const scene = limitedLavaScene(resources);
+  const { output } = await scene.startInterrupted();
+  scene.lavaChanges();
+  await scene.leavePit();
+  scene.bot.entity.onGround = false;
+  await scene.pass(7_000);
+  const finished = await output;
+  assert.equal(scene.attempts.count, 1, "the action is not resumed");
+  assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
+});
+
+test("an escape with no ticks is released at 6 s", async () => {
+  await using resources = new AsyncDisposableStack();
+  const scene = limitedLavaScene(resources);
+  const { output } = await scene.startInterrupted();
+  await scene.pass(5_900, false);
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "5.9 s: the window is still open");
+  await scene.pass(1_200, false);
+  const finished = await output;
+  assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
+  assert.equal(scene.runner.status().owner, "idle");
 });

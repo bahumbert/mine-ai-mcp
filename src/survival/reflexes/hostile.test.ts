@@ -397,6 +397,9 @@ test("a blaze shot travelling away does not attribute another victim's combat to
   }
 });
 
+/** "death" listeners on an idle bot: the hostile reflex's own and the body-tick pacer's (the driver ticks through it). */
+const DEATH_LISTENERS_AT_REST = 3;
+
 /** Let the claimed response run to its recorded event, or give up after a bounded number of turns. */
 async function until(condition: () => boolean, turns = 50): Promise<boolean> {
   for (let turn = 0; turn < turns; turn += 1) {
@@ -438,7 +441,7 @@ test("claims an idle body for a hostile in contact and records what happened", a
 
   assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
   assert.equal(fixture.runner.status().busy, false);
-  assert.ok(await until(() => fixture.bot.listenerCount("death") === 2));
+  assert.ok(await until(() => fixture.bot.listenerCount("death") === DEATH_LISTENERS_AT_REST));
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
 });
@@ -450,7 +453,7 @@ test("a denied reflex claim removes its death listener", async () => {
     value: () => ({ kind: "busy", activeAction: { action: "other", startedAt: new Date().toISOString() } }),
   });
   fixture.tick();
-  assert.equal(fixture.bot.listenerCount("death"), 2);
+  assert.equal(fixture.bot.listenerCount("death"), DEATH_LISTENERS_AT_REST);
   assert.deepEqual(fixture.recorded(), []);
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
@@ -1059,7 +1062,7 @@ for (const cleanup of ["returns", "throws"] as const) {
     assert.deepEqual(payload.finalDistances, [{ id: 7, distance: 3 }]);
     assert.equal(payload.attacks, cleanup === "returns" ? 3 : 0);
     fixture.bot.off("death", cancelOnDeath);
-    assert.equal(fixture.bot.listenerCount("death"), 2);
+    assert.equal(fixture.bot.listenerCount("death"), DEATH_LISTENERS_AT_REST);
     await fixture.observer[Symbol.asyncDispose]();
     fixture.data.close();
   });

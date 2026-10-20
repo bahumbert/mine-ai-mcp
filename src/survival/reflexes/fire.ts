@@ -1,7 +1,8 @@
 import type { Bot } from "mineflayer";
 import type { WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
-import { LETHAL_REFLEX_RETRY_MS } from "../control/contract.js";
+import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
+import { turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
@@ -96,6 +97,23 @@ function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["bl
   }
 }
 
+/**
+ * An escape (15 s) and the wait for lava to settle (10 s) fit in 30 s; 6 s without leaving the lava or fire, the fire
+ * going out, or standing on dry ground ends the claim, and the reflex pauses 2 s (owner 2026-10-19).
+ */
+const FIRE_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 6_000, standDownMs: 2_000 };
+
+/** What counts as getting somewhere: out of the lava or fire, the fire out, and every tick on dry ground (the lava wait). */
+function fireProgress(bot: Bot, mark: (reason: string) => void): () => void {
+  const onDryGround = () => !isInLava(bot) && !isInFire(bot) && bot.entity.onGround;
+  return watchBodyTicks(bot, mark, {
+    out_of_lava: turnsTrue(() => !isInLava(bot)),
+    out_of_fire: turnsTrue(() => !isInFire(bot)),
+    fire_out: turnsTrue(() => !isBurning(bot)),
+    on_dry_ground: onDryGround,
+  });
+}
+
 /** Fire owns its environmental authority; combat policy cannot prohibit escape. */
 export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
   const lava: LavaWatch = { advancing: false, lastChangeAge: null };
@@ -125,6 +143,8 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
       return { kind: "observed", danger: facts, evidence: { ...facts } };
     },
     decide: decideFireResponse,
+    limits: () => FIRE_LIMITS,
+    progress: (_response, mark) => fireProgress(bot, mark),
     facts: () => {
       const origin = bot.entity.position.floored();
       return {
