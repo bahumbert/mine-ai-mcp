@@ -24,7 +24,7 @@ export function findFlatPlacementCandidates(bot: Bot, footprint: readonly Positi
           const valid = cells.every((cell) => {
             if (cellIntersectsPlayerBody(cell, bot.entity.position)) return false;
             return (
-              isDryPlacementSite(bot.blockAt(cell)) && supportsFlatPlacement(bot.blockAt(cell.offset(0, -1, 0)))
+              isDryPlacementSite(bot.blockAt(cell), bot.version) && supportsFlatPlacement(bot.blockAt(cell.offset(0, -1, 0)))
             );
           });
           if (valid) candidates.push(origin);

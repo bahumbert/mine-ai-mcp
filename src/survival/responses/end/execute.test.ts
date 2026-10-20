@@ -180,6 +180,7 @@ test("an ordinary scaffold blocking a resistant shelter sends retreat directly t
   const bot = botFixture({ dimension: "the_end", position: new Vec3(6.5, 63, 1.5),
     blocks: { "6,62,1": "end_stone", "7,63,1": "cobbled_deepslate" },
     items: [{ name: "end_stone", count: 20 }] }, {
+    version: "1.21.4",
     placeBlock: () => assert.fail("Do not start a shelter whose required wall cannot be placed"),
   });
   bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,

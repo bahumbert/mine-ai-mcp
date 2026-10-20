@@ -45,7 +45,7 @@ function poolWorld(held: string | null = null) {
       },
     },
     {
-      findBlocks: ({ matching, point }: { matching: number; point?: Vec3 }) =>
+      version: "1.21.4", findBlocks: ({ matching, point }: { matching: number; point?: Vec3 }) =>
         [...blocks.values()]
           .filter((block) => registry.blocksByName[block.name]?.id === matching)
           .filter((block) => !point || block.position.distanceTo(point) <= 10)

@@ -291,7 +291,7 @@ export async function placeSolidBlockInto(
   const current = bot.blockAt(position);
   if (!current) return { kind: "failed", error: "The cell is not loaded." };
   if (current.boundingBox === "block") return { kind: "placed", block: current };
-  if (!isReplaceableForPlacement(current)) {
+  if (!isReplaceableForPlacement(current, bot.version)) {
     return { kind: "failed", error: `The cell holds ${current.name}, which a placement does not replace.` };
   }
   if (!item) return { kind: "failed", error: "No permitted full block is available for placement." };

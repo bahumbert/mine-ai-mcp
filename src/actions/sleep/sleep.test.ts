@@ -38,6 +38,8 @@ function mockBot(overrides: Record<string, any> = {}) {
   const bot: any = botFixture(
     { username: "sleeper", position: { x: 0, y: 64, z: 0 }, time: { timeOfDay: 14000 } },
     {
+      version: registry.version.minecraftVersion,
+      _client: { write: () => undefined },
       world: { getColumns: () => [...columns.values()] },
       isSleeping: false,
       activateBlock: async () => {},

@@ -6,6 +6,7 @@ import { findFlatPlacementCandidates } from "./placement-candidates.js";
 
 test("finds supported flat footprints without placing through the player", () => {
   const bot = {
+    version: "1.21.4",
     entity: { position: new Vec3(0.8, 64, 0.5) },
     blockAt: (position: Vec3) => ({
       name: position.y === 63 ? "stone" : "air",

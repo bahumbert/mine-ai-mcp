@@ -52,7 +52,7 @@ function chooseCell(
         const position = feet.offset(dx, dy, dz);
         const distance = position.distanceTo(feet);
         if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, body)) continue;
-        if (!isDryPlacementSite(bot.blockAt(position))) continue;
+        if (!isDryPlacementSite(bot.blockAt(position), bot.version)) continue;
         if (chestOpeningObstruction(bot, itemName, position)) continue;
         if (!inRegions && protectedRegionAt(regions, bot.game.dimension, position.x, position.y, position.z) !== null) continue;
         const placement = findPlacementSupport(bot, position, supportsFlatPlacement);

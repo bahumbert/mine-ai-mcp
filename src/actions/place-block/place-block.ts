@@ -304,7 +304,7 @@ function planTarget(run: PlaceRun, target: Vec3): TargetPlan | PlaceBlockResult 
   if (!targetBlock) return failedPlacement(run, placeBlockOutcomes.targetUnloaded, target, null);
   if (targetBlock.name === request.blockName) return targetAlreadyHoldsBlock(run, target);
   run.beforeBlock ??= targetBlock.name;
-  if (!isReplaceableForPlacement(targetBlock)) {
+  if (!isReplaceableForPlacement(targetBlock, bot.version)) {
     return failedPlacement(run, placeBlockOutcomes.targetOccupied(targetBlock.name), target, targetBlock.name);
   }
   const support = findSupport(bot, target);

@@ -14,7 +14,7 @@ function fill(cells: Record<string, string>, name: string, [x0, y0, z0]: number[
 
 /** Open air above, stone up to y=59 and the feet of the bot at (0, 62, 0). */
 function botIn(cells: Record<string, string>) {
-  return botFixture({ blocks: cells, position: { x: 0.5, y: 62, z: 0.5 } });
+  return botFixture({ blocks: cells, position: { x: 0.5, y: 62, z: 0.5 } }, { version: "1.21.4", _client: { write: () => undefined } });
 }
 
 /** A lake of water (y 60..62) for x <= 4, dry stone ground (top y=61) from x = shoreX on. */
@@ -87,7 +87,7 @@ function craftingTableBot() {
     blocks: cells,
     position: { x: 0.5, y: 62, z: 0.5 },
     items: [{ name: "crafting_table", count: 1 }],
-  });
+  }, { version: "1.21.4", _client: { write: () => undefined } });
 }
 
 test("the cell is reported right before the placement packet, so an aborted placement still names it", async () => {

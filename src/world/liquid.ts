@@ -163,7 +163,7 @@ export function pourAim(bot: Bot, accepts: (landing: Vec3) => number | null): Po
           const distance = lookAt.distanceTo(eye);
           if (distance > USE_RAY_REACH || distance < RAY_STEP) continue;
           if (best !== null && score === best.score && distance >= best.distance) continue;
-          if (!isReplaceableForPlacement(bot.blockAt(landing))) continue;
+          if (!isReplaceableForPlacement(bot.blockAt(landing), bot.version)) continue;
           const direction = lookAt.minus(eye).scaled(1 / distance);
           const hit = bot.world.raycast(eye, direction, USE_RAY_REACH);
           if (hit === null) continue;

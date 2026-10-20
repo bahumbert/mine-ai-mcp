@@ -375,7 +375,7 @@ class BuildTargeting {
     if (refused !== undefined) return { kind: "refused", ...refused };
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
-    if (!isReplaceableForPlacement(block)) {
+    if (!isReplaceableForPlacement(block, this.bot.version)) {
       return this.request.removeWrongBlocks
         ? { kind: "diggable", holds: described(block, cell) }
         : { kind: "blocked", holds: described(block, cell) };

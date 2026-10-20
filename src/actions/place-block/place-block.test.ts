@@ -22,7 +22,7 @@ function testWorld(targetName = "air", carried = 2) {
   const items: FakeStack[] = carried > 0 ? [{ name: "cobblestone", count: carried }] : [];
   const bot = botFixture(
     { items, position: { x: 0, y: 64, z: 0 } },
-    { blockAt: (position: Vec3) => blocks.get(key(position)) ?? { name: "air", boundingBox: "empty", position } },
+    { version: "1.21.4", blockAt: (position: Vec3) => blocks.get(key(position)) ?? { name: "air", boundingBox: "empty", position } },
   );
   /** What the server's own broadcast does: change the count, then say so. */
   const takeOneFromInventory = () => {

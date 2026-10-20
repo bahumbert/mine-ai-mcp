@@ -157,6 +157,9 @@ function controllerAfterObservedHit(bot: Bot, navigation: NavigationRuntime) {
 
 function blazePreflightFixture(items: readonly string[]) {
   const fixture = combatFixture(items);
+  // A logged-in bot: it has its version, and a client the shift packets are written to.
+  Object.assign(fixture.bot, { version: "1.21.4" });
+  Object.assign(fixture.bot._client, { write: () => undefined });
   fixture.bot.entity.position.set(0.5, 64, 0.5);
   fixture.bot.entity.width = 0.6;
   fixture.bot.entity.height = 1.8;

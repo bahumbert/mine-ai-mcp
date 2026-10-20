@@ -227,7 +227,7 @@ function namedCell(
   // Not loaded yet: the walk itself is what makes the cell readable.
   if (!block) return { target };
   if (request.action === "pour") {
-    return isReplaceableForPlacement(block) ? { target } : { error: useBucketOutcomes.targetOccupied(block.name) };
+    return isReplaceableForPlacement(block, bot.version) ? { target } : { error: useBucketOutcomes.targetOccupied(block.name) };
   }
   if (isLiquidSource(bot, block, request.liquid)) return { target };
   const feeding = block.name === request.liquid ? sourceFeeding(bot, target, request.liquid) : null;
@@ -389,7 +389,7 @@ async function castBucket(
       signal: context.signal,
     });
   }
-  if (!isReplaceableForPlacement(targetBlock)) return refused(useBucketOutcomes.targetOccupied(targetBlock.name));
+  if (!isReplaceableForPlacement(targetBlock, bot.version)) return refused(useBucketOutcomes.targetOccupied(targetBlock.name));
   const stepped = await aimWithCloserSteps(bot, target, context, dependencies);
   if ("error" in stepped) return refused(stepped.error);
   progress.aimedAt = stepped.aim.surface;

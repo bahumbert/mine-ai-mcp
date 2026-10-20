@@ -255,7 +255,7 @@ export class EndCombat {
     if (protectionShell(origin, [origin]).some(cell => {
       const block = bot.blockAt(cell);
       return !(fullProtectionBlock(block) && DRAGON_PROTECTION_BLOCKS.includes(block!.name)) &&
-        !isReplaceableForPlacement(block) && block?.name !== "fire";
+        !isReplaceableForPlacement(block, bot.version);
     })) return false;
     return enclosedInPlace(bot, DRAGON_PROTECTION_BLOCKS) ||
       (policy.combat.terrain.place && countCapBlocks(bot, DRAGON_PROTECTION_BLOCKS) >= WALL_IN_BLOCKS);

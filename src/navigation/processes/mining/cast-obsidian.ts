@@ -88,7 +88,7 @@ function castScore(bot: Bot, sources: ReadonlySet<string>, landing: Vec3): numbe
     const beside = landing.plus(direction);
     if (sources.has(cellKey(beside))) return true;
     // A buried source's stone lid blocks flow from a neighbouring shore cell.
-    return sources.has(cellKey(beside.offset(0, -1, 0))) && isReplaceableForPlacement(bot.blockAt(beside));
+    return sources.has(cellKey(beside.offset(0, -1, 0))) && isReplaceableForPlacement(bot.blockAt(beside), bot.version);
   });
   return reachesSource ? 1 : null;
 }

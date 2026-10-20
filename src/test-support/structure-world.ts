@@ -40,7 +40,7 @@ export function structureWorld(options: StructureWorldOptions = {}) {
   const position = (options.feet ?? new Vec3(0, 64, 0)).offset(0.5, 0, 0.5);
   const bot = {
     game: { dimension: "overworld" },
-    registry,
+    registry, version: registry.version.minecraftVersion,
     entity: { position, height: 1.8 },
     inventory: {
       items: () => [...carried].filter(([, count]) => count > 0).map(([name, count]) => ({ name, count })),
