@@ -13,7 +13,9 @@ import { isLiquid, isReplaceableForPlacement } from "./block-classification.js";
 import { STANDING_EYE_HEIGHT } from "./block-visibility.js";
 import type { WorldBlock } from "./placement.js";
 
-export type LiquidName = "water" | "lava";
+/** The game's two fluids: the one list the bucket action's input, its items and its source checks all read. */
+export const LIQUIDS = ["water", "lava"] as const;
+export type LiquidName = (typeof LIQUIDS)[number];
 
 /** How far around a pour the obsidian and cobblestone are counted. */
 const FORMATION_RADIUS = 10;

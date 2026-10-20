@@ -30,6 +30,7 @@ import {
 import { exploreForBlocks } from "../../navigation/processes/mining/block-exploration.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import {
+  bucketItem,
   carriedCount,
   countFormations,
   isLiquidSource,
@@ -94,10 +95,6 @@ function productionDependencies(navigation: NavigationRuntime): UseBucketDepende
 
 function coordinates(position: Vec3): BucketCell {
   return { x: position.x, y: position.y, z: position.z };
-}
-
-function bucketFor(liquid: BucketLiquid, full: boolean): string {
-  return full ? `${liquid}_bucket` : "bucket";
 }
 
 function carried(bot: Bot, name: string) {
@@ -319,17 +316,19 @@ interface BucketCounts {
 }
 
 function bucketCounts(bot: Bot, liquid: BucketLiquid): BucketCounts {
-  return { empty: carriedCount(bot, bucketFor(liquid, false)), full: carriedCount(bot, bucketFor(liquid, true)) };
+  return { empty: carriedCount(bot, bucketItem(liquid, false)), full: carriedCount(bot, bucketItem(liquid, true)) };
 }
 
 /**
- * Whether a pour's cell shows the pour: its liquid in source state, or what that liquid made of the lava that was
- * there. The footing reflex's water landing elsewhere moves the bucket counts without touching this cell.
+ * Whether a pour's cell shows the pour: its liquid in source state, or a block with a collision box that is not what
+ * the cell held before (the liquid met the lava there and made a block). A cell is replaceable before any cast, so a
+ * solid block now came from the pour. The footing reflex's water landing elsewhere moves the bucket counts without
+ * touching this cell, and flowing liquid has no collision box: neither shows this pour.
  */
 function pourShownByCell(bot: Bot, progress: BucketProgress, target: Vec3): boolean {
   const block = bot.blockAt(target);
   if (!block) return false;
-  const formed = (block.name === "obsidian" || block.name === "cobblestone") && block.name !== progress.targetBefore;
+  const formed = block.boundingBox === "block" && block.name !== progress.targetBefore;
   return isLiquidSource(bot, block, progress.request.liquid) || formed;
 }
 
@@ -391,7 +390,7 @@ async function castBucket(
     return dependencies.useItem(bot, {
       item,
       lookAt: target.offset(0.5, 0.9, 0.5),
-      expectedInventoryGain: { item: bucketFor(request.liquid, true), count: 1 },
+      expectedInventoryGain: { item: bucketItem(request.liquid, true), count: 1 },
       signal: context.signal,
     });
   }
@@ -404,7 +403,7 @@ async function castBucket(
     item,
     lookAt: stepped.aim.lookAt,
     expectedCells: [{ position: target, matches: (block) => block.name === request.liquid }],
-    expectedHeldItem: "bucket",
+    expectedHeldItem: bucketItem(request.liquid, false),
     signal: context.signal,
   });
 }
@@ -420,7 +419,7 @@ export function beginUseBucket(
   dependencies: UseBucketDependencies,
 ): RequestExecution<UseBucketResult> {
   const filling = request.action === "fill";
-  const bucketName = bucketFor(request.liquid, !filling);
+  const bucketName = bucketItem(request.liquid, !filling);
   const before = bucketCounts(bot, request.liquid);
   const progress: BucketProgress = {
     request,

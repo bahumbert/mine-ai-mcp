@@ -1,13 +1,14 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { LIQUIDS, type LiquidName } from "../../world/liquid.js";
 import { actionResultSchema, type ActionOutput } from "../action.js";
 
 export const USE_BUCKET = "use_bucket" as const;
 export const USE_BUCKET_DESCRIPTION =
   "Fill a carried bucket from a water or lava source, or pour a full bucket into one exact cell. A fill without a cell finds the nearest source the way mining finds ore: every loaded column is searched, and when nothing is loaded the bot explores outward for a bounded time before reporting that it found none. A fill that names a flowing cell scoops the source feeding it when one is within a few cells. Navigates into reach and verifies the bucket and the world changed. To obtain obsidian, ask collect_block for it while carrying a water bucket: the mining process pours onto lava itself.";
 
-export const bucketLiquidSchema = z.enum(["water", "lava"]);
-export type BucketLiquid = z.output<typeof bucketLiquidSchema>;
+export const bucketLiquidSchema = z.enum(LIQUIDS);
+export type BucketLiquid = LiquidName;
 
 const coordinate = (axis: string) =>
   z.number().int().safe().describe(`Absolute ${axis} coordinate of the target cell.`);

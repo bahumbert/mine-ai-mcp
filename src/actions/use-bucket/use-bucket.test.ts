@@ -426,13 +426,15 @@ function bucketAttempts(world: ReturnType<typeof bucketRequestWorld>, request: P
   return (signal?: AbortSignal) => run({ signal });
 }
 
-/** Makes the world's useItem abort the request right after its effect, as a reflex taking the body would. */
+/** Makes the world's first useItem abort the request right after its effect, as a reflex taking the body would. */
 function abortAfterUse(world: ReturnType<typeof bucketRequestWorld>, owner: AbortController): void {
   const useItem = world.dependencies.useItem;
+  let casts = 0;
   world.dependencies = {
     ...world.dependencies,
     useItem: async (bot, use) => {
-      await useItem(bot, use);
+      const used = await useItem(bot, use);
+      if (casts++ > 0) return used;
       owner.abort(new Error("hunger reflex"));
       throw owner.signal.reason;
     },
@@ -567,4 +569,99 @@ test("a fill resumed after the bucket counts changed elsewhere with its source s
 
   assert.equal(result.status, "succeeded");
   assert.equal(world.uses.length, 1, "the scoop is cast again");
+});
+
+const LAVA_BESIDE_POOL = new Vec3(7, 64, 0);
+const POUR_INTO_LAVA = { action: "pour", liquid: "water", cell: { x: 7, y: 64, z: 0 } } as const;
+
+/** A lava source in the pour's cell, as a lava cover over the pit is. */
+function lavaInPourCell(world: ReturnType<typeof bucketRequestWorld>): void {
+  world.blocks.set(key(LAVA_BESIDE_POOL), {
+    name: "lava",
+    stateId: lava.minStateId,
+    boundingBox: "empty",
+    position: LAVA_BESIDE_POOL,
+  });
+}
+
+/** The pour's cell becomes `name` once the cast lands, as the game makes a block of lava and water meeting. */
+function pourMakes(world: ReturnType<typeof bucketRequestWorld>, name: string, stateId: number, box: "block" | "empty") {
+  const useItem = world.dependencies.useItem;
+  world.dependencies = {
+    ...world.dependencies,
+    useItem: async (bot, use) => {
+      const used = await useItem(bot, use);
+      world.blocks.set(key(LAVA_BESIDE_POOL), { name, stateId, boundingBox: box, position: LAVA_BESIDE_POOL });
+      return used;
+    },
+  };
+}
+
+test("a lava cover cut after the cast whose cell turned to stone is not poured again", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  lavaInPourCell(world);
+  pourMakes(world, "stone", 1, "block");
+  const owner = new AbortController();
+  abortAfterUse(world, owner);
+  const attempt = bucketAttempts(world, POUR_INTO_LAVA);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1, "one cast in total");
+  assert.equal(result.bucket.targetBefore, "lava");
+  assert.equal(result.bucket.targetAfter, "stone");
+});
+
+test("a pour cut after the cast whose lava cell still holds lava is cast again", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  lavaInPourCell(world);
+  world.count("water_bucket").count = 2;
+  const owner = new AbortController();
+  abortInRoute(world, owner);
+  const attempt = bucketAttempts(world, POUR_INTO_LAVA);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  world.count("water_bucket").count -= 1; // a footing pour elsewhere moved the counts, not this cell
+  world.count("bucket").count += 1;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.uses.length, 1, "the pour is cast again");
+});
+
+test("a pour cut after the cast whose cell holds flowing water now is cast again", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  lavaInPourCell(world);
+  // Flowing water has no collision box and is not a source: it does not show this pour.
+  pourMakes(world, "water", water.minStateId + 1, "empty");
+  const owner = new AbortController();
+  abortAfterUse(world, owner);
+  const attempt = bucketAttempts(world, POUR_INTO_LAVA);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(world.uses.length, 2, "the first cast and the resumed one");
+  assert.equal(result.status, "succeeded");
+});
+
+test("a pour resumed while its cell is unloaded is refused as unloaded, not read as done", async () => {
+  const world = bucketRequestWorld("water_bucket");
+  world.count("water_bucket").count = 2;
+  const owner = new AbortController();
+  abortInRoute(world, owner);
+  const attempt = bucketAttempts(world, POUR_BESIDE_POOL);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  world.count("water_bucket").count -= 1;
+  world.count("bucket").count += 1;
+  const blockAt = world.bot.blockAt.bind(world.bot);
+  world.bot.blockAt = (position: Vec3) => (key(position.floored()) === key(new Vec3(7, 64, 0)) ? null : blockAt(position));
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  assert.match("error" in result ? result.error : "", /BUCKET_TARGET_UNLOADED/);
+  assert.equal(world.uses.length, 0);
 });
