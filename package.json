@@ -45,6 +45,7 @@
     "monitor": "bun monitor/src/main.ts",
     "evidence:render": "bun scenarios/src/action-evidence-page.ts",
     "scenarios": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat forever",
+    "scenarios:once": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
     "scenarios:spectator": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --spectator",
     "scenarios:tailscale": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --tailscale"
   },

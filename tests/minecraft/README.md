@@ -196,7 +196,7 @@ The implementation has three responsibility boundaries:
 - `drivers/single-action.ts`: read the YAML request, call the action, and check its expected result.
 
 Player-arrangement observation uses the shared helper at
-`../../scenarios/src/player-preparation.ts`.
+`player-preparation.ts` (next to this README).
 
 `runWithRuntime` creates the runtime and waits for the start signal before timing
 the driver's run. Preparation
@@ -254,7 +254,7 @@ stay in the host.
 Run the Minecraft suite once:
 
 ```bash
-bunx --bun mine-labs run tests/minecraft/scenarios --repeat 1
+bun run scenarios:once   # = bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1; exits 1 on a red or cancelled scenario
 ```
 
 Build the highlighter from the installed dependency and open the spectator:
