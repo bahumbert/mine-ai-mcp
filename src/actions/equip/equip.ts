@@ -61,6 +61,16 @@ async function equipFromSlot(bot: Bot, sourceSlot: number, destination: Equipmen
   await bot.clickWindow(destinationSlot, hotbarButton, 2);
 }
 
+/**
+ * A swap from `sourceSlot` is done when the destination holds the selected item and the source slot no longer does:
+ * an equal item worn before the request (the click never sent) leaves the selected one in its source slot.
+ */
+function isSwapDone(bot: Bot, sourceSlot: number, destination: EquipmentDestination, kept: ReturnType<typeof itemProperties>): boolean {
+  const worn = equippedItem(bot, destination);
+  const source = bot.inventory.slots[sourceSlot];
+  return !!worn && isDeepStrictEqual(itemProperties(worn), kept) && !(source && isDeepStrictEqual(itemProperties(source), kept));
+}
+
 /** What every equipment slot holds right now, by item name. */
 export function equipmentSlots(bot: Bot): EquipmentSlots {
   return {
@@ -96,12 +106,11 @@ async function equipRequested(
 ): Promise<EquipEntry> {
   const { itemName, destination, sourceSlot } = requested;
   const done = progress.swapped.get(index);
-  if (done) return done;
+  if (done && equippedItem(bot, destination)?.name === itemName) return done;
   if (sourceSlot === undefined && slot(bot, destination) === itemName) return { item: itemName, destination, equipped: true };
   const kept = progress.selected.get(index);
-  const worn = equippedItem(bot, destination);
-  if (kept && worn && worn.name === itemName && isDeepStrictEqual(itemProperties(worn), kept)) {
-    const entry = { item: itemName, destination, sourceSlot: sourceSlot!, durabilityUsed: worn.durabilityUsed ?? null, equipped: true };
+  if (kept && sourceSlot !== undefined && isSwapDone(bot, sourceSlot, destination, kept)) {
+    const entry = { item: itemName, destination, sourceSlot, durabilityUsed: equippedItem(bot, destination)!.durabilityUsed ?? null, equipped: true };
     progress.swapped.set(index, entry);
     return entry;
   }
