@@ -176,8 +176,10 @@ export async function closeDisposalHole(
   context: ActionContext,
   /** An earlier attempt already began plugging: what it placed is counted from the world, not from this call. */
   resumed = false,
+  /** The block the burial kept back to plug with, when it kept one. */
+  plugItem?: string,
 ): Promise<HoleClosure> {
-  const seal = await sealDisposalHole(bot, hole, dependencies.placeInto, context);
+  const seal = await sealDisposalHole(bot, hole, dependencies.placeInto, context, { plugItem });
   const retreat = await stepAwayFromHole(bot, hole, dependencies, context);
   const errors = [seal.error, retreat.error].filter((error): error is string => error !== undefined);
   return {

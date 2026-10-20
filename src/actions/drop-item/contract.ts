@@ -9,7 +9,7 @@ export const DROP_ITEM_DESCRIPTION =
   "Each named item is tossed stack by stack and verified gone from the inventory. Worn armour and the off-hand are never " +
   "dropped, and the held item only with allow_equipped. With in_a_hole, dig a dry two-block-deep hole beside the bot " +
   "(excavating a wall opening underground when needed), verify the items landed below pickup height, then plug the hole " +
-  "with a carried block and step back from it so a later collect_block does not walk straight into the pit. Cannot combine in_a_hole with to_player. " +
+  "with a carried block and step back from it so a later collect_block does not walk straight into the pit. If the request would bury every block that could plug the hole, up to 2 are kept carried for the plug and reported as keptForPlug. Cannot combine in_a_hole with to_player. " +
   "To free inventory space, prefer depositing into a chest with use_container: dropped items despawn after five " +
   "minutes, can be taken by anyone, and may be picked straight back up by this bot. Drop only when no container is in " +
   "reach, when carrying the items to one is not worth the trip, or when the items are genuinely rubbish. " +
@@ -96,6 +96,8 @@ export const droppedItemSchema = z.strictObject({
   carriedBefore: z.number().int(),
   carriedAfter: z.number().int(),
   dropped: z.number().int(),
+  /** Blocks of this item kept carried to plug the hole, out of what the request would have buried; present only when above 0. */
+  keptForPlug: z.number().int().positive().optional(),
   error: z.string().optional(),
 });
 

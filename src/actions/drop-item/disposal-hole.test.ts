@@ -7,6 +7,8 @@ import { Vec3 } from "vec3";
 import { blockClass } from "../../navigation/mineflayer/world.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
+import type { placeSolidBlockInto } from "../../world/placement.js";
+import { rememberSealedPit } from "../../world/sealed-pits.js";
 import {
   observeHoleDrops,
   pluggedCellCount,
@@ -22,6 +24,7 @@ function ground(carried: { name: string; count: number }[] = []) {
   const changed = new Map<string, string>();
   const bot = {
     registry,
+    version: "1.21.4",
     entity: { position: new Vec3(0.5, 64, 0.5), onGround: true },
     inventory: { items: () => carried },
     blockAt(position: Vec3) {
@@ -103,6 +106,30 @@ test("an empty hand leaves the hole open without failing the drop", async () => 
   assert.match(seal.error ?? "", /DROP_HOLE_OPEN/);
 });
 
+test("the plug uses the kept item before the policy's first scaffold block", async () => {
+  const { bot, changed } = ground([
+    { name: "dirt", count: 5 },
+    { name: "oak_planks", count: 2 },
+  ]);
+  for (const y of [62, 63]) changed.set(new Vec3(1, y, 0).toString(), "air");
+  const placed: { cell: Vec3; item: string }[] = [];
+
+  const seal = await sealDisposalHole(bot, new Vec3(1, 62, 0), fakePlacement(changed, placed), {}, { plugItem: "oak_planks" });
+
+  assert.deepEqual(seal, { item: "oak_planks", placed: 2 });
+  assert.deepEqual(placed.map((entry) => entry.item), ["oak_planks", "oak_planks"]);
+});
+
+test("with no policy block carried, a common-stock block plugs the hole", async () => {
+  const { bot, changed } = ground([{ name: "oak_planks", count: 2 }, { name: "oak_log", count: 9 }]);
+  for (const y of [62, 63]) changed.set(new Vec3(1, y, 0).toString(), "air");
+  const placed: { cell: Vec3; item: string }[] = [];
+
+  const seal = await sealDisposalHole(bot, new Vec3(1, 62, 0), fakePlacement(changed, placed), {});
+
+  assert.deepEqual(seal, { item: "oak_planks", placed: 2 });
+});
+
 test("hole preparation refuses liquid beside its shaft without digging", async () => {
   const { bot, changed } = ground();
   for (const [x, z] of [
@@ -171,7 +198,7 @@ test("hole evidence counts merged stack growth and ignores existing items", asyn
   const bot = Object.assign(new EventEmitter(), { entities: { 1: entity } }) as unknown as Bot;
   const baseline = snapshotDroppedCounts(bot);
   entity.getDroppedItem = () => ({ name: "dirt", count: 12 });
-  assert.equal(
+  assert.deepEqual(
     await observeHoleDrops(
       bot,
       { x: 1, y: 62, z: 0 },
@@ -179,18 +206,20 @@ test("hole evidence counts merged stack growth and ignores existing items", asyn
       [{ item: "dirt", requested: 10, carriedBefore: 10, carriedAfter: 0, dropped: 10 }],
       {},
     ),
-    true,
+    { landed: true, entityIds: [1] },
   );
   entity.getDroppedItem = () => ({ name: "dirt", count: 2 });
   assert.equal(
-    await observeHoleDrops(
-      bot,
-      { x: 1, y: 62, z: 0 },
-      baseline,
-      [{ item: "dirt", requested: 10, carriedBefore: 10, carriedAfter: 0, dropped: 10 }],
-      {},
-      50,
-    ),
+    (
+      await observeHoleDrops(
+        bot,
+        { x: 1, y: 62, z: 0 },
+        baseline,
+        [{ item: "dirt", requested: 10, carriedBefore: 10, carriedAfter: 0, dropped: 10 }],
+        {},
+        50,
+      )
+    ).landed,
     false,
   );
 });
@@ -376,4 +405,65 @@ test("a plug a first attempt began is counted with what the next attempt placed"
   changed.set(new Vec3(1, 64, 0).toString(), "air");
 
   assert.equal(pluggedCellCount(bot, new Vec3(1, 62, 0)), 1);
+});
+
+test("no new pit opens a guard cell of a sealed pit", async () => {
+  const { bot, changed } = ground();
+  const dig = async ({ position }: { position: { x: number; y: number; z: number } }) => {
+    changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+    return { status: "broken" as const };
+  };
+  const open = await prepareDisposalHole(bot, createMovementPolicy(), dig, {});
+  assert.deepEqual([open.x, open.y, open.z], [1, 62, 0], "the first side fits on open ground");
+
+  const fresh = ground();
+  rememberSealedPit(fresh.bot, { x: 2, y: 62, z: 1 });
+  const beside = await prepareDisposalHole(fresh.bot, createMovementPolicy(), async ({ position }) => {
+    fresh.changed.set(new Vec3(position.x, position.y, position.z).toString(), "air");
+    return { status: "broken" };
+  }, {});
+  assert.deepEqual([beside.x, beside.y, beside.z], [-1, 62, 0], "the cell inside the sealed pit's guard volume is passed over");
+});
+
+/** A ground bot that emits ticks, with one dropped item lying in the lower plug cell of the pit at (1, 62, 0). */
+function bottomWithFallingStack() {
+  const { bot, changed } = ground([{ name: "cobblestone", count: 2 }]);
+  for (const y of [62, 63]) changed.set(new Vec3(1, y, 0).toString(), "air");
+  const events = new EventEmitter();
+  const stack = { id: 9, name: "item", position: new Vec3(1.5, 63.6, 0.5), getDroppedItem: () => ({ name: "cobblestone", count: 5 }) };
+  Object.assign(bot, { on: events.on.bind(events), off: events.off.bind(events), entities: { 9: stack } });
+  return { bot, changed, events, stack };
+}
+
+test("a plug cell waits for a falling stack to leave it, at most 2 s", async () => {
+  const { bot, changed, events, stack } = bottomWithFallingStack();
+  const stackWhenPlaced: number[] = [];
+  const place: typeof placeSolidBlockInto = fakePlacement(changed, []);
+  const placeAfterStack: typeof placeSolidBlockInto = async (...args) => {
+    stackWhenPlaced.push(stack.position.y);
+    return place(...args);
+  };
+  let ticks = 0;
+  const falling = setInterval(() => {
+    if (++ticks === 3) stack.position = new Vec3(1.5, 62.2, 0.5);
+    events.emit("physicsTick");
+  }, 5);
+  try {
+    const seal = await sealDisposalHole(bot, new Vec3(1, 62, 0), placeAfterStack, {});
+    assert.equal(seal.placed, 2);
+  } finally {
+    clearInterval(falling);
+  }
+  assert.ok(ticks >= 3, "the plug waited for the stack's ticks");
+  assert.ok(stackWhenPlaced.every((y) => y < 63), `the stack was out of the cell when the block went in: ${stackWhenPlaced}`);
+});
+
+test("a stack that never leaves its plug cell does not hold the plug past the bound, ticks or not", async () => {
+  const { bot, changed } = bottomWithFallingStack();
+  const startedAt = Date.now();
+
+  const seal = await sealDisposalHole(bot, new Vec3(1, 62, 0), fakePlacement(changed, []), {}, { clearWaitMs: 60 });
+
+  assert.equal(seal.placed, 2, "placed anyway once the wait ran out");
+  assert.ok(Date.now() - startedAt >= 50, "it waited on the wall clock, with no tick to wake it");
 });

@@ -10,7 +10,14 @@ export interface DiscardedItems {
   ignored(now?: number): ReadonlySet<number>;
 }
 
-export function createDiscardedItems(memoryMs: number = DISCARD_MEMORY_MS): DiscardedItems {
+/**
+ * `buriedIds` lists the stacks lying in the bot's sealed pits, ignored for as long as the pit is remembered: the
+ * wall-clock memory is shorter than an item's life (6000 server ticks, Oskar 16:18: taken at +305 s).
+ */
+export function createDiscardedItems(
+  memoryMs: number = DISCARD_MEMORY_MS,
+  buriedIds: () => Iterable<number> = () => [],
+): DiscardedItems {
   const expiries = new Map<number, number>();
 
   const prune = (now: number) => {
@@ -24,7 +31,7 @@ export function createDiscardedItems(memoryMs: number = DISCARD_MEMORY_MS): Disc
     },
     ignored(now = Date.now()) {
       prune(now);
-      return new Set(expiries.keys());
+      return new Set([...expiries.keys(), ...buriedIds()]);
     },
   };
 }

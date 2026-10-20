@@ -8,6 +8,7 @@ import { createMovements, type Navigate, type NavigationRuntime } from "../../na
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
+import { rememberSealedPit } from "../../world/sealed-pits.js";
 import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
 import { droppedItemName, snapshotEntityIds } from "../../world/item-pickup.js";
 import { placeSolidBlockInto } from "../../world/placement.js";
@@ -32,11 +33,13 @@ import {
 import {
   DisposalHoleError,
   observeHoleDrops,
+  pluggedCellCount,
   prepareDisposalHole,
   snapshotDroppedCounts,
   type PitMemory,
 } from "./disposal-hole.js";
 import { approachPlayer, closeDisposalHole, DropItemActionError, walkAwayFromToss, walkToStance } from "./drop-walks.js";
+import { planPlugKeep, PLUG_CELLS, type PlugKeep } from "./plug-reserve.js";
 
 /**
  * How long a toss is given to clear the slot it emptied.
@@ -95,6 +98,8 @@ function wornSlot(bot: Bot, itemName: string): string | null {
 interface ItemToss {
   readonly baseline: number;
   tossed: number;
+  /** Blocks of this item the burial keeps carried to plug the hole: not part of what the request tosses. */
+  keptForPlug: number;
 }
 
 /** What one drop request keeps across the attempts a reflex splits it into. */
@@ -106,6 +111,8 @@ interface DropProgress {
   /** Per requested item, in request order. */
   readonly tosses: readonly ItemToss[];
   recipient: DropRecipient | null;
+  /** What the burial keeps for its plug, planned once the pit is ready (undefined: not planned yet), reused by a resume. */
+  plugKeep?: PlugKeep | null;
   /** The pit chosen for the request, from the moment it is chosen: a half-dug one is dug on, not replaced. */
   readonly pit: PitMemory;
   hole: Vec3 | null;
@@ -121,7 +128,7 @@ function startDropProgress(bot: Bot, request: DropItemRequest): DropProgress {
     freeSlotsBefore: bot.inventory.emptySlotCount(),
     entityBaseline: snapshotEntityIds(bot),
     heldName: bot.heldItem?.name,
-    tosses: request.items.map(({ itemName }) => ({ baseline: carriedCount(bot, itemName), tossed: 0 })),
+    tosses: request.items.map(({ itemName }) => ({ baseline: carriedCount(bot, itemName), tossed: 0, keptForPlug: 0 })),
     recipient: null,
     pit: { bottom: null },
     hole: null,
@@ -129,6 +136,25 @@ function startDropProgress(bot: Bot, request: DropItemRequest): DropProgress {
     closings: 0,
     droppedAt: null,
   };
+}
+
+/** Toss `remaining` of one item stack by stack, adding each toss to the item's record the moment it resolves. */
+async function tossStacks(
+  bot: Bot,
+  itemName: string,
+  remaining: number,
+  toss: ItemToss,
+  context: ActionContext,
+): Promise<void> {
+  for (const stack of stacksOf(bot, itemName)) {
+    if (remaining <= 0) break;
+    context.signal?.throwIfAborted();
+    const taking = Math.min(remaining, stack.count);
+    if (remaining >= stack.count) await bot.tossStack(stack);
+    else await bot.toss(stack.type, null, remaining);
+    toss.tossed += taking;
+    remaining -= taking;
+  }
 }
 
 /**
@@ -160,19 +186,10 @@ async function tossItem(
   }
 
   // A count above what was carried drops all of it: that is done, not a toss the server swallowed (live 2026-10-09).
-  const wanted = Math.min(requested ?? toss.baseline, toss.baseline);
+  const wanted = Math.min(requested ?? toss.baseline, toss.baseline) - toss.keptForPlug;
   const tossedBefore = toss.tossed;
-  let remaining = Math.min(wanted - toss.tossed, carriedNow);
   try {
-    for (const stack of stacksOf(bot, itemName)) {
-      if (remaining <= 0) break;
-      context.signal?.throwIfAborted();
-      const taking = Math.min(remaining, stack.count);
-      if (remaining >= stack.count) await bot.tossStack(stack);
-      else await bot.toss(stack.type, null, remaining);
-      toss.tossed += taking;
-      remaining -= taking;
-    }
+    await tossStacks(bot, itemName, Math.min(wanted - toss.tossed, carriedNow), toss, context);
   } catch (cause) {
     context.signal?.throwIfAborted();
     return {
@@ -204,7 +221,14 @@ function droppedEntry(
   wanted: number,
   carriedAfter: number,
 ): DroppedItem {
-  const entry = { item: itemName, requested, carriedBefore: toss.baseline, carriedAfter, dropped: toss.tossed };
+  const entry = {
+    item: itemName,
+    requested,
+    carriedBefore: toss.baseline,
+    carriedAfter,
+    dropped: toss.tossed,
+    ...(toss.keptForPlug > 0 && { keptForPlug: toss.keptForPlug }),
+  };
   // Nothing left to toss is done too: a reflex that ate part of the stack between attempts leaves fewer to drop.
   const finished = toss.tossed >= wanted || (toss.tossed > 0 && carriedAfter === 0);
   return finished ? entry : { ...entry, error: dropItemOutcomes.notObserved(itemName, carriedAfter) };
@@ -248,6 +272,25 @@ function refusedEntry(
   if (worn) return refusal(dropItemOutcomes.worn(itemName, worn));
   if (!request.allowEquipped && progress.heldName === itemName) return refusal(dropItemOutcomes.held(itemName));
   return null;
+}
+
+/** Per requested item, how many the request still buries: what a refusal or an earlier attempt settled is not counted. */
+function plannedTosses(bot: Bot, request: DropItemRequest, progress: DropProgress): Map<string, number> {
+  const planned = new Map<string, number>();
+  for (const [index, { itemName, count }] of request.items.entries()) {
+    const toss = progress.tosses[index]!;
+    const refused = toss.tossed === 0 && refusedEntry(bot, request, progress, itemName, count) !== null;
+    const left = Math.min(count ?? toss.baseline, toss.baseline) - toss.tossed;
+    planned.set(itemName, (planned.get(itemName) ?? 0) + (refused ? 0 : Math.max(0, Math.min(left, carriedCount(bot, itemName)))));
+  }
+  return planned;
+}
+
+/** Decide once, with the pit ready and before the first toss, which blocks the burial keeps carried for its plug. */
+function planBurialPlug(bot: Bot, request: DropItemRequest, progress: DropProgress): void {
+  progress.plugKeep = planPlugKeep(bot, plannedTosses(bot, request, progress));
+  const kept = progress.plugKeep;
+  if (kept) progress.tosses[request.items.findIndex(({ itemName }) => itemName === kept.item)]!.keptForPlug = kept.count;
 }
 
 /** Toss every requested item that still has something left to toss; items an earlier attempt finished are reported as done. */
@@ -379,9 +422,10 @@ async function finishHole(
   progress: DropProgress,
   dropped: readonly DroppedItem[],
   dependencies: DropItemDependencies,
+  discarded: DiscardedItems,
   context: ActionContext,
 ): Promise<{ readonly landed: boolean; readonly closure: HoleClosure }> {
-  const landed = await observeHoleDrops(
+  const observed = await observeHoleDrops(
     bot,
     hole,
     progress.holeBaseline ?? new Map<number, number>(),
@@ -390,11 +434,15 @@ async function finishHole(
     dependencies.settleMs ?? TOSS_SETTLE_MS,
   );
   context.signal?.throwIfAborted();
+  // The toss-time claim ran before the server spawned the stacks (run 16): claim the ones now seen in the pit.
+  discarded.remember(observed.entityIds);
   // Whether or not the toss was seen at the bottom, an open pit beside the
   // bot is the hazard the next route walks into, so close it either way.
   progress.closings += 1;
-  const closure = await closeDisposalHole(bot, hole, dependencies, context, progress.closings > 1);
-  return { landed, closure };
+  const closure = await closeDisposalHole(bot, hole, dependencies, context, progress.closings > 1, progress.plugKeep?.item);
+  // A pit plugged in both cells is where this bot's burials lie: its routes must not dig into it (`sealed-pits.ts`).
+  if (pluggedCellCount(bot, hole) === PLUG_CELLS) rememberSealedPit(bot, hole);
+  return { landed: observed.landed, closure };
 }
 
 /** The result of the whole request from what the attempts did. */
@@ -447,13 +495,14 @@ export function beginDropItem(
     context.signal?.throwIfAborted();
     const unreachable = await reachDestination(bot, request, progress, dependencies, context);
     if (unreachable) return unreachable;
+    if (progress.hole && progress.plugKeep === undefined) planBurialPlug(bot, request, progress);
     const dropped = await tossRequested(bot, request, progress, context, dependencies.settleMs ?? TOSS_SETTLE_MS);
     await settleAfterTosses(bot, request, progress, dropped, dependencies, discarded, context);
 
     // Free slots are read now: plugging the hole spends a block and stepping back moves the body, and neither is part of
     // the drop.
     const freeSlotsAfter = bot.inventory.emptySlotCount();
-    const finished = progress.hole ? await finishHole(bot, progress.hole, progress, dropped, dependencies, context) : null;
+    const finished = progress.hole ? await finishHole(bot, progress.hole, progress, dropped, dependencies, discarded, context) : null;
     return dropResult({
       dropped,
       freeSlotsBefore: progress.freeSlotsBefore,
@@ -482,7 +531,8 @@ export function formatDropItemResult(result: DropItemResult): string {
     entry.error
       ? `- Could not drop **${entry.item}**: ${entry.error}`
       : `- Dropped **${entry.item}** x${entry.dropped} (carried ${entry.carriedBefore} → ${entry.carriedAfter}).` +
-        usedElsewhereNote(entry),
+        usedElsewhereNote(entry) +
+        (entry.keptForPlug ? ` Kept ${entry.keptForPlug} ${entry.item} to close the hole.` : ""),
   );
 
   const at = drop.droppedAt;

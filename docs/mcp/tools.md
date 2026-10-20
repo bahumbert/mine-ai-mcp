@@ -887,7 +887,10 @@ material first; never a falling block or a workstation) and walks a few blocks
 clear of the pit, so a following `collect_block` or other route does not lead
 straight back into it. The result's `holeClosure` reports the block used, how
 many were placed, the bot's final distance from the hole, and any reason the
-hole stayed open; neither step changes the drop's status.
+hole stayed open; neither step changes the drop's status. When a hole drop would bury every
+block that could plug it, up to 2 are kept carried for the plug; that item's
+entry reports them as `keptForPlug`; the plug uses them, and if it could not they stay carried
+for the next drop of that item to bury.
 Defined in [src/actions/drop-item/contract.ts](../../src/actions/drop-item/contract.ts).
 
 ### `equip`
