@@ -38,7 +38,11 @@ params:
       expect: failed
     - action: collect_block
       input: { block_name: stone, count: 3, scaffold: false }
-  # The pit's own dig drops a couple of cobblestone and the collect mines three: 38 buried would show at once.
+    # A route to the pit's own bottom cell, dig on: the shortest way is down through the plug, the guard volume refuses it.
+    - action: navigate
+      input: { x: 1, y: -62, z: 0, range: 0, scaffold: false }
+      expect: failed
+  # The plug cells hold after the route step, and the pit's own dig drops a couple of cobblestone and the collect mines three: 38 buried would show at once.
   carried_at_most: { oak_log: 0, cobblestone: 12 }
 
 goal:

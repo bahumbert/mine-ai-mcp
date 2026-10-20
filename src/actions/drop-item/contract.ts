@@ -6,7 +6,7 @@ import { registryNameSchema } from "../registry-name.js";
 export const DROP_ITEM = "drop_item" as const;
 export const DROP_ITEM_DESCRIPTION =
   "Drop carried items on the ground, or hand them to a nearby player by walking to them first and tossing at their feet. " +
-  "Each named item is tossed stack by stack and verified gone from the inventory. Worn armour and the off-hand are never " +
+  "Each named item is tossed stack by stack, the most worn tool first, and verified gone from the inventory; a toss on the ground needs the bot standing on it or in water, else it is refused with nothing dropped. Worn armour and the off-hand are never " +
   "dropped, and the held item only with allow_equipped. With in_a_hole, dig a dry two-block-deep hole beside the bot " +
   "(excavating a wall opening underground when needed), verify the items landed below pickup height, then plug the hole " +
   "with a carried block and step back from it so a later collect_block does not walk straight into the pit. If the request would bury every block that could plug the hole, up to 2 are kept carried for the plug and reported as keptForPlug. Cannot combine in_a_hole with to_player. " +
@@ -164,6 +164,8 @@ export const dropItemOutcomes = {
   playerUnreachable: (name: string, reason: string) =>
     `[DROP_PLAYER_UNREACHABLE] Pathfinder could not reach ${name}: ${reason}.`,
   playerLeft: (name: string) => `[DROP_PLAYER_LEFT] ${name} stopped being observed before the items were tossed.`,
+  groundUnavailable: (): string =>
+    "[DROP_GROUND_UNAVAILABLE] The bot is neither standing on the ground nor in water, so it cannot walk off after a toss at its feet and would pick the items straight back up. Nothing was dropped. Get onto solid ground first (navigate), or drop in_a_hole once it can stand beside a pit.",
   incomplete: (failed: number, total: number, reasons: readonly string[] = []) =>
     `[DROP_INCOMPLETE] ${failed} of ${total} item${total === 1 ? "" : "s"} could not be dropped${reasons.length > 0 ? `: ${reasons.join("; ")}` : ""}.`,
 } as const;

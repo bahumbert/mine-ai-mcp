@@ -2,7 +2,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { BlockPosition } from "../navigation/world/world.js";
-import { droppedItemName } from "./item-pickup.js";
+import { droppedItemName, isItemEntity } from "./item-pickup.js";
 
 /** Pits remembered per bot; the oldest is forgotten past it. */
 export const SEALED_PIT_LIMIT = 32;
@@ -59,7 +59,7 @@ export function sealedPitGuarding(bot: Bot, x: number, y: number, z: number): Bl
 function itemsInPits(bot: Bot, pits: readonly SealedPit[]): Map<SealedPit, number[]> {
   const found = new Map<SealedPit, number[]>();
   for (const entity of Object.values(bot.entities ?? {})) {
-    if (droppedItemName(entity) === null) continue;
+    if (droppedItemName(entity) === null && !isItemEntity(entity)) continue;
     const { x, y, z } = entity.position;
     const pit = pits.find(({ bottom }) => Math.floor(x) === bottom.x && Math.floor(z) === bottom.z && [0, 1].includes(Math.floor(y) - bottom.y));
     if (pit) found.set(pit, [...(found.get(pit) ?? []), entity.id]);

@@ -750,3 +750,79 @@ test("a sealed burial is remembered, an open one is not", async () => {
   await dropItem(open.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }], in_a_hole: true }), {}, open.dependencies, createDiscardedItems());
   assert.equal(sealedPitGuarding(open.bot, 1, 62, 0), null);
 });
+
+test("a count of 1 of two iron pickaxes drops the worn one, wherever it is in the inventory (review #5)", async () => {
+  const pickaxe = (type: number, durabilityUsed: number) => ({ name: "iron_pickaxe", count: 1, type, maxDurability: 250, durabilityUsed });
+  const { bot, items } = dropBot({ carried: [pickaxe(1, 10), pickaxe(2, 240), pickaxe(3, 120)] });
+
+  const result = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "iron_pickaxe", count: 1 }] }), {}, deps(), createDiscardedItems());
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(items.map((stack) => stack.durabilityUsed), [10, 120], "the pickaxe with 10 left went, the two better ones stay");
+});
+
+test("tools without a durability and stackable items keep inventory order", async () => {
+  const unmarked = (type: number, count: number) => ({ name: "bucket", count, type });
+  const { bot, items } = dropBot({ carried: [unmarked(1, 1), unmarked(2, 1)] });
+  await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "bucket", count: 1 }] }), {}, deps(), createDiscardedItems());
+  assert.deepEqual(items.map((stack) => stack.type), [2], "the first bucket went");
+
+  const stacks = dropBot({ carried: [{ name: "cobblestone", count: 5, type: 1 }, { name: "cobblestone", count: 64, type: 2 }] });
+  await dropItem(stacks.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone", count: 5 }] }), {}, deps(), createDiscardedItems());
+  assert.deepEqual(stacks.items.map((stack) => stack.count), [64], "a count equal to the first stack frees that slot");
+});
+
+test("a toss the server swallowed, cut off by a reflex before it was confirmed, is not counted as dropped on the resume", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "gravel", count: 4, type: 1 }], swallows: "gravel" });
+  const owner = new AbortController();
+  abortAfterToss(bot, owner, 1);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "gravel" }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed", "the inventory never lost the gravel: nothing was dropped");
+  assert.match(result.drop.dropped[0]?.error ?? "", /\[DROP_NOT_OBSERVED\].*gravel x4/);
+  assert.equal(result.drop.dropped[0]?.dropped, 0);
+  assert.equal(items[0]?.count, 4);
+});
+
+test("a toss cut off before its confirmation that the server did carry out is still counted once", async () => {
+  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 20, type: 1 }] });
+  const owner = new AbortController();
+  abortAfterToss(bot, owner, 1);
+  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual([result.drop.dropped[0]?.dropped, items[0]?.count], [10, 10], "10 tossed in all, not 20");
+});
+
+test("a ground drop from the air is refused before any toss, and the refusal names what to do next", async () => {
+  // Run 16, Oskar pinned on ghost air: 58 ground tosses at his feet, each picked straight back up for want of a walk away.
+  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 64, type: 1 }] });
+  bot.entity.onGround = false;
+
+  const result = await dropItem(bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }] }), {}, deps({ groundedWaitMs: 30 }), createDiscardedItems());
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /\[DROP_GROUND_UNAVAILABLE\].*navigate/);
+  assert.deepEqual(result.drop.dropped, [], "nothing was tossed");
+  assert.equal(items[0]?.count, 64);
+});
+
+test("a ground drop waits for the body to land, and one in water or seated is not refused", async () => {
+  const landing = dropBot({ carried: [{ name: "cobblestone", count: 4, type: 1 }] });
+  landing.bot.entity.onGround = false;
+  setTimeout(() => { landing.bot.entity.onGround = true; landing.bot.emit("physicsTick"); }, 20);
+  const landed = await dropItem(landing.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }] }), {}, deps({ groundedWaitMs: 500 }), createDiscardedItems());
+  assert.equal(landed.status, "succeeded", "a body that lands within the wait is no refusal");
+
+  const swimming = dropBot({ carried: [{ name: "cobblestone", count: 4, type: 1 }] });
+  swimming.bot.entity.onGround = false;
+  Reflect.set(swimming.bot.entity, "isInWater", true);
+  const swum = await dropItem(swimming.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }] }), {}, deps({ groundedWaitMs: 30 }), createDiscardedItems());
+  assert.equal(JSON.stringify(swum).includes("DROP_GROUND_UNAVAILABLE"), false, "a swimmer tosses into the water and swims on");
+});

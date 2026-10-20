@@ -8,6 +8,8 @@ const paramsSchema = z.strictObject({
     input: z.record(z.string(), z.unknown()),
     /** A step meant to fail says so and the sequence goes on. */
     expect: z.enum(["succeeded", "failed"]).default("succeeded"),
+    /** For a step meant to fail: the text its error must hold, so a refusal before any route is not mistaken for the failure under test. */
+    error_contains: z.string().min(1).optional(),
   })).min(1),
   /** After the last step, the most of each item the bot may carry: the buried stacks must not be back in the inventory. */
   carried_at_most: z.record(z.string(), z.number().int().nonnegative()),
@@ -17,10 +19,13 @@ const paramsSchema = z.strictObject({
 export const run: ScenarioRun = async (context) => {
   const { actions, carried_at_most } = paramsSchema.parse(context.scenario.params);
   const summaries: string[] = [];
-  for (const [index, { action, input, expect }] of actions.entries()) {
+  for (const [index, { action, input, expect, error_contains }] of actions.entries()) {
     const output = await context.call(action, input);
     summaries.push(`${index + 1}. ${output.summary}`);
-    if (output.result.status !== expect) return { status: "failed", detail: summaries.join("; ") };
+    const error = "error" in output.result ? String(output.result.error) : "";
+    if (output.result.status !== expect || (error_contains !== undefined && !error.includes(error_contains))) {
+      return { status: "failed", detail: summaries.join("; ") };
+    }
   }
   const status = viewStatusResultSchema.parse((await context.call("view_status", {})).result);
   if (status.status !== "succeeded") return { status: "failed", detail: `view_status failed; ${summaries.join("; ")}` };

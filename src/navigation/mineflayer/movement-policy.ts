@@ -1,6 +1,7 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
+import { sealedPitRefusal } from "./sealed-pit-refusal.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
  * and what each costs, answered with Mineflayer's own knowledge of blocks,
@@ -538,8 +539,8 @@ export function createMineflayerMovementPolicy(
     confirmBreak: (observation, position, world) => {
       if (observation.kind === "unloaded") return unloaded.decision;
       if (refusedAtCell(observation, position)) return prohibited.decision;
-      const inRegion = regionRefusal(position.x, position.y, position.z);
-      if (inRegion !== null) return inRegion;
+      const refused = regionRefusal(position.x, position.y, position.z) ?? sealedPitRefusal(bot, position.x, position.y, position.z);
+      if (refused !== null) return refused;
       if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return UNDER_WATER;
       return opensIntoLiquid(world, position.x, position.y, position.z) ? OPENS_INTO_LIQUID : ALLOWED_STEP;
     },
@@ -551,8 +552,8 @@ export function createMineflayerMovementPolicy(
       // given: a requested break is judged by cell, and a protected cell
       // refuses before the tool is questioned.
       if (refusedAtCell(observation, position)) return prohibited;
-      const inRegion = regionRefusal(position.x, position.y, position.z);
-      if (inRegion !== null) return { decision: inRegion, tool: verdict.tool };
+      const refused = regionRefusal(position.x, position.y, position.z) ?? sealedPitRefusal(bot, position.x, position.y, position.z);
+      if (refused !== null) return { decision: refused, tool: verdict.tool };
       if (verdict === unharvestable) return verdict;
       if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return { decision: UNDER_WATER, tool: verdict.tool };
       // Last, and with the tool it would have used: a caller that owns the

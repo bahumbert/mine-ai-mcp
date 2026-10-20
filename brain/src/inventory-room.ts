@@ -67,7 +67,8 @@ export interface JunkStack {
 
 /**
  * The carried kinds not in `needed`, most stacks first, then the biggest count, then by name. The stacks of a needed tool
- * (bed, boat) beyond the first are junk too: one is kept, the copies can go.
+ * (bed, boat) beyond the first are junk too: one is kept, the copies can go (`drop_item` gives up the most worn copy first,
+ * so the best one stays whichever the brain names).
  */
 export function junkStacks(snapshot: Pick<BotSnapshot, "inventory">, needed: ReadonlySet<string>): JunkStack[] {
   const junk = new Map<string, number[]>();

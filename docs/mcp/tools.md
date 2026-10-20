@@ -872,8 +872,8 @@ Defined in [src/actions/eat-food/contract.ts](../../src/actions/eat-food/contrac
 
 Drop named carried items, optionally walking to a named player before tossing
 them. Each entry accepts `item_name` and an optional `count`; omitting the count
-drops all carried stacks of that item. Worn armor and the off-hand are excluded,
-and the held item requires `allow_equipped`. Results report the observed inventory
+drops all carried stacks of that item; a count smaller than the copies of a tool gives up the most worn copy first. Worn armor and the off-hand are excluded,
+and the held item requires `allow_equipped`. A toss on the ground (no hole, no player) is refused with `[DROP_GROUND_UNAVAILABLE]` while the bot is in the air: it could not walk off and would pick the items up again. Results report the observed inventory
 decrease. Collection and hunting ignore the resulting item entities as targets.
 Set `in_a_hole: true` to create a dry, enclosed disposal pit below pickup height
 beside the bot. Underground, this can excavate an opening into a tunnel wall

@@ -9,6 +9,7 @@ import { evaluateMineTarget, lavaClosuresOf } from "./target-safety.js";
 import { BREAK_UNDER_WATER, createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../mineflayer/world.js";
 import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
+import { rememberSealedPit } from "../../../world/sealed-pits.js";
 
 test("lava preparation counts permitted building material, not reserved inventory", () => {
   const bot = botFixture({ items: [{ type: 1, name: "oak_log", count: 64 }] });
@@ -130,6 +131,30 @@ test("a block inside a protected region is never a mining target, and the refusa
   assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
     kind: "prohibited", reason: "inside protected region #3 'Tom's place' (owner Tom)",
   });
+});
+
+test("a plug block of a sealed pit is not a mine target, the same block elsewhere is", () => {
+  const bot = botFixture();
+  const blocks = blockClass(bot);
+  bot.blockAt = (position) => {
+    const name = position.y === 64 && position.x >= 1 ? "cobblestone" : position.y < 63 ? "stone" : "air";
+    const block = blocks.fromStateId(bot.registry.blocksByName[name]!.defaultState, 0);
+    block.position = position;
+    return block;
+  };
+  const world = {
+    blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!),
+    revision: 0, subscribe: () => () => {},
+  };
+  const policy = createMineflayerMovementPolicy(bot);
+  const plug = bot.blockAt(new Vec3(1, 64, 0))!;
+  const elsewhere = bot.blockAt(new Vec3(5, 64, 0))!;
+  assert.equal(evaluateMineTarget(bot, policy, plug, world, 0).kind, "mineable");
+  rememberSealedPit(bot, { x: 1, y: 62, z: 0 });
+  assert.deepEqual(evaluateMineTarget(bot, policy, plug, world, 0), {
+    kind: "prohibited", reason: "it would open the pit of items buried at 1 62 0",
+  });
+  assert.equal(evaluateMineTarget(bot, policy, elsewhere, world, 0).kind, "mineable");
 });
 
 test("a bridge over a deep drop is never a mining target, the same block on the ground is", () => {

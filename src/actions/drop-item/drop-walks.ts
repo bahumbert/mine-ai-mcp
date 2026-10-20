@@ -5,6 +5,8 @@ import type { Vec3 } from "vec3";
 import { customGoal, HORIZONTAL_TICKS_PER_BLOCK, nearEntityGoal } from "../../navigation/index.js";
 import type { ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
+import { waitForSignal } from "../../utils/signals.js";
+import { isInWater } from "../../survival/perception/body.js";
 import { dropItemOutcomes, type DropRecipient, type HoleClosure } from "./contract.js";
 import { pluggedCellCount, sealDisposalHole } from "./disposal-hole.js";
 import type { DropItemDependencies } from "./drop-item.js";
@@ -188,4 +190,24 @@ export async function closeDisposalHole(
     distance: retreat.distance,
     ...(errors.length > 0 && { error: errors.join(" ") }),
   };
+}
+
+/** How long a bot in the air is given to land before a ground toss is refused. */
+const GROUNDED_WAIT_MS = 1_000;
+
+/**
+ * Whether the body can walk off after a toss at its feet: standing on the ground, in water or in a vehicle. A bot held in
+ * the air (a ghost-air pin, run 16: 58 ground tosses, every one picked straight back up) cannot, so the toss is refused
+ * up front with the next step instead of reported as picked up again. A body that lands within the wait is no refusal.
+ */
+export async function canWalkOffAfterToss(
+  bot: Bot,
+  dependencies: Pick<DropItemDependencies, "groundedWaitMs">,
+  context: ActionContext,
+): Promise<boolean> {
+  const supported = () => bot.entity.onGround || isInWater(bot) || Boolean(bot.entity.vehicle);
+  return (
+    supported() ||
+    (await waitForSignal(supported, bot, "physicsTick", { timeoutMs: dependencies.groundedWaitMs ?? GROUNDED_WAIT_MS, context })) === true
+  );
 }

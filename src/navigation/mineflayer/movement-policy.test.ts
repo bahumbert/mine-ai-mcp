@@ -15,6 +15,7 @@ import { flatWorld } from "../../test-support/navigation.js";
 import { siteBreakRequest } from "../../actions/build-structure/build-structure.js";
 import { parseBuildStructureRequest } from "../../actions/build-structure/contract.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
+import { rememberSealedPit } from "../../world/sealed-pits.js";
 
 /** Air around the origin: no liquid beside any cell these tests break. */
 const world = flatWorld();
@@ -294,6 +295,33 @@ test("a protected region refuses route digging and scaffolding in it, but not wa
 
   bot.game.dimension = "the_nether";
   assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "an overworld region stays in the overworld");
+});
+
+test("a sealed pit's guard cells refuse route digging but not placing or walking", () => {
+  const bot = botFixture();
+  const policy = createMovements(bot);
+  const stone = observed(bot, "stone");
+  const plug = { x: 10, y: 64, z: 10 };
+  assert.equal(policy.evaluateBreak(stone, plug, world).decision.kind, "penalized", "no pit remembered yet");
+
+  // Read live: a pit sealed after the policy was made applies to its next check (the burial remembers it).
+  rememberSealedPit(bot, { x: 10, y: 62, z: 10 });
+  const refusal = { kind: "prohibited", reason: "it would open the pit of items buried at 10 62 10" };
+  assert.deepEqual(policy.evaluateBreak(stone, plug, world).decision, refusal, "the top plug");
+  assert.deepEqual(policy.confirmBreak(stone, { x: 11, y: 60, z: 9 }, world), refusal, "a corner of the ring below the bottom");
+  assert.deepEqual(policy.evaluateBreak(stone, { x: 9, y: 63, z: 10 }, world).decision, refusal, "the ring beside the lower plug");
+  assert.equal(policy.decidePlace(10, 64, 10, world).kind, "allowed", "a build is never refused by a pit");
+  assert.equal(policy.decideStep(10, 64, 10, world).kind, "allowed", "walking over the plug stays allowed");
+});
+
+test("a cell outside a sealed pit's guard volume is priced as before", () => {
+  const bot = botFixture();
+  const policy = createMovements(bot);
+  const stone = observed(bot, "stone");
+  const before = policy.evaluateBreak(stone, { x: 12, y: 62, z: 10 }, world).decision;
+  rememberSealedPit(bot, { x: 10, y: 62, z: 10 });
+  for (const cell of [{ x: 12, y: 62, z: 10 }, { x: 10, y: 59, z: 10 }, { x: 11, y: 64, z: 10 }, { x: 10, y: 65, z: 10 }])
+    assert.deepEqual(policy.evaluateBreak(stone, cell, world).decision, before, `${cell.x} ${cell.y} ${cell.z}`);
 });
 
 test("routes never set off across deep open water, but a bot already out on it swims back", () => {

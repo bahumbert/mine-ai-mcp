@@ -1,7 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { dropCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
-import type { Item } from "prismarine-item";
 import type { Vec3 } from "vec3";
 import type { BreakBlockInPlace } from "../../navigation/execution/in-place-break.js";
 import { createMovements, type Navigate, type NavigationRuntime } from "../../navigation/index.js";
@@ -9,8 +8,8 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { rememberSealedPit } from "../../world/sealed-pits.js";
-import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
-import { droppedItemName, snapshotEntityIds } from "../../world/item-pickup.js";
+import { carriedCount } from "../../world/inventory-count.js";
+import { droppedItemName, isItemEntity, snapshotEntityIds } from "../../world/item-pickup.js";
 import { placeSolidBlockInto } from "../../world/placement.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { equipmentSlots } from "../equip/index.js";
@@ -38,8 +37,9 @@ import {
   snapshotDroppedCounts,
   type PitMemory,
 } from "./disposal-hole.js";
-import { approachPlayer, closeDisposalHole, DropItemActionError, walkAwayFromToss, walkToStance } from "./drop-walks.js";
+import { approachPlayer, canWalkOffAfterToss, closeDisposalHole, DropItemActionError, walkAwayFromToss, walkToStance } from "./drop-walks.js";
 import { planPlugKeep, PLUG_CELLS, type PlugKeep } from "./plug-reserve.js";
+import { tossItem, type ItemToss } from "./toss-item.js";
 
 /**
  * How long a toss is given to clear the slot it emptied.
@@ -68,6 +68,8 @@ export interface DropItemDependencies {
   readonly settleMs?: number;
   /** How long after the toss the carried count is read again to catch items picked straight back up. */
   readonly pickupWaitMs?: number;
+  /** How long a ground toss waits for a bot in the air to land before it is refused. */
+  readonly groundedWaitMs?: number;
 }
 
 function productionDependencies(navigation: NavigationRuntime): DropItemDependencies {
@@ -78,8 +80,6 @@ function productionDependencies(navigation: NavigationRuntime): DropItemDependen
     createMovements,
   };
 }
-
-const stacksOf = (bot: Bot, itemName: string): Item[] => bot.inventory.items().filter((item) => item.name === itemName);
 
 /** The equipment slot wearing this item, when it is one this action refuses to drop. */
 function wornSlot(bot: Bot, itemName: string): string | null {
@@ -92,14 +92,6 @@ function wornSlot(bot: Bot, itemName: string): string | null {
     "off-hand": slots.offHand,
   };
   return NEVER_DROPPED_SLOTS.find((slot) => byName[slot] === itemName) ?? null;
-}
-
-/** One requested item's count across attempts: carried when the request began, and tossed since. */
-interface ItemToss {
-  readonly baseline: number;
-  tossed: number;
-  /** Blocks of this item the burial keeps carried to plug the hole: not part of what the request tosses. */
-  keptForPlug: number;
 }
 
 /** What one drop request keeps across the attempts a reflex splits it into. */
@@ -128,7 +120,7 @@ function startDropProgress(bot: Bot, request: DropItemRequest): DropProgress {
     freeSlotsBefore: bot.inventory.emptySlotCount(),
     entityBaseline: snapshotEntityIds(bot),
     heldName: bot.heldItem?.name,
-    tosses: request.items.map(({ itemName }) => ({ baseline: carriedCount(bot, itemName), tossed: 0, keptForPlug: 0 })),
+    tosses: request.items.map(({ itemName }) => ({ baseline: carriedCount(bot, itemName), tossed: 0, keptForPlug: 0, pending: null })),
     recipient: null,
     pit: { bottom: null },
     hole: null,
@@ -136,102 +128,6 @@ function startDropProgress(bot: Bot, request: DropItemRequest): DropProgress {
     closings: 0,
     droppedAt: null,
   };
-}
-
-/** Toss `remaining` of one item stack by stack, adding each toss to the item's record the moment it resolves. */
-async function tossStacks(
-  bot: Bot,
-  itemName: string,
-  remaining: number,
-  toss: ItemToss,
-  context: ActionContext,
-): Promise<void> {
-  for (const stack of stacksOf(bot, itemName)) {
-    if (remaining <= 0) break;
-    context.signal?.throwIfAborted();
-    const taking = Math.min(remaining, stack.count);
-    if (remaining >= stack.count) await bot.tossStack(stack);
-    else await bot.toss(stack.type, null, remaining);
-    toss.tossed += taking;
-    remaining -= taking;
-  }
-}
-
-/**
- * Toss what is left of one requested item, then confirm the inventory actually lost it.
- *
- * `bot.toss` throws for a count larger than one stack, so a partial count is
- * spread over the stacks that hold it and whole stacks go through `tossStack`.
- * Every toss is added to the item's record the moment it resolves, so an attempt a reflex cut short leaves the next
- * one the exact count still owed: never more than asked, never more than carried.
- */
-async function tossItem(
-  bot: Bot,
-  itemName: string,
-  requested: number | null,
-  context: ActionContext,
-  settleMs: number,
-  toss: ItemToss,
-): Promise<DroppedItem> {
-  const carriedNow = carriedCount(bot, itemName);
-  if (toss.baseline === 0 || (carriedNow === 0 && toss.tossed === 0)) {
-    return {
-      item: itemName,
-      requested,
-      carriedBefore: toss.baseline,
-      carriedAfter: 0,
-      dropped: 0,
-      error: dropItemOutcomes.notCarried(itemName),
-    };
-  }
-
-  // A count above what was carried drops all of it: that is done, not a toss the server swallowed (live 2026-10-09).
-  const wanted = Math.min(requested ?? toss.baseline, toss.baseline) - toss.keptForPlug;
-  const tossedBefore = toss.tossed;
-  try {
-    await tossStacks(bot, itemName, Math.min(wanted - toss.tossed, carriedNow), toss, context);
-  } catch (cause) {
-    context.signal?.throwIfAborted();
-    return {
-      item: itemName,
-      requested,
-      carriedBefore: toss.baseline,
-      carriedAfter: carriedCount(bot, itemName),
-      dropped: toss.tossed,
-      error: dropItemOutcomes.rejected(itemName, cause),
-    };
-  }
-
-  const tossedNow = toss.tossed - tossedBefore;
-  if (tossedNow === 0) return droppedEntry(itemName, requested, toss, wanted, carriedNow);
-  const settled = await settleInventoryCount(bot, itemName, Math.max(0, carriedNow - tossedNow), {
-    timeoutMs: settleMs,
-    signal: context.signal,
-  });
-  context.signal?.throwIfAborted();
-  // A toss the server did not show leaving the inventory is not counted as done.
-  toss.tossed = tossedBefore + Math.min(tossedNow, Math.max(0, carriedNow - settled.count));
-  return droppedEntry(itemName, requested, toss, wanted, settled.count);
-}
-
-function droppedEntry(
-  itemName: string,
-  requested: number | null,
-  toss: ItemToss,
-  wanted: number,
-  carriedAfter: number,
-): DroppedItem {
-  const entry = {
-    item: itemName,
-    requested,
-    carriedBefore: toss.baseline,
-    carriedAfter,
-    dropped: toss.tossed,
-    ...(toss.keptForPlug > 0 && { keptForPlug: toss.keptForPlug }),
-  };
-  // Nothing left to toss is done too: a reflex that ate part of the stack between attempts leaves fewer to drop.
-  const finished = toss.tossed >= wanted || (toss.tossed > 0 && carriedAfter === 0);
-  return finished ? entry : { ...entry, error: dropItemOutcomes.notObserved(itemName, carriedAfter) };
 }
 
 /**
@@ -246,7 +142,7 @@ function rememberDiscards(bot: Bot, baseline: ReadonlySet<number>, discarded: Di
   const ids = Object.values(bot.entities)
     .filter((entity) => !baseline.has(entity.id))
     .filter((entity) => entity.position.distanceTo(bot.entity.position) <= DISCARD_ATTRIBUTION_RADIUS)
-    .filter((entity) => droppedItemName(entity) !== null || entity.name === "item")
+    .filter((entity) => droppedItemName(entity) !== null || isItemEntity(entity))
     .map((entity) => entity.id);
   discarded.remember(ids);
 }
@@ -329,6 +225,19 @@ function destinationFailure(bot: Bot, progress: DropProgress, error: string): Dr
   };
 }
 
+/** The failure for a ground toss the body cannot walk off after; none once a toss has begun (a resume finishes it). */
+async function groundTossRefusal(
+  bot: Bot,
+  progress: DropProgress,
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<DropItemResult | null> {
+  if (progress.tosses.some((toss) => toss.tossed > 0)) return null;
+  if (await canWalkOffAfterToss(bot, dependencies, context)) return null;
+  context.signal?.throwIfAborted();
+  return destinationFailure(bot, progress, dropItemOutcomes.groundUnavailable());
+}
+
 /** Walk to the player or dig (or dig on) the pit; a failure result when the destination is not usable. */
 async function reachDestination(
   bot: Bot,
@@ -337,7 +246,8 @@ async function reachDestination(
   dependencies: DropItemDependencies,
   context: ActionContext,
 ): Promise<DropItemResult | null> {
-  if (request.destination.kind === "ground" || progress.closings > 0) return null;
+  if (request.destination.kind === "ground") return await groundTossRefusal(bot, progress, dependencies, context);
+  if (progress.closings > 0) return null;
   try {
     if (request.destination.kind === "player") {
       progress.recipient = await approachPlayer(bot, request.destination.name, dependencies, context);
