@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { botFixture } from "../test-support/bot.js";
 import { SqlBotData, readNotificationSummary } from "../bot-data/index.js";
 import { readRecentEvents } from "../actions/read-recent-events/read-recent-events.js";
+import { captureStderr } from "../test-support/stderr.js";
 import { observeEquipmentEvents } from "./equipment-events.js";
 
 function fixture() {
@@ -87,4 +88,55 @@ test("disposal detaches listeners and prevents queued database writes", async ()
   assert.equal(bot.inventory.listenerCount("updateSlot"), slots);
   assert.equal(bot._client.listenerCount("entity_status"), statuses);
   data.close();
+});
+
+const diskFull = () => { throw new Error("database or disk is full"); };
+
+test("a failing low-durability write inside the queued scan does not throw", async (t) => {
+  const { bot, data, put, read } = fixture();
+  const stderr = captureStderr(t);
+  const stop = observeEquipmentEvents(bot, data);
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown) => void uncaught.push(error);
+  process.on("uncaughtException", onUncaught);
+  try {
+    const failing = t.mock.method(data, "transaction", diskFull);
+    put(45, 75);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(uncaught, [], "the microtask scan does not end the host");
+    assert.equal(failing.mock.callCount(), 1);
+    assert.deepEqual(stderr, ["[equipment-events] database or disk is full\n"]);
+    failing.mock.restore();
+    put(45, 20);
+    await new Promise((resolve) => setImmediate(resolve));
+    put(45, 76);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(read().length, 1, "the next scan still records once the store works again");
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    stop();
+    data.close();
+  }
+});
+
+test("an entity_status packet with a failing write does not throw out of the packet listener", (t) => {
+  const { bot, data, put } = fixture();
+  const stderr = captureStderr(t);
+  put(45, 99);
+  const stop = observeEquipmentEvents(bot, data);
+  try {
+    t.mock.method(data, "transaction", diskFull);
+    assert.doesNotThrow(() => bot._client.emit("entity_status", { entityId: bot.entity.id, entityStatus: 48 }));
+    assert.deepEqual(stderr, ["[equipment-events] database or disk is full\n"]);
+  } finally { stop(); data.close(); }
+});
+
+test("a low-durability item already worn at attach, with a failing write, does not throw out of the attach", (t) => {
+  const { bot, data, put } = fixture();
+  captureStderr(t);
+  put(45, 80);
+  t.mock.method(data, "transaction", diskFull);
+  let stop = () => {};
+  assert.doesNotThrow(() => { stop = observeEquipmentEvents(bot, data); });
+  stop(); data.close();
 });

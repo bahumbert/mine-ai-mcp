@@ -1,6 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { createRequire } from "node:module";
-import { recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -25,6 +25,7 @@ export function deathMessage(bot: Bot, message: unknown): string | null {
   }
 }
 type CancelForegroundAction = (reason: string) => unknown;
+type GuardedWrite = ReturnType<typeof guardObservedWrite>;
 
 /** Persist queryable player events for the lifetime of one connected runtime. */
 export function observePlayerEvents(
@@ -32,22 +33,25 @@ export function observePlayerEvents(
   data: SqlBotData,
   cancelForegroundAction: CancelForegroundAction,
 ): () => void {
+  const guarded = guardObservedWrite("player-events");
   const observeMessage =
     (channel: "chat" | "whisper"): PlayerMessageListener =>
     (username, message) => {
       const direction = username.toLowerCase() === bot.username.toLowerCase() ? "outgoing" : "incoming";
-      recordEvent(data, bot.username, {
-        type: "player_message",
-        observedAt: new Date().toISOString(),
-        summary: `${username}: ${message}`,
-        payload: {
-          username,
-          channel,
-          direction,
-          message,
-          addressed: direction === "incoming" && addressesUsername(message, bot.username),
-        },
-      });
+      guarded(() =>
+        recordEvent(data, bot.username, {
+          type: "player_message",
+          observedAt: new Date().toISOString(),
+          summary: `${username}: ${message}`,
+          payload: {
+            username,
+            channel,
+            direction,
+            message,
+            addressed: direction === "incoming" && addressesUsername(message, bot.username),
+          },
+        }),
+      );
     };
 
   const onChat = observeMessage("chat");
@@ -58,24 +62,9 @@ export function observePlayerEvents(
     lastDeathMessage = deathMessage(bot, packet.message);
   };
   const onDeath: DeathListener = () => {
-    const position = {
-      x: bot.entity.position.x,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z,
-    };
-    const dimension = bot.game.dimension;
-    const observedAt = new Date().toISOString();
     const cause = lastDeathMessage;
     lastDeathMessage = null;
-    const summary = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
-
-    cancelForegroundAction(`${bot.username} died${cause ? `: ${cause}` : ""}.`);
-    recordEvent(data, bot.username, {
-      type: "player_death",
-      observedAt,
-      summary,
-      payload: { dimension, position, cause },
-    });
+    recordPlayerDeath(bot, data, cause, cancelForegroundAction, guarded);
   };
 
   // Respawn updates the dimension before the destination position packet.
@@ -91,17 +80,7 @@ export function observePlayerEvents(
     if (crossing === null) return;
     const { from, to } = crossing;
     crossing = null;
-    const position = {
-      x: bot.entity.position.x,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z,
-    };
-    recordEvent(data, bot.username, {
-      type: "player_dimension_change",
-      observedAt: new Date().toISOString(),
-      summary: `${bot.username} arrived in ${to} from ${from}.`,
-      payload: { from, to, position },
-    });
+    recordDimensionArrival(bot, data, from, to, guarded);
   };
 
   bot.on("chat", onChat);
@@ -119,6 +98,50 @@ export function observePlayerEvents(
     bot.off("whisper", onWhisper);
     bot.off("chat", onChat);
   };
+}
+
+/** The foreground action is cancelled before the event is written, so a failing write cannot keep the dead bot working. */
+function recordPlayerDeath(
+  bot: Bot,
+  data: SqlBotData,
+  cause: string | null,
+  cancelForegroundAction: CancelForegroundAction,
+  guarded: GuardedWrite,
+): void {
+  const position = {
+    x: bot.entity.position.x,
+    y: bot.entity.position.y,
+    z: bot.entity.position.z,
+  };
+  const dimension = bot.game.dimension;
+  const observedAt = new Date().toISOString();
+  const summary = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
+
+  cancelForegroundAction(`${bot.username} died${cause ? `: ${cause}` : ""}.`);
+  guarded(() =>
+    recordEvent(data, bot.username, {
+      type: "player_death",
+      observedAt,
+      summary,
+      payload: { dimension, position, cause },
+    }),
+  );
+}
+
+function recordDimensionArrival(bot: Bot, data: SqlBotData, from: string, to: string, guarded: GuardedWrite): void {
+  const position = {
+    x: bot.entity.position.x,
+    y: bot.entity.position.y,
+    z: bot.entity.position.z,
+  };
+  guarded(() =>
+    recordEvent(data, bot.username, {
+      type: "player_dimension_change",
+      observedAt: new Date().toISOString(),
+      summary: `${bot.username} arrived in ${to} from ${from}.`,
+      payload: { from, to, position },
+    }),
+  );
 }
 
 function addressesUsername(message: string, username: string): boolean {

@@ -1,25 +1,18 @@
 import type { Bot } from "mineflayer";
 import type { EventEmitter } from "node:events";
-import { snapshotBotStatus, updateBotStatus, type SqlBotData } from "../bot-data/index.js";
+import { guardObservedWrite, snapshotBotStatus, updateBotStatus, type SqlBotData } from "../bot-data/index.js";
 
 /** Keep SQL current without requiring a status tool call. Owned by the runtime. */
 export function observeBotStatus(bot: Bot, data: SqlBotData): () => void {
   let pending: ReturnType<typeof setTimeout> | undefined;
   // currentWindow's generic typings omit the updateSlot event emitted by every window.
   let window: EventEmitter | null = null;
-  let lastError: string | null = null;
+  // A contended database must not throw out of a Mineflayer event handler.
+  // The next heartbeat retries; the persisted timestamp remains stale.
+  const guarded = guardObservedWrite("bot-status");
   const refresh = () => {
     pending = undefined;
-    try {
-      updateBotStatus(data, snapshotBotStatus(bot));
-      lastError = null;
-    } catch (error) {
-      // A contended database must not throw out of a Mineflayer event handler.
-      // The next heartbeat retries; the persisted timestamp remains stale.
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== lastError) process.stderr.write(`[bot-status] ${message}\n`);
-      lastError = message;
-    }
+    guarded(() => updateBotStatus(data, snapshotBotStatus(bot)));
   };
   const changed = () => {
     // Coalesce window packet bursts and local slot moves into a complete snapshot.

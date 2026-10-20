@@ -4,6 +4,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { captureStderr } from "../test-support/stderr.js";
 import { observeBotStatus } from "./bot-status.js";
 
 function fixture() {
@@ -75,4 +76,20 @@ test("heartbeat refreshes idle status, and disconnect cancels queued work before
   assert.deepEqual(bot.eventNames(), []);
   data.close();
   await delay(300);
+});
+
+test("a failing status refresh logs each distinct error once and the next heartbeat recovers", async t => {
+  const data = temporaryBotData({ closeAfter: t });
+  const stderr = captureStderr(t);
+  const { bot } = fixture();
+  const failing = t.mock.method(data, "transaction", () => { throw new Error("database is locked"); });
+  const stop = observeBotStatus(bot as unknown as Bot, data);
+  t.after(stop);
+  await delay(300);
+  await delay(1_050);
+  assert.ok(failing.mock.callCount() >= 2, "the heartbeat retried");
+  assert.deepEqual(stderr, ["[bot-status] database is locked\n"]);
+  failing.mock.restore();
+  await delay(1_050);
+  assert.equal(data.read("SELECT bot_id FROM bot_status")[0]?.bot_id, "StreamBot");
 });
