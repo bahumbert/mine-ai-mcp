@@ -1,11 +1,15 @@
 // A furnace window's cook: what it holds, the ingots taken while it burns, the wait for it, and the recovery of what is left.
 import type { Bot } from "mineflayer";
+import type { FurnaceProperties } from "./furnace-properties.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { waitForSignal } from "../../utils/signals.js";
 
 const COOK_MS_PER_ITEM = 10_000;
 const COOK_STALL_MS = 15_000;
 const FUEL_START_SETTLEMENT_MS = 1_000;
+/** How long a reopened furnace has to report the fuel still burning in it: ten server ticks. */
+const BURN_REPORT_MS = 500;
+const TICK_MS = 50;
 const HARVEST_STACK = 8;
 const HARVEST_INTERVAL_MS = 30_000;
 export const SLOT_RECOVERY_MS = 2_000;
@@ -126,6 +130,8 @@ export interface Harvest {
   readonly taken: () => number;
   readonly item: () => { readonly name: string; readonly inventoryBefore: number } | null;
   readonly takeReady: (outputCount: number) => Promise<void>;
+  /** Count ingots a take moved beyond what the window showed when it clicked (see `waitForCook`). */
+  readonly credit: (count: number) => void;
 }
 
 export function midCookHarvest(bot: Bot, window: FurnaceWindow, now: () => number): Harvest {
@@ -136,6 +142,9 @@ export function midCookHarvest(bot: Bot, window: FurnaceWindow, now: () => numbe
   return {
     taken: () => taken,
     item: () => item,
+    credit: (count) => {
+      taken += count;
+    },
     async takeReady(outputCount) {
       const at = now();
       if (disabled || outputCount === 0) return;
@@ -166,15 +175,59 @@ export interface FurnaceObservation {
 
 export type CookVerdict = "completed" | "fuel_starved" | "stalled" | "safety_timeout";
 
+/** The window's own fractions, or the server's counters when the window carries them (they do not lose a packet). */
 export function furnaceObservation(window: FurnaceWindow): FurnaceObservation {
-  const state = window as FurnaceWindow & { progress?: number | null; fuel?: number | null };
+  const state = window as WithProperties & { progress?: number | null; fuel?: number | null };
+  const said = state.properties?.() ?? null;
+  const fraction = (done: number, total: number) => (total > 0 ? done / total : 0);
   return {
     output: window.outputItem()?.count ?? 0,
     input: window.inputItem()?.count ?? 0,
     fuelItems: window.fuelItem()?.count ?? 0,
-    cookProgress: typeof state.progress === "number" ? state.progress : null,
-    fuelProgress: typeof state.fuel === "number" ? state.fuel : null,
+    cookProgress: said ? fraction(said.cookTicks, said.cookTotalTicks) : typeof state.progress === "number" ? state.progress : null,
+    fuelProgress: said ? fraction(said.litTicks, said.litTotalTicks) : typeof state.fuel === "number" ? state.fuel : null,
   };
+}
+
+/** A furnace window that tells what the server says it is doing, from the raw packets (see `furnace-properties.ts`). */
+type WithProperties = FurnaceWindow & { readonly properties?: () => FurnaceProperties | null };
+
+/**
+ * How many more items the fuel already burning in the furnace will cook, whole items only: a lit fuel item leaves the
+ * fuel slot at once and burns on, so a resumed attempt that has put its last coal in still has fuel (scenario
+ * busy-smelt-interrupted). A window that has not reported its burn time counts as none.
+ */
+export function burningItems(window: FurnaceWindow): number {
+  const ticks = (window as WithProperties).properties?.()?.litTicks;
+  return typeof ticks === "number" ? Math.floor((ticks * TICK_MS) / COOK_MS_PER_ITEM) : 0;
+}
+
+/**
+ * Wait until a furnace just opened has reported its properties: the server sends them with the window, a moment after
+ * the window itself. A window without them (a test double) reports at once; one that stays silent is read as not burning.
+ */
+export async function settleBurnReport(window: FurnaceWindow, dependencies: CookClock, signal?: AbortSignal): Promise<void> {
+  const properties = (window as WithProperties).properties;
+  if (properties === undefined) return;
+  const startedAt = dependencies.now();
+  while (properties() === null && dependencies.now() - startedAt < BURN_REPORT_MS) await dependencies.pause(50, signal);
+}
+
+/** Observations in a row that must find the cook over: the input and output slots update in separate packets. */
+const COOK_OVER_OBSERVATIONS = 2;
+
+/**
+ * A mid-cook take shift-clicks the whole output stack, and the window it counts from can be one ingot behind the
+ * server's (live, busy-smelt-interrupted: it showed 2 and the click moved 3; smelt-batch-normal, 16 items: "retrieved
+ * 14/16", on the base too), so the cook never reaches its count and ends `SMELT_STALLED`. The furnace itself settles it:
+ * input seen and now gone and nothing cooking for `COOK_OVER_OBSERVATIONS` observations means every item loaded became
+ * an ingot; those in the output slot are counted, the others left through a take, and what the takes did not count is
+ * credited. Only after a take (there is one to blame) and only for an input this wait saw.
+ */
+function creditMissedIngots(harvest: Harvest | undefined, requested: number, output: number, cookOverFor: number): void {
+  if (!harvest || cookOverFor < COOK_OVER_OBSERVATIONS || harvest.item() === null) return;
+  const missed = requested - harvest.taken() - output;
+  if (missed > 0) harvest.credit(missed);
 }
 
 export async function waitForCook(
@@ -189,10 +242,15 @@ export async function waitForCook(
   const safetyDeadline = startedAt + Math.max(60_000, requested * COOK_MS_PER_ITEM * 4 + COOK_STALL_MS);
   let lastAdvanceAt = startedAt;
   let previous = furnaceObservation(window);
+  let sawInput = false;
+  let cookOverFor = 0;
   while (true) {
     signal?.throwIfAborted();
     const current = furnaceObservation(window);
     const now = dependencies.now();
+    if (current.input > 0) sawInput = true;
+    cookOverFor = sawInput && current.input === 0 && (current.cookProgress ?? 0) === 0 ? cookOverFor + 1 : 0;
+    creditMissedIngots(harvest, requested, current.output, cookOverFor);
     if (current.output !== previous.output || current.cookProgress !== previous.cookProgress) lastAdvanceAt = now;
     const stalledForMs = Math.max(0, now - lastAdvanceAt);
     observe?.(current, stalledForMs);

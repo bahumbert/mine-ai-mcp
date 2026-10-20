@@ -2,10 +2,30 @@
  * A furnace window whose cook runs on a fake clock, with the inventory it fills and empties. Tests give the clock
  * (`pause`) and the furnace to `smeltItem` through its dependencies.
  */
+import { EventEmitter } from "node:events";
+import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
+import { fuelCapacity } from "../world/smelting.js";
 import { botFixture, registry, type FakeStack } from "./bot.js";
 
-export function observedFurnace(options: { readonly cookMs: number; readonly stopAfter?: number; readonly starved?: boolean; readonly recoverInputCount?: number; readonly raw?: number; readonly coal?: number; readonly full?: boolean; /** Carried fuel item; `coal` is its count. */ readonly fuel?: string }) {
+/** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
+class FakeBurn {
+  #msLeft = 0;
+  constructor(readonly fuel: string, readonly cookMs: number) {}
+  /** A fuel item burns `fuelCapacity` cooks long; the first one lights at once. */
+  load(count: number) { this.#msLeft += count * fuelCapacity(this.fuel) * this.cookMs; }
+  pass(ms: number) { this.#msLeft = Math.max(0, this.#msLeft - ms); }
+  properties(elapsedInItem: number): FurnaceProperties {
+    return {
+      litTicks: this.#msLeft / 50,
+      litTotalTicks: (fuelCapacity(this.fuel) * this.cookMs) / 50,
+      cookTicks: elapsedInItem / 50,
+      cookTotalTicks: this.cookMs / 50,
+    };
+  }
+}
+
+export function observedFurnace(options: { readonly cookMs: number; readonly stopAfter?: number; readonly starved?: boolean; readonly recoverInputCount?: number; readonly raw?: number; readonly coal?: number; readonly full?: boolean; /** Carried fuel item; `coal` is its count. */ readonly fuel?: string; /** Report `properties()`, the server's ticks of burn and cook, as the game does (scenario busy-smelt-interrupted: a lit coal leaves the fuel slot at once and keeps burning). Off: silent, as before. */ readonly reportsBurnTime?: boolean }) {
   const items: FakeStack[] = [
     { name: "raw_iron", count: options.raw ?? 3 },
     { name: options.fuel ?? "coal", count: options.coal ?? 1 },
@@ -20,9 +40,11 @@ export function observedFurnace(options: { readonly cookMs: number; readonly sto
   let input = 0;
   let output = 0;
   let activeFuel = 0;
-  const furnace = {
-    progress: 0,
+  const burn = new FakeBurn(options.fuel ?? "coal", options.cookMs);
+  const furnace = Object.assign(new EventEmitter(), {
+    id: 7, progress: 0,
     fuel: 0,
+    properties: options.reportsBurnTime ? () => burn.properties(elapsedInItem) : undefined,
     inputItem: () => input > 0 ? { name: "raw_iron", count: input } : null,
     fuelItem: () => null,
     outputItem: () => output > 0 ? { name: "iron_ingot", count: output, type: registry.itemsByName.iron_ingot!.id, stackSize: 64, slot: 2 } : null,
@@ -34,6 +56,7 @@ export function observedFurnace(options: { readonly cookMs: number; readonly sto
       adjust(options.fuel ?? "coal", -count);
       activeFuel = options.starved ? 0 : 1;
       furnace.fuel = activeFuel;
+      burn.load(count);
     },
     takeInput: async () => {
       const taken = { name: "raw_iron", count: input };
@@ -50,7 +73,7 @@ export function observedFurnace(options: { readonly cookMs: number; readonly sto
       return taken;
     },
     close: () => undefined,
-  };
+  });
   const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } });
   if (options.full) (bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
   bot.clickWindow = async (slot) => {
@@ -69,7 +92,7 @@ export function observedFurnace(options: { readonly cookMs: number; readonly sto
       now += milliseconds;
       if (output === options.stopAfter) return;
       if (activeFuel === 0) return;
-      elapsedInItem += milliseconds;
+      elapsedInItem += milliseconds; burn.pass(milliseconds);
       furnace.progress = Math.min(1, elapsedInItem / options.cookMs);
       furnace.fuel = activeFuel > 0 ? Math.max(0, 1 - now / (options.cookMs * 8 * (options.coal ?? 1))) : 0;
       if (elapsedInItem < options.cookMs) return;

@@ -16,10 +16,13 @@ import {
   type WorkstationOperations,
 } from "../temporary-workstation.js";
 import type { ExistingFurnaceRequest } from "./contract.js";
+import { openFurnaceWithProperties } from "./furnace-properties.js";
 import {
+  burningItems,
   furnaceObservation,
   midCookHarvest,
   recover,
+  settleBurnReport,
   SLOT_RECOVERY_MS,
   waitForCook,
   type CookVerdict,
@@ -72,7 +75,7 @@ function productionDependencies(navigate: Navigate): SmeltItemDependencies {
   return {
     createMovements,
     navigate,
-    openFurnace: (bot, block) => bot.openFurnace(block),
+    openFurnace: openFurnaceWithProperties,
     now: () => performance.now(),
     pause: abortablePause,
   };
@@ -218,8 +221,11 @@ type Supplies =
     }
   | { readonly kind: "refused"; readonly result: SmeltItemResult };
 
-/** The registry items, the fuel capacity and the carried counts this attempt needs; a refusal names what is missing. */
-function checkSupplies(bot: Bot, request: SmeltItemRequest, progress: SmeltProgress): Supplies {
+/**
+ * The registry items, the fuel capacity and the carried counts this attempt needs; a refusal names what is missing.
+ * `burning` is how many items the fuel already lit in the furnace will still cook: it is not carried, but it is fuel.
+ */
+function checkSupplies(bot: Bot, request: SmeltItemRequest, progress: SmeltProgress, burning = 0): Supplies {
   const refuse = (error: string): Supplies => ({ kind: "refused", result: stoppedAttempt(bot, request, progress, error) });
   const input = bot.registry.itemsByName[request.itemName];
   const fuel = bot.registry.itemsByName[request.fuelItemName];
@@ -230,7 +236,7 @@ function checkSupplies(bot: Bot, request: SmeltItemRequest, progress: SmeltProgr
   const remaining = request.count - progress.produced;
   const carriedInput = carriedCount(bot, request.itemName);
   if (carriedInput < remaining) return refuse(smeltItemOutcomes.inputMissing(request.itemName, carriedInput, remaining));
-  const requiredFuel = Math.ceil(remaining / capacity);
+  const requiredFuel = Math.ceil(Math.max(0, remaining - burning) / capacity);
   const availableFuel = carriedCount(bot, request.fuelItemName) - (request.itemName === request.fuelItemName ? remaining : 0);
   if (availableFuel < requiredFuel)
     return refuse(smeltItemOutcomes.fuelMissing(request.fuelItemName, Math.max(0, availableFuel), requiredFuel));
@@ -338,7 +344,7 @@ async function loadAndCook(
     await furnace.putInput(supplies.input.id, null, supplies.remaining);
     progress.ownsSlots = true;
     context.signal?.throwIfAborted();
-    await furnace.putFuel(supplies.fuel.id, null, supplies.requiredFuel);
+    if (supplies.requiredFuel > 0) await furnace.putFuel(supplies.fuel.id, null, supplies.requiredFuel);
     progress.fuelInserted += supplies.requiredFuel;
     context.signal?.throwIfAborted();
 
@@ -443,7 +449,9 @@ async function smeltAttempt(
   const { furnace } = opened;
   progress.ownsSlots = false;
   const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress);
-  const supplies = blocked === null ? checkSupplies(bot, request, progress) : null;
+  // A resumed attempt: the fuel it put in earlier may still be burning, and a window just opened has not said so yet.
+  if (blocked === null && progress.fuelInserted > 0) await settleBurnReport(furnace, dependencies, context.signal);
+  const supplies = blocked === null ? checkSupplies(bot, request, progress, burningItems(furnace)) : null;
   if (blocked !== null || supplies?.kind !== "ready") {
     furnace.close();
     return supplies?.kind === "refused" ? supplies.result : stoppedAttempt(bot, request, progress, blocked!);

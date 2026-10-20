@@ -263,3 +263,37 @@ test("a temporary furnace placed by an aborted attempt is reused, never placed t
   assert.equal(result.workstation?.recovered, true);
   assert.equal(carried(fixture, "furnace"), 1);
 });
+
+// busy-smelt-interrupted: a lit coal leaves the fuel slot and burns on in the furnace, so a resume that carries no more coal
+// still has fuel. The request, not the carried count, decides whether the rest of the cook is fuelled.
+const SMELT_3_COAL = { itemName: "raw_iron", count: 3, fuelItemName: "coal", x: 2, y: 64, z: 0 } as const;
+
+test("a resumed attempt counts the fuel still burning in the furnace and loads no more", async () => {
+  const fixture = observedFurnace({ cookMs: 10_000, raw: 3, coal: 1, fuel: "coal", reportsBurnTime: true });
+  const loads = recordLoads(fixture);
+  const first = new AbortController();
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_3_COAL, reflexAt(fixture, [{ at: 12_000, signal: first }]), () => {});
+
+  await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+  assert.equal(carried(fixture, "coal"), 0, "the one coal is burning in the furnace, none is carried");
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.equal(result.smelt.produced, 3);
+  assert.deepEqual(loads.fuels, [1], "the coal was loaded once");
+  assert.equal(result.smelt.fuelInserted, 1);
+});
+
+test("a resumed attempt does not count on a flame shorter than one item, and says the fuel is missing", async () => {
+  // Eight items on one coal burn exactly 80 s; at 75 s seven are done and 5 s of flame is left for the eighth (10 s).
+  const fixture = observedFurnace({ cookMs: 10_000, raw: 8, coal: 1, fuel: "coal", reportsBurnTime: true });
+  const first = new AbortController();
+  const request = { ...SMELT_3_COAL, count: 8 };
+  const run = beginSmeltItem(fixture.bot, navigation, request, reflexAt(fixture, [{ at: 75_000, signal: first }]), () => {});
+
+  await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "partial");
+  assert.match(result.status === "partial" ? result.error : "", /SMELT_FUEL_MISSING/);
+});
