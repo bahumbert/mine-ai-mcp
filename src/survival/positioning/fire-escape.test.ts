@@ -201,7 +201,7 @@ test("the route search is bounded", () => {
   assert.equal(fireWaterRoute(dry.bot, dry.counting, "contact"), null);
   const scanReads = dry.reads();
   dry.reset();
-  escapeCells(dry.bot, dry.counting, "contact");
+  escapeCells(dry.bot, dry.counting);
   assert.equal(scanReads, dry.reads(), "no water in the scan: the route search reads only the scan");
   const ringed = counted(WATER_RINGED_BY_LAVA, ON_THE_WEST_BANK);
   assert.equal(fireWaterRoute(ringed.bot, ringed.counting, "contact"), null);
@@ -241,4 +241,45 @@ test("a lava bank of carpet or a snow layer, which navigation walks over, is adm
       `${name} is thin: its cell holds a collision shape and is still a standing cell`,
     );
   }
+});
+
+/** Stone up to y 64 and a wall of stone two high around the pit at (0,64,0), open only at `gap` (its bank cell). */
+function walledPit(extra: Record<string, string>, gap = "-1,65,0") {
+  const cells: Record<string, string> = { "0,64,0": "lava" };
+  for (let x = -3; x <= 3; x++)
+    for (let z = -3; z <= 3; z++)
+      for (const y of [65, 66]) {
+        const key = `${x},${y},${z}`;
+        if ((x !== 0 || z !== 0) && key !== gap && key !== gap.replace(",65,", ",66,")) cells[key] = "stone";
+      }
+  return { ...cells, ...extra };
+}
+
+test("the body's own cell is never a dry escape cell", () => {
+  const { bot, world } = sceneAt({}, new Vec3(0.5, 65, 0.5));
+  const own = escapeCells(bot, world).dry.filter((point) => cellOf(point) === "0,65,0");
+  assert.deepEqual(own, [], "a burning body on dry ground is not asked to walk to where it stands");
+});
+
+test("a cell lava can spread into is no escape cell", () => {
+  const { bot, world } = sceneAt({ "1,65,0": "lava[level=2]" }, new Vec3(-1.5, 65, 0.5));
+  const dry = escapeCells(bot, world).dry.map(cellOf);
+  assert.ok(!dry.includes("0,65,0"), "beside level 2 lava");
+  assert.ok(!dry.includes("1,65,1"), "beside level 2 lava");
+  assert.ok(dry.includes("-1,65,0"), "two cells from the lava is safe");
+});
+
+test("a body in lava whose only bank is within the lava's reach takes it, as the last resort", () => {
+  const { bot, world } = sceneAt(walledPit({ "-1,65,1": "lava[level=2]" }), IN_THE_PIT);
+  Reflect.set(bot.entity, "isInLava", true);
+  assert.deepEqual(
+    fireEscapeRoute(bot, world, "contact")?.map(cellOf),
+    ["-1,65,0"],
+    "no safe cell exists and staying in lava is worse",
+  );
+});
+
+test("a body on dry ground does not shuffle between cells lava can reach", () => {
+  const { bot, world } = sceneAt(walledPit({ "-1,65,1": "lava[level=2]" }), new Vec3(-0.5, 65, 0.5));
+  assert.equal(fireEscapeRoute(bot, world, "contact"), null, "out of the lava: no safe cell, no walk to another unsafe one");
 });

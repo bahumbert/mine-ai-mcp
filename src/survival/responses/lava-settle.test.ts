@@ -5,6 +5,7 @@ import { botFixture, registry } from "../../test-support/bot.js";
 import { awaitLavaSettled, LAVA_SETTLE_MAXIMUM_MS, type LavaSettle } from "./lava-settle.js";
 
 const airSupplyIndex = registry.entitiesByName.player.metadataKeys!.indexOf("air_supply");
+const sharedFlagsIndex = registry.entitiesByName.player.metadataKeys!.indexOf("shared_flags");
 
 /** A bot standing on dry ground; `lastChange` is the world age of the last lava change the reflex heard of. */
 function settleScene(options: { dimension?: string; lavaBeside?: boolean } = {}) {
@@ -18,6 +19,7 @@ function settleScene(options: { dimension?: string; lavaBeside?: boolean } = {})
   }
   const metadata: number[] = [];
   metadata[airSupplyIndex] = 300;
+  metadata[sharedFlagsIndex] = 0;
   Object.assign(bot.entity, { metadata });
   const scene = {
     bot,
@@ -119,20 +121,20 @@ test("the wall clock ends the wait when physics ticks stop", async (context) => 
   assert.equal(scene.bot.listenerCount("respawn"), 0);
 });
 
-test("lava advancing into the body is endangered", async () => {
+test("lava advancing into the body is advancing", async () => {
   const scene = settleScene({ lavaBeside: true });
   scene.lastChange = 1000;
   await scene.start();
-  assert.equal(scene.result, "endangered", "lava level 0 beside the body can spread into it");
+  assert.equal(scene.result, "advancing", "lava level 0 beside the body can spread into it");
 });
 
-test("lava under the body is endangered", async () => {
+test("lava under the body is advancing", async () => {
   const scene = settleScene();
   scene.lastChange = 1000;
   await scene.start();
   Object.assign(scene.bot.entity, { isInLava: true });
   await scene.advance(20);
-  assert.equal(scene.result, "endangered");
+  assert.equal(scene.result, "advancing");
 });
 
 test("damage during the wait is endangered", async () => {
@@ -142,6 +144,59 @@ test("damage during the wait is endangered", async () => {
   scene.bot.health = 16;
   await scene.advance(20);
   assert.equal(scene.result, "endangered");
+});
+
+test("a burn tick on dry ground while burning does not end the wait", async () => {
+  const scene = settleScene();
+  scene.lastChange = 1020;
+  scene.metadata[sharedFlagsIndex] = 1;
+  await scene.start();
+  for (const health of [19, 18, 17]) {
+    scene.bot.health = health;
+    await scene.advance(20);
+  }
+  assert.equal(scene.result, undefined, "burning ticks lost 3 HP by age 1060 and the wait goes on");
+  await scene.advance(20);
+  assert.equal(scene.result, "settled", "age 1080: two flow steps since the change at 1020");
+});
+
+test("a mob hit while burning is endangered", async () => {
+  const scene = settleScene();
+  scene.lastChange = 1000;
+  scene.metadata[sharedFlagsIndex] = 1;
+  await scene.start();
+  scene.bot.health = 19;
+  await scene.advance(20);
+  assert.equal(scene.result, undefined, "the burn tick alone does not end it");
+  scene.bot.health = 15;
+  scene.bot.emit("entityHurt", scene.bot.entity, { id: 9, name: "zombie" } as never);
+  await scene.advance(20);
+  assert.equal(scene.result, "endangered", "a hit with a source entity is not the burn");
+});
+
+test("health lost after the fire is out is endangered", async () => {
+  const scene = settleScene();
+  scene.lastChange = 1000;
+  scene.metadata[sharedFlagsIndex] = 1;
+  await scene.start();
+  scene.bot.health = 19;
+  await scene.advance(20);
+  scene.metadata[sharedFlagsIndex] = 0;
+  await scene.advance(20);
+  assert.equal(scene.result, undefined, "the fire went out in the same second as its last burn tick");
+  scene.bot.health = 18;
+  await scene.advance(20);
+  assert.equal(scene.result, "endangered", "a loss with no fire on the body is something else");
+});
+
+test("an entity hurt listener is removed when the wait ends", async () => {
+  const scene = settleScene();
+  scene.lastChange = 1000;
+  await scene.start();
+  assert.equal(scene.bot.listenerCount("entityHurt"), 1);
+  await scene.advance(60);
+  assert.equal(scene.result, "settled");
+  assert.equal(scene.bot.listenerCount("entityHurt"), 0);
 });
 
 test("air at 10 is endangered", async () => {

@@ -105,22 +105,133 @@ async function runCancelDuringSubmergedDig(context: ScenarioContext): Promise<Sc
   }
 }
 
-/** Lava reaches the bot (placed beside it, or under its obsidian dig); it must get out and stop burning. */
-async function runLavaEscape(
+/** The dig must start this soon after the action starts: alone it starts 0.3 s in, the rest is the walk to the block. */
+const DIG_START_MS = 10_000;
+/** From the lava to out of it and not burning: lava-escape-step's bound for the same escape. */
+const ESCAPE_MS = 5_000;
+/**
+ * From the escape to the obsidian breaking again: 14.1-15.1 s in 15 runs alone (the lava wait 3 s, 4 s idle before the
+ * next route, a 9.4 s dig). 30 s because on a server shared with other runs 4 of 5 took over 20 s.
+ */
+const RESUMED_BREAK_MS = 30_000;
+/** After the break: time for the pickup to end the action on its own, before the scenario stops it. */
+const SETTLE_MS = 5_000;
+/** The obsidian block the dig breaks. */
+const OBSIDIAN_CELL = new Vec3(0, -59, -1);
+
+/**
+ * Resolves true when `done()` holds on a physics tick, false when `boundMs` of wall clock pass (also when ticks have
+ * stopped) or the bot dies; rejects when `signal` aborts. Its listeners and timer are gone when it settles.
+ */
+function waitTicksUntil(
+  bot: ScenarioContext["bot"],
+  done: () => boolean,
+  boundMs: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (finish: () => void) => {
+      clearTimeout(timer);
+      bot.off("physicsTick", check);
+      bot.off("death", dead);
+      signal.removeEventListener("abort", aborted);
+      finish();
+    };
+    const check = () => {
+      if (done()) settle(() => resolve(true));
+    };
+    const dead = () => settle(() => resolve(false));
+    const aborted = () => settle(() => reject(signal.reason));
+    bot.on("physicsTick", check);
+    bot.once("death", dead);
+    signal.addEventListener("abort", aborted, { once: true });
+    timer = setTimeout(() => settle(() => resolve(done())), boundMs);
+    if (signal.aborted) aborted();
+    else if (done()) settle(() => resolve(true));
+  });
+}
+
+/**
+ * Lava appears under the bot during an obsidian dig: the reflex must get it out within `ESCAPE_MS`, and the resumed
+ * dig must break the obsidian within `RESUMED_BREAK_MS` of that. The pickup is reported, not asserted: the collect is
+ * stopped when it has not ended `SETTLE_MS` after the break (with `burnDrop` the drop is killed at the break, which
+ * is what lava does to it now and then).
+ */
+async function runLavaInterruptsDig(
   context: ScenarioContext,
   runtime: MinecraftRuntime,
-  digObsidian: boolean,
+  { burnDrop }: { burnDrop: boolean },
 ): Promise<ScenarioResult> {
   const { bot, signal } = context;
-  const collect = findCollectBlockAction(runtime);
-  let injected = false;
-  const inject = () => {
-    if (injected || !bot.targetDigBlock) return;
-    injected = true;
-    bot.chat("/setblock 0 -60 0 lava");
+  const stopMining = new AbortController();
+  const mining = runtime.run(findCollectBlockAction(runtime), OBSIDIAN_ONE, AbortSignal.any([signal, stopMining.signal]));
+  const miningEnd = mining.then(
+    (outcome) => ({ outcome }),
+    (error: unknown) => ({ error: String(error) }),
+  );
+  let broken = false;
+  const onBlockUpdate = (_before: unknown, after: { position: Vec3; name: string } | null) => {
+    if (broken || !after?.position.equals(OBSIDIAN_CELL) || after.name !== "air") return;
+    broken = true;
+    if (burnDrop) bot.chat("/kill @e[type=item]");
   };
-  if (digObsidian) bot.on("physicsTick", inject);
-  const mining = digObsidian ? runtime.run(collect, OBSIDIAN_ONE, signal) : null;
+  bot.on("blockUpdate", onBlockUpdate);
+  const facts = { injected: false, sawLava: false, escapedMs: null as number | null, resumedBreakMs: null as number | null };
+  const fail = async (why: string): Promise<ScenarioResult> => {
+    stopMining.abort();
+    return { status: "failed", detail: JSON.stringify({ why, ...facts, health: bot.health, mining: await miningEnd }) };
+  };
+  try {
+    const dug = await waitTicksUntil(
+      bot,
+      () => {
+        if (!bot.targetDigBlock) return false;
+        bot.chat("/setblock 0 -60 0 lava");
+        return true;
+      },
+      DIG_START_MS,
+      signal,
+    );
+    facts.injected = dug;
+    if (!dug) return await fail("the dig never started");
+    const lavaAt = performance.now();
+    let calm = 0;
+    const out = await waitTicksUntil(
+      bot,
+      () => {
+        facts.sawLava ||= isInLava(bot);
+        calm = facts.sawLava && !isInLava(bot) && !isBurning(bot) ? calm + 1 : 0;
+        return calm >= 10;
+      },
+      ESCAPE_MS,
+      signal,
+    );
+    if (!out) return await fail("the bot was not out of the lava and the fire in time");
+    const escapedAt = performance.now();
+    facts.escapedMs = Math.round(escapedAt - lavaAt);
+    const resumed = await waitTicksUntil(bot, () => broken, RESUMED_BREAK_MS, signal);
+    if (!resumed) return await fail("the resumed dig did not break the obsidian in time");
+    facts.resumedBreakMs = Math.round(performance.now() - escapedAt);
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsettled = new Promise<"unsettled">((resolve) => (settleTimer = setTimeout(() => resolve("unsettled"), SETTLE_MS)));
+    if ((await Promise.race([miningEnd, unsettled])) === "unsettled") stopMining.abort();
+    clearTimeout(settleTimer);
+    const mined = await miningEnd;
+    return {
+      status: bot.health > 0 && !bot.targetDigBlock ? "succeeded" : "failed",
+      detail: JSON.stringify({ ...facts, health: bot.health, position: bot.entity.position, mining: mined }),
+    };
+  } finally {
+    bot.off("blockUpdate", onBlockUpdate);
+    stopMining.abort();
+    await miningEnd;
+  }
+}
+
+/** Lava reaches the bot (placed beside it); it must get out, stop burning and then walk on from the water. */
+async function runLavaEscape(context: ScenarioContext, runtime: MinecraftRuntime): Promise<ScenarioResult> {
+  const { bot, signal } = context;
   let sawLava = false;
   let escaped = 0;
   for (let tick = 0; tick < 200 && bot.health > 0; tick++) {
@@ -130,25 +241,18 @@ async function runLavaEscape(
     if (escaped >= 10) break;
     await bot.waitForTicks(1);
   }
-  bot.off("physicsTick", inject);
-  const result = await mining;
-  // Mode lava only: the body is left in the water, so the next action starts from there and must finish.
+  // The body is left in the water, so the next action starts from there and must finish.
   const walked =
-    !digObsidian && escaped >= 10 && bot.health > 0
-      ? await runtime.run(findNavigateAction(runtime), WALK_EAST_FROM_WATER, signal)
-      : null;
-  const walkSucceeded = digObsidian || walked?.result.status === "succeeded";
+    escaped >= 10 && bot.health > 0 ? await runtime.run(findNavigateAction(runtime), WALK_EAST_FROM_WATER, signal) : null;
   return {
-    status: sawLava && escaped >= 10 && bot.health > 0 && !bot.targetDigBlock && walkSucceeded ? "succeeded" : "failed",
+    status: sawLava && escaped >= 10 && bot.health > 0 && !bot.targetDigBlock && walked?.result.status === "succeeded" ? "succeeded" : "failed",
     detail: JSON.stringify({
       sawLava,
-      injected,
       escaped,
       health: bot.health,
       position: bot.entity.position,
       lava: isInLava(bot),
       burning: isBurning(bot),
-      mining: result?.result,
       walked: walked?.result,
     }),
   };
@@ -194,6 +298,8 @@ export const run: MineAiScenario = async (context) => {
     },
   });
   // `return await`: the runtime must stay open until the scenario body settles.
-  if (mode === "lava" || mode === "lava-dig") return await runLavaEscape(context, runtime, mode === "lava-dig");
+  if (mode === "lava") return await runLavaEscape(context, runtime);
+  if (mode === "lava-dig")
+    return await runLavaInterruptsDig(context, runtime, { burnDrop: context.scenario.params.drop === "burns" });
   return await runObsidianMiningBesideWater(context, runtime, mode);
 };

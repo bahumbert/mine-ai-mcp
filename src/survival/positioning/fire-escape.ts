@@ -128,8 +128,13 @@ export interface EscapeCells {
   readonly dry: Vec3[];
 }
 
-/** Scan the escape volume around the body; every read stays in the facts volume of `reflexes/fire.ts`. */
-export function escapeCells(bot: Bot, world: WorldView, reason: FireEscapeReason): EscapeCells {
+/**
+ * Scan the escape volume around the body; every read stays in the facts volume of `reflexes/fire.ts`. A dry cell is
+ * safe footing: not the cell the body stands in, and not one lava can spread into on its next step
+ * (`advancingLavaAt`), whatever woke the reflex; `crossSpreading` admits those cells too, the last resort of a body
+ * that is in lava or fire.
+ */
+export function escapeCells(bot: Bot, world: WorldView, { crossSpreading = false } = {}): EscapeCells {
   const origin = bot.entity.position.floored();
   const water: Vec3[] = [];
   const dry: Vec3[] = [];
@@ -142,9 +147,9 @@ export function escapeCells(bot: Bot, world: WorldView, reason: FireEscapeReason
         const floor = world.blockAt(cell.x, cell.y - 1, cell.z);
         if (feet.kind !== "loaded" || !isHeadPassable(head)) continue;
         const point = cell.offset(0.5, 0, 0.5);
-        if (reason === "advancing_lava" && advancingLavaAt(bot, point)) continue;
+        if (!crossSpreading && advancingLavaAt(bot, point)) continue;
         if (feet.traits.liquid === "water") water.push(point);
-        else if (isPassable(feet) && isSafeSupport(floor)) dry.push(point);
+        else if (isPassable(feet) && isSafeSupport(floor) && !(dx === 0 && dy === 0 && dz === 0)) dry.push(point);
       }
   return { water, dry };
 }
@@ -166,7 +171,8 @@ function pointsOfRoute(end: RouteNode): Vec3[] {
   return points;
 }
 
-const SIDE_STEPS = [
+/** The four horizontal neighbours as [dx, dz]. */
+export const SIDE_STEPS = [
   [1, 0],
   [-1, 0],
   [0, 1],
@@ -239,7 +245,7 @@ function waterRouteOver(bot: Bot, world: WorldView, cells: EscapeCells): Vec3[] 
  */
 export function fireWaterRoute(bot: Bot, world: WorldView, reason: FireEscapeReason): Vec3[] | null {
   if (reason !== "contact") return null;
-  return waterRouteOver(bot, world, escapeCells(bot, world, reason));
+  return waterRouteOver(bot, world, escapeCells(bot, world));
 }
 
 /** Dry cells by distance; cells that tie go to the one nearer a scanned water, the bank a later route can use. */
@@ -253,20 +259,28 @@ function dryCellsNearestFirst(bot: Bot, cells: EscapeCells): Vec3[] {
   return ranked.sort((a, b) => a.away - b.away || a.toWater - b.toWater).map(({ point }) => point);
 }
 
-/**
- * The cells to walk to leave the fire: the way to water (round lava and fire when it is not a straight line), else the
- * nearest straight-line water, else, when the body is in lava or fire or lava advances, the nearest dry bank. Null: none.
- */
-export function fireEscapeRoute(bot: Bot, world: WorldView, reason: FireEscapeReason = "contact"): Vec3[] | null {
-  const cells = escapeCells(bot, world, reason);
+/** The walk over `cells`: the way to water, else the nearest straight-line water, else (when one is needed) the nearest dry bank. */
+function routeOverCells(bot: Bot, world: WorldView, reason: FireEscapeReason, cells: EscapeCells): Vec3[] | null {
   const route = reason === "contact" ? waterRouteOver(bot, world, cells) : null;
   if (route) return route;
-  const needsDryEscape = reason === "advancing_lava" || isInLava(bot) || isInFire(bot);
+  const needsDryEscape = reason === "advancing_lava" || isInLava(bot) || isInFire(bot) || advancingLavaAt(bot);
   const here = bot.entity.position;
   const water = [...cells.water].sort((a, b) => a.distanceTo(here) - b.distanceTo(here));
   const candidates = needsDryEscape ? [...water, ...dryCellsNearestFirst(bot, cells)] : water;
   const target = candidates.find((point) => clearFireEscape(bot, world, point));
   return target ? [target] : null;
+}
+
+/**
+ * The cells to walk to leave the fire: the way to water (round lava and fire when it is not a straight line), else the
+ * nearest straight-line water, else, when the body is in lava or fire or lava advances, the nearest dry bank. Only
+ * safe footing counts; a body in lava or fire with none takes a cell lava can still spread into as the last resort,
+ * one on dry ground does not shuffle between such cells. Null: none.
+ */
+export function fireEscapeRoute(bot: Bot, world: WorldView, reason: FireEscapeReason = "contact"): Vec3[] | null {
+  const safe = routeOverCells(bot, world, reason, escapeCells(bot, world));
+  if (safe || !(isInLava(bot) || isInFire(bot))) return safe;
+  return routeOverCells(bot, world, reason, escapeCells(bot, world, { crossSpreading: true }));
 }
 
 /** The first cell of `fireEscapeRoute`, for callers that only need to know where the body is heading. */

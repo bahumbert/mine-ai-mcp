@@ -61,7 +61,9 @@ export function worldOf(named: Record<string, string>, { groundY = null, onRead 
   };
 }
 
-function blockOf(name: string, cell: Vec3): FakeBlock {
+/** `name` may carry a fluid level, as `lava[level=2]` (a flowing layer: Prismarine reports state properties as strings). */
+function blockOf(named: string, cell: Vec3): FakeBlock {
+  const [name = named, level] = named.split(/[[\]]/);
   const shapes = SHAPES[name] ?? FULL_CUBE;
   return {
     name,
@@ -69,7 +71,7 @@ function blockOf(name: string, cell: Vec3): FakeBlock {
     stateId: registry.blocksByName[name]?.defaultState ?? 0,
     shapes,
     boundingBox: shapes.length > 0 ? "block" : "empty",
-    getProperties: () => ({}),
+    getProperties: () => (level === undefined ? {} : { level: level.replace("level=", "") }),
   };
 }
 

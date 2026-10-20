@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { horizontalControlsToward, type WorldView } from "../../navigation/index.js";
+import { horizontalControlsToward, isHeadPassable, isPassable, type WorldView } from "../../navigation/index.js";
 import { preferredScaffoldItem } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt } from "../../world/lava-flow.js";
@@ -12,30 +12,43 @@ import {
   fireEscapeDeparture,
   fireEscapeRoute,
   type FireEscapeDeparture,
+  SIDE_STEPS,
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
 
 /** `timed_out`: the wall clock ended the walk (15 s of burning), as against `blocked`: no way on. */
 export type FireEscapeOutcome = "escaped" | "blocked" | "timed_out" | "died";
 
+/**
+ * The lava cells beside the body that a solid block can replace: lava by its traits, no creature in the cell, and room
+ * above it to stand (a passable, harmless cell for the feet and one the head fits in).
+ */
+export function lavaStepCells(bot: Bot, world: WorldView): Vec3[] {
+  const origin = bot.entity.position.floored();
+  return SIDE_STEPS.map(([dx, dz]) => origin.offset(dx, 0, dz)).filter((cell) => {
+    const block = world.blockAt(cell.x, cell.y, cell.z);
+    if (block.kind !== "loaded" || block.traits.liquid !== "lava" || occupiedCell(bot, cell)) return false;
+    const feet = world.blockAt(cell.x, cell.y + 1, cell.z);
+    const head = world.blockAt(cell.x, cell.y + 2, cell.z);
+    return (
+      feet.kind === "loaded" &&
+      isPassable(feet) &&
+      feet.traits.liquid === null &&
+      !feet.traits.damaging &&
+      head.kind === "loaded" &&
+      isHeadPassable(head) &&
+      head.traits.liquid === null &&
+      !head.traits.damaging
+    );
+  });
+}
+
 /** Replace adjacent lava with a solid step when there is no natural bank to climb. */
-export async function buildLavaEscapeStep(bot: Bot, signal: AbortSignal): Promise<Vec3 | null> {
+export async function buildLavaEscapeStep(bot: Bot, world: WorldView, signal: AbortSignal): Promise<Vec3 | null> {
   const item = preferredScaffoldItem(bot);
   if (!item) return null;
-  const origin = bot.entity.position.floored();
-  const cells = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)].map((offset) =>
-    origin.plus(offset),
-  );
-  for (const cell of cells) {
+  for (const cell of lavaStepCells(bot, world)) {
     signal.throwIfAborted();
-    if (bot.blockAt(cell)?.name !== "lava" || occupiedCell(bot, cell)) continue;
-    if (
-      ![1, 2].every((dy) => {
-        const block = bot.blockAt(cell.offset(0, dy, 0));
-        return block && ["air", "cave_air", "void_air"].includes(block.name);
-      })
-    )
-      continue;
     const placed = await placeSolidBlockInto(bot, cell, item, { signal });
     if (placed.kind === "placed") return cell.offset(0.5, 1, 0.5);
   }
@@ -66,15 +79,14 @@ function routeEndsInWater(world: WorldView, route: readonly Vec3[]): boolean {
   return block.kind === "loaded" && block.traits.liquid === "water";
 }
 
-/** Out of fire and lava, not burning, and standing or swimming: nothing is left to escape. */
-function hasNothingLeftToEscape(bot: Bot, reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean {
-  return (
-    !inLava &&
-    !inFire &&
-    !isBurning(bot) &&
-    (bot.entity.onGround || Reflect.get(bot.entity, "isInWater")) &&
-    (reason === "contact" || !advancingLavaAt(bot))
-  );
+/** Out of fire and lava and not where lava can spread next: safe footing, whatever woke the reflex. */
+function isOnSafeFooting(bot: Bot, inLava: boolean, inFire: boolean): boolean {
+  return !inLava && !inFire && !advancingLavaAt(bot);
+}
+
+/** On safe footing, not burning, and standing or swimming: nothing is left to escape. */
+function hasNothingLeftToEscape(bot: Bot, safeFooting: boolean): boolean {
+  return safeFooting && !isBurning(bot) && (bot.entity.onGround || Reflect.get(bot.entity, "isInWater"));
 }
 
 function steerToward(bot: Bot, target: Vec3): void {
@@ -119,7 +131,8 @@ export async function escapeFire(
       signal.throwIfAborted();
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
-      if (hasNothingLeftToEscape(bot, reason, inLava, inFire)) return "escaped";
+      const safeFooting = isOnSafeFooting(bot, inLava, inFire);
+      if (hasNothingLeftToEscape(bot, safeFooting)) return "escaped";
       // Keep the admitted departure through the jump. Being momentarily above
       // lava is not a landing, and must not invalidate the bank we are climbing.
       const hop = walk.route[walk.next];
@@ -127,7 +140,7 @@ export async function escapeFire(
       // There is no water in the Nether. Solid terrain can still replace a
       // lava cell and provide the bank the local swimming controller needs.
       if (walk.route.length === 0 && inLava) {
-        const step = await buildLavaEscapeStep(bot, waits);
+        const step = await buildLavaEscapeStep(bot, world, waits);
         walk = newFireWalk(bot, step && [step]);
       }
       if (walk.route.length === 0 && inFire) {
@@ -137,8 +150,7 @@ export async function escapeFire(
         for (const cell of fireContactCells(bot)) await extinguishFireAt(bot, cell, waits, true);
         if (!isInFire(bot)) continue;
       }
-      if (!inLava && !inFire && bot.entity.onGround && reason === "contact" && !routeEndsInWater(world, walk.route))
-        return "escaped";
+      if (safeFooting && bot.entity.onGround && !routeEndsInWater(world, walk.route)) return "escaped";
       const target = walk.route[walk.next];
       if (!target) return "blocked";
       const distance = bot.entity.position.distanceTo(target);

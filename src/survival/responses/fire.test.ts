@@ -6,7 +6,7 @@ import { observeMineflayerBlock } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { botFixture } from "../../test-support/bot.js";
 import { isInLava } from "../perception/body.js";
-import { escapeFire, type FireEscapeOutcome } from "./fire.js";
+import { escapeFire, lavaStepCells, type FireEscapeOutcome } from "./fire.js";
 
 test("lava contact includes the shallow body overlap missed by the swimming flag", () => {
   let level: number | string = 0;
@@ -180,4 +180,63 @@ test("a burning bot goes on from cell to cell of the way round the lava", async 
   setBurning(bot, false);
   await physicsTicks(bot, 1);
   assert.equal(seen.outcome, "escaped");
+});
+
+/** Dry stone floor to y 64, the body at y 65 burning; `cells` add what stands on it (`lava[level=2]` is a flowed layer). */
+function burningOnDryGround(cells: Record<string, string>, position: Vec3) {
+  const scene = burningOnTheBank(position);
+  for (const key of Object.keys(scene.cells)) delete scene.cells[key];
+  Object.assign(scene.cells, cells);
+  for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) for (let y = 62; y <= 68; y++) scene.load(x, y, z);
+  return scene;
+}
+
+test("a burning bot beside lava that can spread into its cell is not escaped there, whatever woke the reflex", async () => {
+  for (const reason of ["contact", "advancing_lava"] as const) {
+    const { bot, world, controls } = burningOnDryGround({ "1,65,0": "lava[level=2]" }, new Vec3(0.5, 65, 0.5));
+    const seen = watch(escapeFire(bot, world, new AbortController().signal, reason));
+    await physicsTicks(bot, 3);
+    assert.equal(seen.outcome, null, `${reason}: beside level 2 lava the escape goes on`);
+    assert.equal(anyMoveControl(controls), true, `${reason}: it walks to a cell lava cannot spread into`);
+    bot.entity.position.set(0.5, 65, 1.5);
+    await physicsTicks(bot, 2);
+    assert.equal(seen.outcome, "escaped", `${reason}: one cell away from the lava's reach`);
+  }
+});
+
+test("burning on safe dry ground with no water in reach is escaped at once, whatever woke the reflex", async () => {
+  for (const reason of ["contact", "advancing_lava"] as const) {
+    const { bot, world } = burningOnDryGround({}, new Vec3(-4.5, 65, 5.5));
+    const seen = watch(escapeFire(bot, world, new AbortController().signal, reason, { maximumMs: 2_000 }));
+    await physicsTicks(bot, 5);
+    assert.equal(seen.outcome, "escaped", `${reason}: not held until the wall clock ends it`);
+  }
+});
+
+test("a burning bot on an unsafe dry cell with no safe cell in reach is told blocked, not held", async () => {
+  const { bot, world } = burningOnDryGround(
+    { "1,65,0": "lava[level=2]", "-1,65,0": "lava[level=2]", "0,65,1": "lava[level=2]", "0,65,-1": "lava[level=2]" },
+    new Vec3(0.5, 65, 0.5),
+  );
+  const seen = watch(escapeFire(bot, world, new AbortController().signal, "advancing_lava", { maximumMs: 2_000 }));
+  await physicsTicks(bot, 3);
+  assert.equal(seen.outcome, "blocked", "the four neighbours are lava and the cell is its own: no way on");
+});
+
+test("a lava cell beside the body with room above it can take a step, whatever the room is made of", () => {
+  const { bot, world } = burningOnDryGround(
+    { "1,65,0": "lava", "1,66,0": "torch", "-1,65,0": "lava", "-1,66,0": "stone", "0,65,1": "lava", "0,66,1": "lava", "0,65,-1": "stone" },
+    new Vec3(0.5, 65, 0.5),
+  );
+  assert.deepEqual(
+    lavaStepCells(bot, world).map((cell) => cell.toString()),
+    [new Vec3(1, 65, 0).toString()],
+    "a torch above is a passable cell, a stone or lava above is not; a stone is no lava cell",
+  );
+});
+
+test("a lava cell holding a creature takes no step", () => {
+  const { bot, world } = burningOnDryGround({ "1,65,0": "lava" }, new Vec3(0.5, 65, 0.5));
+  Object.assign(bot, { entities: { 7: { id: 7, type: "mob", name: "zombie", isValid: true, position: new Vec3(1.5, 65, 0.5), width: 0.6, height: 1.95 } } });
+  assert.deepEqual(lavaStepCells(bot, world), []);
 });

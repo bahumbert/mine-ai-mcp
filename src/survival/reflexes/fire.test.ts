@@ -125,7 +125,7 @@ function burningBesidePit(ringed: boolean) {
       return memory.revision;
     },
   };
-  return { bot, world, reads: () => reads };
+  return { bot, world, memory, reads: () => reads };
 }
 
 test("a burning bot near reachable water is answered", async () => {
@@ -178,7 +178,7 @@ test("a walk that outlasts the 15 s wall clock is reported as out of time, not a
  * ages move in jumps of 20, as the server's time packets do.
  */
 function lavaWaitScene(resources: AsyncDisposableStack) {
-  const { bot, world } = burningBesidePit(false);
+  const { bot, world, memory } = burningBesidePit(false);
   Object.assign(bot.entity, { isInLava: true });
   Object.assign(bot.time, { age: 1000 });
   const runner = new ActionRunner();
@@ -223,6 +223,15 @@ function lavaWaitScene(resources: AsyncDisposableStack) {
       const at = bot.entity.position.floored().offset(2, 0, 0);
       const level = (offset: number) => ({ name: "lava", stateId: bot.time.age + offset, position: at }) as never;
       bot.emit("blockUpdate", level(0), level(1));
+    },
+    /** Lava of level 2 appears at the cell east of the body, in the bot's reads and in the escape's world. */
+    lavaSpreadsBesideTheBody() {
+      const at = bot.entity.position.floored().offset(1, 0, 0);
+      const read = bot.blockAt.bind(bot);
+      const lava = { name: "lava", position: at, stateId: 1, shapes: [], boundingBox: "empty", getProperties: () => ({ level: "2" }) };
+      bot.blockAt = (cell) => (cell.equals(at) ? (lava as never) : read(cell));
+      memory.load(at, observeMineflayerBlock(lava as never));
+      bot.emit("blockUpdate", read(at), lava as never);
     },
     async tickTo(age: number) {
       for (let next = bot.time.age + 20; next <= age; next += 20) {
@@ -372,4 +381,38 @@ test("a throwing blockUpdate handler does not throw out of the emit", async () =
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
   const hostile = { name: "lava", stateId: 1, get position(): never { throw new Error("chunk unloaded"); } } as never;
   assert.doesNotThrow(() => bot.emit("blockUpdate", null, hostile));
+});
+
+test("lava spreading toward the body during the wait runs the escape again before the action resumes", async () => {
+  await using resources = new AsyncDisposableStack();
+  const scene = lavaWaitScene(resources);
+  const { output } = await scene.startInterrupted();
+  scene.lavaChanges();
+  await scene.leavePit();
+  scene.lavaSpreadsBesideTheBody();
+  await scene.tickTo(scene.bot.time.age + 20);
+  assert.equal(scene.attempts.count, 1, "the action is not returned: the escape runs again");
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still the same hold on the body");
+  scene.bot.entity.position.set(-2.5, 65, 0.5);
+  await scene.tickTo(scene.bot.time.age + 20);
+  assert.equal(scene.attempts.count, 1, "safe again, but the lava changed only just now");
+  await scene.tickTo(scene.bot.time.age + 80);
+  assert.equal((await output).result.status, "succeeded", "resumed once two flow steps passed with no change");
+  assert.equal(scene.attempts.count, 2);
+});
+
+test("lava that keeps advancing past the 10 s clock returns the action with the spreading message", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  await using resources = new AsyncDisposableStack();
+  const scene = lavaWaitScene(resources);
+  const { output } = await scene.startInterrupted();
+  scene.lavaChanges();
+  await scene.leavePit();
+  scene.lavaSpreadsBesideTheBody();
+  await scene.tickTo(scene.bot.time.age + 20);
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "walking away from the lava");
+  context.mock.timers.tick(10_000);
+  const finished = await output;
+  assert.equal(scene.attempts.count, 1, "the action was not resumed");
+  assert.equal(finished.result.status, "cancelled");
 });

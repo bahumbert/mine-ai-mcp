@@ -6,8 +6,8 @@ import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
 import { FIRE_ESCAPE_RADIUS, nearbyFireEscape, type FireEscapeReason } from "../positioning/fire-escape.js";
-import { escapeFire, type FireEscapeOutcome } from "../responses/fire.js";
-import { awaitLavaSettled, type LavaSettle } from "../responses/lava-settle.js";
+import type { FireEscapeOutcome } from "../responses/fire.js";
+import { escapeThenSettle, type EscapeAndSettle } from "../responses/lava-settle.js";
 
 /**
  * Whether an escape is reachable, searched once per body position, world revision and danger: the search reads up to
@@ -47,7 +47,7 @@ function reflexOutcomeKind(outcome: FireEscapeOutcome) {
 }
 
 /** The outcome of the wait for nearby lava to stop spreading, after an escape onto dry ground. */
-function lavaWaitOutcomeKind(settle: LavaSettle) {
+function lavaWaitOutcomeKind(settle: NonNullable<EscapeAndSettle["settle"]>) {
   if (settle === "settled") return "dry_footing" as const;
   if (settle === "died") return "bot_died" as const;
   return settle === "spreading" ? ("lava_spreading" as const) : ("lava_endangered" as const);
@@ -58,7 +58,7 @@ function stoppedActionReason(kind: ReturnType<typeof reflexOutcomeKind> | Return
   if (kind === "lava_spreading")
     return "Got out of the fire onto safe ground, but lava within 4 blocks was still spreading 10 s later, so the action was stopped instead of walking back into it. Wait for the lava to stop moving, or go another way.";
   if (kind === "lava_endangered")
-    return "Got out of the fire onto safe ground, but while waiting for nearby lava to settle the bot was in danger again (lava moving toward it, damage taken or air running low), so the action was stopped.";
+    return "Got out of the fire onto safe ground, but while waiting for nearby lava to settle the bot was in danger again (damage taken or air running low), so the action was stopped.";
   return "Fire escape did not establish safe footing.";
 }
 
@@ -137,12 +137,9 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
     },
     act: async (reason, signal) => {
       const healthBefore = bot.health;
-      const outcome = await escapeFire(bot, world, signal, reason);
       // On dry ground the interrupted action would re-plan at once, while released lava is still spreading.
-      const kind =
-        outcome === "escaped"
-          ? lavaWaitOutcomeKind(await awaitLavaSettled(bot, signal, () => lava.lastChangeAge))
-          : reflexOutcomeKind(outcome);
+      const { escape, settle } = await escapeThenSettle(bot, world, signal, reason, () => lava.lastChangeAge);
+      const kind = settle ? lavaWaitOutcomeKind(settle) : reflexOutcomeKind(escape);
       return {
         kind,
         healthBefore,
