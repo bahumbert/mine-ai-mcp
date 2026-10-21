@@ -2211,3 +2211,18 @@ test("give says the recipient took the items, or that they were left at their fe
   const failed = await runStep(step, contextFor(picked));
   assert.equal(failed.status, "failed");
 });
+
+test("give hands over the item in hand too (trade5, 2026-10-20: [DROP_HELD] on the iron in Theo's hand)", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "iron_ingot", count: 2 });
+  const runtime = new FakeRuntime();
+  runtime.walkOnNavigate = true;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "iron_ingot", dropped: 2 }], recipient: { collected: true, collectedCount: 2 } });
+  const result = await runStep(step, contextFor(runtime));
+  assert.equal(result.status, "done");
+  const drops = runtime.submitted.filter((call) => call.tool === "drop_item");
+  assert.equal(drops.length, 1);
+  assert.equal(drops[0]!.input.allow_equipped, true);
+  assert.equal(drops[0]!.input.to_player, "Steve");
+  assert.deepEqual(drops[0]!.input.items, [{ item_name: "iron_ingot", count: 2 }]);
+});
