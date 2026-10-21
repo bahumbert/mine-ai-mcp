@@ -80,6 +80,7 @@ export interface OpenFacts {
   readonly activity: string;
   readonly lately: readonly string[];
   readonly lastFailed: OpeningInput["lastFailed"];
+  readonly intent?: OpeningInput["intent"];
 }
 
 interface Talk {
@@ -208,6 +209,7 @@ export class ConversationController {
     try {
       decision = await this.deps.mind.openConversation({
         persona: this.deps.persona, kind, near, activity: o.activity, lately: o.lately, lastFailed: o.lastFailed, calling,
+        ...(o.intent !== undefined && { intent: o.intent }),
         ...(this.deps.relations !== undefined && { relations: this.deps.relations.openingLines(near.map((n) => n.username)) }),
       }, signal);
     } catch (error) {

@@ -9,7 +9,7 @@ import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
 import type { Conversation } from "./conversation/state.ts";
-import { pickPartner, socialise } from "./conversation/socialise.ts";
+import { pickPartner, socialise, type SocialiseDeps } from "./conversation/socialise.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { namesWord, type LocalizedChat } from "./llm-mind.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
@@ -19,6 +19,7 @@ import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatInput, type Chat
 import { AgentRelations } from "./relations/agent-relations.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, type Handoff } from "./relations/handoff.ts";
+import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -236,6 +237,8 @@ export class Agent {
   private onlineNames: readonly string[] = [];
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
   private lastLook: BotSnapshot | null = null;
+  /** What an own objective could not get and who refused to trade it, for ten minutes (relations/trading.ts). */
+  private readonly asks = new TradeAsks();
   /** When conversations were last looked at, and whether that look is still running. */
   private talksCheckedAt = 0;
   private talksLooking = false;
@@ -574,7 +577,7 @@ export class Agent {
       await talks.tick(snapshot, this.runSignal);
       // An order, a night shelter or a socialising objective on its way (it opens its own conversation) is busy enough.
       const top = this.stack.at(-1);
-      const busy = (top?.objective.requester ?? null) !== null || top?.objective.purpose === "socialising" || this.sheltering !== null;
+      const busy = (top?.objective.requester ?? null) !== null || top?.objective.purpose === "socialising" || top?.objective.purpose === "trading" || this.sheltering !== null;
       await talks.maybeOpen({ snapshot, activity: this.activity, lately: this.lately, lastFailed: this.lastFailed, busy }, this.runSignal);
     })()
       .catch((error: unknown) => {
@@ -743,9 +746,14 @@ export class Agent {
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
-    const chances = activityChances(availableActivities(personaSkills(persona), snapshot, this.partners()), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
-    const drawn = drawTwo(chances, this.options.random ?? Math.random);
-    const opportunities = await this.opportunities(snapshot, drawn);
+    const available = availableActivities(personaSkills(persona), snapshot, this.partners());
+    const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
+    // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
+    this.asks.dropRefused(this.partners(), Date.now());
+    const needs = this.asks.needs.current(Date.now(), snapshot.inventory);
+    const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs);
+    const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, this.partners(), this.asks, snapshot.inventory, Date.now()) : undefined;
+    const opportunities = await this.opportunities(snapshot, drawn, tradeNeeds);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
@@ -762,6 +770,7 @@ export class Agent {
     if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     if (work.objective.requester === null && work.objective.purpose === "socialising") return this.socialiseStep(work);
+    if (work.objective.requester === null && work.objective.purpose === "trading") return this.tradeStep(work);
     const snapshot = await runtime.status();
     await this.keepSettings(snapshot);
     let decision: WorkDecision;
@@ -942,30 +951,47 @@ export class Agent {
    * shelter, no work-tier call). An order that takes the body aborts it, and the objective ends.
    */
   private async socialiseStep(work: Work): Promise<void> {
-    const { persona, runtime, log } = this.options;
-    const talks = this.talks;
-    if (talks === null) return this.finish(work, "failed", "conversations are off");
-    const snapshot = await runtime.status();
+    if (this.talks === null) return this.finish(work, "failed", "conversations are off");
+    const snapshot = await this.options.runtime.status();
     const partner = pickPartner(work.objective.text, this.partners(), snapshot);
     if (partner === null) return this.finish(work, "failed", "nobody to talk to");
+    const openFacts = { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed };
+    return this.routineStep(work, "socialising", `chat with ${partner}`, { skill: "socialise", partner }, (base) => socialise({ ...base, partner, openFacts }));
+  }
+
+  /** The step of a `trading` objective of its own: relations/trading.ts asks a partner for the items it lacks. */
+  private async tradeStep(work: Work): Promise<void> {
+    const trades = this.relations?.trades;
+    if (this.talks === null || trades === undefined) return this.finish(work, "failed", "trading is off");
+    const snapshot = await this.options.runtime.status();
+    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), this.partners(), this.asks, snapshot, Date.now());
+    if ("failed" in plan) return this.finish(work, "failed", plan.failed);
+    const { want, partner } = plan;
+    // What it asks for is what the chat calls of the talk are told it lacks.
+    for (const item of want) work.wanted.add(item);
+    const openFacts = { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed };
+    return this.routineStep(work, "trading", `trade with ${partner}`, { skill: "trade", partner }, (base) => tradeRoutine({ ...base, partner, want, asks: this.asks, trades, openFacts }));
+  }
+
+  /** Runs a conversation routine as the objective's step: journals it, counts its time for `activity`, ends the objective with its result. */
+  private async routineStep(work: Work, activity: "socialising" | "trading", label: string, input: Record<string, string>, run: (base: Omit<SocialiseDeps, "partner" | "openFacts">) => Promise<SkillResult>): Promise<void> {
+    const { persona, runtime, log } = this.options;
+    const talks = this.talks!;
     const controller = new AbortController();
     work.step = controller;
-    const label = `chat with ${partner}`;
-    log(`socialising: ${label}`);
+    log(`${activity}: ${label}`);
     this.journalState(label);
     const started = Date.now();
     const signal = AbortSignal.any([controller.signal, this.runSignal]);
     const talkRange = this.options.localizedChat?.range ?? persona.settings.conversation.stayingDistance;
     let result: SkillResult;
     try {
-      result = await socialise({
+      result = await run({
         runtime,
         signal,
-        partner,
         talks,
         since: work.startedAt,
         context: { runtime, body: this.body, signal, self: persona.username },
-        openFacts: { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed },
         limits: { openingDistance: persona.settings.conversation.openingDistance, talkRange, maxMinutes: persona.settings.conversation.maxMinutes },
       });
     } catch (error) {
@@ -977,8 +1003,8 @@ export class Agent {
     const ms = ended - started;
     const outcome = result.status === "stopped" ? "interrupted" : result.status;
     const detail = result.status === "stopped" ? "an order came first" : result.detail;
-    this.spent({ activity: "socialising", purpose: "socialising", ended: new Date(ended).toISOString(), minutes: ms / 60_000 }, ms >= MIN_RECORDED_MS);
-    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: null, step: label, input: { skill: "socialise", partner }, thought: "", outcome, detail, ms, activity: "socialising", purpose: "socialising" });
+    this.spent({ activity, purpose: activity, ended: new Date(ended).toISOString(), minutes: ms / 60_000 }, ms >= MIN_RECORDED_MS);
+    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: null, step: label, input, thought: "", outcome, detail, ms, activity, purpose: activity });
     this.journalState(null);
     log(`  -> ${label}: ${outcome}: ${detail}`);
     // Set aside (a member's favour, a night) it stays on the stack and runs again; stopped and removed, it ends here.
@@ -1110,6 +1136,8 @@ export class Agent {
     if (objective.requester === null) {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lastFailed = outcome === "failed" ? { objective: objective.text, reason: detail } : null;
+      // A trading objective's own failure is not a new need: the ask would never time out.
+      if (outcome === "failed" && objective.purpose !== "trading") this.asks.failed(work.wanted, this.lastLook?.inventory ?? [], Date.now());
       this.lately.push(outcomeLine);
       if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
       this.memorize({ kind: "own_objective", outcome: outcomeLine });
@@ -1210,7 +1238,7 @@ export class Agent {
   }
 
   /** Things that could use doing now (the tasks a character looks for); the goal tier decides what to make of them. */
-  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[]): Promise<Opportunity[]> {
+  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[], tradeNeeds?: OpportunityFacts["tradeNeeds"]): Promise<Opportunity[]> {
     const ownHome = this.places.some((place) => place.own === true);
     const unfinished = this.building.unfinished;
     let houseShortfall: Shortfall[] = [];
@@ -1227,7 +1255,7 @@ export class Agent {
     } catch (error) {
       this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
-    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse }, drawn);
+    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...(tradeNeeds !== undefined && { tradeNeeds }) }, drawn);
   }
 
   /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */

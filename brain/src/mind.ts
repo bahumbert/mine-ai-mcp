@@ -278,6 +278,8 @@ export interface OpeningInput {
   readonly calling: boolean;
   /** One summary line per nearby partner, with what they said they have against what the objective lacks. */
   readonly relations?: readonly string[];
+  /** The trading routine came to ask for these items and can offer these stacks. */
+  readonly intent?: { readonly kind: "trade"; readonly want: readonly string[]; readonly offer: readonly ItemCount[] };
 }
 
 export interface OpeningDecision {

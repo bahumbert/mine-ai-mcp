@@ -1196,3 +1196,12 @@ test("the goal tier is told what it knows of the others only when there is somet
   await mind.chooseObjective({ ...input, relations: ["You and Theo: friend (+2)."] }, signal);
   assert.match(planner.requests[1]?.[1]?.content ?? "", /What you know of the others:\n- You and Theo: friend \(\+2\)\./u);
 });
+
+test("the goal prompt describes trading only when it is among the available activities", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Trade." }, { objective: "Build." });
+  await mind.chooseObjective(goalInput({ drawn: ["building", "trading"], chances: chancesOf("building", "trading") }), signal);
+  await mind.chooseObjective(goalInput({ drawn: ["building"], chances: chancesOf("building") }), signal);
+  assert.match(planner.requests[0]?.[0]?.content ?? "", /trading is going to someone and swapping things you carry for something you need/u);
+  assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /swapping things you carry/u);
+});

@@ -42,6 +42,7 @@ export function describeOpening(input: OpeningInput, localizedChat?: LocalizedCh
     ...(input.lastFailed === null ? [] : [`Your last objective "${input.lastFailed.objective}" failed: ${input.lastFailed.reason}.`]),
     ...(input.calling ? [localizedChat === undefined ? "calling: they are out of earshot, your line is plain talk and may not reach them." : "calling: they are out of earshot, your line is shouted to call them over."] : []),
     input.kind === "social" ? "You chose to go and talk with them." : "You meet them while you work.",
+    ...(input.intent === undefined ? [] : [`You came to trade: ask for ${input.intent.want.join(", ")}, offer some of ${input.intent.offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`]),
   ];
   return parts.join("\n\n");
 }

@@ -188,3 +188,25 @@ test("socialising needs someone to talk with, and a skill that walks up to them"
   assert.ok(availableActivities(SKILL_NAMES, snapshot(), ["Theo"]).includes("socialising"));
   assert.ok(!availableActivities(SKILL_NAMES.filter((skill) => skill !== "go_to_player"), snapshot(), ["Theo"]).includes("socialising"));
 });
+
+test("trading needs a partner and a stack to give: give_item maps to it", () => {
+  assert.deepEqual(SKILL_ACTIVITIES.give_item, ["trading"]);
+  const carrying = { ...snapshot(), inventory: [{ name: "oak_log", count: 8 }] };
+  assert.deepEqual(availableActivities(["give_item"], carrying, ["Theo"]), ["trading"]);
+  assert.deepEqual(availableActivities(["give_item"], carrying, []), [], "no one to trade with");
+  assert.deepEqual(availableActivities(["give_item"], snapshot(), ["Theo"]), [], "nothing to give");
+  assert.deepEqual(availableActivities(["go_to"], carrying, ["Theo"]), [], "without the give_item skill");
+});
+
+test("worn armour alone is nothing to trade", () => {
+  const worn = { ...snapshot(), inventory: [{ name: "iron_chestplate", count: 1 }], gear: { tools: [], armour: [{ class: "chestplate", item: "iron_chestplate" }] } };
+  assert.deepEqual(availableActivities(["give_item"], worn, ["Theo"]), []);
+  const spare = { ...worn, inventory: [{ name: "iron_chestplate", count: 2 }] };
+  assert.deepEqual(availableActivities(["give_item"], spare, ["Theo"]), ["trading"], "a second one is givable");
+});
+
+test("a persona that loves trading draws it more often than one that hates it", () => {
+  const loves = activityChances(["trading", "mining"], { loves: "trading", likes: "mining", dislikes: "farming", hates: "building" }, MULTIPLIERS, noTime);
+  const hates = activityChances(["trading", "mining"], { loves: "building", likes: "mining", dislikes: "farming", hates: "trading" }, MULTIPLIERS, noTime);
+  assert.ok(share(loves, "trading") > share(hates, "trading"));
+});

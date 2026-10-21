@@ -241,6 +241,15 @@ export class TradeController {
     return this.deps.book.trades().find((t) => t.id === tradeId);
   }
 
+  /** The newest trade with that partner proposed at or after `since`; a read, nothing is written. */
+  latestWith(partner: string, since: number): Trade | null {
+    let newest: Trade | null = null;
+    for (const t of this.deps.book.trades()) {
+      if (same(t.partner, partner) && t.createdAt >= since && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
+    }
+    return newest;
+  }
+
   private openWith(partner: string): Trade | undefined {
     return this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner));
   }

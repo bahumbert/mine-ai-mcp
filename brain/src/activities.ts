@@ -4,7 +4,7 @@ import type { ForegroundTool } from "./runtime-client.ts";
 /**
  * The kinds of work a character spends its time on (spec 2026-10-03-specialisations-preferences): our vocabulary, like
  * the skill names, not game knowledge. Preferences name them, the time per activity is counted in them, and the
- * opportunities a character sees are tagged with them. Some have no skill yet (trading, pvp, guarding, storing): a
+ * opportunities a character sees are tagged with them. Some have no skill yet (pvp, guarding, storing): a
  * persona may still love or hate them, the feeling is in the prompt until the skill exists.
  */
 export const ACTIVITIES = [
@@ -27,6 +27,7 @@ const WORDS: Readonly<Partial<Record<Activity, string>>> = {
   terraforming: "reshaping ground",
   following: "following someone",
   socialising: "chatting with someone",
+  trading: "trading items with someone",
   foraging: "foraging",
   exploring: "exploring",
 };
@@ -152,7 +153,7 @@ export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> 
   collect_block: ["woodcutting", "mining", "digging", "foraging"],
   craft_item: ["crafting", "cooking"],
   get_items: ["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"],
-  give_item: [],
+  give_item: ["trading"],
   drop_item: [],
   eat: [],
   equip: [],

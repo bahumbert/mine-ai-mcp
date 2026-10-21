@@ -3,7 +3,7 @@ import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentOptions } from "./agent.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
-import { ConversationBudget } from "./conversation/controller.ts";
+import { ConversationBudget, type ConversationController } from "./conversation/controller.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
@@ -1841,4 +1841,80 @@ test("a hand-off already given ends done without a give and the previous objecti
   assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"), "no give_item call");
   const finished = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("hand over") ? [[event.outcome, event.detail]] : []));
   assert.deepEqual(finished, [["done", "already handed over"]]);
+});
+
+/** Ayla (bread, Theo 2 blocks away) whose own `get_items` for 3 iron_ingot ends failed: the goal tier is asked again with trading in reach. */
+async function failedIronObjective(t: Parameters<typeof agentFor>[0], extra: Partial<AgentOptions> = {}) {
+  // Theo is out of the opening distance: no chance opening takes the talk before the routine does.
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 30, y: 64, z: 0 } }] };
+  runtime.durations.navigate = 5;
+  const events: BrainEvent[] = [];
+  const built = agentFor(t, runtime, { goal: "Forge an iron kit." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Theo"], random: () => 0, ...extra }));
+  built.planner.reply({ objective: "get 3 iron_ingot" });
+  built.action.reply({ step: { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] } }, { give_up: "no iron anywhere near" });
+  return { runtime, events, ...built };
+}
+
+test("a failed own get_items objective draws trading and shows the trade-needs line to the next goal call", async (t) => {
+  const { planner } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  const prompt = JSON.stringify(planner.requests[1]);
+  assert.match(prompt, /feel most like [^.]*trading items with someone/u);
+  assert.match(prompt, /trade for iron_ingot you could not get: ask Theo what they would want for it \(you carry 10 bread\)/u);
+});
+
+test("without anyone to trade with, a failed objective draws no trading", async (t) => {
+  const runtime = tradingRuntime();
+  const built = agentFor(t, runtime, { goal: "Forge an iron kit." }, { random: () => 0 });
+  built.planner.reply({ objective: "get 3 iron_ingot" });
+  built.action.reply({ step: { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] } }, { give_up: "no iron anywhere near" });
+  built.planner.reply({ objective: "gather wood" });
+  await until(() => built.planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(JSON.stringify(built.planner.requests[1]), /trading items with someone|trade for/u);
+});
+
+test("a trading objective runs the routine: no work-tier call, a trade step in the journal, done on an agreed trade", async (t) => {
+  const { runtime, events, agent, chat, action, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for 5 iron ingots", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" }, ACCEPT, { gist: "Agreed bread for iron." }, { gist: "Agreed bread for iron." });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the trading objective asked the work tier nothing");
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  // The hand-off sets the routine aside; it resumes with the talk still on and follows until the talk ends.
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await sleep(100);
+  (agent as unknown as { talks: ConversationController }).talks.end("out_of_range");
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "done"), 6_000);
+  const rows = events.filter((event) => event.kind === "step" && event.objective.startsWith("trade Theo"));
+  const row = rows.at(-1);
+  assert.equal(rows.length, 2, "set aside for the hand-off, then resumed");
+  assert.deepEqual(row?.kind === "step" && row.input, { skill: "trade", partner: "Theo" });
+  assert.match(String(row?.kind === "step" && row.detail), /^agreed with Theo: 5 bread for 5 iron_ingot/u);
+  assert.equal(action.requests.length, 2);
+  assert.ok(runtime.submitted.some((call) => call.tool === "drop_item"), "the hand-off ran");
+});
+
+test("a trading objective that ends refused is not asked again: the next goal call is not a trade ask to that partner", async (t) => {
+  const { events, agent, chat, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for 3 iron ingots", for: "trading" }, { objective: "gather wood" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, want to swap for iron?" }, { gist: "He said no." });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  (agent as unknown as { talks: ConversationController }).talks.end("out_of_range");
+  await until(() => planner.requests.length >= 3, 8_000);
+  assert.ok(events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "failed"));
+  const situation = planner.requests[2]?.[1]?.content ?? "";
+  assert.doesNotMatch(situation, /feel most like.*trading|trade for iron_ingot/u);
+});
+
+test("an order during a trading objective aborts the routine and runs", async (t) => {
+  const { agent, chat, action, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for iron ingots", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "long", say: "Theo! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true }, { gist: "An order came." });
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  await until(() => action.requests.length >= 3, 6_000);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Steve\): "collect 5 dirt"/u);
 });

@@ -74,3 +74,14 @@ test("the opening shows the relation lines of those near", () => {
   assert.match(describeOpening(input), /You and Theo: friend \(\+2\)/u);
   assert.doesNotMatch(describeOpening({ ...input, relations: undefined }), /You and Theo/u);
 });
+
+test("a trade intent adds one line to the opening; without it the text is as before", () => {
+  const input: OpeningInput = {
+    persona: testPersona(), kind: "social", near: [{ username: "Theo", distance: 7, lastTalk: null }], activity: "trading", lately: [], lastFailed: null, calling: false,
+  };
+  const plain = describeOpening(input);
+  const withIntent = describeOpening({ ...input, intent: { kind: "trade", want: ["iron_ingot", "bread"], offer: [{ item: "oak_log", count: 32 }, { item: "stick", count: 4 }] } });
+  assert.match(withIntent, /You came to trade: ask for iron_ingot, bread, offer some of 32 oak_log, 4 stick; say what you would give\./u);
+  assert.equal(withIntent.replace(/\n\nYou came to trade[^\n]*/u, ""), plain);
+  assert.doesNotMatch(plain, /trade/u);
+});

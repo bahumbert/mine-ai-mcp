@@ -442,3 +442,19 @@ test("handoffSkipped forgets the pending hand-off so the trade is not given twic
   await h.c.tick(snapshot(), new Set(), signal);
   assert.equal(h.handoffs.length, 1, "no second give hand-off");
 });
+
+test("latestWith: the newest trade with that partner since a time, any case, no other partner", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "propose", give: bread(1) }), "Bruno", s);
+  await h.c.onDecision(decision({ action: "propose", give: bread(2) }), "Theo", s);
+  h.state.now += MIN;
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", s);
+  h.state.now += MIN;
+  await h.c.onDecision(decision({ action: "propose", give: bread(3) }), "Theo", s);
+  assert.deepEqual(h.c.latestWith("THEO", 0)?.give, bread(3), "the newest of two");
+  assert.equal(h.c.latestWith("theo", h.state.now + 1), null, "none proposed since then");
+  assert.deepEqual(h.c.latestWith("bruno", 0)?.give, bread(1), "another partner's trade is its own");
+  assert.equal(h.c.latestWith("Zed", 0), null);
+  assert.equal(h.book.trades().length, 3, "a read writes nothing");
+});
