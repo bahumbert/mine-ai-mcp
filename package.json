@@ -39,6 +39,7 @@
     "typecheck:tests": "bunx --bun tsc -p tests/tsconfig.json --noEmit",
     "typecheck:brain": "bunx --bun tsc -p brain/tsconfig.json --noEmit",
     "typecheck:monitor": "bunx --bun tsc -p monitor/tsconfig.json --noEmit",
+    "typecheck:scripts": "bunx --bun tsc -p scripts/tsconfig.json --noEmit",
     "check": "bun scripts/check.ts",
     "test": "bun scripts/check.ts --all",
     "brain": "bun brain/src/main.ts",
@@ -66,6 +67,7 @@
     "minecraft-data": "https://github.com/aibengineering/node-minecraft-data/releases/download/mine-ai-c932f743/minecraft-data-3.116.0.tgz"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.0.1",
     "highlight.js": "^11.12.0",

@@ -1,5 +1,6 @@
-# Pull request checks: the full test suite (blocking), and a report comment (token cost of the change, new or grown
-# long functions, duplicated code). The model review runs locally before pushing (pre-push gate), not here.
+# Pull request checks: the full test suite with coverage (blocking), and a report comment (token cost of the change,
+# new or grown long functions, duplicated code, coverage). The model review runs locally before pushing (pre-push
+# gate), not here.
 name: PR checks
 
 on:
@@ -22,9 +23,27 @@ jobs:
         with:
           bun-version: latest
       - run: bun install --frozen-lockfile
-      - run: bun run test
+      - name: Tests with coverage
+        shell: bash
+        run: bun run test -- --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage
+      # The summary and the upload run after a red suite too (the job stays red), not in a run a newer push cancelled;
+      # no lcov gives "No coverage data.".
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: mkdir -p coverage && bun scripts/coverage-summary.ts coverage/lcov.info coverage/summary.md
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
 
+  # Waits for the suite to carry its coverage (owner 2026-10-21, Q2); a red suite still gets its report, a run
+  # cancelled by a newer push posts nothing over the newer comment.
   report:
+    needs: test
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +64,11 @@ jobs:
         run: |
           npx --yes jscpd@4.0.5 src brain/src --min-lines 12 --min-tokens 80 \
             --ignore "**/*.test.ts,**/data/**" --reporters markdown --output jscpd --silent || true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage
+          path: coverage
       - name: Post the report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,6 +80,9 @@ jobs:
             echo
             echo "### Duplicated code (jscpd, ≥ 12 lines)"
             if [ -f jscpd/jscpd-report.md ]; then head -n 40 jscpd/jscpd-report.md; else echo "No report."; fi
+            echo
+            echo "### Coverage (bun test --coverage)"
+            if [ -f coverage/summary.md ]; then cat coverage/summary.md; else echo "No coverage data."; fi
           } > report.md
           id=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
             --jq '[.[] | select(.body | startswith("<!-- pr-checks-report -->"))][0].id // empty')
