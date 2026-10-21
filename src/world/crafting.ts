@@ -1,8 +1,8 @@
 import { createRequire } from "node:module";
-import { setTimeout as sleep } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
+import { sleepMs } from "../utils/wall-timers.js";
 
 export type CraftExecution =
   | { readonly kind: "completed"; readonly completedSteps: number }
@@ -76,7 +76,7 @@ async function craftOnce(
   } catch (cause) {
     if (!/did not update crafting result/u.test(String(cause))) throw cause;
     bot.closeWindow(bot.currentWindow ?? bot.inventory);
-    await sleep(UNSEEN_RESULT_SETTLE_MS);
+    await sleepMs(UNSEEN_RESULT_SETTLE_MS);
     if (bot.inventory.count(output.id, null) < before + output.count) throw cause;
   }
 }

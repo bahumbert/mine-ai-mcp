@@ -5,6 +5,7 @@
 import type { Bot } from "mineflayer";
 import { horizontalControlsToward } from "../../navigation/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { timeoutSignal } from "../../utils/wall-timers.js";
 import { AirRoute } from "./air-route.js";
 import { routeVerticalControls } from "./swim-escape.js";
 
@@ -19,7 +20,7 @@ const CONTROLS = ["forward", "back", "left", "right", "jump", "sneak"] as const;
  * control released; rethrows the cancel of `signal`.
  */
 export async function swimToBreathableCell(bot: Bot, signal: AbortSignal, wallMs = SWIM_WALL_MS): Promise<void> {
-  const deadline = AbortSignal.timeout(wallMs);
+  const deadline = timeoutSignal(wallMs);
   const stop = AbortSignal.any([signal, deadline]);
   const route = new AirRoute(Number.POSITIVE_INFINITY);
   try {

@@ -9,6 +9,7 @@ import { Vec3 } from "vec3";
 import { equipCombatLoadout, MELEE_RANGE, readCombatItems, selectMeleeLoadout } from "../../survival/weapons/equipment.js";
 import { BoatRide, isBoatEntity } from "./boat-crossing.js";
 import { currentVehicle } from "./vehicle-sync.js";
+import { timeoutSignal } from "../../utils/wall-timers.js";
 
 /** Longest one response lasts on the wall clock, whatever the threat does. */
 export const SEATED_RESPONSE_WALL_MS = 20_000;
@@ -107,7 +108,7 @@ export async function respondFromBoat(
   signal: AbortSignal,
   options: { readonly wallMs?: number; readonly hostileRadius?: number } = {},
 ): Promise<SeatedOutcome> {
-  const ceiling = AbortSignal.any([signal, AbortSignal.timeout(options.wallMs ?? SEATED_RESPONSE_WALL_MS)]);
+  const ceiling = AbortSignal.any([signal, timeoutSignal(options.wallMs ?? SEATED_RESPONSE_WALL_MS)]);
   const radius = options.hostileRadius ?? Number.POSITIVE_INFINITY;
   let died = false;
   const onDeath = () => {

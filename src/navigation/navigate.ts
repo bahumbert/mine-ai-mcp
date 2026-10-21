@@ -23,6 +23,7 @@ import {
   type NavigationCalculationFailureResult,
 } from "./orchestration/process-events.js";
 import type { SearchLimits } from "./search/search-result.js";
+import { timeoutSignal } from "../utils/wall-timers.js";
 
 /** Baritone's inline search budgets: enough to find a useful first segment without holding movement up indefinitely. */
 export const DEFAULT_SEARCH_LIMITS = Object.freeze({
@@ -130,7 +131,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
   // takes. Whichever source aborts first supplies the reason the outcome
   // reports; nothing below this line installs a listener of its own.
   const stops = [options.signal, options.stopSignal];
-  if (options.timeoutMs !== undefined) stops.push(AbortSignal.timeout(options.timeoutMs));
+  if (options.timeoutMs !== undefined) stops.push(timeoutSignal(options.timeoutMs));
   const signal = AbortSignal.any(stops.filter((source) => source !== undefined));
   const admission = navigator.startRun({
     goal: options.goal,

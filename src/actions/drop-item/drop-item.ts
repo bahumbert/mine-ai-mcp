@@ -1,4 +1,4 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { sleepMs } from "../../utils/wall-timers.js";
 import { dropCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
@@ -281,7 +281,7 @@ async function netOfPickedUp(
   waitMs: number,
   context: ActionContext,
 ): Promise<void> {
-  await delay(waitMs, undefined, { signal: context.signal });
+  await sleepMs(waitMs, context.signal);
   for (const [index, entry] of dropped.entries()) {
     if (entry.dropped <= 0 || entry.error) continue;
     const now = carriedCount(bot, entry.item);

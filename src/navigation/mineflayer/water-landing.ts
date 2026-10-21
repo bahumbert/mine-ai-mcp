@@ -6,6 +6,7 @@ export { predictWaterLanding, waterableLanding } from "../world/water-landing.js
 import { horizontalControlsToward } from "../steering/local-steering.js";
 import { liveBlockReader } from "./world.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { timeoutSignal } from "../../utils/wall-timers.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 /** Stop waiting for an unavailable server; every continuation rechecks ownership before issuing another effect. */
 function whileOwned<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
@@ -75,7 +76,7 @@ export async function saveWaterLanding(bot: Bot, options: {
   const waterCount = () => bot.inventory.items().filter(item => item.name === "water_bucket").reduce((total, item) => total + item.count, 0);
   const fullBefore = waterCount();
   const lifetime = new AbortController();
-  const signal = AbortSignal.any([options.signal, lifetime.signal, AbortSignal.timeout(15000)]);
+  const signal = AbortSignal.any([options.signal, lifetime.signal, timeoutSignal(15000)]);
   const reset = () => lifetime.abort("Water landing lost its body or dimension.");
   const game = () => {
     if (bot.game.dimension !== dimension) reset();

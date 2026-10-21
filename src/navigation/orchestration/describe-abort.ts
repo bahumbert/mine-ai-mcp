@@ -1,7 +1,7 @@
 /**
  * What an abort reason says, in words.
  *
- * Callers abort with a string; `AbortSignal.timeout` aborts with a
+ * Callers abort with a string; `AbortSignal.timeout` and `timeoutSignal` (`utils/wall-timers.ts`) abort with a
  * `TimeoutError`; a bare `abort()` aborts with an `AbortError`.
  */
 export function describeAbort(reason: unknown): string {

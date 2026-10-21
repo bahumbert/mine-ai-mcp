@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
+import { timeoutSignal } from "../utils/wall-timers.js";
 import { waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions } from "./navigate.js";
@@ -241,7 +242,7 @@ export class Diving {
       const origin = this.bot.entity.position.clone();
       await navigate({ movements: { ...options.movements, ...(options.movements.allowSwimming ? { dive: { origin, airTicks: air ?? FULL_AIR_TICKS } } : {}) },
         goal: exactBlockGoal(target), timeoutMs: budgetMs,
-        stopSignal: AbortSignal.any([ended.signal, AbortSignal.timeout(budgetMs), ...(options.signal ? [options.signal] : [])]) });
+        stopSignal: AbortSignal.any([ended.signal, timeoutSignal(budgetMs), ...(options.signal ? [options.signal] : [])]) });
     } catch {
       // The route back failed: the body stays where it is for the breath reflex, which owns the last resort.
     } finally {
