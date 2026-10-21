@@ -86,6 +86,7 @@ function fakeBot(options: {
       height: 1.8,
     },
     entities,
+    version: "1.21.4",
     registry: {
       blocksByName: {
         lava: { minStateId: 3, id: 11 },
