@@ -1,9 +1,7 @@
 import type { StallClock } from "../actions/stall-watch.js";
+import { flush } from "./fake-bot/fake-clock.js";
 
-/** Lets every promise reaction already queued run, timers included. */
-export async function flush(): Promise<void> {
-  for (let turn = 0; turn < 5; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
-}
+export { flush };
 
 /** A `StallClock` the test steps by hand: `advance` moves time forward and runs every live timer once per step. */
 export function handClock() {
