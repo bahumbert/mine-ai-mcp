@@ -24,6 +24,12 @@ reset:
 setup:
   - "difficulty normal"
 
+# The driver's scripted hit is attributed to the zombie, so the game knocks the bot back about a block towards -x:
+# from 2 blocks it landed out of melee reach, where an ordinary melee attacker is not fought, and the fight ended at
+# once (1 run in 6 under load). This wall behind the bot stops the knockback inside reach.
+geometry:
+  - fill: { block: stone, from: [-1, -60, -1], to: [-1, -59, 1] }
+
 entities:
   - type: zombie
     pos: [2.5, -60, 0.5]

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { Bot } from "mineflayer";
+import { MELEE_RANGE } from "../../../src/survival/weapons/equipment.ts";
+import { meleeDistance } from "../../../src/survival/weapons/melee.ts";
 import { openRuntime, standStill } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 
@@ -17,6 +20,32 @@ interface Claim {
   readonly kind: string;
   readonly from: number;
   to: number | null;
+  /** The zombie's melee distance when the claim started and ended (`null`: the zombie is not seen). */
+  readonly reachFrom: number | null;
+  reachTo: number | null;
+}
+
+/** The bot's melee distance to the zombie, rounded to the centimetre; `null` while the zombie is not seen. */
+function zombieReach(bot: Bot): number | null {
+  const zombie = Object.values(bot.entities).find((entity) => entity.name === "zombie");
+  return zombie ? Math.round(meleeDistance(bot, zombie) * 100) / 100 : null;
+}
+
+/**
+ * The fixture's own failure, told apart from the limit's: the scripted hit's knockback can carry the bot out of melee
+ * reach, where an ordinary melee attacker is not fought (owner 2026-10-21, Q1), so the first fight ends at once or is
+ * never chosen. `null` when the first fight held its window or the zombie stayed in reach. A short fight followed by
+ * another response (an evade) is not blamed on the fixture: that response may have carried the bot out of reach
+ * before the poll read it, and an early release in reach is the limit's own failure.
+ */
+function fixtureOutOfReach(claims: readonly Claim[], reachNow: number | null): string | null {
+  const fightIndex = claims.findIndex((claim) => claim.kind === "fight");
+  const fight = claims[fightIndex];
+  const endedAloneEarly = fight?.to != null && fight.to - fight.from < SHORTEST_FIGHT_MS && claims[fightIndex + 1] === undefined;
+  const reach = fight === undefined ? reachNow : endedAloneEarly ? fight.reachTo : null;
+  return reach !== null && reach > MELEE_RANGE
+    ? `the scripted hit left the bot ${reach} blocks from the zombie, out of melee reach: fixture, not the limit`
+    : null;
 }
 
 /**
@@ -34,7 +63,8 @@ export const run: MineAiScenario = async (context) => {
   let limitEntry = false;
   let lastSurvival: unknown = null;
   let seenLast = "";
-  // One scripted hit by the zombie: the reflex defends only against an observed attacker, and the glass keeps it from hitting.
+  // One scripted hit by the zombie: the reflex defends only against an observed attacker, and NoAI keeps it from hitting.
+  // The hit knocks the bot back about a block (towards -x): the wall in the YAML stops it inside melee reach.
   let hurtBy: string | null = null;
   bot.on("entityHurt", (entity, source) => {
     if (entity.id === bot.entity.id) hurtBy = source?.name ?? "unattributed";
@@ -66,16 +96,19 @@ export const run: MineAiScenario = async (context) => {
       const kind = survival.response?.kind ?? "unknown";
       const open = claims.at(-1);
       if (open !== undefined && open.to === null && (!owned || (kind !== "unknown" && open.kind !== "unknown" && kind !== open.kind)))
-        open.to = now;
+        Object.assign(open, { to: now, reachTo: zombieReach(bot) });
       // The response that follows a released one (the evade after the fight) is a new claim.
-      if (owned && (claims.at(-1) === undefined || claims.at(-1)!.to !== null)) claims.push({ kind, from: now, to: null });
+      if (owned && (claims.at(-1) === undefined || claims.at(-1)!.to !== null)) claims.push({ kind, from: now, to: null, reachFrom: zombieReach(bot), reachTo: null });
       else if (owned && open !== undefined && open.kind === "unknown" && kind !== "unknown") Object.assign(open, { kind });
       if (survival.answered.some((entry) => entry.failure.kind === "reflex_limit")) limitEntry = true;
       await sleep(POLL_MS, undefined, { signal });
     }
     const result = verdict();
-    const detail = JSON.stringify({ claims, result, limitEntry, hurtBy, health: bot.health, lastSurvival, slowestStatusMs: Math.round(slowestStatusMs), zombies: Object.values(bot.entities).filter((entity) => entity.name === "zombie").length });
+    const reachNow = zombieReach(bot);
+    const detail = JSON.stringify({ claims, result, limitEntry, hurtBy, reachNow, health: bot.health, lastSurvival, slowestStatusMs: Math.round(slowestStatusMs), zombies: Object.values(bot.entities).filter((entity) => entity.name === "zombie").length });
     log(detail);
+    const fixtureFailure = fixtureOutOfReach(claims, reachNow);
+    assert.ok(fixtureFailure === null, `${fixtureFailure}: ${detail}`);
     assert.ok(result, `no fight claim ended with a reflex_limit answer: ${detail}`);
     assert.ok(result.fightMs >= SHORTEST_FIGHT_MS && result.fightMs <= LONGEST_FIGHT_MS, `the fight held the body ${result.fightMs} ms: ${detail}`);
     assert.ok(result.nextFightAfterMs === null || result.nextFightAfterMs >= STAND_DOWN_MS, `the target was fought again after ${result.nextFightAfterMs} ms: ${detail}`);
