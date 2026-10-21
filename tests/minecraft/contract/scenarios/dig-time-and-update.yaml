@@ -1,0 +1,48 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-dig-time-and-update
+tags:
+  - contract
+description: A dig ends at Mineflayer's digTime and the server keeps the cell open, on dry ground and with the eye in
+  water (5x or more). Contract check tests/minecraft/contract/checks/dig-time-and-update.ts, also run on the fake bot
+  (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: dig-time-and-update
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -1 -60 0 glass
+  - setblock -1 -59 0 glass
+  - setblock 0 -60 1 glass
+  - setblock 0 -59 1 glass
+  - setblock 0 -60 -1 glass
+  - setblock 0 -59 -1 glass
+  - setblock 0 -58 0 glass
+  - setblock 2 -60 0 glass
+  - setblock 1 -60 1 glass
+  - setblock 1 -60 -1 glass
+  - setblock 2 -59 0 glass
+  - setblock 1 -59 1 glass
+  - setblock 1 -59 -1 glass
+  - setblock 1 -58 0 glass
+  - setblock 1 -60 0 dirt
+  - setblock 1 -59 0 dirt
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

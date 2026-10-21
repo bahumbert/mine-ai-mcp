@@ -176,6 +176,36 @@ Starting grounded is the default. Add an exception only when a real fixture
 needs to start off the ground; there is no configuration option for it now.
 The action starts only after Mine Labs sends `start`.
 
+## Contract checks: the fake bot against the real server
+
+`contract/` holds the answers of Mineflayer and a 1.21.4 server that the shared fake bot
+(`src/test-support/fake-bot/`) must give: each check in `contract/checks/` is one module
+`{ name, fixture, run(subject) }` acting on the bot directly and asserting with `node:assert`.
+The same check runs twice:
+
+- on the fake, by `contract/bot-contract.test.ts` (`bun test`, mocked clock);
+- on the real server, by `contract/scenarios/<check>.yaml` (tag `contract`) with
+  `drivers/bot-contract.ts`. This driver is the one that acts on the bot itself
+  and sends op commands as chat (`setblock`, `execute ... on vehicle`): the YAML's
+  player is `op: true`. A check our runtime would disturb (its idle-water control, its
+  vehicle watch) runs on the bare bot: `client-host.ts <driver> --without-runtime`.
+
+The subject (`contract/subject.ts`) is `{ bot, wait, now, setBlock, seatedOnServer }`:
+wall time and op commands on a server, the harness clock and its server side on
+the fake. A YAML's `setup`, player and entities equal `setupCommands(check.fixture)`
+(`contract/setup-commands.test.ts` fails on a YAML edited alone).
+
+**The rule:** only a contract change changes the fake. A fake answer that differs
+from the server shows as a check red on the server; the fake and its own test
+change in the same commit as the check. A test that needs an answer the fake lacks
+gets a new check first. Run them before any change to the fake, not in the soak run
+(owner, 2026-10-21): their YAMLs live in `contract/scenarios/`, outside the `scenarios/`
+folder that `bun run scenarios` and `scenarios:once` take.
+
+```bash
+bunx --bun mine-labs run tests/minecraft/contract/scenarios --repeat 3 -p <port>
+```
+
 ## Runtime boundary and evidence
 
 The host builds `createMinecraftRuntime` once. Drivers receive only `scenario`

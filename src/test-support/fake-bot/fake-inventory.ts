@@ -204,9 +204,11 @@ function tossFromWindow(window: PlayerWindow, registry: Registry, type: number, 
   let left = wanted;
   for (let slot = window.inventoryStart; slot < window.inventoryEnd && left > 0; slot += 1) {
     if (window.slots[slot]?.type !== type) continue;
+    const whole = window.slots[slot]!.count <= left;
     const stack = takeFromSlot(window, registry, slot, left);
     left -= stack.count;
-    tossed.push(stack);
+    // `transfer` drops a whole slot with one left click, a part of one with a right click per item: a drop per click.
+    tossed.push(...(whole ? [stack] : Array.from({ length: stack.count }, () => ({ type: stack.type, count: 1 }))));
   }
   return tossed;
 }

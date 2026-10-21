@@ -73,13 +73,15 @@ test("equip of a missing item throws Mineflayer's error", async () => {
   await assert.rejects(inventory.equip(null, "hand"), /Invalid item object in equip/);
 });
 
-test("a toss lowers the slot at once and announces it", () => {
+// Mineflayer's `transfer` to -999 (`inventory.js:363-367`) drops a whole slot with one left click and a part of one with
+// a right click per item; the server spawned 3 drops for a toss of 3 (Mine Labs 2026-10-21, toss-count-and-entity).
+test("a toss lowers the slot at once and announces it: a whole slot is one drop, a part of one is a drop per item", () => {
   const inventory = createFakeInventory(registry, { carried: { cobblestone: 70 } });
   const updated: number[] = [];
   inventory.on("updateSlot", (slot: number) => updated.push(slot));
   const tossed = inventory.toss(id("cobblestone"), 66);
   assert.equal(inventory.count(id("cobblestone"), null), 4);
-  assert.deepEqual(tossed, [{ type: id("cobblestone"), count: 64 }, { type: id("cobblestone"), count: 2 }]);
+  assert.deepEqual(tossed, [{ type: id("cobblestone"), count: 64 }, { type: id("cobblestone"), count: 1 }, { type: id("cobblestone"), count: 1 }]);
   assert.deepEqual(updated, [36, 37]);
 });
 

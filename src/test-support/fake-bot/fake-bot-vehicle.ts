@@ -1,6 +1,6 @@
 /**
  * The fake bot's rides: the mount the server confirms, and the two ways off a boat with what each side hears of them
- * (`facts/navigation-and-boats.md` "A vanilla 1.21.4 server tells the rider nothing at her get-off", run 14b).
+ * (contract checks `boat-get-off-by-shift`, `boat-dismount-ignored`, Mine Labs 2026-10-21).
  */
 import type { FakeBot } from "./fake-bot.js";
 import type { Entity } from "prismarine-entity";
@@ -31,15 +31,19 @@ export function attachFakeVehicle(bot: FakeBot, server: FakeServer): void {
       seatOnClient(bot, vehicle);
     });
   });
-  // The get-off: the server lets her off at the boat's top and sends her nothing, no `position` and no passenger list,
-  // so the client keeps `vehicle` and physics stays off (`entities.js:768-829`, `physics.js:437-448`).
+  // The get-off: the server lets her off at the boat's top, sends her a `position` there (a real server sent 2 on land,
+  // 11-14 on water) and the boat's passenger list without her. Mineflayer's `set_passengers` handler changes
+  // `bot.vehicle` only for a list naming her, so the client keeps it; the position restarts physics (`physics.js`).
   server.onPacket("entity_action", (data) => {
     if ((data as { actionId: number }).actionId !== PRESS_SHIFT) return;
     server.answer(() => {
       const vehicle = bot.vehicle;
       if (vehicle === null || server.riderOf(vehicle.id) !== bot.entity.id) return;
+      const top = vehicle.position.offset(0, vehicle.height, 0);
       server.freeRider(vehicle.id);
-      server.setServerPosition(bot.entity.id, vehicle.position.offset(0, vehicle.height, 0));
+      server.setServerPosition(bot.entity.id, top);
+      bot._client.emit("set_passengers", { entityId: vehicle.id, passengers: [] });
+      server.sendPosition(top);
     });
   });
   // `dismount()` sends the jump input (`entities.js:902-916`), which a boat ignores (`navigation-and-boats.md`).

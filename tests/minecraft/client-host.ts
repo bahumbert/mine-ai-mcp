@@ -17,20 +17,18 @@ import {
 import { createScenarioBot, prepareScenarioBot, closeScenarioBot } from "./scenario-bot.ts";
 import { openScenarioHighlighter } from "./scenario-highlighter.ts";
 import type { ScenarioContext, ScenarioRun, ScenarioCall } from "./scenario.ts";
+import { WITHOUT_RUNTIME_FLAG, parseClientHostArgs } from "./client-host-args.ts";
 
-const [driverFile, ...extraArgs] = process.argv.slice(2);
-if (!driverFile || extraArgs.length > 0) {
-  throw new Error("Usage: client-host.ts <driver module>");
-}
+const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
-await runNodeClient((session) => runScenario(driverFile, session));
+await runNodeClient((session) => runScenario(driverFile, withRuntime, session));
 
-async function runScenario(file: string, session: NodeClientSession): Promise<void> {
+async function runScenario(file: string, withRuntime: boolean, session: NodeClientSession): Promise<void> {
   const driver = await loadDriver(file);
   const bot = createScenarioBot(session);
   try {
     await prepareScenarioBot(bot, session);
-    const completion = await runWithRuntime(driver, bot, session);
+    const completion = withRuntime ? await runWithRuntime(driver, bot, session) : await runWithoutRuntime(driver, bot, session);
     session.signal.throwIfAborted();
     if (completion.status === "failed") session.log(`scenario driver failed: ${completion.detail}`);
     session.finish(completion);
@@ -54,11 +52,25 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
   await using overlay = await openScenarioHighlighter(bot, session);
   await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter });
   overlay?.follow(runtime.navigation);
+  const context = scenarioContextOf(bot, session, (action, input) => callScenarioAction(runtime, session, action, input));
+  return await runTimedDriver(driver, context, session);
+}
+
+/** The driver on the bare bot, no runtime created (`--without-runtime`): `call` refuses, everything else is the same. */
+async function runWithoutRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession): Promise<ClientCompletion> {
+  const context = scenarioContextOf(bot, session, async (action) => {
+    throw new Error(`'${action}' cannot run: this scenario's client runs ${WITHOUT_RUNTIME_FLAG}`);
+  });
+  return await runTimedDriver(driver, context, session);
+}
+
+/** What a driver receives: the scenario, the bot and its client-side controls, and `call` for actions. */
+function scenarioContextOf(bot: Bot, session: NodeClientSession, call: ScenarioContext["call"]): ScenarioContext {
   let windowsOpened = 0;
   bot.on("windowOpen", () => {
     windowsOpened += 1;
   });
-  const context: ScenarioContext = {
+  return {
     scenario: session.scenario,
     bot,
     waitForTicks: async (ticks) => {
@@ -78,9 +90,12 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
       body: () => ({ ...bot.entity.position, onGround: bot.entity.onGround }),
       windowsOpened: () => windowsOpened,
     },
-    call: (action, input) => callScenarioAction(runtime, session, action, input),
+    call,
   };
+}
 
+/** Report prepared, wait for the start, then time the driver's run (preparation is outside the trial budget). */
+async function runTimedDriver(driver: ScenarioRun, context: ScenarioContext, session: NodeClientSession): Promise<ClientCompletion> {
   session.signal.throwIfAborted();
   session.prepared();
   await session.start;

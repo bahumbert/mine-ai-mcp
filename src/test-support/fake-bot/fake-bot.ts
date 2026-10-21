@@ -146,7 +146,9 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   });
   world.forwardTo(bot);
   server.onTimePacket(() => bot.emit("time"));
-  attachFakePhysics(bot, clock, server, options.simulatePhysics);
+  // The server's position packet, as the protocol hands it to Mineflayer's handler (`physics.js`).
+  server.onPosition(({ x, y, z }) => client.emit("position", { x, y, z, yaw: 0, pitch: 0, flags: {}, teleportId: 0 }));
+  attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
   attachFakeVehicle(bot, server);
   attachFakeItems(bot, { clock, server, world, inventory, entities });

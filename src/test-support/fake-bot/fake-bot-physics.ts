@@ -7,9 +7,7 @@
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { FakeBot } from "./fake-bot.js";
-import type { Vec3 } from "vec3";
 import type { FakeClock } from "./fake-clock.js";
-import type { FakeServer } from "./fake-server.js";
 
 /** Mineflayer's physics engine (no typings shipped): one step of a player's state, written back onto the bot. */
 interface PrismarinePhysics {
@@ -28,6 +26,16 @@ function physicsStep(bot: FakeBot): () => void {
 
 /** Mineflayer's `PHYSICS_TIMESTEP`: one client tick each 50 ms. */
 const TICK_MS = 50;
+/** How far the sent yaw turns in a tick: `PHYSICS_TIMESTEP * physics.yawSpeed` (prismarine-physics 3 rad/s, `physics.js:169`). */
+const YAW_STEP_PER_TICK = 0.05 * 3;
+/** Mineflayer ends a look once the sent yaw is this close to the body's (`physics.js:308-311`). */
+const LOOK_DONE_YAW = 0.001;
+
+/** `physics.js` `deltaYaw`: the signed turn from `from` to `to`, in -π..π. */
+function deltaYaw(to: number, from: number): number {
+  const turn = (to - from) % (2 * Math.PI);
+  return turn < -Math.PI ? turn + 2 * Math.PI : turn > Math.PI ? turn - 2 * Math.PI : turn;
+}
 
 /** Mineflayer's standing eye height (`entities.js` `PLAYER_EYEHEIGHT`), which its typings leave off the entity. */
 const PLAYER_EYE_HEIGHT = 1.62;
@@ -67,12 +75,22 @@ function waitForTicksTimeoutMs(ticks: number): number {
   return ticks * TICK_MS + 5_000;
 }
 
-/** Give `bot` its ticks, `look`, `lookAt` and `waitForTicks`, driven by `clock` and the `server`'s position packets. */
-export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeServer, simulate = false): void {
+/** The fields of Mineflayer's `position` packet the fake reads. */
+interface PositionPacket {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly teleportId: number;
+}
+
+/** Give `bot` its ticks, `look`, `lookAt` and `waitForTicks`, driven by `clock` and the `position` packets on its client. */
+export function attachFakePhysics(bot: FakeBot, clock: FakeClock, simulate = false): void {
   // `shouldUsePhysics` of `physics.js`: off from a mount, a death or a respawn until the next position packet.
   let shouldUsePhysics = true;
   let accumulatedMs = 0;
   let pendingLook: (() => void) | null = null;
+  /** `lastSentYaw`: the yaw the server was told, which turns toward the body's a step a tick. */
+  let sentYaw = bot.entity.yaw;
   bot.physicsEnabled = true;
   const step = simulate ? physicsStep(bot) : null;
 
@@ -83,8 +101,9 @@ export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeSe
       bot.emit("physicsTick");
     }
     if (!shouldUsePhysics) return;
-    // `updatePosition`: the look reaches the server with the next position packet, and the look's promise ends.
-    if (pendingLook === null) return;
+    // `updatePosition`: the sent yaw turns a step toward the body's; the look ends on the `move` once it caught up.
+    sentYaw += Math.max(-YAW_STEP_PER_TICK, Math.min(YAW_STEP_PER_TICK, deltaYaw(bot.entity.yaw, sentYaw)));
+    if (pendingLook === null || Math.abs(deltaYaw(bot.entity.yaw, sentYaw)) >= LOOK_DONE_YAW) return;
     const finished = pendingLook;
     pendingLook = null;
     bot.emit("move", bot.entity.position.clone());
@@ -105,10 +124,12 @@ export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeSe
     shouldUsePhysics = true;
     bot.emit("forcedMove");
   };
-  server.onPosition((position: Vec3) => {
-    bot.entity.position = position.clone();
+  // Mineflayer's handler reads the packet on `_client` (`physics.js:380-450`): the server's `sendPosition` and a
+  // client-fed one (`resumePhysics`, `vehicle-sync.ts`) both come this way (contract boat-get-off-by-shift).
+  bot._client.on("position", (packet: PositionPacket) => {
+    bot.entity.position.set(packet.x, packet.y, packet.z); // in place, as `pos.set` does: holders see the move
     bot.entity.onGround = false;
-    bot._client.write("teleport_confirm", { teleportId: 0 });
+    bot._client.write("teleport_confirm", { teleportId: packet.teleportId });
     const sinceDeathMs = diedAtMs === null ? null : clock.now() - diedAtMs;
     diedAtMs = null;
     if (sinceDeathMs !== null && sinceDeathMs < RESPAWN_WINDOW_MS) clock.after(RESPAWN_POSITION_DELAY_MS, usePhysicsAgain);
@@ -122,7 +143,10 @@ export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeSe
     if (yaw === bot.entity.yaw && pitch === bot.entity.pitch) return;
     bot.entity.yaw = yaw;
     bot.entity.pitch = pitch;
-    if (force) return;
+    if (force) {
+      sentYaw = yaw; // `lastSentYaw = yaw`: a forced look reaches the server at once
+      return;
+    }
     await new Promise<void>((resolve) => (pendingLook = resolve));
   };
   bot.lookAt = async (point, force) => {

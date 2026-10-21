@@ -19,6 +19,16 @@ function track<T>(promise: Promise<T>) {
   return state;
 }
 
+/**
+ * Clock a non-forced look at `point` takes: the sent yaw turns 0.15 rad a tick (`physics.js:169`, measured on the
+ * server 2026-10-21), at least one tick.
+ */
+function lookMsToward(bot: ReturnType<typeof createFakeBot>["bot"], point: Vec3): number {
+  const delta = point.minus(bot.entity.position.offset(0, 1.62, 0));
+  const turn = Math.abs(((Math.atan2(-delta.x, -delta.z) - bot.entity.yaw + 3 * Math.PI) % (2 * Math.PI)) - Math.PI);
+  return Math.max(1, Math.ceil(turn / 0.15 - 1e-9)) * 50;
+}
+
 const BOAT = { 7: { name: "oak_boat", position: new Vec3(0.5, 62.5, 0.5) } };
 
 test("the bot's version and its registry's version agree, the project's default when none is given", () => {
@@ -147,9 +157,10 @@ test("a dig with the eye in water, or airborne, takes 5 times as long", async ()
 test("stopDigging while lookAt is pending leaves the dig running", async () => {
   const { bot, clock } = createFakeBot({ cells: { "1,64,0": "dirt" } });
   const block = bot.blockAt(DIRT)!;
+  const lookMs = lookMsToward(bot, block.position.offset(0.5, 0.5, 0.5));
   const digging = track(bot.dig(block));
   bot.stopDigging();
-  await clock.advance(bot.digTime(block) + 50);
+  await clock.advance(lookMs + bot.digTime(block) + 50);
   assert.deepEqual(digging, { done: true, error: null });
 });
 
@@ -167,7 +178,7 @@ test("stopDigging after the dig packet emits diggingAborted and rejects the dig 
   assert.equal(world.blockAt(DIRT)!.name, "dirt");
 });
 
-test("a toss lowers the count at once and the item entity appears one answer later", async () => {
+test("a toss lowers the count at once and the item entities appear one answer later, one per item of a part stack", async () => {
   const { bot, clock } = createFakeBot({ carried: { cobblestone: 10 } });
   const cobblestone = bot.registry.itemsByName.cobblestone!.id;
   const spawned: string[] = [];
@@ -176,9 +187,7 @@ test("a toss lowers the count at once and the item entity appears one answer lat
   assert.equal(bot.inventory.count(cobblestone, null), 6);
   assert.deepEqual(spawned, []);
   await clock.advance(50);
-  assert.deepEqual(spawned, ["item"]);
-  const drop = Object.values(bot.entities).find((entity) => entity.name === "item")!;
-  assert.equal(drop.getDroppedItem()!.count, 4);
+  assert.deepEqual(spawned, ["item", "item", "item", "item"]);
 });
 
 test("a placement looks at the face, then sets the cell on the server's answer and lowers the held stack", async () => {
@@ -186,9 +195,10 @@ test("a placement looks at the face, then sets the cell on the server's answer a
   const floor = bot.blockAt(new Vec3(1, 63, 0))!;
   const updates: string[] = [];
   bot.on("blockUpdate", (_before, after) => void updates.push(after?.name ?? ""));
+  const lookMs = lookMsToward(bot, new Vec3(1.5, 64, 0.5));
   const placing = track(bot.placeBlock(floor, new Vec3(0, 1, 0)));
-  await clock.advance(50);
-  assert.equal(world.blockAt(new Vec3(1, 64, 0))!.name, "air", "the look takes a tick, the answer one more slice");
+  await clock.advance(lookMs);
+  assert.equal(world.blockAt(new Vec3(1, 64, 0))!.name, "air", "the look takes its turn, the answer one more slice");
   await clock.advance(50);
   assert.deepEqual(placing, { done: true, error: null });
   assert.deepEqual(updates, ["cobblestone"]);
@@ -198,9 +208,10 @@ test("a placement looks at the face, then sets the cell on the server's answer a
 test("a placement the server never answers rejects with Mineflayer's 5000 ms timeout", async () => {
   const { bot, clock, server } = createFakeBot({ slots: { 36: { name: "cobblestone" } } });
   server.stop();
+  const lookMs = lookMsToward(bot, new Vec3(1.5, 64, 0.5));
   const placing = track(bot.placeBlock(bot.blockAt(new Vec3(1, 63, 0))!, new Vec3(0, 1, 0)));
-  await clock.advance(5_000);
-  assert.equal(placing.done, false, "the 5000 ms count from the packet, sent after the look's tick");
+  await clock.advance(lookMs + 4_950);
+  assert.equal(placing.done, false, "the 5000 ms count from the packet, sent once the look turned");
   await clock.advance(50);
   assert.match(String(placing.error), /did not fire within timeout of 5000ms/);
 });
@@ -221,22 +232,27 @@ test("mount: the mount event, the vehicle set on both sides, physics stopped", a
   assert.equal(ticks, before);
 });
 
-test("the shift packet while seated frees the rider on the server only: no position, vehicle kept, physics off", async () => {
+// Contract boat-get-off-by-shift (Mine Labs 2026-10-21, 1.21.4, on land and on water): the server answers the shift with
+// position packets and a passenger list without her; Mineflayer keeps `bot.vehicle` (the list does not name her).
+test("the shift packet while seated frees the rider: a position at the boat's top and a passenger list without her", async () => {
   const { bot, clock, server } = createFakeBot({ entities: BOAT });
   bot.mount(bot.entities[7]!);
   await clock.advance(50);
   let ticks = 0;
   let forcedMoves = 0;
+  const lists: { entityId: number; passengers: number[] }[] = [];
   bot.on("physicsTick", () => void (ticks += 1));
   bot.on("forcedMove", () => void (forcedMoves += 1));
+  bot._client.on("set_passengers", (packet: { entityId: number; passengers: number[] }) => void lists.push(packet));
   writeShiftKey(bot, true);
   await clock.advance(2_000);
   assert.equal(server.riderOf(7), null);
-  assert.deepEqual(server.serverPositionOf(bot.entity.id)?.y, 62.5 + bot.entities[7]!.height);
+  const top = 62.5 + bot.entities[7]!.height;
+  assert.equal(bot.entity.position.y, top);
+  assert.equal(forcedMoves, 1);
+  assert.deepEqual(lists, [{ entityId: 7, passengers: [] }]);
   assert.equal(bot.vehicle, bot.entities[7]);
-  assert.equal(ticks, 0);
-  assert.equal(forcedMoves, 0);
-  assert.deepEqual(server.sentPositions, []);
+  assert.ok(ticks > 0, "the position restarts physics");
 });
 
 test("dismount() in a boat sends the jump input, which the boat ignores: the server keeps the rider", async () => {
@@ -250,16 +266,26 @@ test("dismount() in a boat sends the jump input, which the boat ignores: the ser
   assert.equal(bot.vehicle, bot.entities[7]);
 });
 
-test("sendPosition restarts physics after a mount, as Mineflayer's position packet does", async () => {
-  const { bot, clock, server } = createFakeBot({ entities: BOAT });
-  bot.mount(bot.entities[7]!);
-  await clock.advance(50);
-  let ticks = 0;
-  bot.on("physicsTick", () => void (ticks += 1));
-  server.sendPosition(new Vec3(0.5, 63, 0.5));
-  await clock.advance(100);
-  assert.equal(ticks, 2);
-  assert.deepEqual(bot.entity.position, new Vec3(0.5, 63, 0.5));
+// Contract boat-get-off-by-shift / boat-dismount-ignored: `resumePhysics` feeds the client's own `position` handler too.
+test("a position restarts physics after a mount, from the server or fed to the client, and moves the held position", async () => {
+  const sources = {
+    server: (harness: ReturnType<typeof createFakeBot>) => harness.server.sendPosition(new Vec3(0.5, 63, 0.5)),
+    client: ({ bot }: ReturnType<typeof createFakeBot>) =>
+      bot._client.emit("position", { x: 0.5, y: 63, z: 0.5, yaw: 0, pitch: 0, flags: {}, teleportId: 5 }),
+  };
+  for (const [source, send] of Object.entries(sources)) {
+    const harness = createFakeBot({ entities: BOAT });
+    const { bot, clock } = harness;
+    bot.mount(bot.entities[7]!);
+    await clock.advance(50);
+    const held = bot.entity.position;
+    let ticks = 0;
+    bot.on("physicsTick", () => void (ticks += 1));
+    send(harness);
+    await clock.advance(100);
+    assert.equal(ticks, 2, source);
+    assert.deepEqual(held, new Vec3(0.5, 63, 0.5), `${source}: moved in place, as pos.set does`);
+  }
 });
 
 test("equip into the hand sets heldItem and emits heldItemChanged on the bot", async () => {
@@ -298,8 +324,9 @@ test("the bot stands on ground under its feet by default, and in open air when g
 
 test("the placement packet names the reference block and the face number, as Mineflayer writes it", async () => {
   const { bot, clock, server } = createFakeBot({ slots: { 36: { name: "cobblestone" } } });
+  const lookMs = lookMsToward(bot, new Vec3(1.5, 64, 0.5));
   void bot.placeBlock(bot.blockAt(new Vec3(1, 63, 0))!, new Vec3(0, 1, 0));
-  await clock.advance(50);
+  await clock.advance(lookMs);
   const sent = server.packets.find((packet) => packet.name === "block_place")!.data as { location: Vec3; direction: number };
   assert.deepEqual([sent.location, sent.direction], [new Vec3(1, 63, 0), 1]);
 });
