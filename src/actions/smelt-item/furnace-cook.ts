@@ -125,6 +125,15 @@ export async function recover(bot: Bot, window: FurnaceWindow): Promise<Recovery
   return { input, fuel, output, errors };
 }
 
+/**
+ * The items an attempt cooked, from the furnace's input: every item it loaded that neither came back to the inventory
+ * nor stays in the input slot became an output (the item being cooked stays in the slot until done, and comes back).
+ * The window's take deltas can be an ingot behind the server (see `creditMissedIngots`); the carried input is not.
+ */
+export function ingotsFromInput(carriedBefore: number, carriedAfter: number, leftInSlot: number): number {
+  return Math.max(0, carriedBefore - carriedAfter - leftInSlot);
+}
+
 /** Ingots taken out while the furnace still cooks, so the carried count rises as they come. */
 export interface Harvest {
   readonly taken: () => number;

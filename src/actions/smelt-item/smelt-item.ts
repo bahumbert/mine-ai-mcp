@@ -4,7 +4,7 @@ import { Vec3 } from "vec3";
 import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest, RequestEvidence } from "../../session/request.js";
-import { carriedCount, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
+import { carriedCount, settledNow, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
 import { startOwnPlacement } from "../../world/own-placement.js";
 import { cookingTicksOf, fuelCapacity, STANDARD_COOK_TICKS } from "../../world/smelting.js";
 import { SMELTING_STATION } from "../../world/workstations.js";
@@ -17,6 +17,7 @@ import {
   type WorkstationOperations,
 } from "../temporary-workstation.js";
 import type { ExistingFurnaceRequest } from "./contract.js";
+import { countAttemptIngots, type AttemptIngots, type CookAttempt, type LoadedInput } from "./attempt-ingots.js";
 import { openFurnaceWithProperties } from "./furnace-properties.js";
 import {
   burningItems,
@@ -26,10 +27,8 @@ import {
   settleBurnReport,
   SLOT_RECOVERY_MS,
   waitForCook,
-  type CookVerdict,
   type FurnaceObservation,
   type FurnaceWindow,
-  type Harvest,
   type Recovery,
 } from "./furnace-cook.js";
 import {
@@ -148,6 +147,8 @@ interface SmeltProgress {
   /** The furnace cell an attempt loaded: what it still holds there, of our items, is this request's own. */
   loadedAt: string | null;
   ownsSlots: boolean;
+  /** Whether ingots still in the furnace's output slot are already in `produced` (`AttemptIngots.outputLeftCounted`). */
+  outputLeftCounted: boolean;
   current: FurnaceObservation;
   stalledForMs: number;
 }
@@ -162,6 +163,7 @@ function newSmeltProgress(bot: Bot, request: SmeltItemRequest): SmeltProgress {
     fuelRecovered: 0,
     loadedAt: null,
     ownsSlots: false,
+    outputLeftCounted: false,
     current: { output: 0, input: 0, fuelItems: 0, cookProgress: null, fuelProgress: null },
     stalledForMs: 0,
   };
@@ -317,17 +319,10 @@ async function clearFurnaceForAttempt(
   if (!holdsOnlyOurLeftovers(furnace, request, progress)) return smeltItemOutcomes.occupied(occupied);
   const recovery = await recover(bot, furnace);
   if (recovery.output) {
-    progress.produced += recovery.output.count;
+    if (!progress.outputLeftCounted) progress.produced += recovery.output.count;
     progress.outputItem = recovery.output.name;
   }
   return recovery.errors.length > 0 ? smeltItemOutcomes.executionFailed(recovery.errors.join(" ")) : null;
-}
-
-interface CookAttempt {
-  readonly verdict: CookVerdict | "execution_failed";
-  readonly executionError: string;
-  readonly recovery: Recovery;
-  readonly harvest: Harvest;
 }
 
 /** Load this attempt's input and fuel, wait for the cook, and give back what the furnace still holds. */
@@ -344,10 +339,15 @@ async function loadAndCook(
   let verdict: CookAttempt["verdict"] = "execution_failed";
   let executionError = "";
   let recovery: Recovery = { input: 0, fuel: 0, output: null, errors: [] };
+  let loaded: LoadedInput | null = null;
+  let inputLeft = 0;
+  let recoveredAtAge: number | undefined;
   progress.ownsSlots = false;
   try {
     progress.loadedAt = furnaceCellKey(request);
+    const carriedBefore = carriedCount(bot, request.itemName);
     await furnace.putInput(supplies.input.id, null, supplies.remaining);
+    loaded = { carriedBefore, count: supplies.remaining };
     progress.ownsSlots = true;
     context.signal?.throwIfAborted();
     if (supplies.requiredFuel > 0) await furnace.putFuel(supplies.fuel.id, null, supplies.requiredFuel);
@@ -363,31 +363,32 @@ async function loadAndCook(
   } catch (cause) {
     executionError = smeltItemOutcomes.executionFailed(cause);
   } finally {
-    if (progress.ownsSlots) recovery = await recover(bot, furnace);
+    if (progress.ownsSlots) {
+      recoveredAtAge = bot.time?.age;
+      recovery = await recover(bot, furnace);
+      inputLeft = furnace.inputItem()?.count ?? 0;
+    }
     furnace.close();
   }
-  return { verdict, executionError, recovery, harvest };
-}
-
-interface AttemptOutput {
-  readonly produced: number;
-  readonly inventoryBefore: number;
+  return { verdict, executionError, recovery, harvest, loaded, inputLeft, recoveredAtAge };
 }
 
 /**
- * Count what the attempt took out of the furnace into the request's progress, before an abort can throw: a resume
- * smelts only the rest. Null when the attempt took no output.
+ * Count what the attempt cooked into the request's progress, before an abort can throw: a resume smelts only the rest.
  */
-function recordAttemptOutput(progress: SmeltProgress, cook: CookAttempt): AttemptOutput | null {
-  const harvested = cook.harvest.item();
-  const { recovery } = cook;
-  progress.rawRecovered = recovery.input;
-  progress.fuelRecovered = recovery.fuel;
-  if (!recovery.output && !harvested) return null;
-  const produced = cook.harvest.taken() + (recovery.output?.count ?? 0);
-  progress.outputItem = (recovery.output ?? harvested)!.name;
-  progress.produced += produced;
-  return { produced, inventoryBefore: (harvested ?? recovery.output)!.inventoryBefore };
+async function recordAttemptOutput(
+  bot: Bot,
+  request: SmeltItemRequest,
+  progress: SmeltProgress,
+  cook: CookAttempt,
+): Promise<AttemptIngots> {
+  progress.rawRecovered = cook.recovery.input;
+  progress.fuelRecovered = cook.recovery.fuel;
+  const ingots = await countAttemptIngots(bot, request, cook);
+  progress.produced += ingots.produced;
+  progress.outputLeftCounted = ingots.outputLeftCounted;
+  if (ingots.outputItem) progress.outputItem = ingots.outputItem;
+  return ingots;
 }
 
 /** The result of a settled attempt: the request's totals, and why it stopped when it did not finish. */
@@ -396,21 +397,22 @@ async function settleAttempt(
   request: ExistingFurnaceRequest,
   progress: SmeltProgress,
   cook: CookAttempt,
-  output: AttemptOutput | null,
+  recorded: AttemptIngots,
   context: ActionContext,
 ): Promise<SmeltItemResult> {
   let { recovery } = cook;
+  const { output } = recorded;
   if (output) {
     const outputAfter = await settleInventoryMinimum(
       bot,
       progress.outputItem!,
-      output.inventoryBefore + output.produced,
+      output.inventoryBefore + output.taken,
       { timeoutMs: SLOT_RECOVERY_MS, signal: context.signal },
     );
     if (!outputAfter.confirmed) {
       recovery = {
         ...recovery,
-        errors: [...recovery.errors, `Player inventory did not confirm furnace output ${progress.outputItem} x${output.produced} after close.`],
+        errors: [...recovery.errors, `Player inventory did not confirm furnace output ${progress.outputItem} x${output.taken} after close.`],
       };
     }
   }
@@ -419,9 +421,12 @@ async function settleAttempt(
   // transaction's own invariant is that the input loses exactly what was
   // smelted, so that is the count worth waiting for, and the fuel count is
   // read once it has landed.
-  const inputAfter = await settleInventoryCount(bot, request.itemName, progress.before.input - progress.produced, {
-    signal: context.signal,
-  });
+  // A failed recovery left an unknown part in the furnace: no count is worth waiting for.
+  const inputAfter =
+    recorded.inputAfter ??
+    (cook.recovery.errors.length > 0
+      ? settledNow(bot, request.itemName)
+      : await settleInventoryCount(bot, request.itemName, progress.before.input - progress.produced, { signal: context.signal }));
   const observed = { ...progressEvidence(bot, request, progress), inputInventoryAfter: inputAfter.count };
   if (cook.verdict === "completed" && progress.produced >= request.count && recovery.errors.length === 0)
     return { status: "succeeded", smelt: observed };
@@ -468,9 +473,9 @@ async function smeltAttempt(
   }
   progress.current = furnaceObservation(furnace);
   const cook = await loadAndCook(bot, furnace, request, supplies, progress, context, dependencies);
-  const output = recordAttemptOutput(progress, cook);
+  const recorded = await recordAttemptOutput(bot, request, progress, cook);
   context.signal?.throwIfAborted();
-  return settleAttempt(bot, request, progress, cook, output, context);
+  return settleAttempt(bot, request, progress, cook, recorded, context);
 }
 
 /**

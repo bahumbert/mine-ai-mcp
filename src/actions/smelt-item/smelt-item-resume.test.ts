@@ -298,3 +298,102 @@ test("a resumed attempt does not count on a flame shorter than one item, and say
   assert.equal(result.status, "partial");
   assert.match(result.status === "partial" ? result.error : "", /SMELT_FUEL_MISSING/);
 });
+
+// smelt-resumes-after-hunger (3 of 6 runs red, 2026-10-20): the furnace window is one ingot behind the server in the tick
+// an item finishes, so a take counted from its deltas misses that ingot. An attempt counts what it cooked from the input
+// it loaded and the input that came back to the inventory; the window's deltas are kept only when the recovery failed.
+
+function laggingFurnace(): Fixture {
+  return observedFurnace({ cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", windowLagsCompletion: true });
+}
+
+for (const { at, inputs, window } of [
+  // The 30 s take moves 3 ingots while the window shows 2; the abort gives the 5 uncooked raw back.
+  { at: 35_000, inputs: [8, 5], window: "a mid-cook take" },
+  // The 5th item has just finished: the window shows 1 ingot (2 there) and 4 raw (3 there); the takes move 2 and 3.
+  { at: 50_000, inputs: [8, 3], window: "the tick an item finishes" },
+]) {
+  test(`an attempt aborted after the window under-counted ${window} resumes with what is really left`, async () => {
+    const fixture = laggingFurnace();
+    const loads = recordLoads(fixture);
+    const first = new AbortController();
+    const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at, signal: first }]), () => {});
+
+    await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+    const result = await run(freshAttempt());
+
+    assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+    assert.deepEqual(loads.inputs, inputs);
+    assert.equal(result.smelt.produced, 8);
+    assert.equal(carried(fixture, "iron_ingot"), 8);
+    assert.equal(carried(fixture, "raw_iron"), 0);
+  });
+}
+
+test("a recovery that leaves input in the slot does not count it as cooked, and the next attempt smelts it once", async () => {
+  // The first recovery takes back 2 of the 5 raw (the inventory had room for no more); the clear of the next attempt takes 3.
+  // The fake reads `recoverInputCount` at each take, so the test lifts the limit for the next attempt.
+  const options = { cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", windowLagsCompletion: true, recoverInputCount: 2 as number | undefined };
+  const fixture = observedFurnace(options);
+  const loads = recordLoads(fixture);
+  const first = new AbortController();
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
+
+  await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+  assert.equal(carried(fixture, "raw_iron"), 2);
+  options.recoverInputCount = undefined;
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.deepEqual(loads.inputs, [8, 5]);
+  assert.equal(result.smelt.produced, 8);
+  assert.equal(carried(fixture, "iron_ingot"), 8);
+  assert.equal(carried(fixture, "raw_iron"), 0);
+});
+
+test("ingots the furnace cooks from input left in its slot while the bot is away are counted by the next attempt", async () => {
+  // The lit furnace keeps cooking the 3 raw the recovery left: 2 more ingots in the 20 s the reflex takes.
+  const options = { cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", recoverInputCount: 2 as number | undefined };
+  const fixture = observedFurnace(options);
+  const loads = recordLoads(fixture);
+  const first = new AbortController();
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
+
+  await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+  options.recoverInputCount = undefined;
+  for (const ms of [10_000, 10_000, 1]) await fixture.dependencies.pause(ms);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.deepEqual(loads.inputs, [8, 3]);
+  assert.equal(result.smelt.produced, 8);
+  assert.equal(carried(fixture, "iron_ingot"), 8);
+});
+
+test("an ingot the window hid at the abort is taken by the next attempt's clear and counted once", async () => {
+  // At 40 s the 4th item has just finished: the window shows no ingot (1 there) and 5 raw (4 there), so the recovery
+  // takes no output; the input count makes it 4 ingots, and the reopened window shows the hidden one to the clear.
+  const fixture = laggingFurnace();
+  const loads = recordLoads(fixture);
+  const first = new AbortController();
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 40_000, signal: first }]), () => {});
+
+  await assert.rejects(run({ signal: first.signal }), /reflex took the body/);
+  const result = await run(freshAttempt());
+
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.deepEqual(loads.inputs, [8, 4]);
+  assert.equal(result.smelt.produced, 8);
+  assert.equal(carried(fixture, "iron_ingot"), 8);
+});
+
+test("with a recovery error the attempt keeps the window's count and reports the error", async () => {
+  // The takes at 30 s and 60 s move 3 each; the final take of the last 2 fails, so they stay in the furnace, uncounted.
+  const fixture = observedFurnace({ cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", outputClickFailsAt: 3 });
+  const result = await beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {})(freshAttempt());
+
+  assert.equal(result.status, "partial");
+  assert.match(result.status === "partial" ? result.error : "", /window closed under the take/);
+  assert.equal(result.smelt.produced, 6);
+  assert.equal(carried(fixture, "iron_ingot"), 6);
+});
