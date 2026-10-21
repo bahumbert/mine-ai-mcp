@@ -106,6 +106,17 @@ export function dropLedger(bot: Bot): DropLedger {
   return { baseline: snapshotEntityIds(bot), leftBehind: new Set() };
 }
 
+/** A block as the farm reads it: name and state, a fluid or not, no collision box or one, and whether a hand breaks it. */
+export function cellBlockOf(block: NonNullable<ReturnType<Bot["blockAt"]>>, registry: Bot["registry"]): CellBlock {
+  return {
+    name: block.name,
+    properties: block.getProperties() as CellBlock["properties"],
+    liquid: observeMineflayerBlock(block).traits.liquid !== null,
+    empty: block.boundingBox === "empty",
+    breakable: registry.blocksByName[block.name]?.diggable ?? false,
+  };
+}
+
 export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal, drops = dropLedger(bot)): FarmBody {
   const vec = (cell: FarmCell) => new Vec3(cell.x, cell.y, cell.z);
   // Routes never dig the farmland they work, nor drop scaffold onto the plot.
@@ -137,15 +148,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
   return {
     read(x, y, z) {
       const block = bot.blockAt(new Vec3(x, y, z));
-      if (block === null) return null;
-      const cell: CellBlock = {
-        name: block.name,
-        properties: block.getProperties() as CellBlock["properties"],
-        liquid: observeMineflayerBlock(block).traits.liquid !== null,
-        empty: block.boundingBox === "empty",
-        breakable: bot.registry.blocksByName[block.name]?.diggable ?? false,
-      };
-      return cell;
+      return block === null ? null : cellBlockOf(block, bot.registry);
     },
 
     async reach(cell) {

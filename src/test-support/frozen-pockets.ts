@@ -6,7 +6,8 @@
  */
 import type { Bot } from "mineflayer";
 import type { FakeStack } from "./bot.js";
-import { layeredWorld } from "./layered-world.js";
+import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot/index.js";
+import { type LayeredWorldSpec, layeredCells, layeredWorld } from "./layered-world.js";
 
 const LEGEND = {
   A: "air",
@@ -32,8 +33,7 @@ const outside = (waterFrom: number) => (y: number) => (y >= waterFrom ? "water" 
 export const DIRK_START = { x: -549, y: 56, z: -50 } as const;
 /** The air cell of the cave east and below Dirk's cell. */
 export const DIRK_CAVE = { x: -548, y: 55, z: -50 } as const;
-export function dirkPocket(bot: Pick<Bot, "registry">) {
-  return layeredWorld(bot, {
+const DIRK_POCKET: LayeredWorldSpec = {
     origin: { x: -551, z: -52 },
     legend: LEGEND,
     outside: outside(60),
@@ -47,15 +47,14 @@ export function dirkPocket(bot: Pick<Bot, "registry">) {
       55: ["WWWWW", "GSGBW", "SSCAS", "SAAAS", "SSWSS"],
       54: ["SSWWW", "SSSWW", "SSSRR", "SAARR", "SAWAS"],
     },
-  });
-}
+};
+export const dirkPocket = (bot: Pick<Bot, "registry">) => layeredWorld(bot, DIRK_POCKET);
 
 /** Sana: falling water west and north, andesite east, oak stairs over the cell south; andesite below, an air cave south at y 55-56. */
 export const SANA_START = { x: -455, y: 57, z: 100 } as const;
 /** The cave floor south of the cell below Sana (the cave is two high, y 55-56). */
 export const SANA_CAVE = { x: -455, y: 55, z: 101 } as const;
-export function sanaPocket(bot: Pick<Bot, "registry">) {
-  return layeredWorld(bot, {
+const SANA_POCKET: LayeredWorldSpec = {
     origin: { x: -457, z: 98 },
     legend: LEGEND,
     outside: outside(61),
@@ -69,11 +68,21 @@ export function sanaPocket(bot: Pick<Bot, "registry">) {
       56: ["FFLNN", "FFNNN", "DDNNN", "DAANN", "SSASG"],
       55: ["FNNNN", "SNNNN", "DDSNN", "SAAAN", "SAAAG"],
     },
-  });
-}
+};
+export const sanaPocket = (bot: Pick<Bot, "registry">) => layeredWorld(bot, SANA_POCKET);
 
 /** What each bot carried when the scene was frozen: a search counts the cobblestone as scaffold, so Dirk can pillar up one cell. */
 export const dirkItems = (): FakeStack[] => [
   { name: "stone_pickaxe", count: 1 }, { name: "wooden_pickaxe", count: 1 }, { name: "cobblestone", count: 10 }, { name: "oak_planks", count: 3 },
 ];
 export const sanaItems = (): FakeStack[] => [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 9 }, { name: "cobblestone", count: 13 }];
+
+/** The pocket on the shared fake: its cells in the harness world, the bot at the start carrying what it carried. */
+function pocketHarness(spec: LayeredWorldSpec, start: { x: number; y: number; z: number }, items: FakeStack[], options: FakeBotOptions): FakeHarness {
+  const carried: Record<string, number> = {};
+  for (const { name, count } of items) carried[name] = (carried[name] ?? 0) + count;
+  return createFakeBot({ cells: layeredCells(spec), groundY: null, position: { x: start.x + 0.5, y: start.y, z: start.z + 0.5 }, carried, ...options });
+}
+
+export const dirkPocketHarness = (options: FakeBotOptions = {}) => pocketHarness(DIRK_POCKET, DIRK_START, dirkItems(), options);
+export const sanaPocketHarness = (options: FakeBotOptions = {}) => pocketHarness(SANA_POCKET, SANA_START, sanaItems(), options);

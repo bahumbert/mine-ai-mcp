@@ -3,11 +3,19 @@
  * (`pause`) and the furnace to `smeltItem` through its dependencies.
  */
 import { EventEmitter } from "node:events";
+import minecraftData from "minecraft-data";
 import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
 import { fuelCapacity as capacityIn } from "../world/smelting.js";
-import { botFixture, registry, type FakeStack } from "./bot.js";
+import { botFixture, type FakeStack } from "./bot.js";
+import { CarriedCounts } from "./carried-counts.js";
+import { createFakeBot } from "./fake-bot/index.js";
 import { startServerClock } from "./server-clock.js";
+import { letTestsWriteWorldAge } from "./written-world-age.js";
+
+const FURNACE_VERSION = "1.21.4";
+const registry = minecraftData(FURNACE_VERSION);
+const FURNACE_CELL = "2,64,0";
 
 /** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
 const fuelCapacity = (fuel: string) => capacityIn(fuel, registry.version.minecraftVersion!);
@@ -44,6 +52,12 @@ export interface ObservedFurnaceOptions {
   readonly windowLagsCompletion?: boolean;
   /** The nth click on the output slot (1 = the first) throws, as a take whose window closed under it. */
   readonly outputClickFailsAt?: number;
+  /**
+   * Build the bot on the shared fake (`fake-bot/`, returned as `harness`); off, on the old `botFixture` (no harness),
+   * whose `items()` is the carried array: `smelt-item-resume.test.ts` pushes and splices it (the temporary furnace), so
+   * this stays opt-in until that file moves (migration batch M2).
+   */
+  readonly onHarness?: boolean;
 }
 
 /** Wall-clock delay of the server's correction of a mispredicted take: ten ticks at `startServerClock`'s 20 ticks per 10 ms. */
@@ -90,23 +104,40 @@ function outputSlotClicks(slots: FakeFurnaceSlots, adjust: (name: string, delta:
   };
 }
 
-/** The carried stacks, and the change a furnace transfer makes to them. */
-function carriedStacks(options: ObservedFurnaceOptions) {
-  const items: FakeStack[] = [
-    { name: "raw_iron", count: options.raw ?? 3 },
-    { name: options.fuel ?? "coal", count: options.coal ?? 1 },
-  ];
+/** What the bot carries at the start: the ore and the fuel. */
+const carriedAtStart = (options: ObservedFurnaceOptions) => ({ raw_iron: options.raw ?? 3, [options.fuel ?? "coal"]: options.coal ?? 1 });
+
+/**
+ * The bot on the shared fake, carrying the ore and the fuel in its window, a furnace beside it, and the change a
+ * furnace transfer makes to what it carries.
+ */
+function sceneOnHarness(options: ObservedFurnaceOptions) {
+  const harness = createFakeBot({ version: FURNACE_VERSION, cells: { [FURNACE_CELL]: "furnace" }, carried: carriedAtStart(options) });
+  const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
+  const adjust = (name: string, delta: number) => {
+    const id = registry.itemsByName[name]!.id;
+    counts.set(id, (counts.get(id) ?? 0) + delta);
+  };
+  // Kept for unmigrated importers: `startServerClock` below moves the age (see `written-world-age.ts`).
+  letTestsWriteWorldAge(harness);
+  return { bot: harness.bot, harness, adjust };
+}
+
+/** Kept for unmigrated importers (smelt-item-resume, smelt-item, action-runner-resume-workstation): the old `botFixture`, whose `items()` is the carried array itself. */
+function sceneOnBotFixture(options: ObservedFurnaceOptions) {
+  const items: FakeStack[] = Object.entries(carriedAtStart(options)).map(([name, count]) => ({ name, count }));
   const adjust = (name: string, delta: number) => {
     const stack = items.find((candidate) => candidate.name === name);
     if (stack) stack.count += delta;
     else items.push({ name, count: delta, type: registry.itemsByName[name]!.id });
     if (stack?.count === 0) items.splice(items.indexOf(stack), 1);
   };
-  return { items, adjust };
+  const bot = botFixture({ items, blocks: { [FURNACE_CELL]: "furnace" } }, { version: FURNACE_VERSION });
+  return { bot, harness: undefined, adjust };
 }
 
 export function observedFurnace(options: ObservedFurnaceOptions) {
-  const { items, adjust } = carriedStacks(options);
+  const { bot, harness, adjust } = options.onHarness ? sceneOnHarness(options) : sceneOnBotFixture(options);
   let now = 0;
   let activeFuel = 0;
   const slots = new FakeFurnaceSlots(options.windowLagsCompletion === true);
@@ -148,8 +179,7 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
     },
     close: () => undefined,
   });
-  const bot = botFixture({ items, blocks: { "2,64,0": "furnace" } }, { version: "1.21.4" });
-  if (options.full) (bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;
+  if (options.full) bot.inventory.emptySlotCount = () => 0;
   // The world age moves on while an attempt waits for the server's answer to its takes.
   startServerClock(bot);
   bot.clickWindow = outputSlotClicks(slots, adjust, options.outputClickFailsAt);
@@ -180,5 +210,5 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
       if (slots.input === 0) activeFuel = 0;
     },
   };
-  return { bot, dependencies, furnace, get now() { return now; } };
+  return { bot, dependencies, furnace, harness, get now() { return now; } };
 }

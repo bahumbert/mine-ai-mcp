@@ -1,7 +1,12 @@
 // A fake farm body for the tend_crops tests: soil at y 63 and what stands on it at y 64, changed the way the server would.
+import minecraftData from "minecraft-data";
+import { Vec3 } from "vec3";
 import type { CellBlock, PlotFacts, FarmBody, TillFailure } from "../actions/tend-crops/tend-plot.js";
-import { isGroundCover, isTilledSoil } from "../actions/tend-crops/farm-body.js";
-import { registry } from "./bot.js";
+import { cellBlockOf, isGroundCover, isTilledSoil } from "../actions/tend-crops/farm-body.js";
+import { type FakeCell, createFakeBot } from "./fake-bot/index.js";
+
+const FARM_VERSION = "1.21.4";
+const registry = minecraftData(FARM_VERSION);
 
 /** The properties of a block's default state, as the registry's states list them (the order the state ids are laid out in). */
 function defaultProperties(name: string): CellBlock["properties"] {
@@ -29,16 +34,23 @@ export const block = (name: string, properties: CellBlock["properties"] = {}, tr
 
 /** Wheat and carrots as the loot tables have them (ripe at age 7, planted from their unripe drop); ground cover and tilled soil as the real facts answer. */
 export const PLOT_FACTS: PlotFacts = {
-  isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? cell.properties.age === 7 : null),
+  // A live block gives its age as the registry lists the value (`"7"`, Prismarine `propValue`); `block()` takes a number.
+  isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? String(cell.properties.age) === "7" : null),
   seedOf: (name) => ({ wheat: "wheat_seeds", carrots: "carrot" })[name] ?? null,
   isGroundCover: (name) => isGroundCover(name, "1.21.4"),
   isTilledSoil,
 };
 
 
-/** A world of soil at y 63 and what stands on it at y 64, changed the way the server would. */
+/**
+ * A world of soil at y 63 and what stands on it at y 64, changed the way the server would. The cells are real blocks
+ * of the version in the shared fake's world (`harness`, a bot beside the plot); a cell never set reads as not loaded
+ * here (the harness world reads it as air). What the farm carries is `inventory`, not the harness bot's window.
+ */
 export class FakeFarm implements FarmBody {
-  readonly world = new Map<string, CellBlock>();
+  readonly harness = createFakeBot({ version: FARM_VERSION, groundY: null, position: { x: 0.5, y: 64, z: -1.5 } });
+  /** The cells `set` or a gesture wrote: every other cell is unloaded. */
+  readonly #written = new Set<string>();
   readonly inventory = new Map<string, number>();
   readonly calls: string[] = [];
   hoe = true;
@@ -55,12 +67,19 @@ export class FakeFarm implements FarmBody {
   private tilledCells = 0;
 
   set(x: number, z: number, soil: string, above = "air", age?: number): void {
-    this.world.set(`${x},63,${z}`, block(soil, soil === "farmland" ? { moisture: 7 } : {}, { liquid: soil === "water", empty: soil === "water" }));
-    this.world.set(`${x},64,${z}`, block(above, age === undefined ? {} : { age }));
+    this.#put({ x, y: 63, z }, soil === "farmland" ? { name: soil, properties: { moisture: 7 } } : soil);
+    this.#put({ x, y: 64, z }, age === undefined ? above : { name: above, properties: { age } });
   }
 
   read(x: number, y: number, z: number): CellBlock | null {
-    return this.world.get(`${x},${y},${z}`) ?? null;
+    if (!this.#written.has(`${x},${y},${z}`)) return null;
+    const placed = this.harness.world.blockAt(new Vec3(x, y, z));
+    return placed === null ? null : cellBlockOf(placed, this.harness.bot.registry);
+  }
+
+  #put(cell: { x: number; y: number; z: number }, block: FakeCell): void {
+    this.#written.add(`${cell.x},${cell.y},${cell.z}`);
+    this.harness.world.setCell(new Vec3(cell.x, cell.y, cell.z), block);
   }
 
   async reach(cell: { x: number; y: number; z: number }): Promise<string | null> {
@@ -71,7 +90,7 @@ export class FakeFarm implements FarmBody {
     const broken = this.read(cell.x, cell.y, cell.z)!;
     this.calls.push(`break ${broken.name} ${cell.x},${cell.z}`);
     if (broken.name === "wheat") this.ground.push("wheat", "wheat_seeds", "wheat_seeds");
-    this.world.set(`${cell.x},${cell.y},${cell.z}`, block("air"));
+    this.#put(cell, "air");
     return null;
   }
 
@@ -82,7 +101,7 @@ export class FakeFarm implements FarmBody {
     if (this.useFails !== null) return { kind: "error", error: this.useFails };
     if (this.unconfirmed.has(`${cell.x},${cell.z}`)) return { kind: "unconfirmed" };
     if (!this.tillable.has(soil.name)) return { kind: "unchanged" };
-    this.world.set(`${cell.x},${cell.y},${cell.z}`, block("farmland", { moisture: 7 }));
+    this.#put(cell, { name: "farmland", properties: { moisture: 7 } });
     this.tilledCells += 1;
     return null;
   }
@@ -92,7 +111,7 @@ export class FakeFarm implements FarmBody {
     // Only seeds take on farmland; the server leaves anything else in the hand.
     if (item !== "wheat_seeds" && item !== "carrot") return "nothing grew";
     this.inventory.set(item, (this.inventory.get(item) ?? 0) - 1);
-    this.world.set(`${cell.x},${cell.y + 1},${cell.z}`, block(item === "carrot" ? "carrots" : "wheat", { age: 0 }));
+    this.#put({ ...cell, y: cell.y + 1 }, { name: item === "carrot" ? "carrots" : "wheat", properties: { age: 0 } });
     return null;
   }
 
