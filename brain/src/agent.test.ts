@@ -12,6 +12,7 @@ import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } f
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
 import type { Handoff } from "./relations/handoff.ts";
+import type { TradeAsks } from "./relations/trading.ts";
 
 function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
@@ -1917,4 +1918,33 @@ test("an order during a trading objective aborts the routine and runs", async (t
   await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
   await until(() => action.requests.length >= 3, 6_000);
   assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Steve\): "collect 5 dirt"/u);
+});
+
+test("every partner refused lately: the next goal call draws no trading, though a need is set", async (t) => {
+  const { agent, planner } = await failedIronObjective(t);
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[1]), /trading items with someone|trade for/u);
+});
+
+test("one partner of two refused lately: trading is still drawn for the other", async (t) => {
+  const { agent, planner } = await failedIronObjective(t, { otherAgents: ["Theo", "Bruno"] });
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  planner.reply({ objective: "ask Bruno for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u);
+});
+
+test("a refusal older than 10 minutes, or a miss that is not yet a refusal, leaves trading drawn", async (t) => {
+  const old = await failedIronObjective(t);
+  (old.agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 10 * 60_000 - 1);
+  old.planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => old.planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(old.planner.requests[1]), /trading items with someone/u);
+  const missed = await failedIronObjective(t);
+  (missed.agent as unknown as { asks: TradeAsks }).asks.refused.missed("Theo", ["bread"], Date.now());
+  missed.planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => missed.planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(missed.planner.requests[1]), /trading items with someone/u);
 });

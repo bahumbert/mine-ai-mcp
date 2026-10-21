@@ -74,11 +74,26 @@ class Needs {
 /** Who refused which item, per bot and for a few minutes only. */
 class Refusals {
   private readonly at = new Map<string, number>();
+  /** When an ask to that partner for those items was last missed (the talk ended before the bot could ask). */
+  private readonly missedAt = new Map<string, number>();
 
   private key = (partner: string, item: string): string => `${partner.toLowerCase()}\u0000${item}`;
 
   add(partner: string, items: readonly string[], now: number): void {
     for (const item of items) this.at.set(this.key(partner, item), now);
+  }
+
+  /** The bot never got to ask: the first miss is noted, a second within the memory time is a refusal (a partner who always ends the talk first cannot loop the bot). */
+  missed(partner: string, items: readonly string[], now: number): void {
+    const key = this.key(partner, [...items].sort().join(","));
+    if (now - (this.missedAt.get(key) ?? -Infinity) <= ASK_MEMORY_MS) this.add(partner, items, now);
+    else this.missedAt.set(key, now);
+  }
+
+  /** That partner refused any item lately. */
+  refusedAnything(partner: string, now: number): boolean {
+    const prefix = this.key(partner, "");
+    return [...this.at].some(([key, at]) => key.startsWith(prefix) && now - at <= ASK_MEMORY_MS);
   }
 
   /** Every item of the ask was refused by that partner lately. */
@@ -113,6 +128,17 @@ export function withTrading(drawn: readonly Activity[], available: readonly Acti
   return drawn[0] === undefined ? ["trading"] : [drawn[0], "trading"];
 }
 
+/** The partners that did not refuse any trade lately. */
+export function tradingPartners(partners: readonly string[], asks: TradeAsks, now: number): string[] {
+  return partners.filter((partner) => !asks.refused.refusedAnything(partner, now));
+}
+
+/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with"). */
+export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number): Activity[] {
+  const hopeless = partners.length > 0 && tradingPartners(partners, asks, now).length === 0;
+  return hopeless ? available.filter((activity) => activity !== "trading") : [...available];
+}
+
 /** The goal tier's trade-needs fact: what is needed, the partners not yet refused for it, and what can be offered. */
 export function tradeNeedsFacts(needs: readonly string[], partners: readonly string[], asks: TradeAsks, inventory: Inventory, now: number): { items: string[]; partners: string[]; offer: ItemCount[] } {
   return { items: [...needs], partners: partners.filter((partner) => !asks.refused.isRefused(partner, needs, now)), offer: offerFrom(inventory, needs) };
@@ -137,25 +163,47 @@ export interface TradeRoutineDeps extends Omit<SocialiseDeps, "openFacts"> {
 }
 
 const AGREED = new Set(["agreed", "i_gave", "they_gave", "done"]);
+/** A trade the partner turned down or let fall apart: a no, whether or not the ask was heard by the code. */
+const DECLINED = new Set(["cancelled", "broken"]);
 const sideText = (items: readonly ItemCount[]): string => items.map((i) => `${i.count} ${i.item}`).join(", ");
 
 /**
  * The `trading` routine: talks like `socialise` with the intent to trade, then reads the trade controller. A trade
- * with the partner proposed since the routine's start and agreed (or further) is done; else it failed and the
- * partner is remembered as having refused these items, unless the talk never took place.
+ * with the partner proposed since the routine's start and agreed (or further) is done. The partner refused these
+ * items for a few minutes when the ask was said (or a trade was declined). A talk that ended before the ask, even
+ * after one more try, only counts as a refusal the second time within those minutes ({@link Refusals.missed}); a
+ * talk that never took place counts as neither.
  */
 export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult> {
-  const { runtime, signal, partner, want, asks, trades, since } = deps;
+  const { runtime, signal, partner, want, asks, trades, talks, since } = deps;
   const now = (): number => (deps.clock ?? { now: () => Date.now() }).now();
   const snapshot = await runtime.status();
   const intent: OpenFacts["intent"] = { kind: "trade", want, offer: offerFrom(snapshot.inventory, want) };
-  const talked = await socialise({ ...deps, openFacts: { ...deps.openFacts, intent } });
-  if (talked.status === "stopped" || signal.aborted) return { status: "stopped" };
-  if (talked.status === "failed" && NO_TALK.test(talked.detail)) return talked;
-  const trade = trades.latestWith(partner, since);
-  if (trade !== null && AGREED.has(trade.state)) {
-    return { status: "done", detail: `agreed with ${partner}: ${sideText(trade.give)} for ${sideText(trade.get)}` };
+  // The intent reaches a line whichever way the talk starts: in the opening, or in her reply to a talk already open.
+  talks.carryIntent(partner, intent);
+  try {
+    const talk = (from: number) => socialise({ ...deps, since: from, openFacts: { ...deps.openFacts, intent } });
+    const unfinished = (talked: SkillResult): SkillResult | null =>
+      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && NO_TALK.test(talked.detail) ? talked : null;
+    let ended = unfinished(await talk(since));
+    if (ended !== null) return ended;
+    let trade = trades.latestWith(partner, since);
+    if (!(trade !== null && AGREED.has(trade.state)) && !talks.askedSince(partner, since)) {
+      // The talk was already open (or over) and nothing asked: once more, so a fresh opening carries the ask.
+      ended = unfinished(await talk(now()));
+      if (ended !== null) return ended;
+      trade = trades.latestWith(partner, since);
+    }
+    if (trade !== null && AGREED.has(trade.state)) {
+      return { status: "done", detail: `agreed with ${partner}: ${sideText(trade.give)} for ${sideText(trade.get)}` };
+    }
+    if (talks.askedSince(partner, since) || (trade !== null && DECLINED.has(trade.state))) {
+      asks.refused.add(partner, want, now());
+      return { status: "failed", detail: `${partner} did not trade ${want.join(", ")}` };
+    }
+    asks.refused.missed(partner, want, now());
+    return { status: "failed", detail: `did not get to ask ${partner}` };
+  } finally {
+    talks.releaseIntent();
   }
-  asks.refused.add(partner, want, now());
-  return { status: "failed", detail: `${partner} did not trade ${want.join(", ")}` };
 }

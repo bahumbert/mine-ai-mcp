@@ -53,6 +53,10 @@ export function conversationBlock(facts: ConversationFacts): string {
   lines.push(facts.iAmOpener
     ? `- You opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`
     : `- ${facts.opener} opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`);
+  if (facts.intent !== undefined) {
+    const { partner, want, offer } = facts.intent;
+    lines.push(`- You came to trade: ask ${partner} for ${want.join(", ")} now, offer some of ${offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`);
+  }
   lines.push(`- ${facts.lines} lines so far, ${facts.minutes} min.`);
   if (facts.iAmOpener && facts.planned !== null) {
     lines.push(`- As its opener, you meant it to be ${facts.planned} (${PLANNED_LINES[facts.planned].join("-")} lines in all).`);

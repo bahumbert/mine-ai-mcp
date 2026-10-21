@@ -19,7 +19,7 @@ import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatInput, type Chat
 import { AgentRelations } from "./relations/agent-relations.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, type Handoff } from "./relations/handoff.ts";
-import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading } from "./relations/trading.ts";
+import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -746,7 +746,8 @@ export class Agent {
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
-    const available = availableActivities(personaSkills(persona), snapshot, this.partners());
+    // Trading is not drawn while every partner refused lately: it would only fail "no one to trade with".
+    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now());
     const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
     this.asks.dropRefused(this.partners(), Date.now());

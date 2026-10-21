@@ -90,6 +90,14 @@ interface Talk {
   readonly endedAt: number;
 }
 
+interface CarriedIntent {
+  readonly partner: string;
+  readonly intent: NonNullable<OpeningInput["intent"]>;
+  readonly carriedAt: number;
+  /** A chat call was shown the intent: her next line is the ask. */
+  shown: boolean;
+}
+
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /** What is remembered of a talk the model did not sum up: its topic, else the last line another member said, else who it was with. Never empty. */
@@ -116,6 +124,10 @@ export class ConversationController {
   private readonly talks = new Map<string, Talk>();
   private readonly pending = new Set<Promise<void>>();
   private readonly limits: Limits;
+  /** The trade a routine came to ask for: shown to her chat calls in a talk with its partner until a line asks it. */
+  private carried: CarriedIntent | null = null;
+  /** When a trade ask was last said to each partner (lower case), kept for the bot's life. */
+  private readonly askedAt = new Map<string, number>();
 
   constructor(private readonly deps: ControllerDeps) {
     this.limits = { ...deps.persona.settings.conversation, talkRange: deps.talkRange };
@@ -140,6 +152,27 @@ export class ConversationController {
     return talk === undefined ? null : { topic: talk.topic, gist: talk.gist, endedAt: talk.endedAt };
   }
 
+  /** A routine carries a trade intent for `partner`: any talk with them shows it to her chat calls until a line asks it. One at a time. */
+  carryIntent(partner: string, intent: NonNullable<OpeningInput["intent"]>): void {
+    this.carried = { partner, intent, carriedAt: this.deps.now(), shown: false };
+  }
+
+  releaseIntent(): void {
+    this.carried = null;
+  }
+
+  /** A trade ask was said to `partner` at or after `since`. */
+  askedSince(partner: string, since: number): boolean {
+    return (this.askedAt.get(partner.toLowerCase()) ?? -Infinity) >= since;
+  }
+
+  /** The carried intent, while the current talk is with its partner and it was not asked since it was carried. */
+  private pendingIntent(): CarriedIntent | null {
+    const carried = this.carried;
+    if (carried === null || !this.isMember(carried.partner) || this.askedSince(carried.partner, carried.carriedAt)) return null;
+    return carried;
+  }
+
   facts(): ConversationFacts | undefined {
     const c = this.record;
     if (c === null) return undefined;
@@ -150,9 +183,12 @@ export class ConversationController {
       const talk = this.talks.get(name.toLowerCase());
       if (talk !== undefined) gists.add(talk);
     }
+    const pending = this.pendingIntent();
+    if (pending !== null) pending.shown = true;
     return {
       kind: c.kind, others, opener: c.opener, topic: c.topic, planned: c.planned, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10,
       iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => this.pastTalk(talk, now)),
+      ...(pending !== null && { intent: { ...pending.intent, partner: pending.partner } }),
     };
   }
 
@@ -235,6 +271,7 @@ export class ConversationController {
     this.begin(c, true);
     lineSaid(c, now);
     this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
+    if (o.intent !== undefined && partner !== null) this.askedAt.set(partner.toLowerCase(), now);
     this.journal("opened", c, { conversationKind: kind, topic: c.topic, planned: c.planned });
     return true;
   }
@@ -283,6 +320,8 @@ export class ConversationController {
     if (c === null) return;
     const now = this.deps.now();
     const afterCap = capReached(c, this.limits, now);
+    const asked = this.pendingIntent();
+    if (asked?.shown === true) this.askedAt.set(asked.partner.toLowerCase(), now);
     lineSaid(c, now);
     if (close) this.end("goodbye", signal);
     else if (afterCap) this.end("cap", signal);

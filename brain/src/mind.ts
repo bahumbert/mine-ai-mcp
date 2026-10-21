@@ -257,6 +257,8 @@ export interface ConversationFacts {
   /** The cap is reached: it says goodbye now. */
   readonly sayGoodbye: boolean;
   readonly lastGists: readonly PastTalk[];
+  /** A trade the routine came to ask for, while this talk is with its partner and the ask has not been made. */
+  readonly intent?: NonNullable<OpeningInput["intent"]> & { readonly partner: string };
 }
 
 /** Someone near enough to talk to. */

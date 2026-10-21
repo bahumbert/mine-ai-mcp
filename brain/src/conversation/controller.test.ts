@@ -472,3 +472,68 @@ test("a gist with no partners leaves the feelings alone, and the fallback gist n
   await busy.controller.finished();
   assert.deepEqual(ended, [], "no model call, no judgment");
 });
+
+const TRADE_INTENT = { kind: "trade" as const, want: ["iron_ingot"], offer: [{ item: "oak_log", count: 32 }] };
+
+test("a carried trade intent reaches the facts of a talk with its partner, until her next line asks it", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  assert.equal(t.controller.facts(), undefined);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.deepEqual(t.controller.facts()?.intent, { ...TRADE_INTENT, partner: "Theo" });
+  assert.equal(t.controller.askedSince("Theo", 0), false, "shown is not asked");
+  t.clock.now += 1_000;
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("THEO", t.clock.now), true, "her line after the facts is the ask, case-insensitive");
+  assert.equal(t.controller.askedSince("Theo", t.clock.now + 1), false);
+  assert.equal(t.controller.facts()?.intent, undefined, "asked once");
+});
+
+test("a carried intent for someone who is not in the talk is not shown and no line asks it", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.heard("Bruno", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined);
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Theo", 0), false);
+  assert.equal(t.controller.askedSince("Bruno", 0), false);
+});
+
+test("a line said without the intent shown asks nothing", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Theo", 0), false, "facts() was never asked for");
+});
+
+test("a second carryIntent replaces the first; releaseIntent removes it and later talks have none", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.carryIntent("Bruno", { ...TRADE_INTENT, want: ["bread"] });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined, "Theo's was replaced");
+  t.controller.releaseIntent();
+  t.controller.heard("Bruno", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined);
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Bruno", 0), false);
+});
+
+test("an opening that carries the intent records the ask for its partner, and it survives the end", async () => {
+  const t = setup();
+  t.chat.reply(OPEN, { gist: "Talked." });
+  const before = t.clock.now;
+  assert.equal(await t.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, { ...t.facts(t.theoAt(3)), intent: TRADE_INTENT }, signal), true);
+  assert.equal(t.controller.askedSince("Theo", before), true);
+  t.controller.end("goodbye");
+  await t.controller.finished();
+  assert.equal(t.controller.askedSince("Theo", before), true, "kept after the talk ended");
+});
+
+test("an opening without the intent records no ask", async () => {
+  const t = setup();
+  t.chat.reply(OPEN);
+  await t.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, t.facts(t.theoAt(3)), signal);
+  assert.equal(t.controller.askedSince("Theo", 0), false);
+});

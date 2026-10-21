@@ -85,3 +85,12 @@ test("a trade intent adds one line to the opening; without it the text is as bef
   assert.equal(withIntent.replace(/\n\nYou came to trade[^\n]*/u, ""), plain);
   assert.doesNotMatch(plain, /trade/u);
 });
+
+test("the block with a trade intent adds one line after the opener line; without it, nothing changes", () => {
+  const plain = conversationBlock(facts());
+  const intent = { kind: "trade" as const, partner: "Theo", want: ["iron_ingot"], offer: [{ item: "oak_log", count: 32 }] };
+  const block = conversationBlock(facts({ intent }));
+  assert.equal(block.split("\n").filter((line) => !plain.split("\n").includes(line)).join("\n"), "- You came to trade: ask Theo for iron_ingot now, offer some of 32 oak_log; say what you would give.");
+  assert.equal(block.split("\n")[3], "- You came to trade: ask Theo for iron_ingot now, offer some of 32 oak_log; say what you would give.", "right after the opener line");
+  assert.equal(conversationBlock(facts({})), plain);
+});
