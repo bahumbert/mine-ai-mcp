@@ -8,9 +8,10 @@ import type { Position3 } from "../world/world.js";
  * The longest the body can take to dig the block at `position` from the state it is in now, with the item type
  * `toolType` (bare hands when null): Mineflayer's own `bot.digTime` arithmetic with the enchantments of the tool and of
  * the helmet (aqua affinity) and the potion effects. A body with any part in water (`entity.isInWater`) is costed with
- * both of Minecraft's penalties, x5 in water and x5 off the ground, whatever its stance at this instant: buoyancy,
- * `holdWaterPosition`'s jump and surface bobbing lift it off a floor or dip it under before the swing, and the planner
- * prices the stance it plans (a body hovering over a solid cell is priced as standing). A dry body is read as it
+ * both of Minecraft's penalties, x5 in water and x5 off the ground, whatever its stance at this instant: buoyancy and
+ * surface bobbing lift it off a floor or dip it under before the swing, a mid-water hold (`holdWaterPosition` with no
+ * stance floor) jumps to keep its depth, and a landing on the planned stance floor that runs out of time still digs
+ * (`landOnStanceFloor`). The planner prices the stance it plans (a body over a solid cell as standing). A dry body is read as it
  * stands (its eyes in water as the server decides it, `botEyesInWater`; `onGround`). The tool comes from the operation,
  * not from the hand, because the deadline is set before the tool is equipped. Null when the block is not loaded.
  */

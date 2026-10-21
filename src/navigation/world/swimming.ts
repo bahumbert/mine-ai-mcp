@@ -140,6 +140,16 @@ export function swimTravelTicks(from: Position3, to: Position3): number {
     Math.max(0, from.y - to.y) * SWIM_DOWN_TICKS + Math.max(0, to.y - from.y) * SWIM_UP_TICKS + 8;
 }
 
+/**
+ * Whether a body in the cell `feet` has a floor to stand on: the cell below is loaded, not empty and not a liquid.
+ * The one rule for "standing" in water: the planner prices a dig from such a cell as grounded (`digContextAt`), and
+ * the water hold lets the body sink onto it (`holdWaterPosition`), so the dig runs at the speed it was priced.
+ */
+export function solidFloorUnder(read: WorldView["blockAt"], feet: BlockPosition): boolean {
+  const below = read(feet.x, feet.y - 1, feet.z);
+  return below.kind === "loaded" && !below.traits.empty && below.traits.liquid === null;
+}
+
 /** Apply jump early enough to arrest sinking; release early enough to arrest lift. */
 export function holdSwimDepth(y: number, velocityY: number, targetY: number): boolean {
   return y + velocityY * 4 < targetY;

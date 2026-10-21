@@ -57,8 +57,9 @@ export interface NavigationBot {
    * The longest the body can take to dig the block of a break operation from its state now, in ms: its tool, its
    * enchantments and effects, and both of Minecraft's penalties (x5 in water, x5 off the ground) for a body with any
    * part in water; null when the block is not loaded. The planner prices the stance it plans (water at the head cell,
-   * ground = a solid cell below), so a body hovering in water above a solid cell is priced as standing; the executor
-   * sets a break's confirmation deadline from this instead. Optional so fakes keep the planned deadline.
+   * ground = a solid cell below, `solidFloorUnder`), so a body in water above a solid cell is priced as standing (the
+   * water hold lets it sink onto that floor); the executor sets a break's confirmation deadline from this instead.
+   * Optional so fakes keep the planned deadline.
    */
   longestBreakDurationMs?(operation: Extract<PlannedOperation, { kind: "break" }>): number | null;
   stabilize(signal: AbortSignal): Promise<{ kind: "stable" } | { kind: "failed"; observation: string }>;

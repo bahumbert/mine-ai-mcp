@@ -2,7 +2,7 @@ import { saveWaterLanding } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { SupportedPositionController } from "../execution/supported-position-controller.js";
-import { holdWaterPosition } from "../steering/hold-water-position.js";
+import { holdWaterPosition, landOnStanceFloor } from "../steering/hold-water-position.js";
 import { holdSwimDepth } from "../world/swimming.js";
 import { horizontalControlsToward } from "../steering/local-steering.js";
 /**
@@ -17,7 +17,6 @@ import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
 import { appendFileSync } from "node:fs";
 import { Vec3 } from "vec3";
-import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { occupiedCell, placeWithoutLooking, type WorldBlock } from "../../world/placement.js";
 import { AIR_COAST_TICKS, COAST_TICKS, PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import type { EffectHandle, MovementPreparation, NavigationBot, CellResync } from "../bot.js";
@@ -32,7 +31,6 @@ import {
 } from "../execution/movement-controller.js";
 import type { AttemptToken } from "../execution/mutations.js";
 import { OPEN_WATER_RISE } from "../execution/water-movement-controller.js";
-import { DIG_REACH } from "../movements/excavation.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
 import {
   centerOnCell,
@@ -53,9 +51,10 @@ import {
   type WorldView,
 } from "../world/world.js";
 import { longestBreakDurationMs } from "./break-duration.js";
+import { putAwayHeldTool, visibleDigAim } from "./dig-preparation.js";
 import { requestCellResync } from "./cell-resync.js";
 import { type ServerChangeWatch, watchServerChange } from "./server-block-changes.js";
-import { CLIMBABLES, isSwimWater, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
+import { CLIMBABLES, isSwimWater, liveBlockReader, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
 
 const NETHER_VINES = new Set(["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"]);
 // Prismarine applies gravity and drag after assigning its 0.2 climb impulse;
@@ -105,7 +104,13 @@ export interface MineflayerBotSurface {
   readonly food?: number;
   setControlState(control: "forward" | "back" | "left" | "right" | "jump" | "sprint" | "sneak", state: boolean): void;
   /** Holds a water stance counted on the connected bot itself, the bot `runtime.steering` asks (review 2026-10-19 #2). */
-  holdWaterStance(signal: AbortSignal | undefined, setControl: NonNullable<Parameters<typeof holdWaterPosition>[2]>): () => void;
+  holdWaterStance(
+    signal: AbortSignal | undefined,
+    setControl: NonNullable<Parameters<typeof holdWaterPosition>[2]>,
+    stance?: BlockPosition,
+  ): () => void;
+  /** Wait, bounded, for a body held over `stance`'s solid floor to land on it; see `landOnStanceFloor`. Optional so fakes need no change. */
+  landOnStanceFloor?(stance: BlockPosition, signal: AbortSignal): Promise<boolean>;
   getControlState?(control: "jump" | "sneak"): boolean;
   waitForTicks(ticks: number): Promise<void>;
   lookAt(position: Position3, force?: boolean): Promise<void>;
@@ -181,7 +186,9 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
       return bot.food;
     },
     setControlState: (control, state) => bot.setControlState(control, state),
-    holdWaterStance: (signal, setControl) => holdWaterPosition(bot, signal, setControl),
+    holdWaterStance: (signal, setControl, stance) =>
+      holdWaterPosition(bot, signal, setControl, stance && { stance, read: liveBlockReader(bot) }),
+    landOnStanceFloor: (stance, signal) => landOnStanceFloor(bot, { stance, read: liveBlockReader(bot) }, signal),
     bucketDrop: async (target, signal) => {
       const result = await saveWaterLanding(bot, { target, signal, permitted: () => readNavigationPolicy(bot).bucket_drops });
       const at = bot.entity.position;
@@ -193,29 +200,10 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     lookAt: (position, force) => bot.lookAt(new Vec3(position.x, position.y, position.z), force),
     look: (yaw, pitch, force) => bot.look(yaw, pitch, force),
     equip: (value, destination) => bot.equip(item(value), destination),
-    putAwayHeldTool: async () => {
-      const wears = (type: number) => (bot.registry.items[type]?.maxDurability ?? 0) > 0;
-      const held = bot.heldItem;
-      if (!held || !wears(held.type)) return;
-      // Something that does not wear out in hand, else an empty hand.
-      const plain = bot.inventory.items().find((candidate) => !wears(candidate.type));
-      if (plain) await bot.equip(plain, "hand");
-      else await bot.unequip("hand");
-    },
+    putAwayHeldTool: () => putAwayHeldTool(bot),
     blockAt: (position) => bot.blockAt(new Vec3(position.x, position.y, position.z)),
     dig: (target, forceLook) => bot.dig(block(target), forceLook ?? false),
-    visibleDigAim: (position) => {
-      const eyeHeight = (bot.entity as { readonly eyeHeight?: number }).eyeHeight ?? STANDING_EYE_HEIGHT;
-      const target = bot.blockAt(new Vec3(position.x, position.y, position.z));
-      if (!target) return null;
-      return visibleBlockAim(
-        bot.world,
-        bot.entity.position.offset(0, eyeHeight, 0),
-        position,
-        DIG_REACH,
-        observeMineflayerBlock(target).collisionShapes,
-      );
-    },
+    visibleDigAim: (position) => visibleDigAim(bot, position),
     stopDigging: () => bot.stopDigging(),
     longestBreakDurationMs: (position, toolType) => longestBreakDurationMs(bot, position, toolType),
     placementObstacle: (position) => occupiedCell(bot, position),
@@ -743,13 +731,19 @@ export class MineflayerBot implements NavigationBot {
     // Read before the hold so the dig aims where the route left the head.
     const yaw = this.bot.entity.yaw;
     const digStartedAt = Date.now();
-    const airborne = !this.bot.entity.onGround;
     const inWater = this.bot.entity.isInWater;
-    const releaseStance = this.bot.holdWaterStance(signal, (control, active) =>
-      this.#control(control, active),
+    const releaseStance = this.bot.holdWaterStance(
+      signal,
+      (control, active) => this.#control(control, active),
+      operation.stance,
     );
     const serverWatch = this.bot.watchServerChange?.(operation.position);
+    let airborne = !this.bot.entity.onGround;
     try {
+      // The planner priced a dig from a stance over a solid floor as standing (`digContextAt`), and Minecraft digs
+      // x5 slower off the ground: the hold lets the body sink onto that floor, and the swing waits for it, bounded.
+      if (operation.stance) await this.bot.landOnStanceFloor?.(operation.stance, signal);
+      airborne = !this.bot.entity.onGround;
       const swing = async (target: unknown) => {
         if (
           (directlyBelowFeet || directlyAboveHead) &&

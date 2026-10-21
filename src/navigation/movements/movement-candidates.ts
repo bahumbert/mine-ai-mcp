@@ -532,6 +532,7 @@ export class MovementCandidates implements GeneratedMovements {
         expectedStateId: dig.stateId,
         toolType: dig.toolType,
         brings: dig.brings,
+        stance: from,
       });
       for (const cleared of [dig.position, ...dig.brings])
         effects.push({ kind: "break", position: cleared, stateId: 0 });

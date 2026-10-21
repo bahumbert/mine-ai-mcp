@@ -33,8 +33,7 @@ import { liveBlockReader, observeMineflayerBlock } from "../../mineflayer/world.
 import { botEyesInWater } from "../../../world/eyes-in-water.js";
 import { isSafeSupport, isWater } from "../../world/block-geometry.js";
 import { admitsDive, openWaterSurface } from "../../world/swimming.js";
-import { holdWaterPosition } from "../../steering/hold-water-position.js";
-import { physicsTicksUntil } from "../../../utils/physics-ticks.js";
+import { settleInWaterForDig } from "../../steering/hold-water-position.js";
 import { DIG_REACH } from "../../movements/excavation.js";
 import { branchMiningGoal } from "./block-exploration.js";
 import { carriesWaterBucket, CAST_REACH, castOntoPool } from "./cast-obsidian.js";
@@ -563,14 +562,7 @@ async function sealAndBreakInReach(
   if (!target) return false;
   // A goal can become satisfied during a speculative search as the swimmer
   // enters this cell. Mining needs the actual floor, not the floored Y alone.
-  if (!bot.entity.onGround && botEyesInWater(bot)) {
-    const release = holdWaterPosition(bot, signal, (control, active) =>
-      bot.setControlState(control, control === "jump" ? false : active));
-    try {
-      await physicsTicksUntil(bot, () => bot.entity.onGround, 60, signal ?? new AbortController().signal);
-    } finally { release(); }
-    if (!bot.entity.onGround) return false;
-  }
+  if (!(await settleInWaterForDig(bot, read, feet, botEyesInWater(bot), signal))) return false;
   await breakTargetInPlace(bot, request, targeting, target, signal);
   return true;
 }

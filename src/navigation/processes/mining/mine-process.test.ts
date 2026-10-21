@@ -730,6 +730,64 @@ test("a wet target already in reach can be mined while floating", async () => {
   assert.equal(broken, true);
 });
 
+test("a dry-eyed body in water over a solid floor lands on it before the dig in reach", async () => {
+  // lava-interrupts-mining's escape cell: one cell of water in a floor, the eyes in the air above.
+  const target = new Vec3(1, 64, 0);
+  const feet = new Vec3(0.5, 64.38, 0.5);
+  const bot = fakeBot({ blocks: [target], solids: [new Vec3(0, 63, 0)], feet, onGround: false, isInWater: true });
+  const hole = new Vec3(0, 64, 0);
+  const blockAt = bot.blockAt.bind(bot);
+  // A source block, as the escape cell is (level 0).
+  bot.blockAt = (position) => {
+    const block = blockAt(position);
+    return position.equals(hole) && block
+      ? Object.assign(block, { name: "water", stateId: 4, boundingBox: "empty", shapes: [], getProperties: () => ({ level: 0 }) })
+      : block;
+  };
+  const physics = new EventEmitter();
+  bot.on = (event, listener) => {
+    physics.on(event, listener);
+    return bot;
+  };
+  bot.off = (event, listener) => {
+    physics.off(event, listener);
+    return bot;
+  };
+  // The body sinks as prismarine-physics moves it in water with no jump held (`index.js` `waterInertia` 0.8,
+  // `waterGravity` 0.02): the hold-layer test proves the jump stays released on the real engine.
+  let velocityY = 0;
+  const sink = setInterval(() => {
+    if (!bot.entity.onGround) {
+      bot.entity.position.y = Math.max(64, bot.entity.position.y + velocityY);
+      velocityY = velocityY * 0.8 - 0.02;
+    }
+    bot.entity.onGround = bot.entity.position.y === 64;
+    physics.emit("physicsTick");
+  }, 1);
+  let groundedAtDig: boolean | undefined;
+  try {
+    const result = await mine(
+      bot,
+      request(bot, {
+        canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+        isSatisfied: () => groundedAtDig !== undefined,
+        breakInPlace: async () => {
+          groundedAtDig = bot.entity.onGround;
+          (bot as FakeWorld).removeBlock(target);
+          return { status: "broken" };
+        },
+        route: async () => {
+          throw new Error("The working stance is already in reach.");
+        },
+      }),
+    );
+    assert.equal(result.status, "satisfied");
+  } finally {
+    clearInterval(sink);
+  }
+  assert.equal(groundedAtDig, true, "the dig waited for the floor: off the ground it is x5 slower");
+});
+
 test("incidental inventory gain cannot satisfy an unbroken exact target", async () => {
   const target = new Vec3(1, 64, 0);
   const bot = fakeBot({ blocks: [target], feet: new Vec3(0.5, 64, 0.5) });

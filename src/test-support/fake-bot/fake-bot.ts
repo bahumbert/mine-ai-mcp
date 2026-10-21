@@ -56,6 +56,8 @@ export interface FakeBotOptions {
   readonly lagMs?: number;
   /** The server's age, time of day, packet phase and tick rate. */
   readonly server?: Omit<FakeServerOptions, "lagMs">;
+  /** Move the body by Mineflayer's own physics engine each tick (gravity, water, jumping); off by default. */
+  readonly simulatePhysics?: boolean;
   /** Methods a test replaces (a scripted `tossStack` failure). */
   readonly overrides?: Partial<Bot>;
 }
@@ -144,7 +146,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   });
   world.forwardTo(bot);
   server.onTimePacket(() => bot.emit("time"));
-  attachFakePhysics(bot, clock, server);
+  attachFakePhysics(bot, clock, server, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
   attachFakeVehicle(bot, server);
   attachFakeItems(bot, { clock, server, world, inventory, entities });

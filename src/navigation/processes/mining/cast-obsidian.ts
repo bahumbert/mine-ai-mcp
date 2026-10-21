@@ -1,4 +1,4 @@
-import { holdWaterPosition } from "../../steering/hold-water-position.js";
+import { holdWaterPosition, stanceFloorAt } from "../../steering/hold-water-position.js";
 /**
  * Make obsidian where there is none: water flowing onto lava sources.
  *
@@ -17,6 +17,7 @@ import { holdWaterPosition } from "../../steering/hold-water-position.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { liveBlockReader } from "../../mineflayer/world.js";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { isLiquidSource } from "../../../world/liquid.js";
@@ -193,7 +194,9 @@ export async function castOntoPool(
 
   // The newly poured flow can otherwise carry the bot away while formations
   // settle, leaving both the original scoop ray and the bucket out of reach.
-  const releaseStance = holdWaterPosition(bot, physics.signal);
+  // A pour from a floor (the cast needs the body on the ground) keeps it there if the pour reaches the body.
+  const floor = stanceFloorAt(liveBlockReader(bot), bot.entity.position.floored());
+  const releaseStance = holdWaterPosition(bot, physics.signal, undefined, floor);
   try {
     const watch = watchFormations(bot, aim.landing);
     const use = await physics.useItem(bot, {

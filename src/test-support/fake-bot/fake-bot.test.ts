@@ -58,6 +58,22 @@ test("no physics tick while the feet cell is unloaded", async () => {
   assert.equal(ticks, 0);
 });
 
+test("simulatePhysics moves the body by the game's engine before physicsTick; without it nothing moves", async () => {
+  for (const simulatePhysics of [true, false]) {
+    const { bot, clock } = createFakeBot({ position: { x: 0.5, y: 66, z: 0.5 }, groundY: 63, simulatePhysics });
+    bot.entity.onGround = false;
+    const seen: number[] = [];
+    bot.on("physicsTick", () => void seen.push(bot.entity.position.y));
+    await clock.advance(1_000);
+    if (!simulatePhysics) assert.deepEqual(new Set(seen), new Set([66]), "the body stays where the test put it");
+    else {
+      assert.ok(seen[1]! < 66, "falling by the second tick (the engine moves by the velocity of the tick before)");
+      assert.equal(bot.entity.position.y, 64, "landed on the stone at 63");
+      assert.equal(bot.entity.onGround, true);
+    }
+  }
+});
+
 test("no physics tick after a death until the server sends a position", async () => {
   const { bot, clock, server } = createFakeBot();
   let ticks = 0;

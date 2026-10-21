@@ -192,6 +192,33 @@ test("digging straight down keeps the current yaw and owns its own aim", async (
   assert.equal(lookedAtCalls, 0);
 });
 
+test("a break planned from a water stance holds that floor and lands on it before the swing; one with none swings at once", async () => {
+  // lava-interrupts-mining under load: the body at -59.62 over its floor at -60 dug obsidian x5 slower off the ground.
+  for (const stance of [{ x: 2, y: -60, z: 0 }, undefined]) {
+    const events: string[] = [];
+    const stances: unknown[] = [];
+    const bot = surface({
+      entity: { position: { x: 2.7, y: -59.62, z: 0.5 }, onGround: false, isInWater: true, yaw: 0 },
+      holdWaterStance: (_signal, _setControl, held) => {
+        stances.push(held);
+        return () => undefined;
+      },
+      // A landing that ran out: the dig still goes ahead.
+      landOnStanceFloor: async (at) => (events.push(`land ${at.x},${at.y},${at.z}`), false),
+      blockAt: () => ({ name: "obsidian" }),
+      dig: async () => void events.push("dig"),
+    });
+    const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+      { kind: "break", position: { x: 2, y: -59, z: 1 }, expectedStateId: 1, toolType: null, brings: [], ...(stance && { stance }) },
+      { runId: "run", planId: "plan", stepId: "excavate", attempt: 1 },
+      new AbortController().signal,
+    );
+    assert.deepEqual(await effect.completion, { kind: "accepted" });
+    assert.deepEqual(stances, [stance], "the hold is given the planned stance");
+    assert.deepEqual(events, stance ? ["land 2,-60,0", "dig"] : ["dig"]);
+  }
+});
+
 test("a dig at the edge of reach centres on the stance search judged it from before giving up", async () => {
   // Search prices reach and sight from the centre of the stance cell; the body
   // can stop at its corner, which puts the same face out of reach.

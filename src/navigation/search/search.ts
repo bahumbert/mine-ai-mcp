@@ -29,7 +29,8 @@ import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
 import { lavaWatchCells } from "../world/lava-watch.js";
-import { blockKey, packKey } from "../world/world.js";
+import { blockKey, packKey, type WorldView } from "../world/world.js";
+import { solidFloorUnder } from "../world/swimming.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
 import { endsStrandedUnderWater } from "./stranded-segment.js";
@@ -213,11 +214,11 @@ interface SearchOptions {
  */
 function digContextAt(options: SearchOptions, state: PlanningState) {
   const { x, y, z } = state.node.feet;
-  const head = state.overlay.blockAt(options.context.world, x, y + 1, z);
-  const below = state.overlay.blockAt(options.context.world, x, y - 1, z);
+  const read: WorldView["blockAt"] = (atX, atY, atZ) => state.overlay.blockAt(options.context.world, atX, atY, atZ);
+  const head = read(x, y + 1, z);
   return {
     submergedAtEyes: head.kind === "loaded" && head.traits.liquid === "water",
-    onGround: below.kind === "loaded" && !below.traits.empty && below.traits.liquid === null,
+    onGround: solidFloorUnder(read, state.node.feet),
     // Mining Fatigue is the dangerous direction: it makes a dig slower than
     // the route priced it, so confirmation windows and progress checks fire on
     // a movement that was always going to take longer.

@@ -1,13 +1,30 @@
 /**
  * The fake bot's client ticks as Mineflayer's physics plugin runs them (`physics.js`): when a tick fires, when it
  * does not (unloaded feet, a mount, a death), the look that waits for a tick, and `waitForTicks`. Nothing moves the
- * body: the fake simulates no gravity or walking, so a test sets the position it needs.
+ * body unless the bot is made with `simulatePhysics`: then each tick runs Mineflayer's own engine (`prismarine-physics`)
+ * on the fake world before `physicsTick`, as `physics.js` does; otherwise a test sets the position it needs.
  */
+import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { FakeBot } from "./fake-bot.js";
 import type { Vec3 } from "vec3";
 import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
+
+/** Mineflayer's physics engine (no typings shipped): one step of a player's state, written back onto the bot. */
+interface PrismarinePhysics {
+  Physics(registry: unknown, world: unknown): { simulatePlayer(state: object, world: unknown): { apply(bot: object): void } };
+  PlayerState: new (bot: object, controls: object) => object;
+}
+
+/** One step of `physics.js` `tickPhysics`: the player's state simulated with its controls and written back. */
+function physicsStep(bot: FakeBot): () => void {
+  const { Physics, PlayerState } = createRequire(import.meta.url)("prismarine-physics") as PrismarinePhysics;
+  const engine = Physics(bot.registry, bot.world);
+  // The fields `PlayerState` reads that Mineflayer's physics plugin keeps on the bot (`physics.js:40-45`).
+  Object.assign(bot, { jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0 });
+  return () => engine.simulatePlayer(new PlayerState(bot, bot.controlState), bot.world).apply(bot);
+}
 
 /** Mineflayer's `PHYSICS_TIMESTEP`: one client tick each 50 ms. */
 const TICK_MS = 50;
@@ -51,16 +68,20 @@ function waitForTicksTimeoutMs(ticks: number): number {
 }
 
 /** Give `bot` its ticks, `look`, `lookAt` and `waitForTicks`, driven by `clock` and the `server`'s position packets. */
-export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeServer): void {
+export function attachFakePhysics(bot: FakeBot, clock: FakeClock, server: FakeServer, simulate = false): void {
   // `shouldUsePhysics` of `physics.js`: off from a mount, a death or a respawn until the next position packet.
   let shouldUsePhysics = true;
   let accumulatedMs = 0;
   let pendingLook: (() => void) | null = null;
   bot.physicsEnabled = true;
+  const step = simulate ? physicsStep(bot) : null;
 
   const tickPhysics = () => {
     if (bot.blockAt(bot.entity.position) == null) return; // `physics.js:82`: the feet's chunk is not loaded
-    if (bot.physicsEnabled && shouldUsePhysics) bot.emit("physicsTick");
+    if (bot.physicsEnabled && shouldUsePhysics) {
+      step?.();
+      bot.emit("physicsTick");
+    }
     if (!shouldUsePhysics) return;
     // `updatePosition`: the look reaches the server with the next position packet, and the look's promise ends.
     if (pendingLook === null) return;

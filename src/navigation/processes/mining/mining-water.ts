@@ -4,7 +4,7 @@ import { waitForWorldAge } from "../../../world/world-age.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { HORIZONTAL, sourceFeeding, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
-import { holdWaterPosition } from "../../steering/hold-water-position.js";
+import { holdWaterPosition, stanceFloorAt } from "../../steering/hold-water-position.js";
 import type { BlockPosition } from "../../world/world.js";
 import { liveBlockReader } from "../../mineflayer/world.js";
 import { isWater } from "../../world/block-geometry.js";
@@ -37,7 +37,8 @@ export async function clearMiningWater(
   const wetFaces = () => touching(target).filter(holdsWaterAt);
   const seeds = [...wetFaces(), bot.entity.position.floored()];
   if (!seeds.some(holdsWaterAt)) return null;
-  const release = holdWaterPosition(bot, signal);
+  // Isolating the water from a stance over a solid floor keeps the body on it, where the dig after it is priced.
+  const release = holdWaterPosition(bot, signal, undefined, stanceFloorAt(read, bot.entity.position.floored()));
   const lifetime = signal ?? new AbortController().signal;
   try {
     const sources = new Map<string, Vec3>();

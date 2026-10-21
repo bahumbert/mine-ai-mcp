@@ -406,8 +406,8 @@ export class RouteExecutor {
       operation,
       targets,
       // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
-      // it plans, so a body hovering in water over a solid cell is priced as standing and digs 25 times slower), and the
-      // falling column.
+      // it plans, so a body in water over a solid cell is priced as standing, and one that has not landed when its swing
+      // starts digs 25 times slower), and the falling column.
       deadlineMs: Date.now() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
       invalidated: this.#invalidatedResult,
     });
