@@ -12,7 +12,7 @@ import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { openingRelationLines } from "./prompts.ts";
-import type { RelationEvent, TradeEvent } from "./types.ts";
+import type { ItemCount, RelationEvent, TradeEvent } from "./types.ts";
 
 export interface AgentRelationsDeps {
   readonly persona: Persona;
@@ -116,7 +116,10 @@ export class AgentRelations {
         this.trades.handoffSkipped(h.tradeId);
         return { outcome: "done", detail: "already handed over" };
       }
-      end = handoffOutcome(await runHandoff(context, { ...h, items: left }));
+      const taken: ItemCount[] = [];
+      end = handoffOutcome(await runHandoff(context, { ...h, items: left }, (credit) => taken.push(credit)));
+      // What the partner took counts even when the rest was not taken: the retake gives only what is left.
+      if (taken.length > 0) await this.trades.tookInHandoff(h.tradeId, taken);
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
     }

@@ -4,6 +4,7 @@ import { Body } from "../body.ts";
 import type { SkillContext } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
 import type { Clock } from "../conversation/socialise.ts";
+import type { ItemCount } from "./types.ts";
 import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, runHandoff, type AwaitOptions } from "./handoff.ts";
 
 function contextFor(runtime: FakeRuntime): SkillContext {
@@ -155,4 +156,85 @@ test("an await stopped mid-wait is dropped, not failed", async () => {
   const result = await awaitTheirSide({ ...contextFor(runtime), signal: abort.signal }, "Theo", { ...w.options, clock });
   assert.equal(handoffOutcome(result).outcome, "dropped");
   assert.equal(w.state.polls, 3, "no poll after the stop");
+});
+
+const tossed = (item: string, dropped: number, collectedCount: number) =>
+  ({ status: "succeeded", error: null, dropped: [{ item, dropped }], recipient: { collected: collectedCount >= dropped, collectedCount } }) as const;
+const picksUp = (runtime: FakeRuntime): unknown[] => runtime.submitted.filter((call) => call.tool === "pick_up_items").map((call) => call.input);
+
+test("a toss the partner did not take is picked back up and the hand-off is dropped, naming what was not taken (s1d, bug A)", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
+  const taken: ItemCount[] = [];
+  const result = await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit));
+  const ended = handoffOutcome(result);
+  assert.equal(ended.outcome, "dropped");
+  assert.equal(ended.detail, "Theo did not take 4 oak_log");
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", radius: 16 }]);
+  assert.deepEqual(taken, [], "nothing taken, nothing credited");
+});
+
+test("a partial take credits what was taken and picks the rest back up", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push(tossed("bread", 5, 3));
+  const taken: ItemCount[] = [];
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "bread", count: 5 }] }, (credit) => taken.push(credit)));
+  assert.equal(ended.outcome, "dropped");
+  assert.equal(ended.detail, "Theo did not take 2 bread");
+  assert.deepEqual(taken, [{ item: "bread", count: 3 }]);
+  assert.equal(picksUp(runtime).length, 1);
+});
+
+test("a hand-off with a second entry still gives it after a first that was taken, and stops at the first not taken", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push(tossed("bread", 5, 5), tossed("oak_log", 2, 0));
+  const taken: ItemCount[] = [];
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "bread", count: 5 }, { item: "oak_log", count: 2 }] }, (credit) => taken.push(credit)));
+  assert.equal(ended.outcome, "dropped");
+  assert.deepEqual(taken, [{ item: "bread", count: 5 }]);
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", radius: 16 }], "only the untaken item is picked up");
+});
+
+test("a toss lying at the feet is not 'taken' even when someone else took it: only the recipient's count counts", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "oak_log", dropped: 4 }], recipient: { collected: false, collectedCount: 0 } });
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }));
+  assert.equal(ended.outcome, "dropped");
+});
+
+test("the pick-back-up finding nothing still ends the hand-off dropped", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
+  runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }));
+  assert.equal(ended.outcome, "dropped");
+  assert.match(ended.detail, /did not take 4 oak_log/u);
+});
+
+test("a cancel during the toss is stopped, nothing is picked up or credited", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const abort = new AbortController();
+  runtime.dropOutcomes.push({ ...tossed("oak_log", 4, 0), effect: () => abort.abort() });
+  const taken: ItemCount[] = [];
+  const result = await runHandoff({ ...contextFor(runtime), signal: abort.signal }, { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit));
+  assert.equal(handoffOutcome(result).outcome, "dropped");
+  assert.equal(handoffOutcome(result).detail, "stopped");
+  assert.deepEqual(picksUp(runtime), []);
+  assert.deepEqual(taken, []);
+});
+
+test("a runtime that reports no recipient counts the give as taken, as before", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "oak_log", dropped: 4 }] });
+  const taken: ItemCount[] = [];
+  const result = await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit));
+  assert.equal(handoffOutcome(result).outcome, "done");
+  assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
 });

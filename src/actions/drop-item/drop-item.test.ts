@@ -590,3 +590,19 @@ test("hand-over: the aim height makes the toss land at the recipient's feet, fro
   assert.ok(tossAimHeight(0.5) < tossAimHeight(1) && tossAimHeight(1) < tossAimHeight(2), "the farther they are, the higher the aim");
   assert.equal(tossAimHeight(6), PLAYER_EYE_HEIGHT, "beyond the toss reach the aim is level");
 });
+
+test("hand-over: a toss nobody took is no deliberate discard any more, so pick_up_items can take it back (F6, trade s1d)", async () => {
+  const { bot } = handOver();
+  const discarded = createDiscardedItems();
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 100 }), discarded);
+  assert.equal(result.drop.recipient?.collected, false);
+  assert.equal(discarded.ignored().size, 0);
+});
+
+test("hand-over: a toss the recipient took stays a remembered discard", async () => {
+  const { bot } = handOver({ collects: { by: "recipient", afterMs: 40 } });
+  const discarded = createDiscardedItems();
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWaitMs: 1_000 }), discarded);
+  assert.equal(result.drop.recipient?.collected, true);
+  assert.ok(discarded.ignored().size > 0);
+});

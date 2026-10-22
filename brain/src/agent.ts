@@ -887,7 +887,11 @@ export class Agent {
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     // A give made by any objective but the trade's own hand-off still counts for the trade with that player (B1).
-    if (decision.step.skill === "give_item" && record.outcome === "done" && work.objective.handoff === undefined) this.relations?.gaveOutside(decision.step.player, decision.step.item, decision.step.count);
+    if (decision.step.skill === "give_item" && record.outcome === "done" && work.objective.handoff === undefined) {
+      // Only what the partner took counts; a toss left at their feet is not a give (s1d, F6).
+      const taken = result.status === "done" ? result.taken ?? decision.step.count : 0;
+      if (taken > 0) this.relations?.gaveOutside(decision.step.player, decision.step.item, taken);
+    }
     if (work.steps.length > STEP_MEMORY) {
       work.steps.splice(0, work.steps.length - STEP_MEMORY);
       work.carried.splice(0, work.carried.length - STEP_MEMORY);

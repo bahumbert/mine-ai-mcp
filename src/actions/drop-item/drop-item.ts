@@ -473,6 +473,8 @@ export async function dropItem(
   if (handoverWatch && recipient) {
     const handover = await handoverWatch;
     recipient = { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount };
+    // What the recipient left lying was a hand-over that failed, not a deliberate discard: its owner may pick it up again.
+    if (!handover.recipientTookAll) discarded.forget(tossedIds);
   }
 
   // Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six

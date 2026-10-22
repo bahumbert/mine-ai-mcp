@@ -7,8 +7,9 @@ import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { RelationBook } from "./book.ts";
 import { TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
-import { newRelation } from "./record.ts";
-import type { ItemCount, RelationEvent, TradeEvent, TradeSettings } from "./types.ts";
+import { newRelation, withTrade } from "./record.ts";
+import { proposeTrade } from "./trade.ts";
+import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from "./types.ts";
 
 const MIN = 60_000;
 const t0 = 1_000_000;
@@ -638,4 +639,97 @@ test("a wait that ended failed on its bound is not taken again; the trade is can
   assert.equal(theirTrade(h).state, "cancelled");
   assert.equal(h.c.awaits(id), false);
   assert.deepEqual(kinds(h), [], "no give either");
+});
+
+const empty = (): BotSnapshot => snapshot({ inventory: [] });
+
+test("a hand-off's taken part counts toward my side: the rest stays due (F6)", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  const id = theirTrade(h).id;
+  await h.c.tookInHandoff(id, bread(2));
+  assert.deepEqual(h.c.leftToGive(id), bread(3));
+  assert.equal(theirTrade(h).gaveAt, null, "not given until the hand-off ends done");
+});
+
+test("a give the partner took before my proposal, inside the window, is credited: agreed means gave at once, with no hand-off (s1d, bug B)", async () => {
+  const h = harness();
+  await h.c.gaveOutside("Theo", "bread", 5);
+  h.state.now += 5 * MIN;
+  await h.c.onDecision(decision({ action: "propose", first: "me" }), "Theo", empty());
+  assert.equal(theirTrade(h).state, "proposed");
+  await h.c.onDecision(decision({ first: "me" }), "Theo", empty());
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.deepEqual(h.handoffs, [], "nothing left to hand over");
+});
+
+test("a give 11 minutes before the proposal is a gift: not credited", async () => {
+  const h = harness();
+  await h.c.gaveOutside("Theo", "bread", 5);
+  h.state.now += 11 * MIN;
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), bread(5));
+  assert.deepEqual(kinds(h), ["give"]);
+});
+
+test("an earlier give of more than the side is credited up to the side", async () => {
+  const h = harness();
+  await h.c.gaveOutside("Theo", "bread", 9);
+  await h.c.onDecision(decision({ first: "me" }), "Theo", empty());
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.deepEqual(theirTrade(h).give, bread(5));
+});
+
+test("an earlier give is consumed by the first trade: a second trade with the partner is not credited by it", async () => {
+  const h = harness();
+  await h.c.gaveOutside("Theo", "bread", 5);
+  await h.c.onDecision(decision({ first: "me" }), "Theo", empty());
+  await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Theo", empty());
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  assert.equal(theirTrade(h).state, "agreed", "the same items are not credited twice");
+});
+
+test("a give while my trade is proposed is credited and the trade stays proposed; accepting it is gave at once (s1d, bug B)", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose", first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(theirTrade(h).state, "proposed");
+  assert.equal(h.c.checkDecision(decision({ first: "me" }), "Theo", empty()), null, "the carry check counts the credited give as carried");
+  await h.c.onDecision(decision({ first: "me" }), "Theo", empty());
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.deepEqual(h.handoffs, []);
+});
+
+test("a proposed trade that is declined drops its credit: the items were a gift for a later trade", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose", first: "me" }), "Theo", snapshot());
+  await h.c.gaveOutside("Theo", "bread", 5);
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", snapshot());
+  assert.match(h.c.checkDecision(decision({ first: "me" }), "Theo", empty()) ?? "", /carry 0 bread/u, "no credit left to count as carried");
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), bread(5));
+});
+
+test("two open trades with one partner: the oldest is credited first", async () => {
+  const h = harness();
+  const mk = (id: string, createdAt: number): Trade => ({ ...proposeTrade({ self: "Ayla", partner: "Theo", give: bread(5), get: ingots(5), first: "me", now: createdAt }), id });
+  await h.book.update("Theo", (r) => withTrade(withTrade(r, mk("t-new", t0 + 10)), mk("t-old", t0)));
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.deepEqual(h.c.leftToGive("t-old"), [], "the oldest took it");
+  assert.deepEqual(h.c.leftToGive("t-new"), bread(5));
+});
+
+test("an agreed trade whose side was given before is gave at once and done when their side arrives", async () => {
+  const h = harness();
+  await h.c.gaveOutside("Theo", "bread", 5);
+  const before = empty();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  assert.equal(theirTrade(h).state, "i_gave");
+  assert.deepEqual(h.handoffs, []);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(before, 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "done");
 });

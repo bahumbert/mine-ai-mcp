@@ -1994,3 +1994,61 @@ test("a refusal older than 10 minutes, or a miss that is not yet a refusal, leav
   await until(() => missed.planner.requests.length >= 2, 4_000);
   assert.match(JSON.stringify(missed.planner.requests[1]), /trading items with someone/u);
 });
+
+test("a hand-off the partner did not take is retaken and done once the partner takes it (s1d, bug A)", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.dropOutcomes.push(
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 0 } },
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: true, collectedCount: 5 } },
+  );
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
+  await sleep(200);
+  assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "agreed", "not taken: the trade is still due, no gave row");
+  offset = 31_000;
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "drop_item").length, 2);
+  clock.mock.restore();
+});
+
+test("a partly taken hand-off credits the taken part: the retake gives only what is left", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.dropOutcomes.push(
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 2 } },
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 3 }], recipient: { collected: true, collectedCount: 3 } },
+  );
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
+  await sleep(200);
+  offset = 31_000;
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
+  const counts = runtime.submitted.filter((call) => call.tool === "drop_item").map((call) => (call.input.items as { count: number }[])[0]?.count);
+  assert.deepEqual(counts, [5, 3]);
+  clock.mock.restore();
+});
+
+test("an outside give_item the partner did not pick up is not counted toward the trade (s1d, bug A)", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 0 } });
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } }, { say: "Sure.", route: "act", request: "give Theo 5 bread" });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 5 } }, { done: "left it" });
+  await agent.handle(say("Steve", "Ayla, give Theo 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await sleep(300);
+  assert.equal(inside.relations.book.trades()[0]?.gaveAt, null, "left at the feet, never taken: not a give");
+  assert.deepEqual(inside.relations.trades.leftToGive(inside.relations.book.trades()[0]!.id), [{ item: "bread", count: 5 }]);
+});

@@ -65,3 +65,10 @@ test("findNewItemEntity skips ids the bot discarded on purpose", () => {
     "everything discarded means nothing to sweep",
   );
 });
+
+test("forget lets go of ids at once and ignores ones never remembered", () => {
+  const discarded = createDiscardedItems(1_000);
+  discarded.remember([7, 9], 0);
+  discarded.forget([7, 99]);
+  assert.deepEqual([...discarded.ignored(500)], [9]);
+});

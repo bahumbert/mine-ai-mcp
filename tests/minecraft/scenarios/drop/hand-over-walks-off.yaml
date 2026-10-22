@@ -1,0 +1,35 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-walks-off
+tags: [regression]
+description: >-
+  F6 (trade s1d, 2026-10-22): the recipient walked off while the giver tossed three logs; the hand-over was counted as
+  given though nobody took it. The toss must report that nothing was picked up (so the trade stays due) and the giver
+  must be able to pick its own logs back up and end holding all three.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [0.5, -60, 2.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over-walks-off.ts]
+params: { giver: Giver, receiver: Receiver, item_name: oak_log, count: 3, walk_to: { x: 0, y: -60, z: 12 } }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Giver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

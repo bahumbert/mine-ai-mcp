@@ -6,6 +6,8 @@ export const DISCARD_MEMORY_MS = 5 * 60 * 1_000;
 export interface DiscardedItems {
   /** Remember item entity ids the bot dropped deliberately. */
   remember(entityIds: Iterable<number>, now?: number): void;
+  /** Let go of ids that were not discarded after all (a hand-over nobody took): they may be picked up again. */
+  forget(entityIds: Iterable<number>): void;
   /** Ids still considered deliberate discards, for use as a pickup exclusion set. */
   ignored(now?: number): ReadonlySet<number>;
 }
@@ -21,6 +23,9 @@ export function createDiscardedItems(memoryMs: number = DISCARD_MEMORY_MS): Disc
     remember(entityIds, now = Date.now()) {
       prune(now);
       for (const id of entityIds) expiries.set(id, now + memoryMs);
+    },
+    forget(entityIds) {
+      for (const id of entityIds) expiries.delete(id);
     },
     ignored(now = Date.now()) {
       prune(now);

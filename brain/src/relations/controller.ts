@@ -17,6 +17,8 @@ const COLLECT_WATCH_MS = 5_000;
 const JUDGE_WAIT_MS = 120_000;
 /** A hand-off dropped by a shelter or a stop is taken again after this long. */
 const RETAKE_AFTER_MS = 30_000;
+/** A give the partner took with no trade of mine to match stays creditable to a trade proposed within this long. */
+const EARLIER_GIVE_MS = 10 * 60_000;
 /** A payment picked up within this long after the partner was last near is still theirs. */
 const RECENT_NEAR_MS = 30_000;
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
@@ -67,6 +69,8 @@ export class TradeController {
   private readonly watches = new Map<string, number>();
   /** Trade id -> item -> count of my side given by a `give_item` outside the hand-off (memory only: a restart loses it). */
   private readonly givenOutside = new Map<string, Map<string, number>>();
+  /** Gives a partner took with no open trade to match, kept 10 min for the next trade with them (memory only: a restart loses it). */
+  private earlierGives: { partner: string; item: string; count: number; at: number }[] = [];
   private readonly collected = new Set<string>();
   private readonly nobodyGave = new Set<string>();
   private readonly judging: PendingJudgment[] = [];
@@ -77,7 +81,7 @@ export class TradeController {
 
   /** Null when a propose or accept can become a trade, else the reason that is sent back to the chat tier once. */
   checkDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): string | null {
-    return checkTradeDecision({ decision: d, speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades });
+    return checkTradeDecision({ decision: d, speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, givenOutside: this.creditedTo(speaker) });
   }
 
   /** The chat decision's trade: a proposal, an agreement (the give starts when I go first) or an end. Answers the id of the trade it proposed or agreed, else null. */
@@ -95,11 +99,14 @@ export class TradeController {
         }
         const proposed = proposeTrade(deal);
         await this.record(proposed, "proposed");
+        this.claimEarlierGives(proposed, now);
         return proposed.id;
       }
       if (d.action === "accept") {
         const agreed = agreeTrade(mine?.state === "proposed" ? mine : null, deal);
         await this.record(agreed, "agreed");
+        this.claimEarlierGives(agreed, now);
+        if (await this.giveIfCovered(agreed, speaker)) return agreed.id;
         if (this.isGiveDue(agreed, now, null)) this.takeGive(agreed);
         return agreed.id;
       }
@@ -108,19 +115,58 @@ export class TradeController {
     });
   }
 
-  /** A `give_item` that ended done outside the trade's hand-off counts toward my side of the open trade with that partner (capped at what is lacking); the side covered, the trade is given. */
+  /** A `give_item` the partner took, outside the trade's hand-off, counts toward my side of the oldest open trade with them whose side has the item (a proposed one too; capped at what is lacking); the side covered and agreed, the trade is given. */
   gaveOutside(partner: string, item: string, count: number): Promise<void> {
     return this.exclusive(async () => {
-      const trade = this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner) && (t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null && t.give.some((g) => g.item === item));
-      if (trade === undefined) return void this.deps.log(`trade: ${count} ${item} given to ${partner} outside a hand-off matches no open trade of mine; not counted`);
-      const given = this.givenOutside.get(trade.id) ?? new Map<string, number>();
-      const wanted = trade.give.find((g) => g.item === item)!.count;
-      given.set(item, Math.min(wanted, (given.get(item) ?? 0) + Math.max(0, count)));
-      this.givenOutside.set(trade.id, given);
-      if ((this.leftToGiveOf(trade) ?? []).length > 0) return;
-      this.givenOutside.delete(trade.id);
-      const gave = markGave(trade, this.deps.now());
-      await this.record({ ...gave, note: gave.note === "" ? `gave ${sideText(trade.give)} to ${partner}, outside the hand-off` : gave.note }, "gave", ...(gave.state === "done" ? (["done"] as const) : []));
+      const trade = this.deps.book.trades().filter((t) => isOpen(t) && same(t.partner, partner) && (t.state === "proposed" || t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null && t.give.some((g) => g.item === item))
+        .sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (trade === undefined) {
+        this.earlierGives.push({ partner: partner.toLowerCase(), item, count, at: this.deps.now() });
+        return void this.deps.log(`trade: ${count} ${item} given to ${partner} outside a hand-off matches no open trade of mine; not counted yet, kept for a trade proposed within ${EARLIER_GIVE_MS / 60_000} min`);
+      }
+      this.creditGiven(trade, item, count);
+      await this.giveIfCovered(trade, partner);
+    });
+  }
+
+  /** My side was all given before it was due: the trade is given at once (done when they gave too), with no hand-off. Proposed trades wait for the agreement. */
+  private async giveIfCovered(trade: Trade, partner: string): Promise<boolean> {
+    const due = trade.state === "agreed" || trade.state === "they_gave";
+    if (!due || trade.give.length === 0 || (this.leftToGiveOf(trade) ?? []).length > 0) return false;
+    this.givenOutside.delete(trade.id);
+    const gave = markGave(trade, this.deps.now());
+    await this.record({ ...gave, note: gave.note === "" ? `gave ${sideText(trade.give)} to ${partner}, outside the hand-off` : gave.note }, "gave", ...(gave.state === "done" ? (["done"] as const) : []));
+    return true;
+  }
+
+  /** What of my side the partner already took, per item: the credit of their open trade and the earlier gives still inside the window. */
+  private creditedTo(partner: string): ReadonlyMap<string, number> {
+    const credited = new Map<string, number>();
+    const trade = this.openWith(partner);
+    for (const [item, count] of trade === undefined ? [] : this.givenOutside.get(trade.id) ?? []) credited.set(item, count);
+    if (trade === undefined || trade.state === "proposed") {
+      const now = this.deps.now();
+      for (const e of this.earlierGives) if (same(e.partner, partner) && now - e.at <= EARLIER_GIVE_MS) credited.set(e.item, (credited.get(e.item) ?? 0) + e.count);
+    }
+    return credited;
+  }
+
+  /** A trade just made takes the partner's earlier gives still inside the window, once (capped at its side). */
+  private claimEarlierGives(trade: Trade, now: number): void {
+    this.earlierGives = this.earlierGives.filter((e) => now - e.at <= EARLIER_GIVE_MS);
+    for (const e of [...this.earlierGives]) {
+      if (!same(e.partner, trade.partner) || !trade.give.some((g) => g.item === e.item)) continue;
+      this.creditGiven(trade, e.item, e.count);
+      this.earlierGives.splice(this.earlierGives.indexOf(e), 1);
+    }
+  }
+
+  /** A hand-off's give was partly or fully taken: what the partner took counts toward my side, so a retake gives only what is left. */
+  tookInHandoff(tradeId: string, taken: readonly ItemCount[]): Promise<void> {
+    return this.exclusive(async () => {
+      const trade = this.find(tradeId);
+      if (trade === undefined || !isOpen(trade) || trade.gaveAt !== null) return;
+      for (const { item, count } of taken) this.creditGiven(trade, item, count);
     });
   }
 
@@ -147,6 +193,14 @@ export class TradeController {
     if (outcome !== "dropped") return;
     this.awaited.delete(tradeId);
     this.droppedAt.set(awaitKey(tradeId), this.deps.now());
+  }
+
+  /** Adds items the partner took to what is credited for the trade, capped at the side. */
+  private creditGiven(trade: Trade, item: string, count: number): void {
+    const wanted = trade.give.find((g) => g.item === item)?.count ?? 0;
+    const given = this.givenOutside.get(trade.id) ?? new Map<string, number>();
+    given.set(item, Math.min(wanted, (given.get(item) ?? 0) + Math.max(0, count)));
+    this.givenOutside.set(trade.id, given);
   }
 
   private leftToGiveOf(t: Trade): ItemCount[] | null {
@@ -286,6 +340,7 @@ export class TradeController {
     if (!ended) return;
     this.nobodyGave.delete(trade.id);
     this.watches.delete(trade.id);
+    this.givenOutside.delete(trade.id);
     // A cancelled trade moved nothing: there is nothing to judge.
     if (trade.state !== "cancelled") this.judging.push({ partner: trade.partner, trade, since: this.deps.now() });
   }

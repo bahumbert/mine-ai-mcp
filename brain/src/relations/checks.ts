@@ -15,6 +15,8 @@ export interface CheckInput {
   readonly snapshot: BotSnapshot;
   readonly trades: readonly Trade[];
   readonly maxOpenTrades: number;
+  /** Items of my side the partner already took (a give outside a hand-off), per item: they count as carried. */
+  readonly givenOutside?: ReadonlyMap<string, number>;
 }
 
 const carriedOf = (inventory: BotSnapshot["inventory"], item: string): number => inventory.filter((s) => s.name === item).reduce((sum, s) => sum + s.count, 0);
@@ -27,7 +29,7 @@ function promisedOf(trades: readonly Trade[], item: string, except: string | und
 
 function whatIsWrongWithMySide(i: CheckInput, answered: Trade | undefined): string | null {
   for (const { item, count } of i.decision.give) {
-    const carried = carriedOf(i.snapshot.inventory, item);
+    const carried = carriedOf(i.snapshot.inventory, item) + (i.givenOutside?.get(item) ?? 0);
     const promised = promisedOf(i.trades, item, answered?.id);
     if (carried - promised < count) {
       return `you carry ${carried} ${item}${promised > 0 ? `, ${promised} of them promised in other trades` : ""}, not ${count}`;

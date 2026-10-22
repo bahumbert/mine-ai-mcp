@@ -106,7 +106,8 @@ export interface UnfinishedHouse {
 }
 
 export type SkillResult =
-  | { readonly status: "done"; readonly detail: string }
+  /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */
+  | { readonly status: "done"; readonly detail: string; readonly taken?: number }
   | { readonly status: "failed"; readonly detail: string }
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
@@ -356,12 +357,25 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
+  const { result, taken } = await giveTo(context, player, item, count);
+  return result.status === "done" && taken !== null ? { ...result, taken } : result;
+}
+
+/** A hand-over to a player: how it went, and how many of the items the recipient took (null when the runtime says nothing of a recipient). */
+export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null }> {
   const approach = await come(context, player);
-  if (approach.status !== "done") return approach;
+  if (approach.status !== "done") return { result: approach, taken: null };
   const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
-  if (context.signal.aborted) return { status: "stopped" };
-  if (outcome.status !== "succeeded") return { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` };
-  return { status: "done", detail: handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}` };
+  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null };
+  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null };
+  const detail = handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}`;
+  return { result: { status: "done", detail }, taken: recipientTook(outcome.result) };
+}
+
+/** How many items the recipient picked up (the action's `drop.recipient.collectedCount`); null when the result names no recipient. */
+function recipientTook(result: Readonly<Record<string, unknown>> | undefined): number | null {
+  const counted = ((result?.drop as { recipient?: { collectedCount?: unknown } | null } | undefined)?.recipient)?.collectedCount;
+  return typeof counted === "number" ? counted : null;
 }
 
 /** Whether the recipient picked the toss up (the action's `drop.recipient.collected`); null when the result says nothing. */
