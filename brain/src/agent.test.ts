@@ -1955,6 +1955,36 @@ test("a trading objective that ends refused is not asked again: the next goal ca
   assert.doesNotMatch(situation, /feel most like.*trading|trade for iron_ingot/u);
 });
 
+test("F7: a trading objective naming only carried items asks Theo for the need instead of failing 'already carry'", async (t) => {
+  const { events, agent, action, planner, chat } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo to trade me 1 bread for some of my bread", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the routine ran: no work-tier call");
+  assert.ok(!events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry/u.test(event.detail ?? "")));
+  assert.ok((agent as unknown as { asks: TradeAsks }).asks.needs.current(Date.now(), []).includes("iron_ingot"));
+});
+
+test("F7: a second trading objective that fails before any ask pauses trading: the next goal call draws none though a need is set, until a new need", async (t) => {
+  const { events, agent, planner } = await failedIronObjective(t);
+  const asks = (agent as unknown as { asks: TradeAsks }).asks;
+  await until(() => planner.requests.length >= 2, 4_000);
+  asks.failedFast(Date.now() - 60_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u, "one fast failure: trading is still drawn");
+  // The need is gone when the objective is planned (the memory ran out): "already carry bread" fails at once.
+  asks.needs.drop("iron_ingot");
+  planner.reply({ objective: "ask Theo to trade me bread", for: "trading" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry bread/u.test(event.detail ?? "")), 4_000);
+  await until(() => planner.requests.length >= 3, 4_000);
+  assert.equal(asks.paused(Date.now()), true);
+  asks.needs.set(["iron_ingot"], Date.now());
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 4, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[3]), /trading items with someone|trade for/u, "paused: no trading though a need is set");
+  asks.failed(["bucket"], [], Date.now());
+  assert.equal(asks.paused(Date.now()), false, "a new need ends the pause");
+});
+
 test("an order during a trading objective aborts the routine and runs", async (t) => {
   const { agent, chat, action, planner } = await failedIronObjective(t);
   planner.reply({ objective: "trade Theo for iron ingots", for: "trading" });

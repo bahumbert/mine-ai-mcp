@@ -11,6 +11,10 @@ import type { ItemCount } from "./types.ts";
 
 /** A need, and a partner's refusal, are forgotten after this long. */
 const ASK_MEMORY_MS = 10 * 60_000;
+/** Two trading objectives that fail before any ask within this long pause trading for as long. */
+const FAST_FAILURE_WINDOW_MS = 5 * 60_000;
+const FAST_FAILURES_TO_PAUSE = 2;
+const PAUSE_MS = 5 * 60_000;
 const MAX_NEEDS = 3;
 const MAX_OFFER_STACKS = 5;
 /** Longest run of words that makes one item id ("iron ingot" = 2, "white stained glass" = 3). */
@@ -67,6 +71,11 @@ class Needs {
     return this.items.slice(0, MAX_NEEDS);
   }
 
+  /** The same items are set now (a failed objective that wants what is already needed brings nothing new). */
+  sameAs(items: readonly string[]): boolean {
+    return items.length === this.items.length && items.every((item) => this.items.includes(item));
+  }
+
   drop(item: string): void {
     this.items = this.items.filter((kept) => kept !== item);
   }
@@ -107,11 +116,33 @@ class Refusals {
 export class TradeAsks {
   readonly needs = new Needs();
   readonly refused = new Refusals();
+  /** When the trading objectives that failed before any ask failed, within the window only. */
+  private fastFailures: number[] = [];
+  private pausedUntil = -Infinity;
 
-  /** An own objective failed: the items it was out to get and does not carry are what it could trade for. */
+  /** An own objective failed: the items it was out to get and does not carry are what it could trade for; a different need ends the pause. */
   failed(wanted: Iterable<string>, inventory: Inventory, now: number): void {
     const missing = [...wanted].filter((item) => stackSizeOf(item) !== null && !carries(inventory, item));
-    if (missing.length > 0) this.needs.set(missing, now);
+    if (missing.length === 0) return;
+    if (!this.needs.sameAs(missing)) this.resume();
+    this.needs.set(missing, now);
+  }
+
+  /** A trading objective ended failed before any talk ("already carry", "nothing to trade for", "no one to trade with"): two within a few minutes pause trading. */
+  failedFast(now: number): void {
+    this.fastFailures = [...this.fastFailures.filter((at) => now - at <= FAST_FAILURE_WINDOW_MS), now];
+    if (this.fastFailures.length >= FAST_FAILURES_TO_PAUSE) this.pausedUntil = now + PAUSE_MS;
+  }
+
+  /** Trading is not drawn: its objectives keep failing before any ask. */
+  paused(now: number): boolean {
+    return now < this.pausedUntil;
+  }
+
+  /** Ends the pause and forgets the fast failures: a new need, a trade proposed to the bot, a trading objective that reached the talk. */
+  resume(): void {
+    this.fastFailures = [];
+    this.pausedUntil = -Infinity;
   }
 
   /** Removes a need that every one of the given partners refused. */
@@ -134,9 +165,9 @@ export function tradingPartners(partners: readonly string[], asks: TradeAsks, no
   return partners.filter((partner) => !asks.refused.refusedAnything(partner, now));
 }
 
-/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with"). */
+/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with") or its objectives keep failing before any ask. */
 export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number): Activity[] {
-  const hopeless = partners.length > 0 && tradingPartners(partners, asks, now).length === 0;
+  const hopeless = asks.paused(now) || (partners.length > 0 && tradingPartners(partners, asks, now).length === 0);
   return hopeless ? available.filter((activity) => activity !== "trading") : [...available];
 }
 
@@ -150,8 +181,8 @@ export function tradePlan(objective: string, needs: readonly string[], partners:
   // An item the objective names that it carries is what it offers, not what it asks for.
   const mentioned = wantedItems(objective, []);
   const named = mentioned.filter((item) => !carries(snapshot.inventory, item));
-  // Every item it names is already in the bags: it asks for nothing (the needs are another objective's).
-  if (mentioned.length > 0 && named.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
+  // Every item it names is already in the bags: what it carries is the offer, and it asks for the needs.
+  if (mentioned.length > 0 && named.length === 0 && needs.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
   const want = named.length > 0 ? named : [...needs];
   if (want.length === 0) return { failed: "nothing to trade for" };
   const eligible = partners.filter((partner) => !asks.refused.isRefused(partner, want, now));
@@ -196,6 +227,7 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
       talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && NO_TALK.test(talked.detail) ? noTalk(talked) : null;
     let ended = unfinished(await talk(since));
     if (ended !== null) return ended;
+    asks.resume();
     let trade = trades.latestWith(partner, since);
     if (!(trade !== null && AGREED.has(trade.state)) && !talks.askedSince(partner, since)) {
       // The talk was already open (or over) and nothing asked: once more, so a fresh opening carries the ask.

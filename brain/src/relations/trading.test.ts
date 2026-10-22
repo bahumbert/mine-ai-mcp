@@ -5,7 +5,7 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
-import { offerFrom, TradeAsks, tradePlan, tradeRoutine, tradingPartners, wantedItems, withoutRefusedTrading } from "./trading.ts";
+import { offerFrom, TradeAsks, tradePlan, tradeRoutine, tradingPartners, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
 import type { ItemCount, Trade, TradeState } from "./types.ts";
 
 const MIN = 60_000;
@@ -205,7 +205,7 @@ test("tradePlan does not ask for what is carried: the offer named in the objecti
   const snapshot = t.runtime.snapshot;
   const now = Date.now();
   assert.deepEqual(tradePlan("trade my oak logs for iron ingots", [], ["Theo"], t.asks, snapshot, now), { want: ["iron_ingot"], partner: "Theo" });
-  assert.deepEqual(tradePlan("trade my oak logs to Theo", ["bread"], ["Theo"], t.asks, snapshot, now), { failed: "already carry oak_log" }, "only carried items named: nothing to ask for, the needs are another objective's");
+  assert.deepEqual(tradePlan("trade my oak logs to Theo", ["bread"], ["Theo"], t.asks, snapshot, now), { want: ["bread"], partner: "Theo" }, "only carried items named: they are the offer, the needs are what it asks for");
   assert.deepEqual(tradePlan("trade my oak logs to Theo", [], ["Theo"], t.asks, snapshot, now), { failed: "already carry oak_log" });
 });
 
@@ -213,7 +213,8 @@ test("tradePlan fails 'already carry' when the objective names items and the bot
   const t = setup(theoAt(30));
   const snapshot = { ...t.runtime.snapshot, inventory: [stack("iron_ingot", 3), stack("oak_log", 32)] };
   const now = Date.now();
-  assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", ["bread"], ["Theo"], t.asks, snapshot, now), { failed: "already carry iron_ingot, oak_log" }, "the needs are not a fallback");
+  assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", ["bread"], ["Theo"], t.asks, snapshot, now), { want: ["bread"], partner: "Theo" }, "only carried items named: the needs are asked for");
+  assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", [], ["Theo"], t.asks, snapshot, now), { failed: "already carry iron_ingot, oak_log" }, "no needs either: nothing to ask for");
   assert.deepEqual(tradePlan("trade Theo for iron ingots", [], ["Theo"], t.asks, snapshot, now), { failed: "already carry iron_ingot" });
   assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", [], ["Theo"], t.asks, { ...snapshot, inventory: [stack("oak_log", 32)] }, now), { want: ["iron_ingot"], partner: "Theo" }, "partly carried: ask for the rest");
   assert.deepEqual(tradePlan("trade with someone", ["bread"], ["Theo"], t.asks, snapshot, now), { want: ["bread"], partner: "Theo" }, "naming nothing: the needs");
@@ -394,4 +395,65 @@ test("withoutRefusedTrading drops trading only when every partner refused lately
   assert.deepEqual(withoutRefusedTrading(available, ["Theo", "Bruno"], asks, MIN), available, "Bruno did not refuse");
   assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 10 * MIN + 1), available, "forgotten");
   assert.deepEqual(withoutRefusedTrading(available, [], asks, MIN), available, "no partners: availableActivities already decides");
+});
+
+test("tradePlan with only carried items named asks the needs, from a partner not refused for them; every partner refused: no one", () => {
+  const t = setup(theoAt(30));
+  const snapshot = t.runtime.snapshot;
+  const now = Date.now();
+  assert.deepEqual(tradePlan("ask Ayla to trade me 1 oak_log for bread", ["bucket"], ["Theo", "Bruno"], t.asks, { ...snapshot, inventory: [stack("oak_log", 7), stack("bread", 2)] }, now), { want: ["bucket"], partner: "Theo" });
+  t.asks.refused.add("Theo", ["bucket"], now);
+  assert.deepEqual(tradePlan("trade my oak logs", ["bucket"], ["Theo", "Bruno"], t.asks, snapshot, now), { want: ["bucket"], partner: "Bruno" }, "the partner who refused the need is skipped");
+  t.asks.refused.add("Bruno", ["bucket"], now);
+  assert.deepEqual(tradePlan("trade my oak logs", ["bucket"], ["Theo", "Bruno"], t.asks, snapshot, now), { failed: "no one to trade bucket with" });
+  assert.deepEqual(tradePlan("trade my oak logs and a bucket", ["wooden_hoe"], ["Theo"], new TradeAsks(), { ...snapshot, inventory: [stack("oak_log", 3)] }, now), { want: ["bucket"], partner: "Theo" }, "a missing item named: it alone, as before");
+});
+
+test("TradeAsks pauses trading after two fast failures within 5 minutes, for 5 minutes", () => {
+  const available: Activity[] = ["exploring", "trading"];
+  const asks = new TradeAsks();
+  asks.failedFast(0);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, MIN), available, "one fast failure: no pause");
+  asks.failedFast(6 * MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 6 * MIN), available, "two 6 minutes apart: no pause");
+  asks.failedFast(8 * MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 8 * MIN), ["exploring"], "two within 5 minutes: paused");
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 13 * MIN - 1), ["exploring"]);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 13 * MIN + 1), available, "back after 5 minutes");
+});
+
+test("a paused bot draws other activities and trades again once a new need comes", () => {
+  const asks = new TradeAsks();
+  const available: Activity[] = ["exploring", "trading"];
+  asks.failed(["bucket"], [], 0);
+  asks.failedFast(MIN);
+  asks.failedFast(2 * MIN);
+  assert.deepEqual(withTrading(["exploring"], withoutRefusedTrading(available, ["Theo"], asks, 3 * MIN), asks.needs.current(3 * MIN, [])), ["exploring"], "paused: trading is not forced in");
+  asks.failed(["bucket"], [], 3 * MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 3 * MIN), ["exploring"], "the same need again is not a new need");
+  asks.failed(["wheat_seeds"], [], 3 * MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 3 * MIN), available, "a new need ends the pause");
+  assert.deepEqual(withTrading(["exploring"], available, asks.needs.current(3 * MIN, [])), ["exploring", "trading"]);
+  asks.failedFast(4 * MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 4 * MIN), available, "the failures before the new need no longer count");
+});
+
+test("an incoming proposal (resume) ends the pause", () => {
+  const asks = new TradeAsks();
+  const available: Activity[] = ["exploring", "trading"];
+  asks.failedFast(0);
+  asks.failedFast(MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 2 * MIN), ["exploring"]);
+  asks.resume();
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, 2 * MIN), available);
+});
+
+test("a trading objective that reaches the talk ends the pause", async () => {
+  const t = setup(theoAt(30));
+  t.asks.failedFast(0);
+  t.asks.failedFast(1);
+  const available: Activity[] = ["exploring", "trading"];
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], t.asks, 2), ["exploring"]);
+  await leaverRun(t);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], t.asks, 2), available);
 });

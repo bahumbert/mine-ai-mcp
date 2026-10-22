@@ -436,6 +436,8 @@ export class Agent {
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
     const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
+    // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
+    if (tradeId !== null) this.asks.resume();
     if (conversation !== undefined) this.spokeInConversation(decision);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
@@ -971,7 +973,11 @@ export class Agent {
     if (this.talks === null || trades === undefined) return this.finish(work, "failed", "trading is off");
     const snapshot = await this.options.runtime.status();
     const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), this.partners(), this.asks, snapshot, Date.now());
-    if ("failed" in plan) return this.finish(work, "failed", plan.failed);
+    if ("failed" in plan) {
+      // It failed before any ask: after two in a row trading is not drawn for a while.
+      this.asks.failedFast(Date.now());
+      return this.finish(work, "failed", plan.failed);
+    }
     const { want, partner } = plan;
     // What it asks for is what the chat calls of the talk are told it lacks.
     for (const item of want) work.wanted.add(item);
