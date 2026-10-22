@@ -21,6 +21,8 @@ interface Harness {
   readonly c: TradeController;
   readonly book: RelationBook;
   readonly handoffs: Handoff[];
+  /** The wait-for-their-side hand-offs, kept apart from the gives and collects. */
+  readonly awaits: Handoff[];
   readonly events: (TradeEvent | RelationEvent)[];
   readonly logs: string[];
   readonly chat: ReturnType<typeof scriptedMind>["chat"];
@@ -30,6 +32,7 @@ interface Harness {
 function harness(over: { settings?: Partial<TradeSettings> } = {}): Harness {
   const state = { now: t0, slotFree: true, talking: new Set<string>() };
   const handoffs: Handoff[] = [];
+  const awaits: Handoff[] = [];
   const events: (TradeEvent | RelationEvent)[] = [];
   const logs: string[] = [];
   const saved: Memory[] = [];
@@ -37,10 +40,10 @@ function harness(over: { settings?: Partial<TradeSettings> } = {}): Harness {
   const { chat, mind } = scriptedMind();
   const c = new TradeController({
     self: "Ayla", persona: testPersona(), book, mind, settings: { ...settings, ...over.settings }, now: () => state.now,
-    takeHandoff: (h) => handoffs.push(h), modelSlotFree: () => state.slotFree, inConversationWith: (name) => state.talking.has(name),
+    takeHandoff: (h) => (h.kind === "await" ? awaits : handoffs).push(h), modelSlotFree: () => state.slotFree, inConversationWith: (name) => state.talking.has(name),
     journal: (e) => events.push(e), log: (l) => logs.push(l),
   });
-  return { c, book, handoffs, events, logs, chat, state };
+  return { c, book, handoffs, awaits, events, logs, chat, state };
 }
 
 const snapshot = (over: { inventory?: BotSnapshot["inventory"]; theo?: Position | null | "absent"; position?: Position } = {}): BotSnapshot => ({
@@ -457,4 +460,182 @@ test("latestWith: the newest trade with that partner since a time, any case, no 
   assert.deepEqual(h.c.latestWith("bruno", 0)?.give, bread(1), "another partner's trade is its own");
   assert.equal(h.c.latestWith("Zed", 0), null);
   assert.equal(h.book.trades().length, 3, "a read writes nothing");
+});
+
+const withIron = (s: BotSnapshot, count: number): BotSnapshot => ({ ...s, inventory: [...s.inventory, { name: "iron_ingot", count }] });
+
+async function agreedThemFirst(h: Harness, near: BotSnapshot): Promise<void> {
+  await h.c.onDecision(decision({ give: [], get: ingots(5), first: "them" }), "Theo", near);
+  await h.c.tick(near, new Set(), signal);
+}
+
+test("a payment picked up 12 s after the partner was near, out of sight since, is credited (stage 1c)", async () => {
+  const h = harness();
+  const near = snapshot({ theo: { x: 3, y: 64, z: 0 } });
+  await agreedThemFirst(h, near);
+  h.state.now += 2_000;
+  await h.c.tick(near, new Set(), signal);
+  h.state.now += 1_000;
+  const gone = snapshot({ theo: "absent" });
+  await h.c.tick(gone, new Set(), signal);
+  h.state.now += 9_000;
+  await h.c.tick(withIron(gone, 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "done");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("a payment picked up 31 s after the partner was last near is not credited", async () => {
+  const h = harness();
+  const near = snapshot({ theo: { x: 3, y: 64, z: 0 } });
+  await agreedThemFirst(h, near);
+  h.state.now += 1_000;
+  const gone = snapshot({ theo: "absent" });
+  await h.c.tick(gone, new Set(), signal);
+  h.state.now += 31_000;
+  await h.c.tick(withIron(gone, 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(theirTrade(h).received, []);
+});
+
+test("a recently near partner's payment is not credited while my own step yields the item", async () => {
+  const h = harness();
+  const near = snapshot({ theo: { x: 3, y: 64, z: 0 } });
+  await agreedThemFirst(h, near);
+  h.state.now += 1_000;
+  const gone = snapshot({ theo: "absent" });
+  await h.c.tick(gone, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(gone, 5), new Set(["iron_ingot"]), signal);
+  assert.equal(theirTrade(h).state, "agreed");
+});
+
+test("a player who was never within hand-off distance is never remembered as near", async () => {
+  const h = harness();
+  const far = snapshot({ theo: { x: 50, y: 64, z: 0 } });
+  await agreedThemFirst(h, far);
+  h.state.now += 1_000;
+  const gone = snapshot({ theo: "absent" });
+  await h.c.tick(gone, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(gone, 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "agreed");
+});
+
+test("agreed with them first: one await hand-off is taken, a second tick takes none", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  assert.deepEqual(h.awaits, [], "not at the decision: the next tick");
+  await h.c.tick(s, new Set(), signal);
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(h.awaits, [{ kind: "await", tradeId: theirTrade(h).id, partner: "Theo" }]);
+  assert.deepEqual(h.handoffs, [], "the wait is not a give or a collect");
+  assert.equal(h.c.awaits(theirTrade(h).id), true);
+});
+
+test("agreed with me first: no await, the give is due at once", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(h.awaits, []);
+  assert.deepEqual(kinds(h), ["give"]);
+});
+
+test("a trade that owes nothing is not awaited", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ give: bread(5), get: [], first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(h.awaits, []);
+});
+
+test("the payment credited while waiting ends the wait, then the give comes due and is taken", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  const id = theirTrade(h).id;
+  h.state.now += 1_000;
+  await h.c.tick(withIron(s, 3), new Set(), signal);
+  assert.equal(h.c.awaits(id), false, "a part payment ends the wait: the trade is no longer unpaid");
+  h.state.now += 1_000;
+  await h.c.tick(withIron(s, 5), new Set(), signal);
+  assert.equal(h.c.awaits(id), false);
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(kinds(h), ["give"], "the give goes on top of the wait");
+  assert.equal(h.awaits.length, 1);
+});
+
+test("awaits is false for a trade that is gone, cancelled or unknown", async () => {
+  const h = harness();
+  const s = snapshot();
+  assert.equal(h.c.awaits("nope"), false);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  assert.equal(h.c.awaits(theirTrade(h).id), true);
+  await h.c.onDecision(decision({ action: "cancel" }), "Theo", s);
+  assert.equal(h.c.awaits(theirTrade(h).id), false);
+});
+
+test("a collect watch firing during the wait goes on top of it", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  h.c.heardLine("Theo", h.state.now);
+  h.state.now += 6_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 1);
+  assert.deepEqual(kinds(h), ["collect"]);
+  assert.equal(h.c.awaits(theirTrade(h).id), true, "still waiting once the collect is over");
+});
+
+test("a stopped wait is dropped: the trade stays open and the await is taken again after 30 s, not at once", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  const id = theirTrade(h).id;
+  h.c.reconcileHandoffs(new Set());
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 1, "not at once after a stop");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 2);
+  assert.equal(theirTrade(h).id, id);
+  assert.equal(theirTrade(h).state, "agreed");
+});
+
+test("a wait that is still on the stack is not dropped by the reconcile; one dropped through its own end is", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  const id = theirTrade(h).id;
+  h.c.reconcileHandoffs(new Set([`await:${id}`]));
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 1);
+  h.c.awaitEnded(id, "dropped");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 2);
+});
+
+test("a wait that ended failed on its bound is not taken again; the trade is cancelled at the pay-back deadline", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  const id = theirTrade(h).id;
+  h.c.awaitEnded(id, "failed");
+  h.state.now += 4 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 1, "no second wait");
+  assert.equal(h.c.awaits(id), true, "the trade still owes");
+  h.state.now += 7 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.equal(h.c.awaits(id), false);
+  assert.deepEqual(kinds(h), [], "no give either");
 });

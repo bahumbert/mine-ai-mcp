@@ -1,6 +1,7 @@
 // What an agent holds for relations: the book (saved as notes), the trade controller, and the calls the agent makes into them.
 import type { Body } from "../body.ts";
 import type { ConversationRelations } from "../conversation/controller.ts";
+import { realClock, type Clock } from "../conversation/socialise.ts";
 import { memoryNote, relationContextPrefix, relationNotesQuery, type Memory, type Recalled } from "../memory.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
 import type { Persona } from "../persona.ts";
@@ -9,7 +10,7 @@ import type { SkillContext } from "../skills.ts";
 import { RelationBook } from "./book.ts";
 import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
-import { handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
+import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { openingRelationLines } from "./prompts.ts";
 import type { RelationEvent, TradeEvent } from "./types.ts";
 
@@ -26,6 +27,8 @@ export interface AgentRelationsDeps {
   readonly lacks: (inventory?: BotSnapshot["inventory"]) => readonly string[];
   readonly journal: (e: TradeEvent | RelationEvent) => void;
   readonly log: (line: string) => void;
+  /** The wall clock the wait for a partner's payment runs on; the real one unless a test moves it. */
+  readonly clock?: Clock;
 }
 
 export class AgentRelations {
@@ -104,6 +107,7 @@ export class AgentRelations {
 
   /** Runs one hand-off and tells the controller how it ended. */
   async runHandoff(h: Handoff, context: SkillContext): Promise<HandoffEnd> {
+    if (h.kind === "await") return this.awaitPayment(h.tradeId, h.partner, context);
     let end: HandoffEnd;
     try {
       // A give made outside this hand-off (another objective's give_item) counts: only what is left is given.
@@ -118,6 +122,22 @@ export class AgentRelations {
     }
     if (end.outcome === "dropped") this.trades.handoffDropped(h.tradeId);
     else await this.trades.handoffEnded(h.tradeId, end.outcome, end.detail);
+    return end;
+  }
+
+  /** The wait for their side: it ends when their payment is credited, at the bound, or when stopped; it never counts as a give. */
+  private async awaitPayment(tradeId: string, partner: string, context: SkillContext): Promise<HandoffEnd> {
+    const { persona, clock = realClock } = this.deps;
+    let end: HandoffEnd;
+    try {
+      end = handoffOutcome(await awaitTheirSide(context, partner, {
+        stillAwaiting: () => this.trades.awaits(tradeId), clock, maxMs: persona.settings.relations.startMinutes * 60_000, openingDistance: persona.settings.conversation.openingDistance,
+      }));
+    } catch (error) {
+      end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
+    }
+    // A dropped wait may only be set aside below a give or a collect: the controller learns it left the stack from the agent's next look.
+    if (end.outcome !== "dropped") this.trades.awaitEnded(tradeId, end.outcome);
     return end;
   }
 

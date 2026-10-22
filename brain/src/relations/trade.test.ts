@@ -114,7 +114,7 @@ test("a failed give is broken by me, a cancel is cancelled", () => {
 const at = (x: number): Position => ({ x, y: 0, z: 0 });
 const logTrade = (partner: string, now: number): Trade => agreeTrade(null, { self: "Ayla", partner, give: bread, get: [{ item: "oak_log", count: 5 }], first: "me", now });
 const attribute = (o: Partial<Parameters<typeof attributeGains>[0]> & { trades: readonly Trade[] }) => attributeGains({
-  gains: [{ item: "oak_log", count: 5 }], partners: new Map(), previous: new Map(), self: at(0), ownStepYields: new Set(), handoffDistance: 4, ...o,
+  gains: [{ item: "oak_log", count: 5 }], partners: new Map(), previous: new Map(), self: at(0), ownStepYields: new Set(), handoffDistance: 4, recentlyNear: new Set(), ...o,
 });
 
 test("own step yielding the item is not credited", () => {
@@ -164,4 +164,30 @@ test("inventoryGains sums stacks per name and keeps only positive differences", 
   const before = [{ name: "oak_log", count: 10 }, { name: "oak_log", count: 4 }, { name: "bread", count: 5 }];
   const after = [{ name: "oak_log", count: 10 }, { name: "oak_log", count: 9 }, { name: "bread", count: 2 }, { name: "iron_ingot", count: 3 }];
   assert.deepEqual(inventoryGains(before, after), [{ item: "oak_log", count: 5 }, { item: "iron_ingot", count: 3 }]);
+});
+
+test("a partner near within the last 30 s counts as near for a payment picked up after they turned away", () => {
+  const trade = logTrade("Theo", t0);
+  const out = attribute({ trades: [trade], partners: new Map(), previous: new Map(), recentlyNear: new Set(["theo"]) });
+  assert.deepEqual(out.get(trade.id), [{ item: "oak_log", count: 5 }]);
+  assert.equal(attribute({ trades: [trade], partners: new Map(), previous: new Map(), recentlyNear: new Set() }).size, 0, "not near lately: not credited");
+});
+
+test("a recently near partner never gets what my own running step yields", () => {
+  const trade = logTrade("Theo", t0);
+  assert.equal(attribute({ trades: [trade], recentlyNear: new Set(["theo"]), ownStepYields: new Set(["oak_log"]) }).size, 0);
+});
+
+test("two trades owed the same item: the recent partner is credited, the one never near is not", () => {
+  const theo = logTrade("Theo", t0 + 5);
+  const bruno = logTrade("Bruno", t0);
+  const out = attribute({ trades: [bruno, theo], recentlyNear: new Set(["theo"]) });
+  assert.deepEqual([...out.keys()], [theo.id]);
+});
+
+test("a recently near partner ranks as at hand-off distance: after one really near, before nobody", () => {
+  const theo = logTrade("Theo", t0);
+  const bruno = logTrade("Bruno", t0 + 5);
+  const out = attribute({ trades: [theo, bruno], partners: new Map([["Bruno", at(1)]]), recentlyNear: new Set(["theo"]), gains: [{ item: "oak_log", count: 5 }] });
+  assert.deepEqual([...out.keys()], [bruno.id], "Bruno, 1 block away, comes first");
 });

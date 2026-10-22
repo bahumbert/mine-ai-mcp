@@ -1844,6 +1844,44 @@ test("a hand-off already given ends done without a give and the previous objecti
   assert.deepEqual(finished, [["done", "already handed over"]]);
 });
 
+test("an agreed trade where they pay first sets the own objective aside for a wait; the payment ends it, the give follows and the objective resumes", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  await until(() => takenObjectives(events).includes("own: wait for Theo to give their side (trade)"), 4_000);
+  assert.ok(runtime.cancelled.length >= 1, "the own step was aborted for the wait");
+  const finishedWait = () => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("wait for Theo"));
+  assert.equal(finishedWait(), false, "the wait runs while nothing arrives");
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await until(finishedWait, 4_000);
+  const waits = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("wait for Theo") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(waits, [["done", "they gave"]]);
+  await until(() => action.requests.length >= 2, 4_000);
+  assert.match(action.requests.at(-1)?.[1]?.content ?? "", /collect 16 oak_log/u, "the own objective resumes after the wait");
+});
+
+test("a stop during the wait for their side drops it: the trade stays open and the wait is not on the stack", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  await until(() => takenObjectives(events).includes("own: wait for Theo to give their side (trade)"), 4_000);
+  const inside = agent as unknown as { relations: AgentRelations; stack: { objective: { handoff?: Handoff } }[] };
+  chat.reply({ spoken_to: ["Ayla"], asks: "", language: "English", say: "Okay.", route: "stop", request: "" });
+  await agent.handle(say("Theo", "Ayla, stop that"));
+  await until(() => inside.stack.every((work) => work.objective.handoff === undefined), 4_000);
+  assert.equal(inside.relations.book.trades()[0]?.state, "agreed", "the trade stays open");
+  assert.equal(inside.relations.trades.awaits(inside.relations.book.trades()[0]!.id), true);
+});
+
 /** Ayla (bread, Theo 2 blocks away) whose own `get_items` for 3 iron_ingot ends failed: the goal tier is asked again with trading in reach. */
 async function failedIronObjective(t: Parameters<typeof agentFor>[0], extra: Partial<AgentOptions> = {}) {
   // Theo is out of the opening distance: no chance opening takes the talk before the routine does.

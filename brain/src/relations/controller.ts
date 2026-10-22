@@ -5,7 +5,7 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { RelationBook } from "./book.ts";
 import { checkTradeDecision } from "./checks.ts";
-import { COLLECT_RADIUS, type Handoff } from "./handoff.ts";
+import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
 import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, proposeTrade, settleTrade } from "./trade.ts";
@@ -17,6 +17,8 @@ const COLLECT_WATCH_MS = 5_000;
 const JUDGE_WAIT_MS = 120_000;
 /** A hand-off dropped by a shelter or a stop is taken again after this long. */
 const RETAKE_AFTER_MS = 30_000;
+/** A payment picked up within this long after the partner was last near is still theirs. */
+const RECENT_NEAR_MS = 30_000;
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
 const GIVE_ATTEMPTS = 2;
 
@@ -55,6 +57,12 @@ export class TradeController {
   private readonly pending = new Map<string, "give" | "collect">();
   private readonly giveFailures = new Map<string, number>();
   private readonly droppedAt = new Map<string, number>();
+  /** Trades whose wait for their side was taken and not dropped (a wait that ended is not taken again). */
+  private readonly awaited = new Set<string>();
+  /** Trades whose wait is on the agent's stack now. */
+  private readonly awaiting = new Set<string>();
+  /** Partner (lower case) -> the wall-clock time they were last within hand-off distance of me. */
+  private readonly nearAt = new Map<string, number>();
   /** Trade id -> when the partner's line started the wait for their payment. */
   private readonly watches = new Map<string, number>();
   /** Trade id -> item -> count of my side given by a `give_item` outside the hand-off (memory only: a restart loses it). */
@@ -127,6 +135,20 @@ export class TradeController {
     this.pending.delete(tradeId);
   }
 
+  /** Whether their payment is still to come for a trade: it is agreed and nothing came yet (the wait for their side ends otherwise). */
+  awaits(tradeId: string): boolean {
+    const trade = this.find(tradeId);
+    return trade !== undefined && trade.state === "agreed" && trade.received.length === 0 && owedItems(trade).length > 0;
+  }
+
+  /** A wait for their side ended: dropped (a stop, a shelter) it is taken again after a while; any other end is final. */
+  awaitEnded(tradeId: string, outcome: HandoffEnd["outcome"]): void {
+    this.awaiting.delete(tradeId);
+    if (outcome !== "dropped") return;
+    this.awaited.delete(tradeId);
+    this.droppedAt.set(awaitKey(tradeId), this.deps.now());
+  }
+
   private leftToGiveOf(t: Trade): ItemCount[] | null {
     if (!isOpen(t) || t.gaveAt !== null) return null;
     const given = this.givenOutside.get(t.id);
@@ -149,6 +171,7 @@ export class TradeController {
       this.partners = new Map(snapshot.players.map((p) => [p.username, p.position]));
       this.previous = { inventory: snapshot.inventory, partners: this.partners };
       this.position = snapshot.position;
+      this.noteNear(snapshot, now);
       if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now);
       await this.settleOpen(now);
       this.startCollects(now);
@@ -192,6 +215,7 @@ export class TradeController {
   /** The agent says which hand-offs are on its stack: one asked for and gone from it (a stop cleared it) is dropped. */
   reconcileHandoffs(onStack: ReadonlySet<string>): void {
     for (const id of [...this.pending.keys()]) if (!onStack.has(id)) this.handoffDropped(id);
+    for (const id of [...this.awaiting]) if (!onStack.has(awaitKey(id))) this.awaitEnded(id, "dropped");
   }
 
   /** A hand-off was dropped (a night shelter, a stop): the trade stays due and the give is taken again after a while. */
@@ -275,7 +299,7 @@ export class TradeController {
     const partners = new Map(this.partners);
     for (const t of collecting) partners.set(t.partner, snapshot.position);
     const mined = new Set([...ownStepYields].filter((item) => !collecting.some((t) => t.get.some((g) => g.item === item))));
-    const credited = attributeGains({ gains, trades, partners, previous: previous.partners, self: snapshot.position, ownStepYields: mined, handoffDistance: this.deps.settings.handoffDistance });
+    const credited = attributeGains({ gains, trades, partners, previous: previous.partners, self: snapshot.position, ownStepYields: mined, handoffDistance: this.deps.settings.handoffDistance, recentlyNear: this.recentlyNear(now) });
     for (const [id, items] of credited) {
       const trade = trades.find((t) => t.id === id);
       if (trade === undefined) continue;
@@ -286,6 +310,18 @@ export class TradeController {
     }
   }
 
+  /** Remembers who stands within hand-off distance now; the ones not near for a while are forgotten. */
+  private noteNear(snapshot: BotSnapshot, now: number): void {
+    for (const p of snapshot.players) {
+      if (p.position !== null && manhattan(snapshot.position, p.position) <= this.deps.settings.handoffDistance) this.nearAt.set(p.username.toLowerCase(), now);
+    }
+    for (const [name, at] of this.nearAt) if (now - at > RECENT_NEAR_MS) this.nearAt.delete(name);
+  }
+
+  private recentlyNear(now: number): ReadonlySet<string> {
+    return new Set([...this.nearAt].filter(([, at]) => now - at <= RECENT_NEAR_MS).map(([name]) => name));
+  }
+
   /** Runs every open trade's clock; a state the clock changed is saved, and a give that came due is handed to the agent. */
   private async settleOpen(now: number): Promise<void> {
     for (const trade of this.deps.book.trades().filter(isOpen)) {
@@ -294,7 +330,22 @@ export class TradeController {
       else this.nobodyGave.delete(trade.id);
       if (settled.trade.state !== trade.state) await this.record(settled.trade, EVENT_OF_STATE[settled.trade.state] ?? "gave");
       if (isOpen(settled.trade) && this.isGiveDue(settled.trade, now, this.position)) this.takeGive(settled.trade);
+      if (isOpen(settled.trade) && this.isAwaitDue(settled.trade, now)) this.takeAwait(settled.trade);
     }
+  }
+
+  /** They are to pay first and nothing came: wait near them, once (a dropped wait after a while). */
+  private isAwaitDue(t: Trade, now: number): boolean {
+    if (t.state !== "agreed" || t.first !== "them" || owedItems(t).length === 0 || this.awaited.has(t.id)) return false;
+    const dropped = this.droppedAt.get(awaitKey(t.id));
+    return dropped === undefined || now - dropped >= RETAKE_AFTER_MS;
+  }
+
+  /** The wait is no pending hand-off: a collect or a give that comes due goes on top of it. */
+  private takeAwait(t: Trade): void {
+    this.awaited.add(t.id);
+    this.awaiting.add(t.id);
+    this.deps.takeHandoff({ kind: "await", tradeId: t.id, partner: t.partner });
   }
 
   /** My side is due: they paid first, or I go first; a failed or dropped give waits for its retry condition. */

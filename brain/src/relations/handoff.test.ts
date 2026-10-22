@@ -3,7 +3,8 @@ import test from "node:test";
 import { Body } from "../body.ts";
 import type { SkillContext } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
-import { handoffOutcome, runHandoff } from "./handoff.ts";
+import type { Clock } from "../conversation/socialise.ts";
+import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, runHandoff, type AwaitOptions } from "./handoff.ts";
 
 function contextFor(runtime: FakeRuntime): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal };
@@ -67,4 +68,91 @@ test("a collect that fails reports it", async () => {
   runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
   const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "collect", tradeId: "t", items: [{ item: "bread", count: 1 }] }));
   assert.equal(ended.outcome, "failed");
+});
+
+const MIN = 60_000;
+const awaitTheo = { kind: "await", tradeId: "t", partner: "Theo" } as const;
+
+/** A fake clock that jumps as the game does (1 s polls), and a payment that arrives after `paidAfter` polls (never when null). */
+function waiting(runtime: FakeRuntime, paidAfter: number | null, over: Partial<AwaitOptions> = {}) {
+  let now = 0;
+  const state = { polls: 0, paid: false };
+  const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; state.polls += 1; if (state.polls === paidAfter) state.paid = true; } };
+  const options: AwaitOptions = { stillAwaiting: () => !state.paid, clock, maxMs: 3 * MIN, openingDistance: 16, ...over };
+  return { state, options, now: () => now, run: (context = contextFor(runtime)) => awaitTheirSide(context, "Theo", options) };
+}
+
+const navigates = (runtime: FakeRuntime): number => runtime.submitted.filter((call) => call.tool === "navigate").length;
+
+test("an await names the partner whose side is awaited", () => {
+  assert.equal(describeHandoff(awaitTheo), "wait for Theo to give their side (trade)");
+  assert.equal(handoffKey(awaitTheo), "await:t");
+  assert.equal(handoffKey({ kind: "collect", tradeId: "t", items: [] }), "t");
+});
+
+test("an await near the partner stays put and ends done when the payment is credited", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const w = waiting(runtime, 4);
+  const result = await w.run();
+  assert.deepEqual(result, { status: "done", detail: "they gave" });
+  assert.equal(navigates(runtime), 0, "within the opening distance: no walk");
+  assert.equal(w.now(), 4_000, "polled every second");
+});
+
+test("an await far from the partner walks to them once, then waits", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 40, y: 64, z: 0 } }] };
+  const w = waiting(runtime, 3);
+  assert.equal((await w.run()).status, "done");
+  assert.equal(navigates(runtime), 1);
+});
+
+test("an await with the payment already credited ends done at once and walks nowhere", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 40, y: 64, z: 0 } }] };
+  const w = waiting(runtime, null, { stillAwaiting: () => false });
+  assert.deepEqual(await w.run(), { status: "done", detail: "they gave" });
+  assert.equal(navigates(runtime), 0);
+  assert.equal(w.now(), 0);
+});
+
+test("no payment: the await fails after the bound on the clock alone, naming the minutes", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const w = waiting(runtime, null);
+  const result = await w.run();
+  assert.deepEqual(result, { status: "failed", detail: "Theo did not give within 3 min" });
+  assert.equal(handoffOutcome(result).outcome, "failed");
+  assert.equal(w.now(), 3 * MIN, "no tick or game event is needed to end the wait");
+});
+
+test("a partner out of sight: go_to_player fails once, the wait still runs where it is and ends on the payment", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [] };
+  const paid = waiting(runtime, 5);
+  assert.equal((await paid.run()).status, "done");
+  assert.equal(navigates(runtime), 0, "nothing to walk to");
+  const unpaid = waiting(runtime, null);
+  assert.equal((await unpaid.run()).status, "failed");
+});
+
+test("a walk that fails does not end the wait", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 40, y: 64, z: 0 } }] };
+  runtime.failures.navigate = "[NO_PATH] no path";
+  const w = waiting(runtime, 6);
+  assert.deepEqual(await w.run(), { status: "done", detail: "they gave" });
+  assert.equal(navigates(runtime), 1, "one try");
+});
+
+test("an await stopped mid-wait is dropped, not failed", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const abort = new AbortController();
+  const w = waiting(runtime, null);
+  const clock: Clock = { now: w.options.clock.now, sleep: async (ms, signal) => { await w.options.clock.sleep(ms, signal); if (w.state.polls === 3) abort.abort(); } };
+  const result = await awaitTheirSide({ ...contextFor(runtime), signal: abort.signal }, "Theo", { ...w.options, clock });
+  assert.equal(handoffOutcome(result).outcome, "dropped");
+  assert.equal(w.state.polls, 3, "no poll after the stop");
 });

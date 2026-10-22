@@ -18,7 +18,7 @@ import type { BrainEvent } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatInput, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
-import { describeHandoff, type Handoff } from "./relations/handoff.ts";
+import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
 import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
@@ -337,7 +337,7 @@ export class Agent {
           unreadable = true;
         }
         this.lookAtConversations();
-        this.relations?.look(this.stepYields, new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [work.objective.handoff.tradeId])), signal);
+        this.relations?.look(this.stepYields, new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal);
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -623,7 +623,8 @@ export class Agent {
       this.journalState(null);
     }
     if (end.outcome !== "dropped") this.finish(work, end.outcome === "done" ? "done" : "failed", end.detail);
-    else if (this.stack.includes(work)) this.stack.splice(this.stack.indexOf(work), 1);
+    // A wait that a give or a collect set aside stays below it and resumes; any other dropped hand-off leaves the stack.
+    else if (this.stack.includes(work) && !(h.kind === "await" && this.stack.at(-1) !== work)) this.stack.splice(this.stack.indexOf(work), 1);
   }
 
   /** The step runs: its controller stops it, and the items it is out to get are its own work, never a partner's payment. */

@@ -20,7 +20,7 @@ export interface Clock {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
 
-const realClock: Clock = {
+export const realClock: Clock = {
   now: () => Date.now(),
   sleep: (ms, signal) => sleep(ms, undefined, { signal }).catch(() => undefined),
 };

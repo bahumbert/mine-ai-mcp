@@ -17,6 +17,7 @@ const MAX_OFFER_STACKS = 5;
 const MAX_ID_WORDS = 3;
 /** What socialise says when no talk took place: no refusal is recorded then. */
 const NO_TALK = /did not come|had nothing to say/u;
+const DID_NOT_COME = /did not come/u;
 
 type Inventory = BotSnapshot["inventory"];
 
@@ -147,7 +148,10 @@ export function tradeNeedsFacts(needs: readonly string[], partners: readonly str
 /** What a trading objective sets out to do: the items it asks for and the partner to ask, or why it cannot. */
 export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number): { readonly want: string[]; readonly partner: string } | { readonly failed: string } {
   // An item the objective names that it carries is what it offers, not what it asks for.
-  const named = wantedItems(objective, []).filter((item) => !carries(snapshot.inventory, item));
+  const mentioned = wantedItems(objective, []);
+  const named = mentioned.filter((item) => !carries(snapshot.inventory, item));
+  // Every item it names is already in the bags: it asks for nothing (the needs are another objective's).
+  if (mentioned.length > 0 && named.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
   const want = named.length > 0 ? named : [...needs];
   if (want.length === 0) return { failed: "nothing to trade for" };
   const eligible = partners.filter((partner) => !asks.refused.isRefused(partner, want, now));
@@ -172,7 +176,7 @@ const sideText = (items: readonly ItemCount[]): string => items.map((i) => `${i.
  * with the partner proposed since the routine's start and agreed (or further) is done. The partner refused these
  * items for a few minutes when the ask was said (or a trade was declined). A talk that ended before the ask, even
  * after one more try, only counts as a refusal the second time within those minutes ({@link Refusals.missed}); a
- * talk that never took place counts as neither.
+ * talk that never took place counts as neither, except a partner who did not come (a miss too).
  */
 export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult> {
   const { runtime, signal, partner, want, asks, trades, talks, since } = deps;
@@ -183,8 +187,13 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
   talks.carryIntent(partner, intent);
   try {
     const talk = (from: number) => socialise({ ...deps, since: from, openFacts: { ...deps.openFacts, intent } });
+    // A partner who did not come is a miss like one who never let the bot ask; a model with nothing to say is neither.
+    const noTalk = (talked: SkillResult & { status: "failed" }): SkillResult => {
+      if (DID_NOT_COME.test(talked.detail)) asks.refused.missed(partner, want, now());
+      return talked;
+    };
     const unfinished = (talked: SkillResult): SkillResult | null =>
-      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && NO_TALK.test(talked.detail) ? talked : null;
+      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && NO_TALK.test(talked.detail) ? noTalk(talked) : null;
     let ended = unfinished(await talk(since));
     if (ended !== null) return ended;
     let trade = trades.latestWith(partner, since);

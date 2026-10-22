@@ -53,13 +53,13 @@ test("offerFrom lists the five biggest stacks, not the wanted items", () => {
   assert.deepEqual(offerFrom(inventory, ["iron_ingot"]).map((o) => o.item), ["oak_f", "oak_e", "oak_d", "oak_c", "oak_b"]);
 });
 
-function setup(players: FakeRuntime["snapshot"]["players"]) {
+function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000) {
   const runtime = new FakeRuntime();
   // A walk takes time: the follow step of a talk would otherwise finish at once and be repeated without yielding.
   runtime.durations.navigate = 5;
   runtime.snapshot = { ...runtime.snapshot, players, inventory: [stack("oak_log", 32)] };
   const { chat, mind } = scriptedMind();
-  let now = 1_000_000;
+  let now = startAt;
   const talks = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => talks.current === null, talkRange: 64, localized: true,
     random: () => 0, now: () => now, speak: () => undefined, journal: () => undefined, memorize: () => undefined, log: () => undefined, history: () => [],
@@ -119,13 +119,43 @@ for (const state of [null, "cancelled", "proposed", "broken"] as const) {
   });
 }
 
-test("a partner who never came is no refusal", async () => {
+test("a partner who never came once is no refusal", async () => {
   const t = setup([]);
   t.chat.reply(OPEN);
   const result = await t.run({ fake: true });
   assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], t.now()), false);
   assert.deepEqual(t.reads, []);
+});
+
+test("a partner who did not come twice within 10 minutes is a refusal, and trading is no longer drawn for them", async () => {
+  const t = setup([]);
+  for (let run = 0; run < 2; run++) {
+    t.chat.reply(OPEN);
+    assert.deepEqual(await t.run({ fake: true, since: t.now() + 1 }), { status: "failed", detail: "Theo did not come" });
+  }
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], t.now()), true);
+  assert.deepEqual(withoutRefusedTrading(["exploring", "trading"], ["Theo"], t.asks, t.now()), ["exploring"]);
+});
+
+test("a partner who did not come, then did not get a word in, within 10 minutes is a refusal (one miss key)", async () => {
+  const t = setup([], Date.now());
+  t.chat.reply(OPEN);
+  assert.equal((await t.run({ fake: true, since: t.now() + 1 })).status, "failed");
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  t.runtime.snapshot = { ...t.runtime.snapshot, players: theoAt(30) };
+  assert.deepEqual(await leaverRun(t, { since: t.now() + 1 }), { status: "failed", detail: "did not get to ask Theo" });
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true);
+});
+
+test("a partner who did not come, a second time after 10 minutes, is a first miss again", async () => {
+  const t = setup([]);
+  t.chat.reply(OPEN);
+  await t.run({ fake: true, since: t.now() + 1 });
+  await t.clock.sleep(10 * MIN + 1, t.controller.signal);
+  t.chat.reply(OPEN);
+  await t.run({ fake: true, since: t.now() + 1 });
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], t.now()), false);
 });
 
 test("a model that has nothing to say is no refusal", async () => {
@@ -135,6 +165,16 @@ test("a model that has nothing to say is no refusal", async () => {
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /had nothing to say/u);
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+});
+
+test("a model that has nothing to say twice is still no refusal", async () => {
+  const t = setup(theoAt(30), Date.now());
+  for (let run = 0; run < 2; run++) {
+    t.chat.reply({ ...OPEN, open: false });
+    assert.match((await t.run() as { detail: string }).detail, /had nothing to say/u);
+  }
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.refusedAnything("Theo", Date.now()), false);
 });
 
 test("an abort mid-talk is stopped: no refusal, no trade read", async () => {
@@ -165,8 +205,19 @@ test("tradePlan does not ask for what is carried: the offer named in the objecti
   const snapshot = t.runtime.snapshot;
   const now = Date.now();
   assert.deepEqual(tradePlan("trade my oak logs for iron ingots", [], ["Theo"], t.asks, snapshot, now), { want: ["iron_ingot"], partner: "Theo" });
-  assert.deepEqual(tradePlan("trade my oak logs to Theo", ["bread"], ["Theo"], t.asks, snapshot, now), { want: ["bread"], partner: "Theo" }, "only carried items named: the needs");
-  assert.deepEqual(tradePlan("trade my oak logs to Theo", [], ["Theo"], t.asks, snapshot, now), { failed: "nothing to trade for" });
+  assert.deepEqual(tradePlan("trade my oak logs to Theo", ["bread"], ["Theo"], t.asks, snapshot, now), { failed: "already carry oak_log" }, "only carried items named: nothing to ask for, the needs are another objective's");
+  assert.deepEqual(tradePlan("trade my oak logs to Theo", [], ["Theo"], t.asks, snapshot, now), { failed: "already carry oak_log" });
+});
+
+test("tradePlan fails 'already carry' when the objective names items and the bot carries every one", () => {
+  const t = setup(theoAt(30));
+  const snapshot = { ...t.runtime.snapshot, inventory: [stack("iron_ingot", 3), stack("oak_log", 32)] };
+  const now = Date.now();
+  assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", ["bread"], ["Theo"], t.asks, snapshot, now), { failed: "already carry iron_ingot, oak_log" }, "the needs are not a fallback");
+  assert.deepEqual(tradePlan("trade Theo for iron ingots", [], ["Theo"], t.asks, snapshot, now), { failed: "already carry iron_ingot" });
+  assert.deepEqual(tradePlan("trade me 3 iron_ingot for 8 oak_log", [], ["Theo"], t.asks, { ...snapshot, inventory: [stack("oak_log", 32)] }, now), { want: ["iron_ingot"], partner: "Theo" }, "partly carried: ask for the rest");
+  assert.deepEqual(tradePlan("trade with someone", ["bread"], ["Theo"], t.asks, snapshot, now), { want: ["bread"], partner: "Theo" }, "naming nothing: the needs");
+  assert.deepEqual(tradePlan("trade with someone", [], ["Theo"], t.asks, snapshot, now), { failed: "nothing to trade for" });
 });
 
 /** The partner ends the talk (without the bot saying a word) once the routine has walked up and started following. */

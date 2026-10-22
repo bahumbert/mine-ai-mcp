@@ -162,8 +162,9 @@ function nearDistance(o: { partners: ReadonlyMap<string, Position | null>; previ
 
 /**
  * Splits this tick's inventory gains between trades: a gain of X goes to a trade expecting X whose partner is within
- * hand-off distance now or at the previous tick, never while my own running step yields X; nearest partner first, then
- * the oldest trade; each trade takes at most what it is owed. Returns trade id -> credited.
+ * hand-off distance now or at the previous tick, or was lately (`recentlyNear`: lower-case names; a payment picked up
+ * after the partner turned away), never while my own running step yields X; nearest partner first (a recently near
+ * one ranks at hand-off distance), then the oldest trade; each trade takes at most what it is owed. Returns trade id -> credited.
  */
 export function attributeGains(o: {
   readonly gains: readonly ItemCount[];
@@ -173,10 +174,11 @@ export function attributeGains(o: {
   readonly self: Position;
   readonly ownStepYields: ReadonlySet<string>;
   readonly handoffDistance: number;
+  readonly recentlyNear: ReadonlySet<string>;
 }): Map<string, ItemCount[]> {
   const credited = new Map<string, ItemCount[]>();
   const near = new Map(o.trades.filter(awaitsPayment).flatMap((t): [string, number][] => {
-    const d = nearDistance(o, t.partner);
+    const d = nearDistance(o, t.partner) ?? (o.recentlyNear.has(t.partner.toLowerCase()) ? o.handoffDistance : null);
     return d === null ? [] : [[t.id, d]];
   }));
   const ranked = o.trades.filter((t) => near.has(t.id))
