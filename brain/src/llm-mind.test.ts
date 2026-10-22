@@ -1204,4 +1204,15 @@ test("the goal prompt describes trading only when it is among the available acti
   await mind.chooseObjective(goalInput({ drawn: ["building"], chances: chancesOf("building") }), signal);
   assert.match(planner.requests[0]?.[0]?.content ?? "", /trading is going to someone and swapping things you carry for something you need/u);
   assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /swapping things you carry/u);
+  assert.match(planner.requests[0]?.[0]?.content ?? "", /For trading, "for" is just trading items with someone: say in the objective what you need and who has it/u);
+  assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /For trading/u);
+});
+
+test("a goal reply whose \"for\" is trading plus the wanted item is the trading purpose, only while trading is available", async () => {
+  const { planner, mind } = scriptedMind();
+  planner.reply({ objective: "Ask Theo for iron.", for: "trading iron_ingot" }, { objective: "Ask Theo for iron.", for: "trading iron_ingot" });
+  const withTrading = await mind.chooseObjective(goalInput({ drawn: ["building", "trading"], chances: chancesOf("building", "trading") }), signal);
+  const without = await mind.chooseObjective(goalInput({ drawn: ["building"], chances: chancesOf("building") }), signal);
+  assert.equal(withTrading.purpose, "trading");
+  assert.equal(without.purpose, null);
 });

@@ -1897,6 +1897,14 @@ test("a trading objective runs the routine: no work-tier call, a trade step in t
   assert.ok(runtime.submitted.some((call) => call.tool === "drop_item"), "the hand-off ran");
 });
 
+test("a goal reply \"for\": \"trading iron_ingot\" runs the trade routine, not a work-tier step", async (t) => {
+  const { agent, action, planner, chat } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo to trade me 3 iron_ingot for some of my bread", for: "trading iron_ingot" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the objective asked the work tier nothing");
+});
+
 test("a trading objective that ends refused is not asked again: the next goal call is not a trade ask to that partner", async (t) => {
   const { events, agent, chat, planner } = await failedIronObjective(t);
   planner.reply({ objective: "trade Theo for 3 iron ingots", for: "trading" }, { objective: "gather wood" });

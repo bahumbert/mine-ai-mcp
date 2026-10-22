@@ -38,13 +38,21 @@ export function describeActivity(activity: Activity): string {
 }
 
 /**
- * The activity a model named: by id (`mob_combat`) or as the prompts word it (`fighting monsters`), in any case.
- * Anything else, "none" included, is no activity.
+ * The activity a model named: by id (`mob_combat`) or as the prompts word it (`fighting monsters`), in any case,
+ * alone or at the start of more words (`trading iron_ingot`, `building: a house`; the longest name wins). A name
+ * inside the text, glued to another word (`buildings`) or none at all ("none" included) is no activity.
  */
 export function parseActivity(text: string | undefined): Activity | null {
   if (text === undefined) return null;
   const words = text.trim().toLowerCase().replace(/[_\s]+/gu, " ");
-  return ACTIVITIES.find((activity) => activity.replaceAll("_", " ") === words || describeActivity(activity).toLowerCase() === words) ?? null;
+  let best: { activity: Activity; length: number } | null = null;
+  for (const activity of ACTIVITIES) {
+    for (const name of [activity.replaceAll("_", " "), describeActivity(activity).toLowerCase()]) {
+      const startsHere = words === name || (words.startsWith(name) && !/[\p{L}\p{N}]/u.test(words.charAt(name.length)));
+      if (startsHere && (best === null || name.length > best.length)) best = { activity, length: name.length };
+    }
+  }
+  return best?.activity ?? null;
 }
 
 /** Game facts the activity of a step depends on, looked up by the agent through the runtime. */

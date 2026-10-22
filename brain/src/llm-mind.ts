@@ -652,7 +652,7 @@ ${skillList(persona)}
 ${MINECRAFT_FACTS}
 Reply with only a JSON object: {"objective": "<one sentence>", "for": "<kind of work>"}. "for" is what the objective
 serves in the end, not the work it takes on the way: stone, wood or anything fetched for a house is building, seeds or a
-bucket for a farm is farming, wood for tools is crafting: ${kinds}, or "none".${available.includes("trading") ? "\nFor trading, name what you need: trading is going to someone and swapping things you carry for something you need." : ""}`;
+bucket for a farm is farming, wood for tools is crafting: ${kinds}, or "none".${available.includes("trading") ? "\nFor trading, \"for\" is just trading items with someone: say in the objective what you need and who has it (\"Ask <who> to trade me <count> <item> for some of my <item>\"): trading is going to someone and swapping things you carry for something you need." : ""}`;
 }
 
 /**

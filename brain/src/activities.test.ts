@@ -98,3 +98,17 @@ test("a model's name for a kind of work is read as the activity, by id or as the
   assert.equal(parseActivity("knitting"), null);
   assert.equal(parseActivity(undefined), null);
 });
+
+test("a kind followed by more words is that kind, the longest kind wins; a kind elsewhere or glued to a word is none", () => {
+  assert.equal(parseActivity("trading iron_ingot"), "trading");
+  assert.equal(parseActivity("Trading: 3 iron_ingot"), "trading");
+  assert.equal(parseActivity("building: a house"), "building");
+  assert.equal(parseActivity("cutting wood for tools"), "woodcutting");
+  assert.equal(parseActivity("chatting with someone about logs"), "socialising");
+  assert.equal(parseActivity("trading items with someone for iron"), "trading");
+  assert.equal(parseActivity("farming_tools"), "farming");
+  assert.equal(parseActivity("mob_combat at night"), "mob_combat");
+  assert.equal(parseActivity("go trading"), null);
+  assert.equal(parseActivity("buildings"), null);
+  assert.equal(parseActivity("none of these"), null);
+});
