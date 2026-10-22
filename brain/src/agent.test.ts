@@ -11,6 +11,7 @@ import { memoryNote, recall } from "./memory.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
+import { TradeBoard } from "./relations/board.ts";
 import type { Handoff } from "./relations/handoff.ts";
 import type { TradeAsks } from "./relations/trading.ts";
 
@@ -2081,4 +2082,62 @@ test("an outside give_item the partner did not pick up is not counted toward the
   await sleep(300);
   assert.equal(inside.relations.book.trades()[0]?.gaveAt, null, "left at the feet, never taken: not a give");
   assert.deepEqual(inside.relations.trades.leftToGive(inside.relations.book.trades()[0]!.id), [{ item: "bread", count: 5 }]);
+});
+
+const sideOf = (item: string, count: number) => [{ item, count }];
+
+/** Moves what one runtime drops to a named player into the other's inventory, and relays each line one says to the other. */
+function linkAgents(a: { name: string; runtime: FakeRuntime; agent: Agent }, b: { name: string; runtime: FakeRuntime; agent: Agent }, t: { after(fn: () => Promise<void>): void }): void {
+  const seen = new Map<FakeRuntime, number>();
+  const move = (from: typeof a, to: typeof b): void => {
+    const calls = from.runtime.submitted;
+    for (let i = seen.get(from.runtime) ?? 0; i < calls.length; i++) {
+      const call = calls[i]!;
+      if (call.tool === "send_message") void to.agent.handle(say(from.name, String(call.input.message)));
+      if (call.tool !== "drop_item") continue;
+      for (const { item_name: item, count } of call.input.items as { item_name: string; count: number }[]) {
+        const give = (inventory: readonly { name: string; count: number }[], by: number) => [...inventory.filter((s) => s.name !== item), { name: item, count: (inventory.find((s) => s.name === item)?.count ?? 0) + by }];
+        from.runtime.snapshot = { ...from.runtime.snapshot, inventory: give(from.runtime.snapshot.inventory, -count) };
+        to.runtime.snapshot = { ...to.runtime.snapshot, inventory: give(to.runtime.snapshot.inventory, count) };
+      }
+    }
+    seen.set(from.runtime, calls.length);
+  };
+  const timer = setInterval(() => { move(a, b); move(b, a); }, 10);
+  t.after(async () => clearInterval(timer));
+}
+
+test("two bots of one brain: the trading routine waits for its turn, opens, and both records hold the proposer's terms and reach done", async (t) => {
+  const budget = new ConversationBudget(1);
+  budget.tryTake();
+  const board = new TradeBoard();
+  const aylaLog: string[] = [];
+  const ayla = await failedIronObjective(t, { tradeBoard: board, conversations: { budget, modelFree: () => true }, random: () => 1, log: (line) => aylaLog.push(line) });
+  ayla.runtime.snapshot = { ...ayla.runtime.snapshot, players: [{ username: "Theo", position: { x: 3, y: 64, z: 0 } }] };
+  const theoRuntime = new FakeRuntime();
+  theoRuntime.snapshot = { ...theoRuntime.snapshot, inventory: [{ name: "iron_ingot", count: 10 }], players: [{ username: "Ayla", position: { x: 3, y: 64, z: 0 } }] };
+  const theo = agentFor(t, theoRuntime, { id: "theo", username: "Theo" }, talkOptions({ tradeBoard: board, conversations: { budget, modelFree: () => true }, otherAgents: ["Ayla"], random: () => 1 }));
+  linkAgents({ name: "Ayla", runtime: ayla.runtime, agent: ayla.agent }, { name: "Theo", runtime: theoRuntime, agent: theo.agent }, t);
+  const words = { spoken_to: ["Ayla"], asks: "", language: "English", route: "talk", request: "" };
+  ayla.planner.reply({ objective: "trade Theo for 4 iron ingots", for: "trading" });
+  ayla.chat.reply(
+    { open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" },
+    { ...words, spoken_to: ["Theo"], say: "Theo, 4 iron_ingot for 4 bread?", trade: { action: "propose", give: sideOf("bread", 4), get: sideOf("iron_ingot", 4), first: "me" } },
+    { gist: "Agreed bread for iron." }, { gist: "Agreed bread for iron." },
+  );
+  theo.chat.reply(
+    { ...words, say: "What would you give?" },
+    { ...words, say: "Deal.", trade: { action: "accept", give: sideOf("iron_ingot", 1), get: sideOf("bread", 1), first: "them" } },
+    { gist: "Agreed iron for bread." }, { gist: "Agreed iron for bread." },
+  );
+  await until(() => aylaLog.some((line) => line === "trading: trade with Theo"), 4_000);
+  await sleep(150);
+  assert.equal(ayla.agent.conversation, null, "the cap is full: the routine waits, no talk yet");
+  assert.ok(!ayla.events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo")), "the trade objective is still waiting for its turn, not failed");
+  budget.give();
+  const trades = (runtime: FakeRuntime, partner: string) => savedRelations(runtime).find((r) => r.partner === partner)?.trades[0];
+  await until(() => trades(theoRuntime, "Ayla")?.state === "done" && trades(ayla.runtime, "Theo")?.state === "done", 8_000);
+  const [mine, theirs] = [trades(ayla.runtime, "Theo")!, trades(theoRuntime, "Ayla")!];
+  assert.equal(mine.id, theirs.id, "one trade, one id");
+  assert.deepEqual([mine.give, mine.get, theirs.give, theirs.get], [sideOf("bread", 4), sideOf("iron_ingot", 4), sideOf("iron_ingot", 4), sideOf("bread", 4)], "Ayla's terms on both sides");
 });

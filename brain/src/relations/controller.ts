@@ -3,6 +3,7 @@ import type { GistPartner, Mind, TradeDecision } from "../mind.ts";
 import type { Persona } from "../persona.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
+import type { BoardOffer, BoardPeer, TradeBoard } from "./board.ts";
 import type { RelationBook } from "./book.ts";
 import { checkTradeDecision } from "./checks.ts";
 import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./handoff.ts";
@@ -37,6 +38,8 @@ export interface TradeControllerDeps {
   readonly inConversationWith: (name: string) => boolean;
   readonly journal: (e: TradeEvent | RelationEvent) => void;
   readonly log: (line: string) => void;
+  /** The brain's trade board: a trade with another bot of this brain is made on the proposer's terms. Absent: every partner is treated as outside the brain. */
+  readonly board?: TradeBoard;
 }
 
 type EventName = TradeEvent["event"];
@@ -51,7 +54,10 @@ const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCas
 const EVENT_OF_STATE: Partial<Record<Trade["state"], EventName>> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
 const sideText = (items: readonly { item: string; count: number }[]): string => items.map((i) => `${i.count} ${i.item}`).join(", ");
 
-export class TradeController {
+const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
+const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
+
+export class TradeController implements BoardPeer {
   private previous: { inventory: BotSnapshot["inventory"]; partners: ReadonlyMap<string, Position | null> } | null = null;
   private position: Position | null = null;
   private partners: ReadonlyMap<string, Position | null> = new Map();
@@ -77,11 +83,54 @@ export class TradeController {
   private readonly running = new Set<Promise<void>>();
   private chain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly deps: TradeControllerDeps) {}
+  constructor(private readonly deps: TradeControllerDeps) {
+    deps.board?.join(deps.self, this);
+  }
 
   /** Null when a propose or accept can become a trade, else the reason that is sent back to the chat tier once. */
   checkDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): string | null {
-    return checkTradeDecision({ decision: d, speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, givenOutside: this.creditedTo(speaker) });
+    return checkTradeDecision({ decision: this.termsOf(d, speaker), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, givenOutside: this.creditedTo(speaker) });
+  }
+
+  /** The proposal the partner (a bot of this brain) posted to me, still open. */
+  private offerFromPartner(partner: string): BoardOffer | undefined {
+    return this.deps.board?.offerFrom(partner, this.deps.self);
+  }
+
+  /** What an accept stands for: the proposer's terms, mirrored, when a bot of this brain proposed to me; else what my model wrote. */
+  private termsOf(d: TradeDecision, partner: string): TradeDecision {
+    const offer = d.action === "accept" ? this.offerFromPartner(partner) : undefined;
+    return offer === undefined ? d : { action: "accept", give: offer.get, get: offer.give, first: flipped(offer.first) };
+  }
+
+  /** A bot of this brain I propose or counter to: the proposal goes on the board for the partner's accept. */
+  private post(trade: Trade): void {
+    const { board } = this.deps;
+    if (board?.isLocal(trade.partner) !== true) return;
+    board.post({ id: trade.id, proposer: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, postedAt: trade.createdAt });
+  }
+
+  /** The partner accepted the proposal I posted: my record moves to agreed on the terms it already holds. */
+  offerAccepted(tradeId: string, by: string): Promise<void> {
+    return this.tracked(async () => {
+      const trade = this.find(tradeId);
+      if (trade === undefined || trade.state !== "proposed") return void this.deps.log(`trade: ${by} accepted ${tradeId}, which is no longer a proposal of mine`);
+      const now = this.deps.now();
+      const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now });
+      await this.record(agreed, "agreed");
+      this.claimEarlierGives(agreed, now);
+      if (await this.giveIfCovered(agreed, trade.partner)) return;
+      if (this.isGiveDue(agreed, now, null)) this.takeGive(agreed);
+    });
+  }
+
+  /** The partner declined the proposal I posted: my record is cancelled. */
+  offerDeclined(tradeId: string, by: string, why: string): Promise<void> {
+    return this.tracked(async () => {
+      const trade = this.find(tradeId);
+      if (trade === undefined || trade.state !== "proposed") return;
+      await this.record(cancelTrade(trade, this.deps.now(), `${by} ${why}`), "cancelled");
+    });
   }
 
   /** The chat decision's trade: a proposal, an agreement (the give starts when I go first) or an end. Answers the id of the trade it proposed or agreed, else null. */
@@ -91,28 +140,55 @@ export class TradeController {
       // The inventory the next tick's gains are counted from, when no tick has been watching.
       this.previous ??= { inventory: snapshot.inventory, partners: new Map(snapshot.players.map((p) => [p.username, p.position])) };
       const mine = this.openWith(speaker);
-      const deal = { self: this.deps.self, partner: speaker, give: d.give, get: d.get, first: d.first, now };
+      const local = this.deps.board?.isLocal(speaker) === true;
+      const offer = d.action === "accept" ? this.offerFromPartner(speaker) : undefined;
+      const terms = this.termsOf(d, speaker);
+      const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
       if (d.action === "propose") {
         if (mine !== undefined) {
           this.deps.log(`trade: a proposal to ${speaker} ignored, ${mine.id} is still open`);
           return null;
         }
-        const proposed = proposeTrade(deal);
-        await this.record(proposed, "proposed");
-        this.claimEarlierGives(proposed, now);
-        return proposed.id;
+        if (local && this.offerFromPartner(speaker) !== undefined) {
+          this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
+          return null;
+        }
+        return this.proposeAndPost(deal, now);
+      }
+      if (d.action === "accept" && local && offer === undefined) {
+        if (mine !== undefined) {
+          this.deps.log(`trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
+          return null;
+        }
+        // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
+        this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
+        return this.proposeAndPost(deal, now);
       }
       if (d.action === "accept") {
-        const agreed = agreeTrade(mine?.state === "proposed" ? mine : null, deal);
+        if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
+        const agreed = offer === undefined ? agreeTrade(mine?.state === "proposed" ? mine : null, deal) : { ...agreeTrade(null, deal), id: offer.id };
+        // Before the record: saving an agreed trade takes its id off the board.
+        if (offer !== undefined) this.deps.board?.accept(offer.id, this.deps.self);
         await this.record(agreed, "agreed");
         this.claimEarlierGives(agreed, now);
         if (await this.giveIfCovered(agreed, speaker)) return agreed.id;
         if (this.isGiveDue(agreed, now, null)) this.takeGive(agreed);
         return agreed.id;
       }
+      const theirs = this.offerFromPartner(speaker);
+      if (theirs !== undefined) this.deps.board?.decline(theirs.id, this.deps.self, d.action === "decline" ? "declined" : "cancelled");
       if (mine !== undefined) await this.record(cancelTrade(mine, now, d.action === "decline" ? "I declined" : "I cancelled"), "cancelled");
       return null;
     });
+  }
+
+  /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */
+  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number): Promise<string> {
+    const proposed = proposeTrade(deal);
+    await this.record(proposed, "proposed");
+    this.post(proposed);
+    this.claimEarlierGives(proposed, now);
+    return proposed.id;
   }
 
   /** A `give_item` the partner took, outside the trade's hand-off, counts toward my side of the oldest open trade with them whose side has the item (a proposed one too; capped at what is lacking); the side covered and agreed, the trade is given. */
@@ -315,6 +391,14 @@ export class TradeController {
     return run;
   }
 
+  /** A controller step the board asked for: exclusive like the rest, and counted so `settled()` and `busy()` see it. */
+  private tracked(step: () => Promise<void>): Promise<void> {
+    const task = this.exclusive(step);
+    this.running.add(task);
+    void task.finally(() => this.running.delete(task)).catch(() => undefined);
+    return task;
+  }
+
   private find(tradeId: string): Trade | undefined {
     return this.deps.book.trades().find((t) => t.id === tradeId);
   }
@@ -335,6 +419,7 @@ export class TradeController {
   /** Saves the trade in its partner's record (counting an end into the facts) and journals the events. */
   private async record(trade: Trade, ...events: EventName[]): Promise<void> {
     const ended = !isOpen(trade);
+    if (trade.state !== "proposed") this.deps.board?.withdraw(trade.id);
     await this.deps.book.update(trade.partner, (r) => (ended ? withEndedTrade(r, trade) : withTrade(r, trade)));
     for (const event of events) this.deps.journal({ kind: "trade", event, partner: trade.partner, tradeId: trade.id, give: trade.give, get: trade.get, first: trade.first, note: trade.note });
     if (!ended) return;

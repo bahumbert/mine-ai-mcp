@@ -457,3 +457,20 @@ test("a trading objective that reaches the talk ends the pause", async () => {
   await leaverRun(t);
   assert.deepEqual(withoutRefusedTrading(available, ["Theo"], t.asks, 2), available);
 });
+
+test("the trading routine's opening waits up to 45 s for its turn, and the socialising routine's does not", async () => {
+  const t = setup(theoAt(30));
+  const waits: (number | undefined)[] = [];
+  t.talks.openSocial = async (_partner, _position, _facts, _signal, waitMs) => { waits.push(waitMs); return false; };
+  await t.run();
+  assert.deepEqual(waits, [45_000]);
+});
+
+test("a full conversation cap makes the trading routine fail 'had nothing to say (conversation limit)', with no refusal", async () => {
+  const t = setup(theoAt(3));
+  t.talks.openSocial = async () => false;
+  Object.defineProperty(t.talks, "openRefusal", { get: () => "conversation limit" });
+  const result = await t.run();
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+});

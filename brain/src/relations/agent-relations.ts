@@ -7,6 +7,7 @@ import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
 import type { Persona } from "../persona.ts";
 import type { BotRuntime, BotSnapshot } from "../runtime-client.ts";
 import type { SkillContext } from "../skills.ts";
+import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
 import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
@@ -29,6 +30,8 @@ export interface AgentRelationsDeps {
   readonly log: (line: string) => void;
   /** The wall clock the wait for a partner's payment runs on; the real one unless a test moves it. */
   readonly clock?: Clock;
+  /** The brain's trade board, when the characters of one process trade with each other. */
+  readonly board?: TradeBoard;
 }
 
 export class AgentRelations {
@@ -43,7 +46,7 @@ export class AgentRelations {
     this.book = new RelationBook({ save: (memory) => this.queue(() => this.saveNote(memory)), remove: (context) => this.queue(() => this.forgetNotes(context)), now: () => Date.now(), log });
     this.trades = new TradeController({
       self: persona.username, persona, book: this.book, mind: deps.mind, settings: persona.settings.relations, now: () => Date.now(),
-      takeHandoff: deps.takeHandoff, modelSlotFree: deps.modelSlotFree, inConversationWith: deps.inConversationWith, journal: deps.journal, log,
+      takeHandoff: deps.takeHandoff, modelSlotFree: deps.modelSlotFree, inConversationWith: deps.inConversationWith, journal: deps.journal, log, ...(deps.board !== undefined && { board: deps.board }),
     });
   }
 

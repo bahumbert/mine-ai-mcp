@@ -17,6 +17,7 @@ import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatInput, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
+import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
 import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
@@ -92,6 +93,8 @@ export interface AgentOptions {
    * the bot nearest the speaker only. Absent: such a line is never answered.
    */
   readonly everyone?: EveryoneLines;
+  /** The trade board shared by the agents of one process: a trade between two of them is made on the proposer's terms. Absent: every partner is outside the brain. */
+  readonly tradeBoard?: TradeBoard;
   /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
   readonly localizedChat?: LocalizedChat;
   readonly log: (line: string) => void;
@@ -255,6 +258,7 @@ export class Agent {
       modelSlotFree: conversations?.modelFree ?? (() => true), inConversationWith: (name) => this.talks?.isMember(name) === true,
       lacks: (inventory) => describeLacks(this.stack.at(-1)?.wanted ?? [], inventory ?? this.lastLook?.inventory ?? []),
       journal: (event) => options.journal?.(event), log: (line) => options.log(line),
+      ...(options.tradeBoard !== undefined && { board: options.tradeBoard }),
     });
     this.talks = conversations === undefined ? null : new ConversationController({
       self: persona.username,

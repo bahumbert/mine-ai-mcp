@@ -37,6 +37,8 @@ export interface SocialiseDeps {
   readonly limits: { readonly openingDistance: number; readonly talkRange: number; readonly maxMinutes: number };
   /** When the objective started (the clock's time): a talk with the partner that ended since is the one it came for. */
   readonly since: number;
+  /** How long a deliberate opening waits for the model, a conversation slot or the bot's own talk (wall clock); default none. */
+  readonly openWaitMs?: number;
   readonly clock?: Clock;
 }
 
@@ -75,7 +77,7 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
   let position = positionOf(snapshot, partner);
   if (position === null || manhattan(snapshot.position, position) > limits.talkRange) {
     // Out of earshot: the opening line calls them over, then they are waited for.
-    if (!(await talks.openSocial(partner, position, { ...openFacts, snapshot }, signal))) return signal.aborted ? stopped : { status: "failed", detail: `had nothing to say to ${partner}` };
+    if (!(await talks.openSocial(partner, position, { ...openFacts, snapshot }, signal, deps.openWaitMs))) return signal.aborted ? stopped : noOpening(talks, partner);
     const deadline = clock.now() + CALL_WAIT_MS;
     for (;;) {
       await clock.sleep(WAIT_POLL_MS, signal);
@@ -98,8 +100,8 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
   }
   if (talks.current !== null || signal.aborted) {
     // Opened while they came (or by their own line): nothing more to say first.
-  } else if (!(await talks.openSocial(partner, position, { ...openFacts, snapshot }, signal))) {
-    return signal.aborted ? stopped : { status: "failed", detail: `had nothing to say to ${partner}` };
+  } else if (!(await talks.openSocial(partner, position, { ...openFacts, snapshot }, signal, deps.openWaitMs))) {
+    return signal.aborted ? stopped : noOpening(talks, partner);
   }
   if (signal.aborted) return stopped;
   // Stay with them until the conversation ends: the follow step is aborted as soon as the record is gone.
@@ -129,4 +131,10 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
 function talked(talk: { readonly topic: string; readonly gist: string } | null, partner: string): SkillResult {
   const gist = talk === null ? "" : talk.gist !== "" ? talk.gist : talk.topic;
   return { status: "done", detail: `talked with ${partner}${gist === "" ? "" : `: ${gist}`}` };
+}
+
+/** The routine could not open: the words trading matches on, then why the controller held back (when it was not the model that had nothing to say). */
+function noOpening(talks: ConversationController, partner: string): SkillResult {
+  const why = talks.openRefusal;
+  return { status: "failed", detail: `had nothing to say to ${partner}${why === null ? "" : ` (${why})`}` };
 }

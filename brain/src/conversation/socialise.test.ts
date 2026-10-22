@@ -15,19 +15,20 @@ function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) 
   const spoken: { text: string; shout: boolean }[] = [];
   let now = 1_000_000;
   // Free for the opening call; once a talk runs the queue is "full", so its end takes the topic as the gist.
+  const budget = new ConversationBudget(2);
   const talks = new ConversationController({
-    self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => talks.current === null, talkRange: 64, localized,
+    self: "Ayla", persona: testPersona(), mind, budget, modelFree: () => talks.current === null, talkRange: 64, localized,
     random: () => 0, now: () => now, speak: (text, _to, _whisperTo, shout) => spoken.push({ text, shout }), journal: () => undefined,
     memorize: () => undefined, log: () => undefined, history: () => [],
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };
   const controller = new AbortController();
-  const run = (extra: { clock?: Clock; signal?: AbortSignal } = {}) => socialise({
+  const run = (extra: { clock?: Clock; signal?: AbortSignal; openWaitMs?: number } = {}) => socialise({
     runtime, signal: extra.signal ?? controller.signal, partner: "Theo", talks,
     context: { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: controller.signal, self: "Ayla" },
-    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, since: 0, ...(extra.clock !== undefined && { clock: extra.clock }),
+    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, since: 0, ...(extra.openWaitMs !== undefined && { openWaitMs: extra.openWaitMs }), ...(extra.clock !== undefined && { clock: extra.clock }),
   });
-  return { runtime, chat, talks, spoken, clock, run, controller };
+  return { runtime, chat, talks, spoken, clock, run, controller, budget };
 }
 
 const theoAt = (x: number) => [{ username: "Theo", position: { x, y: 64, z: 0 } }];
@@ -125,4 +126,32 @@ test("a slow gist does not hold the routine", async () => {
   const result = await running;
   assert.equal(result.status, "done");
   assert.match(result.status === "done" ? result.detail : "", /^talked with Theo/u);
+});
+
+test("a full conversation cap with no wait fails at once: 'had nothing to say', with the reason", async () => {
+  const t = setup(true, theoAt(3));
+  t.budget.tryTake();
+  t.budget.tryTake();
+  const result = await t.run();
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
+});
+
+test("with openWaitMs the routine waits for a conversation slot and then opens", async () => {
+  const t = setup(true, theoAt(3));
+  t.budget.tryTake();
+  t.budget.tryTake();
+  t.chat.reply(OPEN);
+  setTimeout(() => t.budget.give(), 30);
+  const running = t.run({ openWaitMs: 5_000 });
+  await until(() => t.talks.current !== null);
+  t.talks.said(true);
+  assert.equal((await running).status, "done");
+});
+
+test("with openWaitMs a cap that stays full fails at the deadline with the reason", async () => {
+  const t = setup(true, theoAt(3));
+  t.budget.tryTake();
+  t.budget.tryTake();
+  const result = await t.run({ openWaitMs: 60 });
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
 });

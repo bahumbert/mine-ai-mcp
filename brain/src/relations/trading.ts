@@ -20,6 +20,8 @@ const MAX_OFFER_STACKS = 5;
 /** Longest run of words that makes one item id ("iron ingot" = 2, "white stained glass" = 3). */
 const MAX_ID_WORDS = 3;
 /** What socialise says when no talk took place: no refusal is recorded then. */
+/** A deliberate trading opening waits this long (wall clock) for the model, a conversation slot or its own talk to end. */
+export const OPENING_WAIT_MS = 45_000;
 const NO_TALK = /did not come|had nothing to say/u;
 const DID_NOT_COME = /did not come/u;
 
@@ -217,7 +219,7 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
   // The intent reaches a line whichever way the talk starts: in the opening, or in her reply to a talk already open.
   talks.carryIntent(partner, intent);
   try {
-    const talk = (from: number) => socialise({ ...deps, since: from, openFacts: { ...deps.openFacts, intent } });
+    const talk = (from: number) => socialise({ ...deps, since: from, openWaitMs: OPENING_WAIT_MS, openFacts: { ...deps.openFacts, intent } });
     // A partner who did not come is a miss like one who never let the bot ask; a model with nothing to say is neither.
     const noTalk = (talked: SkillResult & { status: "failed" }): SkillResult => {
       if (DID_NOT_COME.test(talked.detail)) asks.refused.missed(partner, want, now());

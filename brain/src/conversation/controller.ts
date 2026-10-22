@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { BrainEvent } from "../brain-log.ts";
 import { namesWord } from "../llm-mind.ts";
 import type { Memory } from "../memory.ts";
@@ -15,6 +16,8 @@ const PARTNERS_KEPT = 5;
 const CALL_WAIT_MS = 60_000;
 /** A gist waits this long for a model slot before the fallback is written. */
 const GIST_WAIT_MS = 120_000;
+/** How often a deliberate opening looks again at what blocks it (wall clock). */
+const OPEN_POLL_MS = 1_000;
 /** The most of a member's last line the fallback gist quotes. */
 const FALLBACK_GIST_CHARS = 120;
 
@@ -62,6 +65,8 @@ export interface ControllerDeps {
   readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   /** Blocks (Manhattan) talk carries: the Localized Chat range, else the staying distance. */
   readonly talkRange: number;
+  /** Milliseconds between two looks of a waiting deliberate opening; default {@link OPEN_POLL_MS}. */
+  readonly openPollMs?: number;
   /** Whether the server limits how far talk carries (Localized Chat): only then is a call shouted. */
   readonly localized?: boolean;
   readonly random: () => number;
@@ -128,6 +133,8 @@ export class ConversationController {
   private carried: CarriedIntent | null = null;
   /** When a trade ask was last said to each partner (lower case), kept for the bot's life. */
   private readonly askedAt = new Map<string, number>();
+  /** Why the last {@link openSocial} that returned false was blocked (null: it was not). */
+  private refusal: string | null = null;
 
   constructor(private readonly deps: ControllerDeps) {
     this.limits = { ...deps.persona.settings.conversation, talkRange: deps.talkRange };
@@ -229,15 +236,51 @@ export class ConversationController {
     return this.open("chance", near.map((player) => this.nearby(player.username, player.distance, now)), o, false, null, signal);
   }
 
-  /** A deliberate opening (the socialising activity): no chance draw, no cooldown. */
-  async openSocial(partner: string, partnerPosition: Position | null, o: OpenFacts, signal: AbortSignal): Promise<boolean> {
-    if (this.record !== null) return isMember(this.record, partner);
-    if (!this.deps.modelFree()) return false;
+  /** Why the last deliberate opening that returned false was blocked: `model busy`, `conversation limit` or `in a talk with <names>`; null when nothing blocked it. */
+  get openRefusal(): string | null {
+    return this.refusal;
+  }
+
+  /**
+   * A deliberate opening (the socialising and trading activities): no chance draw, no cooldown. It waits up to `waitMs`
+   * of wall clock for what blocks it (the bot's own talk, a model slot, a conversation slot), then leaves the reason in
+   * {@link openRefusal}.
+   */
+  async openSocial(partner: string, partnerPosition: Position | null, o: OpenFacts, signal: AbortSignal, waitMs = 0): Promise<boolean> {
+    this.refusal = null;
+    const deadline = performance.now() + waitMs;
+    for (;;) {
+      if (signal.aborted) return false;
+      if (this.record !== null && isMember(this.record, partner)) return true;
+      const blocked = this.openBlocker();
+      if (blocked === null) break;
+      const left = deadline - performance.now();
+      if (left <= 0) {
+        this.refusal = blocked;
+        this.deps.log(`conversation: opening to ${partner} refused: ${blocked}`);
+        return false;
+      }
+      await this.pauseWithin(Math.min(left, this.deps.openPollMs ?? OPEN_POLL_MS), blocked === "model busy", signal);
+    }
     const now = this.deps.now();
     const calling = partnerPosition === null || manhattan(o.snapshot.position, partnerPosition) > this.limits.talkRange;
-    if (!this.deps.budget.tryTake()) return false;
     const near = [this.nearby(partner, calling || partnerPosition === null ? null : manhattan(o.snapshot.position, partnerPosition), now)];
     return this.open("social", near, o, calling, partner, signal);
+  }
+
+  /** What stops a deliberate opening now; null when nothing does, and then a conversation slot is taken. */
+  private openBlocker(): string | null {
+    if (this.record !== null) return `in a talk with ${this.record.members.filter((name) => !same(name, this.deps.self)).join(", ")}`;
+    if (!this.deps.modelFree()) return "model busy";
+    return this.deps.budget.tryTake() ? null : "conversation limit";
+  }
+
+  /** Sleeps `ms` of wall clock, or waits that long for a model slot; ends early on abort. */
+  private async pauseWithin(ms: number, forModel: boolean, signal: AbortSignal): Promise<void> {
+    const started = performance.now();
+    if (forModel && this.deps.waitForModel !== undefined && (await this.slotWithin(ms, signal))) return;
+    // A wait that failed early must not turn the loop into a spin.
+    await sleep(Math.max(0, ms - (performance.now() - started)), undefined, { signal }).catch(() => undefined);
   }
 
   private async open(kind: ConversationKind, near: readonly Nearby[], o: OpenFacts, calling: boolean, partner: string | null, signal: AbortSignal): Promise<boolean> {
