@@ -9,13 +9,13 @@ import { type FakeHarness, createFakeBot } from "./fake-bot/index.js";
 export interface WaterFixtureOptions {
   /**
    * Build the bot on the shared fake (`fake-bot/`, returned as `harness`), whose player metadata is the version's
-   * (`air_supply` at index 1). Off: a bare bot whose one metadata key puts `air_supply` at index 0, which the breath
-   * tests write directly (`entity.metadata[0]`), until they move (migration batches M3-M4).
+   * (`air_supply` at index 1). Off: a bare bot whose one metadata key puts `air_supply` at index 0, which the
+   * builder's legacy-default test writes directly (`entity.metadata[0]`), until T3b-F deletes it.
    */
   readonly onHarness?: boolean;
 }
 
-/** Kept for unmigrated importers (reflexes/breath, responses/breath, idle-water, idle-water-working): the old bare bot, an entity, a one-key player metadata and the control setter. */
+/** Kept for the test of the builder's own legacy default (domain-builders.test.ts), until T3b-F deletes it: the old bare bot, an entity, a one-key player metadata and the control setter. */
 function bareBot(setControlState: Bot["setControlState"]) {
   const entity = { isInWater: false, position: new Vec3(0, 64, 0), yaw: 0, onGround: true, metadata: [] };
   const bot = Object.assign(new EventEmitter(), {
@@ -39,7 +39,6 @@ function harnessBot(setControlState: Bot["setControlState"]) {
   return { bot: harness.bot, entity, harness };
 }
 
-/** `bot.oxygenLevel` read from and written to the entity's `air_supply` metadata (15 per bubble), at the registry's index. */
 function oxygenFromAirSupply(bot: Bot): void {
   const airSupply = (bot.registry.entitiesByName.player as { metadataKeys?: string[] }).metadataKeys?.indexOf("air_supply") ?? -1;
   if (airSupply < 0) throw new Error("no air_supply metadata for a player");
@@ -65,7 +64,7 @@ export function waterFixture(
   const { bot, entity, harness } = options.onHarness ? harnessBot(record) : bareBot(record);
   const reflex = new ReflexDriver(bot, new ActionRunner(runnerOptions), driverOptions);
   t.after(() => reflex[Symbol.asyncDispose]());
-  oxygenFromAirSupply(bot);
+  if (!harness) oxygenFromAirSupply(bot);
 
   return {
     bot,

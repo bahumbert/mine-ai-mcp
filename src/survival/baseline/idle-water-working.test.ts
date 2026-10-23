@@ -79,7 +79,7 @@ function navigationWith(stance: () => boolean = () => false) {
 }
 
 test("working in water with the eyes under it presses jump, and lets go once the eyes are out", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   fixture.entity.onGround = false;
@@ -99,7 +99,7 @@ test("working in water with the eyes under it presses jump, and lets go once the
 });
 
 test("a worker standing in shallow water with its eyes out is left alone", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_OUT_OF_WATER);
   fixture.entity.isInWater = true;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -113,7 +113,7 @@ test("a worker standing in shallow water with its eyes out is left alone", async
 });
 
 test("the working mode holds its place against the current while it floats", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -129,7 +129,7 @@ test("the working mode holds its place against the current while it floats", asy
 });
 
 test("the working mode relinquishes without writing false when navigation starts, and holds again after it", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const { state, navigation } = navigationWith();
@@ -151,7 +151,7 @@ test("the working mode relinquishes without writing false when navigation starts
 });
 
 test("a held water stance keeps the working mode from writing, a released one lets it hold again", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const { navigation } = navigationWith(() => waterStancesHeld(fixture.bot) > 0);
@@ -169,7 +169,7 @@ test("a held water stance keeps the working mode from writing, a released one le
 });
 
 test("a reflex that holds the body gets no writes from the working mode, which holds again afterwards", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -200,7 +200,7 @@ test("a reflex that holds the body gets no writes from the working mode, which h
 });
 
 test("a body that yields its action's cleanup to a reflex is not written to", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const yielding = {
@@ -217,7 +217,7 @@ test("a body that yields its action's cleanup to a reflex is not written to", as
 });
 
 test("the idle mode takes over from the working mode without a tick where jump drops", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -235,7 +235,7 @@ test("the idle mode takes over from the working mode without a tick where jump d
 });
 
 test("a bot afloat when its action ends is held by the idle mode, and the next admission releases that hold", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_OUT_OF_WATER);
   fixture.entity.isInWater = true;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -257,7 +257,7 @@ test("a bot afloat when its action ends is held by the idle mode, and the next a
 });
 
 test("when the action ends dry, the working mode clears the controls it set", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_IN_WATER);
   fixture.entity.isInWater = true;
   fixture.entity.onGround = false;
@@ -278,7 +278,7 @@ test("when the action ends dry, the working mode clears the controls it set", as
 });
 
 test("a worker that never wrote a control does not clear anyone else's when its action ends", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(fixture, EYES_OUT_OF_WATER);
   fixture.entity.isInWater = false;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
@@ -292,8 +292,8 @@ test("a worker that never wrote a control does not clear anyone else's when its 
 });
 
 test("each bot's working mode follows its own water", async (t) => {
-  const wet = waterFixture(t);
-  const dry = waterFixture(t);
+  const wet = waterFixture(t, {}, {}, { onHarness: true });
+  const dry = waterFixture(t, {}, {}, { onHarness: true });
   waterUpTo(wet, EYES_IN_WATER);
   waterUpTo(dry, EYES_OUT_OF_WATER);
   wet.entity.isInWater = true;
@@ -310,7 +310,7 @@ test("each bot's working mode follows its own water", async (t) => {
 });
 
 test("on dry land the working mode reads no cell on the ticks of a foreground action (backlog: idle-water eye cell)", async (t) => {
-  const fixture = waterFixture(t);
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
   let reads = 0;
   Object.assign(fixture.bot, { blockAt: () => { reads += 1; return { name: "air", getProperties: () => ({}) }; } });
   fixture.entity.isInWater = false;

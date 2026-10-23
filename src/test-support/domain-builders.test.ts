@@ -127,9 +127,10 @@ test("waterFixture on the harness reads its air from the version's air_supply me
   const fixture = waterFixture(t, {}, {}, { onHarness: true });
   assert.equal(fixture.harness?.bot, fixture.bot);
   assert.equal(fixture.entity, fixture.bot.entity);
-  fixture.bot.oxygenLevel = 7;
+  fixture.harness?.breath.setAirSupply(7 * 15);
   const airIndex = (fixture.bot.registry.entitiesByName.player as { metadataKeys: string[] }).metadataKeys.indexOf("air_supply");
   assert.equal(fixture.bot.entity.metadata[airIndex], 7 * 15);
+  assert.equal(fixture.bot.oxygenLevel, 7, "the server's air is what the client reads as its level");
   fixture.bot.setControlState("sneak", true);
   assert.deepEqual(fixture.controls, [["sneak", true]]);
   assert.equal(fixture.bot.controlState.sneak, true);

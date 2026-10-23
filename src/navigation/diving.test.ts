@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
 import { Vec3 } from "vec3";
 import type { Bot } from "mineflayer";
+import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { movementStep } from "../test-support/navigation.js";
 import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
@@ -10,26 +10,39 @@ import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
 import { DIVE_BACKSTOP_TICKS } from "./world/swimming.js";
 
-/** Water levels (`level` property) by y for the column's cells; an unlisted cell is a source. */
-function fixture(levels: Record<number, number> = {}) {
+type Kind = "stone" | "air" | "water";
+
+/**
+ * The navigation world a dive plans on and the fake bot's own, with every cell loaded into both. A flowing cell is
+ * a `level` above 0; `mocked` puts the fake clock on the global timers for a dive that waits.
+ */
+function pond(position: Vec3, onGround: boolean, options: Pick<FakeBotOptions, "lagMs" | "server"> & { readonly mocked?: boolean } = {}) {
   const world = new MemoryWorld();
-  for (let y = 59; y <= 65; y++) world.load({ x: 0, y, z: 0 }, y === 59 ? { stateId: 1 } : y <= 63
-    ? { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } } : { stateId: 0 });
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 61.2, 0.5), metadata: [300], onGround: false },
-    registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
-    blockAt: (p: Vec3) => {
-      const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone"),
-        getProperties: () => ({ level: String(levels[Math.floor(p.y)] ?? 0) }) } : null;
-    },
-    setControlState: () => {},
-  }) as unknown as Bot;
-  return { world, bot };
+  const { mocked, ...fake } = options;
+  const harness = createFakeBot({ position, groundY: null, ...fake, ...(mocked ? { clock: createFakeClock({ mode: "mocked" }) } : {}) });
+  const { bot } = harness;
+  Object.assign(bot.entity, { onGround });
+  const idle = { death: bot.listenerCount("death"), respawn: bot.listenerCount("respawn"), physicsTick: bot.listenerCount("physicsTick") };
+  const load = (cell: { x: number; y: number; z: number }, kind: Kind, level = 0) => {
+    world.load(cell, kind === "stone" ? { stateId: 1 } : kind === "air" ? { stateId: 0 }
+      : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: level === 0 } });
+    harness.world.setCell(new Vec3(cell.x, cell.y, cell.z), kind === "water" && level > 0 ? { name: "water", properties: { level } } : kind);
+  };
+  /** Listeners of `event` the dive left on the bot, beyond the fake's own (a `death` handler of its dig, its physics). */
+  const left = (event: keyof typeof idle) => bot.listenerCount(event) - idle[event];
+  return { world, harness, bot, breath: harness.breath, clock: harness.clock, load, left };
+}
+
+/** A pond column at x 0 (stone floor y 59, water y 60-63, air above), the bot floating in it with full air heard. */
+function fixture(options: Parameters<typeof pond>[2] = {}) {
+  const column = pond(new Vec3(0.5, 61.2, 0.5), false, options);
+  for (let y = 59; y <= 65; y++) column.load({ x: 0, y, z: 0 }, y === 59 ? "stone" : y <= 63 ? "water" : "air");
+  column.breath.setAirSupply(300);
+  return column;
 }
 
 test("a dive declaration and its watcher end on success, cancellation, and exceptions", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, left } = fixture();
   const diving = new Diving(bot, world);
   const options = { movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 61, z: 0 }) };
   await assert.rejects(diving.run(options, async () => {
@@ -38,7 +51,7 @@ test("a dive declaration and its watcher end on success, cancellation, and excep
     throw new Error("failed physical route");
   }), /failed physical route/);
   assert.equal(diving.owned, false);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("physicsTick"), 0);
   const result = await diving.run(options, async (request) => {
     diving.cancel("takeover");
     assert.equal(request.stopSignal?.aborted, true);
@@ -47,11 +60,11 @@ test("a dive declaration and its watcher end on success, cancellation, and excep
   assert.equal(result.status, "stopped");
   assert.equal(diving.active, false);
   assert.equal(diving.backstop(), null);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("physicsTick"), 0);
 });
 
 test("planned breathing returns to the original goal after observing full air", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath, left } = fixture();
   const states: string[] = [];
   const diving = new Diving(bot, world, (state) => states.push(state));
   const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
@@ -59,7 +72,7 @@ test("planned breathing returns to the original goal after observing full air", 
   const result = await diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
     calls++;
     if (calls === 1) {
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       assert.equal(request.stopSignal?.aborted, true);
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
@@ -67,7 +80,7 @@ test("planned breathing returns to the original goal after observing full air", 
     if (calls === 2) {
       assert.notEqual(request.goal, goal);
       bot.entity.position.y = 63.5;
-      Reflect.set(bot.entity.metadata, 0, 300);
+      breath.setAirSupply(300);
     } else assert.equal(request.goal, goal);
     return { status: "completed", elapsedMs: 0 };
   });
@@ -75,7 +88,7 @@ test("planned breathing returns to the original goal after observing full air", 
   assert.equal(calls, 3);
   assert.deepEqual(states, ["breathing", "resumed", "released"]);
   assert.equal(diving.active, false);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("physicsTick"), 0);
 });
 
 /** The return-to-air admission a request carries: from where the body is, with the air it has left (T6 2026-10-21). */
@@ -87,7 +100,7 @@ function returnAdmission(request: Parameters<Parameters<Diving["run"]>[1]>[0]) {
 // T5 probe 2026-10-21: a roof laid over the pond mid-dive fired the stop at air 228, and the return planned with the
 // dive's own admission (origin where the dive began, the 65-tick reserve) refused every cell: "shut in at the start".
 test("a breathing stop returns to air planning from where the body is with the air it has left", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath, left } = fixture();
   const states: string[] = [];
   const diving = new Diving(bot, world, (state) => states.push(state));
   const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
@@ -97,14 +110,14 @@ test("a breathing stop returns to air planning from where the body is with the a
     calls++;
     if (calls === 1) {
       bot.entity.position.y = 60;
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
     if (calls === 2) {
       admission = returnAdmission(request);
       bot.entity.position.y = 63.5;
-      Reflect.set(bot.entity.metadata, 0, 300);
+      breath.setAirSupply(300);
     }
     return { status: "completed", elapsedMs: 0 };
   });
@@ -113,12 +126,12 @@ test("a breathing stop returns to air planning from where the body is with the a
   assert.deepEqual(states, ["breathing", "resumed", "released"]);
   // The next request starts clean from the state the stop left.
   assert.equal(diving.active, false);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("physicsTick"), 0);
   assert.equal((await diving.run({ movements: createMovementPolicy(), goal }, async () => ({ status: "completed", elapsedMs: 0 }))).status, "completed");
 });
 
 test("a breathing stop whose return finds no way keeps the route's failure and says what to do next", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath } = fixture();
   const diving = new Diving(bot, world);
   let calls = 0;
   let swimBack: ReturnType<typeof returnAdmission>;
@@ -128,12 +141,12 @@ test("a breathing stop whose return finds no way keeps the route's failure and s
       bot.entity.position.y = 62.5; // Eyes in the air: the last breathable cell, where the swim back goes.
       bot.emit("physicsTick");
       bot.entity.position.y = 60;
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
     if (calls === 3) swimBack = returnAdmission(request);
-    Reflect.set(bot.entity.metadata, 0, 40);
+    breath.setAirSupply(40);
     return { status: "stopped", reason: "no path", routeFailed: true, elapsedMs: 0 };
   });
   assert.ok(result.status === "stopped" && result.routeFailed, "the pinned watch still sees the route failure");
@@ -143,14 +156,14 @@ test("a breathing stop whose return finds no way keeps the route's failure and s
 });
 
 test("a death during the breathing stop's return ends it: no resume, no listener left", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath, left } = fixture();
   const states: string[] = [];
   const diving = new Diving(bot, world, (state) => states.push(state));
   let calls = 0;
   const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
     calls++;
     if (calls === 1) {
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
@@ -161,7 +174,7 @@ test("a death during the breathing stop's return ends it: no resume, no listener
   assert.equal(result.status, "stopped");
   assert.equal(result.status === "stopped" ? result.reason : "", "died during the return to air", "a dead bot is not told to go and breathe");
   assert.equal(states.includes("resumed"), false);
-  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") + bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("death") + left("respawn") + left("physicsTick"), 0);
 });
 
 test("floating work with dry eyes keeps the existing surface-mining contract", () => {
@@ -172,7 +185,7 @@ test("floating work with dry eyes keeps the existing surface-mining contract", (
 });
 
 test("quantity completion still returns a mining process to air, while takeover cancels refill without another tick", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath, left } = fixture();
   const diving = new Diving(bot, world);
   const quantity = new AbortController();
   let breathing!: () => void;
@@ -189,7 +202,7 @@ test("quantity completion still returns a mining process to air, while takeover 
     }
     assert.equal(request.stopSignal?.aborted, false, "the process still owes its surface handoff");
     bot.entity.position.y = 63.5;
-    Reflect.set(bot.entity.metadata, 0, 200);
+    breath.setAirSupply(200);
     return { status: "completed", elapsedMs: 0 };
   });
   await startedBreathing;
@@ -199,63 +212,40 @@ test("quantity completion still returns a mining process to air, while takeover 
   assert.ok(result.status === "stopped" && result.reason === "connection ended during refill");
   assert.equal(calls, 2);
   assert.equal(diving.active, false);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("physicsTick"), 0);
 });
 
 test("roofed and with no air metadata, a submerged start takes its air as unchanged and plans a dive", async () => {
-  const world = new MemoryWorld();
+  const { world, bot, harness, clock, load } = pond(new Vec3(0.5, 60.2, 0.5), true, { mocked: true });
+  using _timers = clock.install();
   for (let x = -3; x <= 3; x++)
-    for (let y = 59; y <= 66; y++)
-      world.load({ x, y, z: 0 }, y === 59 || (y === 62 && x >= -1 && x <= 1) ? { stateId: 1 } : y <= 63
-        ? { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } } : { stateId: 0 });
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 60.2, 0.5), metadata: [], onGround: true },
-    registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
-    blockAt: (p: Vec3) => {
-      const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone") } : null;
-    },
-    setControlState: () => {},
-  }) as unknown as Bot;
-  const ticking = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    const diving = new Diving(bot, world);
-    let dive: unknown;
-    await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 3, y: 60, z: 0 }) }, async (request) => {
-      dive = request.movements.dive;
-      return { status: "completed", elapsedMs: 0 };
-    });
-    assert.deepEqual(Object.keys(dive as object), ["origin", "airTicks"]);
-    assert.equal((dive as { airTicks: number }).airTicks, 300);
-  } finally {
-    clearInterval(ticking);
-  }
+    for (let y = 59; y <= 66; y++) load({ x, y, z: 0 }, y === 59 || (y === 62 && x >= -1 && x <= 1) ? "stone" : y <= 63 ? "water" : "air");
+  // The premise of the live case (2026-10-10): the server sends no air for the head under water, so a silent server.
+  harness.server.stop();
+  const diving = new Diving(bot, world);
+  let dive: unknown;
+  const run = diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 3, y: 60, z: 0 }) }, async (request) => {
+    dive = request.movements.dive;
+    return { status: "completed", elapsedMs: 0 };
+  });
+  await clock.settle(run, 10_000);
+  assert.deepEqual(Object.keys(dive as object), ["origin", "airTicks"]);
+  assert.equal((dive as { airTicks: number }).airTicks, 300);
 });
 
 // ── A run that ends under a roof swims back to the last air it passed (run 15, Sana) ───────────────
 
 /** An air pocket at x -2..0 and a water tunnel x 1..8 (y 60-61), roofed (y 62) and floored (y 59), z 0 only. */
 function tunnelFixture() {
-  const world = new MemoryWorld();
+  const tunnel = pond(new Vec3(0.5, 60, 0.5), true);
   for (let x = -2; x <= 8; x++)
-    for (let y = 59; y <= 62; y++)
-      world.load({ x, y, z: 0 }, y === 59 || y === 62 ? { stateId: 1 } : x <= 0 ? { stateId: 0 }
-        : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } });
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 60, 0.5), metadata: [300], onGround: true },
-    registry: { entitiesByName: { player: { metadataKeys: ["air_supply"] } } },
-    health: 20,
-    blockAt: (p: Vec3) => {
-      const cell = world.blockAt(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-      return cell.kind === "loaded" ? { name: cell.traits.liquid ?? (cell.stateId === 0 ? "air" : "stone") } : null;
-    },
-    setControlState: () => {},
-  }) as unknown as Bot;
-  return { world, bot };
+    for (let y = 59; y <= 62; y++) tunnel.load({ x, y, z: 0 }, y === 59 || y === 62 ? "stone" : x <= 0 ? "air" : "water");
+  tunnel.breath.setAirSupply(300);
+  return tunnel;
 }
 
 test("a dive that fails five blocks into a roofed tunnel swims back to the air pocket before it releases", async () => {
-  const { world, bot } = tunnelFixture();
+  const { world, bot, left } = tunnelFixture();
   const states: string[] = [];
   const diving = new Diving(bot, world, (state) => states.push(state));
   const calls: { goal: unknown; air: unknown }[] = [];
@@ -276,8 +266,8 @@ test("a dive that fails five blocks into a roofed tunnel swims back to the air p
   assert.ok(back !== calls[0]!.goal);
   assert.equal(bot.entity.position.x, 0.5, "she ends in the air pocket, not inside");
   assert.deepEqual(states, ["released"]);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(left("physicsTick"), 0);
+  assert.equal(left("death"), 0);
 });
 
 test("a takeover cancel leaves the swim back to the reflex that took the body", async () => {
@@ -296,7 +286,7 @@ test("a takeover cancel leaves the swim back to the reflex that took the body", 
 });
 
 test("a death during the swim back ends it cleanly", async () => {
-  const { world, bot } = tunnelFixture();
+  const { world, bot, left } = tunnelFixture();
   const diving = new Diving(bot, world);
   let calls = 0;
   const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }) }, async (request) => {
@@ -314,8 +304,8 @@ test("a death during the swim back ends it cleanly", async () => {
   assert.equal(result.status, "failed");
   assert.equal(calls, 2);
   assert.equal(diving.active, false);
-  assert.equal(bot.listenerCount("death"), 0);
-  assert.equal(bot.listenerCount("respawn"), 0);
+  assert.equal(left("death"), 0);
+  assert.equal(left("respawn"), 0);
 });
 
 // Review 2026-10-18 (run 15 fixes), blocking 3: the swim back ran after successful arrivals and ignored the action's cancel.
@@ -342,7 +332,7 @@ test("a goal under water that was reached is where the run ends: no swim back un
 });
 
 test("the action cancelled during the swim back stops it at once, with no control held", async () => {
-  const { world, bot } = tunnelFixture();
+  const { world, bot, left } = tunnelFixture();
   const held = new Set<string>();
   bot.setControlState = (control, active) => void (active ? held.add(control) : held.delete(control));
   const diving = new Diving(bot, world);
@@ -363,7 +353,7 @@ test("the action cancelled during the swim back stops it at once, with no contro
   assert.equal(stoppedAtOnce, true, "the swim back is told to stop when the action is cancelled");
   assert.equal(held.size, 0);
   assert.equal(diving.active, false);
-  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") + bot.listenerCount("physicsTick"), 0);
+  assert.equal(left("death") + left("respawn") + left("physicsTick"), 0);
 });
 
 test("an action already cancelled when its run ends does not start a swim back", async () => {
@@ -382,18 +372,16 @@ test("an action already cancelled when its run ends does not start a swim back",
 });
 
 /** A dive owned in open water, then roofed in the middle of the route: the admission premise (an ascent) is gone. */
-async function backstopUnderRoof(eyeCell: { liquidSource: boolean; level: number }) {
-  const levels: Record<number, number> = {};
-  const { world, bot } = fixture(levels);
+async function backstopUnderRoof(eyeCellLevel: number) {
+  const { world, bot, load } = fixture();
   // Feet at y 60 on the floor: the eye cell is y 61, which holds water for the whole dive.
-  Object.assign(bot.entity, { position: new Vec3(0.5, 60, 0.5) });
+  bot.entity.position.set(0.5, 60, 0.5);
   const diving = new Diving(bot, world);
   let backstop: number | null = null;
   await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async () => {
     assert.equal(diving.owned, true);
-    world.load({ x: 0, y: 61, z: 0 }, { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: eyeCell.liquidSource } });
-    levels[61] = eyeCell.level;
-    for (let y = 62; y <= 65; y++) world.load({ x: 0, y, z: 0 }, { stateId: 1 });
+    load({ x: 0, y: 61, z: 0 }, "water", eyeCellLevel);
+    for (let y = 62; y <= 65; y++) load({ x: 0, y, z: 0 }, "stone");
     backstop = diving.backstop();
     return { status: "completed", elapsedMs: 0 };
   });
@@ -401,63 +389,55 @@ async function backstopUnderRoof(eyeCell: { liquidSource: boolean; level: number
 }
 
 test("the backstop of a roofed dive does not ask a rescue while the eyes are in the air above flowing water of level 4", async () => {
-  assert.equal(await backstopUnderRoof({ liquidSource: false, level: 4 }), DIVE_BACKSTOP_TICKS);
+  assert.equal(await backstopUnderRoof(4), DIVE_BACKSTOP_TICKS);
 });
 
 test("the backstop of a roofed dive still asks an immediate rescue with the eyes under a source and no ascent", async () => {
-  assert.equal(await backstopUnderRoof({ liquidSource: true, level: 0 }), 300);
+  assert.equal(await backstopUnderRoof(0), 300);
 });
 
-/** Emits `count` physics ticks, one per millisecond: the client's clock running while the server lags behind it. */
-function pumpTicks(bot: Bot, count: number): void {
-  let left = count;
-  const timer = setInterval(() => {
-    bot.emit("physicsTick");
-    if (--left <= 0) clearInterval(timer);
-  }, 1);
-}
-
-// NAVP-13 (run 15: the server 2.5-4.6 s behind): the breathing stop counted 100 client ticks for full air.
+// NAVP-13 (run 15: the server 2.5-4.6 s behind): the breathing stop counted 100 client ticks for full air. The fake
+// server on 14 ticks a second (30 % behind) moves the world age so the bound is about 7-8 s (time packets come each
+// second); its air packets come 3 s late (the fake's air ticks 20 a second whatever the server's rate): the
+// full air is heard at about 6 s, past the 100 client ticks (5 s) and inside the age bound.
 test("a server behind the client still completes the breathing stop: full air reported late is waited for", async () => {
-  const { world, bot } = fixture();
+  const { world, bot, breath, clock } = fixture({ mocked: true, lagMs: 3_000, server: { ticksPerSecond: 14 } });
+  using _timers = clock.install();
   const diving = new Diving(bot, world);
   const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
   let calls = 0;
-  const result = await diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
+  const run = diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
     calls++;
     if (calls === 1) {
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
-    if (calls === 2) {
-      bot.entity.position.y = 63.5;
-      pumpTicks(bot, 150);
-      setTimeout(() => Reflect.set(bot.entity.metadata, 0, 300), 300);
-    }
+    // At the surface the server refills 4 a tick, and says so 3 s late.
+    if (calls === 2) bot.entity.position.y = 63.5;
     return { status: "completed", elapsedMs: 0 };
   });
+  const result = await clock.settle(run, 30_000);
   assert.equal(result.status, "completed");
   assert.equal(calls, 3);
 });
 
 test("the breathing stop ends once the server's clock has moved the refill time with no full air", async () => {
-  const { world, bot } = fixture();
-  Object.assign(bot, { time: { age: 1000 } });
+  const { world, bot, breath, clock } = fixture({ mocked: true });
+  using _timers = clock.install();
   const diving = new Diving(bot, world);
   let calls = 0;
-  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
+  // The return completes with the head still under water: the air runs down, never up, while the world age moves on.
+  const run = diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
     calls++;
     if (calls === 1) {
-      Reflect.set(bot.entity.metadata, 0, 60);
+      breath.setAirSupply(60);
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
-    bot.entity.position.y = 63.5;
-    const ageing = setInterval(() => { (bot as unknown as { time: { age: number } }).time.age += 20; }, 5);
-    setTimeout(() => clearInterval(ageing), 1000);
     return { status: "completed", elapsedMs: 0 };
   });
+  const result = await clock.settle(run, 30_000);
   assert.equal(result.status, "stopped");
   assert.match(result.status === "stopped" ? result.reason : "", /Full air was not observed at the breathing stop/u);
   assert.equal(calls, 2);

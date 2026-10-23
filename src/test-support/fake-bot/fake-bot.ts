@@ -8,6 +8,7 @@ import type { Bot, Player } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
+import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
@@ -77,6 +78,7 @@ export interface FakeHarness {
   readonly server: FakeServer;
   readonly world: FakeWorld;
   readonly inventory: FakeInventory;
+  readonly breath: FakeBreath;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -189,8 +191,9 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeVehicle(bot, server);
   attachFakeItems(bot, { clock, server, world, inventory, entities });
   attachFakeFindBlocks(bot);
+  const breath = attachFakeBreath(bot, { clock, server });
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory };
+  return { bot, clock, server, world, inventory, breath };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

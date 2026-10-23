@@ -10,6 +10,9 @@ import { surface } from "./breath.js";
 /** What a test cell holds; leaves are a roof dug by hand within a breath, stone is not (owner 2026-10-19: Q2). */
 type Cell = "water" | "air" | "stone" | "oak_leaves";
 const SPEED = 0.1;
+/** The server's air meter: 15 ticks a bubble, 20 bubbles. */
+const TICKS_PER_BUBBLE = 15;
+const FULL_BUBBLES = 20;
 /** The box of cells the swims below can reach or look at; stone outside it (the fake's ground reaches far above). */
 const BOX = { x: [-25, 25], y: [-3, 6], z: [-3, 3] } as const;
 
@@ -22,6 +25,15 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
   const { bot, harness } = fixture;
   if (harness === undefined) throw new Error("waterFixture was asked for the shared fake");
   const digs: string[] = [];
+  /** The air the scene holds, in bubbles: the server's count under water is not what these tests are about, so each tick sets it back (full with the head in air or after a roof dig, as the scene says). */
+  let sceneAir = 8;
+  const holdAir = () => {
+    if (harness.breath.airSupply !== sceneAir * TICKS_PER_BUBBLE) harness.breath.setAirSupply(sceneAir * TICKS_PER_BUBBLE);
+  };
+  const setAir = (bubbles: number) => {
+    sceneAir = bubbles;
+    holdAir();
+  };
   const at = (read: typeof seen, p: Vec3) => read(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
   /** The fake world's cells over {@link BOX} made `read`'s (a cell already so is left alone); `stone` is the ground's own. */
   const paint = (read: typeof seen) => {
@@ -34,11 +46,11 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
   };
   paint(seen);
   Object.assign(fixture.entity, { position: start.clone(), isInWater: true });
-  bot.oxygenLevel = 8;
+  setAir(8);
   // Scripted, as the old test's: a roof dig that ends at once with the breath that follows it.
   bot.dig = async () => {
     digs.push("roof");
-    bot.oxygenLevel = 20;
+    setAir(FULL_BUBBLES);
   };
   const held = () => Object.entries(bot.controlState).filter(([, state]) => state).map(([control]) => control);
   const step = () => {
@@ -53,7 +65,8 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
     if (free(vertical)) fixture.entity.position = vertical;
     const now = fixture.entity.position;
     fixture.entity.isInWater = at(physical, now) === "water";
-    if (at(physical, now.offset(0, 1.62, 0)) === "air") bot.oxygenLevel = 20;
+    if (at(physical, now.offset(0, 1.62, 0)) === "air") sceneAir = FULL_BUBBLES;
+    holdAir();
   };
   /** What a test runs on each client tick: before the body moves, and after. */
   const onTick: { before?: (tick: number) => void; after?: () => void } = {};
@@ -70,7 +83,7 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
     for (let n = 0; n < ticks && !finished.over; n++) await harness.clock.advance(50);
     return { outcome: await done, position: fixture.entity.position, digs };
   };
-  return { run, bot, fixture, clock: harness.clock, world: harness.world, paint, digs, held, onTick };
+  return { run, bot, fixture, clock: harness.clock, world: harness.world, paint, digs, held, onTick, setAir };
 }
 
 /**
@@ -82,7 +95,7 @@ async function surfaceWithShortAir(world: ReturnType<typeof swimWorld>, ticks: n
   const done = surface(world.bot, stop.signal, new Budgets(), 600).catch(() => undefined);
   world.onTick.before = onTick;
   world.onTick.after = () => {
-    if (world.digs.length === 0) world.bot.oxygenLevel = 8;
+    if (world.digs.length === 0) world.setAir(8);
   };
   for (let tick = 0; tick < ticks; tick++) await world.clock.advance(50);
   stop.abort();

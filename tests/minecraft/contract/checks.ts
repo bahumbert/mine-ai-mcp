@@ -4,6 +4,7 @@
  */
 import type { FakeCell } from "../../../src/test-support/fake-bot/index.ts";
 import type { ContractSubject } from "./subject.ts";
+import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
@@ -59,6 +60,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   boatDismountIgnored,
   columnsHoldCells,
   findBlocksMatching,
+  airSupplyUnderWater,
 ];
 
 /** The check of that name; throws listing the known names. */
