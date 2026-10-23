@@ -1,8 +1,9 @@
 /**
  * The server's side of windows: the player window and the one container window it keeps open, the clicks it applies
  * with Prismarine's own `acceptClick`, and the packets it answers with (`set_slot` for each slot the client's claim got
- * wrong, `window_items` for a stale state id, `open_window` then `window_items` for a container). Measured on a 1.21.4
- * server by the contract checks `click-window-hotbar-swap`, `click-window-shift-move` and `chest-open-take-close`.
+ * wrong, `set_cursor_item` when the cursor is, `window_items` for a stale state id, `open_window` then `window_items` for a
+ * container). Stacks are told apart by their components (`sameItemVariant`). Measured on a 1.21.4 server by the contract
+ * checks `click-window-hotbar-swap`, `click-window-shift-move`, `click-window-onto-variant`, `click-window-variant-split` and `chest-open-take-close`.
  */
 import type { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
@@ -10,7 +11,10 @@ import type { Item } from "prismarine-item";
 import type { WindowsExports } from "prismarine-windows";
 import { Vec3 } from "vec3";
 import type { FakeBot } from "./fake-bot.js";
+import { sameItemVariant } from "../../world/item-variant.js";
 import { type FakeInventory, type FakeSlot, itemOf, stacksOf } from "./fake-inventory.js";
+import { itemWithCount, stackNameOf } from "./item-variants.js";
+import { type ClickableWindow, type ClickItems, installVariantClicks } from "./fake-window-clicks.js";
 import { type QuickMoveItems, quickMove } from "./fake-quick-move.js";
 import type { FakeServer } from "./fake-server.js";
 import type { FakeWorld } from "./fake-world.js";
@@ -24,7 +28,7 @@ export interface ContainerStack extends Required<FakeSlot> {
 
 /** What a test reads and sets of the server's windows. */
 export interface FakeWindows {
-  /** The server's stacks in the container at `cell` ("x,y,z"), by slot; an open window's moves reach them when it closes. */
+  /** The server's stacks in the container at `cell` ("x,y,z"), by slot, a variant under its `ITEM_VARIANTS` name; an open window's moves reach them when it closes. */
   containerStacks(cell: string): ContainerStack[];
   /** Replace what the server holds in the container at `cell` (another bot emptied it, or filled a slot). */
   setContainerStacks(cell: string, stacks: readonly ContainerStack[]): void;
@@ -67,15 +71,13 @@ const SHIFT_CLICK = 1;
 type Notch = unknown;
 
 /** The window as the server drives it: Prismarine's, with the click applied by the library. */
-interface ServerWindow extends EventEmitter {
+interface ServerWindow extends EventEmitter, ClickableWindow {
   readonly id: number;
   readonly slots: (Item | null)[];
   readonly type: string | number;
   readonly inventoryStart: number;
   readonly inventoryEnd: number;
-  selectedItem: Item | null;
   acceptClick(click: { slot: number; mouseButton: number; mode: number; windowId: number; item: Item | null }): void;
-  updateSlot(slot: number, item: Item | null): void;
 }
 
 /** The `window_click` packet as Mineflayer writes it for 1.17.1 and later (`inventory.js:677-686`). */
@@ -86,6 +88,7 @@ interface WindowClick {
   readonly mouseButton: number;
   readonly mode: number;
   readonly changedSlots: readonly { readonly location: number; readonly item: Notch }[];
+  readonly cursorItem: Notch;
 }
 
 interface ContainerRecord {
@@ -99,6 +102,12 @@ interface OpenContainer {
 }
 
 type ItemApi = typeof Item & { fromNotch(notch: Notch): Item | null; toNotch(item: Item | null): Notch; equal(left: Item | null, right: Item | null, matchStackSize?: boolean): boolean };
+
+/** What the server compares a client's claim with: the same variant and the same count, or both empty (the components count: measured where the count differs too, contract checks click-window-onto-variant and click-window-variant-split). */
+function sameStack(claimed: Item | null, actual: Item | null): boolean {
+  if (claimed === null || actual === null) return claimed === actual;
+  return sameItemVariant(claimed, actual) && claimed.count === actual.count;
+}
 
 const keyOf = ({ x, y, z }: Vec3): string => `${x},${y},${z}`;
 
@@ -116,7 +125,7 @@ class WindowServer implements FakeWindowServer {
   private readonly windowLibrary: WindowsExports;
   private readonly records = new Map<string, ContainerRecord>();
   private readonly stateIds = new Map<number, number>([[0, LOGIN_PLAYER_STATE_ID]]);
-  private readonly stackMoves: QuickMoveItems;
+  private readonly stackMoves: QuickMoveItems & ClickItems;
   private player: ServerWindow | null = null;
   private open: OpenContainer | null = null;
   private lastWindowId = 0;
@@ -130,8 +139,8 @@ class WindowServer implements FakeWindowServer {
     this.ItemClass = (require("prismarine-item") as (registry: FakeBot["registry"]) => ItemApi)(bot.registry);
     this.windowLibrary = (require("prismarine-windows") as (registry: FakeBot["registry"]) => WindowsExports)(bot.registry);
     this.stackMoves = {
-      withCount: (item, count) => Object.assign(this.copy(item)!, { count }),
-      sameItem: (left, right) => this.ItemClass.equal(left, right, false),
+      withCount: (item, count) => itemWithCount(bot.registry, item, count),
+      sameItem: sameItemVariant,
     };
     const { server } = parts;
     server.onPacket("block_place", (data) => {
@@ -161,7 +170,7 @@ class WindowServer implements FakeWindowServer {
 
   containerStacks(cell: string): ContainerStack[] {
     const slots = this.open?.key === cell ? this.open.window.slots.slice(0, this.open.window.inventoryStart) : (this.recordOf(cell)?.slots ?? []);
-    return slots.flatMap((item, slot) => (item === null ? [] : [{ slot, name: item.name, count: item.count }]));
+    return slots.flatMap((item, slot) => (item === null ? [] : [{ slot, name: stackNameOf(this.bot.registry, item), count: item.count }]));
   }
 
   setContainerStacks(cell: string, stacks: readonly ContainerStack[]): void {
@@ -180,7 +189,9 @@ class WindowServer implements FakeWindowServer {
   }
 
   private createWindow(id: number, menu: string, title: unknown): ServerWindow {
-    return this.windowLibrary.createWindow(id, menu, title as string) as unknown as ServerWindow;
+    const window = this.windowLibrary.createWindow(id, menu, title as string) as unknown as ServerWindow;
+    installVariantClicks(window, this.stackMoves);
+    return window;
   }
 
   private nextStateId(windowId: number): number {
@@ -292,8 +303,9 @@ class WindowServer implements FakeWindowServer {
     if (stale) return this.sendItems(window);
     for (const { location, item } of click.changedSlots) claimed[location] = this.ItemClass.fromNotch(item);
     window.slots.forEach((item, slot) => {
-      if (!this.ItemClass.equal(claimed[slot] ?? null, item, true)) this.sendSlot(window, slot);
+      if (!sameStack(claimed[slot] ?? null, item)) this.sendSlot(window, slot);
     });
+    if (!sameStack(this.ItemClass.fromNotch(click.cursorItem), window.selectedItem)) this.client.emit("set_cursor_item", { contents: this.ItemClass.toNotch(window.selectedItem) });
   }
 }
 

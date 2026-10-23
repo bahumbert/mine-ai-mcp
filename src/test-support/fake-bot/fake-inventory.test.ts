@@ -93,3 +93,12 @@ test("a carried item unknown to the registry throws naming it", () => {
 test("more carried than 36 slots hold throws, instead of dropping the rest", () => {
   assert.throws(() => createFakeInventory(registry, { carried: { cobblestone: 64 * 37 } }), /room/);
 });
+
+test("a carried variant is built through the server's item path, and a toss of part of it leaves the rest the same variant", () => {
+  const inventory = createFakeInventory(registry, { carried: { renamed_first_cobblestone: 5 } });
+  const components = (item: { readonly count: number } | null | undefined) => Reflect.get(item ?? {}, "components") as { type: string }[];
+  assert.deepEqual(components(inventory.slots[36]).map(({ type }) => type), ["custom_name"]);
+  inventory.toss(id("cobblestone"), 2);
+  assert.equal(inventory.slots[36]?.count, 3);
+  assert.deepEqual(components(inventory.slots[36]).map(({ type }) => type), ["custom_name"], "the stack left in the slot is still renamed");
+});

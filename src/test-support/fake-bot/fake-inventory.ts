@@ -8,6 +8,7 @@ import type minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { WindowsExports } from "prismarine-windows";
+import { isItemVariantName, itemWithCount, variantItemOf } from "./item-variants.js";
 
 type Registry = ReturnType<typeof minecraftData>;
 const require = createRequire(import.meta.url);
@@ -69,8 +70,9 @@ interface PlayerWindow extends EventEmitter {
   firstEmptySlotRange(start: number, end: number): number | null;
 }
 
-/** A real Prismarine item of `name`, `count` of it; throws naming a name the registry does not have. */
+/** A real Prismarine item of `name`, `count` of it (a name of `ITEM_VARIANTS` gives that variant); throws naming a name the registry does not have. */
 export function itemOf(registry: Registry, name: string, count = 1): Item {
+  if (isItemVariantName(name)) return variantItemOf(registry, name, count);
   const known = registry.itemsByName[name];
   if (!known) throw new Error(`unknown item ${name} in ${registry.version.minecraftVersion}`);
   const ItemClass = (require("prismarine-item") as (registry: Registry) => typeof Item)(registry);
@@ -194,7 +196,7 @@ export function createFakeInventory(registry: Registry, options: FakeInventoryOp
 function takeFromSlot(window: PlayerWindow, registry: Registry, slot: number, count: number): TossedStack {
   const item = window.slots[slot]!;
   const taken = Math.min(item.count, count);
-  window.updateSlot(slot, item.count === taken ? null : itemOf(registry, item.name, item.count - taken));
+  window.updateSlot(slot, item.count === taken ? null : itemWithCount(registry, item, item.count - taken));
   return { type: item.type, count: taken };
 }
 

@@ -194,3 +194,69 @@ test("a shift click on a container slot goes to the end of the player's part of 
   await clock.advance(1_000);
   assert.deepEqual([window.slots[0]?.name, window.slots[62]], ["torch", null]);
 });
+
+/** A stack as these tests read it: `name xN`, with its custom name when it has one (`ITEM_VARIANTS`). */
+function stackText(item: { readonly name: string; readonly count: number } | null | undefined): string | null {
+  if (!item) return null;
+  const components = (Reflect.get(item, "components") ?? []) as { type: string; data: { value?: string } }[];
+  const renamed = components.find(({ type }) => type === "custom_name")?.data.value;
+  return `${item.name} x${item.count}${renamed === undefined ? "" : ` "${renamed}"`}`;
+}
+
+/** A bot beside the chest, whose stacks are `containers` or, slot by slot, `stacks` (names of items or of `ITEM_VARIANTS`), its window open. */
+async function openedChest(containers: Readonly<Record<string, number>>, carried: Readonly<Record<string, number>> = {}, stacks?: readonly { slot: number; name: string; count: number }[]) {
+  const harness = createFakeBot({ position: BESIDE_THE_CHEST, cells: CHEST_CELLS, carried, containers: { [CHEST]: containers } });
+  if (stacks !== undefined) harness.windows.setContainerStacks(CHEST, stacks);
+  const window = await harness.clock.settle(harness.bot.openContainer(harness.bot.blockAt(new Vec3(3, 64, 0))!), 5_000);
+  return { ...harness, window, received: receivedFromServer(harness.bot._client, ["set_slot", "set_cursor_item", "window_items"]) };
+}
+
+test("stacks of one variant merge on the server as they do on the client, and so do two plain stacks, with nothing sent back", async () => {
+  const { bot, clock, window, received } = await openedChest({}, {}, [{ slot: 0, name: "renamed_first_cobblestone", count: 5 }, { slot: 1, name: "renamed_first_cobblestone", count: 7 }]);
+  await bot.clickWindow(0, 0, 0);
+  await bot.clickWindow(1, 0, 0);
+  await clock.advance(1_000);
+  assert.deepEqual([stackText(window.slots[0]), stackText(window.slots[1]), stackText(window.selectedItem), received], [null, 'cobblestone x12 "first"', null, []]);
+  const plain = await openedChest({ cobblestone: 4 }, { cobblestone: 5 });
+  await plain.bot.clickWindow(0, 0, 0);
+  await plain.bot.clickWindow(54, 0, 0);
+  await plain.clock.advance(1_000);
+  assert.deepEqual([stackText(plain.window.slots[54]), plain.received], ["cobblestone x9", []]);
+});
+
+test("a right click halves a renamed stack into two renamed stacks on the server, and the client's halves become renamed once it answers", async () => {
+  const { bot, clock, window } = await openedChest({ renamed_first_cobblestone: 5 });
+  await bot.clickWindow(0, 1, 0);
+  assert.deepEqual([stackText(window.slots[0]), stackText(window.selectedItem)], ['cobblestone x2 "first"', "cobblestone x3"], "Prismarine's split drops the components");
+  await bot.clickWindow(5, 0, 0);
+  await clock.advance(1_000);
+  assert.deepEqual([stackText(window.slots[0]), stackText(window.slots[5])], ['cobblestone x2 "first"', 'cobblestone x3 "first"'], "the server's halves are both renamed");
+  window.close();
+  await clock.advance(500);
+  const again = await clock.settle(bot.openContainer(bot.blockAt(new Vec3(3, 64, 0))!), 5_000);
+  assert.deepEqual([stackText(again.slots[0]), stackText(again.slots[5])], ['cobblestone x2 "first"', 'cobblestone x3 "first"'], "and the chest keeps them so");
+});
+
+test("a right click that puts one renamed item down on an empty slot puts down a renamed item: Prismarine's put-down is plain until the server corrects the slot", async () => {
+  const { bot, clock, window, received } = await openedChest({ renamed_first_cobblestone: 5 });
+  await bot.clickWindow(0, 0, 0);
+  await bot.clickWindow(3, 1, 0);
+  assert.deepEqual([stackText(window.slots[3]), stackText(window.selectedItem)], ["cobblestone x1", 'cobblestone x4 "first"']);
+  await clock.advance(1_000);
+  assert.deepEqual([stackText(window.slots[3]), stackText(window.selectedItem)], ['cobblestone x1 "first"', 'cobblestone x4 "first"'], "the slot is corrected; the cursor was right");
+  assert.deepEqual(received.map(({ name, packet }) => [name, packet.slot]), [["set_slot", 3]]);
+});
+
+test("a shift click of a renamed stack does not join a plain stack of its item in the other part of the window", async () => {
+  const { bot, clock, window } = await openedChest({ renamed_first_cobblestone: 5 }, { cobblestone: 10 });
+  await bot.clickWindow(0, 0, 1);
+  await clock.advance(1_000);
+  assert.deepEqual([stackText(window.slots[0]), stackText(window.slots[54]), stackText(window.slots[62])], [null, "cobblestone x10", 'cobblestone x5 "first"']);
+});
+
+test("the chest's stacks read back by the name a test gave them: a variant by its ITEM_VARIANTS name, a plain stack by its item's", () => {
+  const { windows } = createFakeBot({ cells: CHEST_CELLS, containers: { [CHEST]: { renamed_first_cobblestone: 5, cobblestone: 4 } } });
+  assert.deepEqual(windows.containerStacks(CHEST), [{ slot: 0, name: "renamed_first_cobblestone", count: 5 }, { slot: 1, name: "cobblestone", count: 4 }]);
+  windows.setContainerStacks(CHEST, [{ slot: 2, name: "enchanted_cobblestone", count: 3 }]);
+  assert.deepEqual(windows.containerStacks(CHEST), [{ slot: 2, name: "enchanted_cobblestone", count: 3 }], "set and read agree");
+});

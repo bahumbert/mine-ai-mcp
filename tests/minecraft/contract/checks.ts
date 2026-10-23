@@ -23,6 +23,8 @@ import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
+import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
+import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
 import { boatBrokenByAttack } from "./checks/boat-broken-by-attack.ts";
 import { boatMountRefused } from "./checks/boat-mount-refused.ts";
 import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
@@ -34,6 +36,7 @@ import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
+import { itemVariantComponents } from "./checks/item-variant-components.ts";
 import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
@@ -55,7 +58,7 @@ export interface ContractFixture {
   readonly cells: Readonly<Record<string, FakeCell>>;
   /** Item name to the number given, in this order (hotbar first, as `give` fills it). */
   readonly carried: Readonly<Record<string, number>>;
-  /** The stacks in the container block at a cell of `cells`, from slot 0 in this order (`item replace block ... container.<i>`). */
+  /** The stacks in the container block at a cell of `cells`, from slot 0 in this order (`item replace block ... container.<i>`); a name of `ITEM_VARIANTS` stands for that variant (its command text on the server). */
   readonly containers?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   /** The bot's feet, on the floor. */
   readonly position: Cell;
@@ -114,7 +117,10 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   rainAndThunderState,
   clickWindowHotbarSwap,
   clickWindowShiftMove,
+  clickWindowOntoVariant,
+  clickWindowVariantSplit,
   chestOpenTakeClose,
+  itemVariantComponents,
   itemPickupAfterDelay,
   tossedItemKeptBeforeDelay,
   attackCooldownDamage,

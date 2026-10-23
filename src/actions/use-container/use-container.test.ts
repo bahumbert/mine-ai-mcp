@@ -16,8 +16,6 @@ import {
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
 
-/** A stack the server holds in the container, by its slot (`ContainerStack`); `nbt` marks a variant (see the stopgap in `testBot`). */
-type TestStack = ContainerStack & { readonly nbt?: object };
 
 /** The container block's cell, beside a bot standing at the origin. */
 const CELL = "1,64,1";
@@ -53,7 +51,7 @@ function containerOf(harness: ReturnType<typeof createFakeBot>) {
 /** The bot beside a container block at 1,64,1: the fake server holds the stacks and opens the window (Mineflayer's own `openContainer`). */
 function testBot(
   blockName: string,
-  contents: readonly TestStack[] | number,
+  contents: readonly ContainerStack[] | number,
   carried: Readonly<Record<string, number>> = { cobblestone: 10 },
 ) {
   const harness = createFakeBot({
@@ -65,13 +63,8 @@ function testBot(
   });
   const { bot } = harness;
   const container = containerOf(harness);
-  const stacks: readonly TestStack[] = typeof contents === "number" ? (contents === 0 ? [] : [{ slot: 0, name: "cobblestone", count: contents }]) : contents;
-  if (blockName === "chest" || blockName === "barrel") container.contents = stacks.map(({ nbt: _variant, ...stack }) => stack);
-  // Stopgap until the production bug is fixed (master's backlog): `opened-container.ts:244,254` compares stack variants by `nbt`, while 1.21.4 stacks keep
-  // their variants in `components` and carry no `nbt`, so two renamed stacks look like one kind there. A variant row marks the client's stacks with the `nbt` it compares.
-  container.patches.push((window) => {
-    for (const { slot, nbt } of stacks) if (nbt !== undefined && window.slots[slot]) window.slots[slot].nbt = nbt as never;
-  });
+  const stacks: readonly ContainerStack[] = typeof contents === "number" ? (contents === 0 ? [] : [{ slot: 0, name: "cobblestone", count: contents }]) : contents;
+  if (blockName === "chest" || blockName === "barrel") container.contents = stacks;
   const openOwn = bot.openContainer.bind(bot);
   bot.openContainer = async (...args: Parameters<Bot["openContainer"]>) => {
     const window = await openOwn(...args);
@@ -94,7 +87,7 @@ function scene(
     block = "chest",
     contents = 0,
     carried,
-  }: { block?: string; contents?: readonly TestStack[] | number; carried?: Readonly<Record<string, number>> } = {},
+  }: { block?: string; contents?: readonly ContainerStack[] | number; carried?: Readonly<Record<string, number>> } = {},
 ) {
   const data = temporaryBotData({ closeAfter: t });
   const { harness, container } = testBot(block, contents, carried);
@@ -107,15 +100,17 @@ function scene(
       await clock.advance(SERVER_CATCH_UP_MS);
     }
   };
+  /** The action's dependencies on this scene: the stubs above, and the harness clock for the waits on the server's answers to a click. */
+  const dependencies: UseContainerDependencies = { ...testDependencies, waitTiming: clock };
   const use = (
     request: Parameters<typeof useContainer>[2],
     options: Parameters<typeof useContainer>[3] = {},
-    dependencies: UseContainerDependencies = testDependencies,
-  ) => settled(useContainer(bot, data, request, options, dependencies));
+    overriding: UseContainerDependencies = dependencies,
+  ) => settled(useContainer(bot, data, request, options, overriding));
   const carriedOf = (name: string) => inventory.count(bot.registry.itemsByName[name]!.id, null);
   /** Change what the bot carries of `name` by `delta`, as the server redraws the slots (`setCarriedCount`). */
   const addCarried = (name: string, delta: number) => setCarriedCount(inventory, bot.registry, bot.registry.itemsByName[name]!.id, carriedOf(name) + delta);
-  return { data, container, bot, use, settled, carried: carriedOf, addCarried };
+  return { data, container, bot, use, settled, dependencies, carried: carriedOf, addCarried };
 }
 
 test("parses bulk transfers and item ordering into an exhaustive domain union", () => {
@@ -204,7 +199,7 @@ test("cancellation propagates from navigation, and from observation with the ope
       { operation: "inspect", x: 1, y: 64, z: 1 },
       { signal: observeStop.signal },
       {
-        ...testDependencies,
+        ...observing.dependencies,
         now: () => {
           observeStop.abort(new Error("observation cancelled"));
           return new Date("2026-08-24T00:00:00.000Z");
@@ -222,7 +217,7 @@ test("cancellation propagates from navigation, and from observation with the ope
       { operation: "inspect", x: 10, y: 64, z: 0 },
       { signal: routeStop.signal },
       {
-        ...testDependencies,
+        ...routing.dependencies,
         navigate: async () => {
           routeStop.abort(new Error("action cancelled"));
           throw routeStop.signal.reason;
@@ -234,11 +229,12 @@ test("cancellation propagates from navigation, and from observation with the ope
 });
 
 test("a stop before the container is opened is reported as what was actually observed", async (t) => {
-  const stopped = await scene(t).use(
+  const stopping = scene(t);
+  const stopped = await stopping.use(
     { operation: "inspect", x: 10, y: 64, z: 0 },
     {},
     {
-      ...testDependencies,
+      ...stopping.dependencies,
       navigate: async () => ({ status: "stopped", reason: "no path", elapsedMs: 12 }),
     },
   );
@@ -258,7 +254,7 @@ const depositRows = [
   {
     name: "every requested item is carried",
     carried: { cobblestone: 3, oak_log: 2 },
-    contents: [{ slot: 0, name: "cobblestone", count: 5 }] as TestStack[],
+    contents: [{ slot: 0, name: "cobblestone", count: 5 }],
     status: "succeeded",
     transfers: [
       { status: "succeeded", item: "cobblestone", requested: 3, transferred: 3 },
@@ -272,7 +268,7 @@ const depositRows = [
   {
     name: "only part of one requested item is carried",
     carried: { cobblestone: 2 },
-    contents: [] as TestStack[],
+    contents: [],
     status: "partial",
     transfers: [
       { status: "partial", item: "cobblestone", requested: 3, transferred: 2 },
@@ -386,7 +382,7 @@ const organizeRows = [
       { slot: 0, name: "cobblestone", count: 40 },
       { slot: 3, name: "oak_log", count: 2 },
       { slot: 8, name: "cobblestone", count: 30 },
-    ] as TestStack[],
+    ],
     itemOrder: ["oak_log", "cobblestone"],
     matchedSlots: 3,
     organized: [
@@ -401,28 +397,59 @@ const organizeRows = [
       { slot: 0, name: "cobblestone", count: 12 },
       { slot: 3, name: "cobblestone", count: 5 },
       { slot: 8, name: "cobblestone", count: 47 },
-    ] as TestStack[],
+    ],
     itemOrder: ["cobblestone"],
     matchedSlots: 1,
     organized: [{ slot: 0, item: "cobblestone", count: 64 }],
   },
   {
-    // Two stacks share one item name but the server will never merge them.
+    // Stacks of one item the server will never merge: a custom name, an enchantment, nothing.
     name: "incompatible variants of one item stay in separate stacks",
     contents: [
-      { slot: 3, name: "cobblestone", count: 5, nbt: { value: { custom: "first" } } },
-      { slot: 8, name: "cobblestone", count: 7, nbt: { value: { custom: "second" } } },
-    ] as TestStack[],
+      { slot: 3, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 8, name: "renamed_second_cobblestone", count: 7 },
+      { slot: 10, name: "cobblestone", count: 4 },
+      { slot: 12, name: "enchanted_cobblestone", count: 3 },
+    ],
     itemOrder: ["cobblestone"],
-    matchedSlots: 2,
+    matchedSlots: 4,
     organized: [
       { slot: 0, item: "cobblestone", count: 5 },
       { slot: 1, item: "cobblestone", count: 7 },
+      { slot: 2, item: "cobblestone", count: 4 },
+      { slot: 3, item: "cobblestone", count: 3 },
+    ],
+    server: [
+      { slot: 0, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 1, name: "renamed_second_cobblestone", count: 7 },
+      { slot: 2, name: "cobblestone", count: 4 },
+      { slot: 3, name: "enchanted_cobblestone", count: 3 },
+    ],
+  },
+  {
+    // The planks go first, onto the renamed stack's slot; the renamed stack then wants the plain one's slot, which the client would predict as a merge.
+    name: "a stack moves onto the slot of another variant of its item through a buffer slot, never a click onto it",
+    contents: [
+      { slot: 0, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 1, name: "cobblestone", count: 4 },
+      { slot: 2, name: "oak_planks", count: 3 },
+    ],
+    itemOrder: ["oak_planks", "cobblestone"],
+    matchedSlots: 3,
+    organized: [
+      { slot: 0, item: "oak_planks", count: 3 },
+      { slot: 1, item: "cobblestone", count: 5 },
+      { slot: 2, item: "cobblestone", count: 4 },
+    ],
+    server: [
+      { slot: 0, name: "oak_planks", count: 3 },
+      { slot: 1, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 2, name: "cobblestone", count: 4 },
     ],
   },
   {
     name: "an empty order organizes an empty container",
-    contents: [] as TestStack[],
+    contents: [],
     itemOrder: [],
     matchedSlots: 0,
     organized: [],
@@ -431,7 +458,8 @@ const organizeRows = [
 
 test("organize lays the container out as planned, preserving every stack it moved", async (t) => {
   for (const row of organizeRows) {
-    const result = await scene(t, { contents: row.contents }).use({
+    const scenery = scene(t, { contents: row.contents });
+    const result = await scenery.use({
       operation: "organize",
       x: 1,
       y: 64,
@@ -448,6 +476,8 @@ test("organize lays the container out as planned, preserving every stack it move
     assert.equal(result.container.contentsPreserved, true, row.name);
     assert.equal(result.container.playerInventoryPreserved, true, row.name);
     assert.equal(result.container.cursorEmpty, true, row.name);
+    // The server's own chest, where a variant has its name: a merge the server refused would show here.
+    if ("server" in row) assert.deepEqual(scenery.container.contents, row.server, `${row.name}: the server's layout`);
   }
 });
 
@@ -495,7 +525,7 @@ test("a chest the bot placed and found gone is forgotten as a placed container t
 function containerAttempts(
   scenery: ReturnType<typeof scene>,
   request: Parameters<typeof useContainer>[2],
-  dependencies: UseContainerDependencies = testDependencies,
+  dependencies: UseContainerDependencies = scenery.dependencies,
 ) {
   const run = beginUseContainer(scenery.bot, scenery.data, request, undefined, dependencies);
   return (signal?: AbortSignal) => scenery.settled(run({ signal }));

@@ -3,6 +3,7 @@ import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
 import { sleepMs } from "../utils/wall-timers.js";
+import { sameItemVariant } from "./item-variant.js";
 
 export type CraftExecution =
   | { readonly kind: "completed"; readonly completedSteps: number }
@@ -38,7 +39,7 @@ function requireApplicationRoom(bot: Bot, recipe: CraftApplication["recipe"]): v
     const item = new Item(output.id, output.count, output.metadata ?? 0);
     let remaining = output.count;
     for (const stack of stacks) {
-      if (stack.count === 0 || !Item.equal(stack.item, item, false, true)) continue;
+      if (stack.count === 0 || !sameItemVariant(stack.item, item)) continue;
       const stored = Math.min(remaining, Math.max(0, stack.item.stackSize - stack.count));
       stack.count += stored;
       remaining -= stored;

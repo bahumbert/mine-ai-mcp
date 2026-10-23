@@ -1,0 +1,36 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-click-window-onto-variant
+tags:
+  - contract
+description: A renamed stack clicked onto a plain stack of its item swaps on the server while the client predicts a merge, and the
+  server's cursor correction (set_cursor_item) is a packet Mineflayer does not read. Contract check
+  tests/minecraft/contract/checks/click-window-onto-variant.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: click-window-onto-variant
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 0 -60 0 chest
+  - item replace block 0 -60 0 container.0 with cobblestone[custom_name='"first"'] 5
+  - item replace block 0 -60 0 container.1 with cobblestone 4
+players:
+  - name: Actor
+    pos:
+      - -4.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

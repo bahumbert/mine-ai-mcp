@@ -4,6 +4,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { CarriedCounts } from "./carried-counts.js";
 import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
+import { registryNameOf } from "./fake-bot/item-variants.js";
 
 export const craftingRegistry = minecraftData("1.21.4");
 
@@ -61,7 +62,7 @@ export function craftingBot(
   { clock }: { readonly clock?: FakeClock } = {},
 ) {
   const known = [...recipes, ...RECIPES];
-  for (const name of Object.keys(carried)) assert.ok(craftingRegistry.itemsByName[name], `unknown test item ${name}`);
+  for (const name of Object.keys(carried)) assert.ok(craftingRegistry.itemsByName[registryNameOf(name)], `unknown test item ${name}`);
   const craftCalls: string[] = [];
   const harness = createFakeBot({
     clock,

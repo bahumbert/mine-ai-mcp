@@ -1,7 +1,9 @@
 // An open container window and the stack arithmetic behind a transfer, a compaction and an organizing.
 import type { Bot } from "mineflayer";
 import type { ContainerContent } from "../../bot-data/index.js";
+import { itemVariantKey, sameItemVariant } from "../../world/item-variant.js";
 import { useContainerOutcomes } from "./contract.js";
+import { type ClickWaitTiming, watchClickAnswer } from "./window-answer.js";
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
 export type ContainerBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
@@ -35,19 +37,36 @@ export class UseContainerActionError extends Error {}
 
 
 export class OpenedContainer implements Disposable {
-  static async open(bot: Bot, block: ContainerBlock): Promise<OpenedContainer> {
+  static async open(bot: Bot, block: ContainerBlock, timing?: ClickWaitTiming): Promise<OpenedContainer> {
     try {
       const window = await bot.openContainer(block);
-      return new OpenedContainer(window, (slot) => bot.clickWindow(slot, 0, 0));
+      return new OpenedContainer(bot, window, timing);
     } catch (cause) {
       throw new UseContainerActionError(useContainerOutcomes.openFailed(cause), { cause });
     }
   }
 
   private constructor(
+    private readonly bot: Bot,
     private readonly window: ContainerWindow,
-    private readonly clickSlot: (slot: number) => Promise<void>,
+    private readonly timing: ClickWaitTiming | undefined,
   ) {}
+
+  /**
+   * Left-click a slot. A click that lands a stack on another stack of its item is a merge in Mineflayer's prediction and
+   * may be a swap on the server (two variants: contract check click-window-onto-variant), and `clickWindow` resolves when the
+   * packet is written, not when the server answers: the next read of the cursor waits for the server's correction or quiet.
+   */
+  async clickStack(slot: number, signal?: AbortSignal): Promise<void> {
+    const landsOnItsKind = this.window.selectedItem !== null && this.window.slots[slot]?.type === this.window.selectedItem.type;
+    const answer = landsOnItsKind ? watchClickAnswer(this.bot, this.window, this.timing) : null;
+    try {
+      await this.bot.clickWindow(slot, 0, 0);
+      await answer?.settle(slot, signal);
+    } finally {
+      answer?.stop();
+    }
+  }
 
   get slotCount(): number {
     return this.window.inventoryStart;
@@ -147,14 +166,14 @@ export class OpenedContainer implements Disposable {
         const source = current.find(
           (candidate) =>
             !settledSlots.has(candidate.slot) &&
-            sameItemKind(candidate, desired.representative) &&
+            sameItemVariant(candidate, desired.representative) &&
             candidate.count === desired.count,
         );
         if (!source) {
           throw new Error(`No source stack remained for planned slot ${desired.slot}.`);
         }
 
-        await this.moveStack(source, desired.slot, current);
+        await this.moveStack(source, desired.slot, current, signal);
         movedStacks += 1;
         settledSlots.add(desired.slot);
       }
@@ -171,15 +190,15 @@ export class OpenedContainer implements Disposable {
     while (true) {
       signal?.throwIfAborted();
       const partials = this.containerStacks()
-        .filter((stack) => sameItemKind(stack, representative) && stack.count < stack.stackSize)
+        .filter((stack) => sameItemVariant(stack, representative) && stack.count < stack.stackSize)
         .sort((left, right) => right.count - left.count);
       if (partials.length < 2) return mergedStacks;
 
       const destination = partials[0]!;
       const source = partials.at(-1)!;
-      await this.clickSlot(source.slot);
-      await this.clickSlot(destination.slot);
-      if (this.window.selectedItem) await this.clickSlot(source.slot);
+      await this.clickStack(source.slot, signal);
+      await this.clickStack(destination.slot, signal);
+      if (this.window.selectedItem) await this.clickStack(source.slot, signal);
       if (this.window.selectedItem) throw new Error("A compacted container stack remained held by the cursor.");
       mergedStacks += 1;
     }
@@ -189,27 +208,33 @@ export class OpenedContainer implements Disposable {
     source: ContainerStack,
     destinationSlot: number,
     current: readonly ContainerStack[],
+    signal?: AbortSignal,
   ): Promise<void> {
+    // An item's `slot` follows it into the slot it is moved to: read where the stack lies before the first click.
+    const sourceSlot = source.slot;
     const destination = current.find(({ slot }) => slot === destinationSlot);
-    if (!destination || !sameItemKind(destination, source)) {
-      await this.moveOrSwapStack(source.slot, destinationSlot);
+    if (!destination || destination.type !== source.type) {
+      await this.moveOrSwapStack(sourceSlot, destinationSlot, signal);
       return;
     }
 
-    // Left-clicking two stacks of the same item merges them, so use one empty slot as a swap buffer.
+    // Left-clicking two stacks of one item merges them in Mineflayer's prediction, and the server merges them for one
+    // variant but swaps them for two (contract check click-window-onto-variant): use one empty slot as a swap buffer.
     const bufferSlot = this.window.firstEmptyContainerSlot();
     if (bufferSlot === null) {
-      throw new Error("No empty container slot was available to swap matching item stacks.");
+      throw new Error(
+        `No empty container slot was available to swap the stacks of ${source.name} in slots ${sourceSlot} and ${destinationSlot}: a click of one onto the other would merge or swap them unpredictably. Take one stack out of the container to make room, then organize again.`,
+      );
     }
-    await this.moveOrSwapStack(destinationSlot, bufferSlot);
-    await this.moveOrSwapStack(source.slot, destinationSlot);
-    await this.moveOrSwapStack(bufferSlot, source.slot);
+    await this.moveOrSwapStack(destinationSlot, bufferSlot, signal);
+    await this.moveOrSwapStack(sourceSlot, destinationSlot, signal);
+    await this.moveOrSwapStack(bufferSlot, sourceSlot, signal);
   }
 
-  private async moveOrSwapStack(sourceSlot: number, destinationSlot: number): Promise<void> {
-    await this.clickSlot(sourceSlot);
-    await this.clickSlot(destinationSlot);
-    if (this.window.selectedItem) await this.clickSlot(sourceSlot);
+  private async moveOrSwapStack(sourceSlot: number, destinationSlot: number, signal?: AbortSignal): Promise<void> {
+    await this.clickStack(sourceSlot, signal);
+    await this.clickStack(destinationSlot, signal);
+    if (this.window.selectedItem) await this.clickStack(sourceSlot, signal);
     if (this.window.selectedItem) throw new Error("A container stack remained held by the cursor after its slot move.");
   }
 
@@ -230,34 +255,22 @@ interface CompatibleStackGroup {
 function groupCompatibleStacks(stacks: readonly ContainerStack[]): CompatibleStackGroup[] {
   const groups: CompatibleStackGroup[] = [];
   for (const stack of stacks) {
-    const existing = groups.find(({ representative }) => sameItemKind(representative, stack));
+    const existing = groups.find(({ representative }) => sameItemVariant(representative, stack));
     if (existing) existing.totalCount += stack.count;
     else groups.push({ representative: stack, totalCount: stack.count });
   }
   return groups;
 }
 
-function sameItemKind(left: ContainerStack, right: ContainerStack): boolean {
-  return (
-    left.type === right.type &&
-    left.metadata === right.metadata &&
-    JSON.stringify(left.nbt) === JSON.stringify(right.nbt)
-  );
-}
-
 function stackAt(stacks: readonly ContainerStack[], slot: number, expected: PlannedContainerStack): boolean {
   const actual = stacks.find((stack) => stack.slot === slot);
-  return actual !== undefined && sameItemKind(actual, expected.representative) && actual.count === expected.count;
-}
-
-function stackIdentity(stack: ContainerStack): string {
-  return `${stack.type}\u0000${stack.metadata}\u0000${JSON.stringify(stack.nbt)}`;
+  return actual !== undefined && sameItemVariant(actual, expected.representative) && actual.count === expected.count;
 }
 
 function stackTotals(stacks: readonly ContainerStack[]): string {
   const totals = new Map<string, number>();
   for (const stack of stacks) {
-    const identity = stackIdentity(stack);
+    const identity = itemVariantKey(stack);
     totals.set(identity, (totals.get(identity) ?? 0) + stack.count);
   }
   return JSON.stringify([...totals].sort(([left], [right]) => left.localeCompare(right)));
@@ -266,7 +279,7 @@ function stackTotals(stacks: readonly ContainerStack[]): string {
 function stackLayout(stacks: readonly ContainerStack[]): string {
   return JSON.stringify(
     stacks
-      .map((stack) => ({ slot: stack.slot, identity: stackIdentity(stack), count: stack.count }))
+      .map((stack) => ({ slot: stack.slot, identity: itemVariantKey(stack), count: stack.count }))
       .sort((left, right) => left.slot - right.slot),
   );
 }

@@ -17,6 +17,7 @@ import {
   type ContainerLayoutAttempt,
   type ContainerOperationAttempt,
 } from "./opened-container.js";
+import type { ClickWaitTiming } from "./window-answer.js";
 import {
   parseUseContainerRequest,
   USE_CONTAINER,
@@ -56,6 +57,8 @@ export interface UseContainerDependencies {
   readonly navigate: Navigate;
   readonly createMovements: typeof createMovements;
   readonly now: () => Date;
+  /** The clock the waits for the server's answers to a click read; the wall clock when absent (a test passes the fake clock's). */
+  readonly waitTiming?: ClickWaitTiming;
 }
 
 function productionDependencies(navigate: Navigate): UseContainerDependencies {
@@ -390,7 +393,7 @@ async function attemptContainerUse(
 
     const obstruction = chestOpeningObstruction(bot, block.name, position);
     if (obstruction) return { status: "failed", error: obstruction, target: targetValue };
-    using container = await OpenedContainer.open(bot, block);
+    using container = await OpenedContainer.open(bot, block, dependencies.waitTiming);
     const observeAgain = () => observeContainer(bot, data, container, block, dependencies);
     const before = observeAgain();
     context.signal?.throwIfAborted();

@@ -2,6 +2,7 @@
 import minecraftData from "minecraft-data";
 import { DEFAULT_MINECRAFT_VERSION } from "../../../src/server/config.ts";
 import { stacksOf } from "../../../src/test-support/fake-bot/fake-inventory.ts";
+import { itemCommandOf } from "../../../src/test-support/fake-bot/item-variants.ts";
 import { WITHOUT_RUNTIME_FLAG } from "../client-host-args.ts";
 import { blockArgument } from "./subject.ts";
 import type { ContractCheck, ContractFixture } from "./checks.ts";
@@ -25,12 +26,12 @@ function assertInArena(label: string, [x, y, z]: readonly number[]): void {
   if (!inside) throw new Error(`${label} ${x},${y},${z} is outside the contract arena (radius ${ARENA.radius}, y ${ARENA.floorY}..${ARENA.airTopY})`);
 }
 
-/** `item replace block` for each stack of each container, after the `setblock` of the container itself: stacks fill the slots from 0, split at the item's stack size. */
+/** `item replace block` for each stack of each container, after the `setblock` of the container itself: stacks fill the slots from 0, split at the item's stack size; a variant name (`ITEM_VARIANTS`) is written as its command text. */
 function containerLines(fixture: ContractFixture): string[] {
   const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
   return Object.entries(fixture.containers ?? {}).flatMap(([key, carried]) => {
     if (!(key in fixture.cells)) throw new Error(`container ${key} has no block in cells: name the chest to set`);
-    return stacksOf(registry, carried).map(({ name, count }, slot) => `item replace block ${key.split(",").join(" ")} container.${slot} with ${name} ${count}`);
+    return stacksOf(registry, carried).map(({ name, count }, slot) => `item replace block ${key.split(",").join(" ")} container.${slot} with ${itemCommandOf(name)} ${count}`);
   });
 }
 

@@ -106,6 +106,22 @@ test("setupCommands summons an entity's passengers with it as Passengers nbt, an
   assert.throws(() => setupCommands({ cells: {}, carried: {}, position: [0.5, -60, 0.5], entities: [{ ...boat, nbt: "{}", passengers: ["armor_stand"] }] }), /nbt or passengers/);
 });
 
+test("setupCommands writes a container stack named as a variant as its command text, split at the item's stack size", () => {
+  const { setup } = setupCommands({
+    cells: { "0,-60,0": "chest" },
+    carried: {},
+    containers: { "0,-60,0": { renamed_first_cobblestone: 5, damaged_diamond_pickaxe: 2, cobblestone: 4 } },
+    position: [0.5, -60, 0.5],
+  });
+  assert.deepEqual(setup.slice(-5), [
+    "setblock 0 -60 0 chest",
+    `item replace block 0 -60 0 container.0 with cobblestone[custom_name='"first"'] 5`,
+    "item replace block 0 -60 0 container.1 with diamond_pickaxe[damage=5] 1",
+    "item replace block 0 -60 0 container.2 with diamond_pickaxe[damage=5] 1",
+    "item replace block 0 -60 0 container.3 with cobblestone 4",
+  ]);
+});
+
 test("setupCommands sets the difficulty to easy when a hostile mob is summoned (a peaceful world removes it) and leaves it alone for a boat", () => {
   const base = { cells: {}, carried: {}, position: [0.5, -60, 0.5] as const };
   const withZombie = setupCommands({ ...base, entities: [{ name: "zombie", position: [2.5, -60, 0.5] }] }).setup;
