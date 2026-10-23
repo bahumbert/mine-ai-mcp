@@ -22,6 +22,7 @@ function fakeHarnessFor(fixture: ContractFixture) {
     position: new Vec3(...fixture.position),
     cells: fixture.cells,
     carried: fixture.carried,
+    containers: fixture.containers,
     entities,
     server: { timeOfDay: fixture.timeOfDay, weather: fixture.weather },
   });

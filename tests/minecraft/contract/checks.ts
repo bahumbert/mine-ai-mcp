@@ -10,6 +10,9 @@ import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
 import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
+import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
+import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
+import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
 import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
@@ -38,6 +41,8 @@ export interface ContractFixture {
   readonly cells: Readonly<Record<string, FakeCell>>;
   /** Item name to the number given, in this order (hotbar first, as `give` fills it). */
   readonly carried: Readonly<Record<string, number>>;
+  /** The stacks in the container block at a cell of `cells`, from slot 0 in this order (`item replace block ... container.<i>`). */
+  readonly containers?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   /** The bot's feet, on the floor. */
   readonly position: Cell;
   readonly entities?: readonly { readonly name: string; readonly position: Cell }[];
@@ -79,6 +84,9 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   bedSleepAndWake,
   bedRefusedMonsterNear,
   rainAndThunderState,
+  clickWindowHotbarSwap,
+  clickWindowShiftMove,
+  chestOpenTakeClose,
   itemPickupAfterDelay,
   tossedItemKeptBeforeDelay,
 ];

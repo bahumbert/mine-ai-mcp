@@ -5,7 +5,7 @@ import { Vec3 } from "vec3";
 import { recordContainerObservation, recordPlacedContainer } from "../../bot-data/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { type ContainerStack, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { parseUseContainerRequest } from "./contract.js";
 import {
   beginUseContainer,
@@ -16,129 +16,67 @@ import {
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
 
-interface TestStack {
-  slot: number;
-  name: string;
-  count: number;
-  metadata?: number;
-  nbt?: object | null;
-}
+/** A stack the server holds in the container, by its slot (`ContainerStack`); `nbt` marks a variant (see the stopgap in `testBot`). */
+type TestStack = ContainerStack & { readonly nbt?: object };
 
-interface TestContainer {
-  readonly window: ContainerWindow;
-  readonly state: {
-    contents: TestStack[];
-    cursor: TestStack | null;
-    closed: boolean;
-    moves: number;
+/** The container block's cell, beside a bot standing at the origin. */
+const CELL = "1,64,1";
+/** Long enough for any call of these tests on the fake clock, which only moves while a test lets it. */
+const CALL_MS = 120_000;
+/** A server answer (a close, a click) lands one slice after the call that sent it. */
+const SERVER_CATCH_UP_MS = 100;
+
+/** The server's container at CELL, as the old scripted window exposed it: what it holds, what it was asked, whether it was closed. */
+function containerOf(harness: ReturnType<typeof createFakeBot>) {
+  const { windows, server } = harness;
+  /** What each window the bot opens gets patched with, in order (a scripted transfer). */
+  const patches: ((window: ContainerWindow) => void)[] = [];
+  return {
+    patches,
+    get contents(): ContainerStack[] {
+      return windows.containerStacks(CELL);
+    },
+    set contents(stacks: readonly ContainerStack[]) {
+      windows.setContainerStacks(CELL, stacks);
+    },
+    /** The window was closed by the bot (`close_window` written). */
+    get closed(): boolean {
+      return server.packets.some(({ name }) => name === "close_window");
+    },
+    /** Clicks the bot sent: each is a move of a stack. */
+    get moves(): number {
+      return server.packets.filter(({ name }) => name === "window_click").length;
+    },
   };
 }
 
-function testWindow(registry: Bot["registry"], contents: readonly TestStack[] | number): TestContainer {
-  const initialContents =
-    typeof contents === "number"
-      ? contents === 0
-        ? []
-        : [{ slot: 0, name: "cobblestone", count: contents }]
-      : contents;
-  const state = {
-    contents: initialContents.map((item) => ({ ...item })),
-    cursor: null,
-    closed: false,
-    moves: 0,
-  };
-  const window = {
-    inventoryStart: 27,
-    containerItems: () =>
-      state.contents
-        .filter(({ slot }) => slot < 27)
-        .map((item) => {
-          const registryItem = registry.itemsByName[item.name]!;
-          return { ...registryItem, type: registryItem.id, metadata: 0, nbt: null, ...item };
-        }),
-    items: () =>
-      state.contents
-        .filter(({ slot }) => slot >= 27)
-        .map((item) => {
-          const registryItem = registry.itemsByName[item.name]!;
-          return { ...registryItem, type: registryItem.id, metadata: 0, nbt: null, ...item };
-        }),
-    get selectedItem() {
-      return state.cursor;
-    },
-    deposit: async (itemType: number, _metadata: number | null, count: number) => {
-      const itemName = registry.items[itemType]!.name;
-      const existing = state.contents.find(({ name }) => name === itemName);
-      if (existing) existing.count += count;
-      else {
-        const occupied = new Set(state.contents.map(({ slot }) => slot));
-        const slot = Array.from({ length: 27 }, (_, index) => index).find((index) => !occupied.has(index));
-        if (slot === undefined) throw new Error("container is full");
-        state.contents.push({ slot, name: itemName, count });
-      }
-    },
-    withdraw: async (itemType: number, _metadata: number | null, count: number) => {
-      const itemName = registry.items[itemType]!.name;
-      let remaining = count;
-      for (const stack of state.contents.filter(({ name }) => name === itemName)) {
-        const removed = Math.min(stack.count, remaining);
-        stack.count -= removed;
-        remaining -= removed;
-        if (remaining === 0) break;
-      }
-      state.contents = state.contents.filter(({ count: stackCount }) => stackCount > 0);
-    },
-    firstEmptyContainerSlot: () => {
-      const occupied = new Set(state.contents.map(({ slot }) => slot));
-      return Array.from({ length: 27 }, (_, index) => index).find((index) => !occupied.has(index)) ?? null;
-    },
-    firstEmptyInventorySlot: () => (state.contents.some(({ slot }) => slot === 27) ? null : 27),
-    close: () => {
-      state.closed = true;
-    },
-  } as unknown as ContainerWindow;
-  return { window, state };
-}
-
-/** The bot beside a container block at 1,64,1 opening the scripted window (stopgap until the master adds container windows: `chest.js`). */
+/** The bot beside a container block at 1,64,1: the fake server holds the stacks and opens the window (Mineflayer's own `openContainer`). */
 function testBot(
   blockName: string,
   contents: readonly TestStack[] | number,
   carried: Readonly<Record<string, number>> = { cobblestone: 10 },
 ) {
-  const harness = createFakeBot({ username: "StorageBot", position: new Vec3(0, 64, 0), cells: { "1,64,1": blockName }, carried });
+  const harness = createFakeBot({
+    username: "StorageBot",
+    position: new Vec3(0, 64, 0),
+    cells: { [CELL]: blockName },
+    carried,
+    containers: { [CELL]: {} },
+  });
   const { bot } = harness;
-  const container = testWindow(bot.registry, contents);
-  const { state } = container;
-  const sameItemKind = (left: TestStack, right: TestStack) =>
-    left.name === right.name &&
-    (left.metadata ?? 0) === (right.metadata ?? 0) &&
-    JSON.stringify(left.nbt ?? null) === JSON.stringify(right.nbt ?? null);
-  bot.openContainer = async () => container.window;
-  bot.clickWindow = async (slot: number) => {
-    const slotIndex = state.contents.findIndex((item) => item.slot === slot);
-    const slotItem = slotIndex === -1 ? null : state.contents[slotIndex]!;
-    if (!state.cursor) {
-      if (!slotItem) return;
-      state.contents.splice(slotIndex, 1);
-      state.cursor = { ...slotItem };
-      return;
-    }
-
-    if (!slotItem) {
-      state.contents.push({ ...state.cursor, slot });
-      state.cursor = null;
-    } else if (sameItemKind(slotItem, state.cursor)) {
-      const stackSize = bot.registry.itemsByName[slotItem.name]!.stackSize;
-      const moved = Math.min(stackSize - slotItem.count, state.cursor.count);
-      slotItem.count += moved;
-      state.cursor.count -= moved;
-      if (state.cursor.count === 0) state.cursor = null;
-    } else {
-      state.contents[slotIndex] = { ...state.cursor, slot };
-      state.cursor = { ...slotItem };
-    }
-    state.moves += 1;
+  const container = containerOf(harness);
+  const stacks: readonly TestStack[] = typeof contents === "number" ? (contents === 0 ? [] : [{ slot: 0, name: "cobblestone", count: contents }]) : contents;
+  if (blockName === "chest" || blockName === "barrel") container.contents = stacks.map(({ nbt: _variant, ...stack }) => stack);
+  // Stopgap until the production bug is fixed (master's backlog): `opened-container.ts:244,254` compares stack variants by `nbt`, while 1.21.4 stacks keep
+  // their variants in `components` and carry no `nbt`, so two renamed stacks look like one kind there. A variant row marks the client's stacks with the `nbt` it compares.
+  container.patches.push((window) => {
+    for (const { slot, nbt } of stacks) if (nbt !== undefined && window.slots[slot]) window.slots[slot].nbt = nbt as never;
+  });
+  const openOwn = bot.openContainer.bind(bot);
+  bot.openContainer = async (...args: Parameters<Bot["openContainer"]>) => {
+    const window = await openOwn(...args);
+    for (const patch of container.patches) patch(window);
+    return window;
   };
   return { harness, container };
 }
@@ -160,16 +98,24 @@ function scene(
 ) {
   const data = temporaryBotData({ closeAfter: t });
   const { harness, container } = testBot(block, contents, carried);
-  const { bot, inventory } = harness;
+  const { bot, inventory, clock } = harness;
+  /** A call of the action, run on the fake clock until it ends, with the server's last answer (the close) delivered. */
+  const settled = async <T>(call: Promise<T>): Promise<T> => {
+    try {
+      return await clock.settle(call, CALL_MS);
+    } finally {
+      await clock.advance(SERVER_CATCH_UP_MS);
+    }
+  };
   const use = (
     request: Parameters<typeof useContainer>[2],
     options: Parameters<typeof useContainer>[3] = {},
     dependencies: UseContainerDependencies = testDependencies,
-  ) => useContainer(bot, data, request, options, dependencies);
+  ) => settled(useContainer(bot, data, request, options, dependencies));
   const carriedOf = (name: string) => inventory.count(bot.registry.itemsByName[name]!.id, null);
   /** Change what the bot carries of `name` by `delta`, as the server redraws the slots (`setCarriedCount`). */
   const addCarried = (name: string, delta: number) => setCarriedCount(inventory, bot.registry, bot.registry.itemsByName[name]!.id, carriedOf(name) + delta);
-  return { data, container, bot, use, carried: carriedOf, addCarried };
+  return { data, container, bot, use, settled, carried: carriedOf, addCarried };
 }
 
 test("parses bulk transfers and item ordering into an exhaustive domain union", () => {
@@ -242,7 +188,7 @@ test("inspect records the complete slot layout and closes the window", async (t)
     { slot: 2, item: "cobblestone", count: 12 },
     { slot: 8, item: "oak_log", count: 3 },
   ]);
-  assert.equal(container.state.closed, true);
+  assert.equal(container.closed, true);
   assert.deepEqual(data.read("SELECT slot, item_name, item_count FROM observed_container_slots ORDER BY slot"), [
     { slot: 2, item_name: "cobblestone", item_count: 12 },
     { slot: 8, item_name: "oak_log", item_count: 3 },
@@ -267,7 +213,7 @@ test("cancellation propagates from navigation, and from observation with the ope
     ),
     /observation cancelled/,
   );
-  assert.equal(observing.container.state.closed, true, "an opened container must not be left open");
+  assert.equal(observing.container.closed, true, "an opened container must not be left open");
 
   const routing = scene(t);
   const routeStop = new AbortController();
@@ -372,10 +318,14 @@ test("bulk deposit reports the transfer observed for each requested item", async
 
 test("settles an observed partial deposit after the transfer promise rejects", async (t) => {
   const { data, container, use } = scene(t, { block: "barrel", contents: 5 });
-  container.window.deposit = async (_itemType: number, _metadata: number | null, _count: number) => {
-    container.state.contents[0]!.count += 2;
-    throw new Error("connection closed");
-  };
+  container.patches.push((window) => {
+    const depositOwn = window.deposit.bind(window);
+    // The connection drops after the server took two of the three.
+    window.deposit = async (itemType, metadata, _count) => {
+      await depositOwn(itemType, metadata, 2);
+      throw new Error("connection closed");
+    };
+  });
   const result = await use({ operation: "deposit", x: 1, y: 64, z: 1, items: [{ itemName: "cobblestone", count: 3 }] });
 
   assert.equal(result.status, "partial");
@@ -416,9 +366,10 @@ test("bulk withdrawal compacts what remains and reports missing requested items"
       { status: "failed", item: "dirt", transferred: 0 },
     ],
   );
+  // Mineflayer's transfer on a server (contract `chest-open-take-close`): it picks the first stack up, puts the 2 down and puts the rest back, merging into the other stack, so the 4 left over sit in the first slot.
   assert.deepEqual(result.container.contents, [
-    { slot: 0, item: "cobblestone", count: 64 },
-    { slot: 4, item: "cobblestone", count: 4 },
+    { slot: 0, item: "cobblestone", count: 4 },
+    { slot: 4, item: "cobblestone", count: 64 },
     { slot: 5, item: "oak_log", count: 64 },
     { slot: 8, item: "oak_log", count: 6 },
   ]);
@@ -506,7 +457,7 @@ test("organize rejects an order that does not name the observed items exactly on
 
   assert.equal(result.status, "failed");
   assert.match(result.error, /CONTAINER_ITEM_ORDER_MISMATCH/);
-  assert.equal(container.state.moves, 0);
+  assert.equal(container.moves, 0);
 });
 
 test("a loaded non-container removes stale memory for that exact location", async (t) => {
@@ -547,12 +498,13 @@ function containerAttempts(
   dependencies: UseContainerDependencies = testDependencies,
 ) {
   const run = beginUseContainer(scenery.bot, scenery.data, request, undefined, dependencies);
-  return (signal?: AbortSignal) => run({ signal });
+  return (signal?: AbortSignal) => scenery.settled(run({ signal }));
 }
 
 /**
- * Makes the window's transfer behave as the server does: the carried count moves with the container, and the
- * first call stops after `takes` items (a reflex took the body) by aborting `owner` and failing; with no `stopping` every call completes.
+ * Records what each window is asked to transfer (the window's own transfer moves the stacks, and the carried count follows
+ * when it closes), and stops the first call after `takes` items (a reflex took the body) by aborting `owner` and failing;
+ * with no `stopping` every call completes.
  */
 function transferOnServer(
   scenery: ReturnType<typeof scene>,
@@ -561,19 +513,19 @@ function transferOnServer(
   stopping: { readonly takes: number } | null,
 ): number[] {
   const asked: number[] = [];
-  const original = scenery.container.window[operation].bind(scenery.container.window);
-  scenery.container.window[operation] = (async (itemType: number, metadata: number | null, count: number) => {
-    asked.push(count);
-    const item = scenery.bot.registry.items[itemType]!.name;
-    const stops = stopping !== null && asked.length === 1;
-    const moving = stops ? Math.min(count, stopping.takes) : count;
-    await original(itemType, metadata, moving);
-    scenery.addCarried(item, operation === "withdraw" ? moving : -moving);
-    if (stops) {
-      owner.abort(new Error("hunger reflex"));
-      throw new Error("window closed under the transfer");
-    }
-  }) as never;
+  scenery.container.patches.push((window) => {
+    const original = window[operation].bind(window);
+    window[operation] = async (itemType: number, metadata: number | null, count: number) => {
+      asked.push(count);
+      const stops = stopping !== null && asked.length === 1;
+      const moving = stops ? Math.min(count, stopping.takes) : count;
+      await original(itemType, metadata, moving);
+      if (stops) {
+        owner.abort(new Error("hunger reflex"));
+        throw new Error("window closed under the transfer");
+      }
+    };
+  });
   return asked;
 }
 
@@ -594,7 +546,7 @@ test("a withdrawal of three stacks cut off after the first asks only for the oth
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(result.container.transfers[0]?.transferred, 192);
-  assert.equal(scenery.container.state.closed, true);
+  assert.equal(scenery.container.closed, true);
 });
 
 test("a deposit cut off mid-transfer moves only the rest next time", async (t) => {
@@ -620,7 +572,7 @@ test("a chest another bot emptied between attempts gives what it had left, as a 
   const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "cobblestone", count: 192 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  scenery.container.state.contents = [];
+  scenery.container.contents = [];
   const result = await attempt(new AbortController().signal);
 
   assert.equal(result.status, "partial");
@@ -660,7 +612,7 @@ test("a deposit resumed after the hunger reflex ate some of the same food still 
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "deposit") assert.fail("expected deposit evidence");
   assert.equal(result.container.transfers[0]?.transferred, 10);
-  assert.equal(scenery.container.state.contents.find(({ name }) => name === "bread")?.count, 10);
+  assert.equal(scenery.container.contents.find(({ name }) => name === "bread")?.count, 10);
   assert.equal(scenery.carried("bread"), 8);
 });
 
@@ -678,7 +630,7 @@ test("a withdrawal resumed after planks were picked up from the ground still tak
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(result.container.transfers[0]?.transferred, 10);
-  assert.equal(scenery.container.state.contents.find(({ name }) => name === "oak_planks")?.count, 10);
+  assert.equal(scenery.container.contents.find(({ name }) => name === "oak_planks")?.count, 10);
   assert.equal(scenery.carried("oak_planks"), 14);
 });
 
@@ -690,7 +642,7 @@ test("a resumed deposit while another bot also puts items in the chest credits n
   const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "bread", count: 10 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  scenery.container.state.contents.push({ slot: 5, name: "bread", count: 5 }); // another bot's own deposit
+  scenery.container.contents = [...scenery.container.contents, { slot: 5, name: "bread", count: 5 }]; // another bot's own deposit
   await attempt(new AbortController().signal);
 
   assert.deepEqual(asked, [10, 7]);

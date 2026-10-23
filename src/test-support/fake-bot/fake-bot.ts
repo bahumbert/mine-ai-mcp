@@ -17,6 +17,8 @@ import { attachFakePhysics } from "./fake-bot-physics.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
 import { attachFakeVehicle } from "./fake-bot-vehicle.js";
+import { attachFakeWindows } from "./fake-bot-windows.js";
+import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeClock, createFakeClock } from "./fake-clock.js";
 import { type FakeInventory, type FakeInventoryOptions, createFakeInventory } from "./fake-inventory.js";
 import { type FakeServer, type FakeServerOptions, createFakeServer } from "./fake-server.js";
@@ -59,6 +61,8 @@ export interface FakeBotOptions {
   readonly loadedColumns?: FakeWorldOptions["loadedColumns"];
   readonly slots?: FakeInventoryOptions["slots"];
   readonly carried?: FakeInventoryOptions["carried"];
+  /** The stacks the server keeps in the container blocks (a chest, a barrel) of `cells`, by `"x,y,z"`: item name to the number held, filling the slots from 0. */
+  readonly containers?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   /** Entities by id (not the bot's own, which is id 1). */
   readonly entities?: Readonly<Record<number, FakeEntitySpec>>;
   /** Other players by username; the bot's own entry is added. */
@@ -84,6 +88,8 @@ export interface FakeHarness {
   /** The server's own entities after the start: spawn, remove, and the pickup of item entities. */
   readonly entities: ServerEntities;
   readonly breath: FakeBreath;
+  /** The server's side of the windows: the containers' stacks and the window it has open. */
+  readonly windows: FakeWindows;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -195,14 +201,15 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
   attachFakeVehicle(bot, server);
+  const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {} });
   attachFakeUse(bot, { clock, server, world, inventory, entities });
   const serverEntities = attachFakeEntities(bot, { clock, server, inventory, entities });
-  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
+  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn, windows });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
   attachFakeSleep(bot, { clock, server, world });
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, entities: serverEntities, breath };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

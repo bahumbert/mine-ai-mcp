@@ -69,3 +69,16 @@ test("setupCommands sets the day time, the day cycle and the weather after the c
   });
   assert.deepEqual(setup.slice(bare.length), ["gamerule doDaylightCycle true", "time set 14000", "weather thunder"]);
 });
+
+test("setupCommands fills a container's slots from 0 after its setblock, splitting at the stack size, and a fixture without containers writes none", () => {
+  const cells = { "0,-60,0": "chest" };
+  const { setup } = setupCommands({ cells, carried: {}, containers: { "0,-60,0": { cobblestone: 70, torch: 3 } }, position: [0.5, -60, 0.5] });
+  assert.deepEqual(setup.slice(-4), [
+    "setblock 0 -60 0 chest",
+    "item replace block 0 -60 0 container.0 with cobblestone 64",
+    "item replace block 0 -60 0 container.1 with cobblestone 6",
+    "item replace block 0 -60 0 container.2 with torch 3",
+  ]);
+  assert.equal(setupCommands({ cells, carried: {}, position: [0.5, -60, 0.5] }).setup.length, 3);
+  assert.throws(() => setupCommands({ cells: {}, carried: {}, containers: { "0,-60,0": { dirt: 1 } }, position: [0.5, -60, 0.5] }), /no block in cells/);
+});

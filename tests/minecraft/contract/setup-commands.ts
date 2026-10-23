@@ -1,4 +1,7 @@
 /** The Mine Labs arrangement of a contract fixture: the setup commands, the player and the entities its YAML must hold. */
+import minecraftData from "minecraft-data";
+import { DEFAULT_MINECRAFT_VERSION } from "../../../src/server/config.ts";
+import { stacksOf } from "../../../src/test-support/fake-bot/fake-inventory.ts";
 import { WITHOUT_RUNTIME_FLAG } from "../client-host-args.ts";
 import { blockArgument } from "./subject.ts";
 import type { ContractCheck, ContractFixture } from "./checks.ts";
@@ -17,6 +20,15 @@ export interface ContractArrangement {
 function assertInArena(label: string, [x, y, z]: readonly number[]): void {
   const inside = Math.abs(x!) <= ARENA.radius && Math.abs(z!) <= ARENA.radius && y! >= ARENA.floorY && y! <= ARENA.airTopY;
   if (!inside) throw new Error(`${label} ${x},${y},${z} is outside the contract arena (radius ${ARENA.radius}, y ${ARENA.floorY}..${ARENA.airTopY})`);
+}
+
+/** `item replace block` for each stack of each container, after the `setblock` of the container itself: stacks fill the slots from 0, split at the item's stack size. */
+function containerLines(fixture: ContractFixture): string[] {
+  const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
+  return Object.entries(fixture.containers ?? {}).flatMap(([key, carried]) => {
+    if (!(key in fixture.cells)) throw new Error(`container ${key} has no block in cells: name the chest to set`);
+    return stacksOf(registry, carried).map(({ name, count }, slot) => `item replace block ${key.split(",").join(" ")} container.${slot} with ${name} ${count}`);
+  });
 }
 
 /** The fixture as Mine Labs arranges it: the floor and the air, each cell set, the bot's place, stacks and entities. */
@@ -38,6 +50,7 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
       `fill ${-radius} ${floorY} ${-radius} ${radius} ${floorY} ${radius} stone`,
       `fill ${-radius} ${floorY + 1} ${-radius} ${radius} ${airTopY} ${radius} air`,
       ...cellLines,
+      ...containerLines(fixture),
       ...worldLines,
     ],
     player: { pos: fixture.position, inventory: Object.entries(fixture.carried).map(([item, count]) => ({ item, count })) },

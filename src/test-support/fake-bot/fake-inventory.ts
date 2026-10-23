@@ -84,16 +84,21 @@ function carrySlotOrder(): number[] {
   return [...hotbar, ...main];
 }
 
+/** `carried` as stacks, in order, each at most the item's stack size (`give` and a pickup fill a stack before the next). */
+export function stacksOf(registry: Registry, carried: Readonly<Record<string, number>>): Required<FakeSlot>[] {
+  return Object.entries(carried).flatMap(([name, total]) => {
+    const stackSize = itemOf(registry, name).stackSize;
+    return Array.from({ length: Math.ceil(total / stackSize) }, (_, index) => ({ name, count: Math.min(stackSize, total - index * stackSize) }));
+  });
+}
+
 /** Put `carried` into the window's empty slots, one stack-size piece at a time. */
 function fillCarried(window: PlayerWindow, registry: Registry, carried: Readonly<Record<string, number>>): void {
   const free = carrySlotOrder().filter((slot) => window.slots[slot] === null);
-  for (const [name, total] of Object.entries(carried)) {
-    const stackSize = itemOf(registry, name).stackSize;
-    for (let left = total; left > 0; left -= stackSize) {
-      const slot = free.shift();
-      if (slot === undefined) throw new Error(`no room for ${left} more ${name}: carried stacks exceed the 36 slots`);
-      window.updateSlot(slot, itemOf(registry, name, Math.min(stackSize, left)));
-    }
+  for (const { name, count } of stacksOf(registry, carried)) {
+    const slot = free.shift();
+    if (slot === undefined) throw new Error(`no room for ${count} more ${name}: carried stacks exceed the 36 slots`);
+    window.updateSlot(slot, itemOf(registry, name, count));
   }
 }
 

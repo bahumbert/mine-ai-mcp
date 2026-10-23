@@ -13,6 +13,7 @@ import type { MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { EQUIPMENT_SLOTS, type FakeInventory, type TossedStack, itemOf } from "./fake-inventory.js";
 import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
+import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeWorld, blockUpdateEventOf } from "./fake-world.js";
 
 /** Mineflayer's one sequence of prediction acknowledgements per connection (`interaction_sequence.js`). */
@@ -39,7 +40,10 @@ export interface FakeEntities {
 }
 
 /** Give `bot` its hand, `equip`, `toss`, `tossStack` and `placeBlock`. */
-export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; spawn: ServerEntities["spawn"] }): void {
+export function attachFakeItems(
+  bot: FakeBot,
+  parts: { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; spawn: ServerEntities["spawn"]; windows: FakeWindows },
+): void {
   const { inventory, server } = parts;
   Object.defineProperties(bot, {
     heldItem: { get: () => inventory.heldItem, configurable: true },
@@ -65,10 +69,10 @@ export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server:
   server.onPacket("block_place", (data) => {
     const { location, direction, hand } = data as { location: Vec3; direction: number; hand: number };
     const face = FACE_VECTORS[direction];
-    // A block the server uses (a bed: fake-bot-sleep.ts answers it) takes the click; nothing is placed against it.
+    // A block the server uses takes the click and nothing is placed against it: a bed (fake-bot-sleep.ts answers it) or a container (it opens its window, `fake-window-server.ts`).
     const clicked = parts.world.blockAt(location);
     if (clicked !== null && bot.isABed(clicked as never)) return;
-    if (face !== undefined) server.answer(() => answerPlacement(bot, parts, location.plus(face), hand));
+    if (face !== undefined && !parts.windows.opensWindowAt(location)) server.answer(() => answerPlacement(bot, parts, location.plus(face), hand));
   });
 }
 

@@ -26,19 +26,12 @@ function shieldWorn(bot: FakeBot, durabilityUsed: number): Item {
 }
 
 /**
- * A bot carrying `carried` in its main inventory, hand empty. Its `clickWindow` answers a number-key click (mode 2) as the
- * server does, swapping the clicked slot with hotbar slot `button`; its equip throws for the one item named in `rejects`.
+ * A bot carrying `carried` in its main inventory, hand empty. Its `clickWindow` is Mineflayer's, answered by the fake
+ * server (a number-key click swaps the clicked slot with hotbar slot `button`: contract `click-window-hotbar-swap`);
+ * its equip throws for the one item named in `rejects`.
  */
 function equipBot(carried: readonly string[], rejects: string | null = null) {
   const { bot } = createFakeBot({ slots: Object.fromEntries(carried.map((name, index) => [9 + index, { name }])) });
-  // Stopgap until the master adds the server's answer to a window click: the fake has no `clickWindow` (Mineflayer `inventory.js` `clickWindow`).
-  bot.clickWindow = async (source, button, mode) => {
-    assert.equal(mode, 2);
-    const hotbar = 36 + button;
-    const [moving, other] = [bot.inventory.slots[source] ?? null, bot.inventory.slots[hotbar] ?? null];
-    setSlot(bot, source, other);
-    setSlot(bot, hotbar, moving);
-  };
   const equipOwn = bot.equip.bind(bot);
   bot.equip = async (item, destination) => {
     if (equippedName(bot, item) === rejects) throw new Error("server refused");
