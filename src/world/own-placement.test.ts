@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeCell, type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { type FakeCell, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement } from "./own-placement.js";
 import type { WorldBlock } from "./placement.js";
 
@@ -12,15 +12,6 @@ const isCobble = (block: WorldBlock) => block.name === "cobblestone";
 /** A bot whose world holds `cells` (air elsewhere above the ground, `"void"` not loaded), its clock driving the timers. */
 function worldBot(cells: Record<string, FakeCell> = {}) {
   return createFakeBot({ clock: createFakeClock({ mode: "mocked" }), cells });
-}
-
-/** Move the clock `ms` on and hand back `pending`, which must be over by then. Stopgap until M2 merges `clock.settle`. */
-async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  let over = false;
-  void pending.then(() => (over = true), () => (over = true));
-  await clock.advance(ms);
-  assert.ok(over, `still waiting after ${ms} ms of clock`);
-  return pending;
 }
 
 /** Two time packets, one a second (contract check `world-age-per-second`): the 40 ticks past a send. */
@@ -57,7 +48,7 @@ test("not_landed once the world age moved 40 ticks past the send", async () => {
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
 
-  const seen = await settledAfter(clock, TWO_TIME_PACKETS_MS, awaitOwnPlacement(bot, own, isCobble));
+  const seen = await clock.settle(awaitOwnPlacement(bot, own, isCobble), TWO_TIME_PACKETS_MS);
 
   assert.deepEqual(seen, { kind: "not_landed" });
   assert.ok(bot.time.age >= 24_040);
@@ -69,7 +60,7 @@ test("the wait counts from the send: 40 ticks already past is answered at once",
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age - 40);
 
-  assert.deepEqual(await settledAfter(clock, 0, awaitOwnPlacement(bot, own, isCobble)), { kind: "not_landed" });
+  assert.deepEqual(await clock.settle(awaitOwnPlacement(bot, own, isCobble), 0), { kind: "not_landed" });
 });
 
 test("a block that lands while the server is behind is landed, not a second placement", async () => {
@@ -79,7 +70,7 @@ test("a block that lands while the server is behind is landed, not a second plac
   recordPlacementSent(own, [cell], bot.time.age);
   clock.after(150, () => world.setCell(cell, "cobblestone"));
 
-  assert.equal((await settledAfter(clock, 200, awaitOwnPlacement(bot, own, isCobble))).kind, "landed");
+  assert.equal((await clock.settle(awaitOwnPlacement(bot, own, isCobble), 200)).kind, "landed");
 });
 
 test("wall bound when the server clock stops", async () => {
@@ -94,7 +85,7 @@ test("wall bound when the server clock stops", async () => {
 
   await clock.advance(100);
   assert.equal(over, false, "still waiting before the 120 ms wall bound");
-  const seen = await settledAfter(clock, 50, waiting);
+  const seen = await clock.settle(waiting, 50);
 
   assert.deepEqual(seen, { kind: "not_landed" });
 });
@@ -107,7 +98,7 @@ test("the abort signal ends the wait", async () => {
   const controller = new AbortController();
   clock.after(50, () => controller.abort(new Error("cut")));
 
-  await assert.rejects(settledAfter(clock, 100, awaitOwnPlacement(bot, own, isCobble, controller.signal)), /cut/);
+  await assert.rejects(clock.settle(awaitOwnPlacement(bot, own, isCobble, controller.signal), 100), /cut/);
 });
 
 test("forgotten placements are none again, and a second send replaces the first", async () => {
@@ -131,5 +122,5 @@ test("two records on two requests keep their own cells", async () => {
   recordPlacementSent(second, [head], bot.time.age);
 
   assert.equal((await awaitOwnPlacement(bot, first, isCobble)).kind, "landed");
-  assert.equal((await settledAfter(clock, TWO_TIME_PACKETS_MS, awaitOwnPlacement(bot, second, isCobble))).kind, "not_landed");
+  assert.equal((await clock.settle(awaitOwnPlacement(bot, second, isCobble), TWO_TIME_PACKETS_MS)).kind, "not_landed");
 });

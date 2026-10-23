@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { requestCellResync } from "./cell-resync.js";
 import { SERVER_ANSWER_WALL_MS } from "./server-block-changes.js";
 
@@ -20,18 +20,6 @@ function resyncFixture(options: { offHand?: { name: string } | null } = {}) {
   return { ...harness, hear, hearBlockChange, sent: server.packets, resent: () => server.packets.filter((entry) => entry.name === "block_place") };
 }
 
-/** Move the clock `ms` on and hand back the resync, which must be over by then. Stopgap until M2 merges `clock.settle`. */
-async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  let over = false;
-  void pending.then(
-    () => (over = true),
-    () => (over = true),
-  );
-  await clock.advance(ms);
-  assert.ok(over, `the resync still waits after ${ms} ms of clock`);
-  return pending;
-}
-
 /**
  * The packets written, in order. The shift goes out as Mineflayer writes it for the control (`player_input`, which 1.21.3
  * and later send) and again as the `entity_action` this server reads (`setSneaking`; Mineflayer `physics.js:245-275` for the first).
@@ -43,7 +31,7 @@ test("sends one use-on-block on the top face with the off hand while sneaking, a
   const fixture = resyncFixture();
   using _timers = fixture.clock.install();
   fixture.clock.after(50, () => fixture.hearBlockChange({ x: 3, y: 63, z: 4 }));
-  await settledAfter(fixture.clock, 100, requestCellResync(fixture.bot, CELL, new AbortController().signal));
+  await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 100);
   assert.deepEqual(ticks(fixture.sent), ["player_input", "entity_action:0", "block_place", "player_input", "entity_action:1"]);
   const place = fixture.resent()[0]!.data as Record<string, unknown>;
   assert.deepEqual(place.location, CELL, "the clicked cell is the one asked for");
@@ -56,21 +44,21 @@ test("a block packet for the cell within the bound is resent", async () => {
   const fixture = resyncFixture();
   using _timers = fixture.clock.install();
   fixture.clock.after(1_500, () => fixture.hearBlockChange({ x: 3, y: 63, z: 4 }));
-  assert.equal(await settledAfter(fixture.clock, 1_550, requestCellResync(fixture.bot, CELL, new AbortController().signal)), "resent");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 1_550), "resent");
 });
 
 test("a packet for another cell is not the answer", async () => {
   const fixture = resyncFixture();
   using _timers = fixture.clock.install();
   fixture.clock.after(50, () => fixture.hearBlockChange({ x: 9, y: 63, z: 4 }));
-  assert.equal(await settledAfter(fixture.clock, 2_000, requestCellResync(fixture.bot, CELL, new AbortController().signal)), "unanswered");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 2_000), "unanswered");
 });
 
 test("a resent chunk of the cell's column is the answer", async () => {
   const fixture = resyncFixture();
   using _timers = fixture.clock.install();
   fixture.clock.after(50, () => fixture.hear("map_chunk", { x: 0, z: 0 }));
-  assert.equal(await settledAfter(fixture.clock, 100, requestCellResync(fixture.bot, CELL, new AbortController().signal)), "resent");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 100), "resent");
 });
 
 test("no packet in 40 ticks of world age is unanswered", async () => {
@@ -78,7 +66,7 @@ test("no packet in 40 ticks of world age is unanswered", async () => {
   using _timers = fixture.clock.install();
   const started = fixture.bot.time.age;
   // Two time packets (contract check `world-age-per-second`) are the 40 ticks: the wait ends with the second.
-  assert.equal(await settledAfter(fixture.clock, 2_000, requestCellResync(fixture.bot, CELL, new AbortController().signal)), "unanswered");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 2_000), "unanswered");
   assert.equal(fixture.bot.time.age - started, 40, "it stopped as the age passed 40, not before");
 });
 
@@ -87,7 +75,7 @@ test("no packet and no world age for 2 s is unanswered, on the wall clock", asyn
   using _timers = fixture.clock.install();
   fixture.server.stop();
   const started = fixture.bot.time.age;
-  assert.equal(await settledAfter(fixture.clock, SERVER_ANSWER_WALL_MS, requestCellResync(fixture.bot, CELL, new AbortController().signal)), "unanswered");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), SERVER_ANSWER_WALL_MS), "unanswered");
   assert.equal(fixture.bot.time.age, started, "the server clock never moved");
 });
 
@@ -115,7 +103,7 @@ test("listeners are removed after each outcome", async () => {
     using _timers = fixture.clock.install();
     if (outcome === "resent") fixture.clock.after(50, () => fixture.hearBlockChange({ x: 3, y: 63, z: 4 }));
     const pending = requestCellResync(fixture.bot, CELL, new AbortController().signal);
-    assert.equal(await settledAfter(fixture.clock, 2_000, pending), outcome);
+    assert.equal(await fixture.clock.settle(pending, 2_000), outcome);
     for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, `${outcome}: ${name}`);
   }
 });

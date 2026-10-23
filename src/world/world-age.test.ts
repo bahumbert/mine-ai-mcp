@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { waitForServerAnswer, waitForWorldAge } from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
@@ -10,7 +10,7 @@ function worldBot(age = 1_000, options: FakeBotOptions = {}) {
   return { ...harness, timing: { now: clock.now, sleep: clock.sleep } };
 }
 
-/** Whether `pending` has ended, read at any time. Stopgap until M2 merges `clock.settle`. */
+/** Whether `pending` has ended, read at any time. */
 function watch<T>(pending: Promise<T>): { readonly over: boolean } {
   const state = { over: false };
   void pending.then(
@@ -18,14 +18,6 @@ function watch<T>(pending: Promise<T>): { readonly over: boolean } {
     () => (state.over = true),
   );
   return state;
-}
-
-/** Move the clock `ms` on and hand back the wait, which must be over by then. Stopgap until M2 merges `clock.settle`. */
-async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  const wait = watch(pending);
-  await clock.advance(ms);
-  assert.ok(wait.over, `the wait still goes on after ${ms} ms of clock`);
-  return pending;
 }
 
 test("resolves moved when the server age advanced the asked ticks, seen in jumps of 20", async () => {
@@ -37,7 +29,7 @@ test("resolves moved when the server age advanced the asked ticks, seen in jumps
     seen = bot.time.age;
   });
 
-  const moved = await settledAfter(clock, 2_050, waitForWorldAge(bot, 40, { wallMs: 10_000, ...timing }));
+  const moved = await clock.settle(waitForWorldAge(bot, 40, { wallMs: 10_000, ...timing }), 2_050);
 
   assert.equal(moved, "moved");
   assert.deepEqual(jumps, [20, 20], "the age reached the bot as two time packets of 20 ticks");
@@ -48,7 +40,7 @@ test("resolves until when the condition becomes true before the age moves", asyn
   let done = false;
   clock.after(100, () => (done = true));
 
-  const wait = await settledAfter(clock, 150, waitForWorldAge(bot, 40, { wallMs: 10_000, until: () => done, ...timing }));
+  const wait = await clock.settle(waitForWorldAge(bot, 40, { wallMs: 10_000, until: () => done, ...timing }), 150);
 
   assert.equal(wait, "until");
 });
@@ -99,7 +91,7 @@ test("works with the default clock: performance.now and setTimeout", async () =>
   using _timers = clock.install();
   server.stop();
 
-  assert.equal(await settledAfter(clock, 170, waitForWorldAge(bot, 40, { wallMs: 120 })), "timeout");
+  assert.equal(await clock.settle(waitForWorldAge(bot, 40, { wallMs: 120 }), 170), "timeout");
 });
 
 test("the server answer counts ticks from the send, not from the call", async () => {
@@ -143,6 +135,6 @@ test("the awaited change wins over the world age in the server answer wait", asy
 test("a bot without a world age waits on the wall clock only", async () => {
   // The server never sent a time packet: the bot has no `time` to read.
   const { bot, clock, timing } = worldBot(1_000, { overrides: { time: undefined } });
-  const wait = await settledAfter(clock, 1_050, waitForServerAnswer(bot, 0, { wallMs: 1_000, until: () => false, ...timing }));
+  const wait = await clock.settle(waitForServerAnswer(bot, 0, { wallMs: 1_000, until: () => false, ...timing }), 1_050);
   assert.equal(wait, "timeout");
 });

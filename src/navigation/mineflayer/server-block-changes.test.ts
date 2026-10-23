@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeClock, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { changeCovers, SERVER_ANSWER_WALL_MS, type ServerBlockChange, subscribeServerBlockChanges, watchServerChange } from "./server-block-changes.js";
 
 /** A 1.21.4 bot on the shared fake, subscribed to the server's block packets: its protocol client carries them. */
@@ -62,15 +62,6 @@ test("the unsubscribe removes every listener it added, once or twice", () => {
 
 const CELL = { x: 3, y: 63, z: 4 };
 
-/** Move the clock `ms` on and hand back the answer, which must be given by then. Stopgap until M2 merges `clock.settle`. */
-async function answeredAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  let over = false;
-  void pending.then(() => (over = true));
-  await clock.advance(ms);
-  assert.ok(over, `the watch still waits after ${ms} ms of clock`);
-  return pending;
-}
-
 test("a watch answers when the server names its cell, even before anyone waits", async () => {
   const { bot, client, clock } = wire();
   const watch = watchServerChange(bot, CELL);
@@ -85,7 +76,7 @@ test("a watch is not answered by another cell, and gives up when the server cloc
   client.emit("block_change", { location: { ...CELL, x: 9 }, type: 0 });
   const started = bot.time.age;
   // Two time packets (contract check `world-age-per-second`) are the 40 ticks.
-  assert.equal(await answeredAfter(clock, 2_000, watch.answer(new AbortController().signal, clock)), false);
+  assert.equal(await clock.settle(watch.answer(new AbortController().signal, clock), 2_000), false);
   assert.equal(bot.time.age - started, 40);
   watch.dispose();
 });
@@ -100,7 +91,7 @@ test("a watch gives up on the wall clock when the server clock never moves", asy
   void answer.then(() => (over = true));
   await clock.advance(SERVER_ANSWER_WALL_MS - 100);
   assert.equal(over, false, "still waiting inside the wall bound");
-  assert.equal(await answeredAfter(clock, 100, answer), false);
+  assert.equal(await clock.settle(answer, 100), false);
   assert.equal(bot.time.age, started, "the server clock never moved");
   watch.dispose();
 });

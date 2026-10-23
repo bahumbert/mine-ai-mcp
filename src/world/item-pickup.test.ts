@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { MovementPolicy } from "../navigation/index.js";
-import { type FakeClock, createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
 import { armSignal } from "../utils/index.js";
 import {
   DROPPED_ITEM_OBSERVATION_EVENTS,
@@ -30,18 +30,6 @@ function pickupBot(filledSlots: number) {
   const { bot } = harness;
   bot.entities[7]!.getDroppedItem = () => itemOf(bot.registry, "white_wool");
   return harness;
-}
-
-/** Move the clock `ms` on and hand back the pickup, which must be over by then. Stopgap until M2 merges `clock.settle`. */
-async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  let over = false;
-  void pending.then(
-    () => (over = true),
-    () => (over = true),
-  );
-  await clock.advance(ms);
-  assert.ok(over, `the pickup still waits after ${ms} ms of clock`);
-  return pending;
 }
 
 const OBSERVED_ITEM = { entityId: 7, movements: {} as MovementPolicy, hasArrived: () => false } as const;
@@ -81,18 +69,14 @@ test("an item disappearing during a stopped route is gone, not an unreachable pi
   using _timers = clock.install();
   const listenersBefore = bot.inventory.listenerCount("updateSlot");
 
-  const result = await settledAfter(
-    clock,
-    50,
-    pickupObservedItem(bot, {
+  const result = await clock.settle(pickupObservedItem(bot, {
       ...OBSERVED_ITEM,
       navigate: async () => {
         delete bot.entities[7];
         return { status: "stopped", reason: "Entity 7 is not currently observed.", elapsedMs: 0 };
       },
       settleMs: { itemGone: 50 },
-    }),
-  );
+    }), 50);
 
   assert.deepEqual(result, { kind: "item_gone" });
   assert.equal(bot.inventory.listenerCount("updateSlot"), listenersBefore);

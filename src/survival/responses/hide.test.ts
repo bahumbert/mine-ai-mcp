@@ -6,7 +6,6 @@ import {
   type FakeBot,
   type FakeBotOptions,
   type FakeCell,
-  type FakeClock,
   type FakeEntitySpec,
   createFakeBot,
   createFakeClock,
@@ -66,15 +65,8 @@ function refuseEquip(message: string): Pick<NonNullable<FakeBotOptions["override
   };
 }
 
-/** Moves the clock a physics tick at a time until `pending` settles; past `limitMs` of clock it fails, it does not hang. */
-async function finish<T>(clock: FakeClock, pending: Promise<T>, limitMs = 150_000): Promise<T> {
-  let settled = false;
-  const note = () => void (settled = true);
-  pending.then(note, note);
-  for (let passed = 0; passed < limitMs && !settled; passed += 50) await clock.advance(50);
-  if (!settled) assert.fail(`the hide was still running after ${limitMs} ms of clock`);
-  return pending;
-}
+/** The clock a hide may take before the test calls it stuck. */
+const HIDE_LIMIT_MS = 150_000;
 
 function hide(bot: FakeBot): ReturnType<typeof hideInPlace> {
   return hideInPlace(bot, {
@@ -99,7 +91,7 @@ test("soul-sand support uses the observed lower surface when centering a shelter
     carried: { cobblestone: 32 },
     overrides: refuseEquip("placement reached after valid soul-sand support"),
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /placement reached after valid soul-sand support/);
   assert.doesNotMatch(result.error ?? "", /solid floor/);
@@ -125,7 +117,7 @@ test("same-cell knockback into a planned wall recenters before continuing constr
       },
     },
   });
-  await finish(clock, hide(bot));
+  await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(recentered, true, "the body still occupies the same cell but overlaps its west wall");
 });
 
@@ -138,7 +130,7 @@ test("same-cell knockback into a planned wall recenters before continuing constr
  */
 test("a bot already sealed in is hidden, not failed", async () => {
   const { bot, clock } = scene({ health: 18, cells: SEALED_BOX });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "recovered");
   assert.equal(result.enclosed, true);
@@ -151,13 +143,10 @@ test("dragon shelter counts and selects resistant blocks and rejects an ordinary
   const { bot, clock } = scene({ health: 18, cells: SEALED_BOX, carried: { cobblestone: 64, end_stone: 10 } });
   assert.equal(countCapBlocks(bot, DRAGON_PROTECTION_BLOCKS), 10);
   assert.equal(capBlock(bot, DRAGON_PROTECTION_BLOCKS)?.name, "end_stone");
-  const result = await finish(
-    clock,
-    hideInPlace(bot, {
+  const result = await clock.settle(hideInPlace(bot, {
       threatContext: combatTestContext(bot), signal: new AbortController().signal,
       recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS,
-    }),
-  );
+    }), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.equal(result.enclosed, false, "ordinary stone can be destroyed by the dragon");
 });
@@ -174,7 +163,7 @@ test("a failed hide reports the first refused placement, with the cell and the f
     carried: { cobblestone: 47 },
     overrides: refuseEquip("the server would not equip cobblestone"),
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "failed");
   // Ground below and open air at head height is not a box.
@@ -189,7 +178,7 @@ test("a failed hide reports the first refused placement, with the cell and the f
 test("with nothing to dig and nothing to place, the failure says the bot carried nothing", async () => {
   // Every cell around the bot is in a chunk that is not loaded.
   const { bot, clock } = scene({ health: 7, groundY: null, cells: boxOf("void", [-4, 4], [58, 70], [-4, 4]) });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no block worth placing is carried/);
@@ -208,7 +197,7 @@ test("a wall-in that cannot clear the body's overlap refuses before placing wall
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /could not centre inside/);
   assert.equal(equips, 0);
@@ -229,7 +218,7 @@ test("wall centering does not walk off adjacent lip support into an unsupported 
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
   assert.equal(presses, 0);
@@ -242,7 +231,7 @@ test("a partial collision block without center-height footing is not a wall-in f
     cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]),
     carried: { cobblestone: 32 },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
 });
@@ -250,7 +239,7 @@ test("a partial collision block without center-height footing is not a wall-in f
 test("breaking a block without falling into its cell is a failed hide, even at full health", async () => {
   // The fake's own dig (bare hand on stone) turns the cell to air; no physics runs, so the body stays where it was.
   const { bot, clock } = scene({ health: 20 });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.equal(result.dug, 1);
   assert.match(result.error ?? "", /did not land/);
@@ -278,7 +267,7 @@ test("hide repels an authorized intruder before building and uses the observed l
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(attacks, 1);
   assert.equal(result.swings, 1);
   assert.match(result.error ?? "", /4,64,0/);
@@ -297,7 +286,7 @@ test("a neutral piglin sharing the construction space is not permission to attac
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.swings, 0);
   assert.equal(result.kind, "failed");
 });
@@ -346,7 +335,7 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
     if (item.name === "cobblestone") throw new Error("construction boundary");
     return equip(item, destination);
   };
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.swings, 1);
   assert.equal(bystander.isValid, true);
   assert.equal(raised, false, "the construction owner releases its shield on settlement");
@@ -396,7 +385,7 @@ test("an intruder arriving during centering interrupts steering before construct
     arrived = true;
     bot.entities[2]!.position = new Vec3(0.5, 64, 0.9);
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.swings, 1);
   assert.match(result.error ?? "", /placement boundary/);
 });
@@ -414,7 +403,7 @@ test("crossing into the dug cell while airborne does not complete shaft descent"
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(digs, 1);
   assert.equal(result.kind, "failed");
   assert.equal(result.capped, false);
@@ -437,7 +426,7 @@ test("a wall over a drop is built on a floor extension placed against the bot's 
     carried: { cobblestone: 32 },
     overrides: refuseEquip("placement boundary"),
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /1,63,0/, "the extension cell beside the floor block, not the wall cell above it");
@@ -451,7 +440,7 @@ test("a wall over a drop is built on a floor extension placed against the bot's 
  */
 test("a sealed-in bot with nothing to eat and hunger below the regeneration bar is held at once, and says why", async () => {
   const { bot, clock } = scene({ health: 2, food: 13, cells: SEALED_BOX });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "held");
   assert.equal(result.enclosed, true);
@@ -492,7 +481,7 @@ for (const [liquid, flag] of LIQUID_BODIES) {
       },
     });
     Reflect.set(bot.entity, flag, true);
-    const result = await finish(clock, hide(bot));
+    const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
     assert.equal(result.kind, "failed");
     assert.match(result.error ?? "", /^\[SHELTER\].*liquid/);
     assert.equal(equips, 0, "nothing is dug or placed in a liquid");
@@ -503,7 +492,7 @@ for (const [liquid, flag] of LIQUID_BODIES) {
 test("a sealed-in bot in water is not held in its shelter", async () => {
   const { bot, clock } = scene({ health: 18, cells: SEALED_BOX });
   Reflect.set(bot.entity, "isInWater", true);
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /^\[SHELTER\]/);
 });
@@ -514,7 +503,7 @@ test("a hide whose body is pushed into water while it waits to land stops at the
   bot.on("physicsTick", () => {
     Reflect.set(bot.entity, "isInWater", true);
   });
-  const result = await finish(clock, hideBounded(bot, { maximumMs: 60_000 }));
+  const result = await clock.settle(hideBounded(bot, { maximumMs: 60_000 }), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /^\[SHELTER\]/);
 });
@@ -569,7 +558,7 @@ test("an intruder that leaves while the bot turns to it does not stop the shelte
       },
     },
   });
-  const result = await finish(clock, hide(bot));
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.swings, 0);
   assert.match(result.error ?? "", /placement boundary/);
 });
@@ -579,7 +568,7 @@ test("the construction deadline ends a hide whose body never lands", async () =>
   using _installed = clock.install();
   bot.entity.onGround = false;
   const started = Date.now();
-  const result = await finish(clock, hideBounded(bot, { maximumMs: 40 }));
+  const result = await clock.settle(hideBounded(bot, { maximumMs: 40 }), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
   assert.ok(Date.now() - started < 500);
@@ -591,7 +580,7 @@ test("the construction deadline runs on the wall clock when the physics stream h
   bot.entity.onGround = false;
   bot.physicsEnabled = false; // the client runs no tick
   const started = Date.now();
-  const result = await finish(clock, hideBounded(bot, { maximumMs: 40 }));
+  const result = await clock.settle(hideBounded(bot, { maximumMs: 40 }), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
   assert.ok(Date.now() - started < 500);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
-import { type FakeBotOptions, type FakeClock, type FakeEntitySpec, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, type FakeEntitySpec, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import type { CombatController } from "../../control/combat/contract.js";
 import { CrystalObservation } from "./crystal.js";
 
@@ -15,15 +15,6 @@ import type { FootingRecovery } from "../../responses/footing.js";
 /** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
 function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
   return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
-}
-
-/** Let the server's ticks run, 50 ms of clock at a time, until `action` settles; throws after `maxMs` of clock. */
-async function whileTicking<T>(clock: FakeClock, action: Promise<T>, maxMs = 30_000): Promise<T> {
-  let settled = false;
-  const outcome = action.finally(() => void (settled = true));
-  for (let passed = 0; !settled && passed < maxMs; passed += 50) await clock.advance(50);
-  if (!settled) throw new Error(`the action did not settle within ${maxMs / 1000} s of clock`);
-  return outcome;
 }
 
 /** The selected crystal #42 above the bot; the scene's blocks and carried items are the test's. */
@@ -39,7 +30,7 @@ function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> 
   clock.onSlice("server", () => script.onTick(++script.ticks));
   const end = new EndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
   const explode = () => bot._client.emit("explosion", { x: 30, y: 80, z: 0 });
-  const run = <T>(action: Promise<T>) => whileTicking(clock, action, 60_000);
+  const run = <T>(action: Promise<T>) => clock.settle(action, 60_000);
   return { bot, server, world, target, end, explode, script, run };
 }
 

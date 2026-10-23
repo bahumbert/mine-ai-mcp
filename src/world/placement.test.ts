@@ -40,15 +40,6 @@ function shiftPackets(server: FakeServer): number[] {
   return server.packets.filter((packet) => packet.name === "entity_action").map((packet) => (packet.data as { actionId: number }).actionId);
 }
 
-/** Move the clock `ms` on and hand back `pending`, which must be over by then. Stopgap until M2 merges `clock.settle`. */
-async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
-  let over = false;
-  void pending.then(() => (over = true), () => (over = true));
-  await clock.advance(ms);
-  assert.ok(over, `still waiting after ${ms} ms of clock`);
-  return pending;
-}
-
 /** A turn of a quarter circle at Mineflayer's 3 rad/s (11 ticks), with room. */
 const QUARTER_TURN_MS = 1_000;
 /** Two time packets, one a second (contract check `world-age-per-second`): the 40 ticks past a send. */
@@ -77,7 +68,7 @@ test("placement settles the last item before another caller can select the empti
     },
   });
   using _timers = clock.install();
-  const result = await settledAfter(clock, 100, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 100);
   assert.equal(result.kind, "placed");
   assert.equal(bot.inventory.count(item.type, null), 0);
 });
@@ -91,11 +82,7 @@ test("places an oriented block while sneaking and always releases sneak", async 
     world.setCell(target, "red_bed");
   });
 
-  const result = await settledAfter(
-    clock,
-    QUARTER_TURN_MS,
-    placeBlock(bot, placementAt(bot, item, target, { matches: (block: WorldBlock) => block.name.endsWith("_bed"), lookDirection: new Vec3(1, 0, 0) })),
-  );
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { matches: (block: WorldBlock) => block.name.endsWith("_bed"), lookDirection: new Vec3(1, 0, 0) })), QUARTER_TURN_MS);
 
   assert.equal(result.kind, "placed");
   assert.equal(bot.entity.yaw, -Math.PI / 2);
@@ -125,7 +112,7 @@ test("ordinary placement requests immediate native face aiming", async () => {
     assert.deepEqual(options, { forceLook: "ignore", swingArm: "right" });
     world.setCell(target, "cobblestone");
   });
-  const result = await settledAfter(clock, 0, placeBlock(bot, { ...placementAt(bot, item, target), support, face }));
+  const result = await clock.settle(placeBlock(bot, { ...placementAt(bot, item, target), support, face }), 0);
   assert.equal(result.kind, "placed");
   assert.deepEqual(shiftPackets(server), [0, 1]);
 });
@@ -150,7 +137,7 @@ for (const entersDuringAim of [false, true]) {
     withNativePlacement(bot, async () => {
       packets++;
     });
-    const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { matches: () => true })));
+    const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { matches: () => true })), 0);
     assert.equal(result.kind, "failed");
     if (result.kind === "failed") assert.match(result.error, /\(0, 64, 0\).*wither_skeleton #9/);
     assert.equal(packets, 0);
@@ -165,7 +152,7 @@ test("a player standing in the cell is named by username, with a request to step
     players: { Tester: { gamemode: 0 } },
   });
   using _timers = clock.install();
-  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { matches: () => true })));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { matches: () => true })), 0);
   assert.equal(result.kind, "failed");
   if (result.kind === "failed") {
     assert.match(result.error, /overlaps player Tester/u);
@@ -181,16 +168,12 @@ test("does not accept half of a multi-block placement", async () => {
   using _timers = clock.install();
   withNativePlacement(bot, async () => {});
 
-  const result = await settledAfter(
-    clock,
-    QUARTER_TURN_MS + TWO_TIME_PACKETS_MS,
-    placeBlock(bot, {
+  const result = await clock.settle(placeBlock(bot, {
       ...placementAt(bot, item, foot),
       expectedCells: [foot, head],
       matches: (block: WorldBlock) => block.name.endsWith("_bed"),
       lookDirection: new Vec3(1, 0, 0),
-    }),
-  );
+    }), QUARTER_TURN_MS + TWO_TIME_PACKETS_MS);
 
   assert.equal(result.kind, "failed");
 });
@@ -205,16 +188,12 @@ test("waits for every cell of a multi-block placement", async () => {
     clock.after(40, () => world.setCell(head, "red_bed"));
   });
 
-  const result = await settledAfter(
-    clock,
-    QUARTER_TURN_MS,
-    placeBlock(bot, {
+  const result = await clock.settle(placeBlock(bot, {
       ...placementAt(bot, item, foot),
       expectedCells: [foot, head],
       matches: (block: WorldBlock) => block.name.endsWith("_bed"),
       lookDirection: new Vec3(1, 0, 0),
-    }),
-  );
+    }), QUARTER_TURN_MS);
 
   assert.equal(result.kind, "placed");
 });
@@ -226,11 +205,7 @@ test("releases sneak when Mineflayer rejects placement", async () => {
     throw new Error("rejected");
   });
 
-  const result = await settledAfter(
-    clock,
-    QUARTER_TURN_MS,
-    placeBlock(bot, { ...placementAt(bot, item, new Vec3(0, 64, 0)), lookDirection: new Vec3(1, 0, 0) }),
-  );
+  const result = await clock.settle(placeBlock(bot, { ...placementAt(bot, item, new Vec3(0, 64, 0)), lookDirection: new Vec3(1, 0, 0) }), QUARTER_TURN_MS);
 
   assert.deepEqual(result, { kind: "failed", error: "rejected" });
   assert.deepEqual(shiftPackets(server), [0, 1]);
@@ -242,7 +217,7 @@ test("uses the 1.21.4 sneaking action before placement against an interactive su
   const { bot, clock, server, item } = placer("furnace", { version: "1.21.4", cells: { "0,63,0": "crafting_table" } });
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, QUARTER_TURN_MS, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), QUARTER_TURN_MS);
 
   assert.equal(result.kind, "placed");
   const protocol = server.packets
@@ -263,7 +238,7 @@ test("accepts a physically observed placement after Mineflayer's block-update ti
   });
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 0);
 
   assert.equal(result.kind, "placed");
 });
@@ -280,7 +255,7 @@ test("preserves a block-update timeout with post-timeout world evidence", async 
   using _timers = clock.install();
   const sentAt = bot.time.age;
 
-  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), TWO_TIME_PACKETS_MS);
 
   assert.deepEqual(result, {
     kind: "failed",
@@ -322,7 +297,7 @@ test("a block whose slot update comes 600 ms after it is placed, not failed", as
   });
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, 700, placeBlock(bot, placement));
+  const result = await clock.settle(placeBlock(bot, placement), 700);
 
   assert.equal(result.kind, "placed");
 });
@@ -340,7 +315,7 @@ test("a block that appears after mineflayer's timeout but before the world age m
   // The block lands with the first time packet after the send: 20 ticks, half the answer wait.
   server.onTimePacket(() => world.setCell(target, "cobblestone"));
 
-  const result = await settledAfter(clock, 1_050, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 1_050);
 
   assert.equal(result.kind, "placed");
 });
@@ -350,7 +325,7 @@ test("a server that answered without the block fails after 40 ticks with the obs
   const { bot, clock, item } = placer("cobblestone", { overrides: { placeBlock: async () => {} } });
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), TWO_TIME_PACKETS_MS);
 
   assert.deepEqual(result, {
     kind: "failed",
@@ -366,7 +341,7 @@ test("physics stopped (waitForTicks never resolves): the block wait still ends o
   bot.physicsEnabled = false;
   server.stop();
 
-  const outcome = await settledAfter(clock, 150, placeBlock(bot, placementAt(bot, item, target, { answerWallMs: 120 })));
+  const outcome = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { answerWallMs: 120 })), 150);
 
   assert.equal(outcome.kind, "failed");
 });
@@ -378,7 +353,7 @@ test("creative placement does not wait for a count", async () => {
   });
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target)));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 0);
 
   assert.equal(result.kind, "placed");
 });
@@ -388,7 +363,7 @@ test("a block that appeared but whose consumption never shows fails once the ser
   const { bot, clock, placement } = survivalPlacer(target, async (scene) => scene.appear());
   using _timers = clock.install();
 
-  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placement));
+  const result = await clock.settle(placeBlock(bot, placement), TWO_TIME_PACKETS_MS);
 
   assert.equal(result.kind, "failed");
   if (result.kind === "failed") assert.match(result.error, /consumption of cobblestone was not observed \(inventory 1 → 1\)/u);
@@ -407,7 +382,7 @@ test("onSent fires once, after the equip and look, right before the placement pa
   using _timers = clock.install();
   withNativePlacement(bot, async () => void calls.push("packet"));
 
-  await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { onSent: () => calls.push("sent") })));
+  await clock.settle(placeBlock(bot, placementAt(bot, item, target, { onSent: () => calls.push("sent") })), 0);
 
   assert.deepEqual(calls, ["equip", "look", "sent", "packet"]);
 });
@@ -425,7 +400,7 @@ test("onSent does not fire when the look throws", async () => {
   using _timers = clock.install();
   withNativePlacement(bot, async () => {});
 
-  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { onSent: () => void (sent += 1) })));
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { onSent: () => void (sent += 1) })), 0);
 
   assert.equal(result.kind, "failed");
   assert.equal(sent, 0);
@@ -440,7 +415,7 @@ test("onSent does not fire when the signal aborts before the send", async () => 
   withNativePlacement(bot, async () => {});
 
   await assert.rejects(
-    settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { signal: controller.signal, onSent: () => void (sent += 1) }))),
+    clock.settle(placeBlock(bot, placementAt(bot, item, target, { signal: controller.signal, onSent: () => void (sent += 1) })), 0),
     /cut/u,
   );
   assert.equal(sent, 0);

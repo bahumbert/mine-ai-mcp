@@ -6,7 +6,6 @@ import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
 import {
   type FakeBot,
   type FakeBotOptions,
-  type FakeClock,
   type FakeEntitySpec,
   createFakeBot,
   createFakeClock,
@@ -55,15 +54,8 @@ function cloudColumn(ys: number[], radius: number): Record<number, FakeEntitySpe
   return Object.fromEntries(ys.map(y => [y, breathCloud(new Vec3(0, y, 6.5), radius)]));
 }
 
-/** Run the clock on in 50 ms slices until `promise` settles, so the code under test gets its ticks and timers. */
-async function untilSettled<T>(clock: FakeClock, promise: Promise<T>, limitMs = 10_000): Promise<T> {
-  let done = false;
-  const outcome = promise.finally(() => { done = true; });
-  outcome.catch(() => undefined); // the caller awaits `outcome` below: this only keeps it handled while the clock runs
-  for (let passed = 0; !done && passed < limitMs; passed += 50) await clock.advance(50);
-  if (!done) throw new Error(`not settled after ${limitMs} ms of clock`);
-  return outcome;
-}
+/** The clock an End response may take before the test calls it stuck. */
+const SETTLE_LIMIT_MS = 10_000;
 
 test("perch diagnostics explain cloud-rejected endpoints without attempting navigation", async () => {
   const { bot, clock } = endScene({ position: new Vec3(30.5, 63, 0.5), entities: {
@@ -74,7 +66,7 @@ test("perch diagnostics explain cloud-rejected endpoints without attempting navi
   const listeners = bot.listenerCount("physicsTick");
   using observation = new PerchObservation(bot, 42);
   const navigation = { navigate: () => assert.fail("geometry rejected all endpoints") } as unknown as NavigationRuntime;
-  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+  await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
     const event = JSON.parse(JSON.stringify(facts));
     if (event.reason !== "no_safe_striking_position") return;
     reported = true;
@@ -84,7 +76,7 @@ test("perch diagnostics explain cloud-rejected endpoints without attempting navi
     assert.ok(event.details.candidates.cloudBlocked > 0);
     assert.equal(event.currentCloudExposure, 0, "the bot is safe but all strike endpoints are clouded");
     caller.abort(new Error("diagnosis captured"));
-  }).perch(42, caller.signal, observation)), /diagnosis captured/);
+  }).perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /diagnosis captured/);
   assert.equal(reported, true);
   assert.equal(bot.listenerCount("physicsTick"), listeners + 1, "only the still-owned observation listener remains");
 });
@@ -96,14 +88,14 @@ test("perch diagnostics retain a cached route failure and explain its retry cond
   let routes = 0, cached = false;
   const navigation = { navigate: async () => { routes++; return { status: "failed", reason: "no path fixture" }; } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+  await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
     const event = JSON.parse(JSON.stringify(facts));
     if (event.reason !== "cached_route_failure") return;
     cached = true;
     assert.match(event.details.failure, /no path fixture/);
     assert.match(event.details.retryWhen, /head moves/);
     caller.abort(new Error("cached diagnosis captured"));
-  }).perch(42, caller.signal, observation)), /cached diagnosis captured/);
+  }).perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /cached diagnosis captured/);
   assert.equal(cached, true);
   assert.equal(routes, 2, "try the head, then the body union once before waiting");
 });
@@ -135,8 +127,8 @@ test("a cloud-blocked head searches safe body reach and swings the reached nativ
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, caller.signal, observation)), /body swing observed/);
+  await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /body swing observed/);
   assert.equal(routes, 1, "do not restart head pursuit after reaching the body");
   assert.equal(swings, 1);
 });
@@ -154,8 +146,8 @@ test("a late scanning request still pursues the head rather than preparing a tun
     caller.abort(new Error("head pursuit observed"));
     caller.signal.throwIfAborted();
   } } as unknown as NavigationRuntime;
-  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, caller.signal, observation)), /head pursuit observed/);
+  await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /head pursuit observed/);
 });
 
 test("head approach can walk below breath while a jump into the same cloud is refused", async () => {
@@ -181,8 +173,8 @@ test("head approach can walk below breath while a jump into the same cloud is re
     caller.signal.throwIfAborted();
   } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, caller.signal, observation)), /cloud route checked/);
+  await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /cloud route checked/);
 });
 
 test("a fireball dodge clears the growing cloud horizontally rather than dropping into a nearby shaft", async () => {
@@ -200,8 +192,8 @@ test("a fireball dodge clears the growing cloud horizontally rather than droppin
     bot.entities[7]!.isValid = false;
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .evade(new AbortController().signal));
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
 });
 
@@ -221,8 +213,8 @@ test("an ordinary scaffold blocking a resistant shelter sends retreat directly t
     bot.entity.position.set(20.5, 63, 1.5);
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .evade(new AbortController().signal));
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
   assert.equal(moved, true);
 });
@@ -237,8 +229,8 @@ test("takeoff observed during suspension still owes retreat, and failed retreat 
   Object.assign(dragon.metadata, { 9: 193, 16: 4 });
   await clock.advance(50);
   const navigation = { navigate: async () => ({ status: "failed", reason: "blocked return" }) } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, new AbortController().signal, observation));
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, new AbortController().signal, observation), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "stopped");
   assert.match(result.reason!, /PERCH_RETREAT_INCOMPLETE.*blocked return/);
   assert.equal(result.attacks, 1);
@@ -280,7 +272,7 @@ test("breath interrupts a local bite and reaches evasion without swallowing call
   } as unknown as NavigationRuntime;
   const observation = new PerchObservation(bot, 42);
   await assert.rejects(
-    untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation)),
+    clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation), SETTLE_LIMIT_MS),
     /caller cancelled after escape admission/,
   );
   assert.equal(escapes, 1);
@@ -362,7 +354,7 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
   const observation = new PerchObservation(bot, 42);
   try {
     await assert.rejects(
-      untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation)),
+      clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation), SETTLE_LIMIT_MS),
       /stop after danger handling/,
     );
     assert.equal(digAborted, true);
@@ -394,9 +386,9 @@ test("End escape waits for the observed landing before asking navigation for a r
       return { status: "completed", elapsedMs: 1 };
     },
   } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).evade(
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery).evade(
     new AbortController().signal,
-  ));
+  ), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
   assert.equal(calls, 1);
   assert.equal(bot.listenerCount("physicsTick"), listeners);
@@ -425,8 +417,8 @@ test("a landing escape releases a safe bot when the dragon settles instead of fi
       return { status: "cancelled", reason: "landing ended" };
     },
   } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .evade(new AbortController().signal));
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
   assert.equal(moves, 1);
 });
@@ -465,7 +457,7 @@ test("damage-interrupted breath excavation gives the next escape a route without
       return { status: "completed", elapsedMs: 500 } as const;
     },
   } as unknown as NavigationRuntime;
-  const result = await untilSettled(clock, new EndCombat(bot, navigation, footing).evade(new AbortController().signal));
+  const result = await clock.settle(new EndCombat(bot, navigation, footing).evade(new AbortController().signal), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
   assert.equal(attempts, 2);
 });
