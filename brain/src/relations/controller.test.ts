@@ -5,7 +5,7 @@ import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { RelationBook } from "./book.ts";
-import { TradeController } from "./controller.ts";
+import { sameDealTerms, TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
 import { newRelation, withTrade } from "./record.ts";
 import { proposeTrade } from "./trade.ts";
@@ -732,4 +732,107 @@ test("an agreed trade whose side was given before is gave at once and done when 
   h.state.now += 1_000;
   await h.c.tick(withIron(before, 5), new Set(), signal);
   assert.equal(theirTrade(h).state, "done");
+});
+
+/** A trade with Theo run to `done`: they pay first, I give. Leaves the clock at its end. */
+async function runToDone(h: Harness): Promise<Trade> {
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).state, "done");
+  return theirTrade(h);
+}
+const tradesWithTheo = (h: Harness): number => h.book.get("Theo")!.trades.length;
+
+test("sameDealTerms: the same items and counts in any order, the first-to-give ignored", () => {
+  const two = [{ item: "bread", count: 2 }, { item: "oak_log", count: 1 }];
+  const swapped = [{ item: "oak_log", count: 1 }, { item: "bread", count: 2 }];
+  assert.equal(sameDealTerms({ give: two, get: ingots(1) }, { give: swapped, get: ingots(1) }), true);
+  assert.equal(sameDealTerms({ give: two, get: ingots(1) }, { give: two, get: ingots(2) }), false);
+  assert.equal(sameDealTerms({ give: bread(1), get: ingots(1) }, { give: ingots(1), get: bread(1) }), false, "the sides are not exchangeable");
+});
+
+test("F9: an accept of a partner outside the brain, 3 s after the same trade was done, makes no trade and gives nothing", async () => {
+  const h = harness();
+  await runToDone(h);
+  const handoffsBefore = h.handoffs.length;
+  h.state.now += 3_000;
+  assert.equal(await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot()), null);
+  assert.equal(tradesWithTheo(h), 1);
+  assert.equal(h.handoffs.length, handoffsBefore, "no give taken");
+  assert.ok(h.logs.some((l) => /a accept of Theo ignored, it repeats Ayla-Theo-\d+, done 3 s ago/u.test(l)), h.logs.join("\n"));
+});
+
+test("F9: a propose with the same terms just after done is ignored too", async () => {
+  const h = harness();
+  await runToDone(h);
+  h.state.now += 1_000;
+  assert.equal(await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot()), null);
+  assert.equal(tradesWithTheo(h), 1);
+  assert.ok(h.logs.some((l) => /a propose of Theo ignored, it repeats/u.test(l)));
+});
+
+test("F9: the same terms 2 min 1 s after done are a new trade", async () => {
+  const h = harness();
+  await runToDone(h);
+  h.state.now += 2 * MIN + 1_000;
+  assert.notEqual(await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot()), null);
+  assert.equal(tradesWithTheo(h), 2);
+});
+
+test("F9: the same terms 2 min after done are still a repeat", async () => {
+  const h = harness();
+  await runToDone(h);
+  h.state.now += 2 * MIN;
+  assert.equal(await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot()), null);
+});
+
+test("F9: other terms just after done are a new deal said in words: agreed as before", async () => {
+  const h = harness();
+  await runToDone(h);
+  h.state.now += 1_000;
+  assert.notEqual(await h.c.onDecision(decision({ give: bread(3), first: "them" }), "Theo", snapshot()), null);
+  assert.equal(tradesWithTheo(h), 2);
+});
+
+test("F9: a trade cancelled or broken with the same terms just before is no repeat", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", snapshot());
+  assert.equal(theirTrade(h).state, "cancelled");
+  h.state.now += 1_000;
+  assert.notEqual(await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot()), null);
+  assert.equal(tradesWithTheo(h), 2);
+});
+
+test("F9: a proposal while a trade is still open answers the old 'still open' line, not the repeat line", async () => {
+  const h = harness();
+  await runToDone(h);
+  h.state.now += 1_000;
+  await h.c.onDecision(decision({ give: bread(2), first: "them" }), "Theo", snapshot());
+  h.logs.length = 0;
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  assert.ok(h.logs.some((l) => /still open/u.test(l)));
+  assert.ok(!h.logs.some((l) => /it repeats/u.test(l)));
+});
+
+test("F9 agreedSince: the newest trade with anyone created at or after the time and agreed or further; proposed, cancelled, broken and older ones do not count", async () => {
+  const h = harness();
+  assert.equal(h.c.agreedSince(t0), null, "no trade");
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  assert.equal(h.c.agreedSince(t0), null, "proposed only");
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", snapshot());
+  assert.equal(h.c.agreedSince(t0), null, "cancelled");
+  h.state.now += 1_000;
+  await h.c.onDecision(decision({ first: "them", give: bread(2) }), "Bruno", snapshot());
+  assert.equal(h.c.agreedSince(t0)?.partner, "Bruno", "agreed with a partner the plan would not pick");
+  assert.equal(h.c.agreedSince(h.state.now + 1), null, "agreed before the objective started: does not count");
+  const agreed = h.book.get("Bruno")!.trades.at(-1)!;
+  await h.book.update("Bruno", (r) => withTrade(r, { ...agreed, state: "broken", brokenBy: "them", endedAt: h.state.now }));
+  assert.equal(h.c.agreedSince(t0), null, "agreed, then broken before the resume");
+  await h.book.update("Bruno", (r) => withTrade(r, { ...agreed, state: "done", endedAt: h.state.now }));
+  assert.equal(h.c.agreedSince(t0)?.state, "done");
 });

@@ -32,6 +32,9 @@ export function agreeTrade(t: Trade | null, a: DealArgs): Trade {
   return { ...t, give: a.give, get: a.get, first: a.first, state: "agreed", agreedAt: a.now };
 }
 
+/** A trade that was agreed and has not fallen apart: agreed, being paid, or done. */
+export const AGREED_STATES: ReadonlySet<Trade["state"]> = new Set(["agreed", "i_gave", "they_gave", "done"]);
+
 /** Open: still moving. A broken trade is ended, though a late payment can still close it (see `awaitsPayment`). */
 export function isOpen(t: Trade): boolean {
   return t.state === "proposed" || t.state === "agreed" || t.state === "i_gave" || t.state === "they_gave";

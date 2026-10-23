@@ -20,7 +20,7 @@ import { AgentRelations } from "./relations/agent-relations.ts";
 import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
-import { TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
+import { agreedDetail, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -199,6 +199,8 @@ export class Agent {
   private readonly areas: ProtectedArea[] = [];
   /** Each finished step's activity and time over the last hour of play, oldest first. */
   private readonly times: ActivityTime[] = [];
+  /** When this agent started (wall clock): the window of trading's share of the time begins here, so a restart starts it again. */
+  private readonly startedAt = Date.now();
   /** When old activity notes were last deleted. */
   private rotatedAt = 0;
   /** When each player (lower case) last said anything: a follow they asked for ends after a long silence. */
@@ -754,12 +756,14 @@ export class Agent {
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
     // Trading is not drawn while every partner refused lately: it would only fail "no one to trade with".
-    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now());
+    // Nor while it has taken its share of the time since the agent started (relations/trading.ts `MAX_SHARE`).
+    const share = tradingShare(hour, Date.now(), this.startedAt);
+    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now(), share);
     const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
     this.asks.dropRefused(this.partners(), Date.now());
     const needs = this.asks.needs.current(Date.now(), snapshot.inventory);
-    const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs);
+    const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs, share);
     const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, this.partners(), this.asks, snapshot.inventory, Date.now()) : undefined;
     const opportunities = await this.opportunities(snapshot, drawn, tradeNeeds);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
@@ -975,6 +979,12 @@ export class Agent {
   private async tradeStep(work: Work): Promise<void> {
     const trades = this.relations?.trades;
     if (this.talks === null || trades === undefined) return this.finish(work, "failed", "trading is off");
+    // A trade agreed since the objective began (the talk's hand-off interrupted this step) met it: no second talk.
+    const agreed = trades.agreedSince(work.startedAt);
+    if (agreed !== null) {
+      this.asks.resume();
+      return this.finish(work, "done", agreedDetail(agreed.partner, agreed));
+    }
     const snapshot = await this.options.runtime.status();
     const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), this.partners(), this.asks, snapshot, Date.now());
     if ("failed" in plan) {

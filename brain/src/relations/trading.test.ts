@@ -5,7 +5,8 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
-import { offerFrom, TradeAsks, tradePlan, tradeRoutine, tradingPartners, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
+import { offerFrom, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
+import type { ActivityTime } from "../time-spent.ts";
 import type { ItemCount, Trade, TradeState } from "./types.ts";
 
 const MIN = 60_000;
@@ -473,4 +474,47 @@ test("a full conversation cap makes the trading routine fail 'had nothing to say
   const result = await t.run();
   assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+});
+
+const trading = (endedAgo: number, minutes: number, now: number): ActivityTime => ({ activity: "trading", purpose: "trading", ended: new Date(now - endedAgo * MIN).toISOString(), minutes });
+const farming = (endedAgo: number, minutes: number, now: number): ActivityTime => ({ activity: "farming", ended: new Date(now - endedAgo * MIN).toISOString(), minutes });
+const NOW = 100 * MIN;
+
+test("F9 tradingShare: 16 min of trading in the 30 min since the start is a share of 16/30 over a 30 min window", () => {
+  const share = tradingShare([trading(2, 16, NOW), farming(1, 1, NOW)], NOW, NOW - 30 * MIN);
+  assert.equal(share.windowMinutes, 30);
+  assert.ok(Math.abs(share.share - 16 / 30) < 1e-9);
+});
+
+test("F9 tradingShare: the window never exceeds 60 min, and a step that began before it counts its part inside (20 min step ended 50 min ago, 70 min since the start)", () => {
+  const share = tradingShare([trading(50, 20, NOW)], NOW, NOW - 70 * MIN);
+  assert.equal(share.windowMinutes, 60);
+  assert.ok(Math.abs(share.share - 10 / 60) < 1e-9, `${share.share}`);
+});
+
+test("F9 tradingShare: trading minutes from before this start do not count (a restart), and the limits wait for 10 min of window", () => {
+  const share = tradingShare([trading(25, 20, NOW)], NOW, NOW - 20 * MIN);
+  assert.equal(share.share, 0);
+  const fresh = tradingShare([trading(0, 3, NOW)], NOW, NOW - 3 * MIN);
+  assert.equal(fresh.share, 1);
+  assert.equal(fresh.windowMinutes, 3);
+  const asks = new TradeAsks();
+  assert.deepEqual(withoutRefusedTrading(["exploring", "trading"], ["Theo"], asks, MIN, fresh), ["exploring", "trading"], "3 min in: no ceiling yet");
+  assert.deepEqual(withTrading(["farming", "exploring"], ["farming", "exploring", "trading"], ["iron_ingot"], fresh), ["farming", "trading"], "3 min in: forced as today");
+});
+
+test("F9: at 40 % of a 10 min window trading is dropped, at 39.9 % it stays", () => {
+  const asks = new TradeAsks();
+  const available: Activity[] = ["exploring", "trading"];
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, MIN, tradingShare([trading(0, 4, NOW)], NOW, NOW - 10 * MIN)), ["exploring"]);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, MIN, tradingShare([trading(0, 3.99, NOW)], NOW, NOW - 10 * MIN)), available);
+});
+
+test("F9: between 25 % and 40 % trading is not forced into the draw; under 25 % it is forced", () => {
+  const available: Activity[] = ["farming", "exploring", "trading"];
+  const at = (minutes: number) => tradingShare([trading(0, minutes, NOW)], NOW, NOW - 30 * MIN);
+  assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], at(9)), ["farming", "exploring"], "30 %: left to its chance");
+  assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], at(7)), ["farming", "trading"], "23 %: forced");
+  assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], at(7.5)), ["farming", "exploring"], "exactly 25 %: not forced");
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], new TradeAsks(), MIN, at(9)), available, "30 %: still available");
 });

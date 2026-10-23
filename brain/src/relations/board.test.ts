@@ -150,3 +150,62 @@ test("after a restart the board is empty and the books keep their records: an ac
   assert.equal(finn.latest("Ayla")!.state, "proposed", "Finn's record is untouched");
   void ayla;
 });
+
+const signal = new AbortController().signal;
+const withGains = (s: BotSnapshot, name: string, count: number): BotSnapshot => ({ ...s, inventory: [...s.inventory, { name, count }], players: [{ username: "Finn", position: s.position }] });
+
+/** Finn proposed 8 bread for 8 logs, going first, and Ayla accepted: Ayla's record runs to `done`. */
+async function ayla8LogsDone(finn: ReturnType<typeof bot>, ayla: ReturnType<typeof bot>): Promise<string> {
+  const id = (await finn.c.onDecision(propose(bread(8), logs(8)), "Ayla", finn.snapshot()))!;
+  const before = ayla.snapshot();
+  await ayla.c.onDecision(accept(logs(8), bread(8), "them"), "Finn", before);
+  await ayla.c.tick(before, new Set(), signal);
+  state.now += 1_000;
+  await ayla.c.tick(withGains(before, "bread", 8), new Set(), signal);
+  await ayla.c.handoffEnded(id, "done", "gave");
+  assert.equal(ayla.latest("Finn")!.state, "done");
+  return id;
+}
+
+test("F9: Ayla's late accept of the swap that was just done is no counter-offer: no record, nothing on the board", async () => {
+  state.now = t0;
+  const { board, finn, ayla } = pair();
+  await ayla8LogsDone(finn, ayla);
+  state.now += 3_500;
+  assert.equal(await ayla.c.onDecision(accept(logs(8), bread(8), "them"), "Finn", ayla.snapshot()), null);
+  assert.equal(ayla.book.get("Finn")!.trades.length, 1);
+  assert.equal(board.offerFrom("Ayla", "Finn"), undefined);
+  assert.ok(ayla.lines.some((l) => /a accept of Finn ignored, it repeats/u.test(l)));
+  state.now = t0;
+});
+
+test("F9: the same terms after 2 min 1 s are a counter-offer again", async () => {
+  state.now = t0;
+  const { board, finn, ayla } = pair();
+  await ayla8LogsDone(finn, ayla);
+  state.now += 2 * 60_000 + 1_000;
+  const id = await ayla.c.onDecision(accept(logs(8), bread(8), "them"), "Finn", ayla.snapshot());
+  assert.notEqual(id, null);
+  assert.equal(board.offerFrom("Ayla", "Finn")?.id, id);
+  state.now = t0;
+});
+
+test("F9: a repeat ignored leaves no trace: a real new proposal from that partner right after is agreed and reaches done", async () => {
+  state.now = t0;
+  const { board, finn, ayla } = pair();
+  await ayla8LogsDone(finn, ayla);
+  state.now += 3_500;
+  assert.equal(await ayla.c.onDecision(accept(logs(8), bread(8), "them"), "Finn", ayla.snapshot()), null);
+  // The partner's own, new proposal (posted straight on the board: Finn's controller would block a repeat of his own).
+  board.post({ id: "Finn-Ayla-new", proposer: "Finn", partner: "Ayla", give: bread(8), get: logs(8), first: "me", postedAt: state.now });
+  assert.equal(await ayla.c.onDecision(accept(logs(8), bread(8), "them"), "Finn", ayla.snapshot()), "Finn-Ayla-new");
+  assert.equal(ayla.latest("Finn")!.state, "agreed");
+  const before = ayla.snapshot();
+  await ayla.c.tick(before, new Set(), signal);
+  state.now += 1_000;
+  await ayla.c.tick(withGains(before, "bread", 8), new Set(), signal);
+  await ayla.c.handoffEnded("Finn-Ayla-new", "done", "gave");
+  assert.equal(ayla.latest("Finn")!.state, "done");
+  assert.equal(ayla.book.get("Finn")!.trades.length, 2);
+  state.now = t0;
+});

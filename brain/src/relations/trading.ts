@@ -6,9 +6,12 @@ import type { OpenFacts } from "../conversation/controller.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
 import type { TradeController } from "./controller.ts";
+import { minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "../time-spent.ts";
 import { stackSizeOf } from "./item-ids.ts";
-import type { ItemCount } from "./types.ts";
+import { AGREED_STATES } from "./trade.ts";
+import type { ItemCount, Trade } from "./types.ts";
 
+const MIN_MS = 60_000;
 /** A need, and a partner's refusal, are forgotten after this long. */
 const ASK_MEMORY_MS = 10 * 60_000;
 /** Two trading objectives that fail before any ask within this long pause trading for as long. */
@@ -156,9 +159,37 @@ export class TradeAsks {
   }
 }
 
-/** The two activities drawn, with trading as the second when there is something to trade for and it can be done. */
-export function withTrading(drawn: readonly Activity[], available: readonly Activity[], needs: readonly string[]): Activity[] {
-  if (needs.length === 0 || !available.includes("trading") || drawn[0] === "trading") return [...drawn];
+/** Below this share of the window trading is forced into the draw while a need is set (spec pass line 40 %: forcing stops well before it). */
+export const FORCED_SHARE = 0.25;
+/** At or above this share of the window trading is not drawn at all. */
+export const MAX_SHARE = 0.4;
+/** Neither limit applies before the window is this long: one early trade is not 100 %. */
+export const MIN_SHARE_WINDOW_MINUTES = 10;
+
+export interface TradingShare {
+  /** Trading minutes over the window, 0 to 1. */
+  readonly share: number;
+  readonly windowMinutes: number;
+}
+
+/**
+ * The share of the agent's wall-clock time since it started (at most the last hour) that went to trading steps. Steps
+ * cover only part of the run (model calls between them are no step), so the share is taken against the clock, not
+ * against step time. A step that began before the window counts its part inside; records from before `startedAt` (a
+ * restart) fall outside it.
+ */
+export function tradingShare(times: readonly ActivityTime[], now: number, startedAt: number): TradingShare {
+  const windowMinutes = Math.min(RECENT_MINUTES, Math.max(0, now - startedAt) / MIN_MS);
+  if (windowMinutes <= 0) return { share: 0, windowMinutes: 0 };
+  const minutes = minutesByPurpose(times, now - windowMinutes * MIN_MS).find((total) => total.activity === "trading")?.minutes ?? 0;
+  return { share: Math.min(1, minutes / windowMinutes), windowMinutes };
+}
+
+const limitApplies = (share: TradingShare | undefined): share is TradingShare => share !== undefined && share.windowMinutes >= MIN_SHARE_WINDOW_MINUTES;
+
+/** The two activities drawn, with trading as the second when there is something to trade for, it can be done and it has not had its share of the time yet. */
+export function withTrading(drawn: readonly Activity[], available: readonly Activity[], needs: readonly string[], share?: TradingShare): Activity[] {
+  if (needs.length === 0 || !available.includes("trading") || drawn[0] === "trading" || (limitApplies(share) && share.share >= FORCED_SHARE)) return [...drawn];
   return drawn[0] === undefined ? ["trading"] : [drawn[0], "trading"];
 }
 
@@ -167,9 +198,9 @@ export function tradingPartners(partners: readonly string[], asks: TradeAsks, no
   return partners.filter((partner) => !asks.refused.refusedAnything(partner, now));
 }
 
-/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with") or its objectives keep failing before any ask. */
-export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number): Activity[] {
-  const hopeless = asks.paused(now) || (partners.length > 0 && tradingPartners(partners, asks, now).length === 0);
+/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with"), its objectives keep failing before any ask, or trading has taken {@link MAX_SHARE} of the time. */
+export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number, share?: TradingShare): Activity[] {
+  const hopeless = asks.paused(now) || (partners.length > 0 && tradingPartners(partners, asks, now).length === 0) || (limitApplies(share) && share.share >= MAX_SHARE);
   return hopeless ? available.filter((activity) => activity !== "trading") : [...available];
 }
 
@@ -199,10 +230,12 @@ export interface TradeRoutineDeps extends Omit<SocialiseDeps, "openFacts"> {
   readonly openFacts: Omit<OpenFacts, "snapshot" | "intent">;
 }
 
-const AGREED = new Set(["agreed", "i_gave", "they_gave", "done"]);
 /** A trade the partner turned down or let fall apart: a no, whether or not the ask was heard by the code. */
 const DECLINED = new Set(["cancelled", "broken"]);
 const sideText = (items: readonly ItemCount[]): string => items.map((i) => `${i.count} ${i.item}`).join(", ");
+
+/** What a trading objective reports when a trade was agreed: who with and the terms. */
+export const agreedDetail = (partner: string, trade: Pick<Trade, "give" | "get">): string => `agreed with ${partner}: ${sideText(trade.give)} for ${sideText(trade.get)}`;
 
 /**
  * The `trading` routine: talks like `socialise` with the intent to trade, then reads the trade controller. A trade
@@ -231,14 +264,14 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
     if (ended !== null) return ended;
     asks.resume();
     let trade = trades.latestWith(partner, since);
-    if (!(trade !== null && AGREED.has(trade.state)) && !talks.askedSince(partner, since)) {
+    if (!(trade !== null && AGREED_STATES.has(trade.state)) && !talks.askedSince(partner, since)) {
       // The talk was already open (or over) and nothing asked: once more, so a fresh opening carries the ask.
       ended = unfinished(await talk(now()));
       if (ended !== null) return ended;
       trade = trades.latestWith(partner, since);
     }
-    if (trade !== null && AGREED.has(trade.state)) {
-      return { status: "done", detail: `agreed with ${partner}: ${sideText(trade.give)} for ${sideText(trade.get)}` };
+    if (trade !== null && AGREED_STATES.has(trade.state)) {
+      return { status: "done", detail: agreedDetail(partner, trade) };
     }
     if (talks.askedSince(partner, since) || (trade !== null && DECLINED.has(trade.state))) {
       asks.refused.add(partner, want, now());

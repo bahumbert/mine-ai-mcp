@@ -1929,9 +1929,10 @@ test("a trading objective runs the routine: no work-tier call, a trade step in t
   await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "done"), 6_000);
   const rows = events.filter((event) => event.kind === "step" && event.objective.startsWith("trade Theo"));
   const row = rows.at(-1);
-  assert.equal(rows.length, 2, "set aside for the hand-off, then resumed");
+  assert.equal(rows.length, 1, "F9: set aside for the hand-off, then ended done on resume: no second trade step");
   assert.deepEqual(row?.kind === "step" && row.input, { skill: "trade", partner: "Theo" });
-  assert.match(String(row?.kind === "step" && row.detail), /^agreed with Theo: 5 bread for 5 iron_ingot/u);
+  const finished = events.find((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo"));
+  assert.match(String(finished?.kind === "objective" && finished.detail), /^agreed with Theo: 5 bread for 5 iron_ingot/u);
   assert.equal(action.requests.length, 2);
   assert.ok(runtime.submitted.some((call) => call.tool === "drop_item"), "the hand-off ran");
 });
@@ -2140,4 +2141,47 @@ test("two bots of one brain: the trading routine waits for its turn, opens, and 
   const [mine, theirs] = [trades(ayla.runtime, "Theo")!, trades(theoRuntime, "Ayla")!];
   assert.equal(mine.id, theirs.id, "one trade, one id");
   assert.deepEqual([mine.give, mine.get, theirs.give, theirs.get], [sideOf("bread", 4), sideOf("iron_ingot", 4), sideOf("iron_ingot", 4), sideOf("bread", 4)], "Ayla's terms on both sides");
+});
+
+type ShareInside = { startedAt: number; times: { activity: string; purpose: string; ended: string; minutes: number }[] };
+/** The agent has been up `sinceStart` minutes and spent `minutes` of them on trading steps that ended `endedAgo` minutes ago. */
+function tradedFor(agent: Agent, sinceStart: number, minutes: number, endedAgo = 0): void {
+  const inside = agent as unknown as ShareInside;
+  inside.startedAt = Date.now() - sinceStart * MIN;
+  inside.times.push({ activity: "trading", purpose: "trading", ended: new Date(Date.now() - endedAgo * MIN).toISOString(), minutes });
+}
+const ownDrawn = (events: BrainEvent[]) => events.flatMap((event) => (event.kind === "objective" && event.event === "own" ? [event.drawn ?? []] : []));
+
+test("F9: 16 min of trading in the 30 min since the start: the next goal call draws no trading though a need is set; time passing without trading brings it back", async (t) => {
+  const { events, agent, planner } = await failedIronObjective(t);
+  tradedFor(agent, 30, 16);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(String(planner.requests[1]?.[1]?.content), /feel most like[^.]*trading|trade for/u);
+  assert.ok(ownDrawn(events).every((drawn) => !drawn.includes("trading")), "the journal's drawn has no trading");
+  // Edge 4: the wall clock moves, no step runs; the trading minutes fall out of the hour.
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, "now", () => now() + 61 * MIN);
+  (agent as unknown as { asks: TradeAsks }).asks.needs.set(["iron_ingot"], Date.now());
+  planner.reply({ objective: "gather wood again" });
+  await until(() => planner.requests.length >= 3, 6_000);
+  assert.match(String(planner.requests[2]?.[1]?.content), /feel most like[^.]*trading/u, "trading capped, then drawn again");
+});
+
+test("F9: 3 min after the start, all of it trading: no ceiling yet, trading is forced as today", async (t) => {
+  const { agent, planner } = await failedIronObjective(t);
+  tradedFor(agent, 3, 3);
+  planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u);
+});
+
+test("F9: while trading is capped a partner's proposal in chat is still answered, agreed and handed off", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, { random: () => 0 });
+  tradedFor(agent, 30, 16);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  assert.equal((agent as unknown as { relations: AgentRelations }).relations.book.trades().length, 1, "the trade was made");
 });
