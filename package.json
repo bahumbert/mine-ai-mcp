@@ -81,5 +81,8 @@
     "prismarine-physics": "github:aibengineering/prismarine-physics#56a6794611069272653b14eb078a1454633f4eb3",
     "prismarine-recipe": "github:aibengineering/prismarine-recipe#542f0600f5ddf07bb16df67fa1ac06e603bd28e0",
     "mineflayer": "github:aibengineering/mineflayer#9fa1140b90877a084efd988905df0c0eceaa78d0"
+  },
+  "patchedDependencies": {
+    "mine-labs@github:aibengineering/mine-labs#aba1cdf": "patches/mine-labs@github%3Aaibengineering%2Fmine-labs#aba1cdf.patch"
   }
 }

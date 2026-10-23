@@ -28,6 +28,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "mine-labs@github:aibengineering/mine-labs#aba1cdf": "patches/mine-labs@github%3Aaibengineering%2Fmine-labs#aba1cdf.patch",
+  },
   "overrides": {
     "minecraft-data": "https://github.com/aibengineering/node-minecraft-data/releases/download/mine-ai-c932f743/minecraft-data-3.116.0.tgz",
     "mineflayer": "github:aibengineering/mineflayer#9fa1140b90877a084efd988905df0c0eceaa78d0",
