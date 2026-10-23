@@ -5,6 +5,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { z } from "zod";
 import { defineAction, actionResultSchema } from "../actions/action.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { ActionRunner } from "./action-runner.js";
 import { AsyncActions, ExecutionStore } from "./async-actions.js";
 import { RequestProgress, progressChange } from "./progress.js";
@@ -172,15 +173,17 @@ test("concurrent waits retain independent baselines and dispose their own abort 
 });
 
 test("progress marks absent physics samples and retains regressing inventory evidence", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: Date.parse("2026-10-21T00:00:00.000Z") });
+  using _timers = clock.install();
   const p = new RequestProgress({ dimension: "overworld", x: 0, y: 64, z: 0 });
   const before = p.snapshot();
   p.transition("suspended");
-  await pause(10);
+  await clock.advance(10);
   p.transition("resuming");
-  await pause(10);
+  await clock.advance(10);
   assert.ok(p.snapshot().suspendedMs >= 15);
   p.transition("running");
-  await pause(1010);
+  await clock.advance(1010);
   const stale = p.snapshot();
   assert.equal(stale.movementCoverage.complete, false);
   assert.ok(stale.positionAgeMs! >= 1000);

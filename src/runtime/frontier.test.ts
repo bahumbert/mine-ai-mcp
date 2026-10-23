@@ -1,10 +1,9 @@
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import minecraftData from "minecraft-data";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, SEEN_MOVED, SEEN_TTL_MS, seenInWorld } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
@@ -14,63 +13,53 @@ function temporaryBotData(): SqlBotData {
   });
 }
 
+/** The version's state id of `name` (its default state, or its first with `first`): the ids a chunk's palette holds. */
+function stateOf(name: string, first = false): number {
+  const block = REGISTRY.blocksByName[name]!;
+  return first ? block.minStateId! : block.defaultState!;
+}
+
+const REGISTRY = createFakeBot().bot.registry;
+const AIR = stateOf("air");
+
+/** The id the login's biome registry gives `name`: Prismarine keys it by the namespaced name the server sends. */
+function biomeId(name: string): number {
+  return REGISTRY.biomesByName[`minecraft:${name}`]!.id;
+}
+
+/** One column at chunk (-2, 4) whose sections hold the version's state ids, as Prismarine's palettes give them. */
 function fixture(surfaceWaterCells = 129) {
-  const events = new EventEmitter();
+  const ores = ["stone", "oak_log", "prismarine", "coal_ore", "diamond_ore", "gravel", "copper_ore", "deepslate_copper_ore",
+    "gold_ore", "deepslate_gold_ore", "redstone_ore", "deepslate_redstone_ore", "lapis_ore", "deepslate_lapis_ore",
+    "deepslate_diamond_ore"];
   const column = {
     sections: [
-      { data: { palette: [0, 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], get: () => 0 } },
-      { data: { value: 0, get: () => 0 } },
-      { data: { get: (index: number) => (index === 20 ? 8 : 0) } },
+      // Two states of one block (an oak log on two axes) name one material.
+      { data: { palette: [AIR, ...ores.map((name) => stateOf(name)), stateOf("oak_log", true)], get: () => AIR } },
+      { data: { value: AIR, get: () => AIR } },
+      { data: { get: (index: number) => (index === 20 ? stateOf("ancient_debris") : AIR) } },
       {
         data: {
-          palette: [0, 1, 9],
+          palette: [AIR, stateOf("stone"), stateOf("water")],
           get: (index: number) => {
             const y = index >> 8;
             const horizontalIndex = index & 0xff;
-            if (y === 15 && horizontalIndex < surfaceWaterCells) return 9;
-            return y === 14 ? 1 : 0;
+            if (y === 15 && horizontalIndex < surfaceWaterCells) return stateOf("water");
+            return y === 14 ? stateOf("stone") : AIR;
           },
         },
       },
-      { data: { value: 0, get: () => 0 } },
+      { data: { value: AIR, get: () => AIR } },
     ],
-    biomes: [{ data: { palette: [1, 2], get: (index: number) => (index < 16 ? 2 : 1) } }],
+    biomes: [{ data: { palette: [biomeId("plains"), biomeId("forest")],
+      get: (index: number) => (index < 16 ? biomeId("forest") : biomeId("plains")) } }],
   };
   const columns = [{ chunkX: -2, chunkZ: 4, column }];
-  const bot = Object.assign(events, {
-    game: { dimension: "overworld" },
-    entities: {},
-    world: { getColumns: () => columns, getColumn: () => column },
-    registry: {
-      blocksByStateId: {
-        0: { name: "air" },
-        1: { name: "stone" },
-        2: { name: "oak_log" },
-        3: { name: "prismarine" },
-        4: { name: "coal_ore" },
-        5: { name: "diamond_ore" },
-        6: { name: "oak_log" },
-        8: { name: "ancient_debris" },
-        9: { name: "water" },
-        10: { name: "gravel" },
-        11: { name: "copper_ore" },
-        12: { name: "deepslate_copper_ore" },
-        13: { name: "gold_ore" },
-        14: { name: "deepslate_gold_ore" },
-        15: { name: "redstone_ore" },
-        16: { name: "deepslate_redstone_ore" },
-        17: { name: "lapis_ore" },
-        18: { name: "deepslate_lapis_ore" },
-        19: { name: "deepslate_diamond_ore" },
-      },
-      biomes: {
-        1: { name: "plains" },
-        2: { name: "forest" },
-      },
-    },
-  }) as unknown as Bot;
+  const { bot } = createFakeBot();
+  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): this one column is loaded.
+  Object.assign(bot.world, { getColumns: () => columns, getColumn: () => column });
   const data = temporaryBotData();
-  return { events, bot, column, data };
+  return { events: bot, bot, column, data };
 }
 
 test("records useful materials and counted biomes once for each loaded chunk", async (t) => {
@@ -287,8 +276,7 @@ test("does not scan an enriched chunk again when it reloads", async (t) => {
   });
   await frontier.idle();
 
-  column.sections[0]!.data.palette!.push(7);
-  (bot.registry.blocksByStateId as Record<number, { name: string }>)[7] = { name: "birch_log" };
+  column.sections[0]!.data.palette!.push(stateOf("birch_log"));
   events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
   await frontier.idle();
 
@@ -314,8 +302,7 @@ test("a chunk loaded again after the rescan time is scanned again: its materials
   const before = frontier.status().observedChunks;
   recorded.length = 0;
   data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
-  column.sections[0]!.data.palette!.push(7);
-  (bot.registry.blocksByStateId as Record<number, { name: string }>)[7] = { name: "birch_log" };
+  column.sections[0]!.data.palette!.push(stateOf("birch_log"));
   events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
   await frontier.idle();
 
@@ -329,7 +316,7 @@ test("coalesces repeated chunk loads before scanning", async (t) => {
   let directPaletteReads = 0;
   column.sections[2]!.data.get = (index: number) => {
     directPaletteReads += 1;
-    return index === 20 ? 8 : 0;
+    return index === 20 ? stateOf("ancient_debris") : AIR;
   };
   const frontier = attachSessionFrontier(bot, data);
   t.after(() => {
@@ -377,7 +364,8 @@ test("counts the recorded chunks that hold a material; a material the scan leave
 /** A bot whose loaded blocks within reach are `near` (block name -> count), asked as Mineflayer's findBlocks does. */
 /** A bot standing in one loaded section whose first `near[name]` cells (x, then z, then y) hold that block. */
 function seeingBot(near: Record<string, number>, scans = { count: 0 }): Bot {
-  const registry = minecraftData("1.21.4");
+  const { bot } = createFakeBot({ position: new Vec3(8, 8, 8) });
+  const registry = bot.registry;
   const cells = new Map<number, number>();
   let cell = 0;
   for (const [name, count] of Object.entries(near)) {
@@ -389,17 +377,14 @@ function seeingBot(near: Record<string, number>, scans = { count: 0 }): Bot {
     data: {},
     get: ({ x, y, z }: { x: number; y: number; z: number }) => cells.get(y * 256 + z * 16 + x) ?? 0,
   };
-  return {
-    version: "1.21.4",
-    registry,
-    entity: { position: new Vec3(8, 8, 8) },
-    world: {
-      getColumns: () => {
-        scans.count += 1;
-        return [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections: [section] } }];
-      },
+  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): one loaded section around the bot.
+  Object.assign(bot.world, {
+    getColumns: () => {
+      scans.count += 1;
+      return [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections: [section] } }];
     },
-  } as unknown as Bot;
+  });
+  return bot;
 }
 
 test("an item is as seen as the most-seen block it is gathered from: loaded blocks near the bot, or recorded chunks", () => {

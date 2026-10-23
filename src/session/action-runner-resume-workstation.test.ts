@@ -1,7 +1,6 @@
 // The runner resumes smelt_item and craft_item after a reflex hands the body back, and ends them when it does not.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Vec3 } from "vec3";
 import { createCraftItemAction } from "../actions/craft-item/index.js";
 import { createSmeltItemAction, type SmeltItemDependencies } from "../actions/smelt-item/index.js";
 import type { NavigationRuntime } from "../navigation/index.js";
@@ -18,8 +17,9 @@ type Continuation = { readonly kind: "resume" } | { readonly kind: "return"; rea
 
 /** The fixture's cook, with a reflex claiming the body once the clock passes `at` (the hunger reflex: it always resumes). */
 function smeltWithReflexAt(runner: ActionRunner, at: number, continuation: Continuation, duringReflex: () => void = () => undefined) {
-  const fixture = observedFurnace({ cookMs: 10_000, raw: 8, coal: 40, fuel: "stick" });
-  Object.assign(fixture.bot, { clearControlStates: () => undefined, deactivateItem: () => undefined, currentWindow: null, isSleeping: false });
+  const fixture = observedFurnace({ cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", onHarness: true });
+  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
+  Object.assign(fixture.bot, { deactivateItem: () => undefined });
   const loads: number[] = [];
   const putInput = fixture.furnace.putInput;
   fixture.furnace.putInput = async (type, metadata, count) => {
@@ -93,7 +93,6 @@ test("a reflex that hands the body back resumes a craft: the same one success, n
     claimed = true;
     assert.equal(runner.claim("hunger_reflex", HUNGER, async () => ({ value: "ate", continuation: { kind: "resume" as const } })).kind, "claimed");
   };
-  Object.assign(bot, { entity: { position: new Vec3(0.5, 64, 0.5) } });
 
   const output = await runner.run(createCraftItemAction(bot, navigation), { items: [{ item_name: "oak_planks", count: 8 }] });
 
@@ -114,7 +113,6 @@ test("a reflex that does not hand the body back ends the craft with the interrup
     claimed = true;
     runner.claim("hunger_reflex", HUNGER, async () => ({ value: "ate", continuation: { kind: "return" as const, reason: NOTHING_EDIBLE } }));
   };
-  Object.assign(bot, { entity: { position: new Vec3(0.5, 64, 0.5) } });
 
   const output = await runner.run(createCraftItemAction(bot, navigation), { items: [{ item_name: "oak_planks", count: 8 }] });
 

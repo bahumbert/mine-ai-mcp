@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { scenarioDefinitionSchema } from "mine-labs";
 import type { ActionResult } from "@aibengineering/mine-ai-mcp";
 import { run } from "./drivers/single-action.ts";
 import { run as runSequence } from "./drivers/action-sequence.ts";
+import { createFakeBot } from "../../src/test-support/fake-bot/index.ts";
 
 /** These drivers never stop physics. */
 const NO_PHYSICS = { pause: () => {}, resume: () => {} };
@@ -12,7 +12,7 @@ const NO_PHYSICS = { pause: () => {}, resume: () => {} };
 const NO_CLIENT = { setCell: async () => {}, body: () => ({ x: 0, y: 0, z: 0, onGround: true }), windowsOpened: () => 0 };
 
 /** ...and never read the bot. */
-const NO_BOT = {} as Bot;
+const NO_BOT = createFakeBot().bot;
 
 test("a sequence stops before later actions when a step does not succeed", async () => {
   for (const status of ["partial", "failed", "cancelled"] as const) {

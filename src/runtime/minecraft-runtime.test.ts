@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { CombatDecision } from "../survival/control/combat/contract.js";
@@ -13,7 +12,19 @@ import { Vec3 } from "vec3";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
+
+/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
+type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
+
+/** Each runtime bot's listener counts before the runtime attached: the shared fake listens to some events itself. */
+const idleListeners = new WeakMap<Bot, ReadonlyMap<string | symbol, number>>();
+
+/** Listeners on `event` beyond the idle bot's own: what the runtime attached and has not removed. */
+function added(bot: Bot & Listened, event: string): number {
+  return bot.listenerCount(event) - (idleListeners.get(bot)?.get(event) ?? 0);
+}
 
 const combatController = {
   resourceRefusal: () => null,
@@ -46,42 +57,29 @@ const combatController = {
   activeEngagement: () => null,
 };
 
+/**
+ * The runtime's bot on the shared fake, `controlStates` recording each jump it sets; `rejectedListener` makes adding a
+ * listener for that event throw.
+ */
 function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): Bot {
-  const inventory = Object.assign(new EventEmitter(), { items: () => [], slots: new Array(46).fill(null) });
-  const botEvents = new EventEmitter();
-  const bot = Object.assign(botEvents, {
-    username: "RuntimeBot",
-    _client: new EventEmitter(),
-    getControlState: () => false,
-    game: { dimension: "overworld" },
-    entity: { id: 5, position: new Vec3(0, 64, 0), yaw: 0, pitch: 0, isInWater: false },
-    health: 20,
-    food: 20,
-    inventory,
-    entities: {},
-    blockAt: () => null,
-    setControlState: (control: string, state: boolean) => {
-      if (control === "jump") controlStates.push(state);
-    },
-    world: {
-      getColumns: () => [],
-      getColumn: () => undefined,
-    },
-    registry: {
-      version: { minecraftVersion: "test" },
-      entitiesByName: { player: { metadataKeys: ["shared_flags"] } },
-      blocksByStateId: {},
-      biomes: {},
-      foodsByName: {},
-    },
-  }) as unknown as Bot;
+  const { bot } = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0) });
+  bot.setMaxListeners(40); // as the runtime host allows its observers (`runtime-host.ts`)
+  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): no column loaded.
+  Object.assign(bot.world, { getColumns: () => [], getColumn: () => undefined });
+  const setControlState = bot.setControlState;
+  bot.setControlState = (control, state) => {
+    if (control === "jump") controlStates.push(state);
+    setControlState(control, state);
+  };
+  const listened: Listened = bot;
+  idleListeners.set(bot, new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)])));
   if (rejectedListener) {
-    const addListener = botEvents.on.bind(botEvents);
-    const rejectSelectedListener: EventEmitter["on"] = (eventName, listener) => {
+    const addListener = bot.on.bind(bot);
+    const rejectSelectedListener: typeof bot.on = (eventName, listener) => {
       if (eventName === rejectedListener) throw new Error(`Listener registration failed for ${rejectedListener}.`);
       return addListener(eventName, listener);
     };
-    botEvents.on = rejectSelectedListener;
+    bot.on = rejectSelectedListener;
   }
   bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
   return bot;
@@ -242,7 +240,7 @@ test("Mineflayer end captures the foreground request and still fails a nonsettli
   } finally {
     await runtime.close();
   }
-  assert.equal(bot.listenerCount("end"), 0);
+  assert.equal(added(bot, "end"), 0);
 });
 
 test("an artifact write failure remains evidence and does not turn successful gameplay into failure", async (t) => {
@@ -277,7 +275,7 @@ test("an artifact write failure remains evidence and does not turn successful ga
       execution: { kind: "task" },
       execute: async (request, context) => {
         bot._client.emit("damage_event", {
-          entityId: 5,
+          entityId: bot.entity.id,
           sourceTypeId: 2,
           sourceCauseId: 0,
           sourceDirectId: 0,
@@ -318,22 +316,22 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
     createCombatController: () => combatController,
   });
 
-  assert.equal(bot.listenerCount("chunkColumnLoad"), 2);
-  assert.equal(bot.listenerCount("chunkColumnUnload"), 1);
+  assert.equal(added(bot, "chunkColumnLoad"), 2);
+  assert.equal(added(bot, "chunkColumnUnload"), 1);
   assert.equal(
-    bot.listenerCount("blockUpdate"),
+    added(bot, "blockUpdate"),
     2,
     "frontier observation and advancing lava both observe world changes",
   );
   assert.equal(
-    bot.listenerCount("physicsTick"),
+    added(bot, "physicsTick"),
     10,
     "the runtime owns shared perception, bow timing, footing, survival observation, one reflex loop, idle water, Nether vine physics, End gaze and action progress",
   );
-  assert.equal(bot.listenerCount("chat"), 1);
-  assert.equal(bot.listenerCount("whisper"), 1);
+  assert.equal(added(bot, "chat"), 1);
+  assert.equal(added(bot, "whisper"), 1);
   assert.equal(
-    bot.listenerCount("death"),
+    added(bot, "death"),
     11,
     "eight owners, the server-seat watch and the vehicle watch (they forget their seat at a death too) and the body-tick pacer the reflex loop ticks through",
   );
@@ -461,18 +459,19 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
   assert.equal(runtime.close(), close);
   assert.equal(runtime[Symbol.asyncDispose](), close);
   await close;
-  assert.equal(bot.listenerCount("chunkColumnLoad"), 0);
-  assert.equal(bot.listenerCount("chunkColumnUnload"), 0);
-  assert.equal(bot.listenerCount("blockUpdate"), 0);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
-  assert.equal(bot.listenerCount("chat"), 0);
-  assert.equal(bot.listenerCount("whisper"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(added(bot, "chunkColumnLoad"), 0);
+  assert.equal(added(bot, "chunkColumnUnload"), 0);
+  assert.equal(added(bot, "blockUpdate"), 0);
+  assert.equal(added(bot, "physicsTick"), 0);
+  assert.equal(added(bot, "chat"), 0);
+  assert.equal(added(bot, "whisper"), 0);
+  assert.equal(added(bot, "death"), 0);
   assert.deepEqual(controlStates, [true, false]);
 });
 
 test("runtime creation settles every acquired attachment before rejecting", async () => {
   const bot = runtimeBot([], "physicsTick");
+  const slotListeners = bot.inventory.listenerCount("updateSlot");
 
   await assert.rejects(
     createMinecraftRuntime(bot, {
@@ -497,9 +496,9 @@ test("runtime creation settles every acquired attachment before rejecting", asyn
     "death",
     "spawn",
   ] as const) {
-    assert.equal(bot.listenerCount(eventName), 0, eventName);
+    assert.equal(added(bot, eventName), 0, eventName);
   }
-  assert.equal(bot.inventory.listenerCount("updateSlot"), 0);
+  assert.equal(bot.inventory.listenerCount("updateSlot"), slotListeners);
 });
 
 test("death cancels the foreground action, records one event, and permits work after respawn", async (t) => {

@@ -1,5 +1,4 @@
 // The runner gives a reflex-interrupted build_structure back to its caller as one request (spec 2026-10-18, R2, task T4).
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { createBuildStructureAction } from "../actions/build-structure/build-structure.js";
@@ -13,8 +12,9 @@ const WALL = { blocks: [2, 3, 4, 5].map((x) => ({ x, y: 64, z: 0, block_name: "c
 
 /** A build whose second placement never returns until the body is taken: the reflex arrives there. */
 function buildCutAtSecondPlacement() {
-  const world = structureWorld();
-  Object.assign(world.bot, { clearControlStates() {}, deactivateItem() {}, currentWindow: null, isSleeping: false });
+  const world = structureWorld({ onHarness: true });
+  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
+  Object.assign(world.bot, { deactivateItem() {} });
   const navigation = { cancel() {} } as unknown as NavigationRuntime;
   let placed = 0;
   let cutAt: () => void = () => {};
@@ -31,7 +31,7 @@ function buildCutAtSecondPlacement() {
       return world.physics.place(placement);
     },
   };
-  return { ...world, action: createBuildStructureAction(world.bot as Bot, navigation, botData, physics), atSecond };
+  return { ...world, action: createBuildStructureAction(world.bot, navigation, botData, physics), atSecond };
 }
 
 test("a build the hunger reflex interrupts finishes as one request that names the interruption", async () => {
@@ -65,13 +65,14 @@ test("a build whose reflex ends with a return verdict ends interrupted, unchange
 });
 
 test("two reflexes in a row on one build give two interruptions and one success", async () => {
-  const world = structureWorld();
-  Object.assign(world.bot, { clearControlStates() {}, deactivateItem() {}, currentWindow: null, isSleeping: false });
+  const world = structureWorld({ onHarness: true });
+  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
+  Object.assign(world.bot, { deactivateItem() {} });
   const navigation = { cancel() {} } as unknown as NavigationRuntime;
   let placed = 0;
   const arrivals: (() => void)[] = [];
   const waiting = [0, 1].map(() => new Promise<void>((resolve) => arrivals.push(resolve)));
-  const action = createBuildStructureAction(world.bot as Bot, navigation, botData, {
+  const action = createBuildStructureAction(world.bot, navigation, botData, {
     ...world.physics,
     place: async (placement) => {
       placed += 1;

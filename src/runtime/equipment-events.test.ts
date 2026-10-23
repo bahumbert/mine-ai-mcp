@@ -1,21 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot, itemOf } from "../test-support/fake-bot/index.js";
 import { SqlBotData, readNotificationSummary } from "../bot-data/index.js";
 import { readRecentEvents } from "../actions/read-recent-events/read-recent-events.js";
 import { captureStderr } from "../test-support/stderr.js";
 import { observeEquipmentEvents } from "./equipment-events.js";
 
 function fixture() {
-  const bot = botFixture();
-  Object.assign(bot, { _client: new EventEmitter() });
-  bot.quickBarSlot = 0;
+  const { bot, inventory } = createFakeBot();
   const data = SqlBotData.create({ storage: { kind: "temporary" },
     identity: { worldId: "equipment-events", scope: { kind: "bot", botId: bot.username } } });
-  const put = (slot: number, used: number | null, name = "shield") => {
-    bot.inventory.slots[slot] = used === null ? null : { name, count: 1, maxDurability: 100, durabilityUsed: used } as never;
-    bot.inventory.emit("updateSlot", slot, null, bot.inventory.slots[slot]);
+  /** Put `name` in `slot` with `usedPercent` of its durability used (the version's maximum: 336 for a shield), or empty it. */
+  const put = (slot: number, usedPercent: number | null, name = "shield") => {
+    // Prismarine's typings forget that a slot the server empties takes null.
+    if (usedPercent === null) return inventory.updateSlot(slot, null as never);
+    const item = itemOf(bot.registry, name);
+    item.durabilityUsed = Math.round((item.maxDurability * usedPercent) / 100);
+    inventory.updateSlot(slot, item);
   };
   return { bot, data, put, read: () => readRecentEvents(data, bot.username, 50).events };
 }
@@ -30,7 +31,8 @@ test("low durability notifies once, follows moves, and rearms after repair", asy
     assert.equal(readNotificationSummary(data, bot.username).unreadCount, 1);
     const [event] = read();
     assert.equal(event?.type, "equipment_low_durability");
-    assert.equal(event?.payload && "remaining" in event.payload && event.payload.remaining, 25);
+    // A quarter of a shield's 336 left.
+    assert.equal(event?.payload && "remaining" in event.payload && event.payload.remaining, 84);
     put(45, 76); await Promise.resolve();
     put(10, 76); put(45, null); await Promise.resolve();
     put(45, 76); put(10, null); await Promise.resolve();

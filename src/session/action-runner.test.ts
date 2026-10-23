@@ -1,5 +1,4 @@
 import { getAmbientHighlighterContext } from "@aibengineering/minecraft-block-highlighter";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
@@ -11,6 +10,7 @@ import {
   type ActionExecution,
 } from "../actions/index.js";
 import { ReflexDriver } from "../survival/control/driver.js";
+import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { BodyAbort } from "./abort.js";
 import type { StallClock } from "../actions/stall-watch.js";
@@ -47,7 +47,7 @@ const stubInputSchema = z.object({ block_name: z.string().optional() });
 
 test("an admitted footing claim releases navigation before its recovery takes the airborne body", async () => {
   const runner = new ActionRunner();
-  const bot = new EventEmitter() as unknown as Bot;
+  const { bot } = createFakeBot();
   const order: string[] = [];
   let release!: () => void;
   const navigationReleased = new Promise<void>((resolve) => {
@@ -91,7 +91,7 @@ test("an admitted footing claim releases navigation before its recovery takes th
 
 test("footing recovery releases navigation while a cancelled lower reflex waits for its handoff", async () => {
   const runner = new ActionRunner();
-  const bot = new EventEmitter() as unknown as Bot;
+  const { bot } = createFakeBot();
   const order: string[] = [];
   let release!: () => void;
   const navigationReleased = new Promise<void>((resolve) => {
@@ -274,7 +274,7 @@ test("operator cancellation during a higher reflex cannot resume the original re
 
 test("a refused footing claim cannot release another reflex's navigation", async () => {
   const runner = new ActionRunner();
-  const bot = new EventEmitter() as unknown as Bot;
+  const { bot } = createFakeBot();
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
     release = resolve;
@@ -1083,9 +1083,14 @@ test("an action without a highlighter skips collection display work", async () =
 
 // Run 14: twelve bots left mounted at sea never ticked again; their navigate waited for a tick for ever and ignored its cancel.
 test("an action that owns the body with no physics tick fails RUNTIME_PHYSICS_STALLED and releases the body", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runner = new ActionRunner({ physicsStallMs: 80, cancelGraceMs: 40 });
   const action = stubAction(() => new Promise<never>(() => {}));
-  const output = await runner.run(action, { block_name: "stone" });
+  const running = runner.run(action, { block_name: "stone" });
+  // Past the 80 ms without a tick and the 40 ms of grace the stopped action gets.
+  await clock.advance(300);
+  const output = await running;
   assert.equal(output.result.status, "failed");
   assert.match("error" in output.result ? output.result.error ?? "" : "", /RUNTIME_PHYSICS_STALLED/);
   assert.equal(runner.status().busy, false);
@@ -1095,6 +1100,8 @@ test("an action that owns the body with no physics tick fails RUNTIME_PHYSICS_ST
 });
 
 test("an action that keeps getting physics ticks is not stalled, however long it waits", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runner = new ActionRunner({ physicsStallMs: 80 });
   const ticking = setInterval(() => runner.observePhysicsTick(), 10);
   try {
@@ -1102,26 +1109,34 @@ test("an action that keeps getting physics ticks is not stalled, however long it
       await new Promise((resolve) => setTimeout(resolve, 300));
       return { status: "succeeded" };
     });
-    assert.equal((await runner.run(action, { block_name: "stone" })).result.status, "succeeded");
+    const running = runner.run(action, { block_name: "stone" });
+    await clock.advance(300, 10);
+    assert.equal((await running).result.status, "succeeded");
   } finally {
     clearInterval(ticking);
   }
 });
 
 test("a passenger owes no physics tick, an idle runner is never failed", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   let riding = true;
   const runner = new ActionRunner({ physicsStallMs: 40, physicsExpected: () => !riding });
   const action = stubAction(async () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     return { status: "succeeded" };
   });
-  assert.equal((await runner.run(action, { block_name: "stone" })).result.status, "succeeded");
+  const running = runner.run(action, { block_name: "stone" });
+  await clock.advance(200);
+  assert.equal((await running).result.status, "succeeded");
   riding = false;
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await clock.advance(150);
   assert.equal(runner.status().busy, false);
 });
 
 test("a cancelled action that cannot stop for want of ticks settles as cancelled, and the next action runs", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runner = new ActionRunner({ physicsStallMs: 10_000, cancelGraceMs: 60 });
   let entered!: () => void;
   const running = new Promise<void>((resolve) => { entered = resolve; });
@@ -1132,6 +1147,8 @@ test("a cancelled action that cannot stop for want of ticks settles as cancelled
   const pending = runner.run(action, { block_name: "stone" });
   await running;
   runner.cancelActive("stop");
+  // The watch of a 10 s limit checks every 250 ms: it sees the cancel at one check and the 60 ms of grace gone at the next.
+  await clock.advance(600);
   const output = await pending;
   assert.equal(output.result.status, "cancelled");
   // The model is told the stop is done, or it repeats it (review V5).
@@ -1143,13 +1160,17 @@ test("a cancelled action that cannot stop for want of ticks settles as cancelled
 
 // Run 14b (review V2): the stall released the body but left the old navigate running; it held the navigation for good.
 test("a stalled action's signal is aborted with the stall reason", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runner = new ActionRunner({ physicsStallMs: 80, cancelGraceMs: 40 });
   let seen: AbortSignal | undefined;
   const action = stubAction((_request, context) => {
     seen = context.signal;
     return new Promise<never>(() => {});
   });
-  const output = await runner.run(action, { block_name: "stone" });
+  const running = runner.run(action, { block_name: "stone" });
+  await clock.advance(300);
+  const output = await running;
   assert.equal(output.result.status, "failed");
   assert.equal(seen?.aborted, true);
   assert.match(seen?.reason instanceof Error ? seen.reason.message : String(seen?.reason), /RUNTIME_PHYSICS_STALLED/);
@@ -1179,6 +1200,8 @@ test("ticks resume after a stall: the old action stops before the body is releas
   const moves: string[] = [];
   let stalls = 0;
   let oldStopped = false;
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   // The runtime's recovery turns physics back on: here, the ticks start.
   const runner = new ActionRunner({ physicsStallMs: 80, cancelGraceMs: 2_000, onPhysicsStall: () => { stalls += 1; source.start(); } });
   const source = tickSource(runner);
@@ -1194,7 +1217,9 @@ test("ticks resume after a stall: the old action stops before the body is releas
         moves.push("old");
       }
     });
-    const output = await runner.run(old, { block_name: "stone" });
+    const stalled = runner.run(old, { block_name: "stone" });
+    await clock.advance(300, 10);
+    const output = await stalled;
     assert.equal(output.result.status, "failed");
     assert.match("error" in output.result ? output.result.error ?? "" : "", /RUNTIME_PHYSICS_STALLED/);
     assert.equal(stalls, 1);
@@ -1206,7 +1231,9 @@ test("ticks resume after a stall: the old action stops before the body is releas
       }
       return { status: "succeeded" };
     });
-    assert.equal((await runner.run(next, { block_name: "stone" })).result.status, "succeeded");
+    const moving = runner.run(next, { block_name: "stone" });
+    await clock.advance(50, 10);
+    assert.equal((await moving).result.status, "succeeded");
     assert.deepEqual(moves, ["new", "new", "new"]);
   } finally {
     source.stop();
@@ -1215,6 +1242,8 @@ test("ticks resume after a stall: the old action stops before the body is releas
 
 // Review V3: WSL resyncs its wall clock after the host wakes; the watch must not read that step as 60 s without a tick.
 test("a 60 s wall clock step fails nothing while ticks come", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runner = new ActionRunner({ physicsStallMs: 200 });
   const realNow = Date.now;
   let paused = false;
@@ -1232,7 +1261,9 @@ test("a 60 s wall clock step fails nothing while ticks come", async () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
       return { status: "succeeded" };
     });
-    assert.equal((await runner.run(action, { block_name: "stone" })).result.status, "succeeded");
+    const running = runner.run(action, { block_name: "stone" });
+    await clock.advance(300, 10);
+    assert.equal((await running).result.status, "succeeded");
   } finally {
     Date.now = realNow;
     clearInterval(ticking);

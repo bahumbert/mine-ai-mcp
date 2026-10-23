@@ -1,26 +1,27 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { readRecentEvents } from "../actions/read-recent-events/read-recent-events.js";
 import { botEventInputSchema, readLastDeath, readNotificationSummary, SqlBotData } from "../bot-data/index.js";
 import { closeSqlDatabase } from "../bot-data/sql-bot-data.js";
 import { persistentBotData } from "../test-support/bot-data.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
 import { observePlayerEvents } from "./player-events.js";
 
-function playerBot(username = "MineAI"): Bot {
-  return Object.assign(new EventEmitter(), {
-    username,
-    game: { dimension: "overworld" },
-    entities: {},
-    entity: { position: { x: 12.5, y: 64, z: -3.25 } },
-  }) as unknown as Bot;
+/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
+type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
+
+/** A bot at (12.5, 64, -3.25); `added(event)` counts the listeners on `event` beyond the idle bot's own. */
+function playerBot(username = "MineAI") {
+  const { bot } = createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 } });
+  const listened: Listened = bot;
+  const idle = new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)]));
+  return { bot, added: (event: string) => listened.listenerCount(event) - (idle.get(event) ?? 0) };
 }
 
 test("records incoming and outgoing player messages while notifying only for incoming ones", (t) => {
-  const bot = playerBot();
+  const { bot, added } = playerBot();
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "player-events-message-test", scope: { kind: "bot", botId: bot.username } },
@@ -81,9 +82,9 @@ test("records incoming and outgoing player messages while notifying only for inc
 
   stopObserving();
   stopObserving();
-  assert.equal(bot.listenerCount("chat"), 0);
-  assert.equal(bot.listenerCount("whisper"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(added("chat"), 0);
+  assert.equal(added("whisper"), 0);
+  assert.equal(added("death"), 0);
   bot.emit("chat", "Alex", "after close", null, {} as never, null);
   assert.equal(readRecentEvents(data, bot.username, 50).events.length, 0);
 });
@@ -108,7 +109,7 @@ test("the player death event requires a finite exact position", () => {
 });
 
 test("death requests cancellation once, records one event, and detaches without touching other listeners", (t) => {
-  const bot = playerBot("RuntimeBot");
+  const { bot, added } = playerBot("RuntimeBot");
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "player-events-death-test", scope: { kind: "bot", botId: bot.username } },
@@ -153,7 +154,7 @@ test("death requests cancellation once, records one event, and detaches without 
 
   stopObserving();
   stopObserving();
-  assert.equal(bot.listenerCount("death"), 1);
+  assert.equal(added("death"), 1);
   bot.emit("death");
   assert.equal(unrelatedDeaths, 2);
   assert.deepEqual(cancellations, ["RuntimeBot died."]);
@@ -161,7 +162,7 @@ test("death requests cancellation once, records one event, and detaches without 
 });
 
 test("a respawn into another dimension records one event; a respawn in the same dimension records none", () => {
-  const bot = playerBot("RuntimeBot");
+  const { bot, added } = playerBot("RuntimeBot");
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "player-events-dimension-test", scope: { kind: "bot", botId: bot.username } },
@@ -189,8 +190,8 @@ test("a respawn into another dimension records one event; a respawn in the same 
   }
 
   stopObserving();
-  assert.equal(bot.listenerCount("respawn"), 0);
-  assert.equal(bot.listenerCount("forcedMove"), 0);
+  assert.equal(added("respawn"), 0);
+  assert.equal(added("forcedMove"), 0);
   data.close();
 });
 
@@ -207,7 +208,7 @@ function lockedStore(t: TestContext, botId: string) {
 }
 
 test("a chat message during a database lock does not throw out of the listener", (t) => {
-  const bot = playerBot("LockedBot");
+  const { bot } = playerBot("LockedBot");
   const { data, lock, release } = lockedStore(t, bot.username);
   const stderr = captureStderr(t);
   const stopObserving = observePlayerEvents(bot, data, () => undefined);
@@ -223,7 +224,7 @@ test("a chat message during a database lock does not throw out of the listener",
 });
 
 test("death still cancels the foreground action when the event write fails", (t) => {
-  const bot = playerBot("LockedBot");
+  const { bot } = playerBot("LockedBot");
   const { data, lock } = lockedStore(t, bot.username);
   captureStderr(t);
   const cancellations: string[] = [];
@@ -237,7 +238,7 @@ test("death still cancels the foreground action when the event write fails", (t)
 });
 
 test("a dimension arrival whose write fails does not throw out of the forcedMove listener", (t) => {
-  const bot = playerBot("LockedBot");
+  const { bot } = playerBot("LockedBot");
   const { data, lock } = lockedStore(t, bot.username);
   captureStderr(t);
   const stopObserving = observePlayerEvents(bot, data, () => undefined);
@@ -250,7 +251,7 @@ test("a dimension arrival whose write fails does not throw out of the forcedMove
 });
 
 test("a chat message after the store closed does not throw", (t) => {
-  const bot = playerBot("ClosedBot");
+  const { bot } = playerBot("ClosedBot");
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "player-events-closed", scope: { kind: "bot", botId: bot.username } },

@@ -1,6 +1,5 @@
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,35 +9,21 @@ import type { IncidentReference } from "../bot-data/incident-log.js";
 import type { NavigationEvent } from "../navigation/index.js";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
 import { CombatProgress } from "../survival/control/combat/progress.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { observeDamageRegistry } from "../world/damage-registry.js";
 import { observeIncidents } from "./incident-observer.js";
 
 test("failure evidence separates lost support, server corrections, and local motion and detaches every listener", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const bot = Object.assign(new EventEmitter(), {
-    version: "1.21.4",
-    health: 20,
-    food: 20,
-    oxygenLevel: 20,
-    registry: { entitiesByName: { player: { metadataKeys: ["living_entity_flags", "shared_flags"] } } },
-    usingHeldItem: false,
-    game: { dimension: "overworld" },
-    entity: {
-      id: 5,
-      position: new Vec3(0.5, 64, 0.5),
-      velocity: new Vec3(0.02, -0.08, 0),
-      onGround: true,
-      yaw: 0,
-      pitch: 0,
-      metadata: [3, 1],
-    },
-    entities: {},
-    inventory: { slots: [] },
-    _client: new EventEmitter(),
-    // Use getters just like Mineflayer: object spread must not define the evidence.
-    getControlState: (control: string) => control === "forward",
-  }) as unknown as Bot;
+  const { bot } = createFakeBot();
+  // The server's flags: on fire (`shared_flags`) and using an item in the off hand (`living_entity_flags`).
+  bot.entity.metadata = playerMetadata(bot, { living_entity_flags: 3, shared_flags: 1 });
+  bot.entity.velocity = new Vec3(0.02, -0.08, 0);
+  // Mineflayer answers controls through `getControlState`: object spread must not define the evidence.
+  bot.setControlState("forward", true);
+  const self = bot.entity.id;
+  const listenersBefore = { bot: listenerCounts(bot), client: listenerCounts(bot._client) };
   observeDamageRegistry(bot);
   bot._client.emit("registry_data", {
     id: "minecraft:damage_type",
@@ -101,7 +86,7 @@ test("failure evidence separates lost support, server corrections, and local mot
       atMs: Date.now(),
     });
   bot._client.emit("damage_event", {
-    entityId: 5,
+    entityId: self,
     sourceTypeId: 2,
     sourceCauseId: 7,
     sourceDirectId: 7,
@@ -116,13 +101,13 @@ test("failure evidence separates lost support, server corrections, and local mot
   bot._client.emit("damage_event", { entityId: 9, sourceTypeId: 2, sourceCauseId: 10, sourceDirectId: 10 });
   // Preserve the authoritative own impulse, independent of client velocity.
   bot._client.emit("entity_velocity", {
-    entityId: 5,
+    entityId: self,
     velocity: { x: -4000, y: 3200, z: 8000 },
     secret: "never-record",
   });
   bot._client.emit("entity_velocity", { entityId: 19, velocity: { x: 1, y: 2, z: 3 } });
   bot._client.emit("entity_velocity", { entityId: 19, velocity: "unsupported foreign shape" });
-  bot._client.emit("entity_velocity", { entityId: 5, velocity: { x: 0.5, y: 0, z: 0 } });
+  bot._client.emit("entity_velocity", { entityId: self, velocity: { x: 0.5, y: 0, z: 0 } });
   assert.equal(references.length, 0);
   bot.emit("death");
   await observer.recorder.flush();
@@ -144,7 +129,7 @@ test("failure evidence separates lost support, server corrections, and local mot
   assert.doesNotMatch(intact, /nearby_block_change/);
   assert.match(intact, /"entityId":8,"sourceTypeId":2,"sourceCauseId":6,"sourceDirectId":6/);
   assert.match(intact, /"entityId":9/, "unrelated damage remains available before attribution filtering");
-  assert.match(intact, /"packet":"update_health","botEntityId":5,"fields":\{"health":18,"food":20,"foodSaturation":3\}/);
+  assert.match(intact, new RegExp(String.raw`"packet":"update_health","botEntityId":${self},"fields":\{"health":18,"food":20,"foodSaturation":3\}`));
   const impulseRows = intact
     .split("\n")
     .filter(Boolean)
@@ -157,7 +142,7 @@ test("failure evidence separates lost support, server corrections, and local mot
         kind: "packet",
         packet: "entity_velocity",
         fields: {
-          entityId: 5,
+          entityId: self,
           velocity: { x: -4000, y: 3200, z: 8000 },
           velocityBlocksPerTick: { x: -0.5, y: 0.4, z: 1 },
         },
@@ -185,7 +170,7 @@ test("failure evidence separates lost support, server corrections, and local mot
   bot.emit("physicsTick");
   bot._client.emit("explosion", { x: 10, y: 64, z: 0, playerKnockback: { x: 1, y: 0, z: 0 }, secret: "never-record" });
   // Protodef omits the value of an absent option; it does not return null.
-  bot._client.emit("damage_event", { entityId: 5, sourceTypeId: 2, sourceCauseId: 0, sourceDirectId: 0 });
+  bot._client.emit("damage_event", { entityId: self, sourceTypeId: 2, sourceCauseId: 0, sourceDirectId: 0 });
   bot.health = 17;
   bot.emit("health");
   await observer.close();
@@ -206,29 +191,19 @@ test("failure evidence separates lost support, server corrections, and local mot
   assert.equal(world.listenerCount, 0);
   assert.equal(events.size, 0);
   bot.emit("end", "done");
-  assert.deepEqual(bot.eventNames(), []);
-  assert.deepEqual(bot._client.eventNames(), []);
+  assert.deepEqual({ bot: listenerCounts(bot), client: listenerCounts(bot._client) }, listenersBefore);
 });
 
 // Run 14b: eight bots froze after a boat ride with no record of the mount, the get-off or the server's answer.
 test("a physics stall is captured with the mount, the server's passenger lists and the vehicle state before it", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const boat = { id: 7, name: "oak_boat", position: new Vec3(0.5, 62.46, 0.5), passengers: [] as unknown[] };
-  const bot = Object.assign(new EventEmitter(), {
-    version: "1.21.4",
-    health: 20,
-    registry: { entitiesByName: { player: { metadataKeys: [] } } },
-    game: { dimension: "overworld" },
-    entity: { id: 5, position: new Vec3(0.5, 62.96, 0.5), velocity: new Vec3(0, 0, 0), onGround: false, yaw: 0, pitch: 0, metadata: [], vehicle: null as unknown },
-    vehicle: null as unknown,
-    entities: { 7: boat },
-    inventory: { slots: [] },
-    _client: new EventEmitter(),
-    getControlState: () => false,
-  });
+  const { bot } = createFakeBot({ position: new Vec3(0.5, 62.96, 0.5), entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 62.46, 0.5) } } });
+  bot.entity.onGround = false;
+  const boat = bot.entities[7]!;
+  const self = bot.entity.id;
   const references: IncidentReference[] = [];
-  const observer = observeIncidents(bot as unknown as Bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
+  const observer = observeIncidents(bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
     directory,
     identity: { worldId: "test" },
     published: (reference) => references.push(reference),
@@ -239,7 +214,7 @@ test("a physics stall is captured with the mount, the server's passenger lists a
       combat: { targetId: null, position: null },
     }),
   });
-  bot._client.emit("set_passengers", { entityId: 7, passengers: [5] });
+  bot._client.emit("set_passengers", { entityId: 7, passengers: [self] });
   bot.vehicle = boat;
   bot.entity.vehicle = boat;
   bot.emit("mount");
@@ -247,7 +222,7 @@ test("a physics stall is captured with the mount, the server's passenger lists a
   // The server lets her off: the list no longer names her; Mineflayer keeps the vehicle.
   bot._client.emit("set_passengers", { entityId: 7, passengers: [] });
   bot.vehicle = null;
-  bot.entity.vehicle = null;
+  Object.assign(bot.entity, { vehicle: null });
   bot.emit("dismount", boat);
   observer.physicsStalled("navigate");
   await observer.recorder.flush();
@@ -255,8 +230,8 @@ test("a physics stall is captured with the mount, the server's passenger lists a
   const artifact = references[0]!.artifact;
   if (artifact.kind !== "written") return assert.fail("not written");
   const text = await readFile(artifact.path, "utf8");
-  assert.match(text, /"packet":"set_passengers","botEntityId":5,"fields":\{"entityId":7,"passengers":\[5\]\}/);
-  assert.match(text, /"packet":"set_passengers","botEntityId":5,"fields":\{"entityId":7,"passengers":\[\]\}/);
+  assert.match(text, new RegExp(String.raw`"packet":"set_passengers","botEntityId":${self},"fields":\{"entityId":7,"passengers":\[${self}\]\}`));
+  assert.match(text, new RegExp(String.raw`"packet":"set_passengers","botEntityId":${self},"fields":\{"entityId":7,"passengers":\[\]\}`));
   assert.doesNotMatch(text, /"entityId":9/, "another entity's passengers are not hers");
   assert.match(text, /"kind":"vehicle","atMs":\d+,"event":"mount","vehicleId":7/);
   assert.match(text, /"kind":"vehicle","atMs":\d+,"event":"dismount","vehicleId":7/);
@@ -268,20 +243,9 @@ test("a physics stall is captured with the mount, the server's passenger lists a
 test("a reflex that hit its limit is captured with the reflex and the limit", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const bot = Object.assign(new EventEmitter(), {
-    version: "1.21.4",
-    health: 20,
-    registry: { entitiesByName: { player: { metadataKeys: [] } } },
-    game: { dimension: "overworld" },
-    entity: { id: 5, position: new Vec3(0.5, 62.96, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, yaw: 0, pitch: 0, metadata: [], vehicle: null as unknown },
-    vehicle: null as unknown,
-    entities: {},
-    inventory: { slots: [] },
-    _client: new EventEmitter(),
-    getControlState: () => false,
-  });
+  const { bot } = createFakeBot({ position: new Vec3(0.5, 62.96, 0.5) });
   const references: IncidentReference[] = [];
-  const observer = observeIncidents(bot as unknown as Bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
+  const observer = observeIncidents(bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
     directory,
     identity: { worldId: "test" },
     published: (reference) => references.push(reference),
@@ -300,3 +264,16 @@ test("a reflex that hit its limit is captured with the reflex and the limit", as
   assert.match(await readFile(artifact.path, "utf8"), /"trigger":"reflex_limit".*"reflex":"breath_reflex".*"limit":"no_progress"/);
   await observer.close();
 });
+
+/** The player's metadata as the server sends it: each flag at the index the version's data gives its key. */
+function playerMetadata(bot: Bot, flags: Readonly<Record<string, number>>): object[] {
+  const keys = bot.registry.entitiesByName.player?.metadataKeys ?? [];
+  return Object.assign([], Object.fromEntries(Object.entries(flags).map(([key, value]) => [keys.indexOf(key), value])));
+}
+
+/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
+type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
+/** How many listeners each event has: what an observer that detaches everything leaves unchanged. */
+function listenerCounts(emitter: Listened): Record<string, number> {
+  return Object.fromEntries(emitter.eventNames().map((name) => [String(name), emitter.listenerCount(name)]));
+}
