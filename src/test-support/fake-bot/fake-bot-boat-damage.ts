@@ -4,7 +4,7 @@
  * ms). It breaks at the hit: the boat is removed, its item lies where it stood for the 10 ticks measured, and every
  * rider is freed on the server and told nothing (no position, no passenger list: her client keeps its `vehicle`).
  * Vanilla's rules, not in the fake (an iron sword still takes 8 hits, as a hand): a weapon hits harder, a hit sooner than the 5 ticks of attack recovery
- * weighs less, a creative bot's boat drops nothing, a chest boat drops its chest, the hurt wobble. The reach of a hit is the mount's (unmeasured).
+ * weighs less, a creative bot's boat drops nothing, a chest boat drops its chest, the hurt wobble. The reach of a hit is the mob hit's (`attack-out-of-reach`); unmeasured at the edge for a boat.
  */
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";

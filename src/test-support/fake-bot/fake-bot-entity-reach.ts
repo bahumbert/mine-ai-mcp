@@ -8,7 +8,7 @@ import type { FakeServer } from "./fake-server.js";
 
 /** The boats' items are named like their entities (`oak_boat`, `bamboo_raft`). */
 export const BOAT_NAME = /_(boat|raft)$/;
-/** The nearest point of an entity's box that the server lets a bot use: a boat 6 blocks off was taken, one 7 blocks off was not. A hit shares it (vanilla's rule, not measured). */
+/** The nearest point of an entity's box that the server lets a bot use: a boat 6 blocks off was taken, one 7 blocks off was not. A hit on a mob shares it (contract check `attack-out-of-reach`: 5.9 hit, 6.1 not); a boat's hit is unmeasured at the edge. */
 export const ENTITY_REACH = 6;
 
 /** The vehicle the server has the bot in, whatever her client believes (a seat the server kept after her client walked free). */

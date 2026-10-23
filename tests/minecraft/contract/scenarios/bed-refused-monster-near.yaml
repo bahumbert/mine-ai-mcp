@@ -18,6 +18,7 @@ setup:
   - setblock 1 -60 0 red_bed[facing=east,occupied=false,part=foot]
   - setblock 2 -60 0 red_bed[facing=east,occupied=false,part=head]
   - gamerule doDaylightCycle true
+  - difficulty easy
   - time set 14000
 entities:
   - type: zombie

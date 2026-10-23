@@ -4,6 +4,15 @@
  */
 import type { FakeCell, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ContractSubject } from "./subject.ts";
+import { attackCooldownDamage } from "./checks/attack-cooldown-damage.ts";
+import { attackHurtsAndKills } from "./checks/attack-hurts-and-kills.ts";
+import { attackOutOfReach } from "./checks/attack-out-of-reach.ts";
+import { bowDrawAndRelease } from "./checks/bow-draw-and-release.ts";
+import { consumeFood } from "./checks/consume-food.ts";
+import { damageEventToBot } from "./checks/damage-event-to-bot.ts";
+import { explosionKnockback } from "./checks/explosion-knockback.ts";
+import { shieldRaised } from "./checks/shield-raised.ts";
+import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
@@ -52,6 +61,8 @@ export interface ContractFixture {
   readonly position: Cell;
   /** The day time set before the check (`time set`); the template's world stands at noon. */
   readonly timeOfDay?: number;
+  /** The difficulty set before the check; a fixture with a hostile mob is on easy, the template's world is not set. */
+  readonly difficulty?: "easy" | "normal" | "hard";
   /** Whether the day cycle runs: the template stops it, and a night is skipped only by a world whose time runs. */
   readonly daylightCycle?: boolean;
   /** The weather set before the check; the template's world is clear. */
@@ -70,6 +81,11 @@ export interface ContractCheck {
   run(subject: ContractSubject): Promise<void>;
   /** Run on the bare bot, with no runtime of ours to act on it (`client-host.ts --without-runtime`). */
   readonly withoutRuntime?: boolean;
+  /**
+   * Set when the subject changes something the whole server has (a game rule, the weather) while the check runs: the YAML is tagged
+   * `exclusive` so the scenario gets a server of its own and never a lane of a shared one, where every other lane would see the change. The value is the reason.
+   */
+  readonly exclusive?: string;
 }
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
@@ -101,6 +117,15 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   chestOpenTakeClose,
   itemPickupAfterDelay,
   tossedItemKeptBeforeDelay,
+  attackCooldownDamage,
+  attackHurtsAndKills,
+  attackOutOfReach,
+  bowDrawAndRelease,
+  consumeFood,
+  damageEventToBot,
+  explosionKnockback,
+  shieldRaised,
+  unequipHand,
   bucketPourAndFill,
   placeBlockWithOptions,
 ];

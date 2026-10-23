@@ -1,0 +1,39 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-damage-event-to-bot
+tags:
+  - contract
+description: "A mob's attack on the bot is a damage_event naming the mob (id + 1), a health update and a knockback velocity; a damage with no source names none. Contract check tests/minecraft/contract/checks/damage-event-to-bot.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: damage-event-to-bot
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - difficulty easy
+  - time set 18000
+entities:
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

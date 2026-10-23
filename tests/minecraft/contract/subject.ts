@@ -31,12 +31,41 @@ export interface ContractSubject {
   setWeather(weather: Weather): Promise<void>;
   /** The server spawns `stack` as an item entity at `position` (a world position: `world` of a local one), pickable after `pickupDelayTicks`; resolves with it once the client has it. */
   summonItem(stack: { readonly name: string; readonly count: number }, position: Vec3, pickupDelayTicks: number): Promise<Entity>;
+  /** Another actor hurts the bot (`/damage`: a mob's attack by `sourceId`, or no source); resolves once the client heard the hurt. */
+  hurtBot(amount: number, sourceId: number | null): Promise<void>;
+  /** The server kills a mob (`/kill`); resolves once the client heard it die. */
+  kill(entityId: number): Promise<void>;
+  /** A creeper ignited with no fuse explodes at `position`, breaking no block; resolves once the client heard the explosion. */
+  explode(position: Vec3): Promise<void>;
 }
 
 /** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
 const SERVER_EDIT_WALL_MS = 3_000;
 /** An item entity spawned this close to where `/summon` put it is the summoned one (the server may nudge it a tick later). */
 const SUMMON_MATCH_DISTANCE = 0.5;
+/** The server's selector for the one entity the client sees at `entity`'s place (a mob that does not move). */
+function selectorOf(entity: Entity): string {
+  const { x, y, z } = entity.position;
+  return `@e[type=${entity.name},x=${x},y=${y},z=${z},distance=..0.5,limit=1]`;
+}
+
+/** Resolve with the first `event` for which `wanted` holds, or throw after the wall bound (the command did nothing: is the bot op?). */
+function heardWithin<Args extends unknown[]>(bot: Bot, event: string, wanted: (...args: Args) => boolean, what: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const listener = (...args: unknown[]) => {
+      if (!wanted(...(args as Args))) return;
+      clearTimeout(timer);
+      bot.off(event as never, listener as never);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      bot.off(event as never, listener as never);
+      reject(new Error(`${what}: not heard after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
+    }, SERVER_EDIT_WALL_MS);
+    bot.on(event as never, listener as never);
+  });
+}
+
 /** Steps of `settleWithin`: fine enough for a 2-tick bound, coarse enough for the real event loop. */
 const SETTLE_STEP_MS = 25;
 
@@ -71,7 +100,7 @@ export async function holdsWithin(subject: ContractSubject, condition: () => boo
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
-  const { bot, clock, entities, server, world } = harness;
+  const { bot, clock, combat, entities, server, world } = harness;
   return {
     bot,
     world: (local) => new Vec3(...arena.world(local)),
@@ -91,6 +120,18 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => void (summoned = entities.spawn({ name: "item", position, item: stack, pickupDelayTicks })));
       await clock.advance(50);
       return summoned!;
+    },
+    async hurtBot(amount, sourceId) {
+      server.answer(() => combat.hurtBot(amount, sourceId));
+      await clock.advance(50);
+    },
+    async kill(entityId) {
+      server.answer(() => combat.kill(entityId));
+      await clock.advance(50);
+    },
+    async explode(position) {
+      server.answer(() => combat.explode(position));
+      await clock.advance(50);
     },
   };
 }
@@ -164,6 +205,35 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       });
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
+    },
+    async hurtBot(amount, sourceId) {
+      const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, "/damage");
+      const source = sourceId === null ? "minecraft:generic" : `minecraft:mob_attack by ${selectorOf(bot.entities[sourceId]!)}`;
+      bot.chat(`/damage ${bot.username} ${amount} ${source}`);
+      await heard;
+    },
+    async kill(entityId) {
+      const mob = bot.entities[entityId]!;
+      const heard = heardWithin(bot, "entityDead", (entity: Entity) => entity === mob, "/kill");
+      bot.chat(`/kill ${selectorOf(mob)}`);
+      await heard;
+    },
+    async explode(position) {
+      const heard = new Promise<void>((resolve, reject) => {
+        const onExplosion = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          bot._client.off("explosion", onExplosion);
+          reject(new Error(`/summon creeper: no explosion after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
+        }, SERVER_EDIT_WALL_MS);
+        bot._client.once("explosion", onExplosion);
+      });
+      bot.chat("/gamerule mobGriefing false");
+      bot.chat(`/summon creeper ${at(position)} {Fuse:0,ignited:1b}`);
+      await heard;
+      bot.chat("/gamerule mobGriefing true");
     },
   };
 }

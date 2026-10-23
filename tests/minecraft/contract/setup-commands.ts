@@ -9,6 +9,9 @@ import type { ContractCheck, ContractFixture } from "./checks.ts";
 /** The arena every check stays in: a stone floor at `FLOOR_Y`, air above, `RADIUS` blocks around the origin. */
 export const ARENA = { radius: 6, floorY: -61, airTopY: -55 } as const;
 
+/** How minecraft-data files the mobs that attack on sight. */
+const HOSTILE_CATEGORY = "Hostile mobs";
+
 export interface ContractArrangement {
   /** The YAML's `setup` lines, in order. */
   readonly setup: readonly string[];
@@ -31,6 +34,12 @@ function containerLines(fixture: ContractFixture): string[] {
   });
 }
 
+/** Whether the fixture summons a hostile mob, which a peaceful world removes at once (the mob's attack also scales with the difficulty). */
+function holdsHostileMob(fixture: ContractFixture): boolean {
+  const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
+  return (fixture.entities ?? []).some(({ name }) => registry.entitiesByName[name]?.category === HOSTILE_CATEGORY);
+}
+
 /** The fixture as Mine Labs arranges it: the floor and the air, each cell set, the bot's place, stacks and entities. */
 export function setupCommands(fixture: ContractFixture): ContractArrangement {
   const { radius, floorY, airTopY } = ARENA;
@@ -41,6 +50,7 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
   });
   const worldLines = [
     ...(fixture.daylightCycle === undefined ? [] : [`gamerule doDaylightCycle ${fixture.daylightCycle}`]),
+    ...(fixture.difficulty !== undefined ? [`difficulty ${fixture.difficulty}`] : holdsHostileMob(fixture) ? ["difficulty easy"] : []),
     ...(fixture.timeOfDay === undefined ? [] : [`time set ${fixture.timeOfDay}`]),
     ...(fixture.weather === undefined ? [] : [`weather ${fixture.weather}`]),
   ];
@@ -66,6 +76,11 @@ function entityNbt({ nbt, passengers }: NonNullable<ContractFixture["entities"]>
   if (nbt !== undefined && passengers !== undefined) throw new Error("an entity takes nbt or passengers, not both: passengers are nbt");
   if (passengers === undefined) return nbt;
   return `{Passengers:[${passengers.map((name) => `{id:"minecraft:${name}"}`).join(",")}]}`;
+}
+
+/** The YAML's `tags`: every contract scenario, and `exclusive` for a check that changes the whole server (it then never shares a server with other lanes). */
+export function contractTags(check: Pick<ContractCheck, "exclusive">): readonly string[] {
+  return ["contract", ...(check.exclusive === undefined ? [] : ["exclusive"])];
 }
 
 /** The YAML's `client.args`: the host and the contract driver, bare when the check measures the server alone. */

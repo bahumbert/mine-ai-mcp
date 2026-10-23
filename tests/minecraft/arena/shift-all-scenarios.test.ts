@@ -17,6 +17,9 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   // Natural terrain at a fixed place (seeded default world): lanes are flat.
   ["scenarios/collect/cast-obsidian.yaml", /world\.type/u],
   ["scenarios/pathfinder/obsidian-lava-approach.yaml", /world\.type/u],
+  // Contract checks whose subject changes a server-wide setting while they run (the mobGriefing rule, the weather).
+  ["contract/scenarios/explosion-knockback.yaml", /exclusive/u],
+  ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
   // The arena and its scratch copy pin more than the 256 chunks Minecraft force-loads.
   ["scenarios/collect/obsidian-by-exploring.yaml", /chunks/u],
   ["scenarios/pathfinder/at-sea-land-behind-kelp.yaml", /chunks/u],

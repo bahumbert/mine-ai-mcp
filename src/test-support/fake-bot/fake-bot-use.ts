@@ -98,9 +98,10 @@ function answerUse(bot: FakeBot, parts: UseParts, use: { hand: number; sequence:
 /** Give `bot` `activateItem` and the server's answer to a `use_item`. */
 export function attachFakeUse(bot: FakeBot, parts: UseParts): void {
   // `inventory.js:84-103` `checkActiveItem`: the use ends when the hand's item type or the selected slot changes.
-  let active = { offHand: false, type: undefined as number | undefined, quickBarSlot: 0 };
+  let active: { offHand: boolean; type: number | undefined; quickBarSlot: number } | null = null;
   const endUseOfChangedItem = () => {
-    if (!bot.usingHeldItem) return;
+    // A use Mineflayer's own `consume` began is tracked by its plugin (`inventory.js` `checkActiveItem`), not here.
+    if (!bot.usingHeldItem || active === null) return;
     const item = active.offHand ? parts.inventory.slots[EQUIPMENT_SLOTS["off-hand"]] : bot.heldItem;
     if (item?.type === active.type && (active.offHand || bot.quickBarSlot === active.quickBarSlot)) return;
     bot.usingHeldItem = false;

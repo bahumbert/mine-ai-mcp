@@ -22,6 +22,7 @@ const FIRST_UPDATE_WALL_MS = 3_000;
 export const rainAndThunderState: ContractCheck = {
   name: "rain-and-thunder-state",
   withoutRuntime: true,
+  exclusive: "the subject sets the weather (`/weather`), which every lane of a shared server would see",
   fixture: { ...BED_FIXTURE, timeOfDay: NOON, daylightCycle: false, weather: "clear" },
   async run(subject) {
     const { bot } = subject;

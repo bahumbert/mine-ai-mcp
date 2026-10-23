@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { CONTRACT_CHECKS, contractCheckNamed } from "./checks.ts";
-import { contractClientArgs, setupCommands } from "./setup-commands.ts";
+import { contractClientArgs, contractTags, setupCommands } from "./setup-commands.ts";
 
 const SCENARIOS = path.join(path.dirname(fileURLToPath(import.meta.url)), "scenarios");
 
@@ -42,7 +42,7 @@ test("every contract YAML arranges its check's fixture: setup lines, the op play
     assert.deepEqual(player!.inventory ?? [], expected.player.inventory, `${file}: inventory`);
     // The real subject sends op commands (`setblock`, `execute ... on vehicle`).
     assert.equal(player!.op, true, `${file}: the player is op`);
-    assert.ok(scenario.tags.includes("contract"), `${file}: tagged contract`);
+    assert.deepEqual(scenario.tags, contractTags(check), `${file}: tags`);
   }
 });
 
@@ -104,4 +104,12 @@ test("setupCommands summons an entity's passengers with it as Passengers nbt, an
   const { entities } = setupCommands({ cells: {}, carried: {}, position: [0.5, -60, 0.5], entities: [{ ...boat, passengers: ["armor_stand", "armor_stand"] }] });
   assert.deepEqual(entities, [{ type: "oak_boat", pos: [2.5, -60, 0.5], nbt: '{Passengers:[{id:"minecraft:armor_stand"},{id:"minecraft:armor_stand"}]}' }]);
   assert.throws(() => setupCommands({ cells: {}, carried: {}, position: [0.5, -60, 0.5], entities: [{ ...boat, nbt: "{}", passengers: ["armor_stand"] }] }), /nbt or passengers/);
+});
+
+test("setupCommands sets the difficulty to easy when a hostile mob is summoned (a peaceful world removes it) and leaves it alone for a boat", () => {
+  const base = { cells: {}, carried: {}, position: [0.5, -60, 0.5] as const };
+  const withZombie = setupCommands({ ...base, entities: [{ name: "zombie", position: [2.5, -60, 0.5] }] }).setup;
+  assert.ok(withZombie.includes("difficulty easy"));
+  assert.equal(setupCommands({ ...base, entities: [{ name: "oak_boat", position: [2.5, -60, 0.5] }] }).setup.some((line) => line.startsWith("difficulty")), false);
+  assert.equal(setupCommands(base).setup.some((line) => line.startsWith("difficulty")), false);
 });

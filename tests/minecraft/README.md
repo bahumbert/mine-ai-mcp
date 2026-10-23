@@ -195,7 +195,7 @@ The same check runs twice:
   player is `op: true`. A check our runtime would disturb (its idle-water control, its
   vehicle watch) runs on the bare bot: `client-host.ts <driver> --without-runtime`.
 
-The subject (`contract/subject.ts`) is `{ bot, wait, now, setBlock, seatedOnServer, summonItem }`:
+The subject (`contract/subject.ts`) is `{ bot, wait, now, setBlock, seatedOnServer, setWeather, summonItem, hurtBot, kill, explode }`:
 wall time and op commands on a server, the harness clock and its server side on
 the fake. A YAML's `setup`, player and entities equal `setupCommands(check.fixture)`
 (`contract/setup-commands.test.ts` fails on a YAML edited alone).

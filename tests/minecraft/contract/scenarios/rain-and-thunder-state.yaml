@@ -2,6 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-rain-and-thunder-state
 tags:
   - contract
+  - exclusive
 description: "The weather the client is told: rain and thunder each ramp a level a tick, clear lowers them; by day the bed use is refused and rain alone does not allow a sleep, a full thunderstorm does. Contract check tests/minecraft/contract/checks/rain-and-thunder-state.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun

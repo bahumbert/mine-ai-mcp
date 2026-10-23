@@ -20,7 +20,7 @@ const QUICK_BAR_START = 36;
 type Plugin = (scratch: object, options: { hideErrors: boolean }) => void;
 type WindowApi = Pick<
   Bot,
-  "clickWindow" | "closeWindow" | "putAway" | "putSelectedItemRange" | "transfer" | "moveSlotItem" | "openBlock" | "openContainer" | "openChest" | "openDispenser" | "updateHeldItem"
+  "clickWindow" | "consume" | "closeWindow" | "putAway" | "putSelectedItemRange" | "transfer" | "moveSlotItem" | "openBlock" | "openContainer" | "openChest" | "openDispenser" | "updateHeldItem"
 >;
 
 /**
@@ -142,6 +142,7 @@ export function attachFakeWindows(
   // The client's own prediction of a click or a close is not what the server's record follows: it applies the click itself.
   const forwarded: WindowApi = {
     clickWindow: (...args) => windows.predict(() => api().clickWindow(...args)),
+    consume: () => api().consume(),
     closeWindow: (...args) => windows.predict(() => api().closeWindow(...args)),
     putAway: (...args) => api().putAway(...args),
     putSelectedItemRange: (...args) => api().putSelectedItemRange(...args),

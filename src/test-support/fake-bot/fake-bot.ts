@@ -18,6 +18,7 @@ import { type PlaceBlockWithOptions, attachFakePlacement } from "./fake-bot-plac
 import { attachFakePlugins, offlineUuidOf } from "./fake-bot-plugins.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
+import { type FakeCombat, attachFakeCombat } from "./fake-bot-combat.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
 import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
 import { attachFakeWindows } from "./fake-bot-windows.js";
@@ -95,6 +96,8 @@ export interface FakeHarness {
   readonly breath: FakeBreath;
   /** The server's side of the windows: the containers' stacks and the window it has open. */
   readonly windows: FakeWindows;
+  /** What other actors do to the bot and the creatures around her: hurt, swing, kill, health, a blast. */
+  readonly combat: FakeCombat;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -213,12 +216,13 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeUse(bot, { clock, server, world, inventory, entities });
   attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
   attachFakePlacement(bot, { clock, server, world, inventory, windows });
+  const combat = attachFakeCombat(bot, { clock, server, inventory, entities: serverEntities });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
   attachFakeSleep(bot, { clock, server, world });
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

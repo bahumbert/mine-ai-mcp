@@ -76,7 +76,7 @@ function refuseWhatIsServerWide(scenario: Scenario): void {
   if (scenario.world.dimension !== "overworld") throw new Refusal(`world.dimension is '${scenario.world.dimension}': lanes are in the overworld`);
   if (scenario.world.spawn !== undefined) throw new Refusal("world.spawn sets the spawn of the whole server");
   if (scenario.verification !== undefined) throw new Refusal("verification travels the shared world around its spawn, outside any lane");
-  if (scenario.tags.includes("exclusive")) throw new Refusal("tagged 'exclusive': it measures time or ticks and must not share the server");
+  if (scenario.tags.includes("exclusive")) throw new Refusal("tagged 'exclusive': it measures time or ticks, or changes a server-wide setting while it runs, and must not share the server");
   scenario.players.forEach((player, index) => {
     if (player.pos === undefined) throw new Refusal(`players[${index}].pos is missing: a lane player would join at the world spawn, in no lane`);
   });
