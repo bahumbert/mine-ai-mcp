@@ -1,7 +1,6 @@
 import { HORIZONTAL_TICKS_PER_BLOCK, exactBlockGoal } from "../goals/index.js";
 import { IncrementalSearch } from "../search/search.js";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { blockKey } from "../world/world.js";
@@ -950,7 +949,7 @@ test("a cobweb in the next cell is planned as a block to break, never walked thr
 });
 
 test("a seagrass shallow is waded only when swimming is allowed", () => {
-  const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+  const { bot: registryBot } = createFakeBot();
   const world = new MemoryWorld();
   for (let x = -1; x <= 2; x += 1)
     for (let z = -1; z <= 1; z += 1) {

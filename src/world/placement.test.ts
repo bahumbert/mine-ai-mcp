@@ -1,142 +1,156 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import { botFixture } from "../test-support/bot.js";
-import { startServerClock } from "../test-support/server-clock.js";
+import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import {
+  type FakeBotOptions,
+  type FakeClock,
+  type FakeServer,
+  createFakeBot,
+  createFakeClock,
+} from "../test-support/fake-bot/index.js";
 import { placeBlock, type InventoryItem, type WorldBlock } from "./placement.js";
 
-/** A creative-mode bot with whatever placement surface the test watches. */
-const placer = (overrides: Record<string, unknown>) => botFixture({ gameMode: "creative" }, overrides);
+/** Off every target cell: Mineflayer lists the bot's own entity in `bot.entities` (`entities.js:105`), which a placement checks. */
+const STANDING = new Vec3(3.5, 64, 3.5);
+
+/**
+ * A creative-mode bot carrying one `itemName` over a stone floor (y 63), its clock driving the timers the placement
+ * waits on; `options` add cells, entities, a game mode or the methods the test scripts.
+ */
+function placer(itemName: string, options: FakeBotOptions = {}) {
+  const harness = createFakeBot({
+    gameMode: "creative",
+    position: STANDING,
+    carried: { [itemName]: 1 },
+    clock: createFakeClock({ mode: "mocked" }),
+    ...options,
+  });
+  const item: InventoryItem = harness.bot.inventory.items()[0]!;
+  return { ...harness, item };
+}
+
+/** Mineflayer's own placement with options (`place_block.js`), which the fake leaves out: the test scripts it. Stopgap until the shared fake has it (gap reported to the master, M5). */
+function withNativePlacement(bot: Bot, place: (support: unknown, face: unknown, options: unknown) => Promise<void>): void {
+  Object.assign(bot, { _placeBlockWithOptions: place });
+}
+
+/** The shift key as the 1.21.4 server reads it: `entity_action` 0 down, 1 up (`sneak.ts`). */
+function shiftPackets(server: FakeServer): number[] {
+  return server.packets.filter((packet) => packet.name === "entity_action").map((packet) => (packet.data as { actionId: number }).actionId);
+}
+
+/** Move the clock `ms` on and hand back `pending`, which must be over by then. Stopgap until M2 merges `clock.settle`. */
+async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
+  let over = false;
+  void pending.then(() => (over = true), () => (over = true));
+  await clock.advance(ms);
+  assert.ok(over, `still waiting after ${ms} ms of clock`);
+  return pending;
+}
+
+/** A turn of a quarter circle at Mineflayer's 3 rad/s (11 ticks), with room. */
+const QUARTER_TURN_MS = 1_000;
+/** Two time packets, one a second (contract check `world-age-per-second`): the 40 ticks past a send. */
+const TWO_TIME_PACKETS_MS = 2_000;
+
+function placementAt(bot: Bot, item: InventoryItem, target: Vec3, extra: Record<string, unknown> = {}) {
+  return {
+    item,
+    support: bot.blockAt(target.offset(0, -1, 0))!,
+    face: new Vec3(0, 1, 0),
+    expectedCells: [target] as [Vec3],
+    matches: (block: WorldBlock) => block.name === item.name,
+    ...extra,
+  };
+}
 
 test("placement settles the last item before another caller can select the emptied stack", async () => {
   const target = new Vec3(0, 64, 0);
-  let count = 1;
-  let appeared = false;
-  const inventory = Object.assign(new EventEmitter(), {
-    items: () => (count > 0 ? [{ name: "cobblestone", count }] : []),
-  });
-  const bot = placer({
-    game: { gameMode: "survival" },
-    inventory,
-    blockAt: () => ({ name: appeared ? "cobblestone" : "air", position: target }),
-    placeBlock: async () => {
-      appeared = true;
-      setTimeout(() => {
-        count = 0;
-        inventory.emit("updateSlot");
-      }, 30);
+  const { bot, clock, world, inventory, item } = placer("cobblestone", {
+    gameMode: "survival",
+    overrides: {
+      placeBlock: async () => {
+        world.setCell(target, "cobblestone");
+        clock.after(30, () => inventory.updateSlot(36, null as never));
+      },
     },
   });
-  const result = await placeBlock(bot, {
-    item: { name: "cobblestone" } as InventoryItem,
-    support: { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: (block) => block.name === "cobblestone",
-  });
+  using _timers = clock.install();
+  const result = await settledAfter(clock, 100, placeBlock(bot, placementAt(bot, item, target)));
   assert.equal(result.kind, "placed");
-  assert.equal(count, 0);
+  assert.equal(bot.inventory.count(item.type, null), 0);
 });
 
 test("places an oriented block while sneaking and always releases sneak", async () => {
   const target = new Vec3(1, 64, 0);
-  let placed = false;
-  const controls: boolean[] = [];
-  const bot = placer({
-    look: async (yaw: number, pitch: number) => {
-      assert.equal(yaw, -Math.PI / 2);
-      assert.equal(pitch, 0);
-    },
-    setControlState: (_control: string, state: boolean) => controls.push(state),
-    blockAt: () => (placed ? { name: "red_bed", position: target } : { name: "air", position: target }),
-    _placeBlockWithOptions: async (_support: unknown, _face: unknown, options: unknown) => {
-      assert.deepEqual(options, { forceLook: "ignore", swingArm: "right" });
-      placed = true;
-    },
+  const { bot, clock, server, world, item } = placer("red_bed");
+  using _timers = clock.install();
+  withNativePlacement(bot, async (_support, _face, options) => {
+    assert.deepEqual(options, { forceLook: "ignore", swingArm: "right" });
+    world.setCell(target, "red_bed");
   });
 
-  const result = await placeBlock(bot, {
-    item: { name: "red_bed" } as InventoryItem,
-    support: { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: (block) => block.name.endsWith("_bed"),
-    lookDirection: new Vec3(1, 0, 0),
-  });
+  const result = await settledAfter(
+    clock,
+    QUARTER_TURN_MS,
+    placeBlock(bot, placementAt(bot, item, target, { matches: (block: WorldBlock) => block.name.endsWith("_bed"), lookDirection: new Vec3(1, 0, 0) })),
+  );
 
   assert.equal(result.kind, "placed");
-  assert.deepEqual(controls, [true, false]);
+  assert.equal(bot.entity.yaw, -Math.PI / 2);
+  assert.equal(bot.entity.pitch, 0);
+  assert.deepEqual(shiftPackets(server), [0, 1]);
 });
 
 test("ordinary placement requests immediate native face aiming", async () => {
   const target = new Vec3(1, 64, 0);
-  const support = { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock;
   const face = new Vec3(0, 1, 0);
-  let placed = false;
-  const controls: boolean[] = [];
-  const bot = placer({
-    lookAt: async (point: Vec3, force: boolean) => {
-      assert.deepEqual(point, new Vec3(1.5, 64, 0.5));
-      assert.equal(force, true);
-    },
-    setControlState: (_control: string, state: boolean) => controls.push(state),
-    blockAt: () => ({ name: placed ? "cobblestone" : "air", position: target }),
-    placeBlock: async () => {
-      throw new Error("Default native placement waits for a smooth turn");
-    },
-    _placeBlockWithOptions: async (actualSupport: unknown, actualFace: unknown, options: unknown) => {
-      assert.equal(actualSupport, support);
-      assert.deepEqual(actualFace, face);
-      assert.deepEqual(options, { forceLook: "ignore", swingArm: "right" });
-      placed = true;
+  const { bot, clock, server, world, item } = placer("cobblestone", {
+    overrides: {
+      lookAt: async (point: Vec3, force?: boolean) => {
+        assert.deepEqual(point, new Vec3(1.5, 64, 0.5));
+        assert.equal(force, true);
+      },
+      placeBlock: async () => {
+        throw new Error("Default native placement waits for a smooth turn");
+      },
     },
   });
-  const result = await placeBlock(bot, {
-    item: { name: "cobblestone" } as InventoryItem,
-    support,
-    face,
-    expectedCells: [target],
-    matches: (block) => block.name === "cobblestone",
+  using _timers = clock.install();
+  const support = bot.blockAt(target.offset(0, -1, 0))!;
+  withNativePlacement(bot, async (actualSupport, actualFace, options) => {
+    assert.equal(actualSupport, support);
+    assert.deepEqual(actualFace, face);
+    assert.deepEqual(options, { forceLook: "ignore", swingArm: "right" });
+    world.setCell(target, "cobblestone");
   });
+  const result = await settledAfter(clock, 0, placeBlock(bot, { ...placementAt(bot, item, target), support, face }));
   assert.equal(result.kind, "placed");
-  assert.deepEqual(controls, [true, false]);
+  assert.deepEqual(shiftPackets(server), [0, 1]);
 });
 
 for (const entersDuringAim of [false, true]) {
   test(`full-cube placement refuses an observed body ${entersDuringAim ? "entering during aim" : "already in the cell"}`, async () => {
     const target = new Vec3(0, 64, 0);
-    const entity = {
-      id: 9,
-      name: "wither_skeleton",
-      type: "hostile",
-      isValid: true,
-      width: 0.7,
-      height: 2.4,
-      position: new Vec3(0.5, 64, entersDuringAim ? 3 : 0.5),
-    };
     let packets = 0;
     let equips = 0;
-    const bot = placer({
-      entities: { 9: entity },
-      entity: { id: 1 },
-      equip: async () => {
-        equips++;
-      },
-      lookAt: async () => {
-        entity.position.z = 0.5;
-      },
-      _placeBlockWithOptions: async () => {
-        packets++;
+    const { bot, clock, item } = placer("cobblestone", {
+      entities: { 9: { name: "wither_skeleton", position: new Vec3(0.5, 64, entersDuringAim ? 3 : 0.5) } },
+      overrides: {
+        equip: async () => {
+          equips++;
+        },
+        lookAt: async () => {
+          bot.entities[9]!.position.z = 0.5;
+        },
       },
     });
-    const result = await placeBlock(bot, {
-      item: { name: "cobblestone" } as InventoryItem,
-      support: { position: target.offset(0, -1, 0) } as WorldBlock,
-      face: new Vec3(0, 1, 0),
-      expectedCells: [target],
-      matches: () => true,
+    using _timers = clock.install();
+    withNativePlacement(bot, async () => {
+      packets++;
     });
+    const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { matches: () => true })));
     assert.equal(result.kind, "failed");
     if (result.kind === "failed") assert.match(result.error, /\(0, 64, 0\).*wither_skeleton #9/);
     assert.equal(packets, 0);
@@ -146,15 +160,12 @@ for (const entersDuringAim of [false, true]) {
 
 test("a player standing in the cell is named by username, with a request to step out, not an entity id", async () => {
   const target = new Vec3(0, 64, 0);
-  const entity = { id: 305, name: "player", username: "Tester", type: "player", isValid: true, width: 0.6, height: 1.8, position: new Vec3(0.5, 64, 0.5) };
-  const bot = placer({ entities: { 305: entity }, entity: { id: 1 }, players: { Tester: { gamemode: 0 } } });
-  const result = await placeBlock(bot, {
-    item: { name: "cobblestone" } as InventoryItem,
-    support: { position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: () => true,
+  const { bot, clock, item } = placer("cobblestone", {
+    entities: { 305: { name: "player", username: "Tester", position: new Vec3(0.5, 64, 0.5) } },
+    players: { Tester: { gamemode: 0 } },
   });
+  using _timers = clock.install();
+  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { matches: () => true })));
   assert.equal(result.kind, "failed");
   if (result.kind === "failed") {
     assert.match(result.error, /overlaps player Tester/u);
@@ -166,21 +177,20 @@ test("a player standing in the cell is named by username, with a request to step
 test("does not accept half of a multi-block placement", async () => {
   const foot = new Vec3(1, 64, 0);
   const head = new Vec3(2, 64, 0);
-  const bot = placer({
-    blockAt: (position: Vec3) => (position.equals(foot) ? { name: "red_bed", position } : { name: "air", position }),
-    _placeBlockWithOptions: async () => {},
-  });
-  const stopClock = startServerClock(bot);
+  const { bot, clock, item } = placer("red_bed", { cells: { "1,64,0": "red_bed" } });
+  using _timers = clock.install();
+  withNativePlacement(bot, async () => {});
 
-  const result = await placeBlock(bot, {
-    item: { name: "red_bed" } as InventoryItem,
-    support: { name: "stone", position: foot.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [foot, head],
-    matches: (block) => block.name.endsWith("_bed"),
-    lookDirection: new Vec3(1, 0, 0),
-  });
-  stopClock();
+  const result = await settledAfter(
+    clock,
+    QUARTER_TURN_MS + TWO_TIME_PACKETS_MS,
+    placeBlock(bot, {
+      ...placementAt(bot, item, foot),
+      expectedCells: [foot, head],
+      matches: (block: WorldBlock) => block.name.endsWith("_bed"),
+      lookDirection: new Vec3(1, 0, 0),
+    }),
+  );
 
   assert.equal(result.kind, "failed");
 });
@@ -188,122 +198,89 @@ test("does not accept half of a multi-block placement", async () => {
 test("waits for every cell of a multi-block placement", async () => {
   const foot = new Vec3(1, 64, 0);
   const head = new Vec3(2, 64, 0);
-  let settled = false;
-  const bot = placer({
-    blockAt: (position: Vec3) =>
-      position.equals(foot) || (settled && position.equals(head))
-        ? { name: "red_bed", position }
-        : { name: "air", position },
-    // The head half is a server moment behind the foot half.
-    _placeBlockWithOptions: async () => {
-      setTimeout(() => (settled = true), 40);
-    },
+  const { bot, clock, world, item } = placer("red_bed", { cells: { "1,64,0": "red_bed" } });
+  using _timers = clock.install();
+  // The head half is a server moment behind the foot half.
+  withNativePlacement(bot, async () => {
+    clock.after(40, () => world.setCell(head, "red_bed"));
   });
 
-  const result = await placeBlock(bot, {
-    item: { name: "red_bed" } as InventoryItem,
-    support: { name: "stone", position: foot.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [foot, head],
-    matches: (block) => block.name.endsWith("_bed"),
-    lookDirection: new Vec3(1, 0, 0),
-  });
+  const result = await settledAfter(
+    clock,
+    QUARTER_TURN_MS,
+    placeBlock(bot, {
+      ...placementAt(bot, item, foot),
+      expectedCells: [foot, head],
+      matches: (block: WorldBlock) => block.name.endsWith("_bed"),
+      lookDirection: new Vec3(1, 0, 0),
+    }),
+  );
 
   assert.equal(result.kind, "placed");
 });
 
 test("releases sneak when Mineflayer rejects placement", async () => {
-  const controls: boolean[] = [];
-  const bot = placer({
-    setControlState: (_control: string, state: boolean) => controls.push(state),
-    _placeBlockWithOptions: async () => {
-      throw new Error("rejected");
-    },
+  const { bot, clock, server, item } = placer("red_bed");
+  using _timers = clock.install();
+  withNativePlacement(bot, async () => {
+    throw new Error("rejected");
   });
 
-  const result = await placeBlock(bot, {
-    item: { name: "red_bed" } as InventoryItem,
-    support: { name: "stone", position: new Vec3(0, 63, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [new Vec3(0, 64, 0)],
-    matches: (block) => block.name.endsWith("_bed"),
-    lookDirection: new Vec3(1, 0, 0),
-  });
+  const result = await settledAfter(
+    clock,
+    QUARTER_TURN_MS,
+    placeBlock(bot, { ...placementAt(bot, item, new Vec3(0, 64, 0)), lookDirection: new Vec3(1, 0, 0) }),
+  );
 
   assert.deepEqual(result, { kind: "failed", error: "rejected" });
-  assert.deepEqual(controls, [true, false]);
+  assert.deepEqual(shiftPackets(server), [0, 1]);
 });
 
 test("uses the 1.21.4 sneaking action before placement against an interactive support", async () => {
   const target = new Vec3(0, 64, 0);
-  const protocol: string[] = [];
-  let placed = false;
-  const bot = placer({
-    version: "1.21.4",
-    entity: { id: 7 },
-    _client: {
-      write: (name: string, packet: { actionId?: number }) => protocol.push(`${name}:${packet.actionId}`),
-    },
-    blockAt: () => (placed ? { name: "furnace", position: target } : { name: "air", position: target }),
-    placeBlock: async () => {
-      protocol.push("place");
-      placed = true;
-    },
-  });
+  // Mineflayer's own placement on the fake: the look at the face, `block_place`, the server's block update.
+  const { bot, clock, server, item } = placer("furnace", { version: "1.21.4", cells: { "0,63,0": "crafting_table" } });
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, {
-    item: { name: "furnace" } as InventoryItem,
-    support: { name: "crafting_table", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: (block) => block.name === "furnace",
-  });
+  const result = await settledAfter(clock, QUARTER_TURN_MS, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.equal(result.kind, "placed");
+  const protocol = server.packets
+    .filter((packet) => packet.name === "entity_action" || packet.name === "block_place")
+    .map((packet) => (packet.name === "entity_action" ? `entity_action:${(packet.data as { actionId: number }).actionId}` : "place"));
   assert.deepEqual(protocol, ["entity_action:0", "place", "entity_action:1"]);
 });
 
 test("accepts a physically observed placement after Mineflayer's block-update timeout", async () => {
   const target = new Vec3(0, 64, 0);
-  let placed = false;
-  const bot = placer({
-    blockAt: () => (placed ? { name: "furnace", position: target } : { name: "air", position: target }),
-    placeBlock: async () => {
-      placed = true;
-      throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+  const { bot, clock, world, item } = placer("furnace", {
+    overrides: {
+      placeBlock: async () => {
+        world.setCell(target, "furnace");
+        throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+      },
     },
   });
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, {
-    item: { name: "furnace" } as InventoryItem,
-    support: { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: (block) => block.name === "furnace",
-  });
+  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.equal(result.kind, "placed");
 });
 
 test("preserves a block-update timeout with post-timeout world evidence", async () => {
   const target = new Vec3(0, 64, 0);
-  const bot = placer({
-    blockAt: () => ({ name: "air", position: target }),
-    placeBlock: async () => {
-      throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+  const { bot, clock, item } = placer("furnace", {
+    overrides: {
+      placeBlock: async () => {
+        throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+      },
     },
   });
+  using _timers = clock.install();
   const sentAt = bot.time.age;
-  const stopClock = startServerClock(bot);
 
-  const result = await placeBlock(bot, {
-    item: { name: "furnace" } as InventoryItem,
-    support: { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target],
-    matches: (block) => block.name === "furnace",
-  });
-  stopClock();
+  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.deepEqual(result, {
     kind: "failed",
@@ -314,77 +291,66 @@ test("preserves a block-update timeout with post-timeout world evidence", async 
   assert.equal(bot.time.age, sentAt + 40, "the wait ended on the server answer: two time packets");
 });
 
-const COBBLE = { name: "cobblestone" } as InventoryItem;
-
-/** A survival bot placing cobblestone at one cell; `appear` makes the world show the block, `consume` the slot update. */
-function survivalPlacer(target: Vec3, overrides: (world: { appear: () => void; consume: () => void }) => Record<string, unknown> = () => ({})) {
-  let count = 1;
-  let appeared = false;
-  const inventory = Object.assign(new EventEmitter(), { items: () => (count > 0 ? [{ name: "cobblestone", count }] : []) });
-  const world = {
-    appear: () => void (appeared = true),
-    consume: () => {
-      count = 0;
-      inventory.emit("updateSlot");
-    },
-  };
-  const bot = placer({
-    game: { gameMode: "survival" },
-    inventory,
-    blockAt: () => ({ name: appeared ? "cobblestone" : "air", position: target }),
-    ...overrides(world),
-  });
-  return { bot, placement: placementAt(target) };
+/** What the test's server does with a survival placement: show the block, send the slot update, on its clock. */
+interface PlacementAnswer {
+  readonly appear: () => void;
+  readonly consume: () => void;
+  readonly clock: FakeClock;
 }
 
-function placementAt(target: Vec3, extra: Record<string, unknown> = {}) {
-  return {
-    item: COBBLE,
-    support: { name: "stone", position: target.offset(0, -1, 0) } as WorldBlock,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target] as [Vec3],
-    matches: (block: WorldBlock) => block.name === "cobblestone",
-    ...extra,
-  };
+/** A survival bot placing its one cobblestone at `target`, the placement answered by `answer`. */
+function survivalPlacer(target: Vec3, answer: (scene: PlacementAnswer) => Promise<void>) {
+  const harness = placer("cobblestone", {
+    gameMode: "survival",
+    overrides: {
+      placeBlock: () =>
+        answer({
+          appear: () => harness.world.setCell(target, "cobblestone"),
+          consume: () => harness.inventory.updateSlot(36, null as never),
+          clock: harness.clock,
+        }),
+    },
+  });
+  return { ...harness, placement: placementAt(harness.bot, harness.item, target) };
 }
 
 test("a block whose slot update comes 600 ms after it is placed, not failed", async () => {
   const target = new Vec3(0, 64, 0);
-  const { bot, placement } = survivalPlacer(target, (world) => ({
-    placeBlock: async () => {
-      world.appear();
-      setTimeout(world.consume, 600);
-    },
-  }));
+  const { bot, clock, placement } = survivalPlacer(target, async (scene) => {
+    scene.appear();
+    scene.clock.after(600, scene.consume);
+  });
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, placement);
+  const result = await settledAfter(clock, 700, placeBlock(bot, placement));
 
   assert.equal(result.kind, "placed");
 });
 
 test("a block that appears after mineflayer's timeout but before the world age moved 40 ticks is placed", async () => {
   const target = new Vec3(0, 64, 0);
-  const bot = placer({
-    blockAt: () => (bot.time.age >= 24_020 ? { name: "cobblestone", position: target } : { name: "air", position: target }),
-    placeBlock: async () => {
-      throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+  const { bot, clock, server, world, item } = placer("cobblestone", {
+    overrides: {
+      placeBlock: async () => {
+        throw new Error("Event blockUpdate:(0, 64, 0) did not fire within timeout of 5000ms");
+      },
     },
   });
-  const stopClock = startServerClock(bot);
+  using _timers = clock.install();
+  // The block lands with the first time packet after the send: 20 ticks, half the answer wait.
+  server.onTimePacket(() => world.setCell(target, "cobblestone"));
 
-  const result = await placeBlock(bot, placementAt(target));
-  stopClock();
+  const result = await settledAfter(clock, 1_050, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.equal(result.kind, "placed");
 });
 
 test("a server that answered without the block fails after 40 ticks with the observed cells", async () => {
   const target = new Vec3(0, 64, 0);
-  const bot = placer({ blockAt: () => ({ name: "air", position: target }), placeBlock: async () => {} });
-  const stopClock = startServerClock(bot);
+  const { bot, clock, item } = placer("cobblestone", { overrides: { placeBlock: async () => {} } });
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, placementAt(target));
-  stopClock();
+  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.deepEqual(result, {
     kind: "failed",
@@ -394,45 +360,35 @@ test("a server that answered without the block fails after 40 ticks with the obs
 
 test("physics stopped (waitForTicks never resolves): the block wait still ends on the wall clock", async () => {
   const target = new Vec3(0, 64, 0);
-  const bot = placer({
-    waitForTicks: () => new Promise(() => undefined),
-    blockAt: () => ({ name: "air", position: target }),
-    placeBlock: async () => {},
-  });
-  const started = Date.now();
+  const { bot, clock, server, item } = placer("cobblestone", { overrides: { placeBlock: async () => {} } });
+  using _timers = clock.install();
+  // No physics tick and no time packet: only the wall bound can end the wait.
+  bot.physicsEnabled = false;
+  server.stop();
 
-  const outcome = await Promise.race([
-    placeBlock(bot, placementAt(target, { answerWallMs: 120 })),
-    new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2_000)),
-  ]);
+  const outcome = await settledAfter(clock, 150, placeBlock(bot, placementAt(bot, item, target, { answerWallMs: 120 })));
 
-  assert.notEqual(outcome, "hung", "the wait must not depend on physics ticks");
-  assert.equal((outcome as { kind: string }).kind, "failed");
-  assert.ok(Date.now() - started < 1_500);
+  assert.equal(outcome.kind, "failed");
 });
 
 test("creative placement does not wait for a count", async () => {
   const target = new Vec3(0, 64, 0);
-  let placed = false;
-  const bot = placer({
-    blockAt: () => ({ name: placed ? "cobblestone" : "air", position: target }),
-    placeBlock: async () => void (placed = true),
+  const { bot, clock, world, item } = placer("cobblestone", {
+    overrides: { placeBlock: async () => world.setCell(target, "cobblestone") },
   });
-  const started = Date.now();
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, placementAt(target));
+  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target)));
 
   assert.equal(result.kind, "placed");
-  assert.ok(Date.now() - started < 200);
 });
 
 test("a block that appeared but whose consumption never shows fails once the server answered", async () => {
   const target = new Vec3(0, 64, 0);
-  const { bot, placement } = survivalPlacer(target, (world) => ({ placeBlock: async () => world.appear() }));
-  const stopClock = startServerClock(bot);
+  const { bot, clock, placement } = survivalPlacer(target, async (scene) => scene.appear());
+  using _timers = clock.install();
 
-  const result = await placeBlock(bot, placement);
-  stopClock();
+  const result = await settledAfter(clock, TWO_TIME_PACKETS_MS, placeBlock(bot, placement));
 
   assert.equal(result.kind, "failed");
   if (result.kind === "failed") assert.match(result.error, /consumption of cobblestone was not observed \(inventory 1 → 1\)/u);
@@ -441,14 +397,17 @@ test("a block that appeared but whose consumption never shows fails once the ser
 test("onSent fires once, after the equip and look, right before the placement packet", async () => {
   const target = new Vec3(0, 64, 0);
   const calls: string[] = [];
-  const bot = placer({
-    equip: async () => void calls.push("equip"),
-    lookAt: async () => void calls.push("look"),
-    blockAt: () => ({ name: "cobblestone", position: target }),
-    _placeBlockWithOptions: async () => void calls.push("packet"),
+  const { bot, clock, item } = placer("cobblestone", {
+    cells: { "0,64,0": "cobblestone" },
+    overrides: {
+      equip: async () => void calls.push("equip"),
+      lookAt: async () => void calls.push("look"),
+    },
   });
+  using _timers = clock.install();
+  withNativePlacement(bot, async () => void calls.push("packet"));
 
-  await placeBlock(bot, placementAt(target, { onSent: () => calls.push("sent") }));
+  await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { onSent: () => calls.push("sent") })));
 
   assert.deepEqual(calls, ["equip", "look", "sent", "packet"]);
 });
@@ -456,14 +415,17 @@ test("onSent fires once, after the equip and look, right before the placement pa
 test("onSent does not fire when the look throws", async () => {
   const target = new Vec3(0, 64, 0);
   let sent = 0;
-  const bot = placer({
-    lookAt: async () => {
-      throw new Error("no look");
+  const { bot, clock, item } = placer("cobblestone", {
+    overrides: {
+      lookAt: async () => {
+        throw new Error("no look");
+      },
     },
-    _placeBlockWithOptions: async () => {},
   });
+  using _timers = clock.install();
+  withNativePlacement(bot, async () => {});
 
-  const result = await placeBlock(bot, placementAt(target, { onSent: () => void (sent += 1) }));
+  const result = await settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { onSent: () => void (sent += 1) })));
 
   assert.equal(result.kind, "failed");
   assert.equal(sent, 0);
@@ -473,13 +435,12 @@ test("onSent does not fire when the signal aborts before the send", async () => 
   const target = new Vec3(0, 64, 0);
   const controller = new AbortController();
   let sent = 0;
-  const bot = placer({
-    lookAt: async () => controller.abort(new Error("cut")),
-    _placeBlockWithOptions: async () => {},
-  });
+  const { bot, clock, item } = placer("cobblestone", { overrides: { lookAt: async () => controller.abort(new Error("cut")) } });
+  using _timers = clock.install();
+  withNativePlacement(bot, async () => {});
 
   await assert.rejects(
-    placeBlock(bot, placementAt(target, { signal: controller.signal, onSent: () => void (sent += 1) })),
+    settledAfter(clock, 0, placeBlock(bot, placementAt(bot, item, target, { signal: controller.signal, onSent: () => void (sent += 1) }))),
     /cut/u,
   );
   assert.equal(sent, 0);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { botEyesInWater, eyesInWater, type WaterCell } from "./eyes-in-water.js";
 
 /** A column at x 0, z 0 read from cells by y; every other cell is air. */
@@ -47,14 +47,7 @@ test("air, cave air, stone, lava and unloaded cells are not water", () => {
 });
 
 test("botEyesInWater reads the bot's own position at eye height, or a given feet position", () => {
-  const cells = column({ 1: flowing(4) });
-  const bot = {
-    entity: { position: new Vec3(0.5, 0, 0.5) },
-    blockAt: (at: Vec3) => {
-      const cell = cells(Math.floor(at.x), Math.floor(at.y), Math.floor(at.z));
-      return cell && { name: cell.name, getProperties: () => cell.properties ?? {} };
-    },
-  } as unknown as Bot;
+  const { bot } = createFakeBot({ position: new Vec3(0.5, 0, 0.5), cells: { "0,1,0": { name: "water", properties: { level: 4 } } } });
   assert.equal(botEyesInWater(bot), false, "level 4 at feet 0.0");
   bot.entity.position.y = 0.2 - 0.4; // feet below the floor line: point 1.309 in cell 1, under level 4's 1.444
   assert.equal(botEyesInWater(bot), true);

@@ -1,12 +1,11 @@
 import { installNetherVinePhysics, MineflayerBot, mineflayerBotSurface, type MineflayerBotSurface } from "./bot.js";
-import type { Bot } from "mineflayer";
-import { EventEmitter } from "node:events";
 import { waterStancesHeld } from "../steering/hold-water-position.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../world/memory-world.js";
 import type { Position3 } from "../world/world.js";
+import { createFakeBot, flush } from "../../test-support/fake-bot/index.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
 
 /** A Mineflayer surface that does nothing, standing on the origin, with the given parts replaced. */
@@ -754,7 +753,7 @@ test("a break is accepted only once the server has answered for its cell, and th
   const run = serverWatchedDig(() => new Promise<boolean>((resolve) => (answered = resolve)));
   let settled = false;
   void run.effect.completion.then(() => (settled = true));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flush();
   assert.equal(settled, false, "mineflayer's own air write is not the server's answer");
   answered(true);
   assert.deepEqual(await run.effect.completion, { kind: "accepted" });
@@ -792,10 +791,8 @@ test("a dig that throws still removes the server watch", async () => {
 });
 
 test("a water stance held through the bot surface is counted on the raw bot the runtime asks (review 2026-10-19 #2)", () => {
-  const raw = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 64, 0.5), isInWater: true, onGround: true, yaw: 0 },
-    setControlState: () => {},
-  }) as unknown as Bot;
+  const { bot: raw } = createFakeBot();
+  Object.assign(raw.entity, { isInWater: true });
   const release = mineflayerBotSurface(raw).holdWaterStance(undefined, () => {});
   assert.equal(waterStancesHeld(raw), 1, "runtime.steering asks with the raw bot");
   release();

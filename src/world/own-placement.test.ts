@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
-import { startServerClock } from "../test-support/server-clock.js";
+import { type FakeCell, type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement } from "./own-placement.js";
 import type { WorldBlock } from "./placement.js";
 
@@ -10,23 +9,31 @@ const cell = new Vec3(2, 64, 0);
 const head = new Vec3(3, 64, 0);
 const isCobble = (block: WorldBlock) => block.name === "cobblestone";
 
-/** A bot whose world holds what `cells` says (name per "x,y,z"); a cell not in the map is air, `null` is not loaded. */
-function worldBot(cells: Map<string, string | null>) {
-  return botFixture({}, {
-    blockAt: (position: Vec3) => {
-      const name = cells.get(`${position.x},${position.y},${position.z}`);
-      return name === null ? null : { name: name ?? "air", position };
-    },
-  });
+/** A bot whose world holds `cells` (air elsewhere above the ground, `"void"` not loaded), its clock driving the timers. */
+function worldBot(cells: Record<string, FakeCell> = {}) {
+  return createFakeBot({ clock: createFakeClock({ mode: "mocked" }), cells });
 }
 
+/** Move the clock `ms` on and hand back `pending`, which must be over by then. Stopgap until M2 merges `clock.settle`. */
+async function settledAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
+  let over = false;
+  void pending.then(() => (over = true), () => (over = true));
+  await clock.advance(ms);
+  assert.ok(over, `still waiting after ${ms} ms of clock`);
+  return pending;
+}
+
+/** Two time packets, one a second (contract check `world-age-per-second`): the 40 ticks past a send. */
+const TWO_TIME_PACKETS_MS = 2_000;
+
 test("none before a send", async () => {
+  const { bot } = worldBot();
   const own = startOwnPlacement();
-  assert.deepEqual(await awaitOwnPlacement(worldBot(new Map()), own, isCobble), { kind: "none" });
+  assert.deepEqual(await awaitOwnPlacement(bot, own, isCobble), { kind: "none" });
 });
 
 test("landed on a match in any sent cell", async () => {
-  const bot = worldBot(new Map([["3,64,0", "cobblestone"]]));
+  const { bot } = worldBot({ "3,64,0": "cobblestone" });
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell, head], bot.time.age);
 
@@ -37,7 +44,7 @@ test("landed on a match in any sent cell", async () => {
 });
 
 test("a cell that is not loaded is unloaded, whatever the world age", async () => {
-  const bot = worldBot(new Map([["2,64,0", null]]));
+  const { bot } = worldBot({ "2,64,0": "void" });
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
 
@@ -45,62 +52,66 @@ test("a cell that is not loaded is unloaded, whatever the world age", async () =
 });
 
 test("not_landed once the world age moved 40 ticks past the send", async () => {
-  const bot = worldBot(new Map());
+  const { bot, clock } = worldBot();
+  using _timers = clock.install();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
-  const stopClock = startServerClock(bot);
 
-  const seen = await awaitOwnPlacement(bot, own, isCobble);
-  stopClock();
+  const seen = await settledAfter(clock, TWO_TIME_PACKETS_MS, awaitOwnPlacement(bot, own, isCobble));
 
   assert.deepEqual(seen, { kind: "not_landed" });
   assert.ok(bot.time.age >= 24_040);
 });
 
 test("the wait counts from the send: 40 ticks already past is answered at once", async () => {
-  const bot = worldBot(new Map());
+  const { bot, clock } = worldBot();
+  using _timers = clock.install();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age - 40);
-  const started = Date.now();
 
-  assert.deepEqual(await awaitOwnPlacement(bot, own, isCobble), { kind: "not_landed" });
-  assert.ok(Date.now() - started < 200);
+  assert.deepEqual(await settledAfter(clock, 0, awaitOwnPlacement(bot, own, isCobble)), { kind: "not_landed" });
 });
 
 test("a block that lands while the server is behind is landed, not a second placement", async () => {
-  const cells = new Map<string, string | null>();
-  const bot = worldBot(cells);
+  const { bot, clock, world } = worldBot();
+  using _timers = clock.install();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
-  setTimeout(() => cells.set("2,64,0", "cobblestone"), 150);
+  clock.after(150, () => world.setCell(cell, "cobblestone"));
 
-  assert.equal((await awaitOwnPlacement(bot, own, isCobble)).kind, "landed");
+  assert.equal((await settledAfter(clock, 200, awaitOwnPlacement(bot, own, isCobble))).kind, "landed");
 });
 
 test("wall bound when the server clock stops", async () => {
-  const bot = worldBot(new Map());
+  const { bot, clock, server } = worldBot();
+  using _timers = clock.install();
+  server.stop();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
-  const started = Date.now();
+  let over = false;
+  const waiting = awaitOwnPlacement(bot, own, isCobble, undefined, 120);
+  void waiting.then(() => (over = true));
 
-  const seen = await awaitOwnPlacement(bot, own, isCobble, undefined, 120);
+  await clock.advance(100);
+  assert.equal(over, false, "still waiting before the 120 ms wall bound");
+  const seen = await settledAfter(clock, 50, waiting);
 
   assert.deepEqual(seen, { kind: "not_landed" });
-  assert.ok(Date.now() - started >= 100 && Date.now() - started < 1_500);
 });
 
 test("the abort signal ends the wait", async () => {
-  const bot = worldBot(new Map());
+  const { bot, clock } = worldBot();
+  using _timers = clock.install();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
   const controller = new AbortController();
-  setTimeout(() => controller.abort(new Error("cut")), 50);
+  clock.after(50, () => controller.abort(new Error("cut")));
 
-  await assert.rejects(awaitOwnPlacement(bot, own, isCobble, controller.signal), /cut/);
+  await assert.rejects(settledAfter(clock, 100, awaitOwnPlacement(bot, own, isCobble, controller.signal)), /cut/);
 });
 
 test("forgotten placements are none again, and a second send replaces the first", async () => {
-  const bot = worldBot(new Map([["2,64,0", "cobblestone"]]));
+  const { bot } = worldBot({ "2,64,0": "cobblestone" });
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
   forgetPlacement(own);
@@ -114,12 +125,11 @@ test("forgotten placements are none again, and a second send replaces the first"
 test("two records on two requests keep their own cells", async () => {
   const first = startOwnPlacement();
   const second = startOwnPlacement();
-  const bot = worldBot(new Map([["2,64,0", "cobblestone"]]));
+  const { bot, clock } = worldBot({ "2,64,0": "cobblestone" });
+  using _timers = clock.install();
   recordPlacementSent(first, [cell], bot.time.age);
   recordPlacementSent(second, [head], bot.time.age);
-  const stopClock = startServerClock(bot);
 
   assert.equal((await awaitOwnPlacement(bot, first, isCobble)).kind, "landed");
-  assert.equal((await awaitOwnPlacement(bot, second, isCobble)).kind, "not_landed");
-  stopClock();
+  assert.equal((await settledAfter(clock, TWO_TIME_PACKETS_MS, awaitOwnPlacement(bot, second, isCobble))).kind, "not_landed");
 });

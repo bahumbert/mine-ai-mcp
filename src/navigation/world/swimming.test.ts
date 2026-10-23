@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "./memory-world.js";
 
-const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+const { bot: registryBot } = createFakeBot();
 import { admitsDive, holdSwimDepth, openWaterSurface, swimAscent, swimBreathPath, swimExitPath, swimTravelTicks } from "./swimming.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";

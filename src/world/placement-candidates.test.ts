@@ -1,18 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { findFlatPlacementCandidates } from "./placement-candidates.js";
 
 test("finds supported flat footprints without placing through the player", () => {
-  const bot = {
-    version: "1.21.4",
-    entity: { position: new Vec3(0.8, 64, 0.5) },
-    blockAt: (position: Vec3) => ({
-      name: position.y === 63 ? "stone" : "air",
-      boundingBox: position.y === 63 ? "block" : "empty",
-    }),
-  } as Bot;
+  // Stone at y 63 and below under the feet, air above.
+  const { bot } = createFakeBot({ position: new Vec3(0.8, 64, 0.5) });
 
   const candidates = findFlatPlacementCandidates(bot, [new Vec3(0, 0, 0), new Vec3(1, 0, 0)], 1);
 

@@ -18,10 +18,11 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
-import { botFixture, type FakeBot } from "../../test-support/bot.js";
+import { type FakeBot, type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { blockClass, observeMineflayerBlock } from "../mineflayer/world.js";
 import { createMovements } from "../runtime.js";
+import { timeoutSignal } from "../../utils/wall-timers.js";
 import type { NavigationEvent } from "../telemetry/index.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { Vec3 } from "vec3";
@@ -29,6 +30,19 @@ import { Vec3 } from "vec3";
 const walking = () => createMovementPolicy({ allowSprinting: false });
 /** Commit as soon as there is a segment worth walking, so a run is made of continuations rather than one route. */
 const EARLY_COMMIT = { primaryTimeoutMs: 0, failureTimeoutMs: 1_000 } as const;
+
+/**
+ * Hand back `pending` once it settles, moving the clock on in slices meanwhile: a wait on the fake clock (the run's
+ * own, or a test double's) ends when the run reaches it, whenever that is.
+ * Stopgap until M2 merges `clock.settle`.
+ */
+async function drivenBy<T>(clock: FakeClock, pending: Promise<T>, limitMs = 60_000): Promise<T> {
+  let over = false;
+  void pending.then(() => (over = true), () => (over = true));
+  for (let passed = 0; !over && passed < limitMs; passed += 50) await clock.advance(50);
+  assert.ok(over, `the run still waits after ${limitMs} ms of clock`);
+  return pending;
+}
 
 test("repeated start invalidation settles as planning_stalled and releases the navigation owner", async (t) => {
   let now = 0;
@@ -107,8 +121,13 @@ test("a run stops in the words of whoever asked, before it moves, and a timeout 
   if (byCaller.kind === "stopped") assert.equal(byCaller.reason, "the requested quantity is in the inventory");
   assert.equal(bot.current.position.x, 0.5);
 
-  const timeout = AbortSignal.timeout(0);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const clock = createFakeClock({ mode: "mocked" });
+  let timeout: AbortSignal;
+  {
+    using _timers = clock.install();
+    timeout = timeoutSignal(0);
+    await clock.advance(10);
+  }
   const byTimeout = await settle(createNavigator({ world: flatWorld(), bot: new FakeNavigationBot() }), {
     ...far,
     signal: timeout,
@@ -1040,7 +1059,7 @@ for (const displacement of ["airborne", "different_cell"] as const) {
 const CAGE: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: -1, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "house" };
 
 function cagedBot(regions: readonly ProtectedRegion[]): FakeBot {
-  const bot = botFixture({ username: "Theo", position: new Vec3(0.5, 63, 0.5), items: [{ name: "dirt", count: 16 }] });
+  const { bot } = createFakeBot({ username: "Theo", position: new Vec3(0.5, 63, 0.5), carried: { dirt: 16 } });
   setProtectedRegionsProvider(bot, () => regions);
   return bot;
 }
@@ -1113,12 +1132,15 @@ test("an airborne start with physics stopped fails unstable within about two sec
   const bot = new FakeNavigationBot();
   bot.current = { ...bot.current, stance: "airborne" };
   stabilizeUntilAborted(bot);
-  const startedAt = performance.now();
-  const outcome = await settle(createNavigator({ world: flatWorld(), bot }), {
+  // The landing wait is a wall-clock wait of the run's own: the clock moves it.
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const startedAt = clock.now();
+  const outcome = await drivenBy(clock, settle(createNavigator({ world: flatWorld(), bot }), {
     goal: exactBlockGoal({ x: 3, y: 63, z: 0 }),
     policy: walking(),
-  });
-  const waited = performance.now() - startedAt;
+  }));
+  const waited = clock.now() - startedAt;
   assert.equal(outcome.kind, "failed");
   assert.ok(waited >= 1_800 && waited < 3_000, `failed after ${waited} ms`);
   if (outcome.kind === "failed" && outcome.failure.kind === "movement_failed" && outcome.failure.movement.kind === "unstable")
@@ -1169,7 +1191,9 @@ test("a search overtaken by an impulse with physics stopped still releases its h
       }
     }),
   });
-  const outcome = await settle(navigator, { goal: nearGoal({ x: 5, y: 63, z: 0 }, 0), policy: walking() });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const outcome = await drivenBy(clock, settle(navigator, { goal: nearGoal({ x: 5, y: 63, z: 0 }, 0), policy: walking() }));
   assert.equal(hit, true);
   assert.notEqual(outcome.kind, "completed");
   assert.equal(holding, false, "the hold is released although the landing could not be observed");
@@ -1179,13 +1203,14 @@ test("a search overtaken by an impulse with physics stopped still releases its h
 
 // ── Arrival is judged once, in the foreground ────────────────────────────────
 
-/** A bot whose first step carries the body to `landing` at once (a push, a current), then takes `walkMs` to report it done. */
+/** A bot whose first step carries the body to `landing` at once (a push, a current), then takes `walkMs` of `clock` to report it done. */
 class CarriedBot extends FakeNavigationBot {
   inFlight = false;
   carried = false;
   constructor(
     readonly landing: { readonly x: number; readonly y: number; readonly z: number },
     readonly walkMs: number,
+    readonly clock: FakeClock,
   ) {
     super();
   }
@@ -1197,17 +1222,18 @@ class CarriedBot extends FakeNavigationBot {
     this.carried = true;
     this.arrive(this.landing);
     this.inFlight = true;
-    await new Promise((resolve) => setTimeout(resolve, this.walkMs));
+    await this.clock.sleep(this.walkMs);
     this.inFlight = false;
     return { kind: "completed", arrival: step.to } as const;
   }
 }
 
 test("the plan-ahead search never runs the arrival work while a segment is walked", async () => {
-  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 200);
+  const clock = createFakeClock({ mode: "manual" });
+  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 200, clock);
   actuator.current = observation(-5);
   const arrivals: boolean[] = [];
-  const outcome = await settle(createNavigator({ world: flatWorld(), bot: actuator }), {
+  const outcome = await drivenBy(clock, settle(createNavigator({ world: flatWorld(), bot: actuator }), {
     goal: exactBlockGoal({ x: 5, y: 63, z: 0 }),
     policy: walking(),
     searchLimits: EARLY_COMMIT,
@@ -1215,13 +1241,14 @@ test("the plan-ahead search never runs the arrival work while a segment is walke
       arrivals.push(actuator.inFlight);
       return { kind: "completed" };
     },
-  });
+  }));
   assert.equal(outcome.kind, "completed");
   assert.deepEqual(arrivals, [false], "the arrival work ran once, with no movement in flight");
 });
 
 test("a goal reached at a step's end drains the plan-ahead search before the arrival work", async () => {
-  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 0);
+  const clock = createFakeClock({ mode: "manual" });
+  const actuator = new CarriedBot({ x: 5, y: 63, z: 0 }, 0, clock);
   actuator.current = observation(-5);
   const real = createMovementCatalogue();
   let continuationId: string | null = null;
@@ -1237,7 +1264,7 @@ test("a goal reached at a step's end drains the plan-ahead search before the arr
     },
   };
   const order: string[] = [];
-  const outcome = await settle(
+  const outcome = await drivenBy(clock, settle(
     createNavigator({
       world: flatWorld(),
       bot: actuator,
@@ -1258,7 +1285,7 @@ test("a goal reached at a step's end drains the plan-ahead search before the arr
         return { kind: "completed" };
       },
     },
-  );
+  ));
   assert.equal(outcome.kind, "completed");
   assert.notEqual(continuationId, null, "expected a continuation to have started");
   assert.deepEqual(order, ["drained"]);
@@ -1315,25 +1342,26 @@ test("after drifting the next navigate plans from where the body is", async () =
   assert.equal(actuator.current.position.x, goalCell.x + 0.5);
 });
 
-/** An arrival that waits a moment, as work with a physics tick does, then asks to go on. */
-const idleArrival = async () => {
-  await new Promise((resolve) => setTimeout(resolve, 5));
+/** An arrival that waits a moment of `clock`, as work with a physics tick does, then asks to go on. */
+const idleArrival = (clock: FakeClock) => async () => {
+  await clock.sleep(5);
   return { kind: "continue" } as const;
 };
 
 test("an airborne body at a satisfied stance whose arrival never acts fails repeated_arrival within six seconds", async () => {
+  const clock = createFakeClock({ mode: "manual" });
   const actuator = new FakeNavigationBot();
   actuator.current = { ...observation(), stance: "airborne" };
   let calls = 0;
   const navigator = createNavigator({ world: flatWorld(), bot: actuator, now: steppingClock(1_000) });
-  const outcome = await settle(navigator, {
+  const outcome = await drivenBy(clock, settle(navigator, {
     goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
     policy: walking(),
     onArrival: () => {
       calls += 1;
-      return idleArrival();
+      return idleArrival(clock)();
     },
-  });
+  }));
   assert.equal(outcome.kind, "failed");
   if (outcome.kind === "failed" && outcome.failure.kind === "no_progress") {
     assert.equal(outcome.failure.reason, "repeated_arrival");
@@ -1343,14 +1371,15 @@ test("an airborne body at a satisfied stance whose arrival never acts fails repe
 });
 
 test("after repeated_arrival the next navigate elsewhere starts", async () => {
+  const clock = createFakeClock({ mode: "manual" });
   const actuator = new FakeNavigationBot();
   actuator.current = { ...observation(), stance: "airborne" };
   const navigator = createNavigator({ world: flatWorld(), bot: actuator, now: steppingClock(1_000) });
-  const first = await settle(navigator, {
+  const first = await drivenBy(clock, settle(navigator, {
     goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
     policy: walking(),
-    onArrival: idleArrival,
-  });
+    onArrival: idleArrival(clock),
+  }));
   assert.equal(first.kind, "failed");
   actuator.current = observation();
   const next = await settle(navigator, { goal: exactBlockGoal({ x: 3, y: 63, z: 0 }), policy: walking() });
@@ -1359,20 +1388,21 @@ test("after repeated_arrival the next navigate elsewhere starts", async () => {
 });
 
 test("a mining arrival that digs each time is not cut", async () => {
+  const clock = createFakeClock({ mode: "manual" });
   const world = flatWorld();
   const navigator = createNavigator({ world, bot: new FakeNavigationBot(), now: steppingClock(1_000) });
   let digs = 0;
-  const outcome = await settle(navigator, {
+  const outcome = await drivenBy(clock, settle(navigator, {
     goal: exactBlockGoal({ x: 0, y: 63, z: 0 }),
     policy: walking(),
     onArrival: async () => {
       digs += 1;
       // The block beside the bot changes every time, as a dig does.
       world.load({ x: 1, y: 64, z: 0 }, { stateId: digs % 2 });
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await clock.sleep(5);
       return digs < 8 ? ({ kind: "continue" } as const) : ({ kind: "completed" } as const);
     },
-  });
+  }));
   assert.equal(outcome.kind, "completed");
   assert.equal(digs, 8);
 });

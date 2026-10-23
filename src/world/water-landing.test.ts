@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import type { Bot } from "mineflayer";
 import { blockClass, observeMineflayerBlock } from "../navigation/mineflayer/world.js";
 import { UNLOADED } from "../navigation/world/world.js";
-import { worldOf } from "../test-support/world.js";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
-import { botFixture } from "../test-support/bot.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, flush, itemOf } from "../test-support/fake-bot/index.js";
 import { decideFootingResponse } from "../survival/policy/environment.js";
 import { bucketAvailable, bucketDropTotals, predictWaterLanding, saveWaterLanding, waterLandingActive, waterableLanding } from "../navigation/mineflayer/water-landing.js";
 function floor(y: number) {
@@ -77,66 +77,105 @@ test("the recorded eighth-tower diagonal corner gives two ticks to pour", () => 
 });
 
 test("Nether and unknown dimensions never admit a water bucket", () => {
-  for (const dimension of ["the_nether", "custom:void"]) assert.equal(bucketAvailable(botFixture({dimension,items:[{name:"water_bucket",count:1}]})),false);
+  for (const dimension of ["the_nether", "custom:void"]) assert.equal(bucketAvailable(createFakeBot({ dimension, carried: { water_bucket: 1 } }).bot), false);
 });
+
+/**
+ * A bot at `position` over stone at and below `groundY` (open air when null), a water bucket in hotbar slot 36 unless
+ * `slots` says otherwise, its clock driving the timers. `overrides` are the item uses the test answers as the server
+ * would: Mineflayer's `activateItem`, `deactivateItem`, `clickWindow`, `updateHeldItem`, which the fake leaves out.
+ * Stopgap until the shared fake has them (gap reported to the master, M5).
+ */
+function bucketBot(position: Vec3, overrides: FakeBotOptions["overrides"] = {}, options: FakeBotOptions = {}) {
+  const harness = createFakeBot({
+    position,
+    groundY: 0,
+    slots: { 36: { name: "water_bucket" } },
+    clock: createFakeClock({ mode: "mocked" }),
+    ...options,
+    overrides: { activateItem: () => {}, deactivateItem: () => {}, updateHeldItem: () => {}, ...overrides },
+  });
+  /** The server's `set_slot` for a hotbar slot: the stack becomes `name` (one item), or nothing. */
+  const setSlot = (slot: number, name: string | null) =>
+    harness.inventory.updateSlot(slot, name === null ? (null as never) : itemOf(harness.bot.registry, name, 1));
+  return { ...harness, setSlot };
+}
+
+/** A body falling fast enough that the pour is due within two ticks of `y`. */
+function falling(bot: Bot, velocityY: number): void {
+  bot.entity.onGround = false;
+  bot.entity.velocity.y = velocityY;
+}
+
+/** The body has landed at `y`, wet or dry. */
+function landed(bot: Bot, y: number, inWater: boolean): void {
+  bot.entity.position.y = y;
+  bot.entity.onGround = true;
+  Object.assign(bot.entity, { isInWater: inWater });
+}
+
+/** Physics ticks until `settled()` or `most` of them, each one 50 ms slice of clock; the ticks run. */
+async function tickUntil(clock: FakeClock, settled: () => boolean, most: number): Promise<number> {
+  let ticks = 0;
+  for (; ticks < most && !settled(); ticks++) await clock.advance(50);
+  return ticks;
+}
+
 
 test("abort and body resets during one pending storage swap permit no later selection, click or use", async () => {
   for (const event of ["abort", "death", "end", "respawn", "forcedMove", "game"] as const) {
     let clicks = 0, effects = 0;
     let settle!: () => void;
-    const bot = botFixture({ position: new Vec3(0.5, 20, 0.5), items: [{ name: "water_bucket", count: 1, slot:9 }] }, {
-      quickBarSlot:0, clickWindow: (slot:number,button:number,mode:number) => {
+    const { bot, clock } = bucketBot(new Vec3(0.5, 20, 0.5), {
+      clickWindow: (slot:number,button:number,mode:number) => {
         assert.deepEqual([slot,button,mode],[9,0,2]); clicks++;
         return new Promise<void>(resolve => {settle=resolve;});
-      }, activateItem: () => { effects++; }, updateHeldItem: () => {effects++;}, deactivateItem: () => {}, setQuickBarSlot: () => {effects++;}, clearControlStates: () => {}
-    });
+      }, activateItem: () => { effects++; }, updateHeldItem: () => {effects++;}, setQuickBarSlot: () => {effects++;},
+    }, { groundY: null, slots: { 9: { name: "water_bucket" } } });
+    using _timers = clock.install();
     const abort = new AbortController();
     const work = saveWaterLanding(bot, { signal: abort.signal, permitted: () => true });
     assert.equal(waterLandingActive(bot), true);
     if (event === "abort") abort.abort(new Error("cancelled"));
-    else { if(event === "game") bot.game.dimension="the_nether"; (bot as unknown as EventEmitter).emit(event); }
+    // The bot's typed `emit` wants each event's own arguments; these resets carry none the code reads.
+    else { if(event === "game") bot.game.dimension="the_nether"; EventEmitter.prototype.emit.call(bot, event); }
     await assert.rejects(work);
     assert.equal(waterLandingActive(bot), false);
-    settle(); await new Promise(resolve => setImmediate(resolve));
+    settle(); await flush();
     assert.equal(clicks,1); assert.equal(effects,0);
   }
 });
 
 test("revoked policy or a lost reserved bucket stops before the next body effect", async () => {
   for (const loseBucket of [false,true]) {
-    const items = [{name:"water_bucket",count:1,slot:36}];
     let permitted = true, controls = 0;
-    const bot = botFixture({items,position:new Vec3(.5,20,.5),groundY:0},{quickBarSlot:0,setQuickBarSlot:()=>{},clearControlStates:()=>{},deactivateItem:()=>{},setControlState:()=>{controls++;}});
+    const { bot, clock, setSlot } = bucketBot(new Vec3(.5,20,.5), { clearControlStates:()=>{}, setControlState:()=>{controls++;} });
+    using _timers = clock.install();
     const work = saveWaterLanding(bot,{signal:new AbortController().signal,permitted:()=>permitted});
-    await new Promise(resolve=>setImmediate(resolve));
+    await flush();
     const before=controls;
-    if(loseBucket) items.length=0; else permitted=false;
-    bot.emit("physicsTick");
-    await assert.rejects(work,/revoked|lost/);
+    if(loseBucket) setSlot(36, null); else permitted=false;
+    const stopped = assert.rejects(work,/revoked|lost/);
+    await clock.advance(50);
+    await stopped;
     assert.equal(controls,before); assert.equal(waterLandingActive(bot),false);
   }
 });
 
 test("another full bucket plus removed source cannot falsely prove this attempt recovered its bucket", async () => {
-  const items = [{name:"water_bucket",count:1,slot:36},{name:"water_bucket",count:1,slot:37}];
-  const named: Record<string,string> = {};
-  const read = worldOf(named,{groundY:0});
   let uses = 0;
-  const bot = botFixture({items,position:new Vec3(.5,2.1,.5),blocks:cell=>{
-    const block=read(cell); if(block?.name === "water") block.getProperties=()=>({level:0}); return block;
-  }},{quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},setQuickBarSlot:(slot:number)=>{Reflect.set(bot,"heldItem",items[slot]);},activateItem:()=>{
+  const { bot, clock, world, setSlot } = bucketBot(new Vec3(.5,2.1,.5), { activateItem:()=>{
     uses++;
     if(uses===1) {
-      items[0]!.name="bucket"; named["0,1,0"]="water";
-      bot.entity.position.y=1; bot.entity.onGround=true; Reflect.set(bot.entity,"isInWater",true);
-    } else { delete named["0,1,0"]; }
-  }});
-  bot.entity.onGround=false; bot.entity.velocity.y=-.65;
+      setSlot(36, "bucket"); world.setCell(new Vec3(0,1,0), "water");
+      landed(bot, 1, true);
+    } else { world.setCell(new Vec3(0,1,0), "air"); }
+  }}, { slots: { 36: { name: "water_bucket" }, 37: { name: "water_bucket" } } });
+  using _timers = clock.install();
+  falling(bot, -.65);
   let settled=false;
   const work=saveWaterLanding(bot,{signal:new AbortController().signal,permitted:()=>true}).finally(()=>{settled=true;});
-  for(let ticks=0;ticks<250&&!settled;ticks++) {
-    await new Promise(resolve=>setImmediate(resolve)); bot.emit("physicsTick");
-  }
+  await tickUntil(clock, () => settled, 250);
   const evidence=await work;
   assert.equal(uses,2); assert.equal(evidence.waterRecovered,false);
   assert.match(evidence.reason??"",/not both observed/);
@@ -145,7 +184,7 @@ test("another full bucket plus removed source cannot falsely prove this attempt 
 
 test("native collision-empty fluids and hazards are refused in both feet and head cells", () => {
   for (const height of [1,2]) for (const name of ["water","lava","fire","kelp"]) {
-    const bot=botFixture({blocks:{[`0,${height},0`]:name},groundY:0});
+    const { bot } = createFakeBot({ cells: { [`0,${height},0`]: name }, groundY: 0 });
     const world={blockAt:(x:number,y:number,z:number)=>{
       const block=bot.blockAt(new Vec3(x,y,z));
       return block?observeMineflayerBlock(block):UNLOADED;
@@ -156,34 +195,29 @@ test("native collision-empty fluids and hazards are refused in both feet and hea
 
 
 test("an unconfirmed pour releases the body promptly after dry impact", async () => {
-  const item={name:"water_bucket",count:1,slot:36};
-  const bot=botFixture({items:[item],position:new Vec3(.5,2.1,.5),groundY:0},{quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},activateItem:()=>{bot.entity.position.y=1;bot.entity.onGround=true;}});
-  bot.entity.onGround=false;bot.entity.velocity.y=-.65;
+  const { bot, clock } = bucketBot(new Vec3(.5,2.1,.5), { activateItem:()=>landed(bot, 1, false) });
+  using _timers = clock.install();
+  falling(bot, -.65);
   let settled=false;
   const work=saveWaterLanding(bot,{signal:new AbortController().signal,permitted:()=>true}).finally(()=>{settled=true;});
-  let ticks=0;
-  for(;ticks<20&&!settled;ticks++){await new Promise(resolve=>setImmediate(resolve));bot.emit("physicsTick");}
+  const ticks = await tickUntil(clock, () => settled, 20);
   const result=await work;
   assert.ok(ticks<12);assert.match(result.reason??"",/did not confirm water protection/);
   assert.equal(waterLandingActive(bot),false);
 });
 
 test("a slow approach keeps its bucket until the final two forecast ticks", async () => {
-  const item = {name:"water_bucket",count:1,slot:36};
   const heights: number[] = [];
-  const bot = botFixture({items:[item],position:new Vec3(.5,3.592,.5),groundY:0}, {
-    quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-    setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},
-    activateItem:()=>{heights.push(bot.entity.position.y);}
-  });
-  bot.entity.onGround=false; bot.entity.velocity.y=-.422;
+  const { bot, clock } = bucketBot(new Vec3(.5,3.592,.5), { activateItem:()=>{heights.push(bot.entity.position.y);} });
+  using _timers = clock.install();
+  falling(bot, -.422);
   const abort = new AbortController();
   const work = saveWaterLanding(bot,{signal:abort.signal,permitted:()=>true});
-  await new Promise(resolve=>setImmediate(resolve));
+  await flush();
   assert.deepEqual(heights,[]);
   for(const [height,velocity] of [[3.170,-.492],[2.678,-.560],[2.118,-.627]]) {
     bot.entity.position.y=height!; bot.entity.velocity.y=velocity!;
-    bot.emit("physicsTick"); await new Promise(resolve=>setImmediate(resolve));
+    await clock.advance(50);
     if(height!>2.2) assert.deepEqual(heights,[]);
   }
   assert.deepEqual(heights,[2.118]);
@@ -191,81 +225,65 @@ test("a slow approach keeps its bucket until the final two forecast ticks", asyn
 });
 
 test("cancellation during a relaunch aim prevents a late scoop and releases packet ownership", async () => {
-  const item = {name:"water_bucket",count:1,slot:36};
-  const named: Record<string,string> = {};
-  const read=worldOf(named,{groundY:0});
-  const client = new EventEmitter();
   let uses=0, aims=0;
   let settleAim!:()=>void;
-  const bot = botFixture({items:[item],position:new Vec3(.5,2.1,.5),blocks:cell=>{
-    const block=read(cell); if(block?.name==="water") block.getProperties=()=>({level:0}); return block;
-  }},{_client:client,quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-    setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},
+  const { bot, clock, world, setSlot } = bucketBot(new Vec3(.5,2.1,.5), {
     lookAt:()=>{aims++; return aims===1 ? Promise.resolve() : new Promise<void>(resolve=>{settleAim=resolve;});},
-    activateItem:()=>{uses++;item.name="bucket";named["0,1,0"]="water";}
+    activateItem:()=>{uses++;setSlot(36, "bucket");world.setCell(new Vec3(0,1,0), "water");}
   });
-  bot.entity.onGround=false;bot.entity.velocity.y=-.65;
+  using _timers = clock.install();
+  falling(bot, -.65);
   const abort=new AbortController();
   const work=saveWaterLanding(bot,{signal:abort.signal,permitted:()=>true});
-  await new Promise(resolve=>setImmediate(resolve));
+  await flush();
   assert.equal(uses,1);
-  client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
+  bot._client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
   assert.equal(aims,2);
   abort.abort(new Error("cancel relaunch"));
   await assert.rejects(work,/cancel relaunch/);
-  settleAim();await new Promise(resolve=>setImmediate(resolve));
+  settleAim();await flush();
   assert.equal(uses,1);assert.equal(waterLandingActive(bot),false);
-  assert.equal(client.listenerCount("entity_velocity"),0);
+  assert.equal(bot._client.listenerCount("entity_velocity"),0);
 });
 
 for (const verticalImpulse of [15294, -4168])
 test(`an impulse before a planned pour redirects its landing: y=${verticalImpulse}`, async () => {
-  const item={name:"water_bucket",count:1,slot:36};
-  const client=new EventEmitter();
   const aims: Vec3[]=[];
   let uses=0;
-  const bot=botFixture({items:[item],position:new Vec3(.5,20,.5),groundY:0},{
-    _client:client,quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-    setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},
-    lookAt:(point:Vec3)=>{aims.push(point);return Promise.resolve();},activateItem:()=>{uses++;}
+  const { bot, clock } = bucketBot(new Vec3(.5,20,.5), {
+    lookAt:async(point:Vec3)=>{aims.push(point);},activateItem:()=>{uses++;}
   });
-  bot.entity.onGround=false;bot.entity.velocity.y=-.1;
+  using _timers = clock.install();
+  falling(bot, -.1);
   const abort=new AbortController();
   const work=saveWaterLanding(bot,{signal:abort.signal,permitted:()=>true,target:{x:0,y:1,z:0}});
-  await new Promise(resolve=>setImmediate(resolve));
-  client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:verticalImpulse}});
+  await flush();
+  bot._client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:verticalImpulse}});
   bot.entity.position.set(10.5,2.1,.5);bot.entity.velocity.set(0,-.65,0);
-  bot.emit("physicsTick");await new Promise(resolve=>setImmediate(resolve));
+  await clock.advance(50);
   assert.equal(uses,1);assert.deepEqual(aims,[new Vec3(10.5,1,.5)]);
   abort.abort(new Error("done"));await assert.rejects(work,/done/);
 });
 
 test("a redirected planned drop counts both pours and both independently observed recoveries", async () => {
-  const item={name:"water_bucket",count:1,slot:36};
-  const named:Record<string,string>={};
-  const read=worldOf(named,{groundY:0});
-  const client=new EventEmitter();
   let uses=0;
-  const bot=botFixture({items:[item],position:new Vec3(.5,2.1,.5),blocks:cell=>{
-    const block=read(cell);if(block?.name==="water")block.getProperties=()=>({level:0});return block;
-  }},{_client:client,quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-    setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},activateItem:()=>{
-      uses++;
-      if(uses===1){item.name="bucket";named["0,1,0"]="water";}
-      if(uses===2){item.name="water_bucket";delete named["0,1,0"];}
-      if(uses===3){item.name="bucket";named["10,1,0"]="water";bot.entity.position.y=1;bot.entity.onGround=true;Reflect.set(bot.entity,"isInWater",true);}
-      if(uses===4){item.name="water_bucket";delete named["10,1,0"];}
-    }
-  });
-  bot.entity.onGround=false;bot.entity.velocity.y=-.65;
+  const { bot, clock, world, setSlot } = bucketBot(new Vec3(.5,2.1,.5), { activateItem:()=>{
+    uses++;
+    if(uses===1){setSlot(36, "bucket");world.setCell(new Vec3(0,1,0), "water");}
+    if(uses===2){setSlot(36, "water_bucket");world.setCell(new Vec3(0,1,0), "air");}
+    if(uses===3){setSlot(36, "bucket");world.setCell(new Vec3(10,1,0), "water");landed(bot, 1, true);}
+    if(uses===4){setSlot(36, "water_bucket");world.setCell(new Vec3(10,1,0), "air");}
+  }});
+  using _timers = clock.install();
+  falling(bot, -.65);
   const abort=new AbortController();
   let settled=false;
   const work=saveWaterLanding(bot,{signal:abort.signal,permitted:()=>true,target:{x:0,y:1,z:0}}).finally(()=>{settled=true;});
-  await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,1);
-  client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
-  await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,2);
+  await flush();assert.equal(uses,1);
+  bot._client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
+  await flush();assert.equal(uses,2);
   bot.entity.position.set(10.5,2.1,.5);
-  for(let tick=0;tick<20&&!settled;tick++){bot.emit("physicsTick");await new Promise(resolve=>setImmediate(resolve));}
+  await tickUntil(clock, () => settled, 20);
   if(!settled)abort.abort(new Error("test did not settle"));
   const result=await work;
   assert.equal(uses,4);assert.equal(result.waterRecovered,true);assert.equal(result.relaunchRecoveries,1);
@@ -274,33 +292,26 @@ test("a redirected planned drop counts both pours and both independently observe
 
 test("a relaunch retains its issued pour when the source arrives seven milliseconds after the launch", async () => {
   for (const inventoryFirst of [true, false]) {
-    const item={name:"water_bucket",count:1,slot:36};
-    const named:Record<string,string>={};
-    const read=worldOf(named,{groundY:0});
-    const client=new EventEmitter();
     let uses=0, recoveries=0;
-    const bot=botFixture({items:[item],position:new Vec3(.5,2.1,.5),blocks:cell=>{
-      const block=read(cell);if(block?.name==="water")block.getProperties=()=>({level:0});return block;
-    }},{_client:client,quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-      setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},activateItem:()=>{
-        uses++;
-        if(uses===1 && inventoryFirst)item.name="bucket";
-        if(uses===2){item.name="water_bucket";delete named["0,1,0"];}
-      }
-    });
-    bot.entity.onGround=false;bot.entity.velocity.y=-.65;
+    const { bot, clock, world, setSlot } = bucketBot(new Vec3(.5,2.1,.5), { activateItem:()=>{
+      uses++;
+      if(uses===1 && inventoryFirst)setSlot(36, "bucket");
+      if(uses===2){setSlot(36, "water_bucket");world.setCell(new Vec3(0,1,0), "air");}
+    }});
+    using _timers = clock.install();
+    falling(bot, -.65);
     const abort=new AbortController();
     const work=saveWaterLanding(bot,{signal:abort.signal,permitted:()=>true,observe:e=>{recoveries=e.relaunchRecoveries;}});
-    await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,1);
+    await flush();assert.equal(uses,1);
     bot.entity.velocity.y=1.91175;
-    client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
-    await new Promise(resolve=>setTimeout(resolve,7));
+    bot._client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
+    await clock.advance(7);
     assert.equal(waterLandingActive(bot),true);assert.equal(uses,1);
-    named["0,1,0"]="water";bot.emit("blockUpdate",null,bot.blockAt(new Vec3(0,1,0))!);
-    if(!inventoryFirst){await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,1);item.name="bucket";bot.emit("heldItemChanged",bot.heldItem);}
-    await new Promise(resolve=>setImmediate(resolve));
+    world.setCell(new Vec3(0,1,0), "water");
+    if(!inventoryFirst){await flush();assert.equal(uses,1);setSlot(36, "bucket");}
+    await flush();
     assert.equal(uses,2,"confirmed source is scooped before the next physics displacement");
-    bot.emit("physicsTick");await new Promise(resolve=>setImmediate(resolve));
+    await clock.advance(50);
     assert.equal(recoveries,1);
     abort.abort(new Error("done"));await assert.rejects(work,/done/);
     for(const event of ["blockUpdate","heldItemChanged","move"] as const)assert.equal(bot.listenerCount(event),0);
@@ -309,33 +320,28 @@ test("a relaunch retains its issued pour when the source arrives seven milliseco
 
 test("pending pour acknowledgment releases listeners on cancellation, lost reach, revoked policy and tick exhaustion", async () => {
   for(const stop of ["abort","move","policy","timeout","no_physics"] as const) {
-    const item={name:"water_bucket",count:1,slot:36};
-    const named:Record<string,string>={};
-    const read=worldOf(named,{groundY:0});
-    const client=new EventEmitter();
     let uses=0, permitted=true;
-    const bot=botFixture({items:[item],position:new Vec3(.5,2.1,.5),blocks:cell=>{
-      const block=read(cell);if(block?.name==="water")block.getProperties=()=>({level:0});return block;
-    }},{_client:client,quickBarSlot:0,clearControlStates:()=>{},deactivateItem:()=>{},
-      setQuickBarSlot:()=>{Reflect.set(bot,"heldItem",item);},activateItem:()=>{uses++;item.name="bucket";}
-    });
-    bot.entity.onGround=false;bot.entity.velocity.y=-.65;
+    const { bot, clock, world, setSlot } = bucketBot(new Vec3(.5,2.1,.5), { activateItem:()=>{uses++;setSlot(36, "bucket");} });
+    using _timers = clock.install();
+    falling(bot, -.65);
     const abort=new AbortController();
     let settled=false;
     const work=saveWaterLanding(bot,{signal:abort.signal,permitted:()=>permitted});
     const rejected=assert.rejects(work,stop==="abort"?/cancelled/:stop==="move"?/lost reach/:stop==="policy"?/revoked/:/not acknowledged/).finally(()=>{settled=true;});
-    await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,1);
-    client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
+    await flush();assert.equal(uses,1);
+    bot._client.emit("entity_velocity",{entityId:bot.entity.id,velocity:{y:15294}});
     assert.equal(bot.listenerCount("blockUpdate"),1);
     if(stop==="abort")abort.abort(new Error("cancelled"));
     if(stop==="move"){bot.entity.position.x=10;bot.emit("move",new Vec3(.5,2.1,.5));}
-    if(stop==="policy"){permitted=false;bot.emit("heldItemChanged",bot.heldItem);}
-    if(stop!=="no_physics")for(let tick=0;tick<8&&!settled;tick++){await new Promise(resolve=>setImmediate(resolve));bot.emit("physicsTick");}
+    if(stop==="policy"){permitted=false;bot.emit("heldItemChanged",bot.heldItem!);}
+    // No physics: only the 250 ms relaunch budget on the wall clock ends the wait.
+    if(stop==="no_physics"){bot.physicsEnabled=false;await clock.advance(300);}
+    else await tickUntil(clock, () => settled, 8);
     await rejected;
-    assert.equal(waterLandingActive(bot),false);assert.equal(client.listenerCount("entity_velocity"),0);
+    assert.equal(waterLandingActive(bot),false);assert.equal(bot._client.listenerCount("entity_velocity"),0);
     for(const event of ["blockUpdate","heldItemChanged","move","physicsTick"] as const)assert.equal(bot.listenerCount(event),0);
-    named["0,1,0"]="water";bot.emit("blockUpdate",null,bot.blockAt(new Vec3(0,1,0))!);
-    await new Promise(resolve=>setImmediate(resolve));assert.equal(uses,1);
+    world.setCell(new Vec3(0,1,0), "water");
+    await flush();assert.equal(uses,1);
   }
 });
 
@@ -345,7 +351,7 @@ test("dry oak leaves are refused as a landing floor, and the forecast finds no l
   assert.equal(waterableLanding(world, cell), true, "the plain floor this fixture builds is landable");
   // The block that killed MineAI_v3 on a planned 32-block bucket drop: a full
   // cube, safe support, not yet waterlogged, and it swallows the poured water.
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const leaves = observeMineflayerBlock(
     blockClass(bot).fromStateId(bot.registry.blocksByName.oak_leaves!.defaultState, 0));
   assert.equal(leaves.kind === "loaded" && leaves.traits.waterloggable, true,

@@ -1,65 +1,54 @@
 import { blockClass, isSwimWater, MineflayerWorldView, observeMineflayerBlock } from "./world.js";
 import { WATER_ONLY_BLOCKS } from "../world/deep-water.js";
 import { isSolid, isWater } from "../world/block-geometry.js";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { type FakeHarness, createFakeBot } from "../../test-support/fake-bot/index.js";
 
-const registry = minecraftData("1.21.4");
-const STONE = registry.blocksByName.stone.defaultState;
-const DIRT = registry.blocksByName.dirt.defaultState;
+const { bot: registryBot } = createFakeBot();
+const registry = registryBot.registry;
+const STONE = registry.blocksByName.stone!.defaultState!;
+const DIRT = registry.blocksByName.dirt!.defaultState!;
 
-/** A bot double holding one chunk column whose cells are read from a map; counts column reads. */
-function columnBot(cells: Map<string, number>) {
-  const emitter = new EventEmitter();
+/**
+ * A bot on the shared fake over open air with the cells given, whose world also answers `getColumn` for the one
+ * column (0, 0) as Prismarine's synchronous world does (`MineflayerWorldView` reads a column's cells by their place in
+ * it, which for column (0, 0) is the world's own cell). Counts the cell reads that reach the column, and `chunkData`
+ * holds the state ids the column answers instead of the world's, as a chunk the server sent again would.
+ */
+function columnBot(cells: Record<string, string>): FakeHarness & { cellReads: () => number; chunkData: Map<string, number> } {
+  const harness = createFakeBot({ cells, groundY: null });
   let cellReads = 0;
+  const chunkData = new Map<string, number>();
   const column = {
     minY: -64,
     worldHeight: 384,
-    getBlockStateId: (position: Vec3) => {
+    getBlockStateId: (cell: Vec3) => {
       cellReads += 1;
-      return cells.get(`${position.x},${position.y},${position.z}`) ?? 0;
+      return chunkData.get(`${cell.x},${cell.y},${cell.z}`) ?? harness.world.getBlockStateId(cell);
     },
   };
-  const bot = Object.assign(emitter, {
-    registry,
-    world: { getColumn: (chunkX: number, chunkZ: number) => (chunkX === 0 && chunkZ === 0 ? column : null) },
-  }) as unknown as Bot;
-  return { bot, emitter, cellReads: () => cellReads };
+  // Stopgap until the shared fake answers bot.world.getColumn (gap reported to the master, M5).
+  Object.assign(harness.bot.world, { getColumn: (chunkX: number, chunkZ: number) => (chunkX === 0 && chunkZ === 0 ? column : null) });
+  return { ...harness, cellReads: () => cellReads, chunkData };
 }
 
-function block(stateId: number, position: Vec3) {
-  return { stateId, position } as unknown as NonNullable<ReturnType<Bot["blockAt"]>>;
-}
-
-/** One Prismarine block as its own accessors report it, with everything unnamed left plain. */
-function prismarineBlock(fields: Record<string, unknown>) {
-  return {
-    shapes: [],
-    boundingBox: "empty",
-    diggable: true,
-    getProperties: () => ({}),
-    ...fields,
-  } as unknown as Parameters<typeof observeMineflayerBlock>[0];
-}
+const Block = blockClass(registryBot);
+/** The real Prismarine block of `name`, in its default state or with these properties. */
+const realBlock = (name: string, properties?: Record<string, string | number | boolean>) =>
+  properties === undefined
+    ? Block.fromStateId(registry.blocksByName[name]!.defaultState!, 0)
+    : Block.fromProperties(registry.blocksByName[name]!.id, properties as Record<string, string | number>, 0);
 
 test("both growing and terminal Nether vine blocks are climbable", () => {
   for (const name of ["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"]) {
-    assert.equal(observeMineflayerBlock(prismarineBlock({ name })).traits.climbable, true, name);
+    assert.equal(observeMineflayerBlock(realBlock(name)).traits.climbable, true, name);
   }
 });
 
 test("a cell is read from Prismarine once, and equal cells share one observation", () => {
-  const { bot, cellReads } = columnBot(
-    new Map([
-      ["4,63,2", STONE],
-      ["1,63,1", STONE],
-      ["2,63,1", STONE],
-    ]),
-  );
+  const { bot, cellReads } = columnBot({ "4,63,2": "stone", "1,63,1": "stone", "2,63,1": "stone" });
   const world = new MineflayerWorldView(bot);
 
   const stone = world.blockAt(4, 63, 2);
@@ -78,14 +67,13 @@ test("a cell is read from Prismarine once, and equal cells share one observation
 });
 
 test("a block update rewrites its stored cell and publishes the change; a column reload drops the section", () => {
-  const cells = new Map([["4,63,2", STONE]]);
-  const { bot, emitter, cellReads } = columnBot(cells);
+  const { bot, world: server, cellReads, chunkData } = columnBot({ "4,63,2": "stone" });
   const world = new MineflayerWorldView(bot);
   const changes: number[] = [];
   world.subscribe((change) => changes.push(change.after.kind === "loaded" ? change.after.stateId : -1));
   world.blockAt(4, 63, 2);
 
-  emitter.emit("blockUpdate", block(STONE, new Vec3(4, 63, 2)), block(DIRT, new Vec3(4, 63, 2)));
+  server.setCell(new Vec3(4, 63, 2), "dirt");
 
   const changed = world.blockAt(4, 63, 2);
   assert.equal(changed.kind === "loaded" && changed.stateId, DIRT);
@@ -94,46 +82,30 @@ test("a block update rewrites its stored cell and publishes the change; a column
   assert.equal(cellReads(), 1, "an update carries its own state; the column is not read again");
 
   // A reload replaces the section wholesale, so the next read goes back to it.
-  cells.set("4,63,2", STONE);
-  emitter.emit("chunkColumnLoad", new Vec3(0, 0, 0));
+  chunkData.set("4,63,2", STONE);
+  // Stopgap until the shared fake answers bot.world.getColumn (gap reported to the master, M5).
+  bot.emit("chunkColumnLoad", new Vec3(0, 0, 0));
   const reloaded = world.blockAt(4, 63, 2);
   assert.equal(reloaded.kind === "loaded" && reloaded.stateId, STONE);
   assert.equal(cellReads(), 2);
 
   world.close();
-  assert.equal(emitter.listenerCount("blockUpdate"), 0);
+  assert.equal(bot.listenerCount("blockUpdate"), 0);
 });
 
 test("block traits are read from Prismarine's own property strings", () => {
   // Prismarine reports the water level as a string, so a numeric comparison
   // would never recognise a source block.
-  const water = observeMineflayerBlock(
-    prismarineBlock({ stateId: 86, name: "water", getProperties: () => ({ level: "0" }) }),
-  );
+  const water = observeMineflayerBlock(realBlock("water", { level: 0 }));
   assert.equal(water.traits.liquidSource, true);
 
   // Both halves of a door resolve to one activation group, so opening either
   // names the same passage.
-  const upper = observeMineflayerBlock(
-    prismarineBlock({
-      stateId: 1,
-      name: "oak_door",
-      shapes: [[0, 0, 0, 1, 1, 0.1875]],
-      boundingBox: "block",
-      getProperties: () => ({ half: "upper", open: false }),
-    }),
-  );
+  const upper = observeMineflayerBlock(realBlock("oak_door", { half: "upper", open: false }));
   assert.equal(upper.traits.activationGroup, "oak_door");
   assert.equal(upper.traits.upperHalf, true);
   assert.equal(upper.traits.openable, true);
 });
-
-const Block = blockClass({ registry } as Pick<Bot, "registry">);
-/** The real Prismarine block of `name`, in its default state or with these properties. */
-const realBlock = (name: string, properties?: Record<string, string | number | boolean>) =>
-  properties === undefined
-    ? Block.fromStateId(registry.blocksByName[name]!.defaultState, 0)
-    : Block.fromProperties(registry.blocksByName[name]!.id, properties as Record<string, string | number>, 0);
 
 test("every water-only plant is source water with no collision, and stays breakable", () => {
   for (const name of WATER_ONLY_BLOCKS) {

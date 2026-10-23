@@ -1,20 +1,16 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
-import { registry } from "../../test-support/bot.js";
+import { Vec3 } from "vec3";
+import { type FakeClock, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { changeCovers, SERVER_ANSWER_WALL_MS, type ServerBlockChange, subscribeServerBlockChanges, watchServerChange } from "./server-block-changes.js";
 
-/** A bot with the protocol client and the feature table of 1.21.4: only the wire is real, nothing else is read. */
+/** A 1.21.4 bot on the shared fake, subscribed to the server's block packets: its protocol client carries them. */
 function wire() {
-  const client = new EventEmitter();
-  const bot = Object.assign(new EventEmitter(), {
-    _client: client,
-    supportFeature: (feature: string) => registry.supportFeature(feature as never),
-  }) as unknown as Bot & EventEmitter;
+  const harness = createFakeBot();
+  const client = harness.bot._client;
   const changes: ServerBlockChange[] = [];
-  const unsubscribe = subscribeServerBlockChanges(bot, (change) => changes.push(change));
-  return { bot, client, changes, unsubscribe };
+  const unsubscribe = subscribeServerBlockChanges(harness.bot, (change) => changes.push(change));
+  return { ...harness, client, changes, unsubscribe };
 }
 
 /** One record of a 1.21.4 `multi_block_change`: block state, then the cell inside its 16-cube section. */
@@ -23,9 +19,9 @@ function record(stateId: number, cellX: number, cellY: number, cellZ: number): n
 }
 
 test("mineflayer's own air write is not a server change", () => {
-  const { bot, changes } = wire();
-  // The fork's finished dig sets the cell to air in its own world and emits this; the server has said nothing.
-  bot.emit("blockUpdate", { position: { x: 3, y: 63, z: 4 }, stateId: 0 }, { position: { x: 3, y: 63, z: 4 }, stateId: 0 });
+  const { world, changes } = wire();
+  // The fork's finished dig sets the cell to air in its own world and emits `blockUpdate`; the server has said nothing.
+  world.setCell(new Vec3(3, 63, 4), "air");
   assert.deepEqual(changes, []);
 });
 
@@ -64,45 +60,53 @@ test("the unsubscribe removes every listener it added, once or twice", () => {
   assert.ok(names.every((name) => client.listenerCount(name) === 0));
 });
 
-/** A bot whose world age the test moves, over the same wire. */
-function watched() {
-  const fixture = wire();
-  const bot = Object.assign(fixture.bot, { time: { age: 100 } }) as unknown as Parameters<typeof watchServerChange>[0];
-  return { ...fixture, bot };
+const CELL = { x: 3, y: 63, z: 4 };
+
+/** Move the clock `ms` on and hand back the answer, which must be given by then. Stopgap until M2 merges `clock.settle`. */
+async function answeredAfter<T>(clock: FakeClock, ms: number, pending: Promise<T>): Promise<T> {
+  let over = false;
+  void pending.then(() => (over = true));
+  await clock.advance(ms);
+  assert.ok(over, `the watch still waits after ${ms} ms of clock`);
+  return pending;
 }
 
-const CELL = { x: 3, y: 63, z: 4 };
-const instantClock = { now: () => 0, sleep: async () => undefined };
-
 test("a watch answers when the server names its cell, even before anyone waits", async () => {
-  const { bot, client } = watched();
+  const { bot, client, clock } = wire();
   const watch = watchServerChange(bot, CELL);
   client.emit("block_change", { location: CELL, type: 0 });
-  assert.equal(await watch.answer(new AbortController().signal), true);
+  assert.equal(await watch.answer(new AbortController().signal, clock), true);
   watch.dispose();
 });
 
 test("a watch is not answered by another cell, and gives up when the server clock moves 40 ticks", async () => {
-  const { bot, client } = watched();
+  const { bot, client, clock } = wire();
   const watch = watchServerChange(bot, CELL);
   client.emit("block_change", { location: { ...CELL, x: 9 }, type: 0 });
-  const aging = { ...instantClock, sleep: async () => void ((bot as unknown as { time: { age: number } }).time.age += 20) };
-  assert.equal(await watch.answer(new AbortController().signal, aging), false);
+  const started = bot.time.age;
+  // Two time packets (contract check `world-age-per-second`) are the 40 ticks.
+  assert.equal(await answeredAfter(clock, 2_000, watch.answer(new AbortController().signal, clock)), false);
+  assert.equal(bot.time.age - started, 40);
   watch.dispose();
 });
 
 test("a watch gives up on the wall clock when the server clock never moves", async () => {
-  const { bot } = watched();
+  const { bot, clock, server } = wire();
   const watch = watchServerChange(bot, CELL);
-  let wall = 0;
-  const slow = { now: () => wall, sleep: async () => void (wall += 500) };
-  assert.equal(await watch.answer(new AbortController().signal, slow), false);
-  assert.ok(wall >= SERVER_ANSWER_WALL_MS && wall < SERVER_ANSWER_WALL_MS + 1_000, `waited ${wall} ms`);
+  server.stop();
+  const started = bot.time.age;
+  const answer = watch.answer(new AbortController().signal, clock);
+  let over = false;
+  void answer.then(() => (over = true));
+  await clock.advance(SERVER_ANSWER_WALL_MS - 100);
+  assert.equal(over, false, "still waiting inside the wall bound");
+  assert.equal(await answeredAfter(clock, 100, answer), false);
+  assert.equal(bot.time.age, started, "the server clock never moved");
   watch.dispose();
 });
 
 test("disposing a watch removes its listeners", () => {
-  const { bot, client } = watched();
+  const { bot, client } = wire();
   const before = client.listenerCount("block_change");
   const watch = watchServerChange(bot, CELL);
   assert.equal(client.listenerCount("block_change"), before + 1);

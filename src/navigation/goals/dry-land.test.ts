@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import { WELL_FED, observation, planningStart } from "../../test-support/navigation.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
 import { createMovementPolicy } from "../movements/policy.js";
@@ -42,7 +41,7 @@ test("from open water the nearest dry ground 41 blocks away is found within the 
 
 test("a cell in a kelp column is never dry ground", () => {
   const world = new MemoryWorld();
-  const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+  const { bot: registryBot } = createFakeBot();
   loadNamedBlock(world, registryBot, { x: 0, y: 59, z: 0 }, "dirt");
   loadNamedBlock(world, registryBot, { x: 0, y: 60, z: 0 }, "kelp_plant");
   loadNamedBlock(world, registryBot, { x: 0, y: 61, z: 0 }, "kelp");

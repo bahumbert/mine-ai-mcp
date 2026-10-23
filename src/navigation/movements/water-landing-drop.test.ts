@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { createMovementCatalogue } from "./catalogue.js";
@@ -53,7 +52,7 @@ test("a dry fall of five is still refused", () => {
   assert.deepEqual(dropsEast(pillarOverPool(6, 0), 6), []);
 });
 
-const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+const { bot: registryBot } = createFakeBot();
 
 /** As {@link pillarOverPool}, the pool filled with kelp: kelp plant cells topped by a kelp cell, on the stone floor. */
 function pillarOverKelpPool(top: number, depth: number): MemoryWorld {

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { isSafeSupport, standsOnDryGround } from "./block-geometry.js";
 
@@ -18,7 +17,7 @@ test("a yielding tread is not support, though the same shape is", () => {
 });
 
 test("dry ground needs dry feet and head over safe support: a plant in the feet cell is not dry ground, a carpet floor cell is", () => {
-  const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+  const { bot: registryBot } = createFakeBot();
   const world = new MemoryWorld();
   const place = (x: number, y: number, name: string) => loadNamedBlock(world, registryBot, { x, y, z: 0 }, name);
   for (const x of [0, 1, 2]) {

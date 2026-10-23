@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { findLoadedBlockPositions, type LoadedBlockScan } from "./loaded-block-scan.js";
 
 interface TestSection {
@@ -17,13 +18,22 @@ interface TestColumn {
   column: { minY: number; sections: (TestSection | undefined)[] };
 }
 
+/**
+ * A bot whose loaded columns are the scripted ones: the scan reads their packed states, so the test counts the reads and
+ * picks each section's palette itself, which the fake world's cells cannot show.
+ */
 function scannerBot(columns: TestColumn[]): Bot {
-  return {
-    world: { getColumns: () => columns },
-    blockAt: () => {
-      throw new Error("the raw scanner must not construct Prismarine blocks");
+  const { bot } = createFakeBot({
+    overrides: {
+      blockAt: () => {
+        throw new Error("the raw scanner must not construct Prismarine blocks");
+      },
     },
-  } as unknown as Bot;
+  });
+  // Hand-made columns carry only the surface the scanner reads (`LoadedChunkSection`), not Prismarine's whole chunk.
+  // Stopgap until the shared fake world answers `getColumns` (gap reported to the master, M5): the scanned columns are scripted.
+  bot.world.getColumns = () => columns as unknown as ReturnType<Bot["world"]["getColumns"]>;
+  return bot;
 }
 
 /**

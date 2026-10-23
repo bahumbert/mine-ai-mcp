@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { waterMiningStance, waterOccupancy } from "./water.js";
 
@@ -28,7 +27,7 @@ test("a puddle in a roofed pocket is not: the sea behind a mined wall would seal
   assert.equal(stance(puddle(70)), false);
 });
 
-const registryBot = { registry: minecraftData("1.21.4") } as Pick<Bot, "registry">;
+const { bot: registryBot } = createFakeBot();
 
 /** One column at x 0 z 0: a dirt floor at y 59, then `cells` upward from y 60 (block names), open air above them to y 75. */
 function column(cells: readonly string[]): MemoryWorld {

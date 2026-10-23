@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import {
   centerOnCell,
   driveHorizontalSteering,
@@ -99,6 +100,9 @@ function silentPort() {
 
 test("an abort while no tick comes ends the drive at once", async () => {
   const { port, held, asserted } = silentPort();
+  // The drive's wall bound reads `performance.now` and `setTimeout`: the clock moves both.
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const abort = new AbortController();
   const driving = driveHorizontalSteering(port, {
     target: () => ({ x: 5, y: 64, z: 0 }),
@@ -106,24 +110,33 @@ test("an abort while no tick comes ends the drive at once", async () => {
     maximumTicks: 100,
     signal: abort.signal,
   });
-  setTimeout(() => abort.abort(new Error("run stopped")), 20);
-  const startedAt = performance.now();
-  await assert.rejects(driving, /run stopped/);
-  assert.ok(performance.now() - startedAt < 500);
+  let endedAt: number | undefined;
+  const rejection = assert.rejects(driving, /run stopped/).then(() => (endedAt = clock.now()));
+  clock.after(20, () => abort.abort(new Error("run stopped")));
+  await clock.advance(500);
+  await rejection;
+  assert.ok(endedAt !== undefined && endedAt < 500, `ended after ${endedAt} ms of clock`);
   assert.ok(asserted.length > 0, "the drive had taken controls");
   assert.equal(held.size, 0);
 });
 
 test("a drive whose ticks stop ends exhausted within its wall bound, every control released", async () => {
   const { port, held, asserted } = silentPort();
-  const startedAt = performance.now();
-  const outcome = await driveHorizontalSteering(port, {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  let outcome: Awaited<ReturnType<typeof driveHorizontalSteering>> | undefined;
+  let endedAt: number | undefined;
+  void driveHorizontalSteering(port, {
     target: () => ({ x: 5, y: 64, z: 0 }),
     arrived: () => false,
     maximumTicks: 2,
     signal: new AbortController().signal,
+  }).then((result) => {
+    outcome = result;
+    endedAt = clock.now();
   });
-  const waited = performance.now() - startedAt;
+  await clock.advance(2_500);
+  const waited = endedAt ?? Infinity;
   assert.deepEqual(outcome, { kind: "exhausted", ticks: 2 });
   // 2 ticks are 100 ms of physics; the drive adds one second of slack before it reads physics as stopped.
   assert.ok(waited >= 1_000 && waited < 2_500, `ended after ${waited} ms`);

@@ -3,11 +3,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
-import { structureWorld } from "../../../test-support/structure-world.js";
+import { type StructureWorldOptions, structureWorld as buildStructureWorld } from "../../../test-support/structure-world.js";
 import { build, BuildProgress, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
+
+/** The structure scene on the shared fake bot: its harness is the game's side of the scene. */
+function structureWorld(options: StructureWorldOptions = {}) {
+  const world = buildStructureWorld({ ...options, onHarness: true });
+  return { ...world, harness: world.harness! };
+}
 
 function cells(list: [number, number, number][], blockName = "cobblestone"): BuildCell[] {
   return list.map(([x, y, z]) => ({ position: { x, y, z }, blockName }));
@@ -331,8 +337,11 @@ test("a route that cannot reach a cell refuses that cell and carries on with the
 });
 
 test("a cell asking for block states holds only a block in those states: facing, half (or a slab's type) and axis", () => {
-  const block = (name: string, properties: Record<string, unknown>) =>
-    ({ name, getProperties: () => properties }) as unknown as Parameters<typeof holdsCell>[0];
+  const { bot, put } = structureWorld();
+  const block = (name: string, properties: Record<string, unknown>) => {
+    put(new Vec3(0, 64, 0), name, properties);
+    return bot.blockAt(new Vec3(0, 64, 0))!;
+  };
   const at = { x: 0, y: 64, z: 0 };
   const stairs: BuildCell = { position: at, blockName: "spruce_stairs", facing: "north", half: "bottom" };
   assert.equal(holdsCell(block("spruce_stairs", { facing: "north", half: "bottom", shape: "outer_left" }), stairs), true, "shape is not asked");
@@ -366,9 +375,11 @@ test("a cell asking a state waits for a support that gives it: a beam beside its
   const states = (x: number, y: number, z = 0) => bot.blockAt(new Vec3(x, y, z))!.getProperties();
   assert.deepEqual(states(2, 64), { axis: "y" });
   assert.deepEqual(states(3, 64), { axis: "x" }, "placed against the pillar, not the floor");
-  assert.deepEqual(states(5, 64, 3), { type: "top" });
-  assert.deepEqual(states(5, 64, 6), { facing: "north", half: "top" });
-  assert.deepEqual(states(5, 65, 9), { type: "bottom" });
+  // A placed block is one state id (contract check `state-id-agrees`): the states given on top of its default, so a
+  // slab put with its type reads dry and stairs read their default shape.
+  assert.deepEqual(states(5, 64, 3), { type: "top", waterlogged: false });
+  assert.deepEqual(states(5, 64, 6), { facing: "north", half: "top", shape: "straight", waterlogged: false });
+  assert.deepEqual(states(5, 65, 9), { type: "bottom", waterlogged: false });
 });
 
 /**
@@ -422,8 +433,7 @@ function scaffoldedWorld(scaffold: [number, number, number][], breakFails: strin
         placedScaffold = true;
         for (const [x, y, z] of reportOnly) options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
         for (const [x, y, z] of scaffold) {
-          world.put(new Vec3(x, y, z), "dirt");
-          (world.blocks.get(`${x},${y},${z}`) as unknown as { stateId: number }).stateId = 10;
+          world.harness.world.setCell(new Vec3(x, y, z), 10); // state id 10: dirt, as the route's placement reports it
           options.onPlacement?.({ position: { x, y, z }, stateId: 10 });
         }
       }
