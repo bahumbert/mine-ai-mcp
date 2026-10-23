@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import type { FakeCell, FakeHarness } from "../../../src/test-support/fake-bot/index.ts";
+import type { FakeCell, FakeHarness, Weather } from "../../../src/test-support/fake-bot/index.ts";
 
 /** Mineflayer keeps the ridden entity on the bot too; its typings leave it out. */
 export type ContractBot = Bot & { vehicle?: Entity | null };
@@ -21,6 +21,8 @@ export interface ContractSubject {
   setBlock(cell: Vec3, block: FakeCell): Promise<void>;
   /** Whether the server still has the bot riding `vehicle`, whatever the client believes. */
   seatedOnServer(vehicle: Entity): Promise<boolean>;
+  /** Set the weather on the server (`/weather`); the levels then ramp, and the client hears each step. */
+  setWeather(weather: Weather): Promise<void>;
   /** The server spawns `stack` as an item entity at `position`, pickable after `pickupDelayTicks`; resolves with it once the client has it. */
   summonItem(stack: { readonly name: string; readonly count: number }, position: Vec3, pickupDelayTicks: number): Promise<Entity>;
 }
@@ -73,6 +75,10 @@ export function fakeContractSubject(harness: FakeHarness): ContractSubject {
       await clock.advance(50);
     },
     seatedOnServer: async (vehicle) => server.riderOf(vehicle.id) === bot.entity.id,
+    async setWeather(weather) {
+      server.answer(() => server.setWeather(weather));
+      await clock.advance(50);
+    },
     async summonItem(stack, position, pickupDelayTicks) {
       let summoned: Entity | undefined;
       server.answer(() => void (summoned = entities.spawn({ name: "item", position, item: stack, pickupDelayTicks })));
@@ -126,6 +132,10 @@ export function serverContractSubject(bot: Bot): ContractSubject {
       bot.chat(`/setblock ${at(SEAT_PROBE_CELL)} air`);
       await commandUntil(bot, `setblock ${at(SEAT_SENTINEL_CELL)} air`, SEAT_SENTINEL_CELL, "air");
       return seated;
+    },
+    // The command is sent and not awaited: the weather reaches the client as levels over the next ticks, which the check waits for.
+    async setWeather(weather) {
+      bot.chat(`/weather ${weather}`);
     },
     async summonItem(stack, position, pickupDelayTicks) {
       const spawned = new Promise<Entity>((resolve, reject) => {

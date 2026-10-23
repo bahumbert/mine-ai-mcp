@@ -55,3 +55,17 @@ test("setupCommands writes block states in command form and refuses a cell outsi
   assert.equal(setup.at(-1), "setblock 0 -60 2 snow[layers=1]");
   assert.throws(() => setupCommands({ cells: { "9,-60,0": "dirt" }, carried: {}, position: [0.5, -60, 0.5] }), /outside the contract arena/);
 });
+
+test("setupCommands sets the day time, the day cycle and the weather after the cells, and none of them for a fixture that names none", () => {
+  const bare = setupCommands({ cells: { "0,-60,2": "dirt" }, carried: {}, position: [0.5, -60, 0.5] }).setup;
+  assert.equal(bare.some((line) => /^(time|weather|gamerule)/u.test(line)), false);
+  const { setup } = setupCommands({
+    cells: { "0,-60,2": "dirt" },
+    carried: {},
+    position: [0.5, -60, 0.5],
+    timeOfDay: 14_000,
+    daylightCycle: true,
+    weather: "thunder",
+  });
+  assert.deepEqual(setup.slice(bare.length), ["gamerule doDaylightCycle true", "time set 14000", "weather thunder"]);
+});

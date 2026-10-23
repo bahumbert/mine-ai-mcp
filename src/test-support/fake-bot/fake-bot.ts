@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
-import type { Bot, Player } from "mineflayer";
+import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
@@ -14,6 +14,7 @@ import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js"
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
+import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
 import { attachFakeVehicle } from "./fake-bot-vehicle.js";
 import { type FakeClock, createFakeClock } from "./fake-clock.js";
@@ -61,7 +62,7 @@ export interface FakeBotOptions {
   /** Entities by id (not the bot's own, which is id 1). */
   readonly entities?: Readonly<Record<number, FakeEntitySpec>>;
   /** Other players by username; the bot's own entry is added. */
-  readonly players?: Readonly<Record<string, Partial<Player>>>;
+  readonly players?: Readonly<Record<string, FakePlayerSpec>>;
   /** A clock to share with other harnesses; a new manual one otherwise. */
   readonly clock?: FakeClock;
   /** How long every server answer takes, in ms of clock. */
@@ -144,7 +145,8 @@ function stateOf(options: FakeBotOptions, username: string, server: FakeServer, 
     controlState: controls,
     swingArm: () => undefined,
     get time() {
-      // `time.js`: `time` is the day time unwrapped, `timeOfDay` and `day` are read from it.
+      // `time.js`: all null until the first `update_time` packet, then `time` is the day time unwrapped, `timeOfDay` and `day` are read from it.
+      if (!server.timePacketSent) return { doDaylightCycle: null, bigTime: null, time: null, timeOfDay: null, day: null, isDay: null, moonPhase: null, bigAge: null, age: null, clocks: {} };
       const day = Math.floor(server.dayTime / 24_000);
       return { age: server.age, time: server.dayTime, timeOfDay: server.timeOfDay, day, isDay: server.timeOfDay < 13_000, moonPhase: day % 8 };
     },
@@ -179,7 +181,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
     _client: client,
     entity: self,
     entities: { [BOT_ENTITY_ID]: self, ...spawnedEntities(entities.make, options.entities ?? {}) },
-    players: { ...options.players, [username]: { username, uuid: "", ping: 0, gamemode: 0, displayName: undefined, entity: self } },
+    players: { ...playersOf(world, entities, feet, options.players), [username]: { username, uuid: "", ping: 0, gamemode: 0, displayName: undefined, entity: self } },
     inventory,
     blockAt: (point: Vec3) => world.blockAt(point),
     world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumns: world.getColumns },
@@ -198,6 +200,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
+  attachFakeSleep(bot, { clock, server, world });
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
   return { bot, clock, server, world, inventory, entities: serverEntities, breath };
 }

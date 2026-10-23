@@ -27,12 +27,18 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
     assertInArena("cell", cell);
     return `setblock ${cell.join(" ")} ${blockArgument(block)}`;
   });
+  const worldLines = [
+    ...(fixture.daylightCycle === undefined ? [] : [`gamerule doDaylightCycle ${fixture.daylightCycle}`]),
+    ...(fixture.timeOfDay === undefined ? [] : [`time set ${fixture.timeOfDay}`]),
+    ...(fixture.weather === undefined ? [] : [`weather ${fixture.weather}`]),
+  ];
   assertInArena("feet", fixture.position);
   return {
     setup: [
       `fill ${-radius} ${floorY} ${-radius} ${radius} ${floorY} ${radius} stone`,
       `fill ${-radius} ${floorY + 1} ${-radius} ${radius} ${airTopY} ${radius} air`,
       ...cellLines,
+      ...worldLines,
     ],
     player: { pos: fixture.position, inventory: Object.entries(fixture.carried).map(([item, count]) => ({ item, count })) },
     entities: (fixture.entities ?? []).map(({ name, position }) => ({ type: name, pos: position })),

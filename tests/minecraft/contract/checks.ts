@@ -2,9 +2,11 @@
  * The contract checks: each states one answer of Mineflayer and a 1.21.4 server, runs on the shared fake
  * (`bot-contract.test.ts`) and on the real server (`drivers/bot-contract.ts`), so the fake can only say what the game says.
  */
-import type { FakeCell } from "../../../src/test-support/fake-bot/index.ts";
+import type { FakeCell, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ContractSubject } from "./subject.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
+import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
+import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
 import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
@@ -17,6 +19,7 @@ import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
+import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
@@ -38,6 +41,12 @@ export interface ContractFixture {
   /** The bot's feet, on the floor. */
   readonly position: Cell;
   readonly entities?: readonly { readonly name: string; readonly position: Cell }[];
+  /** The day time set before the check (`time set`); the template's world stands at noon. */
+  readonly timeOfDay?: number;
+  /** Whether the day cycle runs: the template stops it, and a night is skipped only by a world whose time runs. */
+  readonly daylightCycle?: boolean;
+  /** The weather set before the check; the template's world is clear. */
+  readonly weather?: Weather;
 }
 
 export interface ContractCheck {
@@ -67,6 +76,9 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,
+  bedSleepAndWake,
+  bedRefusedMonsterNear,
+  rainAndThunderState,
   itemPickupAfterDelay,
   tossedItemKeptBeforeDelay,
 ];

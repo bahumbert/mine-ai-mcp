@@ -1,0 +1,35 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-rain-and-thunder-state
+tags:
+  - contract
+description: "The weather the client is told: rain and thunder each ramp a level a tick, clear lowers them; by day the bed use is refused and rain alone does not allow a sleep, a full thunderstorm does. Contract check tests/minecraft/contract/checks/rain-and-thunder-state.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: rain-and-thunder-state
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 1 -60 0 red_bed[facing=east,occupied=false,part=foot]
+  - setblock 2 -60 0 red_bed[facing=east,occupied=false,part=head]
+  - gamerule doDaylightCycle false
+  - time set 6000
+  - weather clear
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

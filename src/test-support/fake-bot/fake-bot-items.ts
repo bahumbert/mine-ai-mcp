@@ -65,6 +65,9 @@ export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server:
   server.onPacket("block_place", (data) => {
     const { location, direction, hand } = data as { location: Vec3; direction: number; hand: number };
     const face = FACE_VECTORS[direction];
+    // A block the server uses (a bed: fake-bot-sleep.ts answers it) takes the click; nothing is placed against it.
+    const clicked = parts.world.blockAt(location);
+    if (clicked !== null && bot.isABed(clicked as never)) return;
     if (face !== undefined) server.answer(() => answerPlacement(bot, parts, location.plus(face), hand));
   });
 }

@@ -5,16 +5,13 @@ import { persistentBotData, temporaryBotData } from "../../test-support/bot-data
 import { createNoteReadAction, parseNoteReadRequest } from "../note-read/index.js";
 import { createNoteSaveAction, parseNoteSaveRequest } from "./index.js";
 
-function noteBot(username = "NoteBot") {
-  return createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 }, server: { startAge: 24000 } });
+function noteBot(username = "NoteBot", timePacketYet = true) {
+  return createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 }, server: { startAge: 24000, timePacketYet } });
 }
 
-/** A bot that has not had its first time packet: `bot.time.age` is null. */
+/** A bot that has not had its first time packet: `bot.time.age` is null (`time.js`). */
 function noteBotBeforeFirstTimePacket(username: string) {
-  const harness = noteBot(username);
-  // Stopgap until the master adds a server with no time packet yet: mineflayer `lib/plugins/time.js` starts `bot.time.age` as null.
-  Object.defineProperty(harness.bot, "time", { value: { ...harness.bot.time, age: null }, configurable: true });
-  return harness;
+  return noteBot(username, false);
 }
 
 const request = { note: "Bring a bucket", context: "Found lava while looking for iron." };

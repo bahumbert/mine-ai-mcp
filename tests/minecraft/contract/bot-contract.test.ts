@@ -23,6 +23,7 @@ function fakeHarnessFor(fixture: ContractFixture) {
     cells: fixture.cells,
     carried: fixture.carried,
     entities,
+    server: { timeOfDay: fixture.timeOfDay, weather: fixture.weather },
   });
 }
 
