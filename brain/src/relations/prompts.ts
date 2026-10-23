@@ -24,6 +24,11 @@ export function relationsBlock(summaries: readonly string[], lacks: readonly str
   return [...(summaries.length === 0 ? [] : ["Your relations:", ...summaries]), ...lacking].join("\n");
 }
 
+/** The chat input's line for a speaker who is another agent out of trading reach: the model must not offer to walk to them. */
+export function tooFarLine(speaker: string, away: number | null): string {
+  return `${speaker} is too far away to trade with (${away === null ? "out of sight" : `${away} blocks away`}): do not offer to go to them; they can come to you.`;
+}
+
 const entry = z.object({ item: z.string().min(1), count: z.number().int().min(1).max(MAX_COUNT) });
 const side = z.array(entry).max(MAX_SIDE_ENTRIES);
 const tradeSchema = z.object({

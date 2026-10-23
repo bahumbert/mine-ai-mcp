@@ -70,6 +70,8 @@ export interface TradeSettings {
   readonly handoffDistance: number;
   readonly offersForgetMinutes: number;
   readonly maxOpenTrades: number;
+  /** A partner counts for trading only when seen and at most this many blocks away (Manhattan). */
+  readonly tradeReach: number;
 }
 
 /** The model's judgment of a partner. */

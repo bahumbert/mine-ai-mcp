@@ -12,7 +12,8 @@ import { RelationBook } from "./book.ts";
 import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
-import { openingRelationLines } from "./prompts.ts";
+import { openingRelationLines, tooFarLine } from "./prompts.ts";
+import { reachOf } from "./trading.ts";
 import type { ItemCount, RelationEvent, TradeEvent } from "./types.ts";
 
 export interface AgentRelationsDeps {
@@ -24,6 +25,8 @@ export interface AgentRelationsDeps {
   readonly takeHandoff: (h: Handoff) => void;
   readonly modelSlotFree: () => boolean;
   readonly inConversationWith: (name: string) => boolean;
+  /** Whether the name is another agent (a bot of the project), not a player. */
+  readonly isAgent: (name: string) => boolean;
   /** What the running objective lacks, as the chat tier is told; the inventory of the snapshot at hand, else the last one looked at. */
   readonly lacks: (inventory?: BotSnapshot["inventory"]) => readonly string[];
   readonly journal: (e: TradeEvent | RelationEvent) => void;
@@ -57,9 +60,12 @@ export class AgentRelations {
     this.deps.log(`remembers ${recalled.relations.length} relation(s)`);
   }
 
-  /** The relations block and the trade field for a chat request: the speaker's record, the other members' and what the objective lacks. */
+  /** The relations block and the trade field for a chat request: the speaker's record, the other members' and what the objective lacks, and that an agent speaker out of reach cannot be gone to. */
   chatBlock(speaker: string, others: readonly string[], snapshot: BotSnapshot): NonNullable<ChatInput["relations"]> {
-    return { block: this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tradeOn: true };
+    const { inReach, away } = reachOf(speaker, snapshot, this.deps.persona.settings.relations.tradeReach);
+    // Another agent out of reach: it is told not to offer a walk to them (a player is gone to at any distance).
+    const tooFar = this.deps.isAgent(speaker) && !inReach ? tooFarLine(speaker, away) : "";
+    return { block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar].filter((part) => part !== "").join("\n"), tradeOn: true };
   }
 
   /** A reply that carries a trade: the trade is checked, and sent back once when the checks refuse it. */

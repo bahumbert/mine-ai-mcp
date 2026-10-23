@@ -3,6 +3,7 @@ import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { stackSizeOf } from "./item-ids.ts";
 import { isOpen } from "./trade.ts";
+import { reachOf } from "./trading.ts";
 import type { ItemCount, Trade } from "./types.ts";
 
 const MAX_SIDE_ENTRIES = 4;
@@ -15,6 +16,8 @@ export interface CheckInput {
   readonly snapshot: BotSnapshot;
   readonly trades: readonly Trade[];
   readonly maxOpenTrades: number;
+  /** The speaker counts only when seen and at most this many blocks away (`relations.tradeReach`). */
+  readonly reach: number;
   /** Items of my side the partner already took (a give outside a hand-off), per item: they count as carried. */
   readonly givenOutside?: ReadonlyMap<string, number>;
 }
@@ -61,6 +64,8 @@ const unknownItem = (side: readonly ItemCount[]): string | undefined => side.fin
 export function checkTradeDecision(i: CheckInput): string | null {
   const { decision: d } = i;
   if (d.action === "decline" || d.action === "cancel") return null;
+  const { inReach, away } = reachOf(i.speaker, i.snapshot, i.reach);
+  if (!inReach) return `${i.speaker} is too far away to trade with (${away === null ? "out of sight" : `${away} blocks away`}): no trade from here; say they can come to you`;
   if (d.give.length > MAX_SIDE_ENTRIES || d.get.length > MAX_SIDE_ENTRIES) return `a side has at most ${MAX_SIDE_ENTRIES} entries`;
   const badId = unknownItem(d.give) ?? unknownItem(d.get);
   if (badId !== undefined) return `"${badId}" is not a Minecraft item id`;

@@ -20,7 +20,7 @@ import { AgentRelations } from "./relations/agent-relations.ts";
 import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
-import { agreedDetail, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
+import { agreedDetail, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -258,6 +258,7 @@ export class Agent {
     this.relations = !persona.settings.relations.enabled ? null : new AgentRelations({
       persona, mind: options.mind, runtime: options.runtime, body: this.body, takeHandoff: (h) => this.takeHandoff(h),
       modelSlotFree: conversations?.modelFree ?? (() => true), inConversationWith: (name) => this.talks?.isMember(name) === true,
+      isAgent: (name) => this.isOtherAgent(name),
       lacks: (inventory) => describeLacks(this.stack.at(-1)?.wanted ?? [], inventory ?? this.lastLook?.inventory ?? []),
       journal: (event) => options.journal?.(event), log: (line) => options.log(line),
       ...(options.tradeBoard !== undefined && { board: options.tradeBoard }),
@@ -457,6 +458,11 @@ export class Agent {
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work), ...(decision.place !== undefined && { place: decision.place }) };
+    // No trade errand across the map: a bot out of reach is told to come (relations block); players are obeyed at any distance.
+    if ((routed === "act" || routed === "later") && asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
+      log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
+      return;
+    }
     if ((routed === "act" || routed === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
       return;
@@ -492,15 +498,20 @@ export class Agent {
   /** Whether each speaker (lowercase) was already in the conversation when their last line was heard. */
   private readonly memberBeforeLine = new Map<string, boolean>();
 
+  /** Whether the name is another agent of the project (not a player). */
+  private isOtherAgent(name: string): boolean {
+    return this.options.otherAgents.some((other) => other.toLowerCase() === name.toLowerCase());
+  }
+
   /**
    * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed). Another
    * agent is heard only inside a conversation: a member of it, or a line naming this character or a member (an opening
    * or a join, see {@link AgentOptions.otherAgents}).
    */
   private hears(message: PlayerMessage, named: readonly string[]): boolean {
-    const { persona, otherAgents } = this.options;
+    const { persona } = this.options;
     const speaker = message.username.toLowerCase();
-    const agent = otherAgents.some((name) => name.toLowerCase() === speaker);
+    const agent = this.isOtherAgent(message.username);
     if (!agent && !(persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker))) return false;
     // A line naming her makes its speaker a member: whether they already were is what a request of theirs is judged by.
     this.memberBeforeLine.set(speaker, this.talks?.isMember(message.username) === true);
@@ -758,13 +769,15 @@ export class Agent {
     // Trading is not drawn while every partner refused lately: it would only fail "no one to trade with".
     // Nor while it has taken its share of the time since the agent started (relations/trading.ts `MAX_SHARE`).
     const share = tradingShare(hour, Date.now(), this.startedAt);
-    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now(), share);
+    // Nor while no partner is seen within `relations.tradeReach` blocks: a far partner would only be called and waited for.
+    const inReach = partnersInReach(this.partners(), snapshot, persona.settings.relations.tradeReach);
+    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now(), share, inReach);
     const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
     this.asks.dropRefused(this.partners(), Date.now());
     const needs = this.asks.needs.current(Date.now(), snapshot.inventory);
     const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs, share);
-    const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, this.partners(), this.asks, snapshot.inventory, Date.now()) : undefined;
+    const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, inReach, this.asks, snapshot.inventory, Date.now()) : undefined;
     const opportunities = await this.opportunities(snapshot, drawn, tradeNeeds);
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
@@ -986,7 +999,9 @@ export class Agent {
       return this.finish(work, "done", agreedDetail(agreed.partner, agreed));
     }
     const snapshot = await this.options.runtime.status();
-    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), this.partners(), this.asks, snapshot, Date.now());
+    const partners = this.partners();
+    const inReach = partnersInReach(partners, snapshot, this.options.persona.settings.relations.tradeReach);
+    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), partners, this.asks, snapshot, Date.now(), inReach);
     if ("failed" in plan) {
       // It failed before any ask: after two in a row trading is not drawn for a while.
       this.asks.failedFast(Date.now());

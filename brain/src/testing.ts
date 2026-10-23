@@ -492,7 +492,7 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 }, relations: { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 } },
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 }, relations: { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 } },
     models: {},
     ...overrides,
   };

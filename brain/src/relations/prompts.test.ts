@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { testPersona } from "../testing.ts";
-import { describeJudge, judgeSystemPrompt, openingRelationLines, parseGistPartners, parseTrade, relationsBlock, tradeInstructions } from "./prompts.ts";
+import { describeJudge, judgeSystemPrompt, openingRelationLines, parseGistPartners, parseTrade, relationsBlock, tooFarLine, tradeInstructions } from "./prompts.ts";
 import { newRelation, withSaid } from "./record.ts";
 import { agreeTrade } from "./trade.ts";
 
@@ -96,4 +96,9 @@ test("the judge prompt asks for feeling, word and why; the request shows the rec
   assert.match(text, /You and Theo: friend/u);
   assert.match(text, /5 bread/u);
   assert.match(text, /they paid 3 of 5 iron_ingot/u);
+});
+
+test("F10 tooFarLine tells a partner out of reach cannot be gone to, with the distance or 'out of sight'", () => {
+  assert.equal(tooFarLine("Theo", 200), "Theo is too far away to trade with (200 blocks away): do not offer to go to them; they can come to you.");
+  assert.equal(tooFarLine("Theo", null), "Theo is too far away to trade with (out of sight): do not offer to go to them; they can come to you.");
 });

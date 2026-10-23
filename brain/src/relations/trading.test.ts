@@ -5,7 +5,7 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
-import { offerFrom, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
+import { offerFrom, partnersInReach, reachOf, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
 import type { ActivityTime } from "../time-spent.ts";
 import type { ItemCount, Trade, TradeState } from "./types.ts";
 
@@ -517,4 +517,54 @@ test("F9: between 25 % and 40 % trading is not forced into the draw; under 25 % 
   assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], at(7)), ["farming", "trading"], "23 %: forced");
   assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], at(7.5)), ["farming", "exploring"], "exactly 25 %: not forced");
   assert.deepEqual(withoutRefusedTrading(available, ["Theo"], new TradeAsks(), MIN, at(9)), available, "30 %: still available");
+});
+
+const reachSnapshot = (players: FakeRuntime["snapshot"]["players"]) => ({ ...new FakeRuntime().snapshot, players });
+
+test("F10 reachOf: seen at 32 blocks is in reach, at 33 out; no position is out of reach; the name is case-insensitive", () => {
+  assert.deepEqual(reachOf("Theo", reachSnapshot(theoAt(32)), 32), { inReach: true, away: 32 });
+  assert.deepEqual(reachOf("theo", reachSnapshot(theoAt(33)), 32), { inReach: false, away: 33 });
+  assert.deepEqual(reachOf("Theo", reachSnapshot([]), 32), { inReach: false, away: null });
+});
+
+test("F10 partnersInReach keeps the seen partners at most the reach away, in order; it does not filter the bot itself", () => {
+  const players = [...theoAt(10), { username: "Bruno", position: { x: 200, y: 64, z: 0 } }, { username: "Ayla", position: { x: 0, y: 64, z: 0 } }];
+  assert.deepEqual(partnersInReach(["Bruno", "Theo", "Mia"], reachSnapshot(players), 32), ["Theo"]);
+  assert.deepEqual(partnersInReach(["theo", "AYLA"], reachSnapshot(players), 32), ["theo", "AYLA"], "the caller leaves itself out of the partners");
+  assert.deepEqual(partnersInReach([], reachSnapshot(players), 32), []);
+});
+
+test("F10 withoutRefusedTrading drops trading when no partner is within reach; socialising stays; no partners at all is availableActivities' call", () => {
+  const available: Activity[] = ["exploring", "socialising", "trading"];
+  const asks = new TradeAsks();
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo", "Bruno"], asks, MIN, undefined, []), ["exploring", "socialising"]);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo", "Bruno"], asks, MIN, undefined, ["Theo"]), available, "one in reach");
+  asks.refused.add("Theo", ["iron_ingot"], 0);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo", "Bruno"], asks, MIN, undefined, ["Theo"]), ["exploring", "socialising"], "the only one in reach refused lately");
+  assert.deepEqual(withoutRefusedTrading(available, [], asks, MIN, undefined, []), available);
+});
+
+test("F10 tradePlan picks the partner within reach even when a far one is first in the list", () => {
+  const t = setup([...theoAt(10), { username: "Bruno", position: { x: 200, y: 64, z: 0 } }]);
+  const snapshot = t.runtime.snapshot;
+  assert.deepEqual(tradePlan("trade for iron ingots", [], ["Bruno", "Theo"], t.asks, snapshot, Date.now(), ["Theo"]), { want: ["iron_ingot"], partner: "Theo" });
+  assert.deepEqual(tradePlan("trade Theo for iron ingots", [], ["Bruno", "Theo"], t.asks, snapshot, Date.now(), ["Theo"]), { want: ["iron_ingot"], partner: "Theo" }, "a named partner within reach is picked");
+});
+
+test("F10 tradePlan fails 'too far away' when the objective names a partner out of reach, even with one near, and 'no one within reach' with none", () => {
+  const t = setup([...theoAt(10), { username: "Bruno", position: { x: 200, y: 64, z: 0 } }]);
+  const snapshot = t.runtime.snapshot;
+  const now = Date.now();
+  assert.deepEqual(tradePlan("trade Bruno for iron ingots", [], ["Bruno", "Theo"], t.asks, snapshot, now, ["Theo"]), { failed: "Bruno is too far away to trade with" });
+  assert.deepEqual(tradePlan("trade for iron ingots", [], ["Bruno"], t.asks, snapshot, now, []), { failed: "no one within reach to trade iron_ingot with" });
+  assert.deepEqual(tradePlan("trade for iron ingots", [], ["Mia"], t.asks, snapshot, now, []), { failed: "no one within reach to trade iron_ingot with" }, "no position at all");
+  assert.deepEqual(tradePlan("trade for nothing", [], ["Bruno"], t.asks, snapshot, now, []), { failed: "nothing to trade for" }, "the items come first");
+});
+
+test("F10 two 'too far away' failures within 5 minutes pause trading for 5 minutes", () => {
+  const asks = new TradeAsks();
+  const available: Activity[] = ["exploring", "trading"];
+  asks.failedFast(0);
+  asks.failedFast(MIN);
+  assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, MIN, undefined, ["Theo"]), ["exploring"]);
 });

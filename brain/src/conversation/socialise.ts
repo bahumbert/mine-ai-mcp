@@ -56,7 +56,7 @@ export function pickPartner(objective: string, partners: readonly string[], snap
   return nearest?.partner ?? partners[0] ?? null;
 }
 
-function positionOf(snapshot: BotSnapshot, partner: string): Position | null {
+export function positionOf(snapshot: BotSnapshot, partner: string): Position | null {
   return snapshot.players.find((player) => player.username.toLowerCase() === partner.toLowerCase())?.position ?? null;
 }
 

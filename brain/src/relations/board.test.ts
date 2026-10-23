@@ -10,7 +10,7 @@ import type { Handoff } from "./handoff.ts";
 import type { ItemCount, TradeSettings } from "./types.ts";
 
 const t0 = 1_000_000;
-const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 };
+const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const bread = (count: number): ItemCount[] => [{ item: "bread", count }];
 const logs = (count: number): ItemCount[] => [{ item: "oak_log", count }];
 const state = { now: t0 };
@@ -24,7 +24,7 @@ function bot(self: string, board: TradeBoard | undefined) {
     self, persona: testPersona(), book, mind, settings, now: () => state.now, takeHandoff: (h) => { if (h.kind === "give") handoffs.push(h); },
     modelSlotFree: () => true, inConversationWith: () => false, journal: () => {}, log: (l) => lines.push(l), ...(board !== undefined && { board }),
   });
-  const snapshot = (inventory: BotSnapshot["inventory"] = [{ name: "bread", count: 10 }, { name: "oak_log", count: 10 }]): BotSnapshot => ({ ...new FakeRuntime().snapshot, inventory, players: [] });
+  const snapshot = (inventory: BotSnapshot["inventory"] = [{ name: "bread", count: 10 }, { name: "oak_log", count: 10 }]): BotSnapshot => ({ ...new FakeRuntime().snapshot, inventory, players: ["Finn", "Ayla", "Theo", "Lena"].map((username) => ({ username, position: { x: 2, y: 64, z: 0 } })) });
   const latest = (partner: string) => book.get(partner)?.trades.at(-1);
   return { c, book, handoffs, lines, snapshot, latest };
 }

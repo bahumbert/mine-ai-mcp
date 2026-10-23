@@ -89,9 +89,17 @@ test("conversation settings default", () => {
 
 test("relations settings default", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
-  const defaults = { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 };
+  const defaults = { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
   assert.deepEqual(personaSchema.parse(base).settings.relations, defaults);
   assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { payBackMinutes: 0 } } }).success, false);
   assert.deepEqual(personaSchema.parse({ ...base, settings: { relations: { payBackMinutes: 20 } } }).settings.relations, { ...defaults, payBackMinutes: 20 });
   assert.equal(personaSchema.parse({ ...base, settings: { relations: { enabled: false } } }).settings.relations.enabled, false);
+});
+
+test("relations tradeReach defaults to 32 and must be 1 to 256", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.equal(personaSchema.parse(base).settings.relations.tradeReach, 32);
+  assert.equal(personaSchema.parse({ ...base, settings: { relations: { tradeReach: 256 } } }).settings.relations.tradeReach, 256);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { tradeReach: 0 } } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { tradeReach: 257 } } }).success, false);
 });

@@ -1,7 +1,9 @@
 // The `trading` activity's code routine: go to a partner, ask for what the bot lacks, and judge the talk by what the
 // trade controller recorded (spec 2026-10-21-trading-activity-design).
 import type { Activity } from "../activities.ts";
-import { pickPartner, socialise, type SocialiseDeps } from "../conversation/socialise.ts";
+import { pickPartner, positionOf, socialise, type SocialiseDeps } from "../conversation/socialise.ts";
+import { manhattan } from "../conversation/state.ts";
+import { namesWord } from "../llm-mind.ts";
 import type { OpenFacts } from "../conversation/controller.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
@@ -193,14 +195,31 @@ export function withTrading(drawn: readonly Activity[], available: readonly Acti
   return drawn[0] === undefined ? ["trading"] : [drawn[0], "trading"];
 }
 
+/** Whether the partner is seen and at most `reach` blocks away (Manhattan), and how far (null = not seen, so out of reach). */
+export function reachOf(name: string, snapshot: BotSnapshot, reach: number): { readonly inReach: boolean; readonly away: number | null } {
+  const position = positionOf(snapshot, name);
+  if (position === null) return { inReach: false, away: null };
+  const away = manhattan(snapshot.position, position);
+  return { inReach: away <= reach, away };
+}
+
+/** The partners seen and within reach, in order (the caller leaves itself out of `partners`). */
+export function partnersInReach(partners: readonly string[], snapshot: BotSnapshot, reach: number): string[] {
+  return partners.filter((partner) => reachOf(partner, snapshot, reach).inReach);
+}
+
 /** The partners that did not refuse any trade lately. */
 export function tradingPartners(partners: readonly string[], asks: TradeAsks, now: number): string[] {
   return partners.filter((partner) => !asks.refused.refusedAnything(partner, now));
 }
 
-/** The goal tier's activities without `trading` while every partner refused lately (it would only fail "no one to trade with"), its objectives keep failing before any ask, or trading has taken {@link MAX_SHARE} of the time. */
-export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number, share?: TradingShare): Activity[] {
-  const hopeless = asks.paused(now) || (partners.length > 0 && tradingPartners(partners, asks, now).length === 0) || (limitApplies(share) && share.share >= MAX_SHARE);
+/**
+ * The goal tier's activities without `trading` while no partner is within reach, every partner in reach refused lately
+ * (it would only fail "no one to trade with"), its objectives keep failing before any ask, or trading has taken
+ * {@link MAX_SHARE} of the time. `inReach` (omitted: every partner) is {@link partnersInReach} of `partners`.
+ */
+export function withoutRefusedTrading(available: readonly Activity[], partners: readonly string[], asks: TradeAsks, now: number, share?: TradingShare, inReach: readonly string[] = partners): Activity[] {
+  const hopeless = asks.paused(now) || (partners.length > 0 && tradingPartners(inReach, asks, now).length === 0) || (limitApplies(share) && share.share >= MAX_SHARE);
   return hopeless ? available.filter((activity) => activity !== "trading") : [...available];
 }
 
@@ -209,8 +228,11 @@ export function tradeNeedsFacts(needs: readonly string[], partners: readonly str
   return { items: [...needs], partners: partners.filter((partner) => !asks.refused.isRefused(partner, needs, now)), offer: offerFrom(inventory, needs) };
 }
 
-/** What a trading objective sets out to do: the items it asks for and the partner to ask, or why it cannot. */
-export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number): { readonly want: string[]; readonly partner: string } | { readonly failed: string } {
+/**
+ * What a trading objective sets out to do: the items it asks for and the partner to ask, or why it cannot. Only
+ * `inReach` partners (omitted: every partner) are asked; an objective naming one who is not fails, whoever else is near.
+ */
+export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number, inReach: readonly string[] = partners): { readonly want: string[]; readonly partner: string } | { readonly failed: string } {
   // An item the objective names that it carries is what it offers, not what it asks for.
   const mentioned = wantedItems(objective, []);
   const named = mentioned.filter((item) => !carries(snapshot.inventory, item));
@@ -218,7 +240,10 @@ export function tradePlan(objective: string, needs: readonly string[], partners:
   if (mentioned.length > 0 && named.length === 0 && needs.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
   const want = named.length > 0 ? named : [...needs];
   if (want.length === 0) return { failed: "nothing to trade for" };
-  const eligible = partners.filter((partner) => !asks.refused.isRefused(partner, want, now));
+  const tooFar = partners.find((partner) => namesWord(objective, partner) && !inReach.includes(partner));
+  if (tooFar !== undefined) return { failed: `${tooFar} is too far away to trade with` };
+  if (partners.length > 0 && inReach.length === 0) return { failed: `no one within reach to trade ${want.join(", ")} with` };
+  const eligible = inReach.filter((partner) => !asks.refused.isRefused(partner, want, now));
   const partner = eligible.length === 0 ? null : pickPartner(objective, eligible, snapshot);
   return partner === null ? { failed: `no one to trade ${want.join(", ")} with` } : { want, partner };
 }

@@ -95,7 +95,7 @@ export class TradeController implements BoardPeer {
 
   /** Null when a propose or accept can become a trade, else the reason that is sent back to the chat tier once. */
   checkDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): string | null {
-    return checkTradeDecision({ decision: this.termsOf(d, speaker), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, givenOutside: this.creditedTo(speaker) });
+    return checkTradeDecision({ decision: this.termsOf(d, speaker), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, reach: this.deps.settings.tradeReach, givenOutside: this.creditedTo(speaker) });
   }
 
   /** The proposal the partner (a bot of this brain) posted to me, still open. */

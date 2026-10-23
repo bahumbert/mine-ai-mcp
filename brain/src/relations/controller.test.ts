@@ -13,7 +13,7 @@ import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from 
 
 const MIN = 60_000;
 const t0 = 1_000_000;
-const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 };
+const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const signal = new AbortController().signal;
 const bread = (count: number): ItemCount[] => [{ item: "bread", count }];
 const ingots = (count: number): ItemCount[] => [{ item: "iron_ingot", count }];
@@ -51,7 +51,8 @@ const snapshot = (over: { inventory?: BotSnapshot["inventory"]; theo?: Position 
   ...new FakeRuntime().snapshot,
   position: over.position ?? { x: 0, y: 64, z: 0 },
   inventory: over.inventory ?? [{ name: "bread", count: 10 }, { name: "oak_log", count: 10 }],
-  players: over.theo === "absent" ? [] : [{ username: "Theo", position: over.theo === undefined ? { x: 2, y: 64, z: 0 } : over.theo }],
+  // The other speakers of the tests stand next to the bot, so the reach check passes.
+  players: over.theo === "absent" ? [] : [{ username: "Theo", position: over.theo === undefined ? { x: 2, y: 64, z: 0 } : over.theo }, ...["Bruno", "Ayla2", "Zed"].map((username) => ({ username, position: { x: 2, y: 64, z: 0 } }))],
 });
 
 const decision = (over: Partial<TradeDecision> = {}): TradeDecision => ({ action: "accept", give: bread(5), get: ingots(5), first: "me", ...over });
@@ -835,4 +836,24 @@ test("F9 agreedSince: the newest trade with anyone created at or after the time 
   assert.equal(h.c.agreedSince(t0), null, "agreed, then broken before the resume");
   await h.book.update("Bruno", (r) => withTrade(r, { ...agreed, state: "done", endedAt: h.state.now }));
   assert.equal(h.c.agreedSince(t0)?.state, "done");
+});
+
+test("F10: an accept from a partner who walked out of reach is refused; my proposal stays proposed and is cancelled 'no answer' by the timer", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  const away = snapshot({ theo: { x: 100, y: 64, z: 0 } });
+  assert.match(h.c.checkDecision(decision({ action: "accept" }), "Theo", away) ?? "", /Theo is too far away to trade with \(100 blocks away\)/u);
+  assert.equal(theirTrade(h).state, "proposed");
+  h.state.now += 3 * MIN;
+  await h.c.tick(away, new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.match(theirTrade(h).note, /no answer/u);
+});
+
+test("F10: the reach comes from the settings: a partner 50 blocks away passes with tradeReach 64, a decline passes at any distance", () => {
+  const h = harness({ settings: { tradeReach: 64 } });
+  const far = snapshot({ theo: { x: 50, y: 64, z: 0 } });
+  assert.equal(h.c.checkDecision(decision({ action: "propose" }), "Theo", far), null);
+  assert.match(harness().c.checkDecision(decision({ action: "propose" }), "Theo", far) ?? "", /too far away/u);
+  assert.equal(harness().c.checkDecision(decision({ action: "decline", give: [], get: [] }), "Theo", far), null);
 });

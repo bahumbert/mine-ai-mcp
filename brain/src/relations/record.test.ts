@@ -4,7 +4,7 @@ import { describeRelation, forgetOldSaid, newRelation, parseRelationNote, relati
 import { agreeTrade, creditTrade, failTrade, markGave, settleTrade } from "./trade.ts";
 import type { ItemCount, TradeSettings } from "./types.ts";
 
-const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3 };
+const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
 const t0 = 1_000_000;
 const bread: ItemCount[] = [{ item: "bread", count: 5 }];

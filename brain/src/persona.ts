@@ -141,6 +141,8 @@ export const personaSchema = z.strictObject({
       offersForgetMinutes: z.number().positive().max(10_080).default(60),
       /** Trades open at once, one per partner. */
       maxOpenTrades: z.number().int().min(1).max(20).default(3),
+      /** A trade partner counts only when seen and at most this many blocks away (Manhattan). */
+      tradeReach: z.number().int().min(1).max(256).default(32),
     }).prefault({}),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */
