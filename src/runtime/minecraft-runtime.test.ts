@@ -42,10 +42,9 @@ const combatController = engagingCombat(runtimeBot(), async (targetId) => ({
  * listener for that event throw.
  */
 function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): Bot {
-  const { bot } = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0) });
+  // No column loaded: the frontier observes none.
+  const { bot } = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0), loadedColumns: [] });
   bot.setMaxListeners(40); // as the runtime host allows its observers (`runtime-host.ts`)
-  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): no column loaded.
-  Object.assign(bot.world, { getColumns: () => [], getColumn: () => undefined });
   const setControlState = bot.setControlState;
   bot.setControlState = (control, state) => {
     if (control === "jump") controlStates.push(state);

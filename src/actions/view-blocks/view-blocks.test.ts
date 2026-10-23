@@ -13,28 +13,17 @@ interface Placed {
   readonly properties?: Record<string, string | number | boolean>;
 }
 
-/** One loaded chunk column at the origin, y 0 to 80, holding the named blocks over air. */
+/** One loaded chunk column at the origin holding the named blocks over air. */
 function fakeBot(placed: Record<string, Placed>, options: { readonly version?: string } = {}) {
-  const { bot, world } = createFakeBot({
+  return createFakeBot({
     version: options.version,
     position: new Vec3(0.5, 64, 0.5),
     groundY: null,
+    loadedColumns: [[0, 0]],
     cells: Object.fromEntries(
       Object.entries(placed).map(([cell, block]) => [cell, block.properties ? { name: block.name, properties: block.properties } : block.name]),
     ),
-  });
-  // Stopgap until the master adds `bot.world.getColumns` to the shared fake: prismarine-world `WorldSync.getColumns()`
-  // (`world/sync.js`, the columns `load_chunk` filled), here one column whose sections read the fake world.
-  const sections = Array.from({ length: 5 }, (_unused, index) => {
-    const sectionY = index * 16;
-    return {
-      solidBlockCount: 1,
-      data: {},
-      get: (local: { x: number; y: number; z: number }) => world.getBlockStateId(new Vec3(local.x, sectionY + local.y, local.z)),
-    };
-  });
-  bot.world.getColumns = () => [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections } }] as never;
-  return bot;
+  }).bot;
 }
 
 test("a view needs at least one of find, box, or cells, dedupes names, and defaults the limit", () => {

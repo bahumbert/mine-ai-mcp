@@ -5,22 +5,7 @@ import { createNavigationRuntime } from "./runtime.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeBot, type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
-
-/**
- * The world's synchronous chunk column, which the navigation world reads (`world.ts` `#loadColumn`): the column's cells are
- * local to its chunk in x and z, the heights those of the overworld since 1.18, and the states those of the fake world.
- */
-// Stopgap until the master adds bot.world.getColumn to the fake: node_modules/prismarine-world/src/world.js:84 getColumn.
-function withColumns(bot: FakeBot): void {
-  Object.assign(bot.world, {
-    getColumn: (chunkX: number, chunkZ: number) => ({
-      minY: -64,
-      worldHeight: 384,
-      getBlockStateId: (local: Vec3) => bot.world.getBlockStateId(new Vec3(chunkX * 16 + local.x, local.y, chunkZ * 16 + local.z)),
-    }),
-  });
-}
+import { type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 
 /** Moves the clock, and with it the fake physics ticks, until `work` settles. */
 async function tickUntilSettled<T>(clock: FakeClock, work: Promise<T>): Promise<T> {
@@ -62,7 +47,6 @@ test("navigation uses observed perched-cloud clearance", async () => {
     groundY: 61,
     entities: { 564: { name: "area_effect_cloud", position: new Vec3(-0.8084108410180761, 63, 8.551320364546644), metadata } },
   });
-  withColumns(bot);
   const navigation = createNavigationRuntime(bot);
   const stop = new AbortController();
   let plans = 0;
@@ -87,7 +71,6 @@ test("navigation uses observed perched-cloud clearance", async () => {
 /** A flat stone floor at y 63 and a route along it that waits on physics ticks the test does not send. */
 function waitingRoute(releaseWaitMs?: number, clock?: FakeClock) {
   const { bot } = createFakeBot({ groundY: 63, clock });
-  withColumns(bot);
   const navigation = createNavigationRuntime(bot, releaseWaitMs === undefined ? {} : { releaseWaitMs });
   const committed = new Promise<void>((resolve) => {
     const stop = navigation.onEvent((event) => {
@@ -186,7 +169,6 @@ function enclosedRoom(routes: RouteOutcomes) {
     for (let z = -8; z <= 8; z++)
       for (let y = 64; y <= 67; y++) if (!(Math.abs(x) <= 2 && Math.abs(z) <= 2 && y <= 65)) cells[`${x},${y},${z}`] = "stone";
   const { bot, clock } = createFakeBot({ groundY: 63, cells });
-  withColumns(bot);
   return { bot, clock, navigation: createNavigationRuntime(bot, { routes }), movements: createMovementPolicy({ allowDigging: false, allowParkour: false }) };
 }
 

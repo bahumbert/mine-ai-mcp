@@ -31,14 +31,14 @@ async function configuration(t: TestContext) {
 function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
   const { bot } = createFakeBot({
     slots,
+    // No chunk column is loaded: the frontier observes none.
+    loadedColumns: [],
     // `kick.js`: quit ends the client, whose end Mineflayer re-emits as the bot's `end` (`loader.js:113`).
     overrides: { quit: () => bot.emit("end", "Host test closed") },
   });
   bot._client.uuid = "host-test";
   // The tool plugin as `loadBotPlugins` finds it already installed: the fake bot has no `loadPlugin`.
   Object.assign(bot, { tool: { equipForBlock: async () => {} } });
-  // No chunk column is loaded: the frontier observes none. The fake world keeps blocks, not columns.
-  Object.assign(bot.world, { getColumns: () => [], getColumn: () => undefined });
   t.mock.method(mineflayer, "createBot", () => {
     queueMicrotask(() => {
       bot._client.emit("login", { worldState: { hashedSeed: 1n } });

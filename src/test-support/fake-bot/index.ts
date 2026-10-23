@@ -4,3 +4,4 @@ export { type FakeClock, type FakeClockMode, type FakeClockOptions, createFakeCl
 export { EQUIPMENT_SLOTS, type FakeInventory, type FakeInventoryOptions, createFakeInventory, itemOf } from "./fake-inventory.js";
 export { type FakeServer, type FakeServerOptions, type ReceivedPacket, createFakeServer } from "./fake-server.js";
 export { type FakeCell, type FakeWorld, type FakeWorldOptions, blockUpdateEventOf, createFakeWorld } from "./fake-world.js";
+export { type ChunkCoords, DEFAULT_LOADED_CHUNK_RADIUS, type FakeColumn, type ListedColumn } from "./fake-world-columns.js";

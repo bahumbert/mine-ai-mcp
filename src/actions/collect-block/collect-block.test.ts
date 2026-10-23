@@ -199,9 +199,8 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
     "[NO_TARGET_IN_RANGE] No dark_oak_log block left within 64 blocks of where the run started; the nearest loaded one is at -150,70,-260, 712 blocks from the start.",
   );
   // Nothing loaded at all, in range or beyond.
-  const { bot } = createFakeBot({ version: "1.21.4" });
-  // The harness's world has no loaded columns to list: an empty list, as a client with no chunk loaded answers.
-  Object.assign(bot.world, { getColumns: () => [] });
+  // No column loaded: an empty list, as a client with no chunk loaded answers.
+  const { bot } = createFakeBot({ version: "1.21.4", loadedColumns: [] });
   const result = settle(bot, request, {}, new Set(["dark_oak_log"]), new Vec3(0, 64, 0), { status: "no_targets", broken: [], reason: null });
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /^\[NO_TARGET_IN_RANGE\] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either\./u);

@@ -1,0 +1,34 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-find-blocks-matching
+tags:
+  - contract
+description: findBlocks finds set cells nearest first and stops at count. Contract check
+  tests/minecraft/contract/checks/find-blocks-matching.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: find-blocks-matching
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 0 -60 4 gold_block
+  - setblock 3 -60 0 gold_block
+  - setblock 0 -60 2 gold_block
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

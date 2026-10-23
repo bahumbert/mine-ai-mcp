@@ -6,8 +6,10 @@ import type { FakeCell } from "../../../src/test-support/fake-bot/index.ts";
 import type { ContractSubject } from "./subject.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
+import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
+import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
@@ -55,6 +57,8 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   stopDiggingBothWindows,
   boatGetOffByShift,
   boatDismountIgnored,
+  columnsHoldCells,
+  findBlocksMatching,
 ];
 
 /** The check of that name; throws listing the known names. */

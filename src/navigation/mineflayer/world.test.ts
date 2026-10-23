@@ -12,25 +12,21 @@ const STONE = registry.blocksByName.stone!.defaultState!;
 const DIRT = registry.blocksByName.dirt!.defaultState!;
 
 /**
- * A bot on the shared fake over open air with the cells given, whose world also answers `getColumn` for the one
- * column (0, 0) as Prismarine's synchronous world does (`MineflayerWorldView` reads a column's cells by their place in
- * it, which for column (0, 0) is the world's own cell). Counts the cell reads that reach the column, and `chunkData`
- * holds the state ids the column answers instead of the world's, as a chunk the server sent again would.
+ * A bot on the shared fake over open air with the cells given and the one column (0, 0) loaded (`MineflayerWorldView`
+ * reads a column's cells by their place in it, which for column (0, 0) is the world's own cell). Counts the cell reads
+ * that reach the column, and `chunkData` holds the state ids the column answers instead of its own, as a chunk the
+ * server sent again would.
  */
 function columnBot(cells: Record<string, string>): FakeHarness & { cellReads: () => number; chunkData: Map<string, number> } {
-  const harness = createFakeBot({ cells, groundY: null });
+  const harness = createFakeBot({ cells, groundY: null, loadedColumns: [[0, 0]] });
   let cellReads = 0;
   const chunkData = new Map<string, number>();
-  const column = {
-    minY: -64,
-    worldHeight: 384,
-    getBlockStateId: (cell: Vec3) => {
-      cellReads += 1;
-      return chunkData.get(`${cell.x},${cell.y},${cell.z}`) ?? harness.world.getBlockStateId(cell);
-    },
+  const column = harness.world.getColumn(0, 0)!;
+  const ownRead = column.getBlockStateId.bind(column);
+  column.getBlockStateId = (cell: Vec3) => {
+    cellReads += 1;
+    return chunkData.get(`${cell.x},${cell.y},${cell.z}`) ?? ownRead(cell);
   };
-  // Stopgap until the shared fake answers bot.world.getColumn (gap reported to the master, M5).
-  Object.assign(harness.bot.world, { getColumn: (chunkX: number, chunkZ: number) => (chunkX === 0 && chunkZ === 0 ? column : null) });
   return { ...harness, cellReads: () => cellReads, chunkData };
 }
 
@@ -83,7 +79,7 @@ test("a block update rewrites its stored cell and publishes the change; a column
 
   // A reload replaces the section wholesale, so the next read goes back to it.
   chunkData.set("4,63,2", STONE);
-  // Stopgap until the shared fake answers bot.world.getColumn (gap reported to the master, M5).
+  // The server sending the chunk again: the fake world has no chunk packets, so the test emits Mineflayer's event.
   bot.emit("chunkColumnLoad", new Vec3(0, 0, 0));
   const reloaded = world.blockAt(4, 63, 2);
   assert.equal(reloaded.kind === "loaded" && reloaded.stateId, STONE);

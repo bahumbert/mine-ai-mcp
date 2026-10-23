@@ -31,7 +31,8 @@ function scannerBot(columns: TestColumn[]): Bot {
     },
   });
   // Hand-made columns carry only the surface the scanner reads (`LoadedChunkSection`), not Prismarine's whole chunk.
-  // Stopgap until the shared fake world answers `getColumns` (gap reported to the master, M5): the scanned columns are scripted.
+  // Stopgap that stays (T3b-B): the fake's columns hold the world's real cells, and these tests count the reads and pick each
+  // section's palette, which real columns cannot show.
   bot.world.getColumns = () => columns as unknown as ReturnType<Bot["world"]["getColumns"]>;
   return bot;
 }

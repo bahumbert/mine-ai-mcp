@@ -4,6 +4,20 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { blockClass, type MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { cellKey } from "../../utils/index.js";
+import {
+  type CellState,
+  type ChunkCoords,
+  type DimensionRange,
+  type FakeColumn,
+  type ListedColumn,
+  VOID,
+  assertWithinRange,
+  chunkIndexOf,
+  createChunkedCells,
+  createFakeColumns,
+  createLoadedChunks,
+  lazyRange,
+} from "./fake-world-columns.js";
 
 /** A block by name, by name with state properties, by state id, or `"void"`: a cell in a chunk the bot has not loaded. */
 export type FakeCell =
@@ -18,11 +32,22 @@ export interface FakeWorldOptions {
   readonly groundY?: number | null;
   /** Called with every cell `blockAt` reads, to assert on a rule's cost. */
   readonly onRead?: (cell: Vec3) => void;
+  /** The feet the loaded square is centred on; the origin when omitted. */
+  readonly feet?: { readonly x: number; readonly z: number };
+  /**
+   * The chunks the server sent, exactly (`[]`: none, so every read is null). Omitted: the square of chunks around the
+   * feet plus every chunk holding a named cell that is not `"void"` (`DEFAULT_LOADED_CHUNK_RADIUS`). A `setCell` into an
+   * unlisted chunk lists it.
+   */
+  readonly loadedColumns?: readonly ChunkCoords[];
+  /** The dimension's floor and height, read on first use (the bot's `game` is made after its world); the version's default when omitted. */
+  readonly heights?: () => DimensionRange;
 }
 
 /** Whatever hears the world's block updates: the bot, as Mineflayer forwards them to it. */
 export interface BlockUpdateSink {
   emit(event: "blockUpdate" | "blockUpdate:(x, y, z)", before: MineflayerBlock | null, after: MineflayerBlock | null): boolean;
+  emit(event: "chunkColumnLoad", corner: Vec3): boolean;
 }
 
 export type FakeRaycastHit = MineflayerBlock & { face: number; intersect: Vec3 };
@@ -30,10 +55,14 @@ export type FakeRaycastHit = MineflayerBlock & { face: number; intersect: Vec3 }
 export interface FakeWorld {
   readonly version: string;
   readonly registry: Bot["registry"];
-  /** `bot.blockAt`: a block placed at the cell, or null when the cell is `"void"`. */
+  /** `bot.blockAt`: a block placed at the cell, or null when the cell is `"void"` or in a chunk the server has not sent. */
   blockAt(cell: Vec3): MineflayerBlock | null;
   /** `bot.world.getBlockStateId`: the cell's state id; 0 for `"void"`, as Prismarine answers an unloaded column. */
   getBlockStateId(cell: Vec3): number;
+  /** `bot.world.getColumn` (`worldsync.js:81`): the chunk's Prismarine column, undefined where `blockAt` answers null. */
+  getColumn(chunkX: number, chunkZ: number): FakeColumn | undefined;
+  /** `bot.world.getColumns` (`worldsync.js:78`): every loaded column, its coordinates as strings. */
+  getColumns(): ListedColumn[];
   /** Change a cell and emit `blockUpdate` and `blockUpdate:(x, y, z)` with the old and the new block. */
   setCell(cell: Vec3, block: FakeCell): void;
   /** `bot.world.raycast`: the first block with a collision shape on the ray (fluids have none), with face and point. */
@@ -43,7 +72,6 @@ export interface FakeWorld {
 }
 
 const require = createRequire(import.meta.url);
-const VOID = "void";
 
 /** prismarine-world's ray walk (`iterators.js`), the one `bot.world.raycast` steps with; it ships no typings. */
 interface RaycastIterator {
@@ -83,11 +111,23 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
   const groundY = options.groundY ?? null;
   const stone = registry.blocksByName.stone!.defaultState!;
   const air = registry.blocksByName.air!.defaultState!;
-  const cells = new Map<string, number | typeof VOID>();
+  const cells = createChunkedCells();
   for (const [key, cell] of Object.entries(options.cells ?? {})) cells.set(key, stateIdOf(registry, Block, cell));
   const sinks = new Set<BlockUpdateSink>();
+  const range = lazyRange(registry, options.heights, cells);
+  const loaded = createLoadedChunks({ feet: options.feet ?? { x: 0, z: 0 }, loadedColumns: options.loadedColumns, namedChunks: cells.chunksOfBlocks() });
+  const columns = createFakeColumns(registry, loaded, { range, groundY, groundStateId: stone, namedCells: cells.inChunk });
 
-  const stateAt = (cell: Vec3) => cells.get(cellKey(cell.floored())) ?? (groundY !== null && Math.floor(cell.y) <= groundY ? stone : air);
+  // Where the server sent no chunk the cell is VOID; past the dimension's floor and height the game keeps nothing: air.
+  const stateAt = (cell: Vec3): CellState => {
+    const x = Math.floor(cell.x);
+    const y = Math.floor(cell.y);
+    const z = Math.floor(cell.z);
+    if (!loaded.has(x >> 4, z >> 4)) return VOID;
+    const { minY, height } = range();
+    if (y < minY || y >= minY + height) return air;
+    return cells.get(`${x},${y},${z}`) ?? (groundY !== null && y <= groundY ? stone : air);
+  };
   const placed = (stateId: number, cell: Vec3) => {
     const block = Block.fromStateId(stateId, 0);
     block.position = cell.floored();
@@ -108,9 +148,18 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
       const stateId = stateAt(cell);
       return stateId === VOID ? 0 : stateId;
     },
+    getColumn: columns.getColumn,
+    getColumns: columns.getColumns,
     setCell(cell, block) {
       const before = read(cell);
-      cells.set(cellKey(cell.floored()), stateIdOf(registry, Block, block));
+      const state = stateIdOf(registry, Block, block);
+      assertWithinRange(range(), cellKey(cell));
+      cells.set(cellKey(cell), state);
+      // The server had not sent this chunk; a test that sets a block in it is staging a chunk it did send, with its event
+      // (`worldsync.js` `setColumn` emits `chunkColumnLoad` at the column's corner, which Mineflayer forwards to the bot).
+      const sent = state !== VOID && loaded.add(chunkIndexOf(cell.x), chunkIndexOf(cell.z));
+      columns.setBlockStateId(Math.floor(cell.x), Math.floor(cell.y), Math.floor(cell.z), state === VOID ? 0 : state);
+      if (sent) for (const sink of sinks) sink.emit("chunkColumnLoad", new Vec3(chunkIndexOf(cell.x) * 16, 0, chunkIndexOf(cell.z) * 16));
       const after = read(cell);
       for (const sink of sinks) {
         sink.emit("blockUpdate", before, after);

@@ -9,6 +9,7 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
+import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
 import { attachFakeVehicle } from "./fake-bot-vehicle.js";
@@ -50,6 +51,8 @@ export interface FakeBotOptions {
   readonly cells?: FakeWorldOptions["cells"];
   /** Stone at and below this level; defaults to the level under the feet, null for open air. */
   readonly groundY?: number | null;
+  /** The chunks the server sent, exactly; omitted: the square around the feet and the chunks of named cells (`FakeWorldOptions`). */
+  readonly loadedColumns?: FakeWorldOptions["loadedColumns"];
   readonly slots?: FakeInventoryOptions["slots"];
   readonly carried?: FakeInventoryOptions["carried"];
   /** Entities by id (not the bot's own, which is id 1). */
@@ -150,7 +153,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const feet = new Vec3(point.x, point.y, point.z);
   const clock = options.clock ?? createFakeClock({ mode: "manual" });
   const groundY = options.groundY === undefined ? Math.floor(feet.y) - 1 : options.groundY;
-  const world = createFakeWorld(version, { cells: options.cells, groundY });
+  const world = createFakeWorld(version, { cells: options.cells, groundY, feet, loadedColumns: options.loadedColumns, heights: () => bot.game });
   const registry = world.registry;
   const loginRegistry = registry as unknown as LoginRegistry;
   loadLoginRegistries(loginRegistry, version);
@@ -173,9 +176,10 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
     players: { ...options.players, [username]: { username, uuid: "", ping: 0, gamemode: 0, displayName: undefined, entity: self } },
     inventory,
     blockAt: (point: Vec3) => world.blockAt(point),
-    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast },
+    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumns: world.getColumns },
     supportFeature: registry.supportFeature,
   });
+  world.getBlockStateId(feet); // the first read checks every named cell against the dimension's heights, now the bot's `game` exists
   world.forwardTo(bot);
   server.onTimePacket(() => bot.emit("time"));
   // The server's position packet, as the protocol hands it to Mineflayer's handler (`physics.js`).
@@ -184,6 +188,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeDigging(bot, clock, world);
   attachFakeVehicle(bot, server);
   attachFakeItems(bot, { clock, server, world, inventory, entities });
+  attachFakeFindBlocks(bot);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
   return { bot, clock, server, world, inventory };
 }

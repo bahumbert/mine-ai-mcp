@@ -26,16 +26,17 @@ const makeData = () =>
 const EYE_IDS = [42, 99];
 
 /**
- * The locator's harness bot at (0, 70, 0). Its world has no chunk columns (`findLoadedBlockPositions` scans those, and
- * the shared fake's world is cells): `getColumns` answers none unless a test gives it its own. Recovering a spent eye
+ * The locator's harness bot at (0, 70, 0). Its world has no chunk columns (`findLoadedBlockPositions` scans those):
+ * `loadedColumns` lists the chunks a test names (none by default). Recovering a spent eye
  * waits on the global timers: a test that reaches it passes a mocked clock and installs it.
  */
-function fixture(clock?: FakeClock) {
+function fixture(clock?: FakeClock, loadedColumns: readonly (readonly [number, number])[] = []) {
   let activations = 0;
   const harness = createFakeBot({
     clock,
     username: "Locator",
     position: new Vec3(0, 70, 0),
+    loadedColumns,
     entities: Object.fromEntries(
       EYE_IDS.map((id) => [id, { name: "eye_of_ender", position: new Vec3(0, 71.5, 0), uuid: `eye-${id}` }]),
     ),
@@ -48,7 +49,6 @@ function fixture(clock?: FakeClock) {
   const { bot } = harness;
   const eyes = new Map(EYE_IDS.map((id) => [id, bot.entities[id]!]));
   for (const id of EYE_IDS) delete bot.entities[id];
-  Object.assign(bot.world, { getColumns: () => [] });
   return { bot, harness, activations: () => activations, eye: (id = 42) => Object.assign(eyes.get(id)!, { position: new Vec3(0, 71.5, 0) }) };
 }
 
@@ -173,27 +173,10 @@ test("masonry alone is not confirmation; a loaded frame produces a typed durable
   using data = makeData();
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();
-  const f = fixture(clock);
+  const f = fixture(clock, [[0, 0]]);
   using flights = new StrongholdEyeFlights(f.bot);
-  let material = registry.blocksByName.stone_bricks!.minStateId;
-  f.bot.world.getColumns = () =>
-    [
-      {
-        chunkX: 0,
-        chunkZ: 0,
-        column: {
-          minY: 0,
-          sections: [
-            {
-              solidBlockCount: 1,
-              data: {},
-              palette: [material],
-              get: (pos: Vec3) => (pos.x === 1 && pos.y === 5 && pos.z === 1 ? material : 0),
-            },
-          ],
-        },
-      },
-    ] as never;
+  const frameCell = new Vec3(1, 5, 1);
+  f.harness.world.setCell(frameCell, registry.blocksByName.stone_bricks!.minStateId!);
   assert.equal(loadedStrongholdFrame(f.bot, f.bot.entity.position, 128), null);
   const navigation = { navigate: async () => ({ status: "completed", elapsedMs: 1 }) } as unknown as NavigationRuntime;
   const action = createLocateStrongholdAction(f.bot, navigation, data, flights);
@@ -204,7 +187,7 @@ test("masonry alone is not confirmation; a loaded frame produces a typed durable
   const id = store.begin({ x: 0, y: 70, z: 0 });
   store.observe(id, id, { x: 0, y: 71, z: 0 }, { x: 0, y: 65, z: 0 });
   store.finish(id, "observed");
-  material = registry.blocksByName.end_portal_frame!.minStateId;
+  f.harness.world.setCell(frameCell, registry.blocksByName.end_portal_frame!.minStateId!);
   const result = await clock.settle(
     action.begin(
       action.parse({ phase: "locate", continue_without_recommended_items: true }),

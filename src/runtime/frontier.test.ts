@@ -56,7 +56,8 @@ function fixture(surfaceWaterCells = 129) {
   };
   const columns = [{ chunkX: -2, chunkZ: 4, column }];
   const { bot } = createFakeBot();
-  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): this one column is loaded.
+  // Stopgap that stays (T3b-B): the tests script this column's containers (a palette of materials over empty cells, 64 biome
+  // samples, a read counter, a read that throws) and every chunk answers it; the fake's columns hold the world's real cells.
   Object.assign(bot.world, { getColumns: () => columns, getColumn: () => column });
   const data = temporaryBotData();
   return { events: bot, bot, column, data };
@@ -361,27 +362,20 @@ test("counts the recorded chunks that hold a material; a material the scan leave
   assert.equal(frontier.chunksWithMaterial("stone"), 0);
 });
 
-/** A bot whose loaded blocks within reach are `near` (block name -> count), asked as Mineflayer's findBlocks does. */
-/** A bot standing in one loaded section whose first `near[name]` cells (x, then z, then y) hold that block. */
+/** A bot whose loaded blocks within reach are `near` (block name -> count): the first cells (x, then z, then y) of chunk 0, 0 hold them. */
 function seeingBot(near: Record<string, number>, scans = { count: 0 }): Bot {
-  const { bot } = createFakeBot({ position: new Vec3(8, 8, 8) });
-  const registry = bot.registry;
-  const cells = new Map<number, number>();
+  const cells: Record<string, string> = {};
   let cell = 0;
   for (const [name, count] of Object.entries(near)) {
-    for (let index = 0; index < count; index += 1) cells.set(cell++, registry.blocksByName[name]!.minStateId!);
+    for (let index = 0; index < count; index += 1, cell += 1) cells[`${cell & 15},${cell >> 8},${(cell >> 4) & 15}`] = name;
   }
-  const section = {
-    solidBlockCount: 4_096,
-    palette: [0, ...new Set(cells.values())],
-    data: {},
-    get: ({ x, y, z }: { x: number; y: number; z: number }) => cells.get(y * 256 + z * 16 + x) ?? 0,
-  };
-  // Stopgap until the master's chunk-column task merges `world.getColumns` into the shared fake (gap reported 2026-10-21): one loaded section around the bot.
+  const { bot } = createFakeBot({ position: new Vec3(8, 8, 8), groundY: null, cells, loadedColumns: [[0, 0]] });
+  // Counts the scans: each one asks the world for its columns.
+  const listColumns = bot.world.getColumns.bind(bot.world);
   Object.assign(bot.world, {
     getColumns: () => {
       scans.count += 1;
-      return [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections: [section] } }];
+      return listColumns();
     },
   });
   return bot;
