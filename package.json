@@ -45,8 +45,10 @@
     "brain": "bun brain/src/main.ts",
     "monitor": "bun monitor/src/main.ts",
     "evidence:render": "bun scenarios/src/action-evidence-page.ts",
-    "scenarios": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat forever",
-    "scenarios:once": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
+    "scenarios": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios --repeat 10",
+    "scenarios:once": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios",
+    "scenarios:isolated": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
+    "scenarios:stop": "bun tests/minecraft/shared/submit.ts --stop",
     "scenarios:spectator": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --spectator",
     "scenarios:tailscale": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --tailscale"
   },

@@ -206,6 +206,37 @@ folder that `bun run scenarios` and `scenarios:once` take.
 bunx --bun mine-labs run tests/minecraft/contract/scenarios --repeat 3 -p <port>
 ```
 
+## Shared server: many scenarios at once
+
+`bun run scenarios:once` (and `bun tests/minecraft/shared/submit.ts <yaml|dir>...`) send the scenarios to one
+long-lived daemon instead of starting a Mine Labs server per run. The daemon keeps one or more servers per **settings
+key** (world type, seed, time, difficulty, tick rate and the effective value of every gamerule) warm, and runs each
+scenario on a **lane** of such a server: the scenario is shifted to `z = 512 × lane` (`tests/minecraft/arena/`), so
+many arenas share one world. A scenario the shift refuses (a natural `default` world, a settings verb it cannot
+lift, a `kill` goal, tag `exclusive`...) gets a server of its own at offset 0, started at the same time as the others.
+
+- **Admission is detected, never a fixed count.** Every 5 s the daemon reads each server's tick time P95 (`tick query`),
+  the CPU busy share (`/proc/stat`) and `MemAvailable`, and starts a trial (and a new server for it, at most one per
+  sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what servers and young
+  clients still have to grow into) covers the client, the concurrency target (starts at 10, halves on a machine breach,
+  grows by one after 60 s of held bounds) is not reached. With none of its own trials running the daemon admits one
+  whatever the foreign load. A trial that waits prints the bound that holds it every 30 s. Constants and their env
+  overrides (`MINE_AI_SCENARIO_*`): `tests/minecraft/shared/config.ts`.
+- **Lanes are free slots** handed out lowest first and held until the trial and its restore have settled; a trial is
+  aborted at `goal.timeout` + 120 s on the wall clock, and a server whose restore or abort does not finish in 60 s is
+  marked sick (no admission, stopped once it drains). One arrangement or restore at a time per server.
+- **Commands** (all through `submit.ts`; scripts `scenario-run.sh` and `scenario-repeat.sh` call it):
+  `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (takes
+  `/tmp/mine-labs.lock` and asks the daemon to admit nothing else until the batch ends: timing batches), `--out DIR`
+  (evidence, default `.mine-labs`), `--isolated` (today's `mine-labs run`, one server per worker), `--stop` (daemon
+  stops once its trials end; `bun run scenarios:stop`). The clients run from the YAML's own checkout, so a worker tests
+  its own code; the submitter's `MINE_AI_*` variables reach the clients through `client.env`.
+- **The daemon** listens on `/tmp/mine-ai-scenarios.sock`, owns game ports 25400-25559, logs to
+  `.tmp/scenario-server/daemon.log` of the checkout that started it, exits after 10 idle minutes. A change to
+  `tests/minecraft/arena`, `tests/minecraft/shared` or `patches/` is tested on a daemon of its own: `--socket
+  /tmp/mine-<name>.sock --port <base>` (40 ports from `<base>`, below 25360 so it meets neither the default block nor
+  25566-25574 and 25575+). After a kill of the daemon the next start kills the java servers it left (`.tmp/scenario-server/pids`, by PID).
+
 ## Runtime boundary and evidence
 
 The host builds `createMinecraftRuntime` once. Drivers receive only `scenario`

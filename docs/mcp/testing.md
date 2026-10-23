@@ -150,8 +150,10 @@ Scenarios are organised by world shape in [scenarios/](../../scenarios/):
 
 ## What package scripts run scenarios?
 
-`scenarios` runs `tests/minecraft/scenarios` repeatedly with two workers; appended
-options such as `--jobs` and `--repeat` override those defaults.
+`scenarios` and `scenarios:once` run `tests/minecraft/scenarios` on the shared scenario server
+(`tests/minecraft/shared/submit.ts`: one warm server per world settings, many scenarios at once as
+the machine's load allows); appended options such as `--repeat 10`, `--lanes 1` or `--lock` go to
+`submit`. `scenarios:isolated` is the old `mine-labs run ... --jobs 2` with a server per worker.
 `scenarios:spectator` builds the highlighter and opens that same suite in the
 managed Java viewer. Its controls select scenarios and repetition. The YAML
 `client` command still runs the bot participant in either mode.
@@ -159,7 +161,7 @@ managed Java viewer. Its controls select scenarios and repetition. The YAML
 Run these commands from the package root:
 
 ```sh
-# Soak the current suite with two workers.
+# Soak the current suite: 10 passes, scenarios in parallel on the shared server (bun run scenarios:once for one).
 bun run scenarios
 
 # Run one fixture once.
