@@ -41,15 +41,18 @@ function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, num
     calls.push(`look ${point.x},${point.y},${point.z} force=${force}`);
     await lookAt(point, force);
   };
-  // Stopgap until the shared fake has `activateItem`/`deactivateItem` (gap reported to the master, M5): scripted here.
-  bot.activateItem = () => {
+  // The hand is the fake's (`activateItem` writes `use_item`, `deactivateItem` releases); the bucket's effect on the world
+  // is scripted here as the server's answer to the packet (a bucket's use is not on the fake: backlog).
+  const activateItem = bot.activateItem;
+  bot.activateItem = (offHand) => {
     calls.push("use");
-    bot.usingHeldItem = true;
-    server.answer(effect);
+    activateItem(offHand);
   };
+  server.onPacket("use_item", () => server.answer(effect));
+  const deactivateItem = bot.deactivateItem;
   bot.deactivateItem = () => {
     calls.push("release");
-    bot.usingHeldItem = false;
+    deactivateItem();
   };
   const stack = (name: string): Item => bot.inventory.items().find((item) => item.name === name)!;
   return { ...harness, calls, target, stack, obsidian: bot.blockAt(new Vec3(3, 62, 0))! };
@@ -65,7 +68,8 @@ test("equips, looks with force, uses, and confirms the cell and the hand", async
     }), 4 * TICK_MS);
 
   assert.deepEqual(result, { kind: "used" });
-  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "use", "release"]);
+  // The bucket becomes a water bucket: Mineflayer ends the use itself (`inventory.js:84-103` checkActiveItem), so no release is sent.
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "use"]);
 });
 
 test("an unconfirmed use reports what it observed, whichever evidence it was waiting for", async () => {
@@ -135,7 +139,7 @@ test("onSent fires once, after the equip and the look, right before the use goes
       onSent: () => calls.push("sent"),
     }), 2 * TICK_MS);
   assert.deepEqual(result, { kind: "used" });
-  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "sent", "use", "release"]);
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "sent", "use"]);
 });
 
 test("onSent also fires before a use on a block, and not when the look throws or the signal aborts before the send", async () => {

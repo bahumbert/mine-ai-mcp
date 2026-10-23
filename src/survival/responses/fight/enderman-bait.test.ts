@@ -94,8 +94,6 @@ test("a shielded lure lands ready shared strikes before returning home without w
   const controls = { forward: false, back: false, left: false, right: false };
   const setControlState = bot.setControlState.bind(bot);
   bot.setControlState = (key, value) => { if (key in controls) Reflect.set(controls, key, value); setControlState(key, value); };
-  // Stopgap until the master adds bot.activateItem to the fake: mineflayer item.js activateItem.
-  bot.activateItem = () => { bot.usingHeldItem = true; };
   const hits: { x: number; tick: number; guarded: boolean }[] = [];
   const scene = { bot, target, requestedTarget: target, targetId: 7, movement: "pursue", navigation: { world },
     signal: new AbortController().signal, settled: () => false, roofTargetHostile: () => true,

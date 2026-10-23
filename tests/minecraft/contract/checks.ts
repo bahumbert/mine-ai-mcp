@@ -6,7 +6,9 @@ import type { FakeCell } from "../../../src/test-support/fake-bot/index.ts";
 import type { ContractSubject } from "./subject.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
+import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
+import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
@@ -58,6 +60,8 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   stopDiggingBothWindows,
   boatGetOffByShift,
   boatDismountIgnored,
+  boatPlacedByUse,
+  boatFollowsVehicleMove,
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,

@@ -68,6 +68,13 @@ export async function listenWhileSeated(subject: ContractSubject, boat: Entity):
   return heard;
 }
 
+/** A pool of water sources, 3x3, in the floor three blocks east of the feet: its cells hold no shapes, its surface is `WATER_SURFACE_Y`. */
+export const WATER_POOL_CELLS: Readonly<Record<string, string>> = Object.fromEntries(
+  [2, 3, 4].flatMap((x) => [-1, 0, 1].map((z) => [`${x},-61,${z}`, "water"])),
+);
+/** A source block's surface is 8/9 of its cell: a boat used on it was put at y -60.111 (Mine Labs 1.21.4, 2026-10-23). */
+export const WATER_SURFACE_Y = -61 + 8 / 9;
+
 /** The runtime's get-off (`getOff`), then the bot is free on the server and stands with physics running. */
 export async function getOffAndStand(subject: ContractSubject, boat: Entity): Promise<void> {
   const { bot } = subject;

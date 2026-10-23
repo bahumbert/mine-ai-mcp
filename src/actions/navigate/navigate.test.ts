@@ -8,7 +8,7 @@ import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
 import { createNavigateAction, formatNavigateResult, navigate, toolLossObserverOf, type NavigateDependencies } from "./navigate.js";
-import { createFakeBot, type FakeBotOptions, type FakeCell } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeBotOptions, type FakeCell } from "../../test-support/fake-bot/index.js";
 
 const goalTestWorld = new GoalTestWorld();
 
@@ -24,6 +24,7 @@ interface Scene {
   /** Item name to count; 4 dirt and 11 cobblestone when neither this nor `slots` is given. */
   readonly carried?: Record<string, number>;
   readonly slots?: FakeBotOptions["slots"];
+  readonly clock?: FakeBotOptions["clock"];
 }
 
 /** A bot at (0.5, 64, 0.5) on flat ground whose standing cells are at `groundY`: stone below, air from there up. */
@@ -33,6 +34,7 @@ function flatGroundBot(groundY = 64, scene: Scene = {}) {
     cells: scene.cells,
     carried: scene.carried ?? (scene.slots === undefined ? { dirt: 4, cobblestone: 11 } : undefined),
     slots: scene.slots,
+    clock: scene.clock,
   });
   /** Lower the count of `name` carried to `count`, as a route that placed some leaves it. */
   const useUntil = (name: string, count: number) => {
@@ -729,13 +731,17 @@ test("a cancel while a stopped route is judged ends the navigate with the cancel
 });
 
 test("at sea with a boat carried the route is unchanged: no land leg", async () => {
-  const { bot } = wideSeaBot(-30, 9, { carried: { oak_boat: 1 } });
+  // The boat is put down and ridden on the shared fake's server (the crossing waits on the wall clock: a mocked one); the ride
+  // ends on `bot.attack` (taking the boat back), which the fake has from T3b-A2: this test asserts the land leg only.
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot } = wideSeaBot(-30, 9, { carried: { oak_boat: 1 }, clock });
   let calls = 0;
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
     calls++;
     return { status: "stopped", reason: "no path found", elapsedMs: 5 };
   }));
-  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  await clock.settle(new ActionRunner().run(action, { x: -60, y: 64, z: 0 }), 120_000);
   assert.equal(calls, 1);
 });
 

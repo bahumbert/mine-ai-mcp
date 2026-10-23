@@ -16,11 +16,9 @@ async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
 }
 
 for (const permitted of [true, false]) test(`broken guard ${permitted ? "equips a spare and restarts readiness" : "respects disabled shields"}`, async () => {
-  const { bot, inventory } = createFakeBot({ slots: { 45: { name: "shield" } }, carried: { shield: 1 } });
+  const { bot, inventory, server } = createFakeBot({ slots: { 45: { name: "shield" } }, carried: { shield: 1 } });
   const spare = bot.inventory.items()[0]!;
-  let equipped = 0, readiness = 0, activations = 0;
-  // Stopgap until the master adds bot.activateItem to the fake: mineflayer item.js activateItem.
-  bot.activateItem = () => { activations++; };
+  let equipped = 0, readiness = 0;
   const equip = bot.equip.bind(bot);
   bot.equip = async (item, destination) => {
     assert.equal(item, spare); assert.equal(destination, "off-hand");
@@ -37,7 +35,7 @@ for (const permitted of [true, false]) test(`broken guard ${permitted ? "equips 
   await weapons.maintainGuard();
   assert.equal(equipped, permitted ? 1 : 0);
   assert.equal(readiness, permitted ? 5 : 0);
-  assert.equal(activations, permitted ? 2 : 1);
+  assert.equal(server.packets.filter(({ name }) => name === "use_item").length, permitted ? 2 : 1);
   assert.equal(weapons.itemUse.shieldRaised, permitted);
   await weapons.maintainGuard();
   assert.equal(equipped, permitted ? 1 : 0, "do not repeatedly equip a healthy guard");
@@ -54,8 +52,6 @@ test("guard aim is applied before the same tick's movement send and respects mov
   const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
   // A point one block east of the eye: a forced look turns the body to -π/2.
   Object.assign(weapons, { projectileDefence: () => ({ facing: bot.entity.position.offset(1, 1.62, 0) }) });
-  // Stopgap until the master adds bot.activateItem to the fake: mineflayer item.js activateItem.
-  bot.activateItem = () => {};
   weapons.itemUse.activateShield();
   bot.on("physicsTick", weapons.aimGuardBeforeMovement);
   bot.entity.yaw = 0;
@@ -75,8 +71,6 @@ test("guard aim is applied before the same tick's movement send and respects mov
 for (const abort of [false, true]) test(`terminal volley preserves guard after target death${abort ? " and remains cancellable" : " until the arrow clears"}`, async () => {
   const { bot, clock } = createFakeBot({ slots: { 45: { name: "shield" } }, position: new Vec3(0, 64, 0),
     entities: { 9: { name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1), metadata: [] } } });
-  // Stopgap until the master adds bot.activateItem to the fake: mineflayer item.js activateItem.
-  bot.activateItem = () => { bot.usingHeldItem = true; };
   bot.world.raycast = () => null;
   const arrow = bot.entities[9]!;
   const controller = new AbortController();
