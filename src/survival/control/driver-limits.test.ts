@@ -1,33 +1,25 @@
 // The limits a reflex claim is held to: no progress, a ceiling, a stand-down after either, and the seated tick.
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import { Vec3 } from "vec3";
 import { z } from "zod";
 import { actionResultSchema, defineAction } from "../../actions/index.js";
 import { BodyAbort } from "../../session/abort.js";
+import { forgetVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { ActionRunner } from "../../session/action-runner.js";
-import { flush, handClock } from "../../test-support/hand-clock.js";
+import { type FakeClock, createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import type { ReflexDefinition, ReflexLimits, SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
 
 const LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 1_000, standDownMs: 3_000 };
 
-function botFixture() {
-  const entity = { position: new Vec3(0.5, 64, 0.5), isInWater: false, onGround: true };
-  return Object.assign(new EventEmitter(), { health: 20, entity, game: { dimension: "overworld" } }) as unknown as Bot & {
-    entity: typeof entity;
-    vehicle?: object | null;
-  };
-}
-
-/** A driver on a hand clock: `pass(ms)` moves time in 50 ms ticks with a physics tick at each, as a healthy server would. */
-function scene(limits: ReflexLimits = LIMITS) {
-  const bot = botFixture();
-  const time = handClock();
-  const runner = new ActionRunner({ clock: time.clock, cancelGraceMs: 500 });
-  const driver = new ReflexDriver(bot, runner, { now: time.clock.now });
+/**
+ * A driver on the bot's clock: `pass(ms)` moves time in 50 ms ticks with a physics tick at each, as a healthy server
+ * would. A boat (#7) floats beside the bot; `clock` is a mocked one for a test of the driver's own interval.
+ */
+function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock) {
+  const { bot, clock: time } = createFakeBot({ clock, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
+  const runner = new ActionRunner({ clock: time, cancelGraceMs: 500 });
+  const driver = new ReflexDriver(bot, runner, { now: time.now });
   const events: SurvivalTransition[] = [];
   driver.onTransition((event) => events.push(event));
   const counts = { claims: 0, aborted: 0 };
@@ -60,12 +52,7 @@ function scene(limits: ReflexLimits = LIMITS) {
     failure: () => null,
     describe: (outcome) => outcome,
   });
-  const pass = async (ms: number) => {
-    for (let passed = 0; passed < ms; passed += 50) {
-      bot.emit("physicsTick");
-      await time.advance(50);
-    }
-  };
+  const pass = (ms: number) => time.advance(ms);
   return { bot, time, runner, driver, events, counts, definition, pass };
 }
 
@@ -152,15 +139,14 @@ test("a death during a claim is no stand-down, and the probes are off afterwards
   const { bot, driver, definition, pass } = scene();
   driver.register(definition());
   await pass(100);
-  const emitter = bot as unknown as EventEmitter;
-  const during = emitter.listenerCount("health");
+  const during = bot.listenerCount("health");
   assert.ok(during > 0, "the base probe listens during the claim");
   bot.health = 0;
   bot.emit("death");
   await flush();
   bot.health = 20;
   assert.deepEqual(driver.answered.snapshot(), []);
-  assert.equal(emitter.listenerCount("health"), 0, "the probes detach when the claim ends");
+  assert.equal(bot.listenerCount("health"), 0, "the probes detach when the claim ends");
 });
 
 test("the probes of a refused claim are detached", async () => {
@@ -168,7 +154,7 @@ test("the probes of a refused claim are detached", async () => {
   Object.defineProperty(runner, "claim", { value: () => ({ kind: "busy", activeAction: { action: "other", startedAt: "now" } }) });
   driver.register(definition());
   bot.emit("physicsTick");
-  assert.equal((bot as unknown as EventEmitter).listenerCount("health"), 0);
+  assert.equal(bot.listenerCount("health"), 0);
 });
 
 test("a probe that cannot attach does not keep the reflex from answering", async () => {
@@ -239,25 +225,27 @@ test("the interrupted request returns with the [REFLEX_LIMIT] reason, not a bare
 });
 
 /** Two reflexes, one that can act from a seat; the bot sits in a boat and the pace ticks come from a mocked interval. */
-test("a seated tick reaches only the reflexes that can act from a seat", async (context) => {
-  context.mock.timers.enable({ apis: ["setInterval"] });
-  const { bot, driver, definition } = scene();
+test("a seated tick reaches only the reflexes that can act from a seat", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, driver, definition } = scene(LIMITS, clock);
   const seen: string[] = [];
   driver.register({ ...definition(), name: "breath_reflex", sense: () => (seen.push("breath"), null) });
   driver.register({ ...definition(), name: "hunger_reflex", seated: true, sense: () => (seen.push("hunger"), null) });
   bot.emit("physicsTick");
   assert.deepEqual(seen, ["breath", "hunger"], "on foot both sense");
   seen.length = 0;
-  bot.vehicle = {};
-  (bot as unknown as EventEmitter).emit("mount");
-  context.mock.timers.tick(50);
-  context.mock.timers.tick(50);
+  bot.mount(bot.entities[7]!);
+  await clock.advance(50); // the server seats her: the mount event, and no physics tick while seated
+  seen.length = 0;
+  await clock.advance(50);
+  await clock.advance(50);
   assert.deepEqual(seen, ["hunger", "hunger"], "seated, with no physics tick, only hunger senses");
-  bot.vehicle = null;
-  (bot as unknown as EventEmitter).emit("dismount");
+  // The client hearing she is off: both of Mineflayer's seats cleared, then the dismount event.
+  forgetVehicle(bot);
   seen.length = 0;
   bot.emit("physicsTick");
   assert.deepEqual(seen, ["breath", "hunger"]);
   await driver[Symbol.asyncDispose]();
-  assert.equal((bot as unknown as EventEmitter).listenerCount("physicsTick"), 0, "no body tick listener is left");
+  assert.equal(bot.listenerCount("physicsTick"), 0, "no body tick listener is left");
 });

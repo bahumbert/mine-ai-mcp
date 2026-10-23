@@ -1,8 +1,7 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { observeCombatProgress } from "./combat-progress.js";
 import { ReflexProgress } from "./reflex-progress.js";
 
@@ -10,19 +9,20 @@ const SELF = 1;
 const ZOMBIE = 7;
 const BYSTANDER = 9;
 
-/** A bot with a server connection, a world that is open or a closed shelter, and a zombie in the response's threats. */
+/** Stone on every side of the body at (0, 64, 0): floor, roof and the four walls of both body cells. */
+const SHELTER_SHELL = ["0,63,0", "0,66,0", ...[64, 65].flatMap((y) => [`1,${y},0`, `-1,${y},0`, `0,${y},1`, `0,${y},-1`])];
+
+/** A bot with a server connection, in the open (a shelter can close around it), and a zombie in the response's threats. */
 function fixture() {
-  const client = new EventEmitter();
-  const zombie = { id: ZOMBIE, position: new Vec3(5.5, 64, 0.5), isValid: true };
-  const world = { shelter: false };
-  const emitter = new EventEmitter();
-  const bot = Object.assign(emitter, {
-    _client: client,
-    health: 20,
-    entity: { id: SELF, position: new Vec3(0.5, 64, 0.5), onGround: true, isInWater: false },
-    entities: { [ZOMBIE]: zombie } as Record<number, unknown>,
-    blockAt: () => (world.shelter ? { name: "stone", shapes: [[0, 0, 0, 1, 1, 1]], boundingBox: "block" } : null),
-  }) as unknown as Bot;
+  const { bot, world: blocks } = createFakeBot({ entities: { [ZOMBIE]: { name: "zombie", position: new Vec3(5.5, 64, 0.5) } } });
+  const client = bot._client;
+  const zombie = bot.entities[ZOMBIE]!;
+  const emitter = bot;
+  const world = {
+    closeShelter: () => {
+      for (const cell of SHELTER_SHELL) blocks.setCell(new Vec3(...(cell.split(",").map(Number) as [number, number, number])), "stone");
+    },
+  };
   const progress = new ReflexProgress();
   const tick = () => bot.emit("physicsTick");
   const watch = () => observeCombatProgress(bot, [ZOMBIE], progress.mark);
@@ -78,7 +78,7 @@ test("a target that has left the entity list does not break the sampling", () =>
   const { bot, progress, tick, watch } = fixture();
   const stop = watch();
   tick();
-  delete (bot.entities as Record<number, unknown>)[ZOMBIE];
+  delete bot.entities[ZOMBIE];
   assert.doesNotThrow(tick);
   assert.equal(progress.marks, 0);
   stop();
@@ -102,7 +102,7 @@ test("every tick inside a closed shelter is progress: a hold is protected waitin
   tick();
   tick();
   assert.equal(progress.marks, 0, "in the open");
-  world.shelter = true;
+  world.closeShelter();
   tick();
   tick();
   assert.equal(progress.marks, 2);
@@ -112,11 +112,9 @@ test("every tick inside a closed shelter is progress: a hold is protected waitin
 
 test("a world that cannot be read marks nothing and does not throw out of the tick", () => {
   const { bot, progress, tick, watch } = fixture();
-  Object.assign(bot, {
-    blockAt: () => {
-      throw new Error("chunk unloaded");
-    },
-  });
+  bot.blockAt = () => {
+    throw new Error("chunk unloaded");
+  };
   const stop = watch();
   assert.doesNotThrow(tick);
   assert.equal(progress.marks, 0);

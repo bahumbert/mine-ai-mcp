@@ -1,14 +1,14 @@
-import type { Bot } from "mineflayer";
+import type { BotEvents } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { climbsBy, fallsUnder, observeBodyProgress, ReflexProgress, risesOver, turnsTrue, watchBodyTicks } from "./reflex-progress.js";
 
 function fixture() {
-  const entity = { position: new Vec3(0.5, 64, 0.5), isInWater: false };
-  const emitter = new EventEmitter();
-  const bot = Object.assign(emitter, { entity, health: 20 }) as unknown as Bot;
+  const { bot } = createFakeBot();
+  const { entity } = bot;
+  const emitter = bot;
   const progress = new ReflexProgress();
   const tick = () => bot.emit("physicsTick");
   return { bot, emitter, entity, progress, tick };
@@ -30,7 +30,7 @@ test("a 1-block walk marks, a 0.9-block one does not", () => {
 
 test("a swimmer's bob does not mark", () => {
   const { bot, entity, progress, tick } = fixture();
-  entity.isInWater = true;
+  Object.assign(entity, { isInWater: true });
   const detach = observeBodyProgress(bot, progress.mark);
   tick();
   for (const y of [64.9, 63.8, 64.9, 63.2, 65.1]) {
@@ -77,13 +77,14 @@ test("a death marks", () => {
 
 test("detach removes every listener", () => {
   const { bot, emitter, progress } = fixture();
-  const before = Object.fromEntries(emitter.eventNames().map((name) => [String(name), emitter.listenerCount(name)]));
+  const listeners = (name: string | symbol) => emitter.listenerCount(name as keyof BotEvents);
+  const before = Object.fromEntries(emitter.eventNames().map((name) => [String(name), listeners(name)]));
   const detach = observeBodyProgress(bot, progress.mark);
   const stop = watchBodyTicks(bot, progress.mark, { landed: turnsTrue(() => true) });
   assert.ok(emitter.listenerCount("physicsTick") > 0);
   stop();
   detach();
-  for (const name of emitter.eventNames()) assert.equal(emitter.listenerCount(name), before[String(name)] ?? 0, String(name));
+  for (const name of emitter.eventNames()) assert.equal(listeners(name), before[String(name)] ?? 0, String(name));
 });
 
 test("a probe sampler marks when its value turns true, not while it stays true", () => {

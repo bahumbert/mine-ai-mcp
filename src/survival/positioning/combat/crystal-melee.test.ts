@@ -113,9 +113,12 @@ test("standing level with the crystal without a pedestal between is fully expose
 
 test("melee requires an exposed ray within three blocks after the cage cell is excavated", () => {
   const { bot, world } = fixture();
-  world.setCell(new Vec3(2, 82, 2), "iron_bars");
+  // The cage corner on the crystal side, its bars joined to the cage: the ray meets only shapes, so a thin
+  // post at the eye's own cell does not block (prismarine-world `worldsync.js:40-60`).
+  const cage = [new Vec3(1, 83, 1), new Vec3(1, 84, 1)];
+  for (const cell of cage) world.setCell(cell, { name: "iron_bars", properties: { north: true, west: true } });
   assert.equal(crystalMeleeAim(bot, crystal), null);
-  world.setCell(new Vec3(2, 82, 2), "air");
+  for (const cell of cage) world.setCell(cell, "air");
   assert.ok(crystalMeleeAim(bot, crystal));
   bot.entity.position = new Vec3(8.5, 81, 2.5);
   assert.equal(crystalMeleeAim(bot, crystal), null);

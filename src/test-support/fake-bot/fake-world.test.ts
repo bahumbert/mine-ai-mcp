@@ -105,3 +105,14 @@ test("raycast stops at the first block with a collision shape, walking through f
   assert.equal(hit.face, 2);
   assert.equal(world.raycast(at(0.5, 64.5, 0.5), new Vec3(0, 0, 1), 2), null);
 });
+
+test("raycast meets a block's real shape: a ray over a bottom slab passes, one into it hits its face", () => {
+  // prismarine-world `raycast` intersects `block.shapes` (`world.js:67`), so a slab stops only what crosses its half.
+  const world = createFakeWorld(VERSION, { cells: { "0,64,2": "stone_slab" } });
+  assert.equal(world.raycast(at(0.5, 64.67, 0.5), new Vec3(0, 0, 1), 10), null, "0.17 above the slab's top");
+  const hit = world.raycast(at(0.5, 64.25, 0.5), new Vec3(0, 0, 1), 10)!;
+  assert.equal(hit.name, "stone_slab");
+  assert.deepEqual(hit.position, at(0, 64, 2));
+  assert.equal(hit.face, 2);
+  assert.ok(Math.abs(hit.intersect.z - 2) < 1e-9 && Math.abs(hit.intersect.y - 64.25) < 1e-9, "met on the slab's north face");
+});

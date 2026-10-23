@@ -1,10 +1,9 @@
 /** The fake bot's world: named cells as real Prismarine blocks of one version, so shapes and states are the game's. */
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
-import type { Vec3 } from "vec3";
+import { Vec3 } from "vec3";
 import { blockClass, type MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { cellKey } from "../../utils/index.js";
-import { raycastThrough } from "../world.js";
 
 /** A block by name, by name with state properties, by state id, or `"void"`: a cell in a chunk the bot has not loaded. */
 export type FakeCell =
@@ -45,6 +44,15 @@ export interface FakeWorld {
 
 const require = createRequire(import.meta.url);
 const VOID = "void";
+
+/** prismarine-world's ray walk (`iterators.js`), the one `bot.world.raycast` steps with; it ships no typings. */
+interface RaycastIterator {
+  next(): { x: number; y: number; z: number } | null;
+  intersect(shapes: MineflayerBlock["shapes"], offset: Vec3): { face: number; pos: Vec3 } | null;
+}
+const { RaycastIterator } = require("prismarine-world/src/iterators.js") as {
+  RaycastIterator: new (origin: Vec3, direction: Vec3, maxDistance: number) => RaycastIterator;
+};
 
 /** Mineflayer's per-cell block event (`blockUpdate:(x, y, z)`), which its typings name by that one literal. */
 export function blockUpdateEventOf(cell: Vec3): "blockUpdate:(x, y, z)" {
@@ -110,10 +118,15 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
       }
     },
     raycast(origin, direction, maxDistance) {
-      const solid = (cell: Vec3) => (read(cell)?.shapes.length ?? 0) > 0;
-      const hit = raycastThrough(solid, origin, direction, maxDistance);
-      if (hit === null) return null;
-      return Object.assign(read(hit.position)!, { face: hit.face, intersect: hit.intersect });
+      // prismarine-world `raycast` (`worldsync.js:40-60`): each cell on the walk is met only where its shapes are.
+      const iterator = new RaycastIterator(origin, direction, maxDistance);
+      for (let cell: { x: number; y: number; z: number } | null = origin; cell !== null; cell = iterator.next()) {
+        const position = new Vec3(cell.x, cell.y, cell.z);
+        const block = read(position);
+        const hit = block === null ? null : iterator.intersect(block.shapes, position);
+        if (hit !== null) return Object.assign(block!, { face: hit.face, intersect: hit.pos });
+      }
+      return null;
     },
     forwardTo: (sink) => void sinks.add(sink),
   };

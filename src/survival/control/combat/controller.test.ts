@@ -1,4 +1,3 @@
-import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -13,7 +12,6 @@ import {
   disposeCombatTestResources,
 } from "../../../test-support/combat.js";
 import { ScriptedBlaze } from "../../../test-support/scripted-blaze.js";
-import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
 import { type CombatDecision } from "./contract.js";
 
@@ -28,7 +26,8 @@ import { SupportedPositionHold } from "../../../navigation/index.js";
 import { CombatPerception, positionThreat } from "../../perception/combat/observations.js";
 import { incomingShieldProjectiles } from "../../perception/combat/shield-projectiles.js";
 import { FootingRecovery } from "../../responses/footing.js";
-import { botFixture } from "../../../test-support/bot.js";
+import { type FakeEntitySpec, type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeWorld } from "../../../test-support/fake-bot/index.js";
+import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
 import { FightMovement } from "../../responses/fight/movement.js";
 import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facing.js";
@@ -44,22 +43,19 @@ test("revoking raw food releases an End perch bite before policy settlement", as
   let began!: () => void;
   const biting = new Promise<void>((resolve) => { began = resolve; });
   let rejectBite!: (cause: Error) => void;
-  const bot = botFixture({ items: [{ name: "beef", count: 2 }] }, {
-    _client: new EventEmitter(),
-    clearControlStates: () => {},
+  const { bot } = createFakeBot({
+    carried: { beef: 2 },
     food: 6, health: 20,
-    consume: () => new Promise<void>((_resolve, reject) => {
-      rejectBite = reject;
-      bot.usingHeldItem = true;
-      began();
-    }),
-    deactivateItem: () => { bot.usingHeldItem = false; rejectBite?.(new Error("native bite released")); },
+    entities: { 42: { name: "ender_dragon", position: new Vec3(0, 95, 0), metadata: { 9: 200, 16: 0 } } },
+    overrides: {
+      consume: () => new Promise<void>((_resolve, reject) => {
+        rejectBite = reject;
+        bot.usingHeldItem = true;
+        began();
+      }),
+      deactivateItem: () => { bot.usingHeldItem = false; rejectBite?.(new Error("native bite released")); },
+    },
   });
-  bot.entities[42] = {
-    id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 95, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 0 },
-  } as unknown as Bot["entity"];
   using observation = new PerchObservation(bot, 42);
   const controller = createCombatController(bot, navigationFixture());
   const perch = controller.runEnd({ kind: "perch", targetId: 42, observation }, new AbortController().signal);
@@ -129,6 +125,30 @@ test("the shared controller releases an unprotected pursuit when health falls", 
   assert.equal(fixture.bot.listenerCount("health"), 0);
 });
 
+/** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
+function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
+  return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
+}
+
+/** Fill the cells of the box x, z in -8..8 and y in `fromY`..`toY` that `inside` accepts with `block`. */
+function fillCells(world: FakeWorld, block: string, fromY: number, toY: number, inside: (cell: Vec3) => boolean): void {
+  for (let x = -8; x <= 8; x++)
+    for (let y = fromY; y <= toY; y++)
+      for (let z = -8; z <= 8; z++) if (inside(new Vec3(x, y, z))) world.setCell(new Vec3(x, y, z), block);
+}
+
+/**
+ * The bot's block reads answer stone where `solid` says (and below the flat ground) while its rays still run on its own
+ * open world: the escape checks of these fixtures read blocks (a wall at the bot's back), their sight checks rays (the
+ * creeper in view). One world cannot be solid for the first and clear for the second; the fixtures predate the shared
+ * fake and keep the split, at the point the caller asks for (a wall edge falls inside a cell).
+ */
+function readBlocksFrom(bot: Bot, solid: (point: Vec3) => boolean): void {
+  const rock = createFakeWorld(bot.version, { groundY: 200 });
+  const flat = createFakeWorld(bot.version, { groundY: 63 });
+  bot.blockAt = (point) => (solid(point) ? rock : flat).blockAt(point);
+}
+
 type CombatScript = {
   onWait?: (ticks: number) => void;
   onAttack?: () => void;
@@ -161,8 +181,6 @@ function blazePreflightFixture(items: readonly string[]) {
   Object.assign(fixture.bot, { version: "1.21.4" });
   Object.assign(fixture.bot._client, { write: () => undefined });
   fixture.bot.entity.position.set(0.5, 64, 0.5);
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   fixture.target.name = "blaze";
   fixture.target.kind = "Hostile mobs";
   fixture.target.position.set(0.5, 64, -8);
@@ -230,7 +248,6 @@ test("combat cover uses navigation's standing cell on a lowered soul-sand floor"
   const { bot, target, navigation, world } = blazePreflightFixture(["iron_sword", "cobblestone"]);
   bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;
   bot.entity.position.y = 63.875;
-  bot.entity.onGround = true;
   const stateId = bot.registry.blocksByName.soul_sand!.defaultState;
   for (let x = -12; x <= 12; x++) for (let z = -12; z <= 12; z++) world.load({ x, y: 63, z }, { stateId });
   const planned = new CombatPosition(bot, navigation, target, new Set()).planCover();
@@ -414,7 +431,7 @@ test("an unprotected defensive hold keeps its guard while an angry enderman retu
   assert.ok(fixture.clock.tick >= 40);
 });
 
-function protectedEndermanFixture(items: readonly string[] = ["diamond_sword", "shield"]) {
+function protectedEndermanFixture(items: readonly string[] = ["diamond_sword", "shield"], options: { readonly roof?: boolean } = {}) {
   const fixture = combatFixture(items, { targetDistance: 8 });
   fixture.target.name = "enderman";
   fixture.target.height = 2.9;
@@ -426,14 +443,10 @@ function protectedEndermanFixture(items: readonly string[] = ["diamond_sword", "
     true,
   );
   fixture.bot.entity.position.set(0.5, 64, 0.5);
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   const navigation = navigationFixture();
-  const blockAt = fixture.bot.blockAt;
-  fixture.bot.blockAt = (cell) =>
-    cell.y === 66 && Math.abs(cell.x) <= 1 && Math.abs(cell.z) <= 1
-      ? ({ position: cell, shapes: [[0, 0, 0, 1, 1, 1]] } as NonNullable<ReturnType<Bot["blockAt"]>>)
-      : blockAt(cell);
+  // A stone roof, three by three, over the bot.
+  if (options.roof !== false)
+    for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) fixture.world.setCell(new Vec3(x, 66, z), "stone");
   return { ...fixture, navigation };
 }
 
@@ -441,8 +454,6 @@ test("an existing roof admits melee provocation when the target's eyes are occlu
   const fixture = protectedEndermanFixture();
   fixture.target.metadata = [];
   fixture.target.position.set(2, 64, 0.5);
-  fixture.bot.world.raycast = ((_eye, direction) =>
-    direction.y > 0.2 ? { position: new Vec3(1, 66, 0) } : null) as Bot["world"]["raycast"];
   assert.equal(combatResourceRefusal(fixture.bot, fixture.navigation, fixture.target), null);
   fixture.script.onAttack = () => fixture.bot.emit("entityDead", fixture.target);
   const controller = createCombatController(fixture.bot, fixture.navigation);
@@ -478,9 +489,8 @@ test("an explicitly requested angry Enderman can commit its roof without head-ga
 });
 
 test("an explicitly pursued angry Enderman in reach is guarded and hit before searching for landing room", async () => {
-  const fixture = protectedEndermanFixture();
+  const fixture = protectedEndermanFixture(undefined, { roof: false });
   fixture.target.position.set(2, 64, 0.5);
-  fixture.bot.blockAt = () => null;
   const world = fixture.navigation.world as MemoryWorld;
   world.load({ x: -1, y: 63, z: 0 }, { stateId: 0 });
   using perception = new CombatPerception(fixture.bot);
@@ -535,13 +545,13 @@ test("an unprotected enderman defence releases an unproductive teleport wait", a
 
 test("defending contact postpones roof preparation until the enderman teleports away", async () => {
   const fixture = protectedEndermanFixture();
-  const roofBlocks = fixture.bot.blockAt;
-  const air = roofBlocks(new Vec3(8, 64, 8));
+  const roof = (block: "stone" | "air") => fillCells(fixture.world, block, 66, 66, (cell) => Math.abs(cell.x) <= 1 && Math.abs(cell.z) <= 1);
   let swings = 0;
   fixture.target.position.set(2, 64, 0.5);
-  fixture.bot.blockAt = (cell) => (cell.y === 66 && swings === 0 ? air : roofBlocks(cell));
+  roof("air"); // the roof stands only from the first swing
   fixture.script.onAttack = () => {
     swings++;
+    if (swings === 1) roof("stone");
     fixture.bot._client.emit("damage_event", { entityId: 7, sourceCauseId: fixture.bot.entity.id + 1 });
     if (swings === 1) fixture.target.position.set(8, 64, 0.5);
     else fixture.bot.emit("entityDead", fixture.target);
@@ -762,10 +772,6 @@ test("an unproductive refuge is rejected instead of terminating the engagement",
   const { bot, target, script, clock } = combatFixture(["iron_sword", "cobblestone"]);
   bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;
   bot.entity.position.set(0.5, 64, 0.5);
-  bot.entity.width = 0.6;
-  bot.entity.height = 1.8;
-  bot.entity.onGround = true;
-  bot.entity.velocity = new Vec3(0, 0, 0);
   bot.health = 20;
   bot.food = 20;
   target.name = "blaze";
@@ -839,11 +845,9 @@ for (const interruption of [
             : ["bow", "arrow"],
     );
     const { bot, target, script } = fixture;
+    // Cover needs building blocks: the building step prices the placements against what is carried.
+    if (interruption === "establish knockback") setCarriedCount(fixture.inventory, bot.registry, bot.registry.itemsByName.cobblestone!.id, 64);
     bot.entity.position.set(0.5, 64, 0.5);
-    bot.entity.width = 0.6;
-    bot.entity.height = 1.8;
-    bot.entity.onGround = true;
-    bot.entity.velocity = new Vec3(0, 0, 0);
     bot.health = 20;
     bot.food = 20;
     target.name = "blaze";
@@ -992,8 +996,6 @@ for (const interruption of [
 test("an excavating approach stops when its target reaches an unsafe ledge", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 14 });
   fixture.bot.entity.position.set(6.5, 64, 0.5);
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   let stoppedForContact = false;
   const navigation: NavigationRuntime = {
     ...navigationFixture(),
@@ -1016,8 +1018,6 @@ test("a carried bow cannot satisfy a route that is finding a safe melee stance",
   fixture.bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;
   fixture.target.position.set(2.5, 64, 0.5);
   fixture.target.metadata = [];
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   for (let x = -3; x < 0; x++) fixture.world.load({ x, y: 63, z: 0 }, { stateId: 0 });
   let routes = 0;
   const result = await createCombatController(fixture.bot, {
@@ -1044,8 +1044,6 @@ test("a shielded defender retains facing instead of routing away from contact on
   using perception = new CombatPerception(fixture.bot);
   fixture.bot.emit("entityHurt", fixture.bot.entity, fixture.target);
   fixture.bot.entity.position.set(6.5, 64, 0.5);
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   fixture.target.position.set(5.5, 64, 0.5);
   let routes = 0;
   const navigation: NavigationRuntime = {
@@ -1069,8 +1067,6 @@ test("a shielded defender retains facing instead of routing away from contact on
 test("holding a ledge defends against a contact attacker without searching away from that position", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(6.5, 64, 0.5);
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   fixture.target.position.set(5.5, 64, 0.5);
   let routes = 0;
   const navigation: NavigationRuntime = {
@@ -1147,8 +1143,6 @@ test("an obstructed shooter approach can finish at a bow opening outside melee r
 test("the shield faces the nearer incoming fireball instead of the first spawned one", () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(0, 64, 0);
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   const far = Object.assign({}, fixture.target, {
     id: 8,
     name: "small_fireball",
@@ -1172,8 +1166,6 @@ test("the shield faces the nearer incoming fireball instead of the first spawned
 test("a newly spawned closer fireball does not turn the shield away from the faster arriving shot", () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(-38.51882905638842, 84, 349.4525623707544);
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   // EyesBot's last crossfire before the native hit at 1788827792555.
   // Packet positions lag: the older shot was already travelling much faster.
   const fast = Object.assign({}, fixture.target, {
@@ -1206,8 +1198,6 @@ test("a newly spawned closer fireball does not turn the shield away from the fas
 test("a retreat warning includes a crossing shot before it intersects the stationary body", () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(0, 64, 0);
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   const shot = Object.assign({}, fixture.target, {
     id: 8,
     name: "small_fireball",
@@ -1224,8 +1214,6 @@ test("a retreat warning includes a crossing shot before it intersects the statio
 test("a movement warning never turns the shield away from a real incoming hit", () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(0, 64, 0);
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   const hit = Object.assign({}, fixture.target, {
     id: 8,
     name: "small_fireball",
@@ -1249,22 +1237,11 @@ test("a settled retreat guards an incoming blaze projectile and releases the shi
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.bot.entity.position.set(0.5, 64, 0.5);
   fixture.bot.health = 20;
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
-  fixture.bot.entity.onGround = true;
-  fixture.bot.entity.velocity = new Vec3(0, 0, 0);
   await fixture.bot.equip(
     fixture.bot.inventory.items().find((item) => item.name === "shield")!,
     "off-hand",
   );
-  const projectile = {
-    ...fixture.target,
-    id: 8,
-    name: "small_fireball",
-    width: 0.3125,
-    position: new Vec3(4, 64.9, 0.5),
-    velocity: new Vec3(-0.5, 0, 0),
-  } as Entity;
+  const projectile = bodyOf(8, { name: "small_fireball", width: 0.3125, position: new Vec3(4, 64.9, 0.5), velocity: new Vec3(-0.5, 0, 0) });
   fixture.bot.entities[8] = projectile;
   fixture.script.onWait = () => {
     if (fixture.clock.tick < 8) assert.equal(fixture.bot.usingHeldItem, true);
@@ -1286,10 +1263,6 @@ for (const loss of ["health", "shield", "blast clearance"] as const) {
     const fixture = combatFixture(["iron_sword", "shield"]);
     fixture.bot.entity.position.set(0.5, 64, 0.5);
     fixture.bot.health = 11;
-    fixture.bot.entity.width = 0.6;
-    fixture.bot.entity.height = 1.8;
-    fixture.bot.entity.onGround = true;
-    fixture.bot.entity.velocity = new Vec3(0, 0, 0);
     await fixture.bot.equip(
       fixture.bot.inventory.items().find((item) => item.name === "shield")!,
       "off-hand",
@@ -1327,8 +1300,6 @@ test("a blaze fireball still in flight keeps the bow shielded after the charge f
   const fixture = combatFixture(["bow", "arrow", "shield"], { targetDistance: 26 });
   fixture.target.name = "blaze";
   fixture.target.metadata = [];
-  fixture.bot.entity.width = 0.6;
-  fixture.bot.entity.height = 1.8;
   const shot = Object.assign({}, fixture.target, {
     id: 8,
     name: "small_fireball",
@@ -1376,14 +1347,17 @@ test("a crouching bow draw traces from the observed eye height", async () => {
   const fixture = combatFixture(["bow", "arrow"], { targetDistance: 10 });
   Reflect.set(fixture.bot.entity, "eyeHeight", 1.27);
   const origins: number[] = [];
-  fixture.bot.world.raycast = ((from: Vec3) => {
+  const raycast = fixture.bot.world.raycast;
+  fixture.bot.world.raycast = (from, direction, range, matcher) => {
     origins.push(from.y);
-    return null;
-  }) as Bot["world"]["raycast"];
+    return raycast(from, direction, range, matcher);
+  };
   fixture.script.onShot = () => fixture.bot.emit("entityDead", fixture.target);
   await createCombatController(fixture.bot, navigationFixture()).engage(7, new AbortController().signal, "hold");
   assert.ok(origins.length > 0);
-  assert.ok(Math.abs(origins[0]! - 65.17) < 1e-6, "arrow origin is 0.1 below the crouched eye");
+  // Exposure rays start at the crouched eye (65.27); the arrow's own trace 0.1 below it. None at the standing eye.
+  assert.ok(origins.some((y) => Math.abs(y - 65.17) < 1e-6), "arrow origin is 0.1 below the crouched eye");
+  assert.ok(origins.every((y) => y < 65.3), "no ray starts at the standing eye height");
 });
 
 function navigationFixture(): NavigationRuntime {
@@ -1425,14 +1399,13 @@ test("defensive melee raises the shield in warning range and lets the mob close 
 });
 
 test("a hunter waits for a nearby hopping cube to descend instead of climbing toward its airborne feet", async () => {
-  const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 2 });
+  const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 2, groundY: null });
   fixture.target.name = "magma_cube";
   fixture.target.height = fixture.target.width = 0.52;
   const metadata: unknown[] = [];
   metadata[fixture.bot.registry.entitiesByName.magma_cube!.metadataKeys!.indexOf("size")] = 4;
   fixture.target.metadata = metadata as Entity["metadata"];
   fixture.target.position.y = 70;
-  fixture.bot.blockAt = (() => ({ boundingBox: "empty" })) as unknown as Bot["blockAt"];
   fixture.script.onWait = () => {
     if (fixture.clock.tick >= 20) fixture.target.position.y = 64;
   };
@@ -1522,175 +1495,184 @@ function armWithBow(target: Entity): { drawing: (active: boolean) => void } {
   return { drawing: (active) => (metadata[8] = active ? 0x01 : 0) };
 }
 
-function combatFixture(
-  items: readonly string[],
-  options: { readonly startingHeld?: string; readonly targetDistance?: number } = {},
-): {
-  readonly script: CombatScript;
-  readonly clock: { tick: number };
+/** What the controller did with the bot's hands, controls and eyes, in order. */
+interface CombatLog {
   readonly attackTicks: number[];
   readonly shotTicks: number[];
-  readonly bot: Bot;
-  readonly target: Entity;
   readonly equipped: string[];
   readonly unequipped: string[];
   readonly itemUse: boolean[];
   readonly timeline: string[];
-  /** Every movement control the controller touched; combat is expected to touch none. */
+  /** Every movement control the controller switched on; combat is expected to switch on none. */
   readonly controls: string[];
   readonly activeControls: Set<string>;
   readonly directAttacks: { count: number };
   readonly controlsCleared: { count: number };
-} {
-  const script: CombatScript = {};
-  const clock = { tick: 0 };
-  const attackTicks: number[] = [];
-  const shotTicks: number[] = [];
-  let using: "idle" | "bow" | "shield" = "idle";
-  const events = new EventEmitter();
-  const target = {
-    id: 7,
-    name: "zombie",
-    isValid: true,
-    height: 1.95,
-    width: 0.6,
-    position: new Vec3(options.targetDistance ?? 2, 64, 0),
-  } as Entity;
-  const inventory = items.map((name, type) => ({ name, type }));
-  const slots: unknown[] = new Array(46).fill(null);
-  const equipped: string[] = [];
-  const unequipped: string[] = [];
-  const itemUse: boolean[] = [];
-  const timeline: string[] = [];
-  const controls: string[] = [];
-  const activeControls = new Set<string>();
-  const directAttacks = { count: 0 };
-  const controlsCleared = { count: 0 };
-  let heldItem: { name: string; type: number } | null = options.startingHeld
-    ? { name: options.startingHeld, type: -1 }
-    : null;
+}
 
-  const bot = Object.assign(events, {
-    _client: new EventEmitter(),
-    game: { dimension: "overworld" },
-    entities: { [target.id]: target },
-    entity: { id: 2, yaw: 0, position: new Vec3(0, 64, 0) },
-    world: { raycast: () => null },
-    blockAt: () => null,
-    // Only the approach's movement policy reads this; it is what an unreachable target costs to test.
-    registry: minecraftData("1.21.4"),
-    heldItem: null,
-    inventory: Object.assign(new EventEmitter(), { items: () => inventory, slots }),
-    equip: async (item: { name: string; type: number }, destination: string) => {
-      equipped.push(`${item.name}:${destination}`);
-      if (destination === "hand") heldItem = item;
-      if (destination === "off-hand") slots[45] = item;
-    },
-    unequip: async (destination: string) => {
-      unequipped.push(destination);
-      if (destination === "hand") heldItem = null;
-    },
-    quickBarSlot: 0,
-    usingHeldItem: false,
-    setQuickBarSlot: (slot: number) => {
-      timeline.push(`slot:${slot}`);
-      (bot as { quickBarSlot: number }).quickBarSlot = slot;
-      using = "idle";
-      bot.usingHeldItem = false;
-    },
-    activateItem: (offHand = false) => {
-      itemUse.push(offHand);
-      timeline.push(offHand ? "shield-up" : "item-use");
-      using = offHand ? "shield" : "bow";
-      bot.usingHeldItem = true;
-    },
-    deactivateItem: () => {
-      itemUse.push(false);
-      timeline.push("item-down");
-      const shot = using === "bow";
-      using = "idle";
-      bot.usingHeldItem = false;
-      if (shot) {
-        shotTicks.push(clock.tick);
-        script.onShot?.();
-      }
-    },
-    clearControlStates: () => {
-      controlsCleared.count += 1;
-      activeControls.clear();
-    },
-    setControlState: (control: string, active: boolean) => {
-      controls.push(control);
-      if (active) activeControls.add(control);
-      else activeControls.delete(control);
-    },
-    waitForTicks: (ticks: number) => waitForPhysicsTicks(events, ticks, new AbortController().signal),
-    lookAt: async (point: Vec3) => {
-      timeline.push("look");
-      bot.entity.yaw = Math.atan2(bot.entity.position.x - point.x, bot.entity.position.z - point.z);
-    },
-    attack: () => {
-      directAttacks.count += 1;
-      timeline.push("attack");
-      attackTicks.push(clock.tick);
-      script.onAttack?.();
-    },
-  }) as unknown as Bot;
-  Object.defineProperty(bot, "heldItem", { get: () => heldItem });
-  // Physics is independent of the controller's wait API, as it is on a server.
-  // A new listener starts the fixture clock; the test owns its final cleanup.
-  let scheduled: ReturnType<typeof setImmediate> | null = null;
-  let stopped = false;
-  const schedule = () => {
-    if (scheduled || stopped) return;
-    scheduled = setImmediate(() => {
-      scheduled = null;
-      if (stopped || events.listenerCount("physicsTick") === 0) return;
-      clock.tick++;
-      script.onWait?.(1);
-      events.emit("physicsTick");
-      schedule();
-    });
+type CombatFixture = CombatLog & {
+  readonly script: CombatScript;
+  readonly clock: { tick: number };
+  readonly bot: Bot;
+  readonly inventory: FakeInventory;
+  readonly world: FakeWorld;
+  readonly target: Entity;
+};
+
+interface CombatFixtureOptions {
+  readonly startingHeld?: string;
+  readonly targetDistance?: number;
+  readonly feet?: Vec3;
+  readonly timeOfDay?: number;
+  readonly groundY?: number | null;
+}
+
+/** The hands: each call is logged, then does what the game does with it. */
+function recordHands(bot: Bot, log: CombatLog, clock: { tick: number }, script: CombatScript): void {
+  let using: "idle" | "bow" | "shield" = "idle";
+  const equip = bot.equip.bind(bot);
+  bot.equip = async (item, destination) => {
+    log.equipped.push(`${(item as { name: string }).name}:${destination}`);
+    await equip(item, destination);
   };
-  events.on("newListener", (event) => {
-    if (event === "physicsTick") schedule();
-  });
+  const selectSlot = bot.setQuickBarSlot.bind(bot);
+  // Stopgap until the master adds `unequip` to the fake: Mineflayer's `equipEmpty` for the hand selects the first empty
+  // hotbar slot (`simple_inventory.js:62-68`); with a full hotbar it clicks the item out (`:69-79`), which is not
+  // modelled here, and a non-hand destination is `disrobe` (not modelled either).
+  bot.unequip = async (destination) => {
+    log.unequipped.push(destination ?? "hand");
+    const empty = Array.from({ length: 9 }, (_, slot) => slot).find((slot) => !bot.inventory.slots[36 + slot]);
+    if (destination === "hand" && empty !== undefined) selectSlot(empty);
+  };
+  bot.setQuickBarSlot = (slot) => {
+    log.timeline.push(`slot:${slot}`);
+    selectSlot(slot);
+    using = "idle";
+    bot.usingHeldItem = false;
+  };
+  bot.activateItem = (offHand = false) => {
+    log.itemUse.push(offHand);
+    log.timeline.push(offHand ? "shield-up" : "item-use");
+    using = offHand ? "shield" : "bow";
+    bot.usingHeldItem = true;
+  };
+  bot.deactivateItem = () => {
+    log.itemUse.push(false);
+    log.timeline.push("item-down");
+    const shot = using === "bow";
+    using = "idle";
+    bot.usingHeldItem = false;
+    if (shot) {
+      log.shotTicks.push(clock.tick);
+      script.onShot?.();
+    }
+  };
+}
+
+/** The controls, the eyes and the swing: logged, and the controls and the look still do what the game does with them. */
+function recordBody(bot: Bot, log: CombatLog, clock: { tick: number }, script: CombatScript): void {
+  const setControlState = bot.setControlState.bind(bot);
+  // Only a control switched on counts as the controller moving the body: the footing hold of a standing bot writes
+  // every movement control off on each tick, as `supported-position.ts` does in the game.
+  bot.setControlState = (control, active) => {
+    if (active) log.controls.push(control);
+    if (active) log.activeControls.add(control);
+    else log.activeControls.delete(control);
+    setControlState(control, active);
+  };
+  // Mineflayer's clear sets every control off itself; it is no control the controller chose.
+  bot.clearControlStates = () => {
+    log.controlsCleared.count += 1;
+    log.activeControls.clear();
+    for (const control of Object.keys(bot.controlState) as (keyof typeof bot.controlState)[]) setControlState(control, false);
+  };
+  const lookAt = bot.lookAt.bind(bot);
+  bot.lookAt = async (point, force) => {
+    log.timeline.push("look");
+    await lookAt(point, force);
+  };
+  bot.attack = () => {
+    log.directAttacks.count += 1;
+    log.timeline.push("attack");
+    log.attackTicks.push(clock.tick);
+    script.onAttack?.();
+  };
+}
+
+/**
+ * The server's ticks run while anything waits for one, as on a server: 50 ms of the bot's clock each, the test's
+ * `onWait` first. A new `physicsTick` listener starts them; the test owns its final cleanup.
+ */
+function runTicksOnListen(harness: FakeHarness, clock: { tick: number }, script: CombatScript): void {
+  const { bot } = harness;
+  let pumping = false;
+  let stopped = false;
+  const pump = async () => {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (!stopped && bot.listenerCount("physicsTick") > 0) {
+        clock.tick++;
+        script.onWait?.(1);
+        await harness.clock.advance(50);
+      }
+    } catch (error) {
+      // A failed assertion in a scripted tick fails the test run, as one thrown in a timer callback does.
+      setImmediate(() => {
+        throw error;
+      });
+    } finally {
+      pumping = false;
+    }
+  };
+  // `newListener` is the emitter's own event; Mineflayer's typings only list the game's.
+  Reflect.apply(EventEmitter.prototype.on, bot, [
+    "newListener",
+    (event: string) => {
+      if (event === "physicsTick") setImmediate(() => void pump());
+    },
+  ]);
   fixtureClocks.add(() => {
     stopped = true;
-    if (scheduled) clearImmediate(scheduled);
   });
-  return {
-    script,
-    clock,
-    attackTicks,
-    shotTicks,
-    bot,
-    target,
-    equipped,
-    unequipped,
-    itemUse,
-    timeline,
-    controls,
-    activeControls,
-    directAttacks,
-    controlsCleared,
+}
+
+function combatFixture(items: readonly string[], options: CombatFixtureOptions = {}): CombatFixture {
+  const script: CombatScript = {};
+  const clock = { tick: 0 };
+  const log: CombatLog = {
+    attackTicks: [],
+    shotTicks: [],
+    equipped: [],
+    unequipped: [],
+    itemUse: [],
+    timeline: [],
+    controls: [],
+    activeControls: new Set<string>(),
+    directAttacks: { count: 0 },
+    controlsCleared: { count: 0 },
   };
+  // One of each item, in the main inventory: the hand starts empty, as a bot that has not chosen a weapon.
+  const slots: Record<number, { name: string }> = {};
+  items.forEach((name, index) => (slots[9 + index] = { name }));
+  if (options.startingHeld) slots[36] = { name: options.startingHeld };
+  const harness = createFakeBot({
+    position: options.feet ?? new Vec3(0, 64, 0),
+    ...("groundY" in options && { groundY: options.groundY }),
+    ...(options.timeOfDay !== undefined && { server: { timeOfDay: options.timeOfDay } }),
+    slots,
+    entities: { 7: { name: "zombie", position: new Vec3(options.targetDistance ?? 2, 64, 0) } },
+  });
+  recordHands(harness.bot, log, clock, script);
+  recordBody(harness.bot, log, clock, script);
+  runTicksOnListen(harness, clock, script);
+  return { ...log, script, clock, bot: harness.bot, inventory: harness.inventory, world: harness.world, target: harness.bot.entities[7]! };
 }
 
 test("a pack member in reach is answered before chasing the requested target, without settling its verdict", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 7 });
   const { bot, target } = fixture;
-  const contact = {
-    ...target,
-    id: 8,
-    name: "magma_cube",
-    kind: "Hostile mobs",
-    isValid: true,
-    height: 1.04,
-    width: 1.04,
-    metadata: [] as Entity["metadata"],
-    position: new Vec3(-2, 64, 0),
-  } as Entity;
+  const contact = bodyOf(8, { name: "magma_cube", height: 1.04, width: 1.04, position: new Vec3(-2, 64, 0) });
   bot.entities[contact.id] = contact;
   const attacked: number[] = [];
   bot.attack = (entity) => {
@@ -1712,17 +1694,7 @@ test("a pack member in reach is answered before chasing the requested target, wi
 
 test("melee cooldown guards a nearer pack member behind the bot without spending another swing", async () => {
   const { bot, target, script, attackTicks, clock } = combatFixture(["iron_sword", "shield"]);
-  const contact = {
-    ...target,
-    id: 8,
-    name: "magma_cube",
-    kind: "Hostile mobs",
-    isValid: true,
-    height: 1.04,
-    width: 1.04,
-    metadata: [] as Entity["metadata"],
-    position: new Vec3(-1, 64, 0),
-  } as Entity;
+  const contact = bodyOf(8, { name: "magma_cube", height: 1.04, width: 1.04, position: new Vec3(-1, 64, 0) });
   const guarded: number[] = [];
   script.onAttack = () => {
     bot.entities[contact.id] = contact;
@@ -1744,7 +1716,7 @@ test("melee cooldown guards a nearer pack member behind the bot without spending
 
 test("a shielded swing keeps both sides of a nearby pack inside the guard", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 2 });
-  const other = { ...fixture.target, id: 8, kind: "Hostile mobs", position: new Vec3(0, 64, 2) } as Entity;
+  const other = bodyOf(8, { name: "zombie", position: new Vec3(0, 64, 2) });
   fixture.bot.entities[other.id] = other;
   fixture.script.onAttack = () => {
     const look = new Vec3(-Math.sin(fixture.bot.entity.yaw), 0, -Math.cos(fixture.bot.entity.yaw));
@@ -1764,7 +1736,7 @@ test("a shielded swing keeps both sides of a nearby pack inside the guard", asyn
 
 test("combat crouches when knockback leaves its holding position on magma", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
-  fixture.bot.blockAt = (() => ({ name: "magma_block" })) as unknown as Bot["blockAt"];
+  fillCells(fixture.world, "magma_block", 63, 63, () => true);
   fixture.script.onAttack = () => fixture.bot.emit("entityDead", fixture.target);
   const result = await createCombatController(fixture.bot, navigationFixture()).engage(
     7,
@@ -1777,21 +1749,13 @@ test("combat crouches when knockback leaves its holding position on magma", asyn
 });
 
 test("an exposed cube face still receives contact defense when a ledge hides its centre", async () => {
-  const { bot, target } = combatFixture(["iron_sword", "shield"], { targetDistance: 7 });
-  const contact = {
-    ...target,
-    id: 8,
-    name: "magma_cube",
-    kind: "Hostile mobs",
-    isValid: true,
-    height: 2.08,
-    width: 2.08,
-    metadata: [] as Entity["metadata"],
-    position: new Vec3(0, 66.6, -0.9),
-  } as Entity;
+  const { bot, target, world } = combatFixture(["iron_sword", "shield"], { targetDistance: 7 });
+  const contact = bodyOf(8, { name: "magma_cube", height: 2.08, width: 2.08, position: new Vec3(0, 66.6, -0.9) });
   bot.entities[contact.id] = contact;
-  bot.world.raycast = ((_eye: Vec3, _direction: Vec3, distance: number) =>
-    distance > 1.1 ? { position: new Vec3(0, 66, -1) } : null) as Bot["world"]["raycast"];
+  // A ledge at head height in front of the cube's centre. The contact defence is found by the ray to the nearest
+  // point, which the ledge never meets: this scene does not fail if the code samples the centre only (the same
+  // at the base file, whose ray stub hid only the far rays). Reported to the master as a weak test.
+  world.setCell(new Vec3(0, 66, -1), "stone");
   const attacked: number[] = [];
   bot.attack = (entity) => {
     attacked.push(entity.id);
@@ -1813,17 +1777,7 @@ test("an exposed cube face still receives contact defense when a ledge hides its
 
 test("an approach yields to a second hostile entering reach before its requested target", async () => {
   const { bot, target } = combatFixture(["iron_sword", "shield"], { targetDistance: 7 });
-  const contact = {
-    ...target,
-    id: 8,
-    name: "magma_cube",
-    kind: "Hostile mobs",
-    isValid: true,
-    height: 1.04,
-    width: 1.04,
-    metadata: [] as Entity["metadata"],
-    position: new Vec3(-2, 64, 0),
-  } as Entity;
+  const contact = bodyOf(8, { name: "magma_cube", height: 1.04, width: 1.04, position: new Vec3(-2, 64, 0) });
   let approached = 0;
   const navigation: NavigationRuntime = {
     ...navigationFixture(),
@@ -1894,15 +1848,7 @@ for (const alternative of ["stone_axe", null]) {
     const fixture = combatFixture(["iron_sword", "shield", ...(alternative ? [alternative] : [])]);
     const { bot, target } = fixture;
     fixture.script.onWait = () => {
-      bot.entities[8] = {
-        id: 8,
-        name: "zombified_piglin",
-        kind: "Hostile mobs",
-        isValid: true,
-        width: 0.6,
-        height: 1.95,
-        position: new Vec3(2, 64, 0.7),
-      } as Entity;
+      bot.entities[8] = bodyOf(8, { name: "zombified_piglin", height: 1.95, width: 0.6, position: new Vec3(2, 64, 0.7) });
     };
     fixture.script.onAttack = () => {
       assert.equal(bot.heldItem?.name ?? null, alternative);
@@ -1927,13 +1873,17 @@ test(
     // Every ray from the eyes to the body hits terrain: a blaze in reach behind
     // a fortress pillar. The approach's melee goal is already satisfied, so
     // navigation returns at once, and the step has nothing to await.
-    (bot as { world: unknown }).world = { raycast: () => ({ position: new Vec3(1, 64, 0) }) };
+    fillCells(fixture.world, "stone", 64, 67, (cell) => cell.x === 1 && Math.abs(cell.z) <= 2);
+    let decisions = 0;
     const navigation = {
       ...navigationFixture(),
-      navigate: async () => ({ status: "completed", elapsedMs: 0 }) as const,
+      navigate: async () => {
+        decisions++;
+        return { status: "completed", elapsedMs: 0 } as const;
+      },
     };
     fixture.script.onWait = () => {
-      if (clock.tick >= 8) target.isValid = false;
+      if (clock.tick >= 40) target.isValid = false;
     };
     const outcome = await createCombatController(bot, navigation).engage(
       target.id,
@@ -1942,9 +1892,10 @@ test(
     );
     assert.equal(outcome.kind, "target_lost", JSON.stringify(outcome));
     assert.equal(fixture.directAttacks.count, 0);
-    // Without a tick between decisions the loop never reaches tick 8 and the
+    // Without a tick between decisions the loop never reaches tick 40 and the
     // test times out; with one tick each it ends a decision or two later.
-    assert.ok(clock.tick >= 8 && clock.tick <= 12, `ended after ${clock.tick} ticks`);
+    assert.ok(clock.tick >= 40 && clock.tick <= 44, `ended after ${clock.tick} ticks`);
+    assert.ok(decisions <= clock.tick + 4, `${decisions} decisions in ${clock.tick} ticks: one tick per decision`);
   },
 );
 
@@ -1986,19 +1937,10 @@ for (const geometry of [
   },
 ]) {
   test(`sword selection respects ${geometry.name}`, async () => {
-    const fixture = combatFixture(["iron_sword", "shield", "iron_pickaxe"]);
+    const fixture = combatFixture(["iron_sword", "shield", "iron_pickaxe"], { feet: geometry.feet });
     fixture.bot.entity.position = geometry.feet;
     fixture.target.position = geometry.target;
-    fixture.bot.entities[8] = {
-      metadata: [],
-      id: 8,
-      name: "enderman",
-      kind: "Hostile mobs",
-      isValid: true,
-      width: 0.6,
-      height: 2.9,
-      position: geometry.bystander,
-    } as unknown as Entity;
+    fixture.bot.entities[8] = bodyOf(8, { name: "enderman", height: 2.9, width: 0.6, position: geometry.bystander, metadata: [] });
     fixture.script.onAttack = () => {
       assert.equal(fixture.bot.heldItem?.name, geometry.weapon);
       fixture.bot.emit("entityDead", fixture.target);
@@ -2214,7 +2156,10 @@ test("keeps the shield raised while attacking and waits the cooldown in place", 
   assert.deepEqual(fixture.equipped, ["shield:off-hand", "iron_sword:hand"]);
   assert.deepEqual(fixture.controls, []);
   assert.equal(fixture.itemUse[0], true);
-  assert.deepEqual(fixture.attackTicks, [13, 26], "weapon readiness includes shield raise, then sword cooldown");
+  // The target stands inside contact range, so the guard goes up first; the sword is equipped 6 ticks later and pays
+  // its 13 ticks of attack cooldown from then (6 + 13), the second swing 13 after the first.
+  // The bot's body has its width and eye height now (Mineflayer `entities.js:105-112`), so the contact is real.
+  assert.deepEqual(fixture.attackTicks, [19, 32], "weapon readiness includes shield raise, then sword cooldown");
   const attack = fixture.timeline.indexOf("attack");
   const secondAttack = fixture.timeline.indexOf("attack", attack + 1);
   assert.equal(fixture.timeline[attack + 1], "shield-up");
@@ -2601,7 +2546,6 @@ for (const offset of [new Vec3(8, 0, 0), new Vec3(2, 5, 0)]) {
       true,
     );
     fixture.target.position = fixture.bot.entity.position.plus(offset);
-    fixture.bot.blockAt = (() => null) as Bot["blockAt"];
     fixture.script.onShot = () => assert.fail("Enderman combat must not fire an arrow.");
     fixture.script.onAttack = () => fixture.bot.emit("entityDead", fixture.target);
     let approaches = 0;
@@ -2647,9 +2591,6 @@ test("reports an enderman death observed while waiting for a teleport return", a
 test("hits a creeper sprinting and sprints clear of its fuse instead of waiting a cooldown beside it", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   fixture.target.name = "creeper";
-  const stone = { name: "stone", boundingBox: "block" };
-  const air = { name: "air", boundingBox: "empty" };
-  fixture.bot.blockAt = ((position: Vec3) => (position.y < 64 ? stone : air)) as Bot["blockAt"];
   fixture.script.onAttack = () => {
     // Knocked clear, and dead on the second swing.
     fixture.target.position = fixture.target.position.offset(3, 0, 0);
@@ -2686,13 +2627,10 @@ test("hits a creeper sprinting and sprints clear of its fuse instead of waiting 
 });
 
 /** A creeper fixture whose retreat headings are recorded, on flat ground unless `wall` says otherwise. */
-function creeperFixture(options: { readonly wall?: (position: Vec3) => boolean } = {}) {
-  const fixture = combatFixture(["iron_sword"]);
+function creeperFixture(options: { readonly wall?: (position: Vec3) => boolean; readonly timeOfDay?: number } = {}) {
+  const fixture = combatFixture(["iron_sword"], { timeOfDay: options.timeOfDay });
   fixture.target.name = "creeper";
-  const stone = { name: "stone", boundingBox: "block" };
-  const air = { name: "air", boundingBox: "empty" };
-  fixture.bot.blockAt = ((position: Vec3) =>
-    position.y < 64 || options.wall?.(position) ? stone : air) as Bot["blockAt"];
+  readBlocksFrom(fixture.bot, (point) => options.wall?.(point) ?? false);
   const headings: Vec3[] = [];
   fixture.bot.lookAt = async (point: Vec3) => {
     headings.push(point.minus(fixture.bot.entity.position));
@@ -2703,14 +2641,7 @@ function creeperFixture(options: { readonly wall?: (position: Vec3) => boolean }
 test("a nearby melee crowd cannot turn a creeper retreat toward the fuse", async () => {
   const fixture = creeperFixture();
   fixture.target.position = new Vec3(2, 64, 0);
-  const husk = {
-    id: 8,
-    name: "husk",
-    kind: "Hostile mobs",
-    isValid: true,
-    position: new Vec3(-1, 64, 0),
-    height: 1.95,
-  } as Entity;
+  const husk = bodyOf(8, { name: "husk", height: 1.95, position: new Vec3(-1, 64, 0) });
   fixture.bot.entities[husk.id] = husk;
   await retreatFromCreepers(fixture.bot, new AbortController().signal, () => fixture.headings.length > 0);
   assert.ok(fixture.headings.length > 0);
@@ -2748,16 +2679,7 @@ test("a creeper in measured body reach is struck without an unnecessary approach
 test("a blocked multi-creeper escape counters both fuses under the original request", async () => {
   const fixture = combatFixture(["iron_sword", "bow", "arrow"]);
   fixture.target.name = "creeper";
-  const stone = { name: "stone", boundingBox: "block" };
-  fixture.bot.blockAt = ((_position: Vec3) => stone) as Bot["blockAt"];
-  fixture.bot.entities[8] = {
-    id: 8,
-    name: "creeper",
-    isValid: true,
-    height: 1.7,
-    width: 0.6,
-    position: new Vec3(0, 64, 2),
-  } as Entity;
+  fixture.bot.entities[8] = bodyOf(8, { name: "creeper", height: 1.7, width: 0.6, position: new Vec3(0, 64, 2) });
   const swellIndex = fixture.bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   for (const entity of [fixture.target, fixture.bot.entities[8]!]) {
     entity.metadata = [];
@@ -2782,14 +2704,8 @@ test("a blocked multi-creeper escape counters both fuses under the original requ
 test("an incidental creeper releases the melee shield before sprinting clear", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
   const { bot } = fixture;
-  bot.entity.onGround = true;
-  bot.entity.velocity = new Vec3(0, 0, 0);
   bot.entity.position.set(0.5, 64, 0.5);
   bot.health = 20;
-  bot.blockAt = ((position: Vec3) => ({
-    name: position.y < 64 ? "stone" : "air",
-    boundingBox: position.y < 64 ? "block" : "empty",
-  })) as Bot["blockAt"];
   const controls = new Map<string, boolean>();
   bot.setControlState = (control, value) => {
     controls.set(control, value);
@@ -2797,14 +2713,7 @@ test("an incidental creeper releases the melee shield before sprinting clear", a
   const metadata: unknown[] = [];
   const swell = bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   metadata[swell] = -1;
-  bot.entities[8] = {
-    id: 8,
-    name: "creeper",
-    isValid: true,
-    metadata,
-    height: 1.7,
-    position: new Vec3(3, 64, 0.5),
-  } as Entity;
+  bot.entities[8] = bodyOf(8, { name: "creeper", position: new Vec3(3, 64, 0.5), metadata });
   fixture.script.onAttack = () => {
     metadata[swell] = 1;
   };
@@ -2829,20 +2738,11 @@ test("an incidental creeper releases the melee shield before sprinting clear", a
 
 test("blocked incidental fuses are answered before returning to the original quarry", async () => {
   const fixture = combatFixture(["iron_sword"]);
-  const stone = { name: "stone", boundingBox: "block" };
-  fixture.bot.blockAt = ((_position: Vec3) => stone) as Bot["blockAt"];
+  readBlocksFrom(fixture.bot, () => true);
   const metadata: unknown[] = [];
   metadata[fixture.bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir")] = 1;
-  fixture.bot.entities[8] = {
-    id: 8,
-    name: "creeper",
-    isValid: true,
-    metadata,
-    height: 1.7,
-    width: 0.6,
-    position: new Vec3(0, 64, 2),
-  } as Entity;
-  fixture.bot.entities[9] = { ...fixture.bot.entities[8]!, id: 9, position: new Vec3(0, 64, -2) } as Entity;
+  fixture.bot.entities[8] = bodyOf(8, { name: "creeper", height: 1.7, width: 0.6, position: new Vec3(0, 64, 2) });
+  fixture.bot.entities[9] = bodyOf(9, { name: "creeper", height: 1.7, width: 0.6, position: new Vec3(0, 64, -2), metadata });
   const hits: number[] = [];
   fixture.bot.attack = entity => {
     hits.push(entity.id);
@@ -2862,10 +2762,10 @@ test("blocked incidental fuses are answered before returning to the original qua
 
 test("an incidental creeper counter does not complete the requested quarry", async () => {
   const fixture = combatFixture(["iron_sword"]);
-  fixture.bot.blockAt = (() => ({ name: "stone", boundingBox: "block" })) as unknown as Bot["blockAt"];
+  readBlocksFrom(fixture.bot, () => true);
   const metadata: unknown[] = [];
   metadata[fixture.bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir")] = 1;
-  const creeper = { ...fixture.target, id: 8, name: "creeper", metadata, position: new Vec3(0, 64, 2) } as Entity;
+  const creeper = bodyOf(8, { name: "creeper", position: new Vec3(0, 64, 2), metadata });
   fixture.bot.entities[8] = creeper;
   const hit: number[] = [];
   fixture.bot.attack = (entity) => {
@@ -2884,7 +2784,7 @@ test("a sprint clear of one creeper runs from every creeper within fuse range, n
   // The target is two blocks east; a second creeper stands ten blocks south:
   // beyond the range that forbids the swing, inside the range a sprint clear
   // still steers away from.
-  const second = { id: 8, name: "creeper", isValid: true, height: 1.7, position: new Vec3(0, 64, 10) } as Entity;
+  const second = bodyOf(8, { name: "creeper", height: 1.7, position: new Vec3(0, 64, 10) });
   fixture.bot.entities[second.id] = second;
   fixture.script.onAttack = () => {
     fixture.target.position = fixture.target.position.offset(3, 0, 0);
@@ -2923,12 +2823,10 @@ test("a sprint clear of one creeper runs from every creeper within fuse range, n
 });
 
 test("covered creepers do not suppress a reachable spider while pursuing gunpowder", async () => {
-  const fixture = creeperFixture();
-  fixture.bot.time = { timeOfDay: 18000 } as Bot["time"];
+  const fixture = creeperFixture({ timeOfDay: 18_000 });
   fixture.target.position.set(2.5, 64, 0);
-  const second = { ...fixture.target, id: 8, position: new Vec3(4, 64, 1) } as Entity;
-  const spider = { ...fixture.target, id: 9, name: "spider", kind: "Hostile mobs", width: 1.4, height: 0.9,
-    position: new Vec3(0, 64, 3.5) } as Entity;
+  const second = bodyOf(8, { name: "creeper", position: new Vec3(4, 64, 1) });
+  const spider = bodyOf(9, { name: "spider", height: 0.9, width: 1.4, position: new Vec3(0, 64, 3.5) });
   fixture.bot.entities[8] = second;
   fixture.bot.entities[9] = spider;
   // A solid screen hides the creepers; the spider has come around its end.
@@ -2953,10 +2851,7 @@ test("covered creepers do not suppress a reachable spider while pursuing gunpowd
 test("a ready creeper knockback is followed by shared clearance and a ranged finish", async () => {
   const fixture = combatFixture(["iron_sword", "bow", "arrow"]);
   fixture.target.name = "creeper";
-  const stone = { name: "stone", boundingBox: "block" };
-  const air = { name: "air", boundingBox: "empty" };
-  fixture.bot.blockAt = ((position: Vec3) => (position.y < 64 ? stone : air)) as Bot["blockAt"];
-  const second = { id: 8, name: "creeper", isValid: true, height: 1.7, position: new Vec3(0, 64, 3) } as Entity;
+  const second = bodyOf(8, { name: "creeper", height: 1.7, position: new Vec3(0, 64, 3) });
   fixture.bot.entities[second.id] = second;
   fixture.script.onWait = () => {
     if (fixture.activeControls.has("forward")) {
@@ -2972,10 +2867,11 @@ test("a ready creeper knockback is followed by shared clearance and a ranged fin
     "pursue",
   );
 
-  // The scripted death follows the shot after a knockback hit and shared clearance.
+  // The scripted death follows the shot after a knockback hit and shared clearance. A creeper is a hostile mob in
+  // Mineflayer's data (`entities.js:184`), so the sprint clear's observer also strikes it while it stays in reach.
   assert.equal(outcome.kind, "died");
   assert.deepEqual(outcome.stylesUsed, ["melee", "bow"]);
-  assert.equal(outcome.attacks, 2);
+  assert.equal(outcome.attacks, 3);
 });
 
 test("a creeper whose fuse is running is not walked toward; the bot sprints clear until it unwinds", async () => {
@@ -3093,9 +2989,6 @@ test("the sprint clear keeps running for a full fuse after the last creeper is b
 test("a bow draw is let go the moment a creeper walks into fuse range", async () => {
   const fixture = combatFixture(["iron_sword", "bow", "arrow"], { targetDistance: 7 });
   fixture.target.name = "creeper";
-  const stone = { name: "stone", boundingBox: "block" };
-  const air = { name: "air", boundingBox: "empty" };
-  fixture.bot.blockAt = ((position: Vec3) => (position.y < 64 ? stone : air)) as Bot["blockAt"];
   let drawTicks = 0;
   fixture.script.onWait = () => {
     // The creeper closes a block a tick while the bow is drawn.
@@ -3295,20 +3188,20 @@ test("cornered in a dead-end tunnel, the bot keeps knocking the creeper back dow
 for (const threat of ["gap-exposed charge", "incoming fireball"] as const) {
   test(`a hidden charged blaze lets an excavation turn finish, but ${threat} still interrupts`, async () => {
     const fixture = combatFixture(["diamond_sword", "diamond_pickaxe", "shield"], { targetDistance: 8 });
-    fixture.bot.entity.width = 0.6;
-    fixture.bot.entity.height = 1.8;
     fixture.target.name = "blaze";
     fixture.target.metadata = [];
     const flag = fixture.bot.registry.entitiesByName.blaze!.metadataKeys!.indexOf("flags");
     Reflect.set(fixture.target.metadata, flag, 1);
     let hidden = true;
-    fixture.bot.world.raycast = ((_eye, direction, distance) => {
+    const wall = fixture.world.blockAt(new Vec3(1, 65, 0))!;
+    const raycast = fixture.bot.world.raycast;
+    fixture.bot.world.raycast = (from, direction, distance, matcher) => {
       // The opening reveals only the nearest face at eye height, while the
       // ray toward the blaze's centre remains blocked. Short projectile rays
       // on the bot's side of the wall remain clear.
-      if (distance <= 3 || (!hidden && Math.abs(direction.y) < 0.01)) return null;
-      return { position: new Vec3(1, 65, 0) };
-    }) as Bot["world"]["raycast"];
+      if (distance <= 3 || (!hidden && Math.abs(direction.y) < 0.01)) return raycast(from, direction, distance, matcher);
+      return Object.assign(wall, { x: 1, y: 65, z: 0, position: new Vec3(1, 65, 0), face: 4, intersect: new Vec3(1, 65.5, 0.5) });
+    };
     const stop = new AbortController();
     let routes = 0;
     let stayedOnDig = false;
@@ -3427,8 +3320,6 @@ test("an arrow interrupts construction and waits for its cleanup before returnin
 for (const name of ["small_fireball", "arrow"]) {
   test(`a guarded approach yields facing to an incoming ${name} from a different direction`, async () => {
     const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 10 });
-    fixture.bot.entity.width = 0.6;
-    fixture.bot.entity.height = 1.8;
     armWithBow(fixture.target);
     const projectile = Object.assign(combatFixture([]).target, {
       id: 8,
@@ -3514,6 +3405,8 @@ test("an explosion announced during the fight is counted, so a vanished creeper 
   const fixture = creeperFixture();
   fixture.script.onAttack = () => {
     fixture.bot._client.emit("explosion", {});
+    // Mineflayer removes the entity, then announces it gone (`entities.js` `entityGone`).
+    delete fixture.bot.entities[fixture.target.id];
     fixture.bot.emit("entityGone", fixture.target);
   };
   fixture.script.onWait = () => {
@@ -3747,15 +3640,26 @@ for (const bow of [false, true]) {
 for (const obstructionTick of [0, 10, 20]) {
   test(`terrain obstructing a bow at draw tick ${obstructionTick} cancels without release and approaches`, async () => {
     const fixture = combatFixture(["iron_sword", "bow", "arrow"], { targetDistance: 8 });
-    let cleared = false;
     let approached = false;
-    Object.defineProperty(fixture.bot.world, "raycast", {
-      value: (_eye: Vec3, direction: Vec3, range: number) => {
-        assert.ok(Math.abs(direction.norm() - 1) < 0.000001);
+    // Terrain rises in the arrow's path at the test's tick, and is dug away when the approach is cancelled.
+    const terrain = new Vec3(3, 65, 0);
+    let raised = false;
+    const raise = () => {
+      raised = true;
+      fixture.world.setCell(terrain, "stone");
+    };
+    if (obstructionTick === 0) raise();
+    fixture.script.onWait = () => {
+      if (!raised && fixture.clock.tick >= obstructionTick) raise();
+    };
+    const raycast = fixture.bot.world.raycast;
+    const arrowOriginY = 64 + 1.62 - 0.1; // the arrow's trace starts 0.1 below the eye; exposure rays start at the eye
+    fixture.bot.world.raycast = (from, direction, range, matcher) => {
+      assert.ok(Math.abs(direction.norm() - 1) < 0.000001);
+      if (Math.abs(from.y - arrowOriginY) < 1e-6)
         assert.ok(range > 0 && range <= 3, "each clear-shot ray covers one arrow tick or its final fraction");
-        return !cleared && fixture.clock.tick >= obstructionTick ? { position: new Vec3(3, 65, 0) } : null;
-      },
-    });
+      return raycast(from, direction, range, matcher);
+    };
     const navigation = {
       ...navigationFixture(),
       navigate: async (options: Parameters<NavigationRuntime["navigate"]>[0]) => {
@@ -3763,7 +3667,7 @@ for (const obstructionTick of [0, 10, 20]) {
         assert.equal(fixture.bot.usingHeldItem, false, "draw must be cancelled before movement");
         assert.deepEqual(fixture.shotTicks, [], "cancelling must not release an arrow");
         assert.equal(options.stopSignal?.aborted, false, "a carried bow alone cannot stop the obstructed approach");
-        cleared = true;
+        fixture.world.setCell(terrain, "air");
         fixture.bot.emit("physicsTick");
         assert.equal(options.stopSignal?.aborted, true, "clear bow range returns physical ownership to combat");
         return { status: "stopped", reason: "combat requested a stop", elapsedMs: 0 } as const;
@@ -3812,8 +3716,6 @@ for (const species of ["skeleton", "blaze"]) {
       fixture.target.metadata = [];
       if (species === "skeleton") Object.defineProperty(fixture.target, "heldItem", { value: { name: "bow" } });
       fixture.bot.entity.position.set(6.5, 64, 0.5);
-      fixture.bot.entity.onGround = true;
-      fixture.bot.entity.velocity = new Vec3(0, 0, 0);
       let rejectedHeight = false;
       const navigation: NavigationRuntime = {
         ...navigationFixture(),
@@ -3841,7 +3743,6 @@ for (const species of ["skeleton", "blaze"]) {
 test("an explosive projectile suspends the guard, is deflected, and resumes the same quarry", async () => {
   const { bot, target, script } = combatFixture(["iron_sword", "shield"]);
   bot.health = 20;
-  bot.entity.height = 1.8;
   let spawned = false;
   let reflected = false;
   const stop = new AbortController();
@@ -3850,8 +3751,7 @@ test("an explosive projectile suspends the guard, is deflected, and resumes the 
     if (++ticks === 100) stop.abort("Deflection and one resumed melee turn did not settle in the fixture.");
     if (spawned) return;
     spawned = true;
-    bot.entities[99] = Object.assign({}, target, {
-      id: 99,
+    bot.entities[99] = bodyOf(99, {
       name: "fireball",
       width: 1,
       height: 1,
@@ -3887,7 +3787,6 @@ test("an explosive projectile suspends the guard, is deflected, and resumes the 
 
 test("dragon breath releases an ordinary mob guard before the dragon reflex claims the body", async () => {
   const { bot, target, script } = combatFixture(["bow", "arrow", "shield"]);
-  bot.entity.height = 1.8;
   target.name = "blaze";
   target.position = bot.entity.position.offset(0, 0, 8);
   target.metadata = [];
@@ -3913,8 +3812,6 @@ test("changing the withdrawal budget settles an active End escape before publish
   const { bot, target } = combatFixture(["shield"]);
   bot.health = 20;
   bot.food = 20;
-  bot.entity.height = 1.8;
-  bot.entity.onGround = true;
   bot.entities[99] = Object.assign({}, target, {
     id: 99,
     name: "area_effect_cloud",
@@ -4004,8 +3901,7 @@ test("carrying a shield does not slow a clear chase between volleys", async () =
 for (const interruptTick of [10, 20]) test(`a newly visible drawing skeleton at bow tick ${interruptTick} cancels the shot and guards`, async () => {
   const fixture = combatFixture(["bow", "arrow", "shield"], { targetDistance: 12 });
   Object.assign(fixture.bot.entity, { width: 0.6, height: 1.8 });
-  const second = { id: 9, name: "skeleton", kind: "Hostile mobs", isValid: true,
-    position: new Vec3(0, 64, 8), width: 0.6, height: 1.99, headYaw: 0, pitch: 0 } as unknown as Entity;
+  const second = bodyOf(9, { name: "skeleton", height: 1.99, width: 0.6, position: new Vec3(0, 64, 8), headYaw: 0, pitch: 0 });
   const skeleton = armWithBow(second);
   let drawingTicks = 0;
   fixture.script.onWait = () => {
@@ -4029,8 +3925,7 @@ for (const interruptTick of [10, 20]) test(`a newly visible drawing skeleton at 
 test("a known late skeleton draw leaves time to release and restore protection", async () => {
   const fixture = combatFixture(["bow", "arrow", "shield"], { targetDistance: 12 });
   Object.assign(fixture.bot.entity, { width: 0.6, height: 1.8 });
-  const second = { id: 9, name: "skeleton", kind: "Hostile mobs", isValid: true,
-    position: new Vec3(0, 64, 8), width: 0.6, height: 1.99, headYaw: 0, pitch: 0 } as unknown as Entity;
+  const second = bodyOf(9, { name: "skeleton", height: 1.99, width: 0.6, position: new Vec3(0, 64, 8), headYaw: 0, pitch: 0 });
   const skeleton = armWithBow(second);
   fixture.bot.entities[9] = second;
   let drawingTicks = 0;

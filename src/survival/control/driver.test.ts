@@ -1,8 +1,7 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { BodyAbort } from "../../session/abort.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { type SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
@@ -10,11 +9,10 @@ import { ReflexDriver } from "./driver.js";
 /** Limits far beyond any test: a claim that is not under test never runs into them. */
 const TEST_LIMITS = { ceilingMs: 600_000, noProgressMs: 600_000, standDownMs: 2_000 };
 const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
-const botFixture = () =>
-  Object.assign(new EventEmitter(), { health: 20, game: { dimension: "overworld" } }) as unknown as Bot;
+const idleBot = () => createFakeBot().bot;
 
 test("a failed moving response answers its final arrangement before another tick", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner());
   let cell = "A",
     attempts = 0;
@@ -41,7 +39,7 @@ test("a failed moving response answers its final arrangement before another tick
 });
 
 test("an execution exception is answered once and only declared premises rearm it", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner());
   const events: SurvivalTransition[] = [];
   driver.onTransition((event) => events.push(event));
@@ -86,7 +84,7 @@ test("an execution exception is answered once and only declared premises rearm i
 
 for (const cause of ["policy", "death"] as const)
   test(`${cause} interruption is not a failed physical attempt`, async () => {
-    const bot = botFixture();
+    const bot = idleBot();
     await using driver = new ReflexDriver(bot, new ActionRunner());
     driver.register({
       name: "fire_reflex",
@@ -137,7 +135,7 @@ function throwingEscape(retryAfterFailureMs: number | undefined) {
 }
 
 test("an execution exception of a reflex with retryAfterFailureMs is retried after it", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   let clock = 0;
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => clock });
   const { attempts, definition } = throwingEscape(2_000);
@@ -157,7 +155,7 @@ test("an execution exception of a reflex with retryAfterFailureMs is retried aft
 });
 
 test("a death during the retry delay lets the reflex claim again at once after respawn", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => 0 });
   const { attempts, definition } = throwingEscape(2_000);
   driver.register(definition);
@@ -170,7 +168,7 @@ test("a death during the retry delay lets the reflex claim again at once after r
 });
 
 test("a failure the definition does not retry stays answered while its facts hold, however late", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   let clock = 0;
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => clock });
   const { attempts, definition } = throwingEscape(undefined);
@@ -185,7 +183,7 @@ test("a failure the definition does not retry stays answered while its facts hol
 });
 
 test("a definition's own temporal wins over the retry delay", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   const { definition } = throwingEscape(2_000);
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => 0 });
   driver.register({
@@ -200,7 +198,7 @@ test("a definition's own temporal wins over the retry delay", async () => {
 });
 
 test("a throwing sense publishes sensor_failed once, the lower reflexes still tick, and the listener does not throw", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner());
   const events: SurvivalTransition[] = [];
   driver.onTransition((event) => events.push(event));
@@ -229,7 +227,7 @@ test("a throwing sense publishes sensor_failed once, the lower reflexes still ti
 
 test("a throwing decide or facts is guarded the same and makes no claim", async () => {
   for (const broken of ["decide", "facts"] as const) {
-    const bot = botFixture();
+    const bot = idleBot();
     const runner = new ActionRunner();
     await using driver = new ReflexDriver(bot, runner);
     const { attempts, definition } = throwingEscape(undefined);
@@ -249,7 +247,7 @@ test("a throwing decide or facts is guarded the same and makes no claim", async 
 });
 
 test("a sense that recovers after a throw reads its danger again", async () => {
-  const bot = botFixture();
+  const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner());
   let broken = true;
   driver.register({

@@ -1,25 +1,21 @@
-import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import { Vec3 } from "vec3";
+import { type FakeEntitySpec, createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { CombatPerception } from "./observations.js";
 
+/** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
+function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
+  return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
+}
+
 test("only an observed blaze charge transition offers a first-shot window, spent even behind terrain", () => {
-  const registry = minecraftData("1.21.4");
-  const flags = registry.entitiesByName.blaze!.metadataKeys!.indexOf("flags");
   const metadata: unknown[] = [];
-  const enemy = { id: 2, name: "blaze", isValid: true, position: new Vec3(0, 64, -8), metadata };
-  const entities = { 2: enemy };
-  const bot = Object.assign(new EventEmitter(), {
-    game: { dimension: "overworld" },
-    registry,
-    entity: { id: 1, position: new Vec3(0, 64, 0), yaw: 0 },
-    entities,
-    _client: new EventEmitter(),
-    world: { raycast: () => ({}) },
-  }) as unknown as Bot;
+  // A wall of stone across the line between the bot and the blaze's post: the charge is hidden behind terrain.
+  const cells = Object.fromEntries([-1, 0, 1].flatMap((x) => [64, 65, 66].map((y) => [`${x},${y},-4`, "stone"])));
+  const { bot } = createFakeBot({ position: { x: 0, y: 64, z: 0 }, cells, entities: { 2: { name: "blaze", position: { x: 0, y: 64, z: -8 }, metadata } } });
+  const flags = bot.registry.entitiesByName.blaze!.metadataKeys!.indexOf("flags");
+  const enemy = bot.entities[2]!;
   using perception = new CombatPerception(bot);
   const observe = () => {
     bot.emit("physicsTick");
@@ -38,35 +34,22 @@ test("only an observed blaze charge transition offers a first-shot window, spent
   assert.equal(observe(), 0, "switching to melee does not clear the native flag");
   enemy.position.z = -8;
   assert.equal(observe(), 0);
-  entities[2] = { ...enemy, metadata: [...metadata] };
+  bot.entities[2] = bodyOf(2, { name: "blaze", position: enemy.position, metadata: [...metadata] });
   assert.equal(observe(), null, "entity-id reuse cannot inherit another body's observed charge start");
 });
 
 test("perception caches exposure per tick, retains a distant actual attacker and releases connection listeners", () => {
   let rays = 0;
-  const enemy = {
-    id: 2,
-    name: "blaze",
-    kind: "Hostile mobs",
-    isValid: true,
-    position: new Vec3(0, 64, -8),
-    width: 0.6,
-    height: 1.8,
-    metadata: [],
+  const { bot } = createFakeBot({
+    position: { x: 0, y: 64, z: 0 },
+    entities: { 2: { name: "blaze", position: { x: 0, y: 64, z: -8 } } },
+  });
+  const enemy = bot.entities[2]!;
+  const raycast = bot.world.raycast;
+  bot.world.raycast = (...ray) => {
+    rays++;
+    return raycast(...ray);
   };
-  const bot = Object.assign(new EventEmitter(), {
-    game: { dimension: "overworld" },
-    registry: minecraftData("1.21.4"),
-    entity: { id: 1, position: new Vec3(0, 64, 0), yaw: 0, height: 1.8, metadata: [] },
-    entities: { 2: enemy },
-    _client: new EventEmitter(),
-    world: {
-      raycast: () => {
-        rays++;
-        return null;
-      },
-    },
-  }) as unknown as Bot;
   const perception = new CombatPerception(bot);
   const first = perception.read();
   assert.equal(rays, 0, "reading distances need not perform exposure work");
@@ -92,14 +75,12 @@ test("perception caches exposure per tick, retains a distant actual attacker and
 });
 
 test("Enderman attack attribution follows the observed victim, not its anger flag", () => {
-  const enderman = { id: 2, name: "enderman", kind: "Hostile mobs", isValid: true };
-  const dragon = { id: 3, name: "ender_dragon", kind: "Hostile mobs", isValid: true };
-  const bot = Object.assign(new EventEmitter(), {
-    game: { dimension: "overworld" },
-    entity: { id: 1 },
-    entities: { 2: enderman, 3: dragon },
-    _client: new EventEmitter(),
-  }) as unknown as Bot;
+  const { bot } = createFakeBot({
+    entities: {
+      2: { name: "enderman", position: { x: 4.5, y: 64, z: 0.5 } },
+      3: { name: "ender_dragon", position: { x: 4.5, y: 80, z: 20.5 } },
+    },
+  });
   using perception = new CombatPerception(bot);
   bot.emit("entityHurt", bot.entities[3]!, bot.entities[2]!);
   assert.equal(perception.attackerIds.has(2), false);

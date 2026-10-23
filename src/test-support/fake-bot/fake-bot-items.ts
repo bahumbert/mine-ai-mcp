@@ -135,6 +135,8 @@ export function createFakeEntities(registry: Bot["registry"], EntityClass: new (
       Object.assign(entity, {
         name,
         type: known?.type ?? "other",
+        // Mineflayer files every entity under its category, "unknown" when the type has no data (`entities.js:184,193`).
+        kind: known?.category ?? "unknown",
         displayName: known?.displayName ?? name,
         height: known?.height ?? 0,
         width: known?.width ?? 0,

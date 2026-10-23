@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
 import type { CombatDecisionFacts } from "../../policy/combat/decision.js";
 import type { CombatOutcome } from "./contract.js";
@@ -20,7 +20,7 @@ const result = (kind: "cancelled" | "died", attacks: number): CombatOutcome => (
 });
 
 test("a health stop recovers and continues the same target with accumulated evidence", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 20 }) as unknown as Bot;
+  const bot = createFakeBot({ health: 20 }).bot;
   const request = new AbortController();
   const transitions: string[] = [];
   const outcome = await runEngagement(request.signal, {
@@ -53,7 +53,7 @@ test("a health stop recovers and continues the same target with accumulated evid
 });
 
 test("blocked recovery reports its capability rather than retrying a wounded fight", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 7 }) as unknown as Bot;
+  const bot = createFakeBot({ health: 7 }).bot;
   const outcome = await runEngagement(new AbortController().signal, {
     ...operations(bot),
     fight: async () => {
@@ -68,7 +68,7 @@ test("blocked recovery reports its capability rather than retrying a wounded fig
 });
 
 test("death during recovery remains death rather than a resource limitation", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 7 }) as unknown as Bot;
+  const bot = createFakeBot({ health: 7 }).bot;
   const outcome = await runEngagement(new AbortController().signal, {
     ...operations(bot),
     fight: async () => {
@@ -83,7 +83,7 @@ test("death during recovery remains death rather than a resource limitation", as
 });
 
 test("caller cancellation never starts a recovery retry", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 20 }) as unknown as Bot;
+  const bot = createFakeBot({ health: 20 }).bot;
   const request = new AbortController();
   const outcome = await runEngagement(request.signal, {
     ...operations(bot),
@@ -99,7 +99,7 @@ test("caller cancellation never starts a recovery retry", async () => {
 });
 
 test("recovery uses the caller's policy health threshold", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 15 }) as unknown as Bot;
+  const bot = createFakeBot({ health: 15 }).bot;
   const transitions: string[] = [];
   const outcome = await runEngagement(new AbortController().signal, {
     ...operations(bot, 19),
@@ -120,7 +120,7 @@ test("recovery uses the caller's policy health threshold", async () => {
 
 for (const cleanupFails of [false, true]) {
   test(`cancelling recovery ${cleanupFails ? "preserves a cleanup failure" : "returns cancelled after release"}`, async () => {
-    const bot = Object.assign(new EventEmitter(), { health: 7 }) as unknown as Bot;
+    const bot = createFakeBot({ health: 7 }).bot;
     const request = new AbortController();
     const failure = new Error("Physical cleanup failed.");
     const pending = runEngagement(request.signal, {
@@ -166,7 +166,7 @@ function operations(bot: Bot, minimumHealth = 12) {
 }
 
 test("the selected deflection executes before the quarry fight", async () => {
-  const bot = { health: 20 } as Bot;
+  const { bot } = createFakeBot({ health: 20 });
   const base = operations(bot);
   let fireball = true;
   const effects: string[] = [];

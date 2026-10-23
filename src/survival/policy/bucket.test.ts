@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { SurvivalPolicyState } from "../state/survival-policy.js";
 import { readNavigationPolicy } from "../state/navigation-policy.js";
 import { createMovements } from "../../navigation/runtime.js";
 
 test("bucket navigation flags are independent and live across set, clear and death reset", async () => {
-  const bot = botFixture({items:[{name:"water_bucket",count:1}]});
+  const { bot } = createFakeBot({ carried: { water_bucket: 1 } });
   const policy = new SurvivalPolicyState(bot);
   const movements = createMovements(bot);
   assert.equal(movements.maximumBucketDrop,80);
