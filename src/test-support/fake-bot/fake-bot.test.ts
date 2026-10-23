@@ -317,6 +317,30 @@ test("the shared options reach the bot, and an override replaces one method", as
   await assert.rejects(bot.tossStack(null as never), /scripted/);
 });
 
+test("the dimension's floor and height come from the server's login registry data, as Mineflayer reads them (game.js:70-82)", () => {
+  // minecraft-data's 1.21.4 login packet holds the vanilla `dimension_type` registry: overworld -64 / 384, nether 0 / 256.
+  const overworld = createFakeBot().bot;
+  assert.deepEqual([overworld.game.minY, overworld.game.height], [-64, 384]);
+  const nether = createFakeBot({ dimension: "the_nether" }).bot;
+  assert.deepEqual([nether.game.minY, nether.game.height], [0, 256]);
+  // Read by name, not the overworld's for all: the caves type is deep too; a name the registries lack is game.js's 0 / 256.
+  const caves = createFakeBot({ dimension: "overworld_caves" }).bot;
+  assert.deepEqual([caves.game.minY, caves.game.height], [-64, 384]);
+  const unknown = createFakeBot({ dimension: "no_such_dimension" }).bot;
+  assert.deepEqual([unknown.game.minY, unknown.game.height], [0, 256]);
+});
+
+test("deactivateItem tells the server the use is released and clears usingHeldItem (inventory.js:157-172)", () => {
+  const { bot, server } = createFakeBot();
+  bot.usingHeldItem = true;
+  bot.deactivateItem();
+  assert.equal(bot.usingHeldItem, false);
+  const sent = server.packets.at(-1)!;
+  assert.equal(sent.name, "block_dig");
+  assert.deepEqual({ ...(sent.data as object), location: undefined }, { status: 5, location: undefined, face: 0, sequence: 1 });
+  assert.deepEqual((sent.data as { location: Vec3 }).location.toArray(), [0, 0, 0]);
+});
+
 test("the bot stands on ground under its feet by default, and in open air when groundY is null", () => {
   assert.equal(createFakeBot().bot.blockAt(new Vec3(0, 63, 0))!.name, "stone");
   assert.equal(createFakeBot({ groundY: null }).bot.blockAt(new Vec3(0, 63, 0))!.name, "air");

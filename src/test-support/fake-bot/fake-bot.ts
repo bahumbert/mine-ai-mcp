@@ -19,8 +19,14 @@ import { type FakeWorld, type FakeWorldOptions, createFakeWorld } from "./fake-w
 
 const require = createRequire(import.meta.url);
 
-/** Mineflayer keeps the ridden entity on the bot as well as on its entity; its typings leave it out. */
-export type FakeBot = Bot & { vehicle: Entity | null };
+/** The dimension's floor and height Mineflayer puts on `bot.game` at login (`game.js:70-82`); its typings leave them out. */
+export interface DimensionHeights {
+  readonly minY: number;
+  readonly height: number;
+}
+
+/** Mineflayer keeps the ridden entity on the bot as well as on its entity, and the dimension's heights on `game`; its typings leave both out. */
+export type FakeBot = Bot & { vehicle: Entity | null; game: Bot["game"] & DimensionHeights };
 
 type Point = Vec3 | { readonly x: number; readonly y: number; readonly z: number };
 
@@ -90,8 +96,32 @@ function botEntity(make: (name: string, position: Vec3, id: number) => Entity, u
   });
 }
 
+/** What `loginPacket` minecraft-data records of a vanilla server's login: its registries, one `registry_data` packet each. */
+interface RecordedLogin {
+  readonly loginPacket?: { readonly dimensionCodec?: Readonly<Record<string, unknown>> };
+}
+
+/** The Java registry's side of the login data (`prismarine-registry` pc): Mineflayer's `Bot["registry"]` type joins it with Bedrock's. */
+interface LoginRegistry {
+  loadDimensionCodec(codec: unknown): void;
+  readonly dimensionsByName?: Readonly<Record<string, Partial<DimensionHeights>>>;
+}
+
+/** The registries a vanilla server sends at login, loaded into `registry` as Mineflayer loads each `registry_data` (`game.js:96-98`). */
+function loadLoginRegistries(registry: LoginRegistry, version: string): void {
+  const recorded = (require("minecraft-data") as (version: string) => RecordedLogin)(version).loginPacket?.dimensionCodec ?? {};
+  for (const codec of Object.values(recorded)) registry.loadDimensionCodec(codec);
+}
+
+/** `game.js:70-82`: the dimension's floor and height from the login registries, 0 and 256 when they name no such dimension. */
+function dimensionHeightsOf(registry: LoginRegistry, dimension: string): DimensionHeights {
+  const known = registry.dimensionsByName?.[dimension];
+  return { minY: known?.minY ?? 0, height: known?.height ?? 256 };
+}
+
 /** The parts of a bot that are plain state: names, health, game, time, controls. */
-function stateOf(options: FakeBotOptions, username: string, server: FakeServer) {
+function stateOf(options: FakeBotOptions, username: string, server: FakeServer, registry: LoginRegistry) {
+  const dimension = options.dimension ?? "overworld";
   const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   return {
     username,
@@ -101,7 +131,7 @@ function stateOf(options: FakeBotOptions, username: string, server: FakeServer) 
     oxygenLevel: 20,
     usingHeldItem: false,
     currentWindow: null,
-    game: { dimension: options.dimension ?? "overworld", gameMode: options.gameMode ?? "survival", difficulty: "normal" },
+    game: { dimension, gameMode: options.gameMode ?? "survival", difficulty: "normal", ...dimensionHeightsOf(registry, dimension) },
     controlState: controls,
     swingArm: () => undefined,
     get time() {
@@ -122,6 +152,8 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const groundY = options.groundY === undefined ? Math.floor(feet.y) - 1 : options.groundY;
   const world = createFakeWorld(version, { cells: options.cells, groundY });
   const registry = world.registry;
+  const loginRegistry = registry as unknown as LoginRegistry;
+  loadLoginRegistries(loginRegistry, version);
   const server = createFakeServer(clock, { ...options.server, lagMs: options.lagMs });
   const inventory = createFakeInventory(registry, { slots: options.slots, carried: options.carried });
   const EntityClass = (require("prismarine-entity") as (registry: Bot["registry"]) => new (id: number) => Entity)(registry);
@@ -130,7 +162,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
 
   // The one cast of the shared fake: everything Mineflayer's plugins put on the bot is assigned below.
   const bot = new EventEmitter() as unknown as FakeBot;
-  Object.defineProperties(bot, Object.getOwnPropertyDescriptors(stateOf(options, username, server)));
+  Object.defineProperties(bot, Object.getOwnPropertyDescriptors(stateOf(options, username, server, loginRegistry)));
   const client = Object.assign(new EventEmitter(), { state: "play", write: (name: string, data: unknown) => server.receive(name, data) });
   Object.assign(bot, {
     version,

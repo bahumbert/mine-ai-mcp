@@ -1,28 +1,35 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
-import { Vec3 } from "vec3";
-import { recoverPhysics, watchVehicle } from "./vehicle-sync.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { forgetVehicle, recoverPhysics, watchVehicle } from "./vehicle-sync.js";
 
-/** A bot riding boat 7; the client records the positions fed to Mineflayer's own handler. */
-function ridingBot() {
-  const boat = { id: 7, name: "oak_boat", position: new Vec3(20.5, 62.46, 0.5), passengers: [] as unknown[] };
-  const self = { id: 1, position: new Vec3(20.5, 62.96, 0.5), yaw: 0, pitch: 0, vehicle: boat as unknown };
-  boat.passengers.push(self);
-  const client = new EventEmitter();
-  const bot = Object.assign(new EventEmitter(), { entity: self, vehicle: boat as unknown, _client: client });
+/** A bot by boat 7, seated in it by the server unless `seated` is false; the client records the positions fed to Mineflayer's own handler. */
+async function ridingBot({ seated = true } = {}) {
+  const { bot, clock } = createFakeBot({ position: { x: 20.5, y: 62.96, z: 0.5 }, entities: { 7: { name: "oak_boat", position: { x: 20.5, y: 62.46, z: 0.5 } } } });
+  const boat = bot.entities[7]!;
+  if (seated) {
+    bot.mount(boat);
+    await clock.advance(50);
+  }
+  const self = bot.entity;
+  const client = bot._client;
   const positions: { x: number; y: number; z: number }[] = [];
-  client.on("position", (packet: { x: number; y: number; z: number }) => positions.push(packet));
+  client.on("position", (packet: { x: number; y: number; z: number }) => {
+    positions.push(packet);
+  });
   const dismounts: unknown[] = [];
-  bot.on("dismount", (vehicle: unknown) => dismounts.push(vehicle));
-  const stop = watchVehicle(bot as unknown as Bot);
-  return { bot, self, boat, client, positions, dismounts, stop };
+  bot.on("dismount", (vehicle: unknown) => {
+    dismounts.push(vehicle);
+  });
+  // Mineflayer's own plugins listen for a death and a respawn too: only the watch's own listeners are counted.
+  const ownDeathListeners = bot.listenerCount("death") + bot.listenerCount("respawn");
+  const stop = watchVehicle(bot);
+  return { bot, self, boat, client, positions, dismounts, stop, ownDeathListeners };
 }
 
 // Mineflayer acts only on a passenger list that names the bot: one without her kept the vehicle and physics off for good.
-test("the server letting her off (her boat's passenger list without her) forgets the vehicle and turns physics back on", () => {
-  const { bot, self, boat, client, positions, dismounts, stop } = ridingBot();
+test("the server letting her off (her boat's passenger list without her) forgets the vehicle and turns physics back on", async () => {
+  const { bot, self, boat, client, positions, dismounts, stop } = await ridingBot();
   client.emit("set_passengers", { entityId: 7, passengers: [] });
   assert.equal(bot.vehicle, null);
   assert.equal(self.vehicle, null);
@@ -33,8 +40,8 @@ test("the server letting her off (her boat's passenger list without her) forgets
   stop();
 });
 
-test("a passenger list that still names her, or another entity's, changes nothing", () => {
-  const { bot, boat, client, positions, dismounts, stop } = ridingBot();
+test("a passenger list that still names her, or another entity's, changes nothing", async () => {
+  const { bot, boat, client, positions, dismounts, stop } = await ridingBot();
   client.emit("set_passengers", { entityId: 7, passengers: [1] });
   client.emit("set_passengers", { entityId: 9, passengers: [] });
   assert.equal(bot.vehicle, boat);
@@ -42,47 +49,44 @@ test("a passenger list that still names her, or another entity's, changes nothin
   stop();
 });
 
-test("her boat gone (broken or unloaded) is the same as being let off; nothing once the watch is stopped", () => {
-  const first = ridingBot();
+test("her boat gone (broken or unloaded) is the same as being let off; nothing once the watch is stopped", async () => {
+  const first = await ridingBot();
   first.bot.emit("entityGone", first.boat);
   assert.equal(first.bot.vehicle, null);
   assert.equal(first.positions.length, 1);
   first.stop();
-  const second = ridingBot();
+  const second = await ridingBot();
   second.stop();
   second.client.emit("set_passengers", { entityId: 7, passengers: [] });
   assert.equal(second.bot.vehicle, second.boat);
 });
 
-test("nothing happens when she rides nothing", () => {
-  const { bot, self, client, positions, stop } = ridingBot();
-  bot.vehicle = null;
-  self.vehicle = null;
+test("nothing happens when she rides nothing", async () => {
+  const { client, positions, stop } = await ridingBot({ seated: false });
   client.emit("set_passengers", { entityId: 7, passengers: [] });
   assert.equal(positions.length, 0);
   stop();
 });
 
 // Run 14b: after a stall nothing turned physics back on, so every later action stalled too (Finn 45 times).
-test("a stall's recovery resumes physics where she is, only when she rides nothing and is alive", () => {
-  const { bot, self, positions, stop } = ridingBot();
-  recoverPhysics(bot as unknown as Bot);
+test("a stall's recovery resumes physics where she is, only when she rides nothing and is alive", async () => {
+  const { bot, positions, stop } = await ridingBot();
+  recoverPhysics(bot);
   assert.equal(positions.length, 0, "a passenger owes no tick: her ride is not touched");
-  bot.vehicle = null;
-  self.vehicle = null;
-  Object.assign(bot, { health: 0 });
-  recoverPhysics(bot as unknown as Bot);
+  forgetVehicle(bot);
+  bot.health = 0;
+  recoverPhysics(bot);
   assert.equal(positions.length, 0, "dead: the respawn's position turns physics on");
-  Object.assign(bot, { health: 20 });
-  recoverPhysics(bot as unknown as Bot);
+  bot.health = 20;
+  recoverPhysics(bot);
   assert.equal(positions.length, 1);
   stop();
 });
 
 // A death ends the ride on the server too: the respawn brings its own position, so no fake one is fed, and the next
 // movement must not find her still "riding" and send a shift for a boat she left.
-test("a death while seated forgets the vehicle without a fake position", () => {
-  const { bot, self, boat, positions, dismounts, stop } = ridingBot();
+test("a death while seated forgets the vehicle without a fake position", async () => {
+  const { bot, self, boat, positions, dismounts, stop } = await ridingBot();
   bot.emit("death");
   assert.equal(bot.vehicle, null);
   assert.equal(self.vehicle, null);
@@ -92,11 +96,11 @@ test("a death while seated forgets the vehicle without a fake position", () => {
   stop();
 });
 
-test("a respawn while seated forgets the vehicle too, and the listeners go with the watch", () => {
-  const { bot, dismounts, stop } = ridingBot();
+test("a respawn while seated forgets the vehicle too, and the listeners go with the watch", async () => {
+  const { bot, dismounts, stop, ownDeathListeners } = await ridingBot();
   bot.emit("respawn");
   assert.equal(bot.vehicle, null);
   assert.equal(dismounts.length, 1);
   stop();
-  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn"), 0);
+  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") - ownDeathListeners, 0);
 });

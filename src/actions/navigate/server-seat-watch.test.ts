@@ -1,21 +1,14 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { serverSeatWatchOf, watchServerSeat } from "./server-seat-watch.js";
 import { NO_TELEPORT } from "./vehicle-sync.js";
 
-/** A bot with the events the watch reads, standing at `at`; the boat she left stood at (100.5, 62.5, 100.5). */
+/** A bot standing at `at`, with the boat she left at (100.5, 62.5, 100.5); Mineflayer's own position handler moves her client. */
 function botAt(at: Vec3) {
-  const client = new EventEmitter();
-  const bot = Object.assign(new EventEmitter(), { entity: { id: 1, position: at }, _client: client });
-  const boat = { id: 7, name: "oak_boat", position: new Vec3(100.5, 62.5, 100.5) };
-  // Mineflayer's own position handler moves the client first-come; the watch must read the place before it.
-  client.on("position", (packet: { x: number; y: number; z: number }) => {
-    bot.entity.position = new Vec3(packet.x, packet.y, packet.z);
-  });
-  return { bot: bot as unknown as Bot, raw: bot, client, boat };
+  const { bot } = createFakeBot({ position: at, entities: { 7: { name: "oak_boat", position: { x: 100.5, y: 62.5, z: 100.5 } } } });
+  return { bot, raw: bot, client: bot._client, boat: bot.entities[7]! };
 }
 
 const serverPosition = (x: number, z: number, teleportId = 3) => ({ x, y: 63, z, yaw: 0, pitch: 0, flags: { x: false, y: false, z: false, yaw: false, pitch: false }, teleportId });
@@ -84,7 +77,7 @@ test("a server position back at the boat with her client close is just the serve
 });
 
 test("a death, a respawn and a new mount each clear the watch", () => {
-  for (const event of ["death", "respawn", "mount"]) {
+  for (const event of ["death", "respawn", "mount"] as const) {
     const { bot, raw, boat } = botAt(new Vec3(100.5, 63, 100.5));
     const watch = watchServerSeat(bot);
     raw.emit("dismount", boat);
@@ -107,6 +100,9 @@ test("release forgets the held seat once the server answered", () => {
 test("each bot has its own watch and stop leaves no listener behind", () => {
   const first = botAt(new Vec3(0, 63, 0));
   const second = botAt(new Vec3(0, 63, 0));
+  const counts = (entry: ReturnType<typeof botAt>) => (["dismount", "mount", "death", "respawn"] as const).reduce((sum, name) => sum + entry.raw.listenerCount(name), 0) + entry.client.listenerCount("update_view_position") + entry.client.listenerCount("position");
+  // Mineflayer's own plugins listen for some of these too (its position handler among them).
+  const ownListeners = counts(first);
   const watch = watchServerSeat(first.bot);
   const other = watchServerSeat(second.bot);
   assert.equal(serverSeatWatchOf(first.bot), watch);
@@ -117,6 +113,5 @@ test("each bot has its own watch and stop leaves no listener behind", () => {
   assert.equal(other.heldAt(), null, "the other bot never got off");
   watch.stop();
   assert.equal(serverSeatWatchOf(first.bot), undefined);
-  const counts = (entry: ReturnType<typeof botAt>) => ["dismount", "mount", "death", "respawn"].reduce((sum, name) => sum + entry.raw.listenerCount(name), 0) + entry.client.listenerCount("update_view_position") + entry.client.listenerCount("position");
-  assert.equal(counts(first), 1, "only the test's own position handler remains");
+  assert.equal(counts(first), ownListeners, "only Mineflayer's own listeners remain");
 });
