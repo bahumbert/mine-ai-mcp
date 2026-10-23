@@ -5,6 +5,7 @@
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { FakeBot } from "./fake-bot.js";
+import type { ServerEntities } from "./fake-bot-entities.js";
 import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
@@ -27,6 +28,8 @@ const FACE_VECTORS = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(0, 0, -1),
 const OFF_HAND = 1;
 /** Where a tossed stack appears: the player's toss starts at the eye, 0.3 below it. */
 const DROP_HEIGHT = 1.32;
+/** The pickup delay of a tossed stack, measured by contract check `tossed-item-kept-before-delay`. */
+const TOSS_PICKUP_DELAY_TICKS = 40;
 
 export interface FakeEntities {
   /** A new entity id the bot has not seen. */
@@ -36,7 +39,7 @@ export interface FakeEntities {
 }
 
 /** Give `bot` its hand, `equip`, `toss`, `tossStack` and `placeBlock`. */
-export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; entities: FakeEntities }): void {
+export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; spawn: ServerEntities["spawn"] }): void {
   const { inventory, server } = parts;
   Object.defineProperties(bot, {
     heldItem: { get: () => inventory.heldItem, configurable: true },
@@ -49,7 +52,8 @@ export function attachFakeItems(bot: FakeBot, parts: { clock: FakeClock; server:
     destination === "hand" ? 36 + inventory.quickBarSlot : EQUIPMENT_SLOTS[destination as keyof typeof EQUIPMENT_SLOTS];
   bot.equip = async (item, destination) => inventory.equip(item, destination ?? "hand");
   const dropAll = (stacks: TossedStack[]) => {
-    for (const stack of stacks) server.answer(() => spawnDrop(bot, parts.entities, stack));
+    const tossedFrom = bot.entity.position.offset(0, DROP_HEIGHT, 0);
+    for (const stack of stacks) server.answer(() => spawnDrop(bot, parts.spawn, stack, tossedFrom));
   };
   bot.toss = async (itemType, _metadata, count) => dropAll(inventory.toss(itemType, count));
   bot.tossStack = async (item) => {
@@ -73,13 +77,14 @@ function releaseUseItem(bot: FakeBot): void {
   bot.usingHeldItem = false;
 }
 
-/** The tossed stack as an item entity beside the bot, announced with `entitySpawn`. */
-function spawnDrop(bot: FakeBot, entities: FakeEntities, stack: TossedStack): void {
-  const drop = entities.make("item", bot.entity.position.offset(0, DROP_HEIGHT, 0));
-  const item = itemOf(bot.registry, bot.registry.items[stack.type]!.name, stack.count);
-  drop.getDroppedItem = () => item;
-  bot.entities[drop.id] = drop;
-  bot.emit("entitySpawn", drop);
+/** The tossed stack as an item entity where the bot tossed it, kept for the 40 ticks the server gives a toss (`tossed-item-kept-before-delay`). */
+function spawnDrop(bot: FakeBot, spawn: ServerEntities["spawn"], stack: TossedStack, tossedFrom: Vec3): void {
+  spawn({
+    name: "item",
+    position: tossedFrom,
+    item: { name: bot.registry.items[stack.type]!.name, count: stack.count },
+    pickupDelayTicks: TOSS_PICKUP_DELAY_TICKS,
+  });
 }
 
 /** The server's side of a placement: the used hand's block put in an empty cell, one taken from it outside creative. */

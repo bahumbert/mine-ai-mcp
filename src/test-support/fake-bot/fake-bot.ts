@@ -10,6 +10,7 @@ import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
+import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
@@ -79,6 +80,8 @@ export interface FakeHarness {
   readonly server: FakeServer;
   readonly world: FakeWorld;
   readonly inventory: FakeInventory;
+  /** The server's own entities after the start: spawn, remove, and the pickup of item entities. */
+  readonly entities: ServerEntities;
   readonly breath: FakeBreath;
 }
 
@@ -191,11 +194,12 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeDigging(bot, clock, world);
   attachFakeVehicle(bot, server);
   attachFakeUse(bot, { clock, server, world, inventory, entities });
-  attachFakeItems(bot, { clock, server, world, inventory, entities });
+  const serverEntities = attachFakeEntities(bot, { clock, server, inventory, entities });
+  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, breath };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

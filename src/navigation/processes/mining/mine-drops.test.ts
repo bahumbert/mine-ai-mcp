@@ -4,29 +4,23 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { MineDropTracker } from "./mine-drops.js";
 
-/**
- * An item entity on the shared fake's own entity factory, for a drop that spawns after the bot was made. Stopgap until the
- * shared fake can spawn an entity on a made harness (gap reported to the master, M5).
- */
-function itemEntity(id: number, position: Vec3) {
-  return createFakeBot({ entities: { [id]: { name: "item", position } } }).bot.entities[id]!;
-}
-
 function trackerWith(drops: Record<number, Vec3>) {
-  const { bot } = createFakeBot({
+  const { bot, entities: server } = createFakeBot({
     position: new Vec3(0, 64, 0),
     entities: Object.fromEntries(Object.entries(drops).map(([id, position]) => [id, { name: "item", position }])),
   });
   const tracker = new MineDropTracker(bot, { observedInventoryGain: () => 0 }, new Set(), new Set());
-  return { tracker, entities: bot.entities };
+  /** The server spawns a drop of the block just broken, after the bot was made. */
+  const spawnDrop = (id: number, position: Vec3) => server.spawn({ id, name: "item", position, item: { name: "cobblestone", count: 1 } });
+  return { tracker, entities: bot.entities, spawnDrop };
 }
 
 describe("MineDropTracker anticipated drops", () => {
   test("a drop spawning 2 s after the break (server behind) is still a target and then followed", () => {
-    const { tracker, entities } = trackerWith({});
+    const { tracker, spawnDrop } = trackerWith({});
     tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0);
     assert.deepEqual(tracker.update([], 2_000).map((t) => t.kind), ["anticipated_drop"]);
-    entities[7] = itemEntity(7, new Vec3(5.5, 64, 5.5));
+    spawnDrop(7, new Vec3(5.5, 64, 5.5));
     assert.partialDeepStrictEqual(tracker.update([], 2_100), [{ kind: "drop", entityId: 7 }]);
     assert.equal(tracker.lostDrops, 0);
   });
@@ -51,10 +45,10 @@ describe("MineDropTracker anticipated drops", () => {
   });
 
   test("20 breaks with late drops gain 20", () => {
-    const { tracker, entities } = trackerWith({});
+    const { tracker, spawnDrop } = trackerWith({});
     for (let i = 0; i < 20; i++) tracker.noteBreak({ x: i * 10, y: 64, z: 0 }, 0);
     assert.equal(tracker.update([], 2_000).filter((t) => t.kind === "anticipated_drop").length, 20);
-    for (let i = 0; i < 20; i++) entities[100 + i] = itemEntity(100 + i, new Vec3(i * 10 + 0.5, 64, 0.5));
+    for (let i = 0; i < 20; i++) spawnDrop(100 + i, new Vec3(i * 10 + 0.5, 64, 0.5));
     const drops = tracker.update([], 2_100).filter((t) => t.kind === "drop");
     assert.equal(drops.length, 20);
     assert.equal(tracker.lostDrops, 0);
@@ -75,12 +69,12 @@ describe("MineDropTracker anticipated drops rank last", () => {
   });
 
   test("the last break's late drop (2 s) is still waited for and followed once the blocks are gone", () => {
-    const { tracker, entities } = trackerWith({});
+    const { tracker, spawnDrop } = trackerWith({});
     for (let i = 0; i < 10; i++) tracker.noteBreak({ x: i, y: 64, z: 0 }, i * 100);
     assert.equal(tracker.update([block(99)], 950).length, 1);
     const waiting = tracker.update([], 2_000);
     assert.ok(waiting.every((t) => t.kind === "anticipated_drop"));
-    entities[5] = itemEntity(5, new Vec3(9.5, 64, 0.5));
+    spawnDrop(5, new Vec3(9.5, 64, 0.5));
     assert.ok(tracker.update([], 2_100).some((t) => t.kind === "drop" && t.entityId === 5));
   });
 

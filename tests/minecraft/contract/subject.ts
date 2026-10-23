@@ -21,10 +21,14 @@ export interface ContractSubject {
   setBlock(cell: Vec3, block: FakeCell): Promise<void>;
   /** Whether the server still has the bot riding `vehicle`, whatever the client believes. */
   seatedOnServer(vehicle: Entity): Promise<boolean>;
+  /** The server spawns `stack` as an item entity at `position`, pickable after `pickupDelayTicks`; resolves with it once the client has it. */
+  summonItem(stack: { readonly name: string; readonly count: number }, position: Vec3, pickupDelayTicks: number): Promise<Entity>;
 }
 
 /** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
 const SERVER_EDIT_WALL_MS = 3_000;
+/** An item entity spawned this close to where `/summon` put it is the summoned one (the server may nudge it a tick later). */
+const SUMMON_MATCH_DISTANCE = 0.5;
 /** Steps of `settleWithin`: fine enough for a 2-tick bound, coarse enough for the real event loop. */
 const SETTLE_STEP_MS = 25;
 
@@ -59,7 +63,7 @@ export async function holdsWithin(subject: ContractSubject, condition: () => boo
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness): ContractSubject {
-  const { bot, clock, server, world } = harness;
+  const { bot, clock, entities, server, world } = harness;
   return {
     bot,
     wait: (ms) => clock.advance(ms),
@@ -69,6 +73,12 @@ export function fakeContractSubject(harness: FakeHarness): ContractSubject {
       await clock.advance(50);
     },
     seatedOnServer: async (vehicle) => server.riderOf(vehicle.id) === bot.entity.id,
+    async summonItem(stack, position, pickupDelayTicks) {
+      let summoned: Entity | undefined;
+      server.answer(() => void (summoned = entities.spawn({ name: "item", position, item: stack, pickupDelayTicks })));
+      await clock.advance(50);
+      return summoned!;
+    },
   };
 }
 
@@ -116,6 +126,23 @@ export function serverContractSubject(bot: Bot): ContractSubject {
       bot.chat(`/setblock ${at(SEAT_PROBE_CELL)} air`);
       await commandUntil(bot, `setblock ${at(SEAT_SENTINEL_CELL)} air`, SEAT_SENTINEL_CELL, "air");
       return seated;
+    },
+    async summonItem(stack, position, pickupDelayTicks) {
+      const spawned = new Promise<Entity>((resolve, reject) => {
+        const onSpawn = (entity: Entity) => {
+          if (entity.name !== "item" || entity.position.distanceTo(position) > SUMMON_MATCH_DISTANCE) return;
+          clearTimeout(timer);
+          bot.off("entitySpawn", onSpawn);
+          resolve(entity);
+        };
+        const timer = setTimeout(() => {
+          bot.off("entitySpawn", onSpawn);
+          reject(new Error(`/summon item: no item entity near ${position} after ${SERVER_EDIT_WALL_MS} ms`));
+        }, SERVER_EDIT_WALL_MS);
+        bot.on("entitySpawn", onSpawn);
+      });
+      bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
+      return spawned;
     },
   };
 }
