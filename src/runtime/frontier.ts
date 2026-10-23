@@ -6,7 +6,7 @@ import { findLoadedBlockPositions } from "../world/loaded-block-scan.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { sourcesOf } from "../world/block-drops.js";
-import { CHUNK_WIDTH, chunkPosition } from "../world/chunks.js";
+import { CHUNK_WIDTH, chunkPosition, loadedColumns } from "../world/chunks.js";
 
 export interface SessionFrontierStatus {
   observedChunks: number;
@@ -152,72 +152,148 @@ export function seenInWorld(
 }
 
 /**
+ * The queue behind a session frontier: chunks wait here, are scanned one at a time off the packet path, and the ones
+ * that commit are told to the listeners. One recorder per session.
+ */
+class ChunkRecorder {
+  observedChunks: number;
+  private storageError: string | null = null;
+  /** Why the spawn ring was not read at attach: kept until close, since no later chunk records it. */
+  private attachError: string | null = null;
+  private readonly pending = new Map<string, PendingChunk>();
+  private readonly listeners = new Set<(chunk: FrontierChunk) => void>();
+  private closed = false;
+  private processing: Promise<void> | undefined;
+  private readonly scanErrors = new Map<string, string>();
+  private readonly bot: Bot;
+  private readonly data: SqlBotData;
+
+  constructor(bot: Bot, data: SqlBotData) {
+    this.bot = bot;
+    this.data = data;
+    this.observedChunks = Number(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count ?? 0);
+  }
+
+  /** Queue the chunk when it is new, or recorded long enough ago to be scanned again. */
+  remember(chunk: FrontierChunk, column: LoadedColumn | undefined): void {
+    if (this.closed || !column) return;
+    try {
+      const recorded = this.data.read("SELECT scanned_at FROM frontier_chunks WHERE chunk_key = ?", chunkKey(chunk))[0];
+      if (recorded === undefined) this.queue({ ...chunk, firstObservedAt: new Date().toISOString(), column });
+      else if (Date.now() - Date.parse(String(recorded.scanned_at)) >= RESCAN_AFTER_MS) {
+        this.queue({ ...chunk, firstObservedAt: new Date().toISOString(), column, rescan: true });
+      }
+      this.storageError = null;
+    } catch (cause) {
+      this.storageError = message(cause);
+    }
+  }
+
+  recordAttachError(cause: unknown): void {
+    this.attachError = `Spawn-ring chunks are not recorded: ${message(cause)}`;
+  }
+
+  onRecorded(listener: (chunk: FrontierChunk) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  idle(): Promise<void> {
+    return this.processing ?? Promise.resolve();
+  }
+
+  status(): SessionFrontierStatus {
+    return {
+      observedChunks: this.observedChunks,
+      pendingChunks: this.pending.size,
+      error: this.storageError ?? this.attachError ?? this.scanErrors.values().next().value ?? null,
+    };
+  }
+
+  close(): void {
+    this.closed = true;
+    this.pending.clear();
+    this.listeners.clear();
+  }
+
+  private queue(chunk: PendingChunk): void {
+    const key = chunkKey(chunk);
+    if (!this.pending.has(key)) this.pending.set(key, chunk);
+    this.processing ??= this.processPending();
+  }
+
+  private async processPending(): Promise<void> {
+    await yieldToEventLoop();
+    while (!this.closed && this.pending.size > 0) {
+      const [key, chunk] = this.pending.entries().next().value!;
+      this.pending.delete(key);
+      using execution = new ExecutionScope({ bot: this.bot.username, operation: "frontier", targetId: null });
+      try {
+        if (execution.runSync(`scan_and_record:${key}`, () => scanAndRecord(this.bot, this.data, chunk))) {
+          this.observedChunks += 1;
+          this.notifyRecorded({ dimension: chunk.dimension, chunkX: chunk.chunkX, chunkZ: chunk.chunkZ });
+        }
+        this.scanErrors.delete(key);
+      } catch (cause) {
+        this.scanErrors.set(key, `Chunk ${key}: ${message(cause)}`);
+      }
+      await yieldToEventLoop();
+    }
+    this.processing = undefined;
+  }
+
+  /**
+   * The transaction has committed. Consumers can therefore treat this notification as persisted evidence from this
+   * bot, rather than a chunk-load packet or a write made by another process.
+   */
+  private notifyRecorded(recorded: FrontierChunk): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(recorded);
+      } catch {
+        // A consumer cannot turn an already committed chunk into a scan
+        // failure or prevent the remaining consumers from seeing it.
+      }
+    }
+  }
+}
+
+/** How many recorded chunks of `dimension` hold `material`. */
+function countChunksWithMaterial(data: SqlBotData, dimension: string, material: string): number {
+  const row = data.read(
+    `SELECT COUNT(*) AS count FROM frontier_chunk_materials AS m JOIN frontier_chunks AS c USING (chunk_key)
+     WHERE m.material = ? AND c.dimension = ?`,
+    material,
+    dimension,
+  )[0];
+  return Number(row?.count ?? 0);
+}
+
+/** The farthest recorded chunk of `dimension` along `direction`, or null when none is recorded. */
+function recordedBoundary(data: SqlBotData, dimension: string, direction: { readonly x: number; readonly z: number }): number | null {
+  const row = data.read(
+    `
+    SELECT MAX(chunk_x * ? + chunk_z * ?) AS boundary
+    FROM frontier_chunks
+    WHERE dimension = ?
+  `,
+    direction.x,
+    direction.z,
+    dimension,
+  )[0];
+  return row?.boundary === null || row?.boundary === undefined ? null : Number(row.boundary);
+}
+
+/**
  * Records loaded chunks, useful material sets, and counted biome samples.
  * Work is queued so packet delivery never performs a scan.
  */
 export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFrontier {
-  let closed = false;
-  let processingPromise: Promise<void> | undefined;
-  let storageError: string | null = null;
-  let observedChunks = Number(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count ?? 0);
-  const pending = new Map<string, PendingChunk>();
-  const scanErrors = new Map<string, string>();
-  const recordedListeners = new Set<(chunk: FrontierChunk) => void>();
-
-  const remember = (chunk: FrontierChunk, column: LoadedColumn | undefined) => {
-    if (closed || !column) return;
-    try {
-      const recorded = data.read("SELECT scanned_at FROM frontier_chunks WHERE chunk_key = ?", chunkKey(chunk))[0];
-      if (recorded === undefined) queueChunk({ ...chunk, firstObservedAt: new Date().toISOString(), column });
-      else if (Date.now() - Date.parse(String(recorded.scanned_at)) >= RESCAN_AFTER_MS) {
-        queueChunk({ ...chunk, firstObservedAt: new Date().toISOString(), column, rescan: true });
-      }
-      storageError = null;
-    } catch (cause) {
-      storageError = message(cause);
-    }
-  };
-
-  const processPendingChunks = async () => {
-    await yieldToEventLoop();
-    while (!closed && pending.size > 0) {
-      const [key, chunk] = pending.entries().next().value!;
-      pending.delete(key);
-      using execution = new ExecutionScope({ bot: bot.username, operation: "frontier", targetId: null });
-      try {
-        if (execution.runSync(`scan_and_record:${key}`, () => scanAndRecord(bot, data, chunk))) {
-          observedChunks += 1;
-          // The transaction has committed. Consumers can therefore treat this
-          // notification as persisted evidence from this bot, rather than a
-          // chunk-load packet or a write made by another process.
-          const recorded = { dimension: chunk.dimension, chunkX: chunk.chunkX, chunkZ: chunk.chunkZ };
-          for (const listener of recordedListeners) {
-            try {
-              listener(recorded);
-            } catch {
-              // A consumer cannot turn an already committed chunk into a scan
-              // failure or prevent the remaining consumers from seeing it.
-            }
-          }
-        }
-        scanErrors.delete(key);
-      } catch (cause) {
-        scanErrors.set(key, `Chunk ${key}: ${message(cause)}`);
-      }
-      await yieldToEventLoop();
-    }
-    processingPromise = undefined;
-  };
-
-  function queueChunk(chunk: PendingChunk) {
-    const key = chunkKey(chunk);
-    if (!pending.has(key)) pending.set(key, chunk);
-    processingPromise ??= processPendingChunks();
-  }
+  const recorder = new ChunkRecorder(bot, data);
 
   const loaded = (corner: Vec3) => {
     const { chunkX, chunkZ } = chunkPosition(corner);
-    remember(
+    recorder.remember(
       {
         dimension: bot.game.dimension,
         chunkX,
@@ -230,52 +306,27 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
 
   // The bot is already spawned when the session is built, so its spawn ring may
   // have arrived before this listener existed.
-  for (const { chunkX, chunkZ, column } of bot.world.getColumns()) {
-    remember({ dimension: bot.game.dimension, chunkX, chunkZ }, column as unknown as LoadedColumn);
+  try {
+    for (const { chunkX, chunkZ, column } of loadedColumns<LoadedColumn>(bot.world)) {
+      recorder.remember({ dimension: bot.game.dimension, chunkX, chunkZ }, column);
+    }
+  } catch (cause) {
+    // A column list Prismarine changed under us (a coordinate that is no integer) must not stop the session from
+    // starting: no spawn-ring chunk is recorded, health says why, and the chunk-load events go on.
+    recorder.recordAttachError(cause);
   }
 
   const close = (): void => {
-    if (closed) return;
-    closed = true;
-    pending.clear();
-    recordedListeners.clear();
+    recorder.close();
     bot.off("chunkColumnLoad", loaded);
   };
 
   return {
-    status: (): SessionFrontierStatus => ({
-      observedChunks,
-      pendingChunks: pending.size,
-      error: storageError ?? scanErrors.values().next().value ?? null,
-    }),
-    idle: () => processingPromise ?? Promise.resolve(),
-    chunksWithMaterial: (material): number => {
-      const dimension = bot.game.dimension;
-      const row = data.read(
-        `SELECT COUNT(*) AS count FROM frontier_chunk_materials AS m JOIN frontier_chunks AS c USING (chunk_key)
-         WHERE m.material = ? AND c.dimension = ?`,
-        material,
-        dimension,
-      )[0];
-      return Number(row?.count ?? 0);
-    },
-    boundary: (dimension, direction): number | null => {
-      const row = data.read(
-        `
-        SELECT MAX(chunk_x * ? + chunk_z * ?) AS boundary
-        FROM frontier_chunks
-        WHERE dimension = ?
-      `,
-        direction.x,
-        direction.z,
-        dimension,
-      )[0];
-      return row?.boundary === null || row?.boundary === undefined ? null : Number(row.boundary);
-    },
-    onRecorded: (listener) => {
-      recordedListeners.add(listener);
-      return () => recordedListeners.delete(listener);
-    },
+    status: () => recorder.status(),
+    idle: () => recorder.idle(),
+    chunksWithMaterial: (material) => countChunksWithMaterial(data, bot.game.dimension, material),
+    boundary: (dimension, direction) => recordedBoundary(data, dimension, direction),
+    onRecorded: (listener) => recorder.onRecorded(listener),
     close,
     [Symbol.dispose]: close,
   };

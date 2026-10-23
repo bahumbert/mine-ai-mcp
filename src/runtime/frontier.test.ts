@@ -54,7 +54,8 @@ function fixture(surfaceWaterCells = 129) {
     biomes: [{ data: { palette: [biomeId("plains"), biomeId("forest")],
       get: (index: number) => (index < 16 ? biomeId("forest") : biomeId("plains")) } }],
   };
-  const columns = [{ chunkX: -2, chunkZ: 4, column }];
+  // Strings as the game hands them (`prismarine-world/src/world.js:195-203`; the typings say numbers).
+  const columns = [{ chunkX: "-2", chunkZ: "4", column }];
   const { bot } = createFakeBot();
   // Stopgap that stays (T3b-B): the tests script this column's containers (a palette of materials over empty cells, 64 biome
   // samples, a read counter, a read that throws) and every chunk answers it; the fake's columns hold the world's real cells.
@@ -418,4 +419,98 @@ test("the planner's repeated questions scan the loaded blocks once while the bot
 test("a scan for a block kind absent from every loaded section reads no block", () => {
   const bot = seeingBot({ oak_log: 3 });
   assert.equal(seenInWorld(bot, { chunksWithMaterial: () => 0 })("pale_oak_log"), 0);
+});
+
+type RingMember = "C" | "N" | "E" | "S" | "W";
+const RING_OFFSET: Record<RingMember, readonly [number, number]> = { C: [0, 0], N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+
+/**
+ * The 3x3 spawn ring around `centre`, in the order a login lists it: the four corners, then the centre and its four
+ * neighbours in `last` order. A chunk is rechecked by itself and by each neighbour, so the listing order decides which
+ * recheck is the last one: the centre's last recheck comes from the neighbour listed last.
+ */
+function spawnRing(centre: readonly [number, number], last: readonly RingMember[]): Array<[number, number]> {
+  const corners: Array<readonly [number, number]> = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  return [...corners, ...last.map((member) => RING_OFFSET[member])].map(([dx, dz]) => [centre[0] + dx, centre[1] + dz]);
+}
+
+function frontierFlags(data: SqlBotData): Map<string, number> {
+  const rows = data.read("SELECT chunk_x, chunk_z, is_frontier FROM frontier_chunks");
+  return new Map(rows.map((row) => [`${row.chunk_x},${row.chunk_z}`, Number(row.is_frontier)]));
+}
+
+async function flagsAfterAttach(loadedColumns: Array<[number, number]>, t: { after(fn: () => void): void }): Promise<Map<string, number>> {
+  const { bot } = createFakeBot({ loadedColumns });
+  const data = temporaryBotData();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+  return frontierFlags(data);
+}
+
+function assertOnlyCentreIsInner(flags: Map<string, number>, centre: readonly [number, number]): void {
+  assert.equal(flags.size, 9);
+  for (const [chunk, flag] of flags) assert.equal(flag, chunk === `${centre[0]},${centre[1]}` ? 0 : 1, `chunk ${chunk}`);
+}
+
+// Prismarine hands the spawn ring over with string coordinates (`world.js:195-203`): `chunkX + 1` is then "-21", not -1.
+// Each row lists the ring so that the neighbour recorded last is the one whose recheck of the centre read the string.
+const SPAWN_RING_ROWS: Array<{ name: string; centre: readonly [number, number]; last: RingMember[] }> = [
+  // W (-2, -1) is last: its east recheck of C is `"-2" + 1` = "-21" on the old code, so C kept 1.
+  { name: "west neighbour listed last", centre: [-1, -1], last: ["C", "N", "E", "S", "W"] },
+  // N (-1, -2) is last: its south recheck of C is `"-2" + 1` = "-21".
+  { name: "north neighbour listed last", centre: [-1, -1], last: ["C", "E", "S", "W", "N"] },
+  // W (0, 0) is last: its east recheck of C is `"0" + 1` = "01".
+  { name: "chunk 0 west of the centre, listed last", centre: [1, 0], last: ["C", "N", "E", "S", "W"] },
+];
+for (const { name, centre, last } of SPAWN_RING_ROWS) {
+  test(`a spawn ring loaded before the frontier attaches clears the flags of its inner chunks (${name})`, async (t) => {
+    assertOnlyCentreIsInner(await flagsAfterAttach(spawnRing(centre, last), t), centre);
+  });
+}
+
+test("a chunk loaded by event after attach clears the same flag a spawn-ring chunk does", async (t) => {
+  const centre = [1, 0] as const;
+  const ringWithoutEast = spawnRing(centre, ["C", "N", "S", "W"]);
+  const { bot, world } = createFakeBot({ loadedColumns: ringWithoutEast });
+  const data = temporaryBotData();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+  assert.equal(frontierFlags(data).get("1,0"), 1, "the east neighbour is missing");
+
+  // The column of chunk (2, 0) loads: Prismarine's `setColumn` emits `chunkColumnLoad` (the fake's `setCell` into an unlisted chunk).
+  world.setCell(new Vec3(32, 64, 0), "stone");
+  await frontier.idle();
+
+  assert.equal(frontierFlags(data).get("1,0"), 0);
+  assertOnlyCentreIsInner(frontierFlags(data), centre);
+});
+
+test("a column list that holds a non-integer coordinate is a storage error, the session still attaches and records later chunks", async (t) => {
+  const { bot } = createFakeBot({ loadedColumns: [[0, 0]] });
+  // Stopgap on the fake's list (T1): the fake lists integer chunks only, so the bad entry is handed over by hand; chunk (0, 0) stays loaded.
+  Object.assign(bot.world, { getColumns: () => [{ chunkX: "1.5", chunkZ: "0", column: {} }] });
+  const data = temporaryBotData();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+
+  assert.match(String(frontier.status().error), /Spawn-ring chunks are not recorded.*chunkX.*"1.5"/);
+  assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count, 0);
+
+  bot.emit("chunkColumnLoad", new Vec3(0, 0, 0));
+  await frontier.idle();
+  assert.deepEqual(data.read("SELECT chunk_x, chunk_z FROM frontier_chunks"), [{ chunk_x: 0, chunk_z: 0 }]);
+  // A recorded chunk does not wipe the report: the spawn ring is still not recorded, and health says so.
+  assert.match(String(frontier.status().error), /Spawn-ring chunks are not recorded.*chunkX/);
 });

@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { CHUNK_WIDTH, loadedColumns, type LoadedColumnEntry } from "./chunks.js";
 
 interface LocalBlockPosition {
   x: number;
@@ -18,12 +19,6 @@ interface LoadedChunkSection {
 interface LoadedChunkColumn {
   readonly minY: number;
   readonly sections: readonly (LoadedChunkSection | undefined)[];
-}
-
-interface LoadedColumn {
-  readonly chunkX: number | string;
-  readonly chunkZ: number | string;
-  readonly column: LoadedChunkColumn;
 }
 
 export interface LoadedBlockScan {
@@ -57,7 +52,7 @@ function sectionAxisDistance(center: number, origin: number): number {
 }
 
 function matchingSections(
-  columns: readonly LoadedColumn[],
+  columns: readonly LoadedColumnEntry<LoadedChunkColumn>[],
   center: LocalBlockPosition,
   radiusSquared: number,
   stateIds: ReadonlySet<number>,
@@ -65,8 +60,8 @@ function matchingSections(
   const sections: SearchSection[] = [];
   let order = 0;
   for (const loaded of columns) {
-    const x = Number(loaded.chunkX) * 16;
-    const z = Number(loaded.chunkZ) * 16;
+    const x = loaded.chunkX * CHUNK_WIDTH;
+    const z = loaded.chunkZ * CHUNK_WIDTH;
     const dx = sectionAxisDistance(center.x, x);
     const dz = sectionAxisDistance(center.z, z);
     const horizontalDistanceSquared = dx * dx + dz * dz;
@@ -123,9 +118,9 @@ function retainCandidate(candidates: Candidate[], candidate: Candidate, limit: n
 export function findLoadedBlockPositions(bot: Bot, scan: LoadedBlockScan): readonly Vec3[] {
   if (scan.limit === 0 || scan.stateIds.size === 0) return [];
   // prismarine-world's public type omits the 1.18+ column `minY`, while its
-  // runtime column and serialized form both carry it. Parse that library gap
-  // once here instead of spreading assertions through mining.
-  const columns = bot.world.getColumns() as unknown as readonly LoadedColumn[];
+  // runtime column and serialized form both carry it: `loadedColumns` names
+  // that shape once here instead of spreading assertions through mining.
+  const columns = loadedColumns<LoadedChunkColumn>(bot.world);
   const center = new Vec3(scan.center.x, scan.center.y, scan.center.z).floored();
   const radiusSquared = scan.radius === undefined ? Number.POSITIVE_INFINITY : scan.radius * scan.radius;
   const candidates: Candidate[] = [];
