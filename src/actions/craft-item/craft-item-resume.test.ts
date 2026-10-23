@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { craftingBot } from "../../test-support/crafting.js";
-import { startServerClock } from "../../test-support/server-clock.js";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import type { WorldBlock } from "../../world/placement.js";
 import type { WorkstationOperations } from "../temporary-workstation.js";
 import { beginCraftItem, type CraftItemRequest } from "./index.js";
@@ -257,9 +257,10 @@ test("two craft requests on two bots keep their own credit", async () => {
   assert.deepEqual(b.craftCalls, ["oak_planks"]);
 });
 
-test("a resume whose temporary table is gone after earlier crafts is partial, with the table's own refusal", async (t) => {
-  const { bot, counts, craftCalls } = craftingBot({ crafting_table: 1, oak_log: 2, cobblestone: 3 });
-  t.after(startServerClock(bot)); // "gone" is the server's answer once the world age moved 40 ticks past the send
+test("a resume whose temporary table is gone after earlier crafts is partial, with the table's own refusal", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, counts, craftCalls } = craftingBot({ crafting_table: 1, oak_log: 2, cobblestone: 3 }, false, [], { clock });
   const calls: string[] = [];
   const operations = tableOperations(bot, counts, calls);
   const [first] = reflexAfterCrafts(bot, [1]);
@@ -274,7 +275,8 @@ test("a resume whose temporary table is gone after earlier crafts is partial, wi
   // The table was broken and the carried one lost while the reflex held the body.
   Object.assign(bot, { blockAt: () => ({ name: "air", position: new Vec3(1, 64, 0) }) as WorldBlock });
   counts.set(bot.registry.itemsByName.crafting_table!.id, 0);
-  const result = await run(freshAttempt());
+  // "The server answered": "gone" is its answer once the clock moved the world age 40 ticks (2 s) past the send.
+  const result = await clock.settle(run(freshAttempt()), 2_000);
 
   assert.equal(result.status, "partial", "the planks made before are a result");
   assert.match(result.error, /WORKSTATION_NOT_CARRIED/);

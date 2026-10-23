@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { formatViewBlockDropsResult, parseViewBlockDropsRequest, viewBlockDrops } from "./index.js";
 
-function bot(version: string, dimension = "overworld", loaded: readonly string[] = []): Pick<Bot, "registry" | "version" | "game" | "entities"> {
-  return {
-    version,
-    registry: minecraftData("1.21.4") as unknown as Bot["registry"],
-    game: { dimension } as Bot["game"],
-    entities: Object.fromEntries(loaded.map((name, index) => [index, { name }])) as unknown as Bot["entities"],
-  };
+/** A bot on 1.21.4's registry that reports `version` as its server's, in `dimension`, with the `loaded` mobs around it. */
+function bot(version: string, dimension = "overworld", loaded: readonly string[] = []) {
+  const entities = Object.fromEntries(loaded.map((name, index) => [index + 2, { name, position: new Vec3(index + 3, 64, 0) }]));
+  const { bot } = createFakeBot({ version: "1.21.4", dimension, entities });
+  bot.version = version;
+  return bot;
 }
 
 test("items list the blocks an ordinary break gathers them from; blocks list everything they drop", async () => {

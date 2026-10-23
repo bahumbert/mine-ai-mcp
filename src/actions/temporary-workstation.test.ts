@@ -2,14 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { craftingBot } from "../test-support/crafting.js";
-import { startServerClock } from "../test-support/server-clock.js";
+import { type FakeClock, createFakeClock } from "../test-support/fake-bot/index.js";
 import { startOwnPlacement, type OwnPlacement } from "../world/own-placement.js";
 import type { WorldBlock } from "../world/placement.js";
 import type { ActionResult } from "./action.js";
 import { useTemporaryWorkstation, type WorkstationOperations } from "./temporary-workstation.js";
 
-function fixture() {
-  const { bot, counts } = craftingBot({ crafting_table: 1 });
+/** `clock`: a mocked one the test installs, for a test whose waits for the server (world age, wall bound) run on it. */
+function fixture(clock?: FakeClock) {
+  const { bot, counts } = craftingBot({ crafting_table: 1 }, false, [], { clock });
   const position = new Vec3(1, 64, 0);
   const block = { name: "crafting_table", position } as WorldBlock;
   const calls: string[] = [];
@@ -306,9 +307,23 @@ test("a workstation left placed by an aborted attempt is reused by the next, nev
   assert.deepEqual(hold.cells, [], "recovered: the next call places afresh");
 });
 
-test("a workstation broken between attempts is placed again when it is carried again", async (t) => {
-  const f = fixture();
-  t.after(startServerClock(f.bot));
+/**
+ * The next attempt with the crafting table, run on `clock` until the server answered for the cell the last attempt
+ * sent to: its answer counts once the clock moved the world age 40 ticks (2 s) past the send.
+ */
+function nextAttemptOnceTheServerAnswered(
+  clock: FakeClock,
+  f: ReturnType<typeof fixture>,
+  hold: OwnPlacement,
+  execute: (block: WorldBlock) => Promise<ActionResult> = async () => ({ status: "succeeded" }),
+) {
+  return clock.settle(useTemporaryWorkstation(f.bot, "crafting_table", {}, f.operations, execute, f.failure, hold), 2_000);
+}
+
+test("a workstation broken between attempts is placed again when it is carried again", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(clock);
   placeTableForReal(f);
   const hold = startOwnPlacement();
   await abortingAttempt(f, hold);
@@ -319,23 +334,22 @@ test("a workstation broken between attempts is placed again when it is carried a
     f.bot.blockAt = () => f.block;
     return { kind: "placed", block: f.block, position: f.position };
   };
-  const result = await useTemporaryWorkstation(
-    f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
-  );
+  // "The server answered": "gone" is its answer.
+  const result = await nextAttemptOnceTheServerAnswered(clock, f, hold);
   assert.equal(result.status, "succeeded");
   assert.deepEqual(f.calls, ["place", "place again", "collect"]);
 });
 
-test("a workstation broken between attempts and not carried is the usual refusal", async (t) => {
-  const f = fixture();
-  t.after(startServerClock(f.bot));
+test("a workstation broken between attempts and not carried is the usual refusal", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(clock);
   placeTableForReal(f);
   const hold = startOwnPlacement();
   await abortingAttempt(f, hold);
   f.bot.blockAt = () => ({ name: "air", position: f.position }) as WorldBlock;
-  const result = await useTemporaryWorkstation(
-    f.bot, "crafting_table", {}, f.operations, async () => { throw new Error("must not execute"); }, f.failure, hold,
-  );
+  // "The server answered": "gone" is its answer.
+  const result = await nextAttemptOnceTheServerAnswered(clock, f, hold, async () => { throw new Error("must not execute"); });
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /WORKSTATION_NOT_CARRIED/);
   assert.deepEqual(hold.cells, []);
@@ -417,9 +431,10 @@ test("an abort after the block landed but before the placement answered: the nex
   assert.deepEqual(f.calls, ["place", "craft batch", "collect"]);
 });
 
-test("an abort before the block landed: the next attempt finds the cell empty and places normally", async (t) => {
-  const f = fixture();
-  t.after(startServerClock(f.bot));
+test("an abort before the block landed: the next attempt finds the cell empty and places normally", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(clock);
   const controller = new AbortController();
   const hold = startOwnPlacement();
   cutOffPlacement(f, controller, false);
@@ -433,16 +448,15 @@ test("an abort before the block landed: the next attempt finds the cell empty an
     f.bot.blockAt = () => f.block;
     return { kind: "placed", block: f.block, position: f.position };
   };
-  const result = await useTemporaryWorkstation(
-    f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure, hold,
-  );
+  // "The server answered": the empty cell is its answer.
+  const result = await nextAttemptOnceTheServerAnswered(clock, f, hold);
   assert.equal(result.status, "succeeded");
   assert.deepEqual(f.calls, ["place", "place again", "collect"]);
 });
 
-test("a workstation a reflex set down in the chosen cell before the send is not ours", async (t) => {
+test("a workstation a reflex set down in the chosen cell before the send is not ours", async () => {
+  // Nothing was sent, so no server answer is awaited: no clock to drive.
   const f = fixture();
-  t.after(startServerClock(f.bot));
   const controller = new AbortController();
   const hold = startOwnPlacement();
   // Cut during the equip: the cell was chosen, nothing was sent.

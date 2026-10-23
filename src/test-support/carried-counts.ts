@@ -5,7 +5,7 @@
  */
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
-import { type FakeInventory, itemOf } from "./fake-bot/index.js";
+import { type FakeHarness, type FakeInventory, itemOf } from "./fake-bot/index.js";
 
 const MAIN_START = 9;
 const HOTBAR_START = 36;
@@ -102,4 +102,19 @@ export class CarriedCounts extends Map<number, number> {
   override [Symbol.iterator](): MapIterator<[number, number]> {
     return this.entries();
   }
+}
+
+/** A carried item's count as a field a test reads and sets, kept in the harness's inventory window. */
+export function carriedCountField(harness: FakeHarness, name: string) {
+  const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
+  const type = harness.bot.registry.itemsByName[name]!.id;
+  return {
+    name,
+    get count() {
+      return counts.get(type) ?? 0;
+    },
+    set count(total: number) {
+      counts.set(type, total);
+    },
+  };
 }

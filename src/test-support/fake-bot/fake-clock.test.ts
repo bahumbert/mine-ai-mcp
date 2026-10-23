@@ -123,3 +123,32 @@ test("promise work queued before advance runs at the time it was queued, before 
   await clock.advance(50);
   assert.equal(startedAt, 0);
 });
+
+test("settle advances until the promise resolves, stops at that slice and returns its value", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const value = await clock.settle(clock.sleep(300).then(() => "slept"), 10_000);
+  assert.equal(value, "slept");
+  assert.equal(clock.now(), 300);
+});
+
+test("settle rethrows the promise's rejection at the slice it rejected", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const failing = clock.sleep(120).then(() => Promise.reject(new Error("refused")));
+  await assert.rejects(clock.settle(failing, 10_000), /refused/);
+  assert.equal(clock.now(), 150);
+});
+
+test("settle gives up after maxMs of clock naming the bound, and a settled promise moves no time", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  await assert.rejects(clock.settle(new Promise(() => undefined), 1_000), /did not settle within 1000 ms of clock/);
+  assert.equal(clock.now(), 1_000);
+  assert.equal(await clock.settle(Promise.resolve(7), 1_000), 7);
+  assert.equal(clock.now(), 1_000);
+});
+
+test("settle on a mocked clock lets code waiting on the global timers finish", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const waited = new Promise<number>((resolve) => setTimeout(() => resolve(performance.now()), 2_000));
+  assert.equal(await clock.settle(waited, 5_000, 100), 2_000);
+});

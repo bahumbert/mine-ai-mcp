@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { burningItems, furnaceObservation, settleBurnReport, type FurnaceWindow } from "./furnace-cook.js";
 import { openFurnaceWithProperties, type FurnaceProperties } from "./furnace-properties.js";
 
@@ -10,22 +10,22 @@ type Packet = { readonly windowId: number; readonly property: number; readonly v
 
 /** A bot whose client plays `packets` while the window is opening, as the server sends them right behind the open. */
 function openingBot(packets: readonly Packet[], options: { readonly fails?: boolean } = {}) {
-  const client = new EventEmitter();
   const window = Object.assign(new EventEmitter(), {
     id: 5,
     inputItem: () => null, fuelItem: () => null, outputItem: () => null,
     // What mineflayer leaves on a window that lost the packets of the burst.
     fuel: 0, progress: null as number | null,
   });
-  const bot = {
-    _client: client,
+  const { bot } = createFakeBot();
+  const client = bot._client;
+  Object.assign(bot, {
     openFurnace: async () => {
       for (const packet of packets) client.emit("craft_progress_bar", packet);
       if (options.fails) throw new Error("window did not open");
       return window;
     },
-  };
-  return { bot: bot as unknown as Bot, client };
+  });
+  return { bot, client };
 }
 
 const propertiesOf = (window: FurnaceWindow) => (window as FurnaceWindow & { properties: () => FurnaceProperties | null }).properties();

@@ -11,7 +11,7 @@ import { Vec3 } from "vec3";
 import { type MineflayerBlock, blockClass } from "../navigation/mineflayer/world.js";
 import type { BuildRequest } from "../navigation/processes/building/build-process.js";
 import { CarriedCounts } from "./carried-counts.js";
-import { type FakeCell, type FakeHarness, type FakeWorld, createFakeBot } from "./fake-bot/index.js";
+import { type FakeCell, type FakeClock, type FakeHarness, type FakeWorld, createFakeBot } from "./fake-bot/index.js";
 import { observation } from "./navigation.js";
 
 const STRUCTURE_VERSION = "1.21.4";
@@ -25,6 +25,8 @@ export interface StructureWorldOptions {
   readonly loadedRadius?: number;
   /** Build on the shared fake (see `structureWorld`); off, on the scene's own blocks. */
   readonly onHarness?: boolean;
+  /** The harness's clock (a mocked one the test drives); implies `onHarness`. A new manual clock otherwise. */
+  readonly clock?: FakeClock;
 }
 
 /** A block of the scene as its physics and tests read it. */
@@ -85,6 +87,7 @@ function sceneOnHarness(options: StructureWorldOptions, position: Vec3): Structu
   const harness = createFakeBot({
     version: STRUCTURE_VERSION,
     position,
+    clock: options.clock,
     groundY: null,
     cells: floorCells(),
     carried: options.carried ?? DEFAULT_CARRIED,
@@ -114,8 +117,8 @@ function sceneOnHarness(options: StructureWorldOptions, position: Vec3): Structu
 }
 
 /**
- * Kept for unmigrated importers (build-process incl. its in-place `stateId` edit at :426, build-structure,
- * action-runner-resume-build): the scene on its own blocks, with a bounding box and exactly the states they were put
+ * Kept for unmigrated importers (build-process incl. its in-place `stateId` edit at :426, action-runner-resume-build):
+ * the scene on its own blocks, with a bounding box and exactly the states they were put
  * with (a slab put with `type` reads no `waterlogged`, as `build-process.test.ts:369` asserts).
  */
 function sceneOnOwnBlocks(options: StructureWorldOptions, position: Vec3): StructureScene {
@@ -150,7 +153,8 @@ function sceneOnOwnBlocks(options: StructureWorldOptions, position: Vec3): Struc
  */
 export function structureWorld(options: StructureWorldOptions = {}) {
   const position = (options.feet ?? new Vec3(0, 64, 0)).offset(0.5, 0, 0.5);
-  const { bot, blocks, put, useOne, harness } = options.onHarness ? sceneOnHarness(options, position) : sceneOnOwnBlocks(options, position);
+  const onHarness = options.onHarness === true || options.clock !== undefined;
+  const { bot, blocks, put, useOne, harness } = onHarness ? sceneOnHarness(options, position) : sceneOnOwnBlocks(options, position);
   const placements: string[] = [];
   /** The direction the bot looked for each placement that asked for one. */
   const looks: string[] = [];

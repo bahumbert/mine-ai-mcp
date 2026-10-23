@@ -29,6 +29,11 @@ export interface FakeClock extends StallClock {
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
   /** Move time on in `stepMs` slices: timers, server, physics, then the promise queue drained, once per slice. */
   advance(ms: number, stepMs?: number): Promise<void>;
+  /**
+   * Move time on in `stepMs` slices until `promise` settles, then return its value or rethrow its error; reject naming
+   * `maxMs` when it is still pending after that much clock. For code under test that waits on this clock while it runs.
+   */
+  settle<T>(promise: Promise<T>, maxMs: number, stepMs?: number): Promise<T>;
   /** Run `step` once per slice at `stage`, with the slice's length; the returned function removes it. */
   onSlice(stage: SliceStage, step: (sliceMs: number) => void): () => void;
   /** Timers (`after`, `every`, `sleep`) still waiting: a wait that is over leaves none. */
@@ -120,6 +125,7 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
         await flush();
       }
     },
+    settle: (promise, maxMs, stepMs = 50) => settleOnClock(clock, promise, maxMs, stepMs),
     onSlice(stage, step) {
       stages[stage].add(step);
       return () => void stages[stage].delete(step);
@@ -144,6 +150,21 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
     },
   };
   return clock;
+}
+
+/** `FakeClock.settle`: one slice at a time, so the clock stops in the slice the promise settled in. */
+async function settleOnClock<T>(clock: FakeClock, promise: Promise<T>, maxMs: number, stepMs: number): Promise<T> {
+  let outcome: { readonly value: T } | { readonly error: unknown } | null = null;
+  promise.then(
+    (value) => void (outcome = { value }),
+    (error: unknown) => void (outcome = { error }),
+  );
+  await flush();
+  for (let passed = 0; outcome === null && passed < maxMs; passed += stepMs) await clock.advance(Math.min(stepMs, maxMs - passed), stepMs);
+  const settled = outcome as { readonly value: T } | { readonly error: unknown } | null;
+  if (settled === null) throw new Error(`the promise did not settle within ${maxMs} ms of clock`);
+  if ("error" in settled) throw settled.error;
+  return settled.value;
 }
 
 /** A sleep on the fake clock, with its abort listener and timer removed in one place whichever ends it. */

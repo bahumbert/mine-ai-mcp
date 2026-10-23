@@ -5,21 +5,26 @@ import { createCraftItemAction } from "../actions/craft-item/index.js";
 import { createSmeltItemAction, type SmeltItemDependencies } from "../actions/smelt-item/index.js";
 import type { NavigationRuntime } from "../navigation/index.js";
 import { craftingBot } from "../test-support/crafting.js";
-import { observedFurnace } from "../test-support/furnace.js";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
+import { ANSWERED_ATTEMPT_MS, observedFurnace } from "../test-support/furnace.js";
 import { ActionRunner } from "./action-runner.js";
 
 const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
 const HUNGER = "[HUNGER] Ate cooked_beef at food 12.";
 const NOTHING_EDIBLE = "[HUNGER] Nothing edible to eat.";
 const SMELT_8 = { item_name: "raw_iron", count: 8, fuel_item_name: "stick", x: 2, y: 64, z: 0 };
+/** Harness clock the two attempts of a resumed smelt may take, each settled on the server's answers. */
+const TWO_ATTEMPTS_MS = 2 * ANSWERED_ATTEMPT_MS;
 
 type Continuation = { readonly kind: "resume" } | { readonly kind: "return"; readonly reason: string | null };
 
-/** The fixture's cook, with a reflex claiming the body once the clock passes `at` (the hunger reflex: it always resumes). */
+/**
+ * The fixture's cook, with a reflex claiming the body once the clock passes `at` (the hunger reflex: it always resumes).
+ * The attempts' waits for the server's answers run on a mocked harness clock the test installs and settles the run on.
+ */
 function smeltWithReflexAt(runner: ActionRunner, at: number, continuation: Continuation, duringReflex: () => void = () => undefined) {
-  const fixture = observedFurnace({ cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", onHarness: true });
-  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
-  Object.assign(fixture.bot, { deactivateItem: () => undefined });
+  const clock = createFakeClock({ mode: "mocked" });
+  const fixture = observedFurnace({ clock, cookMs: 10_000, raw: 8, coal: 40, fuel: "stick" });
   const loads: number[] = [];
   const putInput = fixture.furnace.putInput;
   fixture.furnace.putInput = async (type, metadata, count) => {
@@ -40,14 +45,15 @@ function smeltWithReflexAt(runner: ActionRunner, at: number, continuation: Conti
       assert.equal(claim.kind, "claimed");
     },
   };
-  return { fixture, loads, action: createSmeltItemAction(fixture.bot, navigation, dependencies) };
+  return { clock, fixture, loads, action: createSmeltItemAction(fixture.bot, navigation, dependencies) };
 }
 
 test("a reflex that hands the body back resumes a smelt: one success covering the whole request, one interruption", async () => {
   const runner = new ActionRunner();
-  const { fixture, loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "resume" });
+  const { clock, fixture, loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "resume" });
+  using _installed = clock.install();
 
-  const output = await runner.run(action, SMELT_8);
+  const output = await clock.settle(runner.run(action, SMELT_8), TWO_ATTEMPTS_MS);
 
   assert.equal(output.result.status, "succeeded", "error" in output.result ? output.result.error : "");
   assert.equal("smelt" in output.result ? output.result.smelt.produced : -1, 8);
@@ -59,9 +65,10 @@ test("a reflex that hands the body back resumes a smelt: one success covering th
 
 test("a reflex that does not hand the body back ends the smelt with the interrupted result", async () => {
   const runner = new ActionRunner();
-  const { fixture, loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "return", reason: NOTHING_EDIBLE });
+  const { clock, fixture, loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "return", reason: NOTHING_EDIBLE });
+  using _installed = clock.install();
 
-  const output = await runner.run(action, SMELT_8);
+  const output = await clock.settle(runner.run(action, SMELT_8), TWO_ATTEMPTS_MS);
 
   assert.equal(output.result.status, "cancelled");
   assert.deepEqual(output.interruptions, [NOTHING_EDIBLE]);
@@ -72,11 +79,12 @@ test("a reflex that does not hand the body back ends the smelt with the interrup
 test("a model cancel while the reflex holds the body ends the smelt without a resume", async () => {
   const runner = new ActionRunner();
   const caller = new AbortController();
-  const { loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "resume" }, () =>
+  const { clock, loads, action } = smeltWithReflexAt(runner, 35_000, { kind: "resume" }, () =>
     caller.abort(new Error("model cancelled the smelt")),
   );
+  using _installed = clock.install();
 
-  const output = await runner.run(action, SMELT_8, caller.signal);
+  const output = await clock.settle(runner.run(action, SMELT_8, caller.signal), TWO_ATTEMPTS_MS);
 
   assert.equal(output.result.status, "cancelled");
   assert.deepEqual(loads, [8]);

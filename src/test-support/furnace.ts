@@ -6,16 +6,25 @@ import { EventEmitter } from "node:events";
 import minecraftData from "minecraft-data";
 import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
+import { INVENTORY_SETTLE_WALL_MS } from "../world/inventory-count.js";
 import { fuelCapacity as capacityIn } from "../world/smelting.js";
+import { SERVER_ANSWER_TICKS } from "../world/world-age.js";
 import { botFixture, type FakeStack } from "./bot.js";
 import { CarriedCounts } from "./carried-counts.js";
-import { createFakeBot } from "./fake-bot/index.js";
+import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
 import { startServerClock } from "./server-clock.js";
-import { letTestsWriteWorldAge } from "./written-world-age.js";
 
 const FURNACE_VERSION = "1.21.4";
 const registry = minecraftData(FURNACE_VERSION);
 const FURNACE_CELL = "2,64,0";
+
+/**
+ * Harness clock one smelt attempt may take. The cook runs on the fixture's `pause`, not on that clock, so the clock
+ * carries only the attempt's waits for the server's answers: `SERVER_ANSWER_TICKS` of world age (2 s at 20 ticks a
+ * second) on a running server, the `INVENTORY_SETTLE_WALL_MS` wall bound (5 s) on a stopped one. An attempt settled
+ * within the midpoint ended its waits on the server's answers, not on the wall bound.
+ */
+export const ANSWERED_ATTEMPT_MS = (SERVER_ANSWER_TICKS * 50 + INVENTORY_SETTLE_WALL_MS) / 2;
 
 /** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
 const fuelCapacity = (fuel: string) => capacityIn(fuel, registry.version.minecraftVersion!);
@@ -54,13 +63,16 @@ export interface ObservedFurnaceOptions {
   readonly outputClickFailsAt?: number;
   /**
    * Build the bot on the shared fake (`fake-bot/`, returned as `harness`); off, on the old `botFixture` (no harness),
-   * whose `items()` is the carried array: `smelt-item-resume.test.ts` pushes and splices it (the temporary furnace), so
-   * this stays opt-in until that file moves (migration batch M2).
+   * whose `items()` is the carried array. Every smelting test passes `clock`; only `domain-builders.test.ts` still
+   * checks the old fixture's side. On the harness the
+   * world age is the server's own, which only its clock moves (`clock`, or `harness.clock`).
    */
   readonly onHarness?: boolean;
+  /** The harness's clock (a mocked one the test drives); implies `onHarness`. A new manual clock otherwise. */
+  readonly clock?: FakeClock;
 }
 
-/** Wall-clock delay of the server's correction of a mispredicted take: ten ticks at `startServerClock`'s 20 ticks per 10 ms. */
+/** Off the harness, wall-clock delay of the server's correction of a mispredicted take: ten ticks at `startServerClock`'s 20 ticks per 10 ms. */
 const TRAILING_SYNC_MS = 5;
 
 /** The furnace's input and output slots as the server holds them, and as its window shows them. */
@@ -112,18 +124,17 @@ const carriedAtStart = (options: ObservedFurnaceOptions) => ({ raw_iron: options
  * furnace transfer makes to what it carries.
  */
 function sceneOnHarness(options: ObservedFurnaceOptions) {
-  const harness = createFakeBot({ version: FURNACE_VERSION, cells: { [FURNACE_CELL]: "furnace" }, carried: carriedAtStart(options) });
+  const harness = createFakeBot({ version: FURNACE_VERSION, clock: options.clock, cells: { [FURNACE_CELL]: "furnace" }, carried: carriedAtStart(options) });
   const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
   const adjust = (name: string, delta: number) => {
     const id = registry.itemsByName[name]!.id;
     counts.set(id, (counts.get(id) ?? 0) + delta);
   };
-  // Kept for unmigrated importers: `startServerClock` below moves the age (see `written-world-age.ts`).
-  letTestsWriteWorldAge(harness);
-  return { bot: harness.bot, harness, adjust };
+  // The server's trailing `set_slot` is one of its answers: it comes on the harness clock, and not while it is stopped.
+  return { bot: harness.bot, harness, adjust, later: (fix: () => void) => harness.server.answer(fix) };
 }
 
-/** Kept for unmigrated importers (smelt-item-resume, smelt-item, action-runner-resume-workstation): the old `botFixture`, whose `items()` is the carried array itself. */
+/** Kept for `domain-builders.test.ts`' check of the old side: the old `botFixture`, whose `items()` is the carried array itself. */
 function sceneOnBotFixture(options: ObservedFurnaceOptions) {
   const items: FakeStack[] = Object.entries(carriedAtStart(options)).map(([name, count]) => ({ name, count }));
   const adjust = (name: string, delta: number) => {
@@ -133,11 +144,14 @@ function sceneOnBotFixture(options: ObservedFurnaceOptions) {
     if (stack?.count === 0) items.splice(items.indexOf(stack), 1);
   };
   const bot = botFixture({ items, blocks: { [FURNACE_CELL]: "furnace" } }, { version: FURNACE_VERSION });
-  return { bot, harness: undefined, adjust };
+  // The world age moves on while an attempt waits for the server's answer to its takes.
+  startServerClock(bot);
+  return { bot, harness: undefined, adjust, later: (fix: () => void) => void setTimeout(fix, TRAILING_SYNC_MS) };
 }
 
 export function observedFurnace(options: ObservedFurnaceOptions) {
-  const { bot, harness, adjust } = options.onHarness ? sceneOnHarness(options) : sceneOnBotFixture(options);
+  const onHarness = options.onHarness === true || options.clock !== undefined;
+  const { bot, harness, adjust, later } = onHarness ? sceneOnHarness(options) : sceneOnBotFixture(options);
   let now = 0;
   let activeFuel = 0;
   const slots = new FakeFurnaceSlots(options.windowLagsCompletion === true);
@@ -166,7 +180,7 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
       // The inventory first holds what the window predicted (mineflayer `copyInventory` on close); the server's
       // trailing `set_slot` for the closed window corrects it a moment later (inventory.js, `lastClosedWindow`).
       adjust(taken.name, predicted);
-      if (predicted !== moved) setTimeout(() => adjust(taken.name, moved - predicted), TRAILING_SYNC_MS);
+      if (predicted !== moved) later(() => adjust(taken.name, moved - predicted));
       return taken;
     },
     takeFuel: async () => null,
@@ -180,8 +194,6 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
     close: () => undefined,
   });
   if (options.full) bot.inventory.emptySlotCount = () => 0;
-  // The world age moves on while an attempt waits for the server's answer to its takes.
-  startServerClock(bot);
   bot.clickWindow = outputSlotClicks(slots, adjust, options.outputClickFailsAt);
   let elapsedInItem = 0;
   const dependencies: SmeltItemDependencies = {

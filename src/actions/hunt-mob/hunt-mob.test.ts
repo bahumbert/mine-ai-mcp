@@ -1,7 +1,6 @@
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
@@ -12,6 +11,15 @@ import { Budgets } from "../../survival/state/budgets.js";
 import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { mobSourcesOf } from "../../world/mob-drops.js";
+import { carriedCountField } from "../../test-support/carried-counts.js";
+import {
+  type FakeClock,
+  type FakeEntitySpec,
+  type FakeHarness,
+  createFakeBot,
+  createFakeClock,
+  itemOf,
+} from "../../test-support/fake-bot/index.js";
 import { huntMobOutcomes, parseHuntMobRequest, type HuntMobRequest } from "./contract.js";
 import {
   createCollectMobDropAction,
@@ -27,11 +35,20 @@ import {
 } from "./hunt-mob.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
+/** A mob or a dropped stack the harness puts in `bot.entities` under its id. */
+type EntitySpec = FakeEntitySpec & { readonly id: number; readonly position: Vec3 };
 
-test("a hunt delegates health recovery to combat and preserves its terminal evidence", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 20 }) as unknown as Bot;
-  const target = mob(7, 1, "blaze", 2, "Hostile mobs");
-  const combat: CombatController = {
+/** A harness bot that sees `targets` and nothing else of the hunt (engagement tests). */
+function engagementBot(targets: readonly EntitySpec[]): Bot {
+  return createFakeBot({ groundY: null, entities: Object.fromEntries(targets.map((target) => [target.id, target])) }).bot;
+}
+
+/**
+ * The bot's combat, with its policy, fighting each engagement through `engage`: it stops at once, is never in the End,
+ * finishes safe and clear at (0, 64, 0) and cannot recover on its own.
+ */
+function engagingCombat(bot: Bot, engage: CombatController["engage"]): CombatController {
+  return {
     resourceRefusal: () => null,
     policy: new SurvivalPolicyState(bot),
     runEnd: async () => {
@@ -50,13 +67,19 @@ test("a hunt delegates health recovery to combat and preserves its terminal evid
     canRecover: () => false,
     activeEngagement: () => null,
     stop: async () => {},
-    engage: async (_id, signal) => {
-      bot.health = 11;
-      bot.emit("health");
-      assert.equal(signal.aborted, false, "the hunt does not independently cancel combat recovery");
-      return outcome("capability_blocked", 2, { reason: "recovery", observation: "No food remains." });
-    },
+    engage,
   };
+}
+
+test("a hunt delegates health recovery to combat and preserves its terminal evidence", async () => {
+  const bot = engagementBot([mob(7, 1, "blaze", 2, "Hostile mobs")]);
+  const target = bot.entities[7]!;
+  const combat = engagingCombat(bot, async (_id, signal) => {
+    bot.health = 11;
+    bot.emit("health");
+    assert.equal(signal.aborted, false, "the hunt does not independently cancel combat recovery");
+    return outcome("capability_blocked", 2, { reason: "recovery", observation: "No food remains." });
+  });
   const result = await engageTarget(bot, combat, target, {});
   assert.equal(result.outcome.kind, "capability_blocked");
   assert.equal(result.outcome.attacks, 2);
@@ -66,67 +89,64 @@ test("a hunt delegates health recovery to combat and preserves its terminal evid
 });
 
 test("the hostile fight boundary does not cancel a passive quarry engagement", async () => {
-  const bot = Object.assign(new EventEmitter(), { health: 20 }) as unknown as Bot;
-  const combat: CombatController = {
-    resourceRefusal: () => null,
-    policy: new SurvivalPolicyState(bot),
-    runEnd: async () => {
-      throw new Error("Unexpected End combat");
-    },
-    endDanger: () => false,
-    activePosition: () => null,
-    execution: () => null,
-    onDecision: () => () => {},
-    finish: async () => ({
-      observedAt: 1,
-      kind: "safe" as const,
-      basis: "clear" as const,
-      position: { x: 0, y: 64, z: 0 },
-    }),
-    canRecover: () => false,
-    activeEngagement: () => null,
-    stop: async () => {},
-    engage: async (_id, signal) => {
-      bot.health = 11;
-      bot.emit("health");
-      assert.equal(signal.aborted, false);
-      return outcome("died", 2);
-    },
-  };
-  const result = await engageTarget(bot, combat, mob(7, 1, "cow", 2), {});
+  const bot = engagementBot([mob(7, 1, "cow", 2)]);
+  const combat = engagingCombat(bot, async (_id, signal) => {
+    bot.health = 11;
+    bot.emit("health");
+    assert.equal(signal.aborted, false);
+    return outcome("died", 2);
+  });
+  const result = await engageTarget(bot, combat, bot.entities[7]!, {});
   assert.equal(result.outcome.kind, "died");
 });
 
-function mob(id: number, entityType: number, name: string, x: number, kind = "Passive mobs"): Entity {
-  return {
-    id,
-    entityType,
-    name,
-    kind,
-    isValid: true,
-    position: new Vec3(x, 64, 0),
-    height: 1.3,
-  } as Entity;
+function mob(id: number, entityType: number, name: string, x: number, kind = "Passive mobs"): EntitySpec {
+  return { id, entityType, name, kind, position: new Vec3(x, 64, 0) };
 }
 
-function huntBot(targets: readonly Entity[], inventory: { count: number }, health = 20): Bot {
-  const registry = minecraftData("1.21.4");
-  return Object.assign(new EventEmitter(), {
-    registry,
-    version: "1.21.4",
+/** The registry the dropped stacks are made from: the version's own, as every harness has it. */
+const itemRegistry = createFakeBot().bot.registry;
+
+/** A dropped stack of `count` `name` lying at `position`. */
+function droppedItem(id: number, name: string, count: number, position: Vec3): EntitySpec {
+  return { id, name: "item", position, getDroppedItem: () => itemOf(itemRegistry, name, count) };
+}
+
+const harnesses = new WeakMap<Bot, FakeHarness>();
+
+/**
+ * A harness bot at (0, 64, 0) that sees `targets`, carrying `inventory.count` of `dropName`: from here on
+ * `inventory.count` reads and writes that count in the harness's inventory window, as the server's `set_slot` would.
+ */
+function huntBot(
+  targets: readonly EntitySpec[],
+  inventory: { count: number },
+  health = 20,
+  { dropName = "white_wool", clock }: { dropName?: string; clock?: FakeClock } = {},
+): Bot {
+  const harness = createFakeBot({
+    position: new Vec3(0, 64, 0),
+    groundY: null,
     health,
-    blockAt: () => null,
-    world: { raycast: () => null },
-    entity: { id: 0, position: new Vec3(0, 64, 0) },
+    clock,
     entities: Object.fromEntries(targets.map((target) => [target.id, target])),
-    inventory: Object.assign(new EventEmitter(), {
-      emptySlotCount: () => 36,
-      count: (itemId: number) => (itemId === registry.itemsByName.white_wool.id ? inventory.count : 0),
-      items: () => [],
-      slots: new Array(46).fill(null),
-    }),
-    nearestEntity: (predicate: (entity: Entity) => boolean) => targets.find(predicate) ?? null,
-  }) as unknown as Bot;
+  });
+  const drops = carriedCountField(harness, dropName);
+  drops.count = inventory.count;
+  Object.defineProperty(inventory, "count", {
+    get: () => drops.count,
+    set: (total: number) => void (drops.count = total),
+    configurable: true,
+  });
+  harnesses.set(harness.bot, harness);
+  return harness.bot;
+}
+
+/** Take an entity out of the bot's sight until the test lets it appear. */
+function unseen(bot: Bot, id: number): Entity {
+  const entity = bot.entities[id]!;
+  delete bot.entities[id];
+  return entity;
 }
 
 /**
@@ -287,7 +307,10 @@ test("a completed quantity is checked again after handoff consumes it", async ()
 for (const gainedDuringReflex of [false, true])
   test(`quarry observation retains its deadline and baseline through a reflex (gain: ${gainedDuringReflex})`, async () => {
     const inventory = { count: 4 };
-    const bot = huntBot([], inventory);
+    // The observation window reads Date.now and waits on the global timers: a mocked clock moves both.
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const bot = huntBot([], inventory, 20, { clock });
     const budgets = new Budgets();
     const action = createCollectMobDropAction(
       bot,
@@ -306,12 +329,12 @@ for (const gainedDuringReflex of [false, true])
     const original = runner.request();
     assert.equal(budgets.snapshot()[0]?.name, "quarry_observation");
     const claim = runner.claim("hunger_reflex", "Eating while awaiting quarry", async () => {
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      await new Promise<void>((resolve) => clock.after(350, resolve));
       if (gainedDuringReflex) inventory.count++;
       return { value: null, continuation: { kind: "resume" as const } };
     });
     assert.equal(claim.kind, "claimed");
-    const output = await pending;
+    const output = await clock.settle(pending, 2_000);
     assert.equal(output.request?.id, original?.id);
     assert.ok("hunt" in output.result);
     if (!("hunt" in output.result)) return;
@@ -351,27 +374,7 @@ function dependencies(
 }
 
 const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
-const fakeCombat: CombatController = {
-  resourceRefusal: () => null,
-  policy: new SurvivalPolicyState({} as Bot),
-  engage: async () => outcome("target_lost", 0),
-  stop: async () => undefined,
-  runEnd: async () => {
-    throw new Error("Unexpected End combat");
-  },
-  endDanger: () => false,
-  activePosition: () => null,
-  execution: () => null,
-  onDecision: () => () => {},
-  finish: async () => ({
-    observedAt: 1,
-    kind: "safe" as const,
-    basis: "clear" as const,
-    position: { x: 0, y: 64, z: 0 },
-  }),
-  canRecover: () => false,
-  activeEngagement: () => null,
-};
+const fakeCombat = engagingCombat(createFakeBot().bot, async () => outcome("target_lost", 0));
 
 for (const { reflexGain, dropName } of [
   { reflexGain: 0, dropName: "white_wool" },
@@ -381,8 +384,7 @@ for (const { reflexGain, dropName } of [
 ]) {
   test(`a resumed ${dropName} hunt counts prior drops and ${reflexGain} drops gained during the reflex`, async () => {
     const inventory = { count: 0 };
-    const bot = huntBot([], inventory);
-    bot.inventory.count = (id) => id === bot.registry.itemsByName[dropName].id ? inventory.count : 0;
+    const bot = huntBot([], inventory, 20, { dropName });
     const combat = { ...fakeCombat, policy: new SurvivalPolicyState(bot) };
     let runs = 0;
     let entered!: () => void;
@@ -440,7 +442,8 @@ for (const { reflexGain, dropName } of [
 
 test("a terminal reflex interruption returns the hunt's uncollected drop sightings", async () => {
   const inventory = { count: 0 };
-  const bot = huntBot([], inventory);
+  const bot = huntBot([droppedItem(99, "white_wool", 2, new Vec3(8, 63, 2))], inventory);
+  const entity = unseen(bot, 99);
   let entered!: () => void;
   const ready = new Promise<void>((resolve) => {
     entered = resolve;
@@ -448,12 +451,6 @@ test("a terminal reflex interruption returns the hunt's uncollected drop sightin
   const action = createCollectMobDropAction(bot, fakeNavigation, fakeCombat, createDiscardedItems(), {
     ...dependencies(bot, inventory, []),
     pursue: async (pursuit) => {
-      const entity = {
-        id: 99,
-        isValid: true,
-        position: new Vec3(8, 63, 2),
-        getDroppedItem: () => ({ name: "white_wool", count: 2 }),
-      } as Entity;
       bot.entities[entity.id] = entity;
       bot.emit("itemDrop", entity);
       entered();
@@ -708,13 +705,7 @@ test("gathers requested drops already on the ground before hunting", async () =>
 
 test("gathers an observed requested item beyond the old eight-block cutoff", async () => {
   const inventory = { count: 0 };
-  const bot = huntBot([], inventory);
-  bot.entities[9] = {
-    id: 9,
-    isValid: true,
-    position: new Vec3(20, 60, 0),
-    getDroppedItem: () => ({ name: "white_wool", count: 1 }),
-  } as Entity;
+  const bot = huntBot([droppedItem(9, "white_wool", 1, new Vec3(20, 60, 0))], inventory);
   const navigate: NavigationRuntime["navigate"] = async () => {
     inventory.count++;
     return { status: "completed", elapsedMs: 0 };
@@ -938,11 +929,18 @@ test("publishes the action as an intentional destructive task", () => {
 // walks up to the thing, so the first test counts pursuits as well as reading
 // the verdict; a stop reported after the approach would be a later, lesser fact.
 
+/** The bot's carried shields, in its harness's inventory window. */
+const shields = (bot: Bot) => carriedCountField(harnesses.get(bot)!, "shield");
+
 /** A shield loose in the inventory, which is what the loadout equips from. */
 function carryingShield(bot: Bot): Bot {
-  const shield = { name: "shield" } as unknown as ReturnType<Bot["inventory"]["items"]>[number];
-  bot.inventory.items = () => [shield];
+  shields(bot).count = 1;
   return bot;
+}
+
+/** The carried shield gone (broken), as the server empties its slot. */
+function loseShield(bot: Bot): void {
+  shields(bot).count = 0;
 }
 
 function huntRequest(mobName: string, allowWithoutShield = false): HuntMobRequest {
@@ -1021,7 +1019,10 @@ test("a shield lost mid-hunt refuses the next leg rather than the drop already c
   const inventory = { count: 0 };
   const registry = minecraftData("1.21.4");
   const type = registry.entitiesByName.skeleton.id;
-  const bot = carryingShield(huntBot([mob(7, type, "skeleton", 3, "Hostile mobs")], inventory));
+  const bot = carryingShield(
+    huntBot([mob(7, type, "skeleton", 3, "Hostile mobs"), mob(8, type, "skeleton", 5, "Hostile mobs")], inventory),
+  );
+  const wanderer = unseen(bot, 8);
   const result = await huntMob(
     bot,
     { ...huntRequest("skeleton"), count: 2, observeForMs: 5_000 },
@@ -1033,11 +1034,11 @@ test("a shield lost mid-hunt refuses the next leg rather than the drop already c
       // nothing to block with.
       collectDropAfterDeath: async () => {
         inventory.count += 1;
-        bot.inventory.items = () => [];
-        setTimeout(() => {
-          bot.entities[8] = mob(8, type, "skeleton", 5, "Hostile mobs");
-          bot.emit("entitySpawn", bot.entities[8]!);
-        }, 0);
+        loseShield(bot);
+        setImmediate(() => {
+          bot.entities[8] = wanderer;
+          bot.emit("entitySpawn", wanderer);
+        });
         return { kind: "collected" };
       },
     },
@@ -1073,7 +1074,7 @@ for (const loss of ["broken", "forbidden"] as const) {
       shieldPermitted: () => permitted,
       collectDropAfterDeath: async () => {
         inventory.count++;
-        if (loss === "broken") bot.inventory.items = () => [];
+        if (loss === "broken") loseShield(bot);
         else permitted = false;
         return { kind: "collected" };
       },
@@ -1097,7 +1098,7 @@ test("a shield lost while gathering drops at contact is checked again before eng
   const result = await huntMob(bot, huntRequest("skeleton"), {}, {
     ...dependencies(bot, inventory, []),
     gatherLoadedDrops: async () => {
-      if (++pickups === 2) bot.inventory.items = () => [];
+      if (++pickups === 2) loseShield(bot);
       return 0;
     },
   });
@@ -1196,8 +1197,10 @@ test("the report rounds leftover drop positions and counts quarry beyond the nea
 test("a drop named without its colour is answered with the item ids that carry it, white first", async () => {
   // Live 2026-10-04: asked for "wool", the brain was told only that no such item exists.
   const { similarItemNames } = await import("./hunt-mob.js");
-  const bot = { registry: { itemsByName: { white_wool: {}, black_wool: {}, red_wool: {}, wooden_hoe: {}, oak_log: {} } } } as unknown as Parameters<typeof similarItemNames>[0];
-  assert.deepEqual(similarItemNames(bot, "wool"), ["white_wool", "black_wool", "red_wool"]);
+  const { bot } = createFakeBot();
+  // The version's registry holds all sixteen wools (minecraft-data 1.21.4, the registry Mineflayer loads): white
+  // first, then the rest alphabetically, five at most. The old hand registry held three.
+  assert.deepEqual(similarItemNames(bot, "wool"), ["white_wool", "black_wool", "blue_wool", "brown_wool", "cyan_wool"]);
   assert.deepEqual(similarItemNames(bot, "unobtanium"), []);
 });
 

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { formatViewSmeltingRecipesResult, parseViewSmeltingRecipesRequest, viewSmeltingRecipes } from "./index.js";
 
-function bot(version: string): Pick<Bot, "registry" | "version"> {
-  return { version, registry: minecraftData("1.21.4") as unknown as Bot["registry"] };
+/** A bot on 1.21.4's registry that reports `version` as its server's. */
+function bot(version: string) {
+  const { bot } = createFakeBot({ version: "1.21.4" });
+  bot.version = version;
+  return bot;
 }
 
 test("furnace recipes come from the version's data, with every fuel and its worth", async () => {

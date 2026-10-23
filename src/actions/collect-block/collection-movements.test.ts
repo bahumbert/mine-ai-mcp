@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { type LoadedBlock, loadedObservation } from "../../navigation/world/world.js";
 import { TERRAIN_BREAK_PENALTY } from "../../navigation/mineflayer/movement-policy.js";
 import { blockClass, observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
@@ -37,12 +37,9 @@ function observation(stateId: number): LoadedBlock {
 
 function collectionBot(harvestable: boolean) {
   // A pickaxe is what makes stone harvestable; without one the registry says no tool can.
-  const items = [
-    { name: "dirt", count: 2 },
-    { name: "cobblestone", count: 3 },
-  ];
-  if (harvestable) items.push({ name: "iron_pickaxe", count: 1 });
-  return botFixture({ items });
+  const carried: Record<string, number> = { dirt: 2, cobblestone: 3 };
+  if (harvestable) carried.iron_pickaxe = 1;
+  return createFakeBot({ carried }).bot;
 }
 
 /** The policy Collect builds, with only the constraint under test named. */
@@ -138,14 +135,14 @@ test("evaluates a break from the registry with one inventory sweep, then from ca
   let inventoryReads = 0;
   const originalBlockAt = bot.blockAt.bind(bot);
   const originalItems = bot.inventory.items.bind(bot.inventory);
-  bot.blockAt = ((...args: Parameters<Bot["blockAt"]>) => {
+  bot.blockAt = (...args) => {
     blockReads += 1;
     return originalBlockAt(...args);
-  }) as Bot["blockAt"];
-  bot.inventory.items = (() => {
+  };
+  bot.inventory.items = () => {
     inventoryReads += 1;
     return originalItems();
-  }) as Bot["inventory"]["items"];
+  };
   const policy = collectionPolicy(bot);
 
   policy.evaluateBreak(observation(bot.registry.blocksByName.stone.defaultState), { x: 2, y: 64, z: 0 }, world);

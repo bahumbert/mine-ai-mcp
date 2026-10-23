@@ -1,8 +1,9 @@
 import { MemoryWorld as GoalTestWorld } from "../../navigation/world/memory-world.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { carriedCountField } from "../../test-support/carried-counts.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import {
   activatePortal,
   beginActivatePortal,
@@ -16,23 +17,15 @@ import { findNetherFrame } from "./nether-frame.js";
 const goalTestWorld = new GoalTestWorld();
 
 function world() {
-  const blocks = new Map<
-    string,
-    { name: string; position: Vec3; getProperties: () => Record<string, string | boolean> }
-  >();
-  const key = (p: Vec3) => `${p.x},${p.y},${p.z}`;
+  const harness = createFakeBot({
+    position: new Vec3(0.5, 64, -3.5),
+    groundY: null,
+    carried: { ender_eye: 12, flint_and_steel: 1 },
+  });
   const put = (p: Vec3, name: string, properties: Record<string, string | boolean> = {}) =>
-    blocks.set(key(p), { name, position: p, getProperties: () => properties });
-  const items = [
-    { name: "ender_eye", count: 12 },
-    { name: "flint_and_steel", count: 1 },
-  ];
-  const bot = {
-    game: { dimension: "overworld" },
-    entity: { position: new Vec3(0.5, 64, -3.5) },
-    inventory: { items: () => items.filter((item) => item.count > 0) },
-    blockAt: (p: Vec3) => blocks.get(key(p)) ?? { name: "air", position: p, getProperties: () => ({}) },
-  } as unknown as Bot;
+    harness.world.setCell(p, { name, properties });
+  const items = [carriedCountField(harness, "ender_eye"), carriedCountField(harness, "flint_and_steel")];
+  const { bot } = harness;
   const uses: Vec3[] = [];
   const frame = endFrameAt(new Vec3(0, 64, 0));
   const dependencies: ActivatePortalDependencies = {

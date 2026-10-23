@@ -1,76 +1,106 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { EventEmitter } from "node:events";
-import type { Bot } from "mineflayer";
-import minecraftData from "minecraft-data";
+import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
+import { carriedCountField } from "../../test-support/carried-counts.js";
+import { type FakeClock, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { beginBarter } from "./barter.js";
 import { barterInputSchema, barterResultSchema } from "./contract.js";
 
-function fixture(t: TestContext) {
+const PIGLIN_ID = 7;
+const PEARL_DROP_ID = 8;
+const OTHER_DROP_ID = 9;
+/** The gold is held (hotbar slot 0); the first free slot is the next hotbar slot. */
+const GOLD_SLOT = 36;
+const FREE_SLOT = 37;
+/** Player inventory slots: main 9-35 and hotbar 36-44. */
+const INVENTORY_SLOTS = Array.from({ length: 36 }, (_, index) => 9 + index);
+
+/**
+ * A bot holding 3 gold beside an adult piglin, its inventory full but for one slot (dirt elsewhere). Every count
+ * change is a slot update of the harness's window, which announces `updateSlot` as the server's `set_slot` does.
+ * The pearl drop (#8) and another output (#9) are harness entities out of the bot's sight until a test drops them.
+ * Waits for an acknowledgement are global timers: a test that reaches one passes a mocked clock and installs it.
+ */
+function fixture(t: TestContext, clock?: FakeClock) {
   const lifetime = new AbortController();
   t.after(() => lifetime.abort());
-  const registry = minecraftData("1.21.4");
-  const gold = { name: "gold_ingot", count: 3, type: registry.itemsByName.gold_ingot!.id };
-  const pearl = { name: "ender_pearl", count: 0, stackSize: 16, type: registry.itemsByName.ender_pearl!.id };
-  const metadata: unknown[] = [];
-  // Default adult spawn packets omit the false baby flag.
-  const target = {
-    id: 7,
-    name: "piglin",
-    isValid: true,
-    position: new Vec3(1.5, 64, 0.5),
-    metadata,
-    equipment: [null, null] as ({ name: string } | null)[],
-  };
-  const entities: Record<number, unknown> = { 7: target };
-  let offers = 0;
-  const events = new EventEmitter();
-  const bot = Object.assign(events, {
-    registry,
-    heldItem: gold,
-    version: "1.21.4",
-    game: { gameMode: "survival" },
-    entity: { id: 1, position: new Vec3(0.5, 64, 0.5), effects: {} },
-    entities,
-    inventory: Object.assign(new EventEmitter(), {
-      emptySlotCount: () => 1,
-      items: () => [gold, pearl].filter((item) => item.count > 0),
-    }),
-    equip: async () => {},
-    activateEntity: async () => {
-      offers += 1;
-      gold.count -= 1;
-      (bot.inventory as EventEmitter).emit("updateSlot", 0, null, gold);
-      target.equipment[1] = { name: "gold_ingot" };
-      events.emit("entityEquip", target);
+  const drops = new Map<number, { name: string; count: number }>([[PEARL_DROP_ID, { name: "ender_pearl", count: 2 }]]);
+  const dropAt = (id: number) => ({
+    name: "item",
+    position: new Vec3(2, 64, 0),
+    getDroppedItem: () => {
+      const stack = drops.get(id);
+      return stack ? itemOf(harness.bot.registry, stack.name, stack.count) : null;
     },
-  }) as unknown as Bot;
+  });
+  // Default adult spawn packets omit the false baby flag.
+  const metadata: unknown[] = [];
+  const equipment: (Item | null)[] = [null, null];
+  const harness = createFakeBot({
+    clock,
+    slots: {
+      [GOLD_SLOT]: { name: "gold_ingot", count: 3 },
+      ...Object.fromEntries(
+        INVENTORY_SLOTS.filter((slot) => slot !== GOLD_SLOT && slot !== FREE_SLOT).map((slot) => [slot, { name: "dirt", count: 64 }]),
+      ),
+    },
+    entities: {
+      [PIGLIN_ID]: { name: "piglin", position: new Vec3(1.5, 64, 0.5), metadata, equipment },
+      [PEARL_DROP_ID]: dropAt(PEARL_DROP_ID),
+      [OTHER_DROP_ID]: dropAt(OTHER_DROP_ID),
+    },
+  });
+  const { bot } = harness;
+  const entities = bot.entities;
+  const target = entities[PIGLIN_ID]!;
+  const pearlDrop = entities[PEARL_DROP_ID]!;
+  const otherDrop = entities[OTHER_DROP_ID]!;
+  delete entities[PEARL_DROP_ID];
+  delete entities[OTHER_DROP_ID];
+  /** The harness window's own listener (it announces the held stack), which a settled barter leaves alone. */
+  const idleSlotListeners = harness.inventory.listenerCount("updateSlot");
+  const gold = carriedCountField(harness, "gold_ingot");
+  const pearl = carriedCountField(harness, "ender_pearl");
+  let offers = 0;
+  bot.activateEntity = async () => {
+    offers += 1;
+    gold.count -= 1;
+    equipment[1] = itemOf(bot.registry, "gold_ingot", 1);
+    bot.emit("entityEquip", target);
+  };
   const navigation = {
     navigate: async () => {
       pearl.count += 2;
-      delete entities[8];
-      (bot.inventory as EventEmitter).emit("updateSlot", 1, null, pearl);
+      delete entities[PEARL_DROP_ID];
       return { status: "completed", elapsedMs: 0 };
     },
   } as unknown as NavigationRuntime;
   const spawn = () => {
-    entities[8] = {
-      id: 8,
-      name: "item",
-      isValid: true,
-      position: new Vec3(2, 64, 0),
-      getDroppedItem: () => ({ name: "ender_pearl", count: 2 }),
-    };
-    events.emit("itemDrop", entities[8]);
+    entities[PEARL_DROP_ID] = pearlDrop;
+    bot.emit("itemDrop", pearlDrop);
+  };
+  /** Another output of `count` `name` drops by the piglin. */
+  const dropOther = (name: string, count: number) => {
+    drops.set(OTHER_DROP_ID, { name, count });
+    entities[OTHER_DROP_ID] = otherDrop;
+    bot.emit("itemDrop", otherDrop);
   };
   const complete = () => {
     spawn();
-    target.equipment[1] = null;
-    events.emit("entityEquip", target);
+    equipment[1] = null;
+    bot.emit("entityEquip", target);
   };
-  return { lifetime, events, bot, navigation, gold, pearl, target, entities, spawn, complete, offers: () => offers };
+  /** Fill every empty inventory slot with dirt: no free slot is left. */
+  const fillFreeSlots = () => {
+    for (const slot of INVENTORY_SLOTS)
+      if (!harness.inventory.slots[slot]) harness.inventory.updateSlot(slot, itemOf(bot.registry, "dirt", 64));
+  };
+  return {
+    lifetime, events: bot, bot, navigation, gold, pearl, target, metadata, equipment, entities,
+    spawn, dropOther, complete, fillFreeSlots, idleSlotListeners, offers: () => offers,
+  };
 }
 const request = (gold_budget = 1) =>
   barterInputSchema.parse({ piglin_id: 7, item_name: "ender_pearl", count: 2, gold_budget });
@@ -114,7 +144,7 @@ test("a gone recipient settles an accepted exchange without inventing completion
   await new Promise((resolve) => setImmediate(resolve));
   f.target.isValid = false;
   delete f.entities[7];
-  f.events.emit("entityGone", f.target as never);
+  f.events.emit("entityGone", f.target);
   const result = await pending;
   assert.equal(result.status, "partial");
   assert.equal(result.barter.goldSpent, 1);
@@ -126,7 +156,7 @@ test("invalid and baby recipients cannot consume a gold offer", async (t) => {
     const f = fixture(t);
     if (invalid === "gone") delete f.entities[7];
     else
-      f.target.metadata[f.bot.registry.entitiesByName.piglin!.metadataKeys!.indexOf("baby")] =
+      f.metadata[f.bot.registry.entitiesByName.piglin!.metadataKeys!.indexOf("baby")] =
         invalid === "baby" ? true : "unsupported";
     const result = await beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
     assert.equal(result.status, "failed");
@@ -160,7 +190,7 @@ test("runner takeover preserves a pending offer and accepts desired gains during
   assert.equal(output.result.barter.goldSpent, 1);
   assert.equal(f.offers(), 1);
   assert.equal(f.bot.listenerCount("entityEquip"), 0);
-  assert.equal(f.bot.inventory.listenerCount("updateSlot"), 0);
+  assert.equal(f.bot.inventory.listenerCount("updateSlot"), f.idleSlotListeners);
 });
 
 for (const stop of ["cancel", "disconnect"] as const) {
@@ -177,7 +207,7 @@ for (const stop of ["cancel", "disconnect"] as const) {
     assert.equal(f.offers(), 1);
     assert.equal(f.bot.listenerCount("entityEquip"), 0);
     assert.equal(f.bot.listenerCount("entityGone"), 0);
-    assert.equal(f.bot.inventory.listenerCount("updateSlot"), 0);
+    assert.equal(f.bot.inventory.listenerCount("updateSlot"), f.idleSlotListeners);
   });
 }
 
@@ -204,15 +234,8 @@ test("a nonreward output settles immediately and cannot exceed the one-gold budg
   const f = fixture(t);
   const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
   await turn();
-  f.entities[9] = {
-    id: 9,
-    name: "item",
-    isValid: true,
-    position: new Vec3(2, 64, 0),
-    getDroppedItem: () => ({ name: "gravel", count: 8 }),
-  };
-  f.events.emit("itemDrop", f.entities[9]);
-  f.target.equipment[1] = null;
+  f.dropOther("gravel", 8);
+  f.equipment[1] = null;
   f.events.emit("entityEquip", f.target);
   const result = await pending;
   assert.equal(result.status, "partial");
@@ -234,12 +257,14 @@ test("a recipient moving out of reach while equipping receives no reserved offer
 });
 
 test("gold hand release without a new output does not make another offer or report success", async (t) => {
-  const f = fixture(t);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(t, clock);
   const pending = beginBarter(f.bot, f.navigation, request(2), f.lifetime.signal)({});
   await turn();
-  f.target.equipment[1] = null;
+  f.equipment[1] = null;
   f.events.emit("entityEquip", f.target);
-  const result = await pending;
+  const result = await clock.settle(pending, 5_000);
   assert.equal(result.status, "partial");
   assert.equal(result.barter.goldOffers, 1);
   assert.equal(result.barter.gained, 0);
@@ -250,7 +275,7 @@ test("full inventory without a partial requested stack stops before offering any
   for (const carriedPearls of [0, 16]) {
     const f = fixture(t);
     f.pearl.count = carriedPearls;
-    f.bot.inventory.emptySlotCount = () => 0;
+    f.fillFreeSlots();
     const result = await beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
     assert.equal(result.status, "failed");
     assert.equal(result.barter.goldOffers, 0);
@@ -263,7 +288,7 @@ test("full inventory without a partial requested stack stops before offering any
 test("a partial requested stack permits barter even without an empty slot", async (t) => {
   const f = fixture(t);
   f.pearl.count = 14;
-  f.bot.inventory.emptySlotCount = () => 0;
+  f.fillFreeSlots();
   const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
   await turn();
   assert.equal(f.offers(), 1);
@@ -278,7 +303,7 @@ test("a partial requested stack permits barter even without an empty slot", asyn
 test("capacity is checked again after equipping before the gold offer", async (t) => {
   const f = fixture(t);
   f.bot.equip = async () => {
-    f.bot.inventory.emptySlotCount = () => 0;
+    f.fillFreeSlots();
   };
   const result = await beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
   assert.equal(result.status, "failed");
@@ -290,7 +315,7 @@ test("capacity is checked again after equipping before the gold offer", async (t
 test("consuming the last carried ingot frees the slot needed for its reward", async (t) => {
   const f = fixture(t);
   f.gold.count = 1;
-  f.bot.inventory.emptySlotCount = () => (f.gold.count === 0 ? 1 : 0);
+  f.fillFreeSlots(); // The ingot's own slot is the one consuming it frees.
   const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
   await turn();
   assert.equal(f.offers(), 1);
@@ -310,7 +335,6 @@ test("a partial pickup revisits the remaining desired stack before another gold 
     pickups++;
     f.pearl.count++;
     if (pickups === 2) delete f.entities[8];
-    f.bot.inventory.emit("updateSlot", 1, null, null);
     return { status: "completed", elapsedMs: 0 } as never;
   };
   f.bot.activateEntity = async () => {
@@ -344,7 +368,6 @@ test("an uncollectable remainder stops barter without another gold offer", async
     pickups++;
     if (pickups === 1) {
       f.pearl.count++;
-      f.bot.inventory.emit("updateSlot", 1, null, null);
     }
     return { status: "completed", elapsedMs: 0 } as never;
   };
@@ -364,7 +387,6 @@ test("desired items picked up while equipping satisfy the request before reservi
   const f = fixture(t);
   f.bot.equip = async () => {
     f.pearl.count = 2;
-    f.bot.inventory.emit("updateSlot", 1, null, null);
   };
   f.bot.activateEntity = async () => {
     throw new Error("Gold offered after the carried target was satisfied");
@@ -377,7 +399,9 @@ test("desired items picked up while equipping satisfy the request before reservi
 });
 
 test("an incidental reward observed entirely during takeover allows the next reserved offer", async (t) => {
-  const f = fixture(t);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(t, clock);
   const runner = new ActionRunner();
   const activate = f.bot.activateEntity;
   let offered = 0;
@@ -392,23 +416,16 @@ test("an incidental reward observed entirely during takeover allows the next res
   const pending = runner.run(runnerAction(f), request(2));
   await turn();
   const claim = runner.claim("fixture_reflex", "Wait through incidental output", async () => {
-    f.entities[9] = {
-      id: 9,
-      name: "item",
-      isValid: true,
-      position: new Vec3(2, 64, 0),
-      getDroppedItem: () => ({ name: "blackstone", count: 9 }),
-    };
-    f.events.emit("itemDrop", f.entities[9]);
-    f.target.equipment[1] = null;
+    f.dropOther("blackstone", 9);
+    f.equipment[1] = null;
     f.events.emit("entityEquip", f.target);
     delete f.entities[9];
     return { value: null, continuation: { kind: "resume" as const } };
   });
   assert.equal(claim.kind, "claimed");
-  const result = await pending;
+  const result = await clock.settle(pending, 5_000);
   assert.equal(offered, 2);
   assert.equal(result.result.status, "succeeded");
   assert.equal(f.bot.listenerCount("itemDrop"), 0);
-  assert.equal(f.bot.inventory.listenerCount("updateSlot"), 0);
+  assert.equal(f.bot.inventory.listenerCount("updateSlot"), f.idleSlotListeners);
 });

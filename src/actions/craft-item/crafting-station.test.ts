@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
-import { botFixture } from "../../test-support/bot.js";
 import { craftingBot } from "../../test-support/crafting.js";
-import { startServerClock } from "../../test-support/server-clock.js";
+import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import type { WorldBlock } from "../../world/placement.js";
 import { placeCarriedBlockNearby } from "../../world/index.js";
 import { placedTableAt, prepareCraftingStation, reachCraftingTable, startTableHold } from "./crafting-station.js";
@@ -13,8 +12,8 @@ import { recordPlacementSent } from "../../world/own-placement.js";
 const position = new Vec3(3, 64, 1);
 const table = { name: "crafting_table", position } as WorldBlock;
 
-function stationFixture(carried: Record<string, number>) {
-  const fixture = craftingBot(carried);
+function stationFixture(carried: Record<string, number>, clock?: FakeClock) {
+  const fixture = craftingBot(carried, false, [], { clock });
   const id = fixture.bot.registry.itemsByName.crafting_table!.id;
   const placed: string[] = [];
   const place: typeof placeCarriedBlockNearby = async (_bot, _name, options) => {
@@ -41,13 +40,15 @@ test("a table this request set down earlier is used again, never a second one pl
   assert.deepEqual(f.placed, []);
 });
 
-test("a table broken between attempts is replaced by the carried one, and the new place is kept", async (t) => {
-  const f = stationFixture({ crafting_table: 1 });
+test("a table broken between attempts is replaced by the carried one, and the new place is kept", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = stationFixture({ crafting_table: 1 }, clock);
   Object.assign(f.bot, { blockAt: () => ({ name: "air", position }) as WorldBlock });
-  t.after(startServerClock(f.bot));
   recordPlacementSent(f.hold.own, [new Vec3(9, 64, 9)], f.bot.time.age);
 
-  const station = await prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place: f.place });
+  // "The server answered": "gone" is its answer once the clock moved the world age 40 ticks (2 s) past the send.
+  const station = await clock.settle(prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place: f.place }), 2_000);
 
   assert.equal(station.kind, "ready");
   assert.deepEqual(f.placed, ["place"]);
@@ -72,7 +73,7 @@ test("a table beyond reach is walked back to, and one in reach is not", async ()
       return { status: "completed", elapsedMs: 0 };
     },
   } as unknown as NavigationRuntime;
-  const bot = botFixture({ position: new Vec3(0.5, 64, 0.5) });
+  const { bot } = createFakeBot({ position: new Vec3(0.5, 64, 0.5) });
 
   await reachCraftingTable(bot, walking, table, undefined);
   assert.deepEqual(walks, [], "3 blocks away is within reach");
@@ -104,9 +105,10 @@ test("an abort after the table landed but before the placement answered: the nex
   assert.deepEqual(f.placed, ["place"], "no second placement");
 });
 
-test("an abort before the table landed: the next attempt finds the cell empty and places the carried one", async (t) => {
-  const f = stationFixture({ crafting_table: 1 });
-  t.after(startServerClock(f.bot));
+test("an abort before the table landed: the next attempt finds the cell empty and places the carried one", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = stationFixture({ crafting_table: 1 }, clock);
   const controller = new AbortController();
   Object.assign(f.bot, { blockAt: () => ({ name: "air", position }) as WorldBlock });
   const cutOff: typeof placeCarriedBlockNearby = async (_bot, _name, options) => {
@@ -119,7 +121,8 @@ test("an abort before the table landed: the next attempt finds the cell empty an
     /reflex during the placement/,
   );
 
-  const station = await prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place: f.place });
+  // "The server answered": the empty cell is its answer once the clock moved the world age 40 ticks (2 s) past the send.
+  const station = await clock.settle(prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place: f.place }), 2_000);
 
   assert.equal(station.kind, "ready");
   assert.deepEqual(f.placed, ["place"]);
@@ -179,11 +182,10 @@ test("two craft requests on two bots keep their own table cells", async () => {
   const second = stationFixture({ crafting_table: 1 });
   recordPlacementSent(first.hold.own, [position], first.bot.time.age);
   Object.assign(first.bot, { blockAt: () => table });
-  const stopClock = startServerClock(second.bot);
 
+  // The second bot sent no placement before, so it waits for no server answer: no clock to drive.
   const firstStation = await prepareCraftingStation(first.bot, noItems, true, { hold: first.hold, place: first.place });
   const secondStation = await prepareCraftingStation(second.bot, noItems, true, { hold: second.hold, place: second.place });
-  stopClock();
 
   assert.equal(firstStation.kind, "ready");
   assert.equal(secondStation.kind, "ready");

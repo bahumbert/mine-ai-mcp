@@ -1,9 +1,10 @@
 /**
  * A world age that tests can write, for the domain builders whose importers move it themselves (`startServerClock`,
  * `bot.time.age += 20`): the shared fake's `time` is rebuilt from its server at each read, so such a write would be
- * lost and every "40 ticks or the wall bound" wait would end on the wall. Kept for unmigrated importers (crafting:
- * craft-item, craft-item-resume, crafting-station, temporary-workstation; the furnace's own `startServerClock`); a
- * test on the harness moves `clock` instead, and then `server.age` and `bot.time.age` agree (plan T4, batches M1-M8).
+ * lost and every "40 ticks or the wall bound" wait would end on the wall. `craftingBot` still applies it when given no
+ * clock, but after batch M2 none of its importers writes the age (no `startServerClock`, no `bot.time.age` write); only
+ * `domain-builders.test.ts` checks the bridge itself. A test on the harness moves `clock` instead, and then
+ * `server.age` and `bot.time.age` agree (plan T4, batches M1-M8).
  */
 import type { FakeHarness } from "./fake-bot/index.js";
 

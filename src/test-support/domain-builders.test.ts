@@ -5,7 +5,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { carriedCountField } from "./carried-counts.js";
 import { craftingBot } from "./crafting.js";
+import { createFakeBot, createFakeClock } from "./fake-bot/index.js";
 import { FakeFarm } from "./fake-farm.js";
 import { DIRK_START, SANA_START, dirkPocket, dirkPocketHarness, sanaPocket, sanaPocketHarness } from "./frozen-pockets.js";
 import { observedFurnace } from "./furnace.js";
@@ -162,4 +164,42 @@ test("the pocket harnesses hold the same cells as the pocket worlds, the bot at 
     assert.deepEqual(harness.bot.entity.position.floored(), new Vec3(start.x, start.y, start.z));
     assert.ok(harness.bot.inventory.items().some((item) => item.name === "stone_pickaxe"));
   }
+});
+
+test("craftingBot given a clock builds its harness on it, and its world age is the server's own", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const { bot, harness } = craftingBot({ oak_log: 1 }, false, [], { clock });
+  assert.equal(harness.clock, clock);
+  const start = bot.time.age;
+  await clock.advance(1_000);
+  assert.equal(bot.time.age, start + 20);
+  assert.equal(bot.time.age, harness.server.age, "no written ticks: a test given the clock moves the age with it");
+});
+
+test("observedFurnace given a mocked clock moves the world age only with that clock, one time packet a second", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, harness } = observedFurnace({ cookMs: 100, onHarness: true, clock });
+  assert.equal(harness?.clock, clock);
+  const start = bot.time.age;
+  await clock.advance(1_000);
+  assert.equal(bot.time.age, start + 20, "no wall-clock timer of its own moves it (startServerClock would add 20 per 10 ms)");
+  assert.equal(bot.time.age, harness?.server.age);
+});
+
+test("structureWorld given a clock stands on the harness built on that clock", () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const { harness } = structureWorld({ clock });
+  assert.equal(harness?.clock, clock);
+});
+
+test("carriedCountField reads the sum of every stack of its item and rewrites the window when set", () => {
+  const harness = createFakeBot({ carried: { cobblestone: 130 } });
+  const cobblestone = carriedCountField(harness, "cobblestone");
+  assert.equal(cobblestone.name, "cobblestone");
+  assert.equal(cobblestone.count, 130, "the three stacks 64 + 64 + 2 summed");
+  cobblestone.count = 10;
+  const stacks = harness.inventory.slots.filter((item) => item?.name === "cobblestone").map((item) => item!.count);
+  assert.deepEqual(stacks, [10], "the last stacks taken first, the window holds what was set");
+  assert.equal(cobblestone.count, 10);
 });
