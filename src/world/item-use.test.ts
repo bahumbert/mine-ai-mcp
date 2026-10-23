@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
-import { createFakeBot, itemOf } from "../test-support/fake-bot/index.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
 import { useItemAt } from "./item-use.js";
 
@@ -10,27 +10,20 @@ import { useItemAt } from "./item-use.js";
 const TICK_MS = 50;
 
 /**
- * A bot that carries `carried` and stands by a water source at (3, 63, 0) over obsidian. Its use of an item has the
- * server answer `ticksUntilEffect` ticks later, scripted here: the water cell turns to air and a held bucket fills
- * (the only bucket of a stack becomes the water bucket; one of several leaves the rest held and the water bucket in a
- * free slot). `calls` records what the code under test did, in order.
+ * A bot that carries `carried` and stands by a water source at (3, 63, 0) over obsidian. The server answers its use of an
+ * item `ticksUntilEffect` ticks later: a held bucket fills (contract check `bucket-pour-and-fill`: the only bucket of a
+ * stack becomes the water bucket, one of several leaves the rest held and the water bucket in a free slot) and takes the
+ * water; for any other item the water cell turns to air, scripted here as the effect that item would have. `calls` records
+ * what the code under test did, in order.
+ * A look that fills the bucket aims just over the source's surface (y 63.9; 63.889 is the surface): from the eye a lower aim
+ * meets the floor's edge first, as it would in the game.
  */
 function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, number>> = { bucket: 1 }) {
   const target = new Vec3(3, 63, 0);
   const calls: string[] = [];
   const harness = createFakeBot({ lagMs: ticksUntilEffect * TICK_MS, carried, cells: { "3,63,0": "water", "3,62,0": "obsidian" } });
-  const { bot, inventory, server, world } = harness;
-  const effect = () => {
-    world.setCell(target, "air");
-    const held = inventory.heldItem;
-    if (held?.name !== "bucket") return;
-    const water = itemOf(world.registry, "water_bucket");
-    if (held.count === 1) inventory.updateSlot(held.slot, water);
-    else {
-      inventory.updateSlot(held.slot, itemOf(world.registry, "bucket", held.count - 1));
-      inventory.updateSlot(inventory.firstEmptySlotRange(36, 45) ?? 9, water);
-    }
-  };
+  const { bot, server, world } = harness;
+  const effect = () => world.setCell(target, "air");
   const equip = bot.equip;
   bot.equip = async (item, destination) => {
     calls.push(`equip ${typeof item === "object" ? item?.name : item}`);
@@ -41,8 +34,7 @@ function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, num
     calls.push(`look ${point.x},${point.y},${point.z} force=${force}`);
     await lookAt(point, force);
   };
-  // The hand is the fake's (`activateItem` writes `use_item`, `deactivateItem` releases); the bucket's effect on the world
-  // is scripted here as the server's answer to the packet (a bucket's use is not on the fake: backlog).
+  // The hand is the fake's (`activateItem` writes `use_item`, `deactivateItem` releases) and so is a bucket's answer.
   const activateItem = bot.activateItem;
   bot.activateItem = (offHand) => {
     calls.push("use");
@@ -62,14 +54,14 @@ test("equips, looks with force, uses, and confirms the cell and the hand", async
   const { bot, calls, clock, target, stack } = usingBot(3);
   const result = await clock.settle(useItemAt(bot, {
       item: stack("bucket"),
-      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
       expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
       expectedHeldItem: "water_bucket",
     }), 4 * TICK_MS);
 
   assert.deepEqual(result, { kind: "used" });
   // The bucket becomes a water bucket: Mineflayer ends the use itself (`inventory.js:84-103` checkActiveItem), so no release is sent.
-  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "use"]);
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.9,0.5 force=true", "use"]);
 });
 
 test("an unconfirmed use reports what it observed, whichever evidence it was waiting for", async () => {
@@ -135,11 +127,11 @@ test("onSent fires once, after the equip and the look, right before the use goes
   const { bot, calls, clock, stack } = usingBot(1);
   const result = await clock.settle(useItemAt(bot, {
       item: stack("bucket"),
-      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
       onSent: () => calls.push("sent"),
     }), 2 * TICK_MS);
   assert.deepEqual(result, { kind: "used" });
-  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "sent", "use"]);
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.9,0.5 force=true", "sent", "use"]);
 });
 
 test("onSent also fires before a use on a block, and not when the look throws or the signal aborts before the send", async () => {

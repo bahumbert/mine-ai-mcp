@@ -4,15 +4,25 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
+import { plugin as toolPlugin } from "mineflayer-tool";
 import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
 const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
+
+/** The `physicsTick` listeners the tool plugin and the pathfinder it loads a tick later keep on a bot for good: a plugin cannot be unloaded, so a real bot keeps them after the host is gone. */
+const TOOL_PLUGIN_PHYSICS_LISTENERS = await (async () => {
+  const { bot } = createFakeBot();
+  bot.loadPlugin(toolPlugin);
+  await delay(0);
+  return bot.listenerCount("physicsTick");
+})();
 
 test("a kick reason that is a text component is logged whole, a plain one as it is", () => {
   assert.equal(kickReason("Server closed"), "Server closed");
@@ -33,12 +43,7 @@ function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
     slots,
     // No chunk column is loaded: the frontier observes none.
     loadedColumns: [],
-    // `kick.js`: quit ends the client, whose end Mineflayer re-emits as the bot's `end` (`loader.js:113`).
-    overrides: { quit: () => bot.emit("end", "Host test closed") },
   });
-  bot._client.uuid = "host-test";
-  // The tool plugin as `loadBotPlugins` finds it already installed: the fake bot has no `loadPlugin`.
-  Object.assign(bot, { tool: { equipForBlock: async () => {} } });
   t.mock.method(mineflayer, "createBot", () => {
     queueMicrotask(() => {
       bot._client.emit("login", { worldState: { hashedSeed: 1n } });
@@ -58,7 +63,6 @@ test("a plugin startup failure still quits the newly created bot", async (t) => 
   const bot = connectedBot(t);
   const pluginFailure = new Error("Plugin loading failed");
   // Force the real plugin-loading boundary to fail before any spawn waiter exists.
-  delete (bot as Partial<typeof bot>).tool;
   bot.loadPlugin = () => {
     throw pluginFailure;
   };
@@ -102,7 +106,7 @@ test("failed HTTP binding releases the runtime and bot and retains combined clea
     return true;
   });
   assert.deepEqual(releases, ["database", "bot"]);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("physicsTick"), TOOL_PLUGIN_PHYSICS_LISTENERS, "only the tool plugin's own listener is left");
   assert.equal(bot.listenerCount("error"), 0);
 });
 
@@ -150,7 +154,7 @@ test(
     });
     t.mock.method(bot, "quit", () => {
       releases.push("bot");
-      assert.equal(bot.listenerCount("physicsTick"), 0);
+      assert.equal(bot.listenerCount("physicsTick"), TOOL_PLUGIN_PHYSICS_LISTENERS, "only the tool plugin's own listener is left");
       bot.emit("end", "Host test closed");
     });
     bot.emit("end", "Connection lost during test");

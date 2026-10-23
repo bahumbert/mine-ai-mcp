@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { setImmediate, setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { plugin as toolPlugin } from "mineflayer-tool";
 import { scenarioDefinitionSchema } from "mine-labs";
 import { Vec3 } from "vec3";
 import { createFakeBot } from "../../src/test-support/fake-bot/index.ts";
@@ -12,10 +13,11 @@ const FEET = new Vec3(0, 0, 0);
 type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
 
 /** The scenario's player at the origin, its column `"void"` until `terrain` loads it; `added` counts listeners beyond the idle bot's. */
-function fixture(terrain: "loaded" | "absent" = "loaded") {
+async function fixture(terrain: "loaded" | "absent" = "loaded") {
   const { bot, world } = createFakeBot({ username: "Actor", position: FEET, food: 0, cells: terrain === "absent" ? { "0,0,0": "void" } : {} });
-  // The Tool plugin's field: Mineflayer's typings leave plugin fields off the bot.
-  Object.assign(bot, { tool: { equipForBlock: async () => {} } });
+  // The tool plugin as the host loads it, which loads its pathfinder a tick later (`await delay(0)`): that plugin keeps a physics listener for good, so it is the idle bot's.
+  bot.loadPlugin(toolPlugin);
+  await delay(0);
   const listened: Listened = bot;
   const idle = new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)]));
   const added = (event: string) => listened.listenerCount(event) - (idle.get(event) ?? 0);
@@ -35,7 +37,7 @@ function fixture(terrain: "loaded" | "absent" = "loaded") {
 }
 
 test("readiness observes vitals, accepts zero food, and ends physics control before execution", async () => {
-  const { bot, world, added, session, ready, arranged } = fixture("absent");
+  const { bot, world, added, session, ready, arranged } = await fixture("absent");
   const prepared = prepareScenarioBot(bot, session);
   bot.emit("spawn");
   await setImmediate();
@@ -63,7 +65,7 @@ test("readiness observes vitals, accepts zero food, and ends physics control bef
 });
 
 test("cancelling before spawn removes both startup waits and restores physics", async () => {
-  const { bot, added, session, controller } = fixture();
+  const { bot, added, session, controller } = await fixture();
   const prepared = prepareScenarioBot(bot, session);
   const stopped = new Error("stop before spawn");
   controller.abort(stopped);
@@ -74,7 +76,7 @@ test("cancelling before spawn removes both startup waits and restores physics", 
 
 test("cancellation interrupts both terrain and landing waits without another physics tick", async () => {
   for (const phase of ["terrain", "landing"]) {
-    const { bot, added, session, ready, arranged, controller } = fixture(phase === "terrain" ? "absent" : "loaded");
+    const { bot, added, session, ready, arranged, controller } = await fixture(phase === "terrain" ? "absent" : "loaded");
     bot.entity.onGround = false;
     const prepared = prepareScenarioBot(bot, session);
     bot.emit("spawn");

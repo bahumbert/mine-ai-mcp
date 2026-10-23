@@ -39,7 +39,11 @@ const itemEntities = ({ bot }: FakeHarness) => Object.values(bot.entities).filte
 test("attack writes the use_entity attack Mineflayer writes for a 1.21.4 server", async () => {
   const harness = boatBeside();
   harness.bot.attack(harness.bot.entities[BOAT_ID]!);
-  assert.deepEqual(harness.server.packets.map(({ name, data }) => ({ name, data })), [{ name: "use_entity", data: { target: BOAT_ID, mouse: 1, sneaking: false, location: new Vec3(0, 0, 0) } }]);
+  assert.deepEqual(harness.server.packets.map(({ name, data }) => ({ name, data })), [
+    { name: "use_entity", data: { target: BOAT_ID, mouse: 1, sneaking: false, location: new Vec3(0, 0, 0) } },
+    // `entities.js:870`: the swing follows the attack on a 1.21.4 server.
+    { name: "arm_animation", data: { hand: 0 } },
+  ]);
 });
 
 test("a boat breaks on the hit that takes its damage past 40: 10 a hit, 1 lost a tick (8 hits 250 ms apart, 9 at 300, 17 at 400)", async () => {

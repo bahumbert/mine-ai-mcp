@@ -5,13 +5,8 @@ import { createFakeBot } from "./test-support/fake-bot/index.js";
 import { assertBotPluginsLoaded, loadBotPlugins, requireBotTool } from "./bot-capabilities.js";
 
 function pluginBot(tool?: { equipForBlock: () => Promise<void> }): Bot {
-  const { bot } = createFakeBot({
-    overrides: {
-      loadPlugin(this: Bot) {
-        Object.assign(this, { tool: { equipForBlock: async () => undefined } });
-      },
-    },
-  });
+  // `loadPlugin` is Mineflayer's own on the fake: the real tool plugin installs `bot.tool`.
+  const { bot } = createFakeBot();
   // The Tool plugin's field: Mineflayer's typings leave plugin fields off the bot.
   return tool ? Object.assign(bot, { tool }) : bot;
 }

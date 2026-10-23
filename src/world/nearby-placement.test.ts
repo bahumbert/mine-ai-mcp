@@ -92,7 +92,7 @@ test("the cell is reported right before the placement packet, so an aborted plac
   let reported: readonly Vec3[] | null = null;
   let reportedBeforePacket = false;
   Object.assign(bot, {
-    placeBlock: async () => {
+    _placeBlockWithOptions: async () => {
       reportedBeforePacket = reported !== null;
       controller.abort(new Error("reflex took the body"));
       throw controller.signal.reason;

@@ -203,8 +203,9 @@ test("an ordinary scaffold blocking a resistant shelter sends retreat directly t
     carried: { end_stone: 20 },
     entities: { 42: dragonAt(new Vec3(0, 67, 0), 4) },
     overrides: {
-      // A guard, not a server answer: the test fails if the shelter starts placing.
+      // A guard, not a server answer: the test fails if the shelter starts placing (`placement.ts` calls `_placeBlockWithOptions`, a direct caller `placeBlock`).
       placeBlock: () => assert.fail("Do not start a shelter whose required wall cannot be placed"),
+      _placeBlockWithOptions: () => assert.fail("Do not start a shelter whose required wall cannot be placed"),
     } });
   using _timers = clock.install();
   let moved = false;
@@ -402,8 +403,9 @@ test("a landing escape releases a safe bot when the dragon settles instead of fi
     overrides: {
       // Not on the shared fake: `findBlocks`. The scripted answer is no bedrock in range (no exit portal located).
       findBlocks: () => [],
-      // A guard, not a server answer: the test fails if the escape places a block.
+      // A guard, not a server answer: the test fails if the escape places a block (`placement.ts` calls `_placeBlockWithOptions`, a direct caller `placeBlock`).
       placeBlock: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),
+      _placeBlockWithOptions: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),
     } });
   using _timers = clock.install();
   const dragon = bot.entities[42]!;

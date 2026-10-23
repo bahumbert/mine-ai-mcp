@@ -82,9 +82,8 @@ test("Nether and unknown dimensions never admit a water bucket", () => {
 
 /**
  * A bot at `position` over stone at and below `groundY` (open air when null), a water bucket in hotbar slot 36 unless
- * `slots` says otherwise, its clock driving the timers. `overrides` are the item uses the test answers as the server
- * would: Mineflayer's `activateItem`, `deactivateItem`, `clickWindow`, `updateHeldItem`, which the fake leaves out.
- * Stopgap until the shared fake has them (gap reported to the master, M5).
+ * `slots` says otherwise, its clock driving the timers. The use of the bucket, the windows and the hand are the fake's
+ * (contract check `bucket-pour-and-fill`); `overrides` are what a test scripts, such as a use whose answer it shapes.
  */
 function bucketBot(position: Vec3, overrides: FakeBotOptions["overrides"] = {}, options: FakeBotOptions = {}) {
   const harness = createFakeBot({
@@ -93,7 +92,7 @@ function bucketBot(position: Vec3, overrides: FakeBotOptions["overrides"] = {}, 
     slots: { 36: { name: "water_bucket" } },
     clock: createFakeClock({ mode: "mocked" }),
     ...options,
-    overrides: { activateItem: () => {}, deactivateItem: () => {}, updateHeldItem: () => {}, ...overrides },
+    overrides,
   });
   /** The server's `set_slot` for a hotbar slot: the stack becomes `name` (one item), or nothing. */
   const setSlot = (slot: number, name: string | null) =>

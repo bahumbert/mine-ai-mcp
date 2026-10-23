@@ -15,7 +15,8 @@ import { Vec3 } from "vec3";
 import { BOAT_NAME } from "./fake-bot-entity-reach.js";
 import { boxMeetsBlocks, boxMeetsEntity } from "./fake-bot-boxes.js";
 import type { FakeEntities } from "./fake-bot-items.js";
-import { holdsWater } from "../../navigation/world/deep-water.js";
+import { answerBucketUse } from "./fake-bot-bucket.js";
+import { lookDirection, lookMeeting } from "./fake-bot-look.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
 import type { FakeBot } from "./fake-bot.js";
 import type { FakeClock } from "./fake-clock.js";
@@ -33,63 +34,9 @@ const { toNotchianYaw, toNotchianPitch, fromNotchianYaw } = require("mineflayer/
 
 const MAIN_HAND = 0;
 const OFF_HAND = 1;
-/** The block reach: a boat was put at 4.40 blocks and not at 4.70 (contract check `boat-placed-by-use`). */
-const BLOCK_REACH = 4.5;
-/** The look is walked in steps of this length to meet a fluid, then the meeting is narrowed by halving. */
-const FLUID_STEP = 0.02;
-const FLUID_REFINEMENTS = 12;
 /** A boat on water sinks to rest this far below the surface, about 1.5 s after it is put (-60.111 to -60.477 measured). */
 const REST_BELOW_SURFACE = 0.366;
 const REST_AFTER_MS = 1_500;
-
-/** The fluids a source or flowing block of `level` fills up to, as a fraction of its cell: a source is 8/9. */
-function fluidHeight(level: number): number {
-  return level >= 8 ? 1 : (8 - level) / 9;
-}
-
-/** The look as a direction (a notchian yaw and pitch in degrees, `Entity.getViewVector`). */
-function lookDirection({ x: yaw, y: pitch }: { x: number; y: number }): Vec3 {
-  const yawRad = (yaw * Math.PI) / 180;
-  const pitchRad = (pitch * Math.PI) / 180;
-  return new Vec3(-Math.sin(yawRad) * Math.cos(pitchRad), -Math.sin(pitchRad), Math.cos(yawRad) * Math.cos(pitchRad));
-}
-
-/** Where a look from `eye` first meets the top of a fluid, or null: the fluid cell's surface level comes with the point. */
-function fluidMeeting(bot: Bot, eye: Vec3, direction: Vec3, within: number): { point: Vec3; surface: number } | null {
-  const surfaceAt = (point: Vec3): number | null => {
-    const block = bot.blockAt(point);
-    // Water, a water plant or a waterlogged block (`holdsWater`, the runtime's rule; vanilla's `Fluid.ANY`, unmeasured for
-    // the plants); lava is not floated on, so a look at it meets nothing here.
-    if (block === null || !holdsWater(block.name, block.getProperties())) return null;
-    const level = block.name === "water" ? Number(block.getProperties().level ?? 0) : 0;
-    return Math.floor(point.y) + fluidHeight(level);
-  };
-  const inside = (distance: number) => {
-    const point = eye.plus(direction.scaled(distance));
-    const surface = surfaceAt(point);
-    return surface !== null && point.y < surface ? { point, surface } : null;
-  };
-  for (let distance = 0; distance <= within; distance += FLUID_STEP) {
-    if (inside(distance) === null) continue;
-    let [near, far] = [Math.max(0, distance - FLUID_STEP), distance];
-    for (let step = 0; step < FLUID_REFINEMENTS; step += 1) {
-      const middle = (near + far) / 2;
-      if (inside(middle) === null) near = middle;
-      else far = middle;
-    }
-    return inside(far);
-  }
-  return null;
-}
-
-/** What `getPlayerPOVHitResult` finds with fluids counted: the nearer of the first solid face and the first fluid top in reach. */
-function lookMeeting(bot: Bot, eye: Vec3, direction: Vec3): { point: Vec3; surface: number | null } | null {
-  const solid = bot.world.raycast(eye, direction, BLOCK_REACH);
-  const solidAt = solid === null ? BLOCK_REACH : eye.distanceTo(solid.intersect);
-  const fluid = fluidMeeting(bot, eye, direction, solidAt);
-  if (fluid !== null) return fluid;
-  return solid === null ? null : { point: solid.intersect, surface: null };
-}
 
 /** The stack the used hand holds. */
 function heldIn(inventory: FakeInventory, hand: number): Item | null {
@@ -121,12 +68,9 @@ function restOnWater(bot: FakeBot, parts: UseParts, boat: Entity, surface: numbe
   );
 }
 
-/** The server's side of a `use_item`: a boat item held is put where the look meets, one taken from the stack outside creative. */
-function answerUse(bot: FakeBot, parts: UseParts, hand: number, rotation: { x: number; y: number }): void {
-  const held = heldIn(parts.inventory, hand);
-  const entity = held === null || !BOAT_NAME.test(held.name) ? undefined : bot.registry.entitiesByName[held.name];
-  if (held === null || entity === undefined) return;
-  const eye = (parts.server.serverPositionOf(bot.entity.id) ?? bot.entity.position).offset(0, eyeHeightOf(bot.entity), 0);
+/** The server's side of a boat item used: the boat is put where the look meets, one taken from the stack outside creative. */
+function answerBoatUse(bot: FakeBot, parts: UseParts, held: Item, eye: Vec3, rotation: { x: number; y: number }): void {
+  if (bot.registry.entitiesByName[held.name] === undefined) return;
   const meeting = lookMeeting(bot, eye, lookDirection(rotation));
   const boat = meeting === null ? null : boatAt(bot, parts.entities, held.name, meeting.point, fromNotchianYaw(rotation.x));
   if (meeting === null || boat === null) return;
@@ -135,6 +79,20 @@ function answerUse(bot: FakeBot, parts: UseParts, hand: number, rotation: { x: n
   if (bot.game.gameMode !== "creative") parts.inventory.updateSlot(held.slot, held.count > 1 ? itemOf(bot.registry, held.name, held.count - 1) : (null as never));
   bot.emit("entitySpawn", boat);
   if (meeting.surface !== null) restOnWater(bot, parts, boat, meeting.surface);
+}
+
+/**
+ * The server's side of a `use_item`: a boat or a bucket held is answered, anything else changes nothing; the server
+ * acknowledges the use's sequence in every case (contract check `bucket-pour-and-fill`: the sky is only acknowledged).
+ */
+function answerUse(bot: FakeBot, parts: UseParts, use: { hand: number; sequence: number; rotation: { x: number; y: number } }): void {
+  const held = heldIn(parts.inventory, use.hand);
+  if (held !== null) {
+    const eye = (parts.server.serverPositionOf(bot.entity.id) ?? bot.entity.position).offset(0, eyeHeightOf(bot.entity), 0);
+    if (BOAT_NAME.test(held.name)) answerBoatUse(bot, parts, held, eye, use.rotation);
+    else answerBucketUse(bot, parts, held, eye, use.rotation);
+  }
+  bot._client.emit("acknowledge_player_digging", { sequenceId: use.sequence });
 }
 
 /** Give `bot` `activateItem` and the server's answer to a `use_item`. */
@@ -160,7 +118,7 @@ export function attachFakeUse(bot: FakeBot, parts: UseParts): void {
     });
   };
   parts.server.onPacket("use_item", (data) => {
-    const { hand, rotation } = data as { hand: number; rotation: { x: number; y: number } };
-    parts.server.answer(() => answerUse(bot, parts, hand, rotation));
+    const use = data as { hand: number; sequence: number; rotation: { x: number; y: number } };
+    parts.server.answer(() => answerUse(bot, parts, use));
   });
 }

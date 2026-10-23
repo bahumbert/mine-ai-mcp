@@ -14,6 +14,8 @@ import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js"
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
+import { type PlaceBlockWithOptions, attachFakePlacement } from "./fake-bot-placement.js";
+import { attachFakePlugins, offlineUuidOf } from "./fake-bot-plugins.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
@@ -34,7 +36,7 @@ export interface DimensionHeights {
 }
 
 /** Mineflayer keeps the ridden entity on the bot as well as on its entity, and the dimension's heights on `game`; its typings leave both out. */
-export type FakeBot = Bot & { vehicle: Entity | null; game: Bot["game"] & DimensionHeights };
+export type FakeBot = Bot & { vehicle: Entity | null; game: Bot["game"] & DimensionHeights; _placeBlockWithOptions: PlaceBlockWithOptions };
 
 type Point = Vec3 | { readonly x: number; readonly y: number; readonly z: number };
 
@@ -79,7 +81,7 @@ export interface FakeBotOptions {
   /** Move the body by Mineflayer's own physics engine each tick (gravity, water, jumping); off by default. */
   readonly simulatePhysics?: boolean;
   /** Methods a test replaces (a scripted `tossStack` failure). */
-  readonly overrides?: Partial<Bot>;
+  readonly overrides?: Partial<FakeBot>;
 }
 
 export interface FakeHarness {
@@ -190,7 +192,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
     _client: client,
     entity: self,
     entities: { [BOT_ENTITY_ID]: self, ...spawnedEntities(entities.make, options.entities ?? {}) },
-    players: { ...playersOf(world, entities, feet, options.players), [username]: { username, uuid: "", ping: 0, gamemode: 0, displayName: undefined, entity: self } },
+    players: { ...playersOf(world, entities, feet, options.players), [username]: { username, uuid: offlineUuidOf(username), ping: 0, gamemode: 0, displayName: undefined, entity: self } },
     inventory,
     blockAt: (point: Vec3) => world.blockAt(point),
     world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumns: world.getColumns },
@@ -209,10 +211,12 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
   const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {} });
   attachFakeUse(bot, { clock, server, world, inventory, entities });
-  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn, windows });
+  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
+  attachFakePlacement(bot, { clock, server, world, inventory, windows });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
   attachFakeSleep(bot, { clock, server, world });
+  attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
   return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows };
 }

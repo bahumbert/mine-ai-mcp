@@ -10,6 +10,7 @@ import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
 import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
+import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
@@ -24,6 +25,7 @@ import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
+import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
@@ -99,6 +101,8 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   chestOpenTakeClose,
   itemPickupAfterDelay,
   tossedItemKeptBeforeDelay,
+  bucketPourAndFill,
+  placeBlockWithOptions,
 ];
 
 /** The check of that name; throws listing the known names. */

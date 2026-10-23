@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { Vec3 } from "vec3";
-import { setCarriedCount } from "../../test-support/carried-counts.js";
 import { type FakeBotOptions, type FakeCell, type FakeHarness, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { parseSleepRequest, sleepOutcomes } from "./contract.js";
 import { beginSleep, executeSleep, formatSleepResult } from "./sleep.js";
@@ -232,30 +231,23 @@ test("reports an observed nearby hostile instead of Mineflayer's generic sleep t
   assert.match(formatSleepResult(result), /`4, 64, 1`/);
 });
 
-/** The way a placed bed's head lies from the bot's look (the game's `getDirection`), as the nearest of the four sides. */
-function facingOfYaw(yaw: number): Facing {
-  const x = -Math.sin(yaw);
-  const z = -Math.cos(yaw);
-  if (Math.abs(x) > Math.abs(z)) return x > 0 ? "east" : "west";
-  return z > 0 ? "south" : "north";
-}
-
 /** A bot carrying one bed that places it on the stone at y 63; `placements` counts how many beds were put down. */
 function bedPlacingBot(clock = createFakeClock({ mode: "mocked" }), walksOff = true) {
   const state = { placedAt: null as Vec3 | null, facing: "east" as Facing, placements: 0 };
   // The bot ends up eight blocks from the bed it places (placement walked it off), so every sleep has a route to take.
   const h = sleeper({ clock, server: { timeOfDay: 15_000, startAge: 24_000 }, carried: { cyan_bed: 1 } });
-  const bedType = h.bot.registry.itemsByName.cyan_bed!.id;
-  Object.assign(h.bot, {
-    // Stopgap until task W2 gives the fake the server's placement of a held bed (both halves, the item taken): `place_block.js`.
-    _placeBlockWithOptions: async (support: { position: Vec3 }) => {
-      state.placedAt = support.position.offset(0, 1, 0);
+  // The fake server puts the bed whole, facing as she looks, and takes it from the stack (contract check `place-block-with-options`);
+  // the test notes where and how, once the server has answered the click, and walks the bot off.
+  h.server.onPacket("block_place", (data) => {
+    const { location } = data as { location: Vec3 };
+    // The use of a bed (to sleep in it) is a `block_place` too; only a click on any other block places the carried bed.
+    if (h.bot.isABed(h.bot.blockAt(location)!)) return;
+    h.server.answer(() => {
+      state.placedAt = location.offset(0, 1, 0);
       state.placements += 1;
-      state.facing = facingOfYaw(h.bot.entity.yaw);
-      setBed(h, "cyan_bed", state.placedAt, { facing: state.facing });
-      setCarriedCount(h.inventory, h.bot.registry, bedType, 0);
+      state.facing = h.bot.blockAt(state.placedAt)!.getProperties().facing as Facing;
       if (walksOff) h.bot.entity.position = state.placedAt.offset(8, 0, 0);
-    },
+    });
   });
   return { h, state };
 }

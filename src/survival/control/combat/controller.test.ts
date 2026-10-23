@@ -211,6 +211,7 @@ for (const blocks of [0, 1]) {
       },
     } as NavigationRuntime;
     bot.placeBlock = async () => assert.fail("Unaffordable cover must not start construction");
+    Object.assign(bot, { _placeBlockWithOptions: async () => assert.fail("Unaffordable cover must not start construction") });
     fixture.script.onAttack = () => bot.emit("entityDead", target);
     const result = await createCombatController(bot, navigation).engage(7, new AbortController().signal, "pursue");
     assert.equal(result.kind, "died");
