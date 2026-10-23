@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ActionRunner } from "../../session/action-runner.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import {
   createSendMessageAction,
   isChatTextAccepted,
@@ -11,7 +11,7 @@ import {
 } from "./index.js";
 
 function chatBot(send: (bot: Bot, message: string) => void): Bot {
-  const bot = botFixture({ username: "MineAI" });
+  const { bot } = createFakeBot({ username: "MineAI" });
   bot.chat = (message) => send(bot, message);
   return bot;
 }
@@ -79,11 +79,11 @@ function whisperEcho(target: string, text: string) {
 
 /** The server's line reaching the client: Mineflayer's `message` event, whose payload is all the action reads. */
 function emitMessage(bot: Bot, line: ReturnType<typeof whisperEcho>) {
-  (bot as unknown as { emit(event: string, ...args: unknown[]): boolean }).emit("message", line);
+  bot.emit("message", line as never, "chat");
 }
 
 function whisperBot(players: string[], echo: (bot: Bot, to: string, message: string) => void = (bot, to, message) => emitMessage(bot, whisperEcho(to, message))) {
-  const bot = botFixture({ username: "MineAI", players: Object.fromEntries(players.map((name) => [name, { username: name }])) });
+  const { bot } = createFakeBot({ username: "MineAI", players: Object.fromEntries(players.map((name) => [name, { username: name }])) });
   const whispered: [string, string][] = [];
   const publicLines: string[] = [];
   bot.chat = (message) => publicLines.push(message);

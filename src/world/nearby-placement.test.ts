@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { cellKey } from "../utils/index.js";
 import { findStandingSpot, placeCarriedBlockNearby } from "./nearby-placement.js";
 import { setProtectedRegionsProvider } from "./protected-regions.js";
@@ -14,7 +14,7 @@ function fill(cells: Record<string, string>, name: string, [x0, y0, z0]: number[
 
 /** Open air above, stone up to y=59 and the feet of the bot at (0, 62, 0). */
 function botIn(cells: Record<string, string>) {
-  return botFixture({ blocks: cells, position: { x: 0.5, y: 62, z: 0.5 } }, { version: "1.21.4", _client: { write: () => undefined } });
+  return createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 } }).bot;
 }
 
 /** A lake of water (y 60..62) for x <= 4, dry stone ground (top y=61) from x = shoreX on. */
@@ -83,11 +83,7 @@ test("a spot is skipped when no cell can be filled from it", () => {
 function craftingTableBot() {
   const cells: Record<string, string> = {};
   fill(cells, "stone", [-6, 50, -6], [6, 61, 6]);
-  return botFixture({
-    blocks: cells,
-    position: { x: 0.5, y: 62, z: 0.5 },
-    items: [{ name: "crafting_table", count: 1 }],
-  }, { version: "1.21.4", _client: { write: () => undefined } });
+  return createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 } }).bot;
 }
 
 test("the cell is reported right before the placement packet, so an aborted placement still names it", async () => {

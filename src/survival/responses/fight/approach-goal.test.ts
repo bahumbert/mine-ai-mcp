@@ -1,8 +1,7 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../../test-support/bot.js";
+import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { flatWorld, observation } from "../../../test-support/navigation.js";
 import { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
@@ -10,25 +9,13 @@ import type { FightWeapons } from "./weapons.js";
 
 /** A skeleton six blocks away on flat ground: outside sword reach, inside a clear bow line. */
 function fixture(bow: boolean) {
-  const target = {
-    id: 7,
-    name: "skeleton",
-    isValid: true,
-    width: 0.6,
-    height: 1.99,
-    position: new Vec3(4.5, 63, 4.5),
-    heldItem: { name: "bow" },
-    metadata: [],
-  } as unknown as Parameters<Bot["attack"]>[0];
-  const bot = botFixture({
+  const { bot } = createFakeBot({
     position: { x: 0.5, y: 63, z: 0.5 },
-    entities: { 7: target },
-    items: [
-      { name: "diamond_sword", count: 1 },
-      { name: "bow", count: 1 },
-      { name: "arrow", count: 3 },
-    ],
+    entities: { 7: { name: "skeleton", position: new Vec3(4.5, 63, 4.5), metadata: [] } },
+    carried: { diamond_sword: 1, bow: 1, arrow: 3 },
   });
+  const target = bot.entities[7]!;
+  target.setEquipment(0, itemOf(bot.registry, "bow"));
   const world = flatWorld();
   const scene = {
     bot,

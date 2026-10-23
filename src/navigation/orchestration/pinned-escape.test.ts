@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeStack, botFixture } from "../../test-support/bot.js";
+import { type FakeBot, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { layeredWorld, loadNamedBlock } from "../../test-support/layered-world.js";
 import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkItems, dirkPocket, sanaItems, sanaPocket } from "../../test-support/frozen-pockets.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
@@ -21,21 +21,23 @@ import { describeCalculationFailure } from "./process-events.js";
  * left no first move. The policy here reads the override live, like the production one, so a test can see the run
  * never changes it.
  */
-function styledPolicy(bot: ReturnType<typeof botFixture>, override: { digDown: boolean }): MovementPolicy {
+function styledPolicy(bot: FakeBot, override: { digDown: boolean }): MovementPolicy {
   return Object.freeze({ ...createMovements(bot), get allowDownward() { return override.digDown; } });
 }
 
-async function leavePocket(world: (bot: ReturnType<typeof botFixture>) => MemoryWorld, start: BlockPosition, cave: BlockPosition,
-  options: { digDown?: boolean; escape?: boolean; items?: FakeStack[]; edit?: (world: MemoryWorld, bot: ReturnType<typeof botFixture>) => void; cancelOn?: string } = {}) {
+async function leavePocket(world: (bot: FakeBot) => MemoryWorld, start: BlockPosition, cave: BlockPosition,
+  options: { digDown?: boolean; escape?: boolean; items?: readonly { name: string; count: number }[]; edit?: (world: MemoryWorld, bot: FakeBot) => void; cancelOn?: string } = {}) {
   const items = options.items ?? [];
-  const bot = botFixture({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5), items });
+  const carried: Record<string, number> = {};
+  for (const { name, count } of items) carried[name] = (carried[name] ?? 0) + count;
+  const { bot } = createFakeBot({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5), carried });
   const override = { digDown: options.digDown ?? false };
   const memory = world(bot);
   options.edit?.(memory, bot);
   const events: NavigationEvent[] = [];
   const fake = new FakeNavigationBot();
   // The run counts the scaffold from the observation: an empty one plans no pillar (the unit pocket escaped where the live one did not).
-  fake.current = { ...observation(start.x, start.y, start.z), inventory: new Map(items.map((stack) => [stack.type!, stack.count])) };
+  fake.current = { ...observation(start.x, start.y, start.z), inventory: new Map(items.map((stack) => [bot.registry.itemsByName[stack.name]!.id, stack.count])) };
   let cancel: (() => void) | undefined;
   const navigator = createNavigator({ world: memory, bot: fake, telemetry: onEvent((event) => {
     events.push(event);
@@ -109,7 +111,7 @@ test("Sana's pocket with one water source beside the opened cell stays shut and 
  */
 const WALL_START = { x: 0, y: 64, z: 0 } as const;
 const WALL_GOAL = { x: 3, y: 64, z: 0 } as const;
-function pocketBesideFallingWater(bot: ReturnType<typeof botFixture>): MemoryWorld {
+function pocketBesideFallingWater(bot: FakeBot): MemoryWorld {
   const sealed = "RRRRRRR";
   return layeredWorld(bot, {
     origin: { x: -2, z: -2 },
@@ -146,7 +148,7 @@ test("lava beside the opened cell is never let through", async () => {
  */
 const SHORE_START = { x: 1, y: 64, z: 0 } as const;
 const SHORE_GOAL = { x: 4, y: 64, z: 0 } as const;
-function shoreBesideWater(bot: ReturnType<typeof botFixture>): MemoryWorld {
+function shoreBesideWater(bot: FakeBot): MemoryWorld {
   return layeredWorld(bot, {
     origin: { x: -3, z: -3 },
     legend: { R: "bedrock", S: "stone", A: "air", W: "water" },
@@ -263,7 +265,7 @@ test("Sana's pocket with her blocks, lava beside the opened cell: the no-path te
 /** A 3x3 stone platform in bedrock, entered in its middle; the only open cell beyond the bedrock is the goal, 4 cells east. */
 const PLATFORM_START = { x: 0, y: 64, z: 0 } as const;
 const PLATFORM_GOAL = { x: 4, y: 64, z: 0 } as const;
-function sealedPlatform(bot: ReturnType<typeof botFixture>): MemoryWorld {
+function sealedPlatform(bot: FakeBot): MemoryWorld {
   const solid = "RRRRRRRRR";
   const platform = [solid, "RSSSRRRRR", "RSSSRRRRR", "RSSSRRRRR", solid];
   return layeredWorld(bot, {

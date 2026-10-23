@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
+import { type FakeBotOptions, createFakeBot } from "../test-support/fake-bot/index.js";
 import { createDiscardedItems, DISCARD_MEMORY_MS } from "./discarded-items.js";
 import {
   forgetEmptySealedPits,
@@ -21,9 +21,13 @@ const droppedItem = (id: number, x: number, y: number, z: number) => ({
   getDroppedItem: () => ({ name: "dirt", count: 1 }),
 });
 
-/** A bot standing at the origin; `entities` are the item entities it sees. */
-const watching = (entities: ReturnType<typeof droppedItem>[] = [], overrides: Record<string, unknown> = {}) =>
-  botFixture({ entities: Object.fromEntries(entities.map((entity) => [entity.id, entity])) }, overrides);
+/** A bot standing at the origin; `entities` are the item entities it sees, `options` what else the world has. */
+const watching = (entities: ReturnType<typeof droppedItem>[] = [], options: Omit<FakeBotOptions, "entities"> = {}) =>
+  createFakeBot({
+    groundY: null,
+    ...options,
+    entities: Object.fromEntries(entities.map(({ id, ...entity }) => [id, entity])),
+  }).bot;
 
 test("the guard volume is the 3x3 column from two below the bottom to the lower plug, plus the top plug", () => {
   const bot = watching();
@@ -63,12 +67,12 @@ test("a pit seen loaded and empty within 16 blocks is forgotten, one out of sigh
   forgetEmptySealedPits(near, later);
   assert.equal(sealedPitGuarding(near, 10, 62, 10), null);
 
-  const unloaded = watching([], { blockAt: () => null });
+  const unloaded = watching([], { cells: { "10,62,10": "void" } });
   rememberSealedPit(unloaded, BOTTOM, 0);
   forgetEmptySealedPits(unloaded, later);
   assert.notEqual(sealedPitGuarding(unloaded, 10, 62, 10), null, "its cell is not loaded: nothing was seen");
 
-  const far = watching([], { entity: { position: new Vec3(40.5, 64, 10.5) } });
+  const far = watching([], { position: new Vec3(40.5, 64, 10.5) });
   rememberSealedPit(far, BOTTOM, 0);
   forgetEmptySealedPits(far, later);
   assert.notEqual(sealedPitGuarding(far, 10, 62, 10), null, "30 blocks away: out of the watch distance");
@@ -80,7 +84,7 @@ test("a pit seen loaded and empty within 16 blocks is forgotten, one out of sigh
 });
 
 test("the 33rd pit forgets the oldest", () => {
-  const bot = watching([], { blockAt: () => null });
+  const bot = watching();
   for (let index = 0; index <= SEALED_PIT_LIMIT; index++) rememberSealedPit(bot, { x: 100 + index * 5, y: 62, z: 0 }, index);
   assert.equal(sealedPitGuarding(bot, 100, 62, 0), null);
   assert.notEqual(sealedPitGuarding(bot, 105, 62, 0), null);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { type FakeBot, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkPocket, sanaPocket } from "../../test-support/frozen-pockets.js";
 import { WELL_FED, observation, planningStart } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
@@ -13,8 +13,8 @@ import { IncrementalSearch } from "./search.js";
 import { neverLeftStart } from "./start-refusals.js";
 
 /** One search from a pocket's cell to its cave, with the straight-down dig off (the persona's style override) or on. */
-function leavePocket(world: (bot: ReturnType<typeof botFixture>) => MemoryWorld, start: BlockPosition, cave: BlockPosition, digDown: boolean) {
-  const bot = botFixture({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5) });
+function leavePocket(world: (bot: FakeBot) => MemoryWorld, start: BlockPosition, cave: BlockPosition, digDown: boolean) {
+  const { bot } = createFakeBot({ position: new Vec3(start.x + 0.5, start.y, start.z + 0.5) });
   const policy = Object.create(createMovements(bot), { allowDownward: { value: digDown } });
   const goal = exactBlockGoal(cave).resolve(observation(start.x, start.y, start.z));
   if (goal.kind !== "active") throw new Error(goal.observation);

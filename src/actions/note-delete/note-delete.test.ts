@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { createNoteSaveAction } from "../note-save/index.js";
 import { createNoteDeleteAction, parseNoteDeleteRequest } from "./index.js";
@@ -9,8 +9,8 @@ const request = { note: "I spent 3 min farming.", context: "activity time" };
 
 test("a bot deletes its own notes by id, never another bot's; missing ids are reported", async () => {
   using data = temporaryBotData({ botId: "Ayla" });
-  const ayla = createNoteSaveAction(botFixture({ username: "Ayla", position: { x: 0, y: 64, z: 0 } }), data);
-  const vex = createNoteSaveAction(botFixture({ username: "Vex", position: { x: 0, y: 64, z: 0 } }), data);
+  const ayla = createNoteSaveAction(createFakeBot({ username: "Ayla", position: { x: 0, y: 64, z: 0 } }).bot, data);
+  const vex = createNoteSaveAction(createFakeBot({ username: "Vex", position: { x: 0, y: 64, z: 0 } }).bot, data);
   const first = (await ayla.execute(request, {})).note.noteId;
   const second = (await ayla.execute(request, {})).note.noteId;
   const others = (await vex.execute(request, {})).note.noteId;

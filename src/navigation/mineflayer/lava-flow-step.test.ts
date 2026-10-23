@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture, registry } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
 import { LAVA_SPREAD_ESCAPE_COST, relaxedForEscape } from "../orchestration/escape-policy.js";
@@ -15,6 +15,7 @@ import type { MemoryWorld } from "../world/memory-world.js";
  * one `advancingLavaAt` holds for the body (`src/world/lava-flow.ts`): lava beside the cell or above it whose level
  * can spread one more step. The floor of `flatWorld` is y 62, the feet cell y 63, the head cell y 64.
  */
+const { registry } = createFakeBot().bot;
 const FEET = { x: 0, y: 63, z: 0 };
 const FALLING = 8;
 
@@ -27,7 +28,7 @@ function lavaAt(world: MemoryWorld, position: { x: number; y: number; z: number 
 }
 
 function decide(world: MemoryWorld, dimension = "overworld") {
-  const bot = botFixture({ dimension });
+  const { bot } = createFakeBot({ dimension });
   return createMovements(bot).decideStep(FEET.x, FEET.y, FEET.z, world);
 }
 
@@ -95,7 +96,7 @@ test("lava below the floor does not spread up: the cell stays open", () => {
 test("an escape leg prices the cell instead of refusing it: the last resort, never the first choice", () => {
   const world = flatWorld();
   lavaAt(world, { x: 1, y: 63, z: 0 }, FALLING);
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const decision = relaxedForEscape(createMovements(bot)).decideStep(FEET.x, FEET.y, FEET.z, world);
   assert.deepEqual({ kind: decision.kind, cost: decision.kind === "penalized" ? decision.cost : null }, { kind: "penalized", cost: LAVA_SPREAD_ESCAPE_COST });
 });
@@ -105,7 +106,7 @@ test("a route goes round a cell beside falling lava, and lava landing beside the
   const world = flatWorld();
   // Lava falling at (2, 63, 1): the straight row z=0 has the cell (2, 63, 0) beside it; z=-1 leaves one free cell between.
   lavaAt(world, { x: 2, y: 63, z: 1 }, FALLING);
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const events: NavigationEvent[] = [];
   const nav = new FakeNavigationBot();
   nav.current = observation(0, 63, 0);

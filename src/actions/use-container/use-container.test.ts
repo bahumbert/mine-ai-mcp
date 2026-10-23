@@ -4,7 +4,8 @@ import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
 import { recordContainerObservation, recordPlacedContainer } from "../../bot-data/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
-import { botFixture, registry } from "../../test-support/bot.js";
+import { setCarriedCount } from "../../test-support/carried-counts.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { parseUseContainerRequest } from "./contract.js";
 import {
   beginUseContainer,
@@ -33,7 +34,7 @@ interface TestContainer {
   };
 }
 
-function testWindow(contents: readonly TestStack[] | number): TestContainer {
+function testWindow(registry: Bot["registry"], contents: readonly TestStack[] | number): TestContainer {
   const initialContents =
     typeof contents === "number"
       ? contents === 0
@@ -99,50 +100,47 @@ function testWindow(contents: readonly TestStack[] | number): TestContainer {
   return { window, state };
 }
 
+/** The bot beside a container block at 1,64,1 opening the scripted window (stopgap until the master adds container windows: `chest.js`). */
 function testBot(
   blockName: string,
-  container: TestContainer,
+  contents: readonly TestStack[] | number,
   carried: Readonly<Record<string, number>> = { cobblestone: 10 },
-): Bot {
-  const block = { name: blockName, position: new Vec3(1, 64, 1) };
+) {
+  const harness = createFakeBot({ username: "StorageBot", position: new Vec3(0, 64, 0), cells: { "1,64,1": blockName }, carried });
+  const { bot } = harness;
+  const container = testWindow(bot.registry, contents);
+  const { state } = container;
   const sameItemKind = (left: TestStack, right: TestStack) =>
     left.name === right.name &&
     (left.metadata ?? 0) === (right.metadata ?? 0) &&
     JSON.stringify(left.nbt ?? null) === JSON.stringify(right.nbt ?? null);
-  return botFixture(
-    { username: "StorageBot", position: { x: 0, y: 64, z: 0 } },
-    {
-      inventory: { count: (itemType: number) => carried[registry.items[itemType]!.name] ?? 0 },
-      blockAt: (cell: Vec3) =>
-        cell.y === 65 ? { name: "air", position: cell, shapes: [], boundingBox: "empty" } : block,
-      openContainer: async () => container.window,
-      clickWindow: async (slot: number) => {
-        const slotIndex = container.state.contents.findIndex((item) => item.slot === slot);
-        const slotItem = slotIndex === -1 ? null : container.state.contents[slotIndex]!;
-        if (!container.state.cursor) {
-          if (!slotItem) return;
-          container.state.contents.splice(slotIndex, 1);
-          container.state.cursor = { ...slotItem };
-          return;
-        }
+  bot.openContainer = async () => container.window;
+  bot.clickWindow = async (slot: number) => {
+    const slotIndex = state.contents.findIndex((item) => item.slot === slot);
+    const slotItem = slotIndex === -1 ? null : state.contents[slotIndex]!;
+    if (!state.cursor) {
+      if (!slotItem) return;
+      state.contents.splice(slotIndex, 1);
+      state.cursor = { ...slotItem };
+      return;
+    }
 
-        if (!slotItem) {
-          container.state.contents.push({ ...container.state.cursor, slot });
-          container.state.cursor = null;
-        } else if (sameItemKind(slotItem, container.state.cursor)) {
-          const stackSize = registry.itemsByName[slotItem.name]!.stackSize;
-          const moved = Math.min(stackSize - slotItem.count, container.state.cursor.count);
-          slotItem.count += moved;
-          container.state.cursor.count -= moved;
-          if (container.state.cursor.count === 0) container.state.cursor = null;
-        } else {
-          container.state.contents[slotIndex] = { ...container.state.cursor, slot };
-          container.state.cursor = { ...slotItem };
-        }
-        container.state.moves += 1;
-      },
-    },
-  );
+    if (!slotItem) {
+      state.contents.push({ ...state.cursor, slot });
+      state.cursor = null;
+    } else if (sameItemKind(slotItem, state.cursor)) {
+      const stackSize = bot.registry.itemsByName[slotItem.name]!.stackSize;
+      const moved = Math.min(stackSize - slotItem.count, state.cursor.count);
+      slotItem.count += moved;
+      state.cursor.count -= moved;
+      if (state.cursor.count === 0) state.cursor = null;
+    } else {
+      state.contents[slotIndex] = { ...state.cursor, slot };
+      state.cursor = { ...slotItem };
+    }
+    state.moves += 1;
+  };
+  return { harness, container };
 }
 
 const testDependencies = {
@@ -161,14 +159,17 @@ function scene(
   }: { block?: string; contents?: readonly TestStack[] | number; carried?: Readonly<Record<string, number>> } = {},
 ) {
   const data = temporaryBotData({ closeAfter: t });
-  const container = testWindow(contents);
-  const bot = testBot(block, container, carried);
+  const { harness, container } = testBot(block, contents, carried);
+  const { bot, inventory } = harness;
   const use = (
     request: Parameters<typeof useContainer>[2],
     options: Parameters<typeof useContainer>[3] = {},
     dependencies: UseContainerDependencies = testDependencies,
   ) => useContainer(bot, data, request, options, dependencies);
-  return { data, container, bot, use };
+  const carriedOf = (name: string) => inventory.count(bot.registry.itemsByName[name]!.id, null);
+  /** Change what the bot carries of `name` by `delta`, as the server redraws the slots (`setCarriedCount`). */
+  const addCarried = (name: string, delta: number) => setCarriedCount(inventory, bot.registry, bot.registry.itemsByName[name]!.id, carriedOf(name) + delta);
+  return { data, container, bot, use, carried: carriedOf, addCarried };
 }
 
 test("parses bulk transfers and item ordering into an exhaustive domain union", () => {
@@ -555,7 +556,6 @@ function containerAttempts(
  */
 function transferOnServer(
   scenery: ReturnType<typeof scene>,
-  carried: Record<string, number>,
   operation: "deposit" | "withdraw",
   owner: AbortController,
   stopping: { readonly takes: number } | null,
@@ -564,11 +564,11 @@ function transferOnServer(
   const original = scenery.container.window[operation].bind(scenery.container.window);
   scenery.container.window[operation] = (async (itemType: number, metadata: number | null, count: number) => {
     asked.push(count);
-    const item = registry.items[itemType]!.name;
+    const item = scenery.bot.registry.items[itemType]!.name;
     const stops = stopping !== null && asked.length === 1;
     const moving = stops ? Math.min(count, stopping.takes) : count;
     await original(itemType, metadata, moving);
-    carried[item] = (carried[item] ?? 0) + (operation === "withdraw" ? moving : -moving);
+    scenery.addCarried(item, operation === "withdraw" ? moving : -moving);
     if (stops) {
       owner.abort(new Error("hunger reflex"));
       throw new Error("window closed under the transfer");
@@ -580,17 +580,17 @@ function transferOnServer(
 const CHEST = { x: 1, y: 64, z: 1 } as const;
 
 test("a withdrawal of three stacks cut off after the first asks only for the other two", async (t) => {
-  const carried: Record<string, number> = { cobblestone: 0 };
+  const carried = { cobblestone: 0 };
   const scenery = scene(t, { contents: [0, 1, 2].map((slot) => ({ slot, name: "cobblestone", count: 64 })), carried });
   const owner = new AbortController();
-  const asked = transferOnServer(scenery, carried, "withdraw", owner, { takes: 64 });
+  const asked = transferOnServer(scenery, "withdraw", owner, { takes: 64 });
   const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "cobblestone", count: 192 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
   const result = await attempt(new AbortController().signal);
 
   assert.deepEqual(asked, [192, 128]);
-  assert.equal(carried.cobblestone, 192);
+  assert.equal(scenery.carried("cobblestone"), 192);
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(result.container.transfers[0]?.transferred, 192);
@@ -598,25 +598,25 @@ test("a withdrawal of three stacks cut off after the first asks only for the oth
 });
 
 test("a deposit cut off mid-transfer moves only the rest next time", async (t) => {
-  const carried: Record<string, number> = { cobblestone: 40 };
+  const carried = { cobblestone: 40 };
   const scenery = scene(t, { block: "barrel", contents: 0, carried });
   const owner = new AbortController();
-  const asked = transferOnServer(scenery, carried, "deposit", owner, { takes: 10 });
+  const asked = transferOnServer(scenery, "deposit", owner, { takes: 10 });
   const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "cobblestone", count: 30 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
   const result = await attempt(new AbortController().signal);
 
   assert.deepEqual(asked, [30, 20]);
-  assert.equal(carried.cobblestone, 10);
+  assert.equal(scenery.carried("cobblestone"), 10);
   assert.equal(result.status, "succeeded");
 });
 
 test("a chest another bot emptied between attempts gives what it had left, as a partial", async (t) => {
-  const carried: Record<string, number> = { cobblestone: 0 };
+  const carried = { cobblestone: 0 };
   const scenery = scene(t, { contents: [0, 1, 2].map((slot) => ({ slot, name: "cobblestone", count: 64 })), carried });
   const owner = new AbortController();
-  transferOnServer(scenery, carried, "withdraw", owner, { takes: 64 });
+  transferOnServer(scenery, "withdraw", owner, { takes: 64 });
   const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "cobblestone", count: 192 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
@@ -626,13 +626,13 @@ test("a chest another bot emptied between attempts gives what it had left, as a 
   assert.equal(result.status, "partial");
   if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(result.container.transfers[0]?.transferred, 64);
-  assert.equal(carried.cobblestone, 64);
+  assert.equal(scenery.carried("cobblestone"), 64);
 });
 
 test("a second call after a completed withdrawal returns the success without moving anything", async (t) => {
-  const carried: Record<string, number> = { cobblestone: 0 };
+  const carried = { cobblestone: 0 };
   const scenery = scene(t, { contents: [{ slot: 0, name: "cobblestone", count: 64 }], carried });
-  const asked = transferOnServer(scenery, carried, "withdraw", new AbortController(), null);
+  const asked = transferOnServer(scenery, "withdraw", new AbortController(), null);
   const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "cobblestone", count: 64 }] });
 
   const first = await attempt();
@@ -641,52 +641,52 @@ test("a second call after a completed withdrawal returns the success without mov
   assert.equal(first.status, "succeeded");
   assert.equal(second.status, "succeeded");
   assert.deepEqual(asked, [64]);
-  assert.equal(carried.cobblestone, 64);
+  assert.equal(scenery.carried("cobblestone"), 64);
   if (second.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(second.container.transfers[0]?.transferred, 64);
 });
 
 test("a deposit resumed after the hunger reflex ate some of the same food still puts the full count in the chest", async (t) => {
-  const carried: Record<string, number> = { bread: 20 };
+  const carried = { bread: 20 };
   const scenery = scene(t, { block: "barrel", contents: 0, carried });
   const owner = new AbortController();
-  transferOnServer(scenery, carried, "deposit", owner, { takes: 3 });
+  transferOnServer(scenery, "deposit", owner, { takes: 3 });
   const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "bread", count: 10 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  carried.bread -= 2; // the reflex ate two between the attempts: the inventory fell, the chest did not
+  scenery.addCarried("bread", -2); // the reflex ate two between the attempts: the inventory fell, the chest did not
   const result = await attempt(new AbortController().signal);
 
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "deposit") assert.fail("expected deposit evidence");
   assert.equal(result.container.transfers[0]?.transferred, 10);
   assert.equal(scenery.container.state.contents.find(({ name }) => name === "bread")?.count, 10);
-  assert.equal(carried.bread, 8);
+  assert.equal(scenery.carried("bread"), 8);
 });
 
 test("a withdrawal resumed after planks were picked up from the ground still takes the full count from the chest", async (t) => {
-  const carried: Record<string, number> = { oak_planks: 0 };
+  const carried = { oak_planks: 0 };
   const scenery = scene(t, { contents: [{ slot: 0, name: "oak_planks", count: 20 }], carried });
   const owner = new AbortController();
-  transferOnServer(scenery, carried, "withdraw", owner, { takes: 3 });
+  transferOnServer(scenery, "withdraw", owner, { takes: 3 });
   const attempt = containerAttempts(scenery, { operation: "withdraw", ...CHEST, items: [{ itemName: "oak_planks", count: 10 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  carried.oak_planks += 4; // picked up during the rescue: the inventory rose, the chest did not
+  scenery.addCarried("oak_planks", 4); // picked up during the rescue: the inventory rose, the chest did not
   const result = await attempt(new AbortController().signal);
 
   assert.equal(result.status, "succeeded");
   if (result.container?.operation !== "withdraw") assert.fail("expected withdraw evidence");
   assert.equal(result.container.transfers[0]?.transferred, 10);
   assert.equal(scenery.container.state.contents.find(({ name }) => name === "oak_planks")?.count, 10);
-  assert.equal(carried.oak_planks, 14);
+  assert.equal(scenery.carried("oak_planks"), 14);
 });
 
 test("a resumed deposit while another bot also puts items in the chest credits no more than the inventory lost", async (t) => {
-  const carried: Record<string, number> = { bread: 20 };
+  const carried = { bread: 20 };
   const scenery = scene(t, { block: "barrel", contents: 0, carried });
   const owner = new AbortController();
-  const asked = transferOnServer(scenery, carried, "deposit", owner, { takes: 3 });
+  const asked = transferOnServer(scenery, "deposit", owner, { takes: 3 });
   const attempt = containerAttempts(scenery, { operation: "deposit", ...CHEST, items: [{ itemName: "bread", count: 10 }] });
 
   await assert.rejects(attempt(owner.signal), /hunger reflex/);

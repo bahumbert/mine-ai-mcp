@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import minecraftData from "minecraft-data";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { formatToolChange, harvestTier, snapshotTools, toolChanges } from "./tool-tiers.js";
 
 const registry = minecraftData("1.21.4");
 
 test("uses registry harvest capability separately from mining speed", () => {
-  const bot = botFixture({ registry } as never);
+  const { bot } = createFakeBot();
   assert.equal(harvestTier(bot, "golden_pickaxe"), harvestTier(bot, "wooden_pickaxe"));
   assert.ok(harvestTier(bot, "stone_pickaxe") > harvestTier(bot, "golden_pickaxe"));
   assert.ok(registry.materials["mineable/pickaxe"]![registry.itemsByName.golden_pickaxe!.id]! >
@@ -15,14 +15,18 @@ test("uses registry harvest capability separately from mining speed", () => {
 });
 
 test("snapshots the best carried tier and exact remaining durability", () => {
-  const bot = botFixture({ registry } as never);
-  bot.inventory.items = () => [
-    { name: "golden_pickaxe", slot: 9, maxDurability: 32, durabilityUsed: 0 },
-    { name: "stone_pickaxe", slot: 10, maxDurability: 131, durabilityUsed: 126 },
-    { name: "iron_pickaxe", slot: 11, maxDurability: 250, durabilityUsed: 240 },
-    { name: "diamond_helmet", slot: 5, maxDurability: 363, durabilityUsed: 3 },
-    { name: "water_bucket", slot: 12 },
-  ] as never;
+  const { bot } = createFakeBot({
+    slots: {
+      9: { name: "golden_pickaxe" },
+      10: { name: "stone_pickaxe" },
+      11: { name: "iron_pickaxe" },
+      5: { name: "diamond_helmet" },
+      12: { name: "water_bucket" },
+    },
+  });
+  bot.inventory.slots[10]!.durabilityUsed = 126;
+  bot.inventory.slots[11]!.durabilityUsed = 240;
+  bot.inventory.slots[5]!.durabilityUsed = 3;
   const snapshot = snapshotTools(bot);
   assert.deepEqual(snapshot.tools.find((entry) => entry.class === "pickaxe"), {
     class: "pickaxe", tier: "iron", item: "iron_pickaxe", slot: 11, durabilityLeft: 10, maximumDurability: 250,

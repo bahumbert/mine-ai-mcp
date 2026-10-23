@@ -3,7 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { observeMineflayerBlock, type WorldView } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot, type FakeCell } from "../../test-support/fake-bot/index.js";
 import { isInFire } from "../perception/body.js";
 import {
   clearFireEscape,
@@ -16,8 +16,7 @@ import {
 } from "./fire-escape.js";
 
 test("a newly burning occupied cell has a dry escape through navigation's observed geometry", () => {
-  const cells: Record<string, string> = { "0,64,0": "soul_fire", "1,64,0": "fire", "-1,64,0": "cactus" };
-  const bot = botFixture({ blocks: cells, groundY: 63 });
+  const { bot, world: game } = createFakeBot({ cells: { "0,64,0": "soul_fire", "1,64,0": "fire", "-1,64,0": "cactus" } });
   const world = new MemoryWorld();
   const refresh = () => {
     for (let x = -5; x <= 5; x++)
@@ -33,7 +32,7 @@ test("a newly burning occupied cell has a dry escape through navigation's observ
   assert.ok(target, "the occupied source does not make every exit path unreachable");
   assert.equal(clearFireEscape(bot, world, new Vec3(2.5, 64, 0.5)), false, "do not cross a second fire cell");
   assert.equal(clearFireEscape(bot, world, new Vec3(-2.5, 64, 0.5)), false, "reuse navigation's non-fire hazard facts");
-  cells[`${Math.floor(target.x)},64,${Math.floor(target.z)}`] = "soul_fire";
+  game.setCell(new Vec3(Math.floor(target.x), 64, Math.floor(target.z)), "soul_fire");
   refresh();
   assert.equal(clearFireEscape(bot, world, target), false, "a destination igniting after selection invalidates it");
   bot.entity.position.set(0.75, 64, 2.5);
@@ -46,14 +45,14 @@ test("a newly burning occupied cell has a dry escape through navigation's observ
 });
 
 test("fire contact includes shoulder overlap but excludes mere boundary contact", () => {
-  const bot = botFixture({ blocks: { "1,65,0": "soul_fire" }, position: new Vec3(0.76, 64, 0.5) });
+  const { bot } = createFakeBot({ cells: { "1,65,0": "soul_fire" }, position: new Vec3(0.76, 64, 0.5) });
   assert.equal(isInFire(bot), true);
   bot.entity.position.x = 0.7;
   assert.equal(isInFire(bot), false);
 });
 
 test("a raised escape does not hide a new fire cell below its jump clearance", () => {
-  const bot = botFixture({ blocks: { "0,64,0": "soul_fire", "1,64,0": "fire", "2,64,0": "stone" }, groundY: 63 });
+  const { bot } = createFakeBot({ cells: { "0,64,0": "soul_fire", "1,64,0": "fire", "2,64,0": "stone" } });
   const world = new MemoryWorld();
   for (let x = -1; x <= 3; x++)
     for (let z = -1; z <= 1; z++)
@@ -65,8 +64,7 @@ test("a raised escape does not hide a new fire cell below its jump clearance", (
 });
 
 test("a lava escape retains its departure while the body is airborne above the pool", () => {
-  const cells: Record<string, string> = { "0,64,0": "lava", "1,64,0": "stone" };
-  const bot = botFixture({ blocks: cells, groundY: 63 });
+  const { bot, world: game } = createFakeBot({ cells: { "0,64,0": "lava", "1,64,0": "stone" } });
   Reflect.set(bot.entity, "isInLava", true);
   const world = new MemoryWorld();
   for (let x = -1; x <= 2; x++)
@@ -83,15 +81,15 @@ test("a lava escape retains its departure while the body is airborne above the p
   Reflect.set(bot.entity, "isInLava", false);
   assert.equal(clearFireEscape(bot, world, target, departure), true, "the admitted bank remains reachable mid-jump");
   for (const hazard of ["fire", "lava"]) {
-    cells["1,65,0"] = hazard;
+    game.setCell(new Vec3(1, 65, 0), hazard);
     world.load(new Vec3(1, 65, 0), observeMineflayerBlock(bot.blockAt(new Vec3(1, 65, 0))!));
     assert.equal(clearFireEscape(bot, world, target, departure), false, `${hazard} invalidates the destination`);
   }
 });
 
 /** The lava-escape-to-water scene on the fixture's floor: stone up to y 64, so the body stands at y 65 and a pit cell is a hole in it. */
-function sceneAt(cells: Record<string, string>, position: Vec3) {
-  const bot = botFixture({ blocks: cells, groundY: 64, position });
+function sceneAt(cells: Record<string, FakeCell>, position: Vec3) {
+  const { bot } = createFakeBot({ cells, groundY: 64, position });
   const world = new MemoryWorld();
   for (let x = -6; x <= 6; x++)
     for (let z = -6; z <= 6; z++)
@@ -102,6 +100,8 @@ function sceneAt(cells: Record<string, string>, position: Vec3) {
   return { bot, world };
 }
 
+/** A flowing layer of lava: it can spread one cell further. */
+const LAVA_LEVEL_2: FakeCell = { name: "lava", properties: { level: 2 } };
 const PIT_AND_WATER = { "0,64,0": "lava", "2,64,0": "water" };
 const IN_THE_PIT = new Vec3(0.5, 64, 0.5);
 const ON_THE_WEST_BANK = new Vec3(-0.5, 65, 0.5);
@@ -185,7 +185,7 @@ test("a body in water routes to its own cell", () => {
 });
 
 test("the route search is bounded", () => {
-  const counted = (cells: Record<string, string>, position: Vec3) => {
+  const counted = (cells: Record<string, FakeCell>, position: Vec3) => {
     const scene = sceneAt(cells, position);
     let reads = 0;
     const counting: WorldView = {
@@ -244,8 +244,8 @@ test("a lava bank of carpet or a snow layer, which navigation walks over, is adm
 });
 
 /** Stone up to y 64 and a wall of stone two high around the pit at (0,64,0), open only at `gap` (its bank cell). */
-function walledPit(extra: Record<string, string>, gap = "-1,65,0") {
-  const cells: Record<string, string> = { "0,64,0": "lava" };
+function walledPit(extra: Record<string, FakeCell>, gap = "-1,65,0") {
+  const cells: Record<string, FakeCell> = { "0,64,0": "lava" };
   for (let x = -3; x <= 3; x++)
     for (let z = -3; z <= 3; z++)
       for (const y of [65, 66]) {
@@ -262,7 +262,7 @@ test("the body's own cell is never a dry escape cell", () => {
 });
 
 test("a cell lava can spread into is no escape cell", () => {
-  const { bot, world } = sceneAt({ "1,65,0": "lava[level=2]" }, new Vec3(-1.5, 65, 0.5));
+  const { bot, world } = sceneAt({ "1,65,0": LAVA_LEVEL_2 }, new Vec3(-1.5, 65, 0.5));
   const dry = escapeCells(bot, world).dry.map(cellOf);
   assert.ok(!dry.includes("0,65,0"), "beside level 2 lava");
   assert.ok(!dry.includes("1,65,1"), "beside level 2 lava");
@@ -270,7 +270,7 @@ test("a cell lava can spread into is no escape cell", () => {
 });
 
 test("a body in lava whose only bank is within the lava's reach takes it, as the last resort", () => {
-  const { bot, world } = sceneAt(walledPit({ "-1,65,1": "lava[level=2]" }), IN_THE_PIT);
+  const { bot, world } = sceneAt(walledPit({ "-1,65,1": LAVA_LEVEL_2 }), IN_THE_PIT);
   Reflect.set(bot.entity, "isInLava", true);
   assert.deepEqual(
     fireEscapeRoute(bot, world, "contact")?.map(cellOf),
@@ -280,6 +280,6 @@ test("a body in lava whose only bank is within the lava's reach takes it, as the
 });
 
 test("a body on dry ground does not shuffle between cells lava can reach", () => {
-  const { bot, world } = sceneAt(walledPit({ "-1,65,1": "lava[level=2]" }), new Vec3(-0.5, 65, 0.5));
+  const { bot, world } = sceneAt(walledPit({ "-1,65,1": LAVA_LEVEL_2 }), new Vec3(-0.5, 65, 0.5));
   assert.equal(fireEscapeRoute(bot, world, "contact"), null, "out of the lava: no safe cell, no walk to another unsafe one");
 });

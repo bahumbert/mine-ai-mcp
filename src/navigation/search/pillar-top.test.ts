@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { WELL_FED, observation, planningStart } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
@@ -50,7 +50,7 @@ function lakeWorld(liquid: keyof typeof LIQUID): MemoryWorld {
 }
 
 function route(scaffolds: number, digDown: boolean, world: MemoryWorld = pillarWorld(), goalCell = GOAL) {
-  const bot = botFixture({ position: new Vec3(0.5, TOP + 1, 0.5), items: scaffolds ? [{ name: "dirt", count: scaffolds }] : [] });
+  const { bot } = createFakeBot({ position: new Vec3(0.5, TOP + 1, 0.5), carried: scaffolds ? { dirt: scaffolds } : {} });
   const start = { x: 0, y: TOP + 1, z: 0 };
   const goal = exactBlockGoal(goalCell).resolve(observation(start.x, start.y, start.z));
   if (goal.kind !== "active") throw new Error(goal.observation);

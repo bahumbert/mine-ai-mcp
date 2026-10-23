@@ -5,12 +5,11 @@ import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
 import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY, fallbackScaffoldItem } from "./movement-policy.js";
 import { Vec3 } from "vec3";
+import type { Item } from "prismarine-item";
 import { blockClass, observeMineflayerBlock } from "./world.js";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture, type FakeBot, type FakeStack } from "../../test-support/bot.js";
+import { createFakeBot, type FakeBot } from "../../test-support/fake-bot/index.js";
 import { flatWorld } from "../../test-support/navigation.js";
 import { siteBreakRequest } from "../../actions/build-structure/build-structure.js";
 import { parseBuildStructureRequest } from "../../actions/build-structure/contract.js";
@@ -41,15 +40,9 @@ function loadedBlock(stateId: number): LoadedBlock {
   });
 }
 
-/** A bot carrying `items`, whose every world block digs in half a second, as `name` does. */
-function diggingBot(name: string, items: FakeStack[] = []): FakeBot {
-  const bot = botFixture({ items });
-  const block = bot.registry.blocksByName[name]!;
-  bot.blockAt = () =>
-    ({ type: block.id, digTime: () => 500, canHarvest: () => true }) as unknown as NonNullable<
-      ReturnType<Bot["blockAt"]>
-    >;
-  return bot;
+/** A bot carrying `carried` (item name to count), on the runtime's version. */
+function botCarrying(carried: Readonly<Record<string, number>> = {}): FakeBot {
+  return createFakeBot({ carried }).bot;
 }
 
 /** One block as Prismarine reports it at its default state. */
@@ -58,9 +51,9 @@ function observed(bot: FakeBot, name: string) {
 }
 
 test("builds an immutable Mineflayer-backed movement policy without a legacy Pathfinder", () => {
-  const registry = minecraftData("1.21.4");
-  const dirt = { type: registry.itemsByName.dirt.id, name: "dirt", count: 3 };
-  const bot = diggingBot("wheat", [dirt]);
+  const bot = botCarrying({ dirt: 3 });
+  const { registry } = bot;
+  const dirt = { type: registry.itemsByName.dirt!.id };
 
   const policy = createMovements(bot);
 
@@ -73,57 +66,53 @@ test("builds an immutable Mineflayer-backed movement policy without a legacy Pat
   assert.equal(policy.placementPenalty, 20);
   assert.equal(policy.scaffold?.itemType, dirt.type);
   assert.deepEqual(
-    policy.evaluateBreak(loadedBlock(registry.blocksByName.wheat.defaultState), { x: 1, y: 64, z: 1 }, world).decision,
+    policy.evaluateBreak(loadedBlock(registry.blocksByName.wheat!.defaultState!), { x: 1, y: 64, z: 1 }, world).decision,
     { kind: "prohibited", reason: "movement policy prohibits breaking this block" },
   );
 });
 
 test("a caller's option changes only what it names", () => {
-  assert.equal(createMovements(botFixture(), { allowSprinting: false }).allowSprinting, false);
-  const priced = createMovements(botFixture(), { placementPenalty: 80 });
+  assert.equal(createMovements(botCarrying(), { allowSprinting: false }).allowSprinting, false);
+  const priced = createMovements(botCarrying(), { placementPenalty: 80 });
   assert.equal(priced.placementPenalty, 80);
   assert.equal(priced.allowPlacing, true, "pricing scaffold use does not disable necessary placement");
-  const walking = createMovements(botFixture(), { allowDigging: false });
+  const walking = createMovements(botCarrying(), { allowDigging: false });
   assert.equal(walking.allowDigging, false);
   assert.equal(walking.allowDoors, true, "forbidding excavation does not disable door interaction");
 });
 
 test("the scaffold is whatever the inventory holds when it is read, and names the state each face gives", () => {
-  const registry = minecraftData("1.21.4");
-  const netherrack = { type: registry.itemsByName.netherrack.id, name: "netherrack", count: 32 };
-  const nether = botFixture({ items: [netherrack] });
+  const { registry } = botCarrying();
+  const netherrack = { type: registry.itemsByName.netherrack!.id, name: "netherrack", count: 32 };
+  const nether = botCarrying({ netherrack: 32 });
   assert.deepEqual(createMovements(nether).scaffold, {
     itemType: netherrack.type,
-    stateId: registry.blocksByName.netherrack.defaultState,
+    stateId: registry.blocksByName.netherrack!.defaultState,
   });
   assert.equal(createMovements(nether, { protectedScaffoldNames: ["netherrack"] }).scaffold, null);
   assert.equal(createMovements(nether, { scaffolding: false }).scaffold, null);
 
   // An axis block such as basalt is a different state per placement face.
-  const basalt = registry.blocksByName.basalt;
-  const axis = createMovements(
-    botFixture({ items: [{ type: registry.itemsByName.basalt.id, name: "basalt", count: 9 }] }),
-  );
+  const basalt = registry.blocksByName.basalt!;
+  const axis = createMovements(botCarrying({ basalt: 9 }));
   assert.deepEqual(axis.scaffold, {
-    itemType: registry.itemsByName.basalt.id,
+    itemType: registry.itemsByName.basalt!.id,
     stateId: basalt.defaultState,
     stateIdByAxis: { x: basalt.minStateId, y: basalt.defaultState, z: basalt.maxStateId },
   });
-  const cobblestone = { type: registry.itemsByName.cobblestone.id, name: "cobblestone", count: 16 };
-  assert.equal("stateIdByAxis" in (createMovements(botFixture({ items: [cobblestone] })).scaffold ?? {}), false);
+  const cobblestone = { type: registry.itemsByName.cobblestone!.id, name: "cobblestone", count: 16 };
+  assert.equal("stateIdByAxis" in (createMovements(botCarrying({ cobblestone: 16 })).scaffold ?? {}), false);
 
-  const carried = [
-    { ...netherrack, count: 35 },
-    cobblestone,
-    { type: registry.itemsByName.basalt.id, name: "basalt", count: 3 },
-  ];
-  const policy = createMovements(botFixture({ items: carried }));
+  // Carried fill the hotbar in this order: netherrack in slot 36, cobblestone in 37, basalt in 38.
+  const { bot, inventory } = createFakeBot({ carried: { netherrack: 35, cobblestone: 16, basalt: 3 } });
+  const emptySlot = (slot: number) => (inventory.updateSlot as (slot: number, item: Item | null) => void).call(inventory, slot, null);
+  const policy = createMovements(bot);
   assert.equal(policy.scaffold?.itemType, cobblestone.type, "policy order wins over the largest stack");
-  carried.splice(1, 1);
+  emptySlot(37);
   assert.equal(policy.scaffold?.itemType, netherrack.type);
-  carried.shift();
-  assert.equal(policy.scaffold?.itemType, registry.itemsByName.basalt.id);
-  carried.length = 0;
+  emptySlot(36);
+  assert.equal(policy.scaffold?.itemType, registry.itemsByName.basalt!.id);
+  emptySlot(38);
   assert.equal(policy.scaffold, null);
   assert.equal(policy.allowPlacing, true);
 });
@@ -134,9 +123,9 @@ test("prices a walking route's terrain damage well above a tie-break", () => {
   // to walk somewhere took that as licence to open a hole in a house wall
   // rather than use the door beside it, so the walking default is the price of
   // several blocks of travel instead.
-  const bot = diggingBot("stone");
+  const bot = botCarrying();
   const breaking = createMovements(bot).evaluateBreak(
-    loadedBlock(bot.registry.blocksByName.stone.defaultState),
+    loadedBlock(bot.registry.blocksByName.stone!.defaultState!),
     { x: 1, y: 64, z: 1 },
     world,
   ).decision;
@@ -154,7 +143,7 @@ test("prices a walking route's terrain damage well above a tie-break", () => {
  * is what makes obsidian beside lava obtainable at all.
  */
 test("a break is refused exactly when it would open a path into liquid", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const policy = createMovements(bot);
   const stone = loadedBlock(bot.registry.blocksByName.stone.defaultState);
   const water = bot.registry.blocksByName.water;
@@ -212,7 +201,7 @@ test("a break is refused exactly when it would open a path into liquid", () => {
 });
 
 test("uses the production world policy to reject lava steps", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const lava = loadedBlock(bot.registry.blocksByName.lava.defaultState);
   const observation = { ...lava, traits: { ...lava.traits, liquid: "lava" as const } };
   const lavaWorld = { blockAt: () => observation, subscribe: () => () => {}, revision: 0 };
@@ -221,7 +210,7 @@ test("uses the production world policy to reject lava steps", () => {
 });
 
 test("routes preserve what a player built or uses, while terrain stays diggable", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const policy = createMovements(bot);
   const position = { x: 0, y: 64, z: 0 };
   for (const name of ["chest", "crafting_table", "barrel", "furnace", "shulker_box"]) {
@@ -241,7 +230,7 @@ test("routes preserve what a player built or uses, while terrain stays diggable"
 });
 
 test("a build clears a workstation standing in its own site, and no other one (live 2026-10-14: Oskar's house, 4 times)", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const request = parseBuildStructureRequest({ blocks: [{ x: 0, y: 64, z: 0, block_name: "cobblestone" }], remove_wrong_blocks: true });
   const policy = createMovements(bot, { isRequestedBreak: siteBreakRequest(request) });
   const table = observed(bot, "crafting_table");
@@ -256,11 +245,9 @@ test("a build clears a workstation standing in its own site, and no other one (l
 });
 
 test("scaffold admission follows other mobs moving into and out of a placement cell", () => {
-  const bot = botFixture();
   const target = { x: 1, y: 64, z: 0 };
-  const mob = Object.assign({}, bot.entity, { id: 77, name: "enderman", type: "mob", isValid: true,
-    width: 0.6, height: 2.9, position: bot.entity.position.clone().set(1.1, 64, 0.5) });
-  bot.entities[mob.id] = mob;
+  const { bot } = createFakeBot({ entities: { 77: { name: "enderman", position: new Vec3(1.1, 64, 0.5) } } });
+  const mob = bot.entities[77]!;
   const policy = createMovements(bot);
   const occupied = policy.decidePlace(target.x, target.y, target.z, world);
   assert.equal(occupied.kind, "prohibited");
@@ -272,7 +259,7 @@ test("scaffold admission follows other mobs moving into and out of a placement c
 });
 
 test("a protected region refuses route digging and scaffolding in it, but not walking, other dimensions or its owner's build", () => {
-  const bot = botFixture({ username: "Ayla" });
+  const bot = createFakeBot({ username: "Ayla" }).bot;
   let regions: readonly ProtectedRegion[] = [];
   setProtectedRegionsProvider(bot, () => regions);
   const policy = createMovements(bot);
@@ -298,7 +285,7 @@ test("a protected region refuses route digging and scaffolding in it, but not wa
 });
 
 test("a sealed pit's guard cells refuse route digging but not placing or walking", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const policy = createMovements(bot);
   const stone = observed(bot, "stone");
   const plug = { x: 10, y: 64, z: 10 };
@@ -315,7 +302,7 @@ test("a sealed pit's guard cells refuse route digging but not placing or walking
 });
 
 test("a cell outside a sealed pit's guard volume is priced as before", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const policy = createMovements(bot);
   const stone = observed(bot, "stone");
   const before = policy.evaluateBreak(stone, { x: 12, y: 62, z: 10 }, world).decision;
@@ -325,7 +312,7 @@ test("a cell outside a sealed pit's guard volume is priced as before", () => {
 });
 
 test("routes never set off across deep open water, but a bot already out on it swims back", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const water = loadedBlock(bot.registry.blocksByName.water.defaultState);
   const observation = { ...water, traits: { ...water.traits, empty: true, liquid: "water" as const, liquidSource: true } };
   const air = loadedBlock(bot.registry.blocksByName.air.defaultState);
@@ -346,7 +333,7 @@ type SeaCell = "stone" | "water" | "air";
 
 /** The step into deep open water at 10 61 0, from a body at `standing`, over a stone floor at y 58 with `fill` above it. */
 function stepIntoSea(standing: { x: number; y: number; z: number }, fill: (x: number, y: number, z: number) => SeaCell) {
-  const bot = botFixture();
+  const bot = botCarrying();
   bot.entity.position = new Vec3(standing.x + 0.5, standing.y, standing.z + 0.5);
   const sea = new MemoryWorld();
   for (let x = -3; x <= 24; x++) for (let z = -8; z <= 8; z++) for (let y = 58; y <= 64; y++) {
@@ -378,7 +365,7 @@ test("a bot swimming in an open channel is refused deep open water (a river mout
 });
 
 /** A bot carrying `items`, on the version whose block data the fallback reads. */
-const versioned = (items: FakeStack[]) => botFixture({ items }, { version: "1.21.4" });
+const versioned = (items: Array<{ name: string; count: number }>) => botCarrying(Object.fromEntries(items.map(({ name, count }) => [name, count])));
 
 test("the scaffold fallback spends the plentiful common block it carries, never a valuable, a workstation or a falling block", () => {
   const stack = (name: string, count: number) => ({ name, count });
@@ -403,12 +390,11 @@ test("only a bot asked for the fallback may scaffold with a block outside the su
 });
 
 test("a cobweb is a block to break at the best carried tool's time, no longer a wall", () => {
-  const registry = minecraftData("1.21.4");
-  const web = observed(botFixture(), "cobweb");
+  const web = observed(botCarrying(), "cobweb");
   assert.equal(web.traits.entangling, true);
   assert.equal(web.geometry.passable, false);
   const ticksWith = (...items: string[]) => {
-    const bot = botFixture({ items: items.map((name) => ({ name, count: 1, type: registry.itemsByName[name]!.id })) });
+    const bot = botCarrying(Object.fromEntries(items.map((name) => [name, 1])));
     const policy = createMovements(bot);
     const verdict = policy.evaluateBreak(web, { x: 1, y: 64, z: 0 }, world);
     assert.equal(verdict.decision.kind, "allowed", "webs are not terrain to preserve");
@@ -422,7 +408,7 @@ test("a cobweb is a block to break at the best carried tool's time, no longer a 
 });
 
 test("an escape may open into flowing water only: a source or lava beside the break keeps the refusal", () => {
-  const bot = botFixture();
+  const bot = botCarrying();
   const policy = createMovements(bot);
   const water = bot.registry.blocksByName.water;
   const lava = bot.registry.blocksByName.lava;

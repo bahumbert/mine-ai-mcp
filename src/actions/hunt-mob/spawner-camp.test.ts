@@ -1,32 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { parseHuntMobRequest } from "./contract.js";
 import { SpawnerCamp } from "./spawner-camp.js";
 
+const SPAWNER = new Vec3(0, 64, 0);
+
+/** The camp reads `Date.now` and waits on timers: the clock is a mocked one a test installs when it waits. */
 function fixture(waitMs = 15) {
-  let name = "spawner";
-  const bot = botFixture(
-    { position: new Vec3(20.5, 64, 0.5) },
-    {
-      blockAt: (position: Vec3) => ({ name, position }),
-    },
-  );
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot, world } = createFakeBot({ position: new Vec3(20.5, 64, 0.5), cells: { "0,64,0": "spawner" }, clock });
   let routes = 0;
-  const camp = new SpawnerCamp(bot, new Vec3(0, 64, 0), waitMs, async (position) => {
+  const camp = new SpawnerCamp(bot, SPAWNER, waitMs, async (position) => {
     routes++;
     bot.entity.position = position.offset(1.5, 0, 0.5);
     return { status: "completed", elapsedMs: 1 };
   });
   return {
     bot,
+    clock,
     camp,
     routes: () => routes,
-    destroy: () => {
-      name = "air";
-      bot.emit("blockUpdate", null, bot.blockAt(new Vec3(0, 64, 0))!);
-    },
+    destroy: () => world.setCell(SPAWNER, "air"),
   };
 }
 
@@ -40,19 +36,19 @@ test("normal hunting defaults to no wait; camping requires explicit finite patie
 
 test("an empty camp returns observation_exhausted after one return and a finite wait", async () => {
   const f = fixture();
-  const keepAlive = setInterval(() => f.bot.emit("physicsTick"), 2);
-  try {
-    const result = await f.camp.waitForQuarry(() => false, new AbortController().signal);
-    assert.equal(result?.termination, "observation_exhausted");
-    assert.equal(f.routes(), 1);
-    assert.ok(f.camp.snapshot.observationUntil);
-  } finally {
-    clearInterval(keepAlive);
-  }
+  using _timers = f.clock.install();
+  const waiting = f.camp.waitForQuarry(() => false, new AbortController().signal);
+  // The away wait (15 ms), the return, then the wait at the spawner (15 ms).
+  await f.clock.advance(1_000);
+  const result = await waiting;
+  assert.equal(result?.termination, "observation_exhausted");
+  assert.equal(f.routes(), 1);
+  assert.ok(f.camp.snapshot.observationUntil);
 });
 
 test("new quarry resumes hunting without resetting an interrupted camp deadline", async () => {
   const f = fixture(30);
+  using _timers = f.clock.install();
   f.bot.entity.position = new Vec3(1.5, 64, 0.5);
   const stop = new AbortController();
   const pending = f.camp.waitForQuarry(() => false, stop.signal);
@@ -72,6 +68,7 @@ test("new quarry resumes hunting without resetting an interrupted camp deadline"
 
 test("a destroyed camp wakes its wait and reports source loss", async () => {
   const f = fixture();
+  using _timers = f.clock.install();
   f.bot.entity.position = new Vec3(1.5, 64, 0.5);
   const pending = f.camp.waitForQuarry(() => false, new AbortController().signal);
   f.destroy();
@@ -80,19 +77,17 @@ test("a destroyed camp wakes its wait and reports source loss", async () => {
 
 test("failed navigation returns its observation instead of waiting again", async () => {
   const f = fixture();
-  const camp = new SpawnerCamp(f.bot, new Vec3(0, 64, 0), 1, async () => ({
+  using _timers = f.clock.install();
+  const camp = new SpawnerCamp(f.bot, SPAWNER, 1, async () => ({
     status: "stopped",
     elapsedMs: 1,
     reason: "No safe route",
   }));
-  const keepAlive = setInterval(() => f.bot.emit("physicsTick"), 2);
-  try {
-    const result = await camp.waitForQuarry(() => false, new AbortController().signal);
-    assert.equal(result?.termination, "spawner_unreachable");
-    assert.match(result?.reason ?? "", /No safe route/);
-  } finally {
-    clearInterval(keepAlive);
-  }
+  const waiting = camp.waitForQuarry(() => false, new AbortController().signal);
+  await f.clock.advance(1_000);
+  const result = await waiting;
+  assert.equal(result?.termination, "spawner_unreachable");
+  assert.match(result?.reason ?? "", /No safe route/);
 });
 
 test("missing spawner refuses camping without a route or wait", async () => {

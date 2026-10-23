@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { createPrepareDragonPerchAction } from "./index.js";
 
 test("preparation delegates without attacking and publishes current staging readiness", async (t) => {
-  const target = { id: 17, isValid: true, metadata: [], position: new Vec3(0, 70, 0) };
-  const bot = botFixture({ position: new Vec3(0.5, 61, -2.5), dimension: "the_end", entities: { 17: target } });
+  const { bot } = createFakeBot({
+    position: new Vec3(0.5, 61, -2.5),
+    dimension: "the_end",
+    entities: { 17: { name: "ender_dragon", position: new Vec3(0, 70, 0), metadata: [] } },
+  });
   let requestKind: string | null = null;
   const combat = {
     runEnd: async (request: { kind: string; observation: { preparedPosition: Vec3 | null; stage: string } }) => {

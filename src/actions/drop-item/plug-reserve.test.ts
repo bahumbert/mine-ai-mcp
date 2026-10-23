@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { planPlugKeep } from "./plug-reserve.js";
 
 /** A bot on the version whose block tags the common-stock fallback reads, carrying `items`. */
 const carrying = (...items: Array<[string, number]>) =>
-  botFixture({ items: items.map(([name, count]) => ({ name, count })) }, { version: "1.21.4" });
+  createFakeBot({ carried: Object.fromEntries(items) }).bot;
 
 const tossing = (...tosses: Array<[string, number]>) => new Map(tosses);
 

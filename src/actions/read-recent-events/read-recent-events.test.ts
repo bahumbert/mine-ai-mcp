@@ -10,7 +10,7 @@ import {
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
 import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { botEventInputSchema } from "../../bot-data/event-log.js";
 import { formatReadRecentEventsResult, parseReadRecentEventsRequest, readRecentBotEvents } from "./index.js";
 
@@ -37,7 +37,7 @@ test("old combat policies and new survival policies share a readable advancing e
     historicalEvent(data, event);
     assert.equal(botEventInputSchema.safeParse(event).success, false, "old events remain read-only");
   }
-  const policy = new SurvivalPolicyState(botFixture()).snapshot();
+  const policy = new SurvivalPolicyState(createFakeBot().bot).snapshot();
   historicalEvent(data, { type: "survival_policy", observedAt: "2026-09-12T00:00:00.000Z", summary: "Current policy", payload: policy });
   const first = readRecentBotEvents(data, "MineAI", { limit: 2 });
   assert.deepEqual(first.events.map((event) => event.type), ["combat_policy", "combat_policy"]);

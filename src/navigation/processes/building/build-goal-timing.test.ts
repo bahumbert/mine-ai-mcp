@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture, registry } from "../../../test-support/bot.js";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { WELL_FED, observation, planningStart } from "../../../test-support/navigation.js";
 import { DIG_REACH } from "../../movements/excavation.js";
 import { blockClass, observeMineflayerBlock } from "../../mineflayer/world.js";
@@ -35,7 +35,8 @@ function fixture() {
   for (let x = AREA.x0; x <= AREA.x1; x++)
     for (let z = AREA.z0; z <= AREA.z1; z++)
       for (let y = 58; y <= 66; y++) names[`${x},${y},${z}`] = cellName(x, y, z);
-  const bot = botFixture({ position: new Vec3(FEET.x + 0.5, FEET.y, FEET.z + 0.5), blocks: names });
+  const { bot } = createFakeBot({ position: new Vec3(FEET.x + 0.5, FEET.y, FEET.z + 0.5), cells: names });
+  const { registry } = bot;
   const world = new MemoryWorld();
   const Block = blockClass(bot);
   for (const [key, name] of Object.entries(names)) {

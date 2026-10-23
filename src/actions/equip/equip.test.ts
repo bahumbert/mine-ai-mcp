@@ -1,28 +1,49 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture, EQUIPMENT_SLOTS } from "../../test-support/bot.js";
+import type { Item } from "prismarine-item";
+import { type FakeBot, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { beginEquip, formatEquipResult, equip } from "./equip.js";
 import { inferEquipmentDestination, parseEquipRequest } from "./contract.js";
 
-/** A bot whose equip moves the named item into the destination slot, or throws for one named item. */
+const HEAD = 5;
+const OFF_HAND = 45;
+
+/** Put `item` in a window slot, or empty it, as the server's set_slot does. */
+function setSlot(bot: FakeBot, slot: number, item: Item | null): void {
+  (bot.inventory.updateSlot as (slot: number, item: Item | null) => void).call(bot.inventory, slot, item);
+}
+
+/** The name of what `bot.equip` is handed: an item, or an item type id. */
+function equippedName(bot: FakeBot, item: Item | number): string | undefined {
+  return typeof item === "number" ? bot.registry.items[item]?.name : item.name;
+}
+
+/** A shield with its durability used, in the stack the server sends. */
+function shieldWorn(bot: FakeBot, durabilityUsed: number): Item {
+  const shield = itemOf(bot.registry, "shield");
+  shield.durabilityUsed = durabilityUsed;
+  return shield;
+}
+
+/**
+ * A bot carrying `carried` in its main inventory, hand empty. Its `clickWindow` answers a number-key click (mode 2) as the
+ * server does, swapping the clicked slot with hotbar slot `button`; its equip throws for the one item named in `rejects`.
+ */
 function equipBot(carried: readonly string[], rejects: string | null = null) {
-  const slots: Record<number, { name: string } | null> = {};
-  const bot = botFixture(
-    { items: carried.map((name) => ({ name, count: 1 })), slots },
-    {
-      quickBarSlot: 0,
-      clickWindow: async (source: number, button: number, mode: number) => {
-        assert.equal(mode, 2);
-        const hotbar = 36 + button;
-        [slots[source], slots[hotbar]] = [slots[hotbar] ?? null, slots[source] ?? null];
-      },
-      equip: async (item: { name: string }, destination: string) => {
-        if (item.name === rejects) throw new Error("server refused");
-        slots[EQUIPMENT_SLOTS[destination]!] = item;
-        if (destination === "hand") bot.heldItem = item as never;
-      },
-    },
-  );
+  const { bot } = createFakeBot({ slots: Object.fromEntries(carried.map((name, index) => [9 + index, { name }])) });
+  // Stopgap until the master adds the server's answer to a window click: the fake has no `clickWindow` (Mineflayer `inventory.js` `clickWindow`).
+  bot.clickWindow = async (source, button, mode) => {
+    assert.equal(mode, 2);
+    const hotbar = 36 + button;
+    const [moving, other] = [bot.inventory.slots[source] ?? null, bot.inventory.slots[hotbar] ?? null];
+    setSlot(bot, source, other);
+    setSlot(bot, hotbar, moving);
+  };
+  const equipOwn = bot.equip.bind(bot);
+  bot.equip = async (item, destination) => {
+    if (equippedName(bot, item) === rejects) throw new Error("server refused");
+    await equipOwn(item, destination);
+  };
   return bot;
 }
 
@@ -98,7 +119,7 @@ test("already equipped armor and shield succeed when absent from carried invento
   const bot = equipBot(["iron_helmet", "shield"]);
   const request = parseEquipRequest({ items: [{ item_name: "iron_helmet" }, { item_name: "shield" }] });
   await equip(bot, request, {});
-  bot.inventory.items = () => [];
+  assert.deepEqual(bot.inventory.items(), [], "worn, the armor and the shield are out of the inventory's carried slots");
   bot.equip = async () => {
     throw new Error("already equipped items must not move");
   };
@@ -110,20 +131,20 @@ test("already equipped armor and shield succeed when absent from carried invento
 
 test("an explicit source slot replaces a worn shield with the selected copy", async () => {
   const bot = equipBot(["shield"]);
-  const worn = { name: "shield", durabilityUsed: 319 };
-  const fresh = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[45] = worn as never;
-  bot.inventory.slots[24] = fresh as never;
+  const worn = shieldWorn(bot, 319);
+  const fresh = shieldWorn(bot, 0);
+  setSlot(bot, OFF_HAND, worn);
+  setSlot(bot, 24, fresh);
   const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "succeeded");
-  assert.equal(bot.inventory.slots[45], fresh);
+  assert.equal(bot.inventory.slots[OFF_HAND], fresh);
   assert.equal(result.equip.equipped[0]!.sourceSlot, 24);
   assert.equal(result.equip.equipped[0]!.durabilityUsed, 0);
 });
 
 test("a stale source slot refuses rather than choosing another matching shield", async () => {
   const bot = equipBot(["shield"]);
-  bot.inventory.slots[24] = { name: "torch" } as never;
+  setSlot(bot, 24, itemOf(bot.registry, "torch"));
   const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "failed");
   assert.match(result.equip.equipped[0]!.error!, /EQUIP_SOURCE_MISMATCH/);
@@ -132,8 +153,8 @@ test("a stale source slot refuses rather than choosing another matching shield",
 
 test("a matching name alone cannot confirm an explicitly selected item's equip", async () => {
   const bot = equipBot(["shield"]);
-  bot.inventory.slots[45] = { name: "shield", durabilityUsed: 319 } as never;
-  bot.inventory.slots[24] = { name: "shield", durabilityUsed: 0 } as never;
+  setSlot(bot, OFF_HAND, shieldWorn(bot, 319));
+  setSlot(bot, 24, shieldWorn(bot, 0));
   bot.clickWindow = async () => {};
   const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "failed");
@@ -142,20 +163,21 @@ test("a matching name alone cannot confirm an explicitly selected item's equip",
 });
 
 /** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
-function equipAttempts(bot: ReturnType<typeof equipBot>, items: readonly object[]) {
+function equipAttempts(bot: FakeBot, items: readonly object[]) {
   const run = beginEquip(bot, parseEquipRequest({ items }), () => {});
   return (signal?: AbortSignal) => run({ signal });
 }
 
 /** Aborts the request once the named item is equipped (a reflex took the body); returns the names equipped so far. */
-function abortAfterEquipping(bot: ReturnType<typeof equipBot>, owner: AbortController, itemName: string): string[] {
+function abortAfterEquipping(bot: FakeBot, owner: AbortController, itemName: string): string[] {
   const equips: string[] = [];
   const equipSlot = bot.equip.bind(bot);
-  bot.equip = (async (item: { name: string }, destination: string) => {
-    equips.push(item.name);
-    await equipSlot(item as never, destination as never);
-    if (item.name === itemName) owner.abort(new Error("hunger reflex"));
-  }) as typeof bot.equip;
+  bot.equip = async (item, destination) => {
+    const name = equippedName(bot, item);
+    equips.push(name!);
+    await equipSlot(item, destination);
+    if (name === itemName) owner.abort(new Error("hunger reflex"));
+  };
   return equips;
 }
 
@@ -174,11 +196,11 @@ test("an equip aborted after the helmet resumes with the rest and equips the hel
 });
 
 test("a source-slot swap finished before the abort is kept as done and not swapped back", async () => {
-  const bot = equipBot(["shield"]);
-  const worn = { name: "shield", durabilityUsed: 319 };
-  const fresh = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[45] = worn as never;
-  bot.inventory.slots[24] = fresh as never;
+  const bot = equipBot(["iron_sword"]);
+  const worn = shieldWorn(bot, 319);
+  const fresh = shieldWorn(bot, 0);
+  setSlot(bot, OFF_HAND, worn);
+  setSlot(bot, 24, fresh);
   const owner = new AbortController();
   const click = bot.clickWindow.bind(bot);
   let clicks = 0;
@@ -188,21 +210,20 @@ test("a source-slot swap finished before the abort is kept as done and not swapp
     if (clicks === 3) owner.abort(new Error("fall reflex"));
   };
   const attempt = equipAttempts(bot, [{ item_name: "shield", source_slot: 24 }, { item_name: "iron_sword" }]);
-  bot.inventory.items = () => [{ name: "iron_sword", count: 1 }] as never;
 
   await assert.rejects(attempt(owner.signal), /fall reflex/);
   const result = await attempt(new AbortController().signal);
 
   assert.equal(clicks, 3, "the resumed attempt must not click the shield again");
-  assert.equal(bot.inventory.slots[45], fresh);
+  assert.equal(bot.inventory.slots[OFF_HAND], fresh);
   assert.equal(result.equip.equipped[0]!.equipped, true);
   assert.equal(result.equip.equipped[0]!.sourceSlot, 24);
 });
 
 test("a source-slot swap whose abort came before it was observed is recognised in its destination", async () => {
   const bot = equipBot(["shield"]);
-  const fresh = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[24] = fresh as never;
+  const fresh = shieldWorn(bot, 0);
+  setSlot(bot, 24, fresh);
   const owner = new AbortController();
   const click = bot.clickWindow.bind(bot);
   let clicks = 0;
@@ -218,7 +239,7 @@ test("a source-slot swap whose abort came before it was observed is recognised i
 
   assert.equal(clicks, 3, "attempt 1 clicked three times (its hand restore included); the resumed attempt none");
   assert.equal(result.status, "succeeded");
-  assert.equal(bot.inventory.slots[45], fresh);
+  assert.equal(bot.inventory.slots[OFF_HAND], fresh);
 });
 
 test("armor taken off between attempts is equipped again from the inventory, or reported missing", async () => {
@@ -227,8 +248,7 @@ test("armor taken off between attempts is equipped again from the inventory, or 
   abortAfterEquipping(bot, owner, "iron_helmet");
   const attempt = equipAttempts(bot, [{ item_name: "iron_helmet" }, { item_name: "iron_chestplate" }]);
   await assert.rejects(attempt(owner.signal), /hunger reflex/);
-  bot.inventory.slots[EQUIPMENT_SLOTS.head!] = null;
-  bot.inventory.items = () => [{ name: "iron_chestplate", count: 1 }] as never;
+  setSlot(bot, HEAD, null);
 
   const result = await attempt(new AbortController().signal);
 
@@ -251,7 +271,7 @@ test("a second call after a completed equip succeeds without touching the invent
 });
 
 /** Aborts the request on the first click, before the server could have seen it (a reflex took the body). */
-function abortBeforeFirstClick(bot: ReturnType<typeof equipBot>, owner: AbortController) {
+function abortBeforeFirstClick(bot: FakeBot, owner: AbortController) {
   const click = bot.clickWindow.bind(bot);
   const clicked: number[] = [];
   let aborted = false;
@@ -265,10 +285,10 @@ function abortBeforeFirstClick(bot: ReturnType<typeof equipBot>, owner: AbortCon
 
 test("an identical item worn before the request does not mark an unsent swap done", async () => {
   const bot = equipBot(["shield"]);
-  const worn = { name: "shield", durabilityUsed: 0 };
-  const selected = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[45] = worn as never;
-  bot.inventory.slots[24] = selected as never;
+  const worn = shieldWorn(bot, 0);
+  const selected = shieldWorn(bot, 0);
+  setSlot(bot, OFF_HAND, worn);
+  setSlot(bot, 24, selected);
   const owner = new AbortController();
   const clicked = abortBeforeFirstClick(bot, owner);
   const attempt = equipAttempts(bot, [{ item_name: "shield", source_slot: 24 }]);
@@ -277,17 +297,17 @@ test("an identical item worn before the request does not mark an unsent swap don
   const result = await attempt(new AbortController().signal);
 
   assert.equal(clicked.length, 3, "the resumed attempt makes the swap the first one never sent");
-  assert.equal(bot.inventory.slots[45], selected);
+  assert.equal(bot.inventory.slots[OFF_HAND], selected);
   assert.equal(bot.inventory.slots[24], worn);
   assert.equal(result.status, "succeeded");
 });
 
 test("a swap of two identical items finished before the abort ends succeeded with both items in place", async () => {
   const bot = equipBot(["shield"]);
-  const worn = { name: "shield", durabilityUsed: 0 };
-  const selected = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[45] = worn as never;
-  bot.inventory.slots[24] = selected as never;
+  const worn = shieldWorn(bot, 0);
+  const selected = shieldWorn(bot, 0);
+  setSlot(bot, OFF_HAND, worn);
+  setSlot(bot, 24, selected);
   const owner = new AbortController();
   const click = bot.clickWindow.bind(bot);
   let clicks = 0;
@@ -303,16 +323,16 @@ test("a swap of two identical items finished before the abort ends succeeded wit
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.equip.equipped[0]!.equipped, true);
-  assert.equal((bot.inventory.slots[45] as { name: string } | null)?.name, "shield");
+  assert.equal((bot.inventory.slots[OFF_HAND] as { name: string } | null)?.name, "shield");
   assert.equal((bot.inventory.slots[24] as { name: string } | null)?.name, "shield", "equal items swapped twice are where they were: neither is lost");
 });
 
 test("a death between attempts reports the items not carried", async () => {
   const bot = equipBot(["iron_helmet"]);
-  const worn = { name: "shield", durabilityUsed: 319 };
-  const fresh = { name: "shield", durabilityUsed: 0 };
-  bot.inventory.slots[45] = worn as never;
-  bot.inventory.slots[24] = fresh as never;
+  const worn = shieldWorn(bot, 319);
+  const fresh = shieldWorn(bot, 0);
+  setSlot(bot, OFF_HAND, worn);
+  setSlot(bot, 24, fresh);
   const owner = new AbortController();
   const click = bot.clickWindow.bind(bot);
   let clicks = 0;
@@ -324,8 +344,7 @@ test("a death between attempts reports the items not carried", async () => {
   const attempt = equipAttempts(bot, [{ item_name: "shield", source_slot: 24 }, { item_name: "iron_helmet" }]);
   await assert.rejects(attempt(owner.signal), /lava reflex/);
 
-  for (const index of Object.keys(bot.inventory.slots)) bot.inventory.slots[Number(index)] = null;
-  bot.inventory.items = () => [];
+  for (const [index, stack] of bot.inventory.slots.entries()) if (stack) setSlot(bot, index, null);
   const result = await attempt(new AbortController().signal);
 
   assert.equal(result.status, "failed");
@@ -338,9 +357,9 @@ test("a death between attempts reports the items not carried", async () => {
 test("two equip requests on two bots keep their own swaps", async () => {
   const bots = [equipBot(["shield"]), equipBot(["shield"])];
   const copies = bots.map((bot, index) => {
-    const fresh = { name: "shield", durabilityUsed: index };
-    bot.inventory.slots[45] = { name: "shield", durabilityUsed: 300 } as never;
-    bot.inventory.slots[24] = fresh as never;
+    const fresh = shieldWorn(bot, index);
+    setSlot(bot, OFF_HAND, shieldWorn(bot, 300));
+    setSlot(bot, 24, fresh);
     return fresh;
   });
   const owners = bots.map(() => new AbortController());
@@ -361,7 +380,7 @@ test("two equip requests on two bots keep their own swaps", async () => {
 
   for (const [index, bot] of bots.entries()) {
     assert.equal(results[index]!.status, "succeeded");
-    assert.equal(bot.inventory.slots[45], copies[index], "each bot wears the copy it selected");
+    assert.equal(bot.inventory.slots[OFF_HAND], copies[index], "each bot wears the copy it selected");
     assert.equal(clicksSeen[index]!.clicks, 3);
   }
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { Bot } from "mineflayer";
-import { botFixture } from "../../../test-support/bot.js";
+import { type FakeHarness, createFakeBot } from "../../../test-support/fake-bot/index.js";
 import type { Goal } from "../../index.js";
 import { hunt, type EngagementOutcome, type HuntRequest, type HuntResult, type HuntTarget } from "./hunt-process.js";
 
@@ -12,12 +12,10 @@ import { hunt, type EngagementOutcome, type HuntRequest, type HuntResult, type H
  * distance, giving up on a species because one of them was behind a fence — is
  * a question a fake answers in a millisecond rather than in a live fixture.
  */
-function fakeBot(entities: readonly { id: number; at: Vec3; name?: string }[], feet = new Vec3(0, 64, 0)): Bot {
-  return botFixture({
+function fakeBot(entities: readonly { id: number; at: Vec3; name?: string }[], feet = new Vec3(0, 64, 0)): FakeHarness {
+  return createFakeBot({
     position: feet,
-    entities: Object.fromEntries(
-      entities.map((entity) => [entity.id, { id: entity.id, name: entity.name ?? "rabbit", position: entity.at }]),
-    ),
+    entities: Object.fromEntries(entities.map((entity) => [entity.id, { name: entity.name ?? "rabbit", position: entity.at }])),
   });
 }
 
@@ -59,7 +57,7 @@ function walkingRoute(bot: Bot): HuntRequest["route"] {
 
 for (const presence of ["loaded", "gone", "invalid"] as const) {
   test(`a stopped engagement reports the final ${presence} target observation`, async () => {
-    const bot = fakeBot([{ id: 7, at: new Vec3(5, 64, 0) }]);
+    const { bot } = fakeBot([{ id: 7, at: new Vec3(5, 64, 0) }]);
     bot.entities[7]!.isValid = true;
     const sightings: HuntTarget[] = [];
     const result = await hunt(
@@ -90,7 +88,7 @@ for (const presence of ["loaded", "gone", "invalid"] as const) {
 }
 
 test("one kill that satisfies the caller settles the hunt", async () => {
-  const bot = fakeBot([{ id: 7, at: new Vec3(65, 64, 0) }]);
+  const { bot } = fakeBot([{ id: 7, at: new Vec3(65, 64, 0) }]);
   let killed = false;
   const engaged: number[] = [];
 
@@ -112,10 +110,10 @@ test("one kill that satisfies the caller settles the hunt", async () => {
 });
 
 test("nothing left to hunt settles with no targets and no reason, however the quarry went", async () => {
-  const nothingMatched = await hunt(fakeBot([{ id: 7, at: new Vec3(3, 64, 0), name: "cow" }]), request());
+  const nothingMatched = await hunt(fakeBot([{ id: 7, at: new Vec3(3, 64, 0), name: "cow" }]).bot, request());
   assert.deepEqual(nothingMatched, { status: "no_targets", reason: null }, "nothing matching was ever loaded");
 
-  const bot = fakeBot([{ id: 7, at: new Vec3(20, 64, 0) }]);
+  const { bot } = fakeBot([{ id: 7, at: new Vec3(20, 64, 0) }]);
   const vanished = await hunt(
     bot,
     request({
@@ -130,7 +128,7 @@ test("nothing left to hunt settles with no targets and no reason, however the qu
 
 for (const distance of [4, 40]) {
   test(`resource preflight stops before movement or engagement at distance ${distance}`, async () => {
-    const bot = fakeBot([{ id: 7, at: new Vec3(distance, 64, 0) }]);
+    const { bot } = fakeBot([{ id: 7, at: new Vec3(distance, 64, 0) }]);
     const result = await hunt(
       bot,
       request({
@@ -149,7 +147,7 @@ for (const distance of [4, 40]) {
 }
 
 test("the announced targets carry every sighting the model needs, nearest first", async () => {
-  const bot = fakeBot([
+  const { bot } = fakeBot([
     { id: 7, at: new Vec3(65, 64, 3) },
     { id: 8, at: new Vec3(20, 64, 0) },
     { id: 9, at: new Vec3(300, 64, 0) },
@@ -187,7 +185,7 @@ test("enderman ranking keeps terrain priority inside a nearest-relative band for
     { id: 9, at: new Vec3(40, 64, 0) },
   ];
   for (const order of [candidates, [candidates[2]!, candidates[0]!, candidates[1]!], candidates.toReversed()]) {
-    const bot = fakeBot(order);
+    const { bot } = fakeBot(order);
     let killed = false;
     const engaged: number[] = [];
     await hunt(
@@ -210,7 +208,7 @@ test("enderman ranking keeps terrain priority inside a nearest-relative band for
 });
 
 test("the nearest-relative band never promotes an explicit hazard tier", async () => {
-  const bot = fakeBot([
+  const { bot } = fakeBot([
     { id: 7, at: new Vec3(3, 64, 0) },
     { id: 8, at: new Vec3(40, 64, 0) },
   ]);
@@ -262,7 +260,7 @@ test("a target the pursuit cannot finish is given up on, and the next loaded one
   ];
 
   for (const row of rows) {
-    const bot = fakeBot([
+    const { bot } = fakeBot([
       { id: 7, at: row.firstAt },
       { id: 8, at: new Vec3(40, 64, 0) },
     ]);
@@ -338,7 +336,7 @@ test("a second stop on the same target is final, and the reason names its last s
   ];
 
   for (const row of rows) {
-    const bot = fakeBot([{ id: 7, at: row.at }]);
+    const { bot } = fakeBot([{ id: 7, at: row.at }]);
     const selected: number[] = [];
     let attempts = 0;
 
@@ -368,8 +366,7 @@ test("a second stop on the same target is final, and the reason names its last s
 });
 
 test("a target that keeps its distance ends the pursuit instead of walking forever", async () => {
-  const fleeing = new Vec3(40, 64, 0);
-  const bot = fakeBot([{ id: 7, at: fleeing }]);
+  const { bot } = fakeBot([{ id: 7, at: new Vec3(40, 64, 0) }]);
   let routes = 0;
 
   const result = await hunt(
@@ -380,7 +377,7 @@ test("a target that keeps its distance ends the pursuit instead of walking forev
         // The bot closes ten blocks and the rabbit runs ten more: a route that
         // completes without ever arriving.
         bot.entity.position.translate(10, 0, 0);
-        fleeing.translate(10, 0, 0);
+        bot.entities[7]!.position.translate(10, 0, 0);
         return { status: "completed", elapsedMs: 0 };
       },
       engage: async () => {
@@ -395,7 +392,7 @@ test("a target that keeps its distance ends the pursuit instead of walking forev
 });
 
 test("an approach switches to a substantially closer quarry on its bounded reconsideration tick", async () => {
-  const bot = fakeBot([
+  const { bot, clock } = fakeBot([
     { id: 7, at: new Vec3(20, 64, 0) },
     { id: 8, at: new Vec3(30, 64, 0) },
   ]);
@@ -412,7 +409,7 @@ test("an approach switches to a substantially closer quarry on its bounded recon
         const id = aimedAt(bot, options.goal);
         if (id === 7) {
           bot.entities[8]!.position.set(6, 64, 0);
-          for (let tick = 0; tick < 20; tick++) bot.emit("physicsTick");
+          await clock.advance(1_000);
           assert.equal(options.stopSignal?.aborted, true);
           return { status: "stopped", reason: String(options.stopSignal?.reason), elapsedMs: 1 };
         }
@@ -434,7 +431,7 @@ test("an approach switches to a substantially closer quarry on its bounded recon
 });
 
 test("reconsideration sees a closer alternative through one retained approach stop", async () => {
-  const bot = fakeBot([
+  const { bot, clock } = fakeBot([
     { id: 7, at: new Vec3(20, 64, 0) },
     { id: 8, at: new Vec3(5, 64, 0) },
   ]);
@@ -450,7 +447,7 @@ test("reconsideration sees a closer alternative through one retained approach st
         const id = aimedAt(bot, options.goal);
         if (id === 7) {
           bot.entities[8]!.position.set(2, 64, 0);
-          for (let tick = 0; tick < 20; tick++) bot.emit("physicsTick");
+          await clock.advance(1_000);
           assert.equal(options.stopSignal?.aborted, true);
           return { status: "stopped", reason: String(options.stopSignal?.reason), elapsedMs: 1 };
         }
@@ -469,7 +466,7 @@ test("reconsideration sees a closer alternative through one retained approach st
 });
 
 test("reconsideration cannot replace a safe target with a closer hazardous target", async () => {
-  const bot = fakeBot([
+  const { bot, clock } = fakeBot([
     { id: 7, at: new Vec3(20, 64, 0) },
     { id: 8, at: new Vec3(30, 64, 0) },
   ]);
@@ -485,7 +482,7 @@ test("reconsideration cannot replace a safe target with a closer hazardous targe
       onTargetChanged: ({ selected: target }) => selected.push(target.id),
       route: async (options) => {
         bot.entities[8]!.position.set(4, 64, 0);
-        for (let tick = 0; tick < 20; tick++) bot.emit("physicsTick");
+        await clock.advance(1_000);
         assert.equal(options.stopSignal?.aborted, false);
         return walkingRoute(bot)(options);
       },
@@ -501,7 +498,7 @@ test("reconsideration cannot replace a safe target with a closer hazardous targe
 });
 
 test("a selected-target teleport stops its route and reports the distinct retarget reason", async () => {
-  const bot = fakeBot([
+  const { bot } = fakeBot([
     { id: 7, at: new Vec3(20, 64, 0) },
     { id: 8, at: new Vec3(25, 64, 0) },
   ]);
@@ -534,7 +531,7 @@ test("a selected-target teleport stops its route and reports the distinct retarg
 });
 
 test("small distance improvements do not thrash an active approach", async () => {
-  const bot = fakeBot([
+  const { bot, clock } = fakeBot([
     { id: 7, at: new Vec3(9, 64, 0) },
     { id: 8, at: new Vec3(10, 64, 0) },
   ]);
@@ -549,7 +546,7 @@ test("small distance improvements do not thrash an active approach", async () =>
       onTargetChanged: ({ selected: target }) => selected.push(target.id),
       route: async (options) => {
         bot.entities[8]!.position.set(-8, 64, 0);
-        for (let tick = 0; tick < 20; tick++) bot.emit("physicsTick");
+        await clock.advance(1_000);
         assert.equal(options.stopSignal?.aborted, false);
         return walkingRoute(bot)(options);
       },
@@ -564,7 +561,7 @@ test("small distance improvements do not thrash an active approach", async () =>
 });
 
 test("one failed approach stops penalizing nearby quarry after it materially moves", async () => {
-  const bot = fakeBot([
+  const { bot } = fakeBot([
     { id: 7, at: new Vec3(5, 64, 0) },
     { id: 8, at: new Vec3(40, 64, 0) },
   ]);

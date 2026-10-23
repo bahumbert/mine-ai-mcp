@@ -4,46 +4,65 @@ import { RouteOutcomes } from "./route-outcomes.js";
 import { createNavigationRuntime } from "./runtime.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../test-support/bot.js";
+import { Vec3 } from "vec3";
+import { type FakeBot, type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+
+/**
+ * The world's synchronous chunk column, which the navigation world reads (`world.ts` `#loadColumn`): the column's cells are
+ * local to its chunk in x and z, the heights those of the overworld since 1.18, and the states those of the fake world.
+ */
+// Stopgap until the master adds bot.world.getColumn to the fake: node_modules/prismarine-world/src/world.js:84 getColumn.
+function withColumns(bot: FakeBot): void {
+  Object.assign(bot.world, {
+    getColumn: (chunkX: number, chunkZ: number) => ({
+      minY: -64,
+      worldHeight: 384,
+      getBlockStateId: (local: Vec3) => bot.world.getBlockStateId(new Vec3(chunkX * 16 + local.x, local.y, chunkZ * 16 + local.z)),
+    }),
+  });
+}
+
+/** Moves the clock, and with it the fake physics ticks, until `work` settles. */
+async function tickUntilSettled<T>(clock: FakeClock, work: Promise<T>): Promise<T> {
+  let settled = false;
+  work.then(() => { settled = true; }, () => { settled = true; });
+  for (let slice = 0; slice < 400 && !settled; slice += 1) await clock.advance(50);
+  return work;
+}
 
 test("builds and closes one navigation runtime for a bot", async () => {
-  const bot = botFixture();
-  const physicsListeners = bot.listenerCount("physicsTick");
+  const { bot } = createFakeBot();
+  // The fake bot's own plugins listen too: the runtime is counted against what was there.
+  const [deaths, ends, physicsListeners] = (["death", "end", "physicsTick"] as const).map((event) => bot.listenerCount(event));
 
   const navigation = createNavigationRuntime(bot);
   assert.equal(navigation.active, false);
-  assert.equal(bot.listenerCount("death"), 1);
-  assert.equal(bot.listenerCount("end"), 1);
-  assert.equal(bot.listenerCount("physicsTick"), physicsListeners + 1);
+  assert.equal(bot.listenerCount("death"), deaths! + 1);
+  assert.equal(bot.listenerCount("end"), ends! + 1);
+  assert.equal(bot.listenerCount("physicsTick"), physicsListeners! + 1);
 
   await navigation.close();
-  assert.equal(bot.listenerCount("death"), 0);
-  assert.equal(bot.listenerCount("end"), 0);
+  assert.equal(bot.listenerCount("death"), deaths);
+  assert.equal(bot.listenerCount("end"), ends);
   assert.equal(bot.listenerCount("physicsTick"), physicsListeners);
   // A closed runtime is spent: there is no registry to look a live one up in.
   await assert.rejects(navigation.navigate({} as never), /closed/);
 });
 
 test("navigation uses observed perched-cloud clearance", async () => {
-  const bot = botFixture();
-  bot.entity.position.set(-2.5, 62, 1.5);
-  bot.entity.velocity = bot.entity.position.scaled(0);
-  bot.world.getBlockStateId = (p) => (p.y < 62 ? bot.registry.blocksByName.end_stone.defaultState : 0);
-  Object.assign(bot.world, {
-    getColumn: () => ({ minY: -64, worldHeight: 384, getBlockStateId: bot.world.getBlockStateId }),
-  });
+  const { registry } = createFakeBot().bot;
   const metadata: unknown[] = [];
-  const keys = bot.registry.entitiesByName.area_effect_cloud.metadataKeys;
+  const keys = registry.entitiesByName.area_effect_cloud!.metadataKeys;
   assert.ok(keys);
   metadata[keys.indexOf("particle")] = { type: "dragon_breath" };
   metadata[keys.indexOf("radius")] = 5;
-  bot.entities[564] = {
-    id: 564,
-    name: "area_effect_cloud",
-    isValid: true,
-    position: bot.entity.position.clone().set(-0.8084108410180761, 63, 8.551320364546644),
-    metadata,
-  } as typeof bot.entity;
+  // Stone at and below y 61 stands for the island's end stone: both are full cubes.
+  const { bot } = createFakeBot({
+    position: new Vec3(-2.5, 62, 1.5),
+    groundY: 61,
+    entities: { 564: { name: "area_effect_cloud", position: new Vec3(-0.8084108410180761, 63, 8.551320364546644), metadata } },
+  });
+  withColumns(bot);
   const navigation = createNavigationRuntime(bot);
   const stop = new AbortController();
   let plans = 0;
@@ -66,10 +85,9 @@ test("navigation uses observed perched-cloud clearance", async () => {
 });
 
 /** A flat stone floor at y 63 and a route along it that waits on physics ticks the test does not send. */
-function waitingRoute(releaseWaitMs?: number) {
-  const bot = botFixture({ groundY: 63 });
-  bot.world.getBlockStateId = (p) => (p.y <= 63 ? bot.registry.blocksByName.stone.defaultState : 0);
-  Object.assign(bot.world, { getColumn: () => ({ minY: -64, worldHeight: 384, getBlockStateId: bot.world.getBlockStateId }) });
+function waitingRoute(releaseWaitMs?: number, clock?: FakeClock) {
+  const { bot } = createFakeBot({ groundY: 63, clock });
+  withColumns(bot);
   const navigation = createNavigationRuntime(bot, releaseWaitMs === undefined ? {} : { releaseWaitMs });
   const committed = new Promise<void>((resolve) => {
     const stop = navigation.onEvent((event) => {
@@ -81,13 +99,15 @@ function waitingRoute(releaseWaitMs?: number) {
   });
   const movements = createMovementPolicy({ allowDigging: false, allowParkour: false });
   const goal = exactBlockGoal({ x: 6, y: 64, z: 0 });
-  return { bot, navigation, committed, movements, goal };
+  return { bot, clock: clock ?? createFakeClock({ mode: "manual" }), navigation, committed, movements, goal };
 }
 
 // Run 14b: a stalled navigate waited for a tick for good and kept the one navigation slot: every later route was
 // refused "Navigation is busy with another request" (172 times) until the run ended.
 test("a navigate cancelled while it waits for a tick that never comes frees the navigation for the next one within a bound", async () => {
-  const { bot, navigation, movements, goal } = waitingRoute(300);
+  // The release bound runs on the global setTimeout and the bound below on performance.now: both on the mocked clock.
+  const { bot, clock, navigation, movements, goal } = waitingRoute(300, createFakeClock({ mode: "mocked" }));
+  using _timers = clock.install();
   let routes = 0;
   let secondCommitted!: () => void;
   const second = new Promise<void>((resolve) => { secondCommitted = resolve; });
@@ -105,41 +125,36 @@ test("a navigate cancelled while it waits for a tick that never comes frees the 
   owner.abort(new Error("[RUNTIME_PHYSICS_STALLED] navigate owned the body for 30 s with no physics tick"));
   navigation.cancel("foreground action preparation");
   const stop = new AbortController();
+  // No physics tick comes: only the release bound can free the navigation for the next route.
+  bot.physicsEnabled = false;
   const started = performance.now();
   const next = navigation.navigate({ movements, goal: exactBlockGoal({ x: -6, y: 64, z: 0 }), stopSignal: stop.signal });
-  await Promise.race([second, next.then(() => undefined)]);
+  const freed = Promise.race([second, next.then(() => undefined)]);
+  await clock.advance(400);
+  await freed;
   assert.equal(routes, 2, "the next route was planned and committed, not refused busy");
   assert.ok(performance.now() - started < 2_000, "within the bounded wait");
   // Physics back: the new route ends at its stop, and the abandoned one, aborted, settles too.
+  bot.physicsEnabled = true;
   stop.abort("test over");
-  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
-  try {
-    assert.equal((await next).status, "stopped");
-    await navigation.close();
-  } finally {
-    clearInterval(ticking);
-  }
+  assert.equal((await tickUntilSettled(clock, next)).status, "stopped");
+  await tickUntilSettled(clock, navigation.close());
 });
 
 test("a navigate that is not cancelled still refuses a second one at once", async () => {
-  const { bot, navigation, committed, movements, goal } = waitingRoute(300);
+  const { clock, navigation, committed, movements, goal } = waitingRoute(300);
   const owner = new AbortController();
   const first = navigation.navigate({ movements, goal, signal: owner.signal });
   first.catch(() => undefined);
   await committed;
   await assert.rejects(navigation.navigate({ movements, goal }), /Navigation is busy with another request/);
   owner.abort(new Error("test over"));
-  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
-  try {
-    await navigation.close();
-  } finally {
-    clearInterval(ticking);
-  }
+  await tickUntilSettled(clock, navigation.close());
 });
 
 /** Plans one route on the waiting floor, stops it at its commit, and returns the events it raised before. */
 async function eventsOfOneRoute(open: (navigation: ReturnType<typeof createNavigationRuntime>) => Disposable | undefined) {
-  const { navigation, movements, goal } = waitingRoute();
+  const { clock, navigation, movements, goal } = waitingRoute();
   const kinds: string[] = [];
   const stop = new AbortController();
   navigation.onEvent((event) => {
@@ -148,10 +163,10 @@ async function eventsOfOneRoute(open: (navigation: ReturnType<typeof createNavig
   });
   const held = open(navigation);
   try {
-    await navigation.navigate({ movements, goal, stopSignal: stop.signal });
+    await tickUntilSettled(clock, navigation.navigate({ movements, goal, stopSignal: stop.signal }));
   } finally {
     held?.[Symbol.dispose]();
-    await navigation.close();
+    await tickUntilSettled(clock, navigation.close());
   }
   return kinds;
 }
@@ -165,37 +180,36 @@ test("while routesAsEscape is open every route starts as an escape, and the next
 
 /** A 5x5 room (stone floor, walls and ceiling) with the bot in it: a goal outside it has no path, and the search ends fast. */
 function enclosedRoom(routes: RouteOutcomes) {
-  const bot = botFixture({ groundY: 63 });
-  bot.world.getBlockStateId = (p) => {
-    const inside = Math.abs(p.x) <= 2 && Math.abs(p.z) <= 2 && p.y >= 64 && p.y <= 65;
-    return inside ? 0 : bot.registry.blocksByName.stone.defaultState;
-  };
-  Object.assign(bot.world, { getColumn: () => ({ minY: -64, worldHeight: 384, getBlockStateId: bot.world.getBlockStateId }) });
-  return { bot, navigation: createNavigationRuntime(bot, { routes }), movements: createMovementPolicy({ allowDigging: false, allowParkour: false }) };
+  // Stone around the room as far as the goal and the roof: y 64 to 67 over x and z -8 to 8, but the room's own cells.
+  const cells: Record<string, string> = {};
+  for (let x = -8; x <= 8; x++)
+    for (let z = -8; z <= 8; z++)
+      for (let y = 64; y <= 67; y++) if (!(Math.abs(x) <= 2 && Math.abs(z) <= 2 && y <= 65)) cells[`${x},${y},${z}`] = "stone";
+  const { bot, clock } = createFakeBot({ groundY: 63, cells });
+  withColumns(bot);
+  return { bot, clock, navigation: createNavigationRuntime(bot, { routes }), movements: createMovementPolicy({ allowDigging: false, allowParkour: false }) };
 }
 
 // Run 15 review: the pinned watch counts a movement action's failure only when its route or movement failed.
 test("the routes of a navigation runtime are recorded: an exhausted search is a failed route, a route stopped by its caller is not", async () => {
   const routes = new RouteOutcomes();
-  const { bot, navigation, movements } = enclosedRoom(routes);
-  const ticking = setInterval(() => bot.emit("physicsTick"), 5);
+  const { clock, navigation, movements } = enclosedRoom(routes);
   try {
     const exhausted = routes.mark();
-    const noPath = await navigation.navigate({ movements, goal: exactBlockGoal({ x: 6, y: 64, z: 0 }) });
+    const noPath = await tickUntilSettled(clock, navigation.navigate({ movements, goal: exactBlockGoal({ x: 6, y: 64, z: 0 }) }));
     assert.equal(noPath.status, "stopped", JSON.stringify(noPath));
     assert.equal(routes.failedSince(exhausted), true);
     const stopped = routes.mark();
     const stop = AbortSignal.abort("the pickaxe broke");
-    await navigation.navigate({ movements, goal: exactBlockGoal({ x: 1, y: 64, z: 0 }), stopSignal: stop });
+    await tickUntilSettled(clock, navigation.navigate({ movements, goal: exactBlockGoal({ x: 1, y: 64, z: 0 }), stopSignal: stop }));
     assert.equal(routes.failedSince(stopped), false);
   } finally {
-    clearInterval(ticking);
-    await navigation.close();
+    await tickUntilSettled(clock, navigation.close());
   }
 });
 
 test("an in-place break asked of a closed runtime is refused as closed (review 2026-10-19 #7)", async () => {
-  const navigation = createNavigationRuntime(botFixture());
+  const navigation = createNavigationRuntime(createFakeBot().bot);
   await navigation.close();
   await assert.rejects(
     navigation.breakBlockInPlace({ position: { x: 1, y: 64, z: 0 }, movements: createMovementPolicy() } as never),

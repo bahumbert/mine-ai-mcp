@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
 import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import { createActions, type ActionCatalogOptions } from "./index.js";
@@ -69,7 +69,7 @@ function published(t: { after(fn: () => void): void }, options: ActionCatalogOpt
   const botData = temporaryBotData({ closeAfter: t });
   return createActions(
     {
-      bot: botFixture(),
+      bot: createFakeBot().bot,
       botData,
       protectedRegions: new ProtectedRegionStore(botData),
       budgets: {} as never,
