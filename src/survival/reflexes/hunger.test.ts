@@ -1,39 +1,32 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import minecraftData from "minecraft-data";
 import { ActionRunner } from "../../session/action-runner.js";
 import { ReflexDriver } from "../control/driver.js";
 import { SurvivalPolicyState } from "../state/survival-policy.js";
-import { botFixture } from "../../test-support/bot.js";
+import { type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { attachHungerReflex } from "./hunger.js";
 
 test("wounded hunger becomes eligible between fights without taking an active combat controller's body", async () => {
   let foodReads = 0;
   let activeEngagement: { kind: "mob"; targetId: number } | null = { kind: "mob", targetId: 7 };
-  const bot = Object.assign(new EventEmitter(), {
-    health: 14,
-    food: 17,
-    inventory: {
-      items: () => {
-        foodReads += 1;
-        return [];
-      },
-    },
-  }) as unknown as Bot;
-  const driver = new ReflexDriver(bot, new ActionRunner());
+  const { bot, clock } = createFakeBot({ health: 14, food: 17 });
+  // Counts each look at the carried food, then answers what the inventory holds.
+  const carried = bot.inventory.items.bind(bot.inventory);
+  bot.inventory.items = () => {
+    foodReads += 1;
+    return carried();
+  };
+  const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
   const reflex = attachHungerReflex(
     bot,
     driver,
     { activeEngagement: () => activeEngagement },
     new SurvivalPolicyState(bot),
   );
-  const check = () => {
-    for (let tick = 0; tick < 20; tick += 1) bot.emit("physicsTick");
-  };
+  /** A second of client ticks. */
+  const check = () => clock.advance(1_000);
   try {
-    check();
+    await check();
     assert.equal(foodReads, 0, "an active fight keeps its weapon and shield");
     assert.deepEqual(driver.snapshot()[0]?.decision, { kind: "handled", by: "combat" });
     assert.deepEqual(
@@ -50,7 +43,7 @@ test("wounded hunger becomes eligible between fights without taking an active co
       "an occupied body does not erase observed hunger",
     );
     activeEngagement = null;
-    check();
+    await check();
     assert.equal(foodReads, 1, "wounded hunger 17 is eligible immediately after the fight");
     assert.deepEqual(
       driver.snapshot()[0]?.decision,
@@ -61,14 +54,14 @@ test("wounded hunger becomes eligible between fights without taking an active co
       "missing food remains an explicit decision premise",
     );
     bot.food = 18;
-    check();
+    await check();
     assert.equal(foodReads, 1, "regeneration is already possible at hunger 18");
     bot.food = 17;
     bot.health = 20;
-    check();
+    await check();
     assert.equal(foodReads, 1, "a healthy bot keeps the ordinary eating threshold");
     bot.food = 14;
-    check();
+    await check();
     assert.equal(foodReads, 2);
   } finally {
     await reflex[Symbol.asyncDispose]();
@@ -83,16 +76,11 @@ test("wounded hunger becomes eligible between fights without taking an active co
  * reflex now stands down and says which policy floor would release the meat.
  */
 test("a hunt's raw drops stand the reflex down with the policy's reason until an emergency", async () => {
-  const bot = Object.assign(new EventEmitter(), {
-    health: 20,
-    food: 12,
-    registry: minecraftData("1.21.4"),
-    inventory: { items: () => [{ name: "beef", count: 3 }] },
-  }) as unknown as Bot;
-  const driver = new ReflexDriver(bot, new ActionRunner());
+  const { bot, clock } = createFakeBot({ food: 12, carried: { beef: 3 } });
+  const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
   const reflex = attachHungerReflex(bot, driver, { activeEngagement: () => null }, new SurvivalPolicyState(bot));
   try {
-    for (let tick = 0; tick < 20; tick += 1) bot.emit("physicsTick");
+    await clock.advance(1_000);
     assert.deepEqual(driver.snapshot()[0]?.danger, {
       food: 12,
       health: 20,
@@ -123,25 +111,28 @@ test("a hunt's raw drops stand the reflex down with the policy's reason until an
 });
 
 test("revoking raw food releases the active bite without waiting for its native timeout, preserving unrelated edits", async () => {
-  const items = [{ name: "beef", count: 3 }];
   let began!: () => void;
   const biting = new Promise<void>((resolve) => { began = resolve; });
   let finish!: () => void;
   let deactivations = 0;
-  const bot = botFixture({ items }, {
-    health: 20, food: 6,
-    consume: () => new Promise<void>((_resolve, reject) => {
-      bot.usingHeldItem = true;
-      finish = () => reject(new Error("bite released"));
-      began();
-    }),
-    deactivateItem: () => { deactivations++; bot.usingHeldItem = false; },
+  const { bot, clock } = createFakeBot({
+    food: 6,
+    carried: { beef: 3 },
+    // Not on the shared fake: the bite Mineflayer leaves pending until its own timeout, and the hand's release.
+    overrides: {
+      consume: () => new Promise<void>((_resolve, reject) => {
+        bot.usingHeldItem = true;
+        finish = () => reject(new Error("bite released"));
+        began();
+      }),
+      deactivateItem: () => { deactivations++; bot.usingHeldItem = false; },
+    },
   });
   const policy = new SurvivalPolicyState(bot);
-  const driver = new ReflexDriver(bot, new ActionRunner());
+  const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
   const reflex = attachHungerReflex(bot, driver, { activeEngagement: () => null }, policy);
   try {
-    for (let tick = 0; tick < 20; tick++) bot.emit("physicsTick");
+    await clock.advance(1_000);
     await biting;
     await policy.edit({ operation: "set", expected_revision: policy.snapshot().revision,
       changes: { combat: { bow: false } }, lifetime: { kind: "session" }, reason: "keep arrows" });
@@ -157,7 +148,7 @@ test("revoking raw food releases the active bite without waiting for its native 
     assert.equal(policy.settling, false, "settled without the native consume releasing");
     finish();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(items[0]!.count, 3);
+    assert.equal(bot.inventory.count(bot.registry.itemsByName.beef!.id, null), 3);
     assert.equal(driver.snapshot()[0]?.response, null);
     assert.deepEqual(driver.answered.snapshot(), [], "policy cancellation is not a failed capability");
   } finally {
@@ -168,7 +159,7 @@ test("revoking raw food releases the active bite without waiting for its native 
 });
 
 /** The probes of one meal, driven by hand: the reflex's definition is captured instead of run on a driver. */
-function mealProbe(bot: Bot, food = "bread") {
+function mealProbe({ bot, clock }: FakeHarness, food = "bread") {
   let definition: { progress: (food: string, mark: (reason: string) => void) => () => void; limits: (food: string) => unknown } | undefined;
   const driver = {
     bot,
@@ -181,53 +172,49 @@ function mealProbe(bot: Bot, food = "bread") {
   attachHungerReflex(bot, driver as never, { activeEngagement: () => null }, new SurvivalPolicyState(bot));
   const marks: string[] = [];
   const detach = definition!.progress(food, (reason) => marks.push(reason));
-  return { marks, detach, limits: definition!.limits(food), tick: () => bot.emit("physicsTick") };
+  return { marks, detach, limits: definition!.limits(food), tick: () => clock.advance(50) };
 }
 
-function eatingBot(overrides: Record<string, unknown> = {}) {
-  const items = [{ name: "bread", count: 3 }];
-  return Object.assign(new EventEmitter(), {
-    health: 20,
-    food: 10,
-    foodSaturation: 0,
-    usingHeldItem: false,
-    entity: { position: { x: 0, y: 64, z: 0 }, isInWater: false },
-    registry: minecraftData("1.21.4"),
-    inventory: { items: () => items },
-    ...overrides,
-  }) as unknown as Bot & { food: number; foodSaturation: number; usingHeldItem: boolean };
+/** A bot at hunger 10 with no saturation, carrying three bread. */
+function eatingBot() {
+  const harness = createFakeBot({ food: 10, carried: { bread: 3 } });
+  harness.bot.foodSaturation = 0;
+  return harness;
 }
 
-test("a bite in progress is progress", () => {
-  const bot = eatingBot();
-  const { marks, tick, detach } = mealProbe(bot);
-  tick();
+test("a bite in progress is progress", async () => {
+  const meal = eatingBot();
+  const bot = meal.bot;
+  const { marks, tick, detach } = mealProbe(meal);
+  await tick();
   assert.deepEqual(marks, []);
   bot.usingHeldItem = true;
-  tick();
-  tick();
+  await tick();
+  await tick();
   assert.deepEqual(marks, ["biting", "biting"], "every tick of the bite counts, so a 1.6 s meal never nears the 8 s window");
   detach();
 });
 
-test("food or saturation rising and a spent stack are progress", () => {
-  const bot = eatingBot();
-  const { marks, tick, detach } = mealProbe(bot);
-  tick();
+test("food or saturation rising and a spent stack are progress", async () => {
+  const meal = eatingBot();
+  const bot = meal.bot;
+  const { marks, tick, detach } = mealProbe(meal);
+  await tick();
   bot.food = 14;
-  tick();
+  await tick();
   bot.foodSaturation = 2;
-  tick();
-  Reflect.set(bot, "inventory", { items: () => [{ name: "bread", count: 2 }] });
-  tick();
+  await tick();
+  const bread = bot.inventory.items()[0]!;
+  bot.inventory.updateSlot(bread.slot, itemOf(bot.registry, "bread", 2));
+  await tick();
   assert.deepEqual(marks, ["food_rose", "saturation_rose", "food_spent"]);
   detach();
 });
 
-test("a meal that does nothing for the window is not progress, and its limits are the owner's", () => {
-  const bot = eatingBot();
-  const { marks, tick, limits, detach } = mealProbe(bot);
-  for (let count = 0; count < 100; count++) tick();
+test("a meal that does nothing for the window is not progress, and its limits are the owner's", async () => {
+  const meal = eatingBot();
+  const { marks, tick, limits, detach } = mealProbe(meal);
+  for (let count = 0; count < 100; count++) await tick();
   assert.deepEqual(marks, []);
   assert.deepEqual(limits, { ceilingMs: 20_000, noProgressMs: 8_000, standDownMs: 2_000 });
   detach();

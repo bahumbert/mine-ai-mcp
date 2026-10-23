@@ -1,15 +1,20 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { actionResultSchema, defineAction } from "../../actions/index.js";
-import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
-import { handClock } from "../../test-support/hand-clock.js";
 import { observeMineflayerBlock, type WorldView } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { botFixture } from "../../test-support/bot.js";
+import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import {
+  type FakeBot,
+  type FakeBotOptions,
+  type FakeCell,
+  type FakeClock,
+  createFakeBot,
+  createFakeClock,
+  flush,
+} from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
 import { attachFireReflex } from "./fire.js";
@@ -35,14 +40,42 @@ test("fire response selection replays from the observed escape availability", ()
   );
 });
 
+/** The bot of every scene here: the fire escape releases item use before it walks. */
+function fireBot(options: FakeBotOptions = {}) {
+  return createFakeBot({
+    ...options,
+    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
+    overrides: { deactivateItem: () => undefined },
+  });
+}
+
+/** The shared_flags metadata bit 0 the fire checks read as burning, at the version's index. */
+function setBurning(bot: FakeBot, burning: boolean): void {
+  Reflect.set(bot.entity.metadata, bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags"), burning ? 1 : 0);
+}
+
+/** Lava at `level` (a flowed layer below 8). */
+const lavaAt = (level: number): FakeCell => ({ name: "lava", properties: { level } });
+
+/**
+ * A runner whose stall clock never moves: its 30 s ceiling and 6 s without progress cannot trip. The fire tests tick the
+ * client by hand (one tick per time packet), so a runner on the bot's clock would see a stall the game does not.
+ */
+const stillRunner = (options: ActionRunnerOptions = {}) =>
+  new ActionRunner({ clock: createFakeClock({ mode: "manual" }), ...options });
+
+/** The client ticks by hand, `count` of them, letting what each one starts settle before the next. */
+async function tick(bot: FakeBot, count = 1): Promise<void> {
+  for (let done = 0; done < count; done++) {
+    bot.emit("physicsTick");
+    await flush();
+  }
+}
+
 test("burning with no reachable water does not lock a Nether fight out of the body", async () => {
-  const bot = Object.assign(new EventEmitter(), {
-    health: 20,
-    entity: { position: new Vec3(0.5, 64, 0.5), metadata: [1], isInLava: false },
-    registry: { entitiesByName: { player: { metadataKeys: ["shared_flags"] } } },
-    blockAt: () => ({ name: "air", boundingBox: "empty" }),
-  }) as unknown as Bot;
-  const runner = new ActionRunner();
+  const { bot, clock } = fireBot();
+  setBurning(bot, true);
+  const runner = stillRunner();
   let release!: () => void;
   let cancelled = false;
   const claim = runner.claim("hostile_reflex", "fight", async (signal) => {
@@ -57,9 +90,9 @@ test("burning with no reachable water does not lock a Nether fight out of the bo
   if (claim.kind !== "claimed") throw new Error("Expected claim");
   await Promise.resolve();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
-  for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
+  await clock.advance(250);
   assert.equal(cancelled, false);
   assert.equal(runner.status().activeAction?.action, "hostile_reflex");
   release();
@@ -67,23 +100,13 @@ test("burning with no reachable water does not lock a Nether fight out of the bo
 });
 
 test("a failed airborne fire escape does not suppress a fresh attempt after landing", async () => {
-  const bot = botFixture(
-    {},
-    {
-      stopDigging() {},
-      deactivateItem() {},
-      clearControlStates() {},
-    },
-  );
+  const { bot, clock } = fireBot();
   Object.assign(bot.entity, { isInLava: true, onGround: false });
-  const runner = new ActionRunner();
+  const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
-  const observe = async () => {
-    for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  };
+  const observe = () => clock.advance(250);
   await observe();
   const first = driver.answered.snapshot()[0];
   assert.equal(first?.failure.kind, "no_escape");
@@ -96,8 +119,8 @@ test("a failed airborne fire escape does not suppress a fresh attempt after land
 });
 
 /** A burning body on the west bank of the one-cell lava pit; the water 2 cells east is `ringed` by lava or open. */
-function burningBesidePit(ringed: boolean) {
-  const cells: Record<string, string> = { "0,64,0": "lava", "2,64,0": "water" };
+function burningBesidePit(ringed: boolean, options: { clock?: FakeClock; startAge?: number } = {}) {
+  const cells: Record<string, FakeCell> = { "0,64,0": "lava", "2,64,0": "water" };
   if (ringed)
     Object.assign(cells, {
       "2,64,0": "lava",
@@ -106,11 +129,15 @@ function burningBesidePit(ringed: boolean) {
       "3,64,1": "lava",
       "3,64,-1": "lava",
     });
-  const bot = botFixture(
-    { blocks: cells, groundY: 64, position: new Vec3(-0.5, 65, 0.5) },
-    { stopDigging() {}, deactivateItem() {}, clearControlStates() {} },
-  );
-  Object.assign(bot.entity, { metadata: [1] });
+  const harness = fireBot({
+    cells,
+    groundY: 64,
+    position: new Vec3(-0.5, 65, 0.5),
+    clock: options.clock,
+    server: { startAge: options.startAge },
+  });
+  const { bot } = harness;
+  setBurning(bot, true);
   const memory = new MemoryWorld();
   for (let x = -6; x <= 6; x++)
     for (let z = -6; z <= 6; z++)
@@ -126,48 +153,47 @@ function burningBesidePit(ringed: boolean) {
       return memory.revision;
     },
   };
-  return { bot, world, memory, reads: () => reads };
+  return { bot, clock: harness.clock, server: harness.server, fake: harness.world, world, memory, reads: () => reads };
 }
 
 test("a burning bot near reachable water is answered", async () => {
-  const { bot, world } = burningBesidePit(false);
-  const runner = new ActionRunner();
+  const { bot, clock, world } = burningBesidePit(false);
+  const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, world));
-  for (let tick = 0; tick < 3; tick++) bot.emit("physicsTick");
+  await clock.advance(150);
   assert.equal(runner.status().activeAction?.action, "fire_reflex", "the way round the lava is a reachable escape");
 });
 
 test("a still body in one world revision searches once", async () => {
-  const { bot, world, reads } = burningBesidePit(true);
-  const runner = new ActionRunner();
+  const { bot, clock, world, reads } = burningBesidePit(true);
+  const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, world));
-  bot.emit("physicsTick");
+  await clock.advance(50);
   const afterFirst = reads();
   assert.ok(afterFirst > 0, "the first tick searches");
-  for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
+  await clock.advance(250);
   assert.equal(reads(), afterFirst, "the same cell and revision read nothing more");
   assert.ok(!runner.status().activeAction, "water behind lava is no escape: the reflex stands down");
 });
 
-test("a walk that outlasts the 15 s wall clock is reported as out of time, not as no escape", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
-  const { bot, world } = burningBesidePit(false);
-  Object.assign(bot, { setControlState() {} });
-  const runner = new ActionRunner();
+test("a walk that outlasts the 15 s wall clock is reported as out of time, not as no escape", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot, world } = burningBesidePit(false, { clock });
+  // The body never moves, so 15 s of client ticks would end the walk as stalled (40 ticks) before the wall clock does.
+  bot.physicsEnabled = false;
+  const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, world));
-  for (let tick = 0; tick < 3; tick++) bot.emit("physicsTick");
+  await tick(bot, 3);
   assert.equal(runner.status().activeAction?.action, "fire_reflex");
-  context.mock.timers.tick(15_000);
-  for (let tick = 0; tick < 3; tick++) {
-    bot.emit("physicsTick");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
+  await clock.advance(15_000);
+  await tick(bot, 3);
   const failure = driver.answered.snapshot()[0]?.failure;
   assert.equal(failure?.kind, "no_escape");
   assert.match(String(failure && "why" in failure ? failure.why : ""), /ran out of time/);
@@ -175,15 +201,20 @@ test("a walk that outlasts the 15 s wall clock is reported as out of time, not a
 
 /**
  * A resumable action running while a burning body leaves a lava pit, in a world where lava can still spread: the
- * reflex claims the body, the escape ends on the first tick after `leavePit()`, then it waits for the lava. World
- * ages move in jumps of 20, as the server's time packets do.
+ * reflex claims the body, the escape ends on the first tick after `leavePit()`, then it waits for the lava. The body
+ * is ticked by hand, once per time packet (`tickTo`): it never moves, so 20 ticks a second would end the escape as
+ * stalled (40 ticks) before the scene says so. World ages move in jumps of 20, as the server's time packets do.
  */
-function lavaWaitScene(resources: AsyncDisposableStack, runnerOptions: ActionRunnerOptions = {}) {
-  const { bot, world, memory } = burningBesidePit(false);
+function lavaWaitScene(
+  resources: AsyncDisposableStack,
+  clock: FakeClock = createFakeClock({ mode: "manual" }),
+  runnerOptions: ActionRunnerOptions = {},
+) {
+  const { bot, server, fake, world, memory } = burningBesidePit(false, { clock, startAge: 1000 });
   Object.assign(bot.entity, { isInLava: true });
-  Object.assign(bot.time, { age: 1000 });
-  const runner = new ActionRunner(runnerOptions);
-  const driver = resources.use(new ReflexDriver(bot, runner));
+  bot.physicsEnabled = false;
+  const runner = stillRunner(runnerOptions);
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, world));
   const attempts = { count: 0 };
   const action = defineAction({
@@ -201,53 +232,63 @@ function lavaWaitScene(resources: AsyncDisposableStack, runnerOptions: ActionRun
       throw context.signal?.reason;
     },
   });
-  const drain = async () => {
-    for (let turn = 0; turn < 3; turn++) await new Promise<void>((resolve) => setImmediate(resolve));
-  };
+  let lavaFlips = 0;
   const scene = {
     bot,
     runner,
     driver,
+    server,
     attempts,
-    drain,
     /** Starts the action and lets the reflex take the body from it: the bot is in the lava, burning. */
     async startInterrupted() {
       const output = runner.run(action, {});
-      for (let turn = 0; turn < 50 && attempts.count < 1; turn++) await drain();
-      bot.emit("physicsTick");
-      await drain();
+      for (let turn = 0; turn < 50 && attempts.count < 1; turn++) await flush();
+      await tick(bot);
       assert.equal(runner.status().activeAction?.action, "fire_reflex", "the reflex has the body");
       return { output };
     },
     /** A lava level changes inside the reflex's scan volume at the current world age. */
     lavaChanges() {
       const at = bot.entity.position.floored().offset(2, 0, 0);
-      const level = (offset: number) => ({ name: "lava", stateId: bot.time.age + offset, position: at }) as never;
-      bot.emit("blockUpdate", level(0), level(1));
+      fake.setCell(at, lavaAt(lavaFlips++ % 2 === 0 ? 6 : 7));
     },
     /** Lava of level 2 appears at the cell east of the body, in the bot's reads and in the escape's world. */
     lavaSpreadsBesideTheBody() {
       const at = bot.entity.position.floored().offset(1, 0, 0);
-      const read = bot.blockAt.bind(bot);
-      const lava = { name: "lava", position: at, stateId: 1, shapes: [], boundingBox: "empty", getProperties: () => ({ level: "2" }) };
-      bot.blockAt = (cell) => (cell.equals(at) ? (lava as never) : read(cell));
-      memory.load(at, observeMineflayerBlock(lava as never));
-      bot.emit("blockUpdate", read(at), lava as never);
+      fake.setCell(at, lavaAt(2));
+      memory.load(at, observeMineflayerBlock(bot.blockAt(at)!));
     },
+    /** One time packet (20 ticks of world age) and one client tick at a time, up to world age `age`. */
     async tickTo(age: number) {
-      for (let next = bot.time.age + 20; next <= age; next += 20) {
-        bot.time.age = next;
-        bot.emit("physicsTick");
-        await drain();
+      for (let next = server.age + 20; next <= age; next += 20) {
+        await clock.advance(1_000);
+        await tick(bot);
       }
     },
     /** Out of the lava and not burning: the escape ends on the next tick. */
     async leavePit() {
-      Object.assign(bot.entity, { isInLava: false, metadata: [0] });
-      await scene.tickTo(bot.time.age + 20);
+      Object.assign(bot.entity, { isInLava: false });
+      setBurning(bot, false);
+      await scene.tickTo(server.age + 20);
+    },
+    /** The clock jumps with the server frozen (the world age as it was) and the client not ticking: only timers move. */
+    async jump(ms: number) {
+      server.stop();
+      await clock.advance(ms);
+      server.resume();
     },
   };
   return scene;
+}
+
+/** The lava changes as the bot leaves the pit and at each of the next five flow steps: it is still spreading. */
+async function leavePitWhileLavaSpreads(scene: ReturnType<typeof lavaWaitScene>): Promise<void> {
+  scene.lavaChanges();
+  await scene.leavePit();
+  for (let step = 0; step < 5; step++) {
+    scene.lavaChanges();
+    await scene.tickTo(scene.server.age + 20);
+  }
 }
 
 test("an escape from spreading lava resumes the action only after the lava settles", async () => {
@@ -258,7 +299,7 @@ test("an escape from spreading lava resumes the action only after the lava settl
   await scene.tickTo(1020);
   scene.lavaChanges();
   await scene.leavePit();
-  assert.equal(scene.bot.time.age, 1040);
+  assert.equal(scene.server.age, 1040);
   await scene.tickTo(1060);
   assert.equal(scene.attempts.count, 1, "age 1060: 40 ticks after the last change, 60 needed");
   assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "the reflex still holds the body");
@@ -268,19 +309,15 @@ test("an escape from spreading lava resumes the action only after the lava settl
   assert.equal(finished.result.status, "succeeded");
 });
 
-test("lava still spreading after 10 s returns the action with the spreading message", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("lava still spreading after 10 s returns the action with the spreading message", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources);
+  const scene = lavaWaitScene(resources, clock);
   const { output } = await scene.startInterrupted();
-  scene.lavaChanges();
-  await scene.leavePit();
-  for (let step = 0; step < 5; step++) {
-    scene.lavaChanges();
-    await scene.tickTo(scene.bot.time.age + 20);
-  }
+  await leavePitWhileLavaSpreads(scene);
   assert.equal(scene.attempts.count, 1);
-  context.mock.timers.tick(10_000);
+  await scene.jump(10_000);
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action was not resumed");
   assert.equal(finished.result.status, "cancelled");
@@ -292,7 +329,6 @@ test("static lava resumes at once", async () => {
   await using resources = new AsyncDisposableStack();
   const scene = lavaWaitScene(resources);
   const { output } = await scene.startInterrupted();
-  scene.bot.time.age = 1000;
   await scene.leavePit();
   const finished = await output;
   assert.equal(scene.attempts.count, 2, "no lava changed in the volume: no wait");
@@ -310,18 +346,14 @@ test("lava changes before the last two flow steps do not delay the resume", asyn
   assert.equal(scene.attempts.count, 2);
 });
 
-test("a new action gets the body after the spreading outcome returned the old one", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("a new action gets the body after the spreading outcome returned the old one", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources);
+  const scene = lavaWaitScene(resources, clock);
   const { output } = await scene.startInterrupted();
-  scene.lavaChanges();
-  await scene.leavePit();
-  for (let step = 0; step < 5; step++) {
-    scene.lavaChanges();
-    await scene.tickTo(scene.bot.time.age + 20);
-  }
-  context.mock.timers.tick(10_000);
+  await leavePitWhileLavaSpreads(scene);
+  await scene.jump(10_000);
   assert.equal((await output).result.status, "cancelled");
   const next = defineAction({
     name: "look_around",
@@ -345,40 +377,33 @@ test("an endangered body during the wait returns the action with the danger mess
   scene.lavaChanges();
   await scene.leavePit();
   scene.bot.health = 14;
-  await scene.tickTo(scene.bot.time.age + 20);
+  await scene.tickTo(scene.server.age + 20);
   const finished = await output;
   assert.equal(scene.attempts.count, 1);
   assert.match((finished.interruptions ?? []).join("|"), /in danger again/);
 });
 
 test("no escape in static lava is tried again 2 s later", async () => {
-  const bot = botFixture({}, { stopDigging() {}, deactivateItem() {}, clearControlStates() {} });
+  const { bot, clock } = fireBot();
   Object.assign(bot.entity, { isInLava: true, onGround: false });
-  let clock = 0;
-  const runner = new ActionRunner();
+  const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner, { now: () => clock }));
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
-  const observe = async () => {
-    for (let tick = 0; tick < 5; tick++) bot.emit("physicsTick");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  };
-  await observe();
+  await clock.advance(250);
   const first = driver.answered.snapshot()[0];
   assert.equal(first?.failure.kind, "no_escape");
-  clock = 1_999;
-  await observe();
+  await clock.advance(first.since + 1_999 - clock.now());
   assert.equal(driver.answered.snapshot()[0]?.id, first?.id, "the same lava within 2 s: still answered");
-  clock = 2_001;
-  await observe();
+  await clock.advance(first.since + 2_001 - clock.now());
   assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "still burning in the same cells: tried again");
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
 });
 
 test("a throwing blockUpdate handler does not throw out of the emit", async () => {
-  const bot = botFixture({}, { stopDigging() {}, deactivateItem() {}, clearControlStates() {} });
+  const { bot, clock } = fireBot();
   await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, new ActionRunner()));
+  const driver = resources.use(new ReflexDriver(bot, stillRunner(), { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
   const hostile = { name: "lava", stateId: 1, get position(): never { throw new Error("chunk unloaded"); } } as never;
   assert.doesNotThrow(() => bot.emit("blockUpdate", null, hostile));
@@ -391,78 +416,90 @@ test("lava spreading toward the body during the wait runs the escape again befor
   scene.lavaChanges();
   await scene.leavePit();
   scene.lavaSpreadsBesideTheBody();
-  await scene.tickTo(scene.bot.time.age + 20);
+  await scene.tickTo(scene.server.age + 20);
   assert.equal(scene.attempts.count, 1, "the action is not returned: the escape runs again");
   assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still the same hold on the body");
   scene.bot.entity.position.set(-2.5, 65, 0.5);
-  await scene.tickTo(scene.bot.time.age + 20);
+  await scene.tickTo(scene.server.age + 20);
   assert.equal(scene.attempts.count, 1, "safe again, but the lava changed only just now");
-  await scene.tickTo(scene.bot.time.age + 80);
+  await scene.tickTo(scene.server.age + 80);
   assert.equal((await output).result.status, "succeeded", "resumed once two flow steps passed with no change");
   assert.equal(scene.attempts.count, 2);
 });
 
-test("lava that keeps advancing past the 10 s clock returns the action with the spreading message", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("lava that keeps advancing past the 10 s clock returns the action with the spreading message", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources);
+  const scene = lavaWaitScene(resources, clock);
   const { output } = await scene.startInterrupted();
   scene.lavaChanges();
   await scene.leavePit();
   scene.lavaSpreadsBesideTheBody();
-  await scene.tickTo(scene.bot.time.age + 20);
+  await scene.tickTo(scene.server.age + 20);
   assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "walking away from the lava");
-  context.mock.timers.tick(10_000);
+  await scene.jump(10_000);
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action was not resumed");
   assert.equal(finished.result.status, "cancelled");
 });
 
-/** The lava-wait scene on a hand clock: `pass(ms)` moves time in 50 ms ticks, with a physics tick at each unless `ticking` is false. */
-function limitedLavaScene(resources: AsyncDisposableStack) {
-  const time = handClock();
-  const scene = lavaWaitScene(resources, { clock: time.clock, cancelGraceMs: 500 });
+/**
+ * The lava-wait scene with the runner on the scene's own clock: `pass(ms)` moves it with the client ticking 20 times a
+ * second (and a time packet each second), or with the client frozen when `ticking` is false.
+ */
+function limitedLavaScene(resources: AsyncDisposableStack, clock: FakeClock) {
+  const scene = lavaWaitScene(resources, clock, { clock, cancelGraceMs: 500 });
   const pass = async (ms: number, ticking = true) => {
-    for (let passed = 0; passed < ms; passed += 50) {
-      if (ticking) scene.bot.emit("physicsTick");
-      await time.advance(50);
-    }
+    scene.bot.physicsEnabled = ticking;
+    await clock.advance(ms);
+    scene.bot.physicsEnabled = false;
   };
   return { ...scene, pass };
 }
 
-test("waiting on dry ground for lava to settle is progress: not cut at 6 s", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("waiting on dry ground for lava to settle is progress: not cut at 6 s", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
-  const scene = limitedLavaScene(resources);
+  const scene = limitedLavaScene(resources, clock);
   const { output } = await scene.startInterrupted();
   scene.lavaChanges();
   await scene.leavePit();
-  await scene.pass(8_000);
+  // The lava keeps spreading for 7 s of the wait, so the world age alone does not settle it.
+  for (let second = 0; second < 7; second++) {
+    scene.lavaChanges();
+    await scene.pass(1_000);
+  }
+  await scene.pass(1_000);
   assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still waiting at 8 s of the lava wait");
   assert.equal(scene.attempts.count, 1);
-  scene.bot.time.age += 200;
-  await scene.pass(100);
+  await scene.pass(1_100);
   assert.equal((await output).result.status, "succeeded", "the lava settled: the action resumes");
 });
 
-test("the same wait with the body off the ground is cut at 6 s without progress", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("the same wait with the body off the ground is cut at 6 s without progress", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
-  const scene = limitedLavaScene(resources);
+  const scene = limitedLavaScene(resources, clock);
   const { output } = await scene.startInterrupted();
   scene.lavaChanges();
   await scene.leavePit();
   scene.bot.entity.onGround = false;
-  await scene.pass(7_000);
+  for (let second = 0; second < 7; second++) {
+    scene.lavaChanges();
+    await scene.pass(1_000);
+  }
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action is not resumed");
   assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
 });
 
 test("an escape with no ticks is released at 6 s", async () => {
+  const clock = createFakeClock({ mode: "manual" });
   await using resources = new AsyncDisposableStack();
-  const scene = limitedLavaScene(resources);
+  const scene = limitedLavaScene(resources, clock);
   const { output } = await scene.startInterrupted();
   await scene.pass(5_900, false);
   assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "5.9 s: the window is still open");

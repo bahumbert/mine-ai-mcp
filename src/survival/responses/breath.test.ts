@@ -1,53 +1,52 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { waterFixture } from "../../test-support/water.js";
 import { Budgets } from "../state/budgets.js";
 import { surface } from "./breath.js";
 
 /** What a test cell holds; leaves are a roof dug by hand within a breath, stone is not (owner 2026-10-19: Q2). */
 type Cell = "water" | "air" | "stone" | "oak_leaves";
-const registry = minecraftData("1.21.4");
-const Block = prismarineBlock("1.21.4");
 const SPEED = 0.1;
+/** The box of cells the swims below can reach or look at; stone outside it (the fake's ground reaches far above). */
+const BOX = { x: [-25, 25], y: [-3, 6], z: [-3, 3] } as const;
 
 /**
  * A swimmer in a hand-made world. `seen` is what the bot reads; `physical` is what stops the body (they differ when a
  * block the bot cannot see blocks the way). Controls move the body 0.1 per tick; air refills when the head is in air.
  */
 function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: number, z: number) => Cell, start: Vec3, physical = seen, speed = SPEED) {
-  const fixture = waterFixture(t);
-  const held = new Set<string>();
+  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const { bot, harness } = fixture;
+  if (harness === undefined) throw new Error("waterFixture was asked for the shared fake");
   const digs: string[] = [];
-  const bot = fixture.bot as unknown as Bot & { oxygenLevel: number };
   const at = (read: typeof seen, p: Vec3) => read(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
-  Object.assign(fixture.entity, { position: start.clone(), isInWater: true, width: 0.6, height: 1.8 });
-  Object.assign(bot, {
-    oxygenLevel: 8,
-    health: 20,
-    username: "Diver",
-    heldItem: null,
-    targetDigBlock: null,
-    game: { gameMode: "survival" },
-    inventory: { items: () => [], slots: [] },
-    getEquipmentDestSlot: () => 5,
-    equip: async () => {},
-    dig: async () => {
-      digs.push("roof");
-      bot.oxygenLevel = 20;
-    },
-    blockAt: (p: Vec3) => Object.assign(Block.fromStateId(registry.blocksByName[at(seen, p)]!.defaultState, 0), { position: p.floored() }),
-    setControlState: (control: string, state: boolean) => (state ? held.add(control) : held.delete(control)),
-  });
+  /** The fake world's cells over {@link BOX} made `read`'s (a cell already so is left alone); `stone` is the ground's own. */
+  const paint = (read: typeof seen) => {
+    for (let x = BOX.x[0]; x <= BOX.x[1]; x++)
+      for (let y = BOX.y[0]; y <= BOX.y[1]; y++)
+        for (let z = BOX.z[0]; z <= BOX.z[1]; z++) {
+          const cell = new Vec3(x, y, z);
+          if (harness.world.blockAt(cell)?.name !== read(x, y, z)) harness.world.setCell(cell, read(x, y, z));
+        }
+  };
+  paint(seen);
+  Object.assign(fixture.entity, { position: start.clone(), isInWater: true });
+  bot.oxygenLevel = 8;
+  // Scripted, as the old test's: a roof dig that ends at once with the breath that follows it.
+  bot.dig = async () => {
+    digs.push("roof");
+    bot.oxygenLevel = 20;
+  };
+  const held = () => Object.entries(bot.controlState).filter(([, state]) => state).map(([control]) => control);
   const step = () => {
+    const controls = bot.controlState;
     const p = fixture.entity.position;
-    const dy = held.has("jump") ? speed : held.has("sneak") ? -speed : 0;
+    const dy = controls.jump ? speed : controls.sneak ? -speed : 0;
     const open = (cell: Cell) => cell === "water" || cell === "air";
     const free = (q: Vec3) => open(at(physical, q)) && open(at(physical, q.offset(0, 1.79, 0)));
-    const sideways = p.offset(((held.has("right") ? 1 : 0) - (held.has("left") ? 1 : 0)) * speed, 0, ((held.has("back") ? 1 : 0) - (held.has("forward") ? 1 : 0)) * speed);
+    const sideways = p.offset(((controls.right ? 1 : 0) - (controls.left ? 1 : 0)) * speed, 0, ((controls.back ? 1 : 0) - (controls.forward ? 1 : 0)) * speed);
     if (free(sideways)) fixture.entity.position = sideways;
     const vertical = fixture.entity.position.offset(0, dy, 0);
     if (free(vertical)) fixture.entity.position = vertical;
@@ -55,18 +54,23 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
     fixture.entity.isInWater = at(physical, now) === "water";
     if (at(physical, now.offset(0, 1.62, 0)) === "air") bot.oxygenLevel = 20;
   };
+  /** What a test runs on each client tick: before the body moves, and after. */
+  const onTick: { before?: (tick: number) => void; after?: () => void } = {};
+  let tick = 0;
+  // The body's move on each client tick, before the surfacing hears the tick.
+  bot.on("physicsTick", () => {
+    onTick.before?.(tick++);
+    step();
+    onTick.after?.();
+  });
   const run = async (ticks: number, maximumTicks = 600) => {
     const done = surface(bot, new AbortController().signal, new Budgets(), maximumTicks);
     let finished = false;
     void done.then(() => { finished = true; }, () => { finished = true; });
-    for (let tick = 0; tick < ticks && !finished; tick++) {
-      step();
-      bot.emit("physicsTick");
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    for (let n = 0; n < ticks && !finished; n++) await harness.clock.advance(50);
     return { outcome: await done, position: fixture.entity.position, digs };
   };
-  return { run, bot, fixture, digs, held, step };
+  return { run, bot, fixture, clock: harness.clock, world: harness.world, paint, digs, held, onTick };
 }
 
 /**
@@ -76,13 +80,11 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
 async function surfaceWithShortAir(world: ReturnType<typeof swimWorld>, ticks: number, onTick: (tick: number) => void) {
   const stop = new AbortController();
   const done = surface(world.bot, stop.signal, new Budgets(), 600).catch(() => undefined);
-  for (let tick = 0; tick < ticks; tick++) {
-    onTick(tick);
-    world.step();
-    if (world.digs.length === 0) (world.bot as unknown as { oxygenLevel: number }).oxygenLevel = 8;
-    world.bot.emit("physicsTick");
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+  world.onTick.before = onTick;
+  world.onTick.after = () => {
+    if (world.digs.length === 0) world.bot.oxygenLevel = 8;
+  };
+  for (let tick = 0; tick < ticks; tick++) await world.clock.advance(50);
   stop.abort();
   await done;
   return world.fixture.entity.position;
@@ -142,8 +144,9 @@ test("two stalled paths and no third way: the reflex digs up through the roof", 
 
 test("cells that were never loaded are no way to air", async (t) => {
   const world = swimWorld(t, leavesRoofed(tunnel), new Vec3(0.5, 0.2, 0.5));
-  const unloaded = world.bot.blockAt;
-  Object.assign(world.bot, { blockAt: (p: Vec3) => (Math.floor(p.x) < -1 ? null : unloaded(p)) });
+  // Every cell west of x -1 is in a chunk the bot has not loaded.
+  for (let x = BOX.x[0]; x < -1; x++)
+    for (let y = BOX.y[0]; y <= BOX.y[1]; y++) for (let z = BOX.z[0]; z <= BOX.z[1]; z++) world.world.setCell(new Vec3(x, y, z), "void");
   const { outcome, digs } = await world.run(300);
   assert.equal(outcome.kind, "air_full");
   assert.deepEqual(digs, ["roof"], "an unknown cell is not passable, so the only way left is up through the roof");
@@ -151,9 +154,15 @@ test("cells that were never loaded are no way to air", async (t) => {
 
 test("with the clock stopped the surfacing still ends on the wall clock", async (t) => {
   const world = swimWorld(t, tunnel, new Vec3(0.5, 0.2, 0.5));
-  Object.assign(world.bot, { dig: async () => { throw new Error("no dig"); } });
+  world.bot.dig = async () => { throw new Error("no dig"); };
+  // Not on the shared fake until M2 merges: the builder's clock (waterFixture's is manual, and the surfacing's wall
+  // clock reads the global timers), so a second, mocked clock stands for the wall clock; the builder's never advances.
+  const wall = createFakeClock({ mode: "mocked" });
+  using _installed = wall.install();
   const started = performance.now();
-  const outcome = await surface(world.bot, new AbortController().signal, new Budgets(), 2);
+  const done = surface(world.bot, new AbortController().signal, new Budgets(), 2);
+  await wall.advance(200);
+  const outcome = await done;
   assert.equal(outcome.kind, "stuck");
   assert.ok(performance.now() - started < 2000);
 });
@@ -161,11 +170,11 @@ test("with the clock stopped the surfacing still ends on the wall clock", async 
 test("a death during the surfacing ends it with the controls released", async (t) => {
   const world = swimWorld(t, tunnel, new Vec3(0.5, 0.2, 0.5));
   const done = surface(world.bot, new AbortController().signal, new Budgets(), 600);
-  world.bot.emit("physicsTick");
-  Object.assign(world.bot, { health: 0 });
+  await world.clock.advance(50);
+  world.bot.health = 0;
   world.bot.emit("death");
   assert.equal((await done).kind, "bot_died");
-  assert.equal(world.held.size, 0);
+  assert.deepEqual(world.held(), []);
 });
 
 // Review 2026-10-18 (run 15 fixes), blocking 2: a route that is empty (the head was in air) or fully walked was never
@@ -175,7 +184,10 @@ test("the head in air, then under water again with the air short and no pocket l
   const seen = leavesRoofed((x: number, y: number, z: number): Cell => (!flooded && x >= -6 && x <= -5 && y === 1 && z === 0 ? "air" : tunnel(x, y, z)));
   const world = swimWorld(t, seen, new Vec3(-4.5, 0.2, 0.5));
   await surfaceWithShortAir(world, 25, (tick) => {
-    if (tick === 5) flooded = true;
+    if (tick === 5) {
+      flooded = true;
+      world.paint(seen);
+    }
   });
   assert.deepEqual(world.digs, ["roof"], "the empty route of the breathing head was dropped when it went under again");
 });
@@ -186,7 +198,10 @@ test("the head in air, then under water again with another pocket in reach: a ne
     y === 1 && z === 0 && ((!flooded && x >= -6 && x <= -5) || x === 6) ? "air" : tunnel(x, y, z);
   const world = swimWorld(t, seen, new Vec3(-4.5, 0.2, 0.5));
   const position = await surfaceWithShortAir(world, 25, (tick) => {
-    if (tick === 5) flooded = true;
+    if (tick === 5) {
+      flooded = true;
+      world.paint(seen);
+    }
   });
   assert.ok(position.x > -3.5, `swam east toward the other pocket, ended at x ${position.x}`);
   assert.deepEqual(world.digs, []);
@@ -198,7 +213,10 @@ test("a route walked to its last cell, then the pocket floods: a new route is as
     y === 1 && z === 0 && ((!flooded && x >= -5 && x <= -4) || x === 6) ? "air" : tunnel(x, y, z);
   const world = swimWorld(t, seen, new Vec3(0.5, 0.2, 0.5));
   const position = await surfaceWithShortAir(world, 100, (tick) => {
-    if (tick === 80) flooded = true;
+    if (tick === 80) {
+      flooded = true;
+      world.paint(seen);
+    }
   });
   assert.ok(position.x > -3, `walked to the pocket (x -4), then swam east after it flooded, ended at x ${position.x}`);
   assert.deepEqual(world.digs, []);
@@ -214,7 +232,7 @@ test("a roof dig that would outlast the air and half the health is not started: 
   assert.deepEqual(digs, []);
   assert.equal(outcome.kind, "stuck");
   assert.equal(outcome.roofDig, "too_slow");
-  assert.equal(world.held.size, 0);
+  assert.deepEqual(world.held(), []);
 });
 
 /** The pocket under a leaves roof whose dig hangs until it is stopped; counts the stops. */
@@ -222,14 +240,18 @@ function hangingDig(t: Parameters<typeof waterFixture>[0]) {
   const world = swimWorld(t, leavesRoofed(sealedPocket("stone")), new Vec3(0.5, 0.2, 0.5));
   let stops = 0;
   let stop: ((cause: Error) => void) | undefined;
+  // Scripted, as the old test's: a dig that never ends by itself, and a stop that aborts it. Like Mineflayer's own
+  // `stopDigging`, a stop with no dig under way does nothing (its death handler, `digging.js`, stops a dig too).
   Object.assign(world.bot, {
     dig: () => new Promise<void>((_resolve, reject) => {
       stop = reject;
       world.digs.push("roof");
     }),
     stopDigging: () => {
+      if (stop === undefined) return;
       stops += 1;
-      stop?.(new Error("Digging aborted"));
+      stop(new Error("Digging aborted"));
+      stop = undefined;
     },
   });
   return { world, stops: () => stops };
@@ -237,7 +259,13 @@ function hangingDig(t: Parameters<typeof waterFixture>[0]) {
 
 test("the attempt's wall clock stops a dig in progress when physics ticks have stopped", async (t) => {
   const { world, stops } = hangingDig(t);
-  const outcome = await surface(world.bot, new AbortController().signal, new Budgets(), 2);
+  // Not on the shared fake until M2 merges: the builder's clock (see the clock-stopped test above): a second, mocked
+  // clock stands for the wall clock; the builder's never advances, so no physics tick comes.
+  const wall = createFakeClock({ mode: "mocked" });
+  using _installed = wall.install();
+  const done = surface(world.bot, new AbortController().signal, new Budgets(), 2);
+  await wall.advance(200);
+  const outcome = await done;
   assert.deepEqual(world.digs, ["roof"]);
   assert.equal(outcome.kind, "stuck");
   assert.equal(stops(), 1);
@@ -253,8 +281,8 @@ test("the tick budget running out stops a dig in progress", async (t) => {
 test("a death during a dig stops it and the attempt ends bot_died", async (t) => {
   const { world, stops } = hangingDig(t);
   const done = surface(world.bot, new AbortController().signal, new Budgets(), 600);
-  await new Promise((resolve) => setImmediate(resolve));
-  Object.assign(world.bot, { health: 0 });
+  await world.clock.advance(0);
+  world.bot.health = 0;
   world.bot.emit("death");
   assert.equal((await done).kind, "bot_died");
   assert.equal(stops(), 1);

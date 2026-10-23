@@ -1,37 +1,36 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { isWindingUp } from "../perception/combat/observations.js";
 import { observeProjectileDefence } from "./shield-facing.js";
 
 // Metadata is indexed exactly as the shared 1.21.4 registry indexes it: a
-// fixture must never write to that registry, which every botFixture shares.
+// fixture must never write to that registry, which every fake bot shares.
 /** Blaze charge sits in the `flags` byte at sixteen. */
 const charging = () => { const m: unknown[] = []; m[16] = 1; return m; };
 /** A drawn bow sets bit one of `living_entity_flags` at eight. */
 const drawing = () => { const m: unknown[] = []; m[8] = 1; return m; };
 
+/** A shooter nine blocks out over open ground, facing the bot, with a clear line between them. */
 function shooterFixture(name: string, held: string | null, metadata: unknown[]) {
-  const bot = botFixture();
-  bot._client = new EventEmitter() as Bot["_client"];
-  bot.entity.position.set(0, 64, 0);
-  bot.entity.width = 0.6;
-  bot.entity.height = 1.8;
-  bot.world.raycast = () => null;
-  const shooter = {
-    id: 21, name, kind: "Hostile mobs", isValid: true,
-    width: 0.6, height: 1.8, eyeHeight: 1.6,
-    position: new Vec3(0, 64, 9),
-    velocity: new Vec3(0, 0, 0),
-    // Facing the bot: yaw zero looks down -z, from +z toward the origin.
-    yaw: 0, headYaw: 0, pitch: 0,
-    heldItem: held ? { name: held } : null,
-    metadata,
-  } as unknown as Bot["entity"];
-  bot.entities[21] = shooter;
+  const { bot } = createFakeBot({
+    position: new Vec3(0, 64, 0),
+    entities: {
+      21: {
+        // Not on the shared fake until M3 merges: entity.kind.
+        name, kind: "Hostile mobs",
+        width: 0.6, height: 1.8, eyeHeight: 1.6,
+        position: new Vec3(0, 64, 9),
+        // Facing the bot: yaw zero looks down -z, from +z toward the origin.
+        yaw: 0, headYaw: 0, pitch: 0,
+        metadata,
+      },
+    },
+  });
+  const shooter = bot.entities[21]!;
+  // The main hand the server shows of a mob (`entity_equipment`), which `heldItem` reads.
+  if (held) shooter.equipment[0] = itemOf(bot.registry, held);
   return { bot, shooter };
 }
 

@@ -1,11 +1,9 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
 import { worldViewRaycaster } from "../../../navigation/world/line-of-sight.js";
 import { MemoryWorld } from "../../../navigation/world/memory-world.js";
+import { type FakeWorld, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { observation, planningStart } from "../../../test-support/navigation.js";
 import {
   crystalBlastCoverCell,
@@ -16,21 +14,17 @@ import {
   crystalReturnGoal,
 } from "./crystal-melee.js";
 
-const registry = minecraftData("1.21.4"),
-  Block = prismarineBlock("1.21.4");
 const crystal = new Vec3(0.5, 83, 0.5);
+/** An End island tower top in open air: the crystal on its pedestal, the bot beside the tower. */
 function fixture(pedestal: string | null = "bedrock") {
-  const blocks = new Map<string, string>();
-  if (pedestal) blocks.set("(0, 82, 0)", pedestal);
-  const blockAt = (position: Vec3) => {
-    const p = position.floored(),
-      name = blocks.get(p.toString()) ?? "air";
-    const block = Block.fromStateId(registry.blocksByName[name]!.defaultState, 0);
-    block.position = p;
-    return block;
-  };
+  const { bot, world, inventory } = createFakeBot({
+    position: new Vec3(2.5, 81, 2.5),
+    cells: pedestal ? { "0,82,0": pedestal } : {},
+    groundY: null,
+  });
+  // Minecraft's body-exposure rays, cast on the same cells independently of the code under test.
   const rays = worldViewRaycaster((x, y, z) =>
-    blockAt(new Vec3(x, y, z)).shapes.map(([minX, minY, minZ, maxX, maxY, maxZ]) => ({
+    (bot.blockAt(new Vec3(x, y, z))?.shapes ?? []).map(([minX, minY, minZ, maxX, maxY, maxZ]) => ({
       minX,
       minY,
       minZ,
@@ -39,16 +33,15 @@ function fixture(pedestal: string | null = "bedrock") {
       maxZ,
     })),
   );
-  const slots: Record<number, { name: string } | null> = {};
-  const bot = { blockAt, world: rays, entity: { position: new Vec3(2.5, 81, 2.5) }, inventory: { slots } } as unknown as Bot;
-  return { bot, blocks, rays, slots };
+  const wear = (slot: number, name: string) => inventory.updateSlot(slot, itemOf(bot.registry, name));
+  return { bot, world, rays, wear };
 }
 
 /** The top obsidian layer of a native tower sits one block below its bedrock pedestal. */
-function tower(blocks: Map<string, string>, radius: number) {
+function tower(world: FakeWorld, radius: number) {
   for (let x = -radius; x <= radius; x++)
     for (let z = -radius; z <= radius; z++)
-      if (x * x + z * z <= radius * radius + 1) blocks.set(new Vec3(x, 81, z).toString(), "obsidian");
+      if (x * x + z * z <= radius * radius + 1) world.setCell(new Vec3(x, 81, z), "obsidian");
 }
 
 test("native pedestal cover blocks every standing-player explosion sample from all approach corners", () => {
@@ -87,8 +80,8 @@ test("melee evidence identifies the observed pedestal", () => {
 });
 
 test("on the tower top the pedestal still shields the lower body, and armor decides whether the hit is survivable", () => {
-  const { bot, blocks, slots } = fixture();
-  tower(blocks, 5);
+  const { bot, world, wear } = fixture();
+  tower(world, 5);
   const feet = new Vec3(3.5, 82, -2.5);
   bot.entity.position = feet;
   assert.equal(bot.blockAt(feet.offset(0, -1, 0))?.name, "obsidian", "standing on the top layer");
@@ -103,7 +96,7 @@ test("on the tower top the pedestal still shields the lower body, and armor deci
   assert.equal(bare.rawDamage, 14);
   assert.equal(bare.damage, 14, "no armor, no reduction");
   for (const [slot, name] of [[5, "diamond_helmet"], [6, "diamond_chestplate"], [7, "diamond_leggings"], [8, "diamond_boots"]] as const)
-    slots[slot] = { name };
+    wear(slot, name);
   const armored = crystalBlastEstimate(bot, crystal, feet);
   assert.equal(armored.rawDamage, 14);
   // Twenty armor points, toughness eight: 20 - 14 / (2 + 2) = 16.5 points, 66% off.
@@ -119,10 +112,10 @@ test("standing level with the crystal without a pedestal between is fully expose
 });
 
 test("melee requires an exposed ray within three blocks after the cage cell is excavated", () => {
-  const { bot, blocks } = fixture();
-  blocks.set("(2, 82, 2)", "iron_bars");
+  const { bot, world } = fixture();
+  world.setCell(new Vec3(2, 82, 2), "iron_bars");
   assert.equal(crystalMeleeAim(bot, crystal), null);
-  blocks.delete("(2, 82, 2)");
+  world.setCell(new Vec3(2, 82, 2), "air");
   assert.ok(crystalMeleeAim(bot, crystal));
   bot.entity.position = new Vec3(8.5, 81, 2.5);
   assert.equal(crystalMeleeAim(bot, crystal), null);

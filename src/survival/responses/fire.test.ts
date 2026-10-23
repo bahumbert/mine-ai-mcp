@@ -1,20 +1,16 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { observeMineflayerBlock } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { botFixture } from "../../test-support/bot.js";
+import { type FakeCell, type FakeClock, type FakeEntitySpec, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { isInLava } from "../perception/body.js";
 import { escapeFire, lavaStepCells, type FireEscapeOutcome } from "./fire.js";
 
 test("lava contact includes the shallow body overlap missed by the swimming flag", () => {
-  let level: number | string = 0;
-  const bot = {
-    entity: { position: new Vec3(0.761841334797, 63.875, 0.5), width: 0.6, height: 1.8, isInLava: false },
-    blockAt: (at: Vec3) =>
-      at.floored().equals(new Vec3(1, 63, 0)) ? { name: "lava", getProperties: () => ({ level }) } : { name: "air" },
-  } as unknown as Bot;
+  const lavaCell = new Vec3(1, 63, 0);
+  const { bot, world } = createFakeBot({ position: new Vec3(0.761841334797, 63.875, 0.5), cells: { "1,63,0": "lava" }, groundY: null });
+  const setLevel = (level: number | string) => world.setCell(lavaCell, { name: "lava", properties: { level } });
   assert.equal(isInLava(bot), true);
   bot.entity.position.x = 0.69;
   assert.equal(isInLava(bot), false, "beside lava without body overlap is safe");
@@ -22,33 +18,42 @@ test("lava contact includes the shallow body overlap missed by the swimming flag
   bot.entity.position.y = 63.95;
   assert.equal(isInLava(bot), false, "above the source surface is safe");
   bot.entity.position.y = 63.875;
-  level = 7;
+  setLevel(7);
   assert.equal(isInLava(bot), false, "a low flowing layer does not fill the whole cell");
-  level = "7";
+  setLevel("7");
   assert.equal(isInLava(bot), false, "Prismarine string levels retain the same shallow surface");
-  level = "8";
+  setLevel("8");
   assert.equal(isInLava(bot), true, "a falling stream fills back up to source height");
 });
 
-/** The lava-escape-to-water scene: a one-cell lava pit at (0,64,0), water at (2,64,0), the body burning on the west bank. */
-function burningOnTheBank(position = new Vec3(-0.5, 65, 0.5)) {
-  const cells: Record<string, string> = { "0,64,0": "lava", "2,64,0": "water" };
-  const controls: Record<string, boolean> = {};
+/** Lava at `level` (a flowed layer below 8). */
+const lavaAt = (level: number): FakeCell => ({ name: "lava", properties: { level } });
+
+/**
+ * A burning body at `position` on a stone floor to y 64, with `cells` on it, and a navigation world observed from the
+ * same cells. The default is the lava-escape-to-water scene: a one-cell lava pit at (0,64,0), water at (2,64,0), the
+ * body on the west bank.
+ */
+function burningScene(
+  options: { cells?: Record<string, FakeCell>; position?: Vec3; entities?: Record<number, FakeEntitySpec>; clock?: FakeClock } = {},
+) {
+  const harness = createFakeBot({
+    position: options.position ?? new Vec3(-0.5, 65, 0.5),
+    cells: options.cells ?? { "0,64,0": "lava", "2,64,0": "water" },
+    groundY: 64,
+    entities: options.entities,
+    clock: options.clock,
+    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
+    overrides: { deactivateItem: () => undefined },
+  });
+  const { bot } = harness;
+  const controls = bot.controlState;
   const cleared = { count: 0 };
-  const bot = botFixture(
-    { blocks: cells, groundY: 64, position },
-    {
-      stopDigging() {},
-      deactivateItem() {},
-      setControlState: (control: string, state: boolean) => {
-        controls[control] = state;
-      },
-      clearControlStates: () => {
-        cleared.count++;
-        for (const control of Object.keys(controls)) controls[control] = false;
-      },
-    },
-  );
+  const clear = bot.clearControlStates.bind(bot);
+  bot.clearControlStates = () => {
+    cleared.count++;
+    clear();
+  };
   setBurning(bot, true);
   const world = new MemoryWorld();
   const load = (x: number, y: number, z: number) => {
@@ -56,20 +61,21 @@ function burningOnTheBank(position = new Vec3(-0.5, 65, 0.5)) {
     world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
   };
   for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) for (let y = 62; y <= 68; y++) load(x, y, z);
-  return { bot, world, cells, controls, cleared, load };
+  /** Change a cell for the bot and for the navigation world that observed it. */
+  const setCell = (x: number, y: number, z: number, cell: FakeCell) => {
+    harness.world.setCell(new Vec3(x, y, z), cell);
+    load(x, y, z);
+  };
+  /** Client ticks one at a time, letting the escape's waits settle between them. */
+  const physicsTicks = (count: number) => harness.clock.advance(50 * count);
+  return { bot, clock: harness.clock, world, controls, cleared, setCell, physicsTicks };
 }
 
-/** Emit physics ticks one at a time, letting the escape's waits settle between them. */
-async function physicsTicks(bot: Bot, count: number): Promise<void> {
-  for (let tick = 0; tick < count; tick++) {
-    bot.emit("physicsTick");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-}
+const burningOnTheBank = (position?: Vec3) => burningScene({ position });
 
-/** The shared_flags metadata bit 0 the fire checks read as burning. */
-function setBurning(bot: Bot, burning: boolean): void {
-  Object.assign(bot.entity, { metadata: [burning ? 1 : 0] });
+/** The shared_flags metadata bit 0 the fire checks read as burning, at the version's index. */
+function setBurning(bot: ReturnType<typeof createFakeBot>["bot"], burning: boolean): void {
+  Reflect.set(bot.entity.metadata, bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags"), burning ? 1 : 0);
 }
 
 function watch(promise: Promise<FireEscapeOutcome>) {
@@ -78,58 +84,57 @@ function watch(promise: Promise<FireEscapeOutcome>) {
   return seen;
 }
 
-const anyMoveControl = (controls: Record<string, boolean>) =>
-  ["forward", "back", "left", "right"].some((control) => controls[control]);
+const anyMoveControl = (controls: Readonly<Record<"forward" | "back" | "left" | "right", boolean>>) =>
+  (["forward", "back", "left", "right"] as const).some((control) => controls[control]);
 
 test("a burning bot on the bank keeps going while water is reachable", async () => {
-  const { bot, world, controls } = burningOnTheBank();
+  const { bot, world, controls, physicsTicks } = burningOnTheBank();
   const escape = new AbortController();
   const seen = watch(escapeFire(bot, world, escape.signal));
-  await physicsTicks(bot, 5);
+  await physicsTicks(5);
   assert.equal(seen.outcome, null, "burning with water in reach is not settled");
   assert.equal(anyMoveControl(controls), true, "a move control is set toward the first cell of the way round");
   Object.assign(bot.entity, { isInWater: true });
   bot.entity.position.set(2.5, 64, 0.5);
   setBurning(bot, false);
-  await physicsTicks(bot, 1);
+  await physicsTicks(1);
   assert.equal(seen.outcome, "escaped");
 });
 
 test("fire out before arriving ends the escape", async () => {
-  const { bot, world, controls, cleared } = burningOnTheBank();
+  const { bot, world, controls, cleared, physicsTicks } = burningOnTheBank();
   const escape = new AbortController();
   const seen = watch(escapeFire(bot, world, escape.signal));
-  await physicsTicks(bot, 3);
+  await physicsTicks(3);
   assert.equal(seen.outcome, null, "still burning with water in reach: the walk is on");
   assert.equal(anyMoveControl(controls), true, "a move control is set toward the way round");
   const clearedWhileWalking = cleared.count;
   setBurning(bot, false);
-  await physicsTicks(bot, 2);
+  await physicsTicks(2);
   assert.equal(seen.outcome, "escaped", "the flag cleared: ended within 2 ticks");
   assert.equal(anyMoveControl(controls), false);
   assert.ok(cleared.count > clearedWhileWalking, "the controls were cleared at the end");
 });
 
 test("water drained mid-route ends the walk", async () => {
-  const { bot, world, cells, load } = burningOnTheBank();
+  const { world, setCell, bot, physicsTicks } = burningOnTheBank();
   const escape = new AbortController();
   const seen = watch(escapeFire(bot, world, escape.signal));
-  await physicsTicks(bot, 3);
+  await physicsTicks(3);
   assert.equal(seen.outcome, null, "still walking to the water");
-  cells["2,64,0"] = "stone";
-  load(2, 64, 0);
-  await physicsTicks(bot, 3);
+  setCell(2, 64, 0, "stone");
+  await physicsTicks(3);
   assert.equal(seen.outcome, "escaped", "dry ground and no water left: the same end as with no water");
 });
 
 test("a cancel mid-route stops at once", async () => {
-  const { bot, world, cleared } = burningOnTheBank();
+  const { bot, world, cleared, physicsTicks } = burningOnTheBank();
   const escape = new AbortController();
   const result = escapeFire(bot, world, escape.signal).then(
     () => "returned",
     (error: unknown) => error,
   );
-  await physicsTicks(bot, 3);
+  await physicsTicks(3);
   const before = cleared.count;
   escape.abort(new Error("cancelled by the test"));
   assert.match(String(await result), /cancelled by the test/);
@@ -138,24 +143,30 @@ test("a cancel mid-route stops at once", async () => {
 });
 
 test("no physics ticks: the wall clock ends the escape", async () => {
-  const { bot, world } = burningOnTheBank();
+  const { bot, world, clock } = burningScene({ clock: createFakeClock({ mode: "mocked" }) });
+  using _installed = clock.install();
+  bot.physicsEnabled = false; // the client runs no tick: physics stopped
   const started = performance.now();
-  const outcome = await escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 50 });
+  const escaping = escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 50 });
+  await clock.advance(50);
+  const outcome = await escaping;
   assert.equal(outcome, "timed_out", "the clock ended it: not the same as a walk with nowhere to go");
   assert.ok(performance.now() - started < 500, "returned within 500 ms without one physics tick");
   assert.equal(bot.listenerCount("physicsTick"), 0);
 });
 
 test("a death mid-route ends the escape as died", async () => {
-  const { bot, world } = burningOnTheBank();
+  const { bot, world, physicsTicks } = burningOnTheBank();
+  // The client's own listeners (Mineflayer's physics stops on a death and restarts on a respawn).
+  const atRest = { death: bot.listenerCount("death"), respawn: bot.listenerCount("respawn") };
   const seen = watch(escapeFire(bot, world, new AbortController().signal));
-  await physicsTicks(bot, 2);
+  await physicsTicks(2);
   bot.health = 0;
   bot.emit("death");
-  await physicsTicks(bot, 1);
+  await physicsTicks(1);
   assert.equal(seen.outcome, "died");
-  assert.equal(bot.listenerCount("death"), 0, "the death listener is removed");
-  assert.equal(bot.listenerCount("respawn"), 0, "the respawn listener is removed");
+  assert.equal(bot.listenerCount("death"), atRest.death, "the death listener is removed");
+  assert.equal(bot.listenerCount("respawn"), atRest.respawn, "the respawn listener is removed");
 });
 
 test("no water in reach: escaped on dry ground as today", async () => {
@@ -165,69 +176,60 @@ test("no water in reach: escaped on dry ground as today", async () => {
 });
 
 test("a burning bot goes on from cell to cell of the way round the lava", async () => {
-  const { bot, world, controls } = burningOnTheBank();
+  const { bot, world, controls, physicsTicks } = burningOnTheBank();
   const seen = watch(escapeFire(bot, world, new AbortController().signal));
   for (const [x, z] of [[-0.5, 1.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]] as const) {
-    await physicsTicks(bot, 2);
+    await physicsTicks(2);
     assert.equal(seen.outcome, null, `still walking before (${x}, ${z})`);
     bot.entity.position.set(x, 65, z);
   }
-  await physicsTicks(bot, 2);
+  await physicsTicks(2);
   assert.equal(seen.outcome, null, "on the bank beside the water, still burning");
   assert.equal(anyMoveControl(controls), true);
   Object.assign(bot.entity, { isInWater: true });
   bot.entity.position.set(2.5, 64, 0.5);
   setBurning(bot, false);
-  await physicsTicks(bot, 1);
+  await physicsTicks(1);
   assert.equal(seen.outcome, "escaped");
 });
 
-/** Dry stone floor to y 64, the body at y 65 burning; `cells` add what stands on it (`lava[level=2]` is a flowed layer). */
-function burningOnDryGround(cells: Record<string, string>, position: Vec3) {
-  const scene = burningOnTheBank(position);
-  for (const key of Object.keys(scene.cells)) delete scene.cells[key];
-  Object.assign(scene.cells, cells);
-  for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) for (let y = 62; y <= 68; y++) scene.load(x, y, z);
-  return scene;
-}
-
 test("a burning bot beside lava that can spread into its cell is not escaped there, whatever woke the reflex", async () => {
   for (const reason of ["contact", "advancing_lava"] as const) {
-    const { bot, world, controls } = burningOnDryGround({ "1,65,0": "lava[level=2]" }, new Vec3(0.5, 65, 0.5));
+    const { bot, world, controls, physicsTicks } = burningScene({ cells: { "1,65,0": lavaAt(2) }, position: new Vec3(0.5, 65, 0.5) });
     const seen = watch(escapeFire(bot, world, new AbortController().signal, reason));
-    await physicsTicks(bot, 3);
+    await physicsTicks(3);
     assert.equal(seen.outcome, null, `${reason}: beside level 2 lava the escape goes on`);
     assert.equal(anyMoveControl(controls), true, `${reason}: it walks to a cell lava cannot spread into`);
     bot.entity.position.set(0.5, 65, 1.5);
-    await physicsTicks(bot, 2);
+    await physicsTicks(2);
     assert.equal(seen.outcome, "escaped", `${reason}: one cell away from the lava's reach`);
   }
 });
 
 test("burning on safe dry ground with no water in reach is escaped at once, whatever woke the reflex", async () => {
   for (const reason of ["contact", "advancing_lava"] as const) {
-    const { bot, world } = burningOnDryGround({}, new Vec3(-4.5, 65, 5.5));
+    const { bot, world, physicsTicks } = burningScene({ cells: {}, position: new Vec3(-4.5, 65, 5.5) });
     const seen = watch(escapeFire(bot, world, new AbortController().signal, reason, { maximumMs: 2_000 }));
-    await physicsTicks(bot, 5);
+    await physicsTicks(5);
     assert.equal(seen.outcome, "escaped", `${reason}: not held until the wall clock ends it`);
   }
 });
 
 test("a burning bot on an unsafe dry cell with no safe cell in reach is told blocked, not held", async () => {
-  const { bot, world } = burningOnDryGround(
-    { "1,65,0": "lava[level=2]", "-1,65,0": "lava[level=2]", "0,65,1": "lava[level=2]", "0,65,-1": "lava[level=2]" },
-    new Vec3(0.5, 65, 0.5),
-  );
+  const { bot, world, physicsTicks } = burningScene({
+    cells: { "1,65,0": lavaAt(2), "-1,65,0": lavaAt(2), "0,65,1": lavaAt(2), "0,65,-1": lavaAt(2) },
+    position: new Vec3(0.5, 65, 0.5),
+  });
   const seen = watch(escapeFire(bot, world, new AbortController().signal, "advancing_lava", { maximumMs: 2_000 }));
-  await physicsTicks(bot, 3);
+  await physicsTicks(3);
   assert.equal(seen.outcome, "blocked", "the four neighbours are lava and the cell is its own: no way on");
 });
 
 test("a lava cell beside the body with room above it can take a step, whatever the room is made of", () => {
-  const { bot, world } = burningOnDryGround(
-    { "1,65,0": "lava", "1,66,0": "torch", "-1,65,0": "lava", "-1,66,0": "stone", "0,65,1": "lava", "0,66,1": "lava", "0,65,-1": "stone" },
-    new Vec3(0.5, 65, 0.5),
-  );
+  const { bot, world } = burningScene({
+    cells: { "1,65,0": "lava", "1,66,0": "torch", "-1,65,0": "lava", "-1,66,0": "stone", "0,65,1": "lava", "0,66,1": "lava", "0,65,-1": "stone" },
+    position: new Vec3(0.5, 65, 0.5),
+  });
   assert.deepEqual(
     lavaStepCells(bot, world).map((cell) => cell.toString()),
     [new Vec3(1, 65, 0).toString()],
@@ -236,7 +238,10 @@ test("a lava cell beside the body with room above it can take a step, whatever t
 });
 
 test("a lava cell holding a creature takes no step", () => {
-  const { bot, world } = burningOnDryGround({ "1,65,0": "lava" }, new Vec3(0.5, 65, 0.5));
-  Object.assign(bot, { entities: { 7: { id: 7, type: "mob", name: "zombie", isValid: true, position: new Vec3(1.5, 65, 0.5), width: 0.6, height: 1.95 } } });
+  const { bot, world } = burningScene({
+    cells: { "1,65,0": "lava" },
+    position: new Vec3(0.5, 65, 0.5),
+    entities: { 7: { type: "mob", name: "zombie", position: new Vec3(1.5, 65, 0.5), width: 0.6, height: 1.95 } },
+  });
   assert.deepEqual(lavaStepCells(bot, world), []);
 });

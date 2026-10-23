@@ -1,72 +1,82 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { combatTestContext } from "../../test-support/combat.js";
+import {
+  type FakeBot,
+  type FakeBotOptions,
+  type FakeCell,
+  type FakeClock,
+  type FakeEntitySpec,
+  createFakeBot,
+  createFakeClock,
+} from "../../test-support/fake-bot/index.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { hideInPlace } from "./hide.js";
 import { capBlock, countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../positioning/combat/hide-blocks.js";
 
-/** A cell as the hide reads it: only `boundingBox` decides whether it is solid. */
-function stone(): unknown {
+type Range = readonly [number, number];
+
+/** Every cell of the box from `x`, `y`, `z` (inclusive) as `cell`. */
+function boxOf(cell: FakeCell, x: Range, y: Range, z: Range): Record<string, FakeCell> {
+  const cells: Record<string, FakeCell> = {};
+  for (let cx = x[0]; cx <= x[1]; cx++)
+    for (let cy = y[0]; cy <= y[1]; cy++) for (let cz = z[0]; cz <= z[1]; cz++) cells[`${cx},${cy},${cz}`] = cell;
+  return cells;
+}
+
+/** The eight wall cells (feet and head height) and the cap around a bot standing at (0, 64, 0): the box the hide closes. */
+const SEALED_BOX: Record<string, FakeCell> = Object.fromEntries([
+  ...[[1, 0], [-1, 0], [0, 1], [0, -1]].flatMap(([x, z]) => [64, 65].map((y) => [`${x},${y},${z}`, "stone"])),
+  ["0,66,0", "stone"],
+]);
+
+type SceneOptions = Omit<FakeBotOptions, "clock" | "overrides"> & {
+  readonly overrides?: FakeBotOptions["overrides"];
+  /** The hide reads `Date.now` and `setTimeout` for its deadline: a test about that installs this clock (`using`). */
+  readonly mockedClock?: boolean;
+};
+
+/**
+ * A bot on the shared fake, standing on stone with the sky above it (stone at y 63 and below) unless the test says
+ * otherwise. The hide releases item use first thing, and takes the held block out of the hand before a fight; the
+ * fake has neither.
+ */
+function scene(options: SceneOptions = {}) {
+  const { overrides, mockedClock, ...bot } = options;
+  return createFakeBot({
+    ...bot,
+    clock: createFakeClock({ mode: mockedClock ? "mocked" : "manual" }),
+    overrides: {
+      // Not on the shared fake until M1 merges: deactivateItem (the hide releases any item use before it begins).
+      deactivateItem: () => undefined,
+      // Not on the shared fake: unequip. Stands for the server taking the held block out of the hand (a fight with nothing to wield).
+      unequip: async () => undefined,
+      ...overrides,
+    },
+  });
+}
+
+/** An `equip` the server refuses: the first thing a placement does, so the hide stops at its placement boundary. */
+function refuseEquip(message: string): Pick<NonNullable<FakeBotOptions["overrides"]>, "equip"> {
   return {
-    name: "stone",
-    boundingBox: "block",
-    shapes: [[0, 0, 0, 1, 1, 1]],
-    hardness: 1.5,
-    position: new Vec3(0, 0, 0),
+    equip: async () => {
+      throw new Error(message);
+    },
   };
 }
 
-function air(): unknown {
-  return { name: "air", boundingBox: "empty", shapes: [], hardness: 0, position: new Vec3(0, 0, 0) };
+/** Moves the clock a physics tick at a time until `pending` settles; past `limitMs` of clock it fails, it does not hang. */
+async function finish<T>(clock: FakeClock, pending: Promise<T>, limitMs = 150_000): Promise<T> {
+  let settled = false;
+  const note = () => void (settled = true);
+  pending.then(note, note);
+  for (let passed = 0; passed < limitMs && !settled; passed += 50) await clock.advance(50);
+  if (!settled) assert.fail(`the hide was still running after ${limitMs} ms of clock`);
+  return pending;
 }
 
-function botIn(options: {
-  readonly health: number;
-  /** Hunger; full unless a test is about what the hold can do without food. */
-  readonly food?: number;
-  /** What stands at each cell; null is an unloaded cell. */
-  readonly blockAt: (position: Vec3) => unknown;
-  readonly items?: readonly { readonly name: string; readonly count: number }[];
-  /** Thrown by `equip`, which is the first thing a placement does. */
-  readonly equipError?: string;
-}): Bot {
-  const events = new EventEmitter();
-  return {
-    on: (event: string, listener: () => void) => {
-      events.on(event, listener);
-      if (event === "physicsTick")
-        queueMicrotask(() => {
-          for (let i = 0; i < 30; i++) events.emit(event);
-        });
-    },
-    off: (event: string, listener: () => void) => events.off(event, listener),
-    health: options.health,
-    food: options.food ?? 20,
-    version: "1.21.4",
-    registry: minecraftData("1.21.4"),
-    game: { gameMode: "survival" },
-    heldItem: null,
-    entity: { id: 1, onGround: true, position: new Vec3(0.5, 64, 0.5), width: 0.6, height: 1.8 },
-    entities: {},
-    inventory: { items: () => options.items ?? [], slots: new Array(46).fill(null) },
-    world: { raycast: () => null },
-    blockAt: options.blockAt,
-    clearControlStates: () => undefined,
-    deactivateItem: () => undefined,
-    setControlState: () => undefined,
-    _client: { write: () => undefined },
-    equip: async () => {
-      if (options.equipError) throw new Error(options.equipError);
-    },
-    waitForTicks: async () => undefined,
-  } as unknown as Bot;
-}
-
-function hide(bot: Bot): ReturnType<typeof hideInPlace> {
+function hide(bot: FakeBot): ReturnType<typeof hideInPlace> {
   return hideInPlace(bot, {
     threatContext: {
       ...combatTestContext(bot),
@@ -81,41 +91,41 @@ function hide(bot: Bot): ReturnType<typeof hideInPlace> {
 }
 
 test("soul-sand support uses the observed lower surface when centering a shelter", async () => {
-  const bot = botIn({
+  const { bot, clock } = scene({
     health: 20,
-    items: [{ name: "cobblestone", count: 32 }],
-    equipError: "placement reached after valid soul-sand support",
-    blockAt: (position) =>
-      position.y < 64
-        ? { name: "soul_sand", boundingBox: "block", shapes: [[0, 0, 0, 1, 0.875, 1]], hardness: 0.5, position }
-        : air(),
+    position: new Vec3(0.5, 63.875, 0.5),
+    groundY: null,
+    cells: boxOf("soul_sand", [-4, 4], [58, 63], [-4, 4]),
+    carried: { cobblestone: 32 },
+    overrides: refuseEquip("placement reached after valid soul-sand support"),
   });
-  bot.entity.position.y = 63.875;
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /placement reached after valid soul-sand support/);
   assert.doesNotMatch(result.error ?? "", /solid floor/);
 });
 
 test("same-cell knockback into a planned wall recenters before continuing construction", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-  });
   let equips = 0;
   let recentered = false;
-  bot.equip = async () => {
-    if (++equips === 1) bot.entity.position.x = 0.15;
-    throw new Error("placement boundary");
-  };
-  bot.setControlState = (_control, state) => {
-    if (state && bot.entity.position.x === 0.15) {
-      bot.entity.position.x = 0.5;
-      recentered = true;
-    }
-  };
-  await hide(bot);
+  const { bot, clock } = scene({
+    health: 20,
+    carried: { cobblestone: 32 },
+    overrides: {
+      equip: async () => {
+        if (++equips === 1) bot.entity.position.x = 0.15;
+        throw new Error("placement boundary");
+      },
+      // Scripted: pressing a control while overlapping the west wall moves the body back to the cell's middle.
+      setControlState: (_control, state) => {
+        if (state && bot.entity.position.x === 0.15) {
+          bot.entity.position.x = 0.5;
+          recentered = true;
+        }
+      },
+    },
+  });
+  await finish(clock, hide(bot));
   assert.equal(recentered, true, "the body still occupies the same cell but overlaps its west wall");
 });
 
@@ -127,7 +137,8 @@ test("same-cell knockback into a planned wall recenters before continuing constr
  * the body every second.
  */
 test("a bot already sealed in is hidden, not failed", async () => {
-  const result = await hide(botIn({ health: 18, blockAt: () => stone() }));
+  const { bot, clock } = scene({ health: 18, cells: SEALED_BOX });
+  const result = await finish(clock, hide(bot));
 
   assert.equal(result.kind, "recovered");
   assert.equal(result.enclosed, true);
@@ -137,15 +148,16 @@ test("a bot already sealed in is hidden, not failed", async () => {
 });
 
 test("dragon shelter counts and selects resistant blocks and rejects an ordinary stone enclosure", async () => {
-  const bot = botIn({ health: 18, blockAt: () => stone(), items: [
-    { name: "cobblestone", count: 64 }, { name: "end_stone", count: 10 },
-  ] });
+  const { bot, clock } = scene({ health: 18, cells: SEALED_BOX, carried: { cobblestone: 64, end_stone: 10 } });
   assert.equal(countCapBlocks(bot, DRAGON_PROTECTION_BLOCKS), 10);
   assert.equal(capBlock(bot, DRAGON_PROTECTION_BLOCKS)?.name, "end_stone");
-  const result = await hideInPlace(bot, {
-    threatContext: combatTestContext(bot), signal: new AbortController().signal,
-    recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS,
-  });
+  const result = await finish(
+    clock,
+    hideInPlace(bot, {
+      threatContext: combatTestContext(bot), signal: new AbortController().signal,
+      recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS,
+    }),
+  );
   assert.equal(result.kind, "failed");
   assert.equal(result.enclosed, false, "ordinary stone can be destroyed by the dragon");
 });
@@ -156,15 +168,13 @@ test("dragon shelter counts and selects resistant blocks and rejects an ordinary
  * that named no cause. The refusal now travels with the failure.
  */
 test("a failed hide reports the first refused placement, with the cell and the face it chose", async () => {
-  const result = await hide(
-    botIn({
-      health: 7,
-      blockAt: (position) => (position.y < 64 ? stone() : air()),
-      // Enough to wall in rather than dig, which is the live failure's shape.
-      items: [{ name: "cobblestone", count: 47 }],
-      equipError: "the server would not equip cobblestone",
-    }),
-  );
+  const { bot, clock } = scene({
+    health: 7,
+    // Enough to wall in rather than dig, which is the live failure's shape.
+    carried: { cobblestone: 47 },
+    overrides: refuseEquip("the server would not equip cobblestone"),
+  });
+  const result = await finish(clock, hide(bot));
 
   assert.equal(result.kind, "failed");
   // Ground below and open air at head height is not a box.
@@ -177,24 +187,28 @@ test("a failed hide reports the first refused placement, with the cell and the f
 });
 
 test("with nothing to dig and nothing to place, the failure says the bot carried nothing", async () => {
-  const result = await hide(botIn({ health: 7, blockAt: () => null }));
+  // Every cell around the bot is in a chunk that is not loaded.
+  const { bot, clock } = scene({ health: 7, groundY: null, cells: boxOf("void", [-4, 4], [58, 70], [-4, 4]) });
+  const result = await finish(clock, hide(bot));
 
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no block worth placing is carried/);
 });
 
 test("a wall-in that cannot clear the body's overlap refuses before placing walls", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-  });
-  bot.entity.position.z = 0.146;
   let equips = 0;
-  bot.equip = async () => {
-    equips += 1;
-  };
-  const result = await hide(bot);
+  const { bot, clock } = scene({
+    health: 20,
+    position: new Vec3(0.5, 64, 0.146),
+    carried: { cobblestone: 32 },
+    overrides: {
+      // Counts the equips: no wall may be started.
+      equip: async () => {
+        equips += 1;
+      },
+    },
+  });
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /could not centre inside/);
   assert.equal(equips, 0);
@@ -202,157 +216,147 @@ test("a wall-in that cannot clear the body's overlap refuses before placing wall
 });
 
 test("wall centering does not walk off adjacent lip support into an unsupported origin cell", async () => {
-  const bot = botIn({ health: 20, blockAt: () => air(), items: [{ name: "cobblestone", count: 32 }] });
-  bot.entity.position.z = 0.146;
-  let controls = 0;
-  bot.setControlState = () => {
-    controls += 1;
-  };
-  const result = await hide(bot);
+  let presses = 0;
+  const { bot, clock } = scene({
+    health: 20,
+    position: new Vec3(0.5, 64, 0.146),
+    groundY: null,
+    carried: { cobblestone: 32 },
+    overrides: {
+      // Counts the controls pressed; the fake's clearControlStates releases each control through this too.
+      setControlState: (_control, state) => {
+        if (state) presses += 1;
+      },
+    },
+  });
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
-  assert.equal(controls, 0);
+  assert.equal(presses, 0);
 });
 
 test("a partial collision block without center-height footing is not a wall-in floor", async () => {
-  const bot = botIn({
+  const { bot, clock } = scene({
     health: 20,
-    blockAt: (position) => (position.y < 64 ? { ...(stone() as object), shapes: [[0, 0, 0, 1, 0.5, 1]] } : air()),
-    items: [{ name: "cobblestone", count: 32 }],
+    groundY: null,
+    cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]),
+    carried: { cobblestone: 32 },
   });
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
 });
 
 test("breaking a block without falling into its cell is a failed hide, even at full health", async () => {
-  let broken = false;
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => {
-      if (position.y >= 64 || (broken && position.y === 63)) return air();
-      return { ...(stone() as object), position, digTime: () => 750 };
-    },
-  });
-  bot.game = { gameMode: "survival" } as Bot["game"];
-  bot.dig = async () => {
-    broken = true;
-  };
-  const result = await hide(bot);
+  // The fake's own dig (bare hand on stone) turns the cell to air; no physics runs, so the body stays where it was.
+  const { bot, clock } = scene({ health: 20 });
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.equal(result.dug, 1);
   assert.match(result.error ?? "", /did not land/);
 });
 
-function closeMob(name: string): Bot["entity"] {
-  return {
-    id: 2,
-    name,
-    kind: "Hostile mobs",
-    type: "mob" as const,
-    isValid: true,
-    width: 0.6,
-    height: 2,
-    metadata: [],
-    position: new Vec3(0.5, 64, 0.9),
-  } as unknown as Bot["entity"];
+/** A hostile mob inside the bot's cell column, the shelter shell's near side. */
+function closeMob(name: string): FakeEntitySpec {
+  // Not on the shared fake until M3 merges: entity.kind (the hide reads the mob's kind).
+  return { name, kind: "Hostile mobs", metadata: [], position: new Vec3(0.5, 64, 0.9) };
 }
 
 test("hide repels an authorized intruder before building and uses the observed landing cell", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-    equipError: "placement boundary",
-  });
-  const mob = closeMob("wither_skeleton");
-  bot.entities[2] = mob;
-  bot.lookAt = async () => undefined;
   let attacks = 0;
-  bot.attack = () => {
-    attacks++;
-    mob.position.x = 10;
-    bot.entity.position.x = 3.5;
-  };
-  const result = await hide(bot);
+  const { bot, clock } = scene({
+    health: 20,
+    carried: { cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton") },
+    overrides: {
+      ...refuseEquip("placement boundary"),
+      // Not on the shared fake: attack. The strike knocks the mob away and the bot into the next cell.
+      attack: () => {
+        attacks++;
+        bot.entities[2]!.position.x = 10;
+        bot.entity.position.x = 3.5;
+      },
+    },
+  });
+  const result = await finish(clock, hide(bot));
   assert.equal(attacks, 1);
   assert.equal(result.swings, 1);
   assert.match(result.error ?? "", /4,64,0/);
 });
 
 test("a neutral piglin sharing the construction space is not permission to attack", async () => {
-  const bot = botIn({
+  const { bot, clock } = scene({
     health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-    equipError: "placement boundary",
+    carried: { cobblestone: 32 },
+    entities: { 2: closeMob("piglin") },
+    overrides: {
+      ...refuseEquip("placement boundary"),
+      // Not on the shared fake: attack.
+      attack: () => {
+        throw new Error("neutral mob attacked");
+      },
+    },
   });
-  bot.entities[2] = closeMob("piglin");
-  bot.attack = () => {
-    throw new Error("neutral mob attacked");
-  };
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.swings, 0);
   assert.equal(result.kind, "failed");
 });
 
 test("shelter contact uses a ready shield and a non-sweeping tool beside a neutral Enderman", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: ["iron_sword", "iron_pickaxe", "shield", "cobblestone"].map((name) => ({ name, count: 32 })),
-  });
-  const intruder = closeMob("wither_skeleton");
-  const bystander = Object.assign(closeMob("enderman"), { id: 3, position: new Vec3(2, 64, 0.5) });
-  bot.entities[2] = intruder;
-  bot.entities[3] = bystander;
   let raised = false;
   let ticks = 0;
   let raisedAt = 0;
+  const { bot, clock } = scene({
+    health: 20,
+    carried: { iron_sword: 1, iron_pickaxe: 1, shield: 1, cobblestone: 32 },
+    entities: {
+      2: closeMob("wither_skeleton"),
+      3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) },
+    },
+    overrides: {
+      // Not on the shared fake: activateItem and deactivateItem, until M1 merges (the shield use the hide commands).
+      activateItem: () => {
+        if (!raised) raisedAt = ticks;
+        raised = true;
+        bot.usingHeldItem = true;
+      },
+      deactivateItem: () => {
+        raised = false;
+        bot.usingHeldItem = false;
+      },
+      // Not on the shared fake: attack.
+      attack: (target) => {
+        assert.equal(target.id, intruder.id);
+        assert.equal(bot.heldItem?.name, "iron_pickaxe");
+        assert.equal(raised, true);
+        assert.ok(ticks - raisedAt >= 5);
+        delete bot.entities[2];
+      },
+    },
+  });
+  const intruder = bot.entities[2]!;
+  const bystander = bot.entities[3]!;
   bot.on("physicsTick", () => {
     ticks++;
   });
+  // The tools equip as the game does; only the construction's block is refused, so the hide ends after the contact.
+  const equip = bot.equip;
   bot.equip = async (item, destination) => {
     if (typeof item === "number") throw new Error("Fixture expects a resolved item.");
     if (item.name === "cobblestone") throw new Error("construction boundary");
-    if (destination === "hand") Reflect.set(bot, "heldItem", item);
-    else bot.inventory.slots[45] = item;
+    return equip(item, destination);
   };
-  bot.activateItem = () => {
-    if (!raised) raisedAt = ticks;
-    raised = true;
-    Reflect.set(bot, "usingHeldItem", true);
-  };
-  bot.deactivateItem = () => {
-    raised = false;
-    Reflect.set(bot, "usingHeldItem", false);
-  };
-  bot.lookAt = async () => undefined;
-  bot.attack = (target) => {
-    assert.equal(target.id, intruder.id);
-    assert.equal(bot.heldItem?.name, "iron_pickaxe");
-    assert.equal(raised, true);
-    assert.ok(ticks - raisedAt >= 5);
-    delete bot.entities[2];
-  };
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.swings, 1);
   assert.equal(bystander.isValid, true);
   assert.equal(raised, false, "the construction owner releases its shield on settlement");
 });
 
 test("a stopped physics stream does not prevent hide cancellation", async () => {
-  const bot = botIn({ health: 20, blockAt: () => air() });
+  const { bot } = scene({ health: 20, groundY: null });
   bot.entity.onGround = false;
-  const events = new EventEmitter();
-  bot.on = (event, listener) => {
-    events.on(event, listener);
-    return bot;
-  };
-  bot.off = (event, listener) => {
-    events.off(event, listener);
-    return bot;
-  };
+  bot.physicsEnabled = false; // the client runs no tick
+  const listening = bot.listenerCount("physicsTick");
   const abort = new AbortController();
   const pending = hideInPlace(bot, {
     signal: abort.signal,
@@ -367,51 +371,50 @@ test("a stopped physics stream does not prevent hide cancellation", async () => 
   });
   abort.abort(new Error("hide cancelled"));
   await assert.rejects(pending, /hide cancelled/);
-  assert.equal(events.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("physicsTick"), listening);
 });
 
 test("an intruder arriving during centering interrupts steering before construction", async () => {
-  const bot = botIn({
+  let arrived = false;
+  const { bot, clock } = scene({
     health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-    equipError: "placement boundary",
+    position: new Vec3(0.5, 64, 0.146),
+    carried: { cobblestone: 32 },
+    // Starts well outside the shell; the first tick brings it in.
+    entities: { 2: { ...closeMob("wither_skeleton"), position: new Vec3(20, 64, 20) } },
+    overrides: {
+      ...refuseEquip("placement boundary"),
+      // Not on the shared fake: attack.
+      attack: () => {
+        delete bot.entities[2];
+        bot.entity.position.z = 0.5;
+      },
+    },
   });
-  bot.entity.position.z = 0.146;
-  const mob = closeMob("wither_skeleton");
-  const on = bot.on;
-  let introduced = false;
-  bot.on = (event, listener) => {
-    if (event === "physicsTick" && !introduced) {
-      introduced = true;
-      queueMicrotask(() => {
-        bot.entities[2] = mob;
-      });
-    }
-    return on.call(bot, event, listener);
-  };
-  bot.lookAt = async () => undefined;
-  bot.attack = () => {
-    delete bot.entities[2];
-    bot.entity.position.z = 0.5;
-  };
-  const result = await hide(bot);
+  bot.on("physicsTick", () => {
+    if (arrived) return;
+    arrived = true;
+    bot.entities[2]!.position = new Vec3(0.5, 64, 0.9);
+  });
+  const result = await finish(clock, hide(bot));
   assert.equal(result.swings, 1);
   assert.match(result.error ?? "", /placement boundary/);
 });
 
 test("crossing into the dug cell while airborne does not complete shaft descent", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? { ...(stone() as object), position, digTime: () => 750 } : air()),
-  });
   let digs = 0;
-  bot.dig = async () => {
-    digs++;
-    bot.entity.position.y = 63.2;
-    bot.entity.onGround = false;
-  };
-  const result = await hide(bot);
+  const { bot, clock } = scene({
+    health: 20,
+    overrides: {
+      // Scripted: the dig drops the body into the cell, still falling.
+      dig: async () => {
+        digs++;
+        bot.entity.position.y = 63.2;
+        bot.entity.onGround = false;
+      },
+    },
+  });
+  const result = await finish(clock, hide(bot));
   assert.equal(digs, 1);
   assert.equal(result.kind, "failed");
   assert.equal(result.capped, false);
@@ -426,15 +429,15 @@ test("crossing into the dug cell while airborne does not complete shaft descent"
  * before the wall goes up from it.
  */
 test("a wall over a drop is built on a floor extension placed against the bot's own floor block", async () => {
-  const result = await hide(
-    botIn({
-      health: 7,
-      // A one-wide bridge: the only solid block is the one underfoot.
-      blockAt: (position) => (position.x === 0 && position.y === 63 && position.z === 0 ? stone() : air()),
-      items: [{ name: "cobblestone", count: 32 }],
-      equipError: "placement boundary",
-    }),
-  );
+  const { bot, clock } = scene({
+    health: 7,
+    // A one-wide bridge: the only solid block is the one underfoot.
+    groundY: null,
+    cells: { "0,63,0": "stone" },
+    carried: { cobblestone: 32 },
+    overrides: refuseEquip("placement boundary"),
+  });
+  const result = await finish(clock, hide(bot));
 
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /1,63,0/, "the extension cell beside the floor block, not the wall cell above it");
@@ -447,7 +450,8 @@ test("a wall over a drop is built on a floor extension placed against the bot's 
  * so at once and hands the body back sealed in.
  */
 test("a sealed-in bot with nothing to eat and hunger below the regeneration bar is held at once, and says why", async () => {
-  const result = await hide(botIn({ health: 2, food: 13, blockAt: () => stone() }));
+  const { bot, clock } = scene({ health: 2, food: 13, cells: SEALED_BOX });
+  const result = await finish(clock, hide(bot));
 
   assert.equal(result.kind, "held");
   assert.equal(result.enclosed, true);
@@ -460,26 +464,7 @@ const LIQUID_BODIES = [
   ["lava", "isInLava"],
 ] as const;
 
-/** Physics ticks as the game delivers them, one per timer turn: a hide that never awaits one starves the timers. */
-function tickEvery(bot: Bot, intervalMs = 1): { readonly stop: () => void; readonly ticks: () => number } {
-  const events = new EventEmitter();
-  let count = 0;
-  bot.on = (event, listener) => {
-    events.on(event, listener);
-    return bot;
-  };
-  bot.off = (event, listener) => {
-    events.off(event, listener);
-    return bot;
-  };
-  const timer = setInterval(() => {
-    count += 1;
-    events.emit("physicsTick");
-  }, intervalMs);
-  return { stop: () => clearInterval(timer), ticks: () => count };
-}
-
-function hideBounded(bot: Bot, options: { readonly signal?: AbortSignal; readonly maximumMs: number }) {
+function hideBounded(bot: FakeBot, options: { readonly signal?: AbortSignal; readonly maximumMs: number }) {
   return hideInPlace(bot, {
     threatContext: {
       ...combatTestContext(bot),
@@ -487,7 +472,7 @@ function hideBounded(bot: Bot, options: { readonly signal?: AbortSignal; readonl
       attackerIds: new Set(),
       unreachableIds: new Set(),
     },
-    signal: options.signal ?? AbortSignal.timeout(2_000),
+    signal: options.signal ?? new AbortController().signal,
     recoverTo: 18,
     maximumMs: options.maximumMs,
   });
@@ -495,17 +480,19 @@ function hideBounded(bot: Bot, options: { readonly signal?: AbortSignal; readonl
 
 for (const [liquid, flag] of LIQUID_BODIES) {
   test(`hideInPlace in ${liquid} fails at once with [SHELTER]`, async () => {
-    const bot = botIn({
+    let equips = 0;
+    const { bot, clock } = scene({
       health: 7,
-      blockAt: (position) => (position.y < 64 ? stone() : air()),
-      items: [{ name: "cobblestone", count: 32 }],
+      carried: { cobblestone: 32 },
+      overrides: {
+        // Counts the equips: nothing may be dug or placed in a liquid.
+        equip: async () => {
+          equips += 1;
+        },
+      },
     });
     Reflect.set(bot.entity, flag, true);
-    let equips = 0;
-    bot.equip = async () => {
-      equips += 1;
-    };
-    const result = await hide(bot);
+    const result = await finish(clock, hide(bot));
     assert.equal(result.kind, "failed");
     assert.match(result.error ?? "", /^\[SHELTER\].*liquid/);
     assert.equal(equips, 0, "nothing is dug or placed in a liquid");
@@ -514,105 +501,97 @@ for (const [liquid, flag] of LIQUID_BODIES) {
 }
 
 test("a sealed-in bot in water is not held in its shelter", async () => {
-  const bot = botIn({ health: 18, blockAt: () => stone() });
+  const { bot, clock } = scene({ health: 18, cells: SEALED_BOX });
   Reflect.set(bot.entity, "isInWater", true);
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /^\[SHELTER\]/);
 });
 
 test("a hide whose body is pushed into water while it waits to land stops at the next pass", async () => {
-  const bot = botIn({
-    health: 7,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-  });
+  const { bot, clock } = scene({ health: 7, carried: { cobblestone: 32 } });
   bot.entity.onGround = false;
-  const clock = tickEvery(bot);
   bot.on("physicsTick", () => {
     Reflect.set(bot.entity, "isInWater", true);
   });
-  try {
-    const result = await hideBounded(bot, { signal: AbortSignal.timeout(500), maximumMs: 60_000 });
-    assert.equal(result.kind, "failed");
-    assert.match(result.error ?? "", /^\[SHELTER\]/);
-  } finally {
-    clock.stop();
-  }
+  const result = await finish(clock, hideBounded(bot, { maximumMs: 60_000 }));
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /^\[SHELTER\]/);
 });
 
 test("an intruder that cannot be struck does not starve the event loop", async () => {
-  const bot = botIn({
-    health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-  });
-  // Standing in the shell but shielded from the bot's eye: shelter contact the bot cannot answer.
-  bot.world.raycast = () => ({ position: new Vec3(0, 65, 0) }) as never;
-  bot.entities[2] = closeMob("wither_skeleton");
-  const clock = tickEvery(bot);
   const abort = new AbortController();
   let looks = 0;
-  bot.lookAt = async () => {
-    // A hide that spins without awaiting a tick never lets the timer below run; stop it so the test fails, not hangs.
-    if (++looks > 2_000) abort.abort(new Error("the hide spun without yielding"));
-  };
+  let ticks = 0;
+  const { bot, clock } = scene({
+    health: 20,
+    carried: { cobblestone: 32 },
+    // Standing in the shell, inside the stone of its east wall, so the bot's eye cannot see it: shelter contact the bot cannot answer.
+    cells: { "1,64,0": "stone", "1,65,0": "stone" },
+    entities: { 2: { ...closeMob("wither_skeleton"), position: new Vec3(1.5, 64, 0.5) } },
+    overrides: {
+      lookAt: async () => {
+        // A hide that spins without awaiting a tick never lets the clock below run; stop it so the test fails, not hangs.
+        if (++looks > 2_000) abort.abort(new Error("the hide spun without yielding"));
+      },
+    },
+  });
+  bot.on("physicsTick", () => {
+    ticks += 1;
+  });
   let timerFired = false;
-  setTimeout(() => {
+  clock.after(100, () => {
     timerFired = true;
     abort.abort(new Error("stopped by the test"));
-  }, 0);
-  try {
-    await assert.rejects(hideBounded(bot, { signal: abort.signal, maximumMs: 60_000 }), /stopped by the test/);
-    assert.equal(timerFired, true);
-    assert.ok(looks <= 5, `${looks} passes ran before the first timer turn`);
-    assert.ok(clock.ticks() >= 1, "every pass awaits a physics tick");
-  } finally {
-    clock.stop();
-  }
+  });
+  const rejected = assert.rejects(hideBounded(bot, { signal: abort.signal, maximumMs: 60_000 }), /stopped by the test/);
+  await clock.advance(100);
+  await rejected;
+  assert.equal(timerFired, true);
+  assert.ok(looks <= 5, `${looks} passes ran before the timer at 100 ms`);
+  assert.ok(ticks >= 1, "every pass awaits a physics tick");
 });
 
 test("an intruder that leaves while the bot turns to it does not stop the shelter being built", async () => {
-  const bot = botIn({
+  const { bot, clock } = scene({
     health: 20,
-    blockAt: (position) => (position.y < 64 ? stone() : air()),
-    items: [{ name: "cobblestone", count: 32 }],
-    equipError: "placement boundary",
+    carried: { cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton") },
+    overrides: {
+      ...refuseEquip("placement boundary"),
+      // Scripted: the intruder is gone by the time the look ends.
+      lookAt: async () => {
+        delete bot.entities[2];
+      },
+      // Not on the shared fake: attack.
+      attack: () => {
+        throw new Error("nothing was left to attack");
+      },
+    },
   });
-  bot.entities[2] = closeMob("wither_skeleton");
-  bot.lookAt = async () => {
-    delete bot.entities[2];
-  };
-  bot.attack = () => {
-    throw new Error("nothing was left to attack");
-  };
-  const result = await hide(bot);
+  const result = await finish(clock, hide(bot));
   assert.equal(result.swings, 0);
   assert.match(result.error ?? "", /placement boundary/);
 });
 
 test("the construction deadline ends a hide whose body never lands", async () => {
-  const bot = botIn({ health: 7, blockAt: (position) => (position.y < 64 ? stone() : air()) });
+  const { bot, clock } = scene({ health: 7, mockedClock: true });
+  using _installed = clock.install();
   bot.entity.onGround = false;
-  const clock = tickEvery(bot);
-  try {
-    const started = Date.now();
-    const result = await hideBounded(bot, { signal: AbortSignal.timeout(1_000), maximumMs: 40 });
-    assert.equal(result.kind, "failed");
-    assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
-    assert.ok(Date.now() - started < 500);
-  } finally {
-    clock.stop();
-  }
+  const started = Date.now();
+  const result = await finish(clock, hideBounded(bot, { maximumMs: 40 }));
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
+  assert.ok(Date.now() - started < 500);
 });
 
 test("the construction deadline runs on the wall clock when the physics stream has stopped", async () => {
-  const bot = botIn({ health: 7, blockAt: (position) => (position.y < 64 ? stone() : air()) });
+  const { bot, clock } = scene({ health: 7, mockedClock: true });
+  using _installed = clock.install();
   bot.entity.onGround = false;
-  bot.on = () => bot;
-  bot.off = () => bot;
+  bot.physicsEnabled = false; // the client runs no tick
   const started = Date.now();
-  const result = await hideBounded(bot, { signal: AbortSignal.timeout(1_000), maximumMs: 40 });
+  const result = await finish(clock, hideBounded(bot, { maximumMs: 40 }));
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
   assert.ok(Date.now() - started < 500);

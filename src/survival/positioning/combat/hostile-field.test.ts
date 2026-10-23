@@ -1,4 +1,3 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
@@ -6,6 +5,7 @@ import type { HostileContext } from "../../control/combat/context.js";
 import { DEFAULT_COMBAT_POLICY, type CombatPolicy } from "../../policy/combat/contract.js";
 import { DEFAULT_NAVIGATION_POLICY } from "../../policy/contract.js";
 import { SurvivalPolicyState } from "../../state/survival-policy.js";
+import { type FakeCell, createFakeBot } from "../../../test-support/fake-bot/index.js";
 import {
   createHostileStepFieldProvider,
   HIDE_EXPOSURE_PENALTY,
@@ -24,43 +24,49 @@ interface Mob {
   readonly z?: number;
   /** minecraft-data category; defaults to a hostile. */
   readonly kind?: string;
-  readonly metadata?: readonly unknown[];
+  /** The `mob_flags` byte (bit 4: aggressive), written at the version's index for the mob. */
+  readonly mobFlags?: number;
 }
 
 interface BotOptions {
   /** Full unless a test is about the hide bar. */
   readonly health?: number;
-  /** What a sight line meets; open air unless a test builds a wall. */
-  readonly raycast?: (from: Vec3, direction: Vec3, range: number) => unknown;
+  /** Cells a sight line meets; open air unless a test builds a wall. */
+  readonly cells?: Readonly<Record<string, FakeCell>>;
 }
 
-function botWith(mobs: readonly Mob[], options: BotOptions = {}): Bot {
-  return {
+/** The fake bot at the origin in open air at night, `mobs` around it as the entities it sees. */
+function botWith(mobs: readonly Mob[], options: BotOptions = {}) {
+  const { bot } = createFakeBot({
+    position: new Vec3(0, 0, 0),
     health: options.health ?? 20,
     // Night, because a spider is only priced as a threat while it is one.
-    time: { timeOfDay: 18_000 },
-    blockAt: () => null,
-    world: { raycast: options.raycast ?? (() => null) },
-    registry: { entitiesByName: { piglin: { metadataKeys: ["mob_flags"] } } },
-    entity: { id: 1, position: new Vec3(0, 0, 0), width: 0.6, height: 1.8 },
+    server: { timeOfDay: 18_000 },
+    groundY: null,
+    cells: options.cells,
     entities: Object.fromEntries(
       mobs.map((mob) => [
         mob.id,
         {
-          id: mob.id,
           name: mob.name,
           displayName: mob.name,
           type: "hostile",
+          // Not on the shared fake until M3 merges: entity.kind.
           kind: "kind" in mob ? mob.kind : "Hostile mobs",
-          isValid: true,
-          metadata: mob.metadata ?? [],
+          metadata: [],
           position: new Vec3(mob.x, mob.y ?? 0, mob.z ?? 0),
           width: 0.6,
           height: 1.95,
         },
       ]),
     ),
-  } as unknown as Bot;
+  });
+  for (const mob of mobs) {
+    if (mob.mobFlags === undefined) continue;
+    const index = bot.registry.entitiesByName[mob.name]!.metadataKeys!.indexOf("mob_flags");
+    Reflect.set(bot.entities[mob.id]!.metadata, index, mob.mobFlags);
+  }
+  return bot;
 }
 
 function context(
@@ -307,9 +313,9 @@ test("the fingerprint does not depend on the order the entity table was in", () 
 });
 
 test("observed aggressive piglin is priced for avoidance without attacker attribution", () => {
-  const piglin = { id: 7, name: "piglin", x: 0, metadata: [4] };
+  const piglin = { id: 7, name: "piglin", x: 0, mobFlags: 4 };
   assert.ok(fieldFor([piglin])?.costAt(0, 0, 0));
-  assert.equal(fieldFor([{ ...piglin, metadata: [0] }]), null);
+  assert.equal(fieldFor([{ ...piglin, mobFlags: 0 }]), null);
   assert.equal(fieldFor([piglin], context({ resolved: [7] })), null);
 });
 
@@ -319,15 +325,13 @@ test("observed aggressive piglin is priced for avoidance without attacker attrib
  * the hide bar a cell the hostile can see is priced as the hide it provokes.
  */
 test("under the hide bar, a cell the hostile can see costs twenty terrain breaks more than one it cannot", () => {
-  // A wall halfway through cell 4, between the zombie at x = 10 and everything
-  // west of it: a sight line meets the wall when it crosses that plane.
-  const wall = (from: Vec3, direction: Vec3, range: number) => {
-    const to = from.plus(direction.scaled(range));
-    return from.x < 4.5 !== to.x < 4.5 ? { position: { x: 4, y: 0, z: 0 } } : null;
-  };
+  // A wall in cell 4, between the zombie at x = 10 and everything west of it:
+  // a sight line meets the wall when it crosses that cell.
+  const wall: Record<string, FakeCell> = {};
+  for (let y = -3; y <= 5; y++) for (let z = -3; z <= 3; z++) wall[`4,${y},${z}`] = "stone";
   const zombie = { id: 7, name: "zombie", x: 10 };
-  const hurt = fieldFor([zombie], context(), { health: 7, raycast: wall });
-  const healthy = fieldFor([zombie], context(), { health: 20, raycast: wall });
+  const hurt = fieldFor([zombie], context(), { health: 7, cells: wall });
+  const healthy = fieldFor([zombie], context(), { health: 20, cells: wall });
   assert.notEqual(hurt, null);
   assert.notEqual(healthy, null);
   if (!hurt || !healthy) return;
@@ -353,7 +357,7 @@ test("under the hide bar, a cell the hostile can see costs twenty terrain breaks
   const pack = fieldFor(
     Array.from({ length: 8 }, (_unused, index) => ({ id: index + 1, name: "creeper", x: 10 })),
     context(),
-    { health: 7, raycast: wall },
+    { health: 7, cells: wall },
   );
   assert.equal(pack?.costAt(9, 0, 0), SEVERE_CAP + HIDE_EXPOSURE_PENALTY);
 });

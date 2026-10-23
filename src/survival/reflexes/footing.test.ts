@@ -1,30 +1,26 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner } from "../../session/action-runner.js";
-import { handClock } from "../../test-support/hand-clock.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachFootingReflex } from "./footing.js";
 
-/** A footing reflex over a recovery that waits for the landing, on a hand clock. */
+/** A footing reflex over a recovery that waits for the landing, on the fake bot's clock, high in open air. */
 function fallingScene() {
-  const entity = { position: new Vec3(0.5, 200, 0.5), isInWater: false, onGround: false };
-  const bot = Object.assign(new EventEmitter(), { health: 20, entity, game: { dimension: "overworld" } }) as unknown as Bot;
-  const time = handClock();
-  const runner = new ActionRunner({ clock: time.clock, cancelGraceMs: 500 });
-  const driver = new ReflexDriver(bot, runner, { now: time.clock.now });
+  const { bot, clock } = createFakeBot({ position: new Vec3(0.5, 200, 0.5), groundY: null });
+  const entity = Object.assign(bot.entity, { onGround: false });
+  const runner = new ActionRunner({ clock, cancelGraceMs: 500 });
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const recovery = {
     needed: true,
     recover: (signal: AbortSignal) => new Promise<"landed" | "failed">((resolve) => signal.addEventListener("abort", () => resolve("failed"), { once: true })),
   };
   const reflex = attachFootingReflex(driver, { activeEngagement: () => null }, recovery, () => {});
-  /** One 50 ms step: the body falls `drop` blocks, a physics tick, time passes. */
+  /** One 50 ms step: the body falls `drop` blocks, then a client tick. */
   const step = async (drop: number) => {
     entity.position = entity.position.offset(0, -drop, 0);
-    bot.emit("physicsTick");
-    await time.advance(50);
+    await clock.advance(50);
   };
   return { entity, runner, step, dispose: async () => { await reflex[Symbol.asyncDispose](); await driver[Symbol.asyncDispose](); } };
 }
@@ -52,7 +48,7 @@ test("landing marks, and so does entering water", async () => {
   await scene.step(0);
   for (let tick = 0; tick < 80; tick++) await scene.step(0);
   assert.equal(scene.runner.status().activeAction?.action, "recover_footing", "the landing at 4 s reopened the window");
-  scene.entity.isInWater = true;
+  Object.assign(scene.entity, { isInWater: true });
   await scene.step(0);
   for (let tick = 0; tick < 80; tick++) await scene.step(0);
   assert.equal(scene.runner.status().activeAction?.action, "recover_footing", "so did the splash at 8 s");

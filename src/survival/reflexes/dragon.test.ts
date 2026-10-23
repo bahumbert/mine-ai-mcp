@@ -1,23 +1,16 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner } from "../../session/action-runner.js";
-import { handClock } from "../../test-support/hand-clock.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { SurvivalPolicyState } from "../state/survival-policy.js";
 import { attachDragonReflex } from "./dragon.js";
 
 test("idle dragon defense claims one body, leaves active combat alone, and awaits cancellation cleanup", async () => {
-  const bot = Object.assign(new EventEmitter(), {
-    username: "DragonReflex",
-    health: 20,
-    entities: {},
-    entity: { position: new Vec3(0, 64, 0) },
-  }) as unknown as Bot;
-  const runner = new ActionRunner();
-  const driver = new ReflexDriver(bot, runner);
+  const { bot, clock } = createFakeBot({ username: "DragonReflex", position: new Vec3(0, 64, 0) });
+  const runner = new ActionRunner({ clock });
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   let active: number | null = 42,
     calls = 0,
     released = false;
@@ -34,12 +27,11 @@ test("idle dragon defense claims one body, leaves active combat alone, and await
       return { outcome: "stopped", reason: "cancelled", attacks: 0, healthBefore: null, healthAfter: null };
     },
   });
-  bot.emit("physicsTick");
+  await clock.advance(50);
   assert.equal(calls, 0);
   active = null;
-  bot.emit("physicsTick");
-  await new Promise((resolve) => setImmediate(resolve));
-  bot.emit("physicsTick");
+  await clock.advance(50);
+  await clock.advance(50);
   assert.equal(calls, 1);
   await reflex[Symbol.asyncDispose]();
   await driver[Symbol.asyncDispose]();
@@ -49,14 +41,9 @@ test("idle dragon defense claims one body, leaves active combat alone, and await
 });
 
 test("prohibited dragon retreat stands down and a permitted policy revision re-arms it", async () => {
-  const bot = Object.assign(new EventEmitter(), {
-    username: "DragonPolicy",
-    health: 20,
-    entities: {},
-    entity: { position: new Vec3(0, 64, 0) },
-  }) as unknown as Bot;
-  const runner = new ActionRunner();
-  const driver = new ReflexDriver(bot, runner);
+  const { bot, clock } = createFakeBot({ username: "DragonPolicy", position: new Vec3(0, 64, 0) });
+  const runner = new ActionRunner({ clock });
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const policy = new SurvivalPolicyState(bot);
   let calls = 0;
   const reflex = attachDragonReflex(bot, driver, {
@@ -77,8 +64,7 @@ test("prohibited dragon retreat stands down and a permitted policy revision re-a
       lifetime: { kind: "session" },
       reason: "test",
     });
-    bot.emit("physicsTick");
-    await new Promise((resolve) => setImmediate(resolve));
+    await clock.advance(50);
     assert.equal(calls, 0);
     assert.equal(runner.status().owner, "idle");
     assert.deepEqual(driver.snapshot()[0]?.decision, {
@@ -86,8 +72,7 @@ test("prohibited dragon retreat stands down and a permitted policy revision re-a
       candidates: [{ response: "evade", excluded: { kind: "prohibited", field: "retreat" } }],
     });
     await policy.edit({ operation: "reset", expected_revision: policy.snapshot().revision, reason: "test" });
-    bot.emit("physicsTick");
-    await new Promise((resolve) => setImmediate(resolve));
+    await clock.advance(50);
     assert.equal(calls, 1);
     assert.equal(runner.status().owner, "takeover");
   } finally {
@@ -97,15 +82,9 @@ test("prohibited dragon retreat stands down and a permitted policy revision re-a
 });
 
 test("the dragon evade with no progress is released after 30 s and stands down 10 s", async () => {
-  const time = handClock();
-  const bot = Object.assign(new EventEmitter(), {
-    username: "DragonLimit",
-    health: 20,
-    entities: {},
-    entity: { id: 1, position: new Vec3(0, 64, 0), onGround: true },
-  }) as unknown as Bot;
-  const runner = new ActionRunner({ clock: time.clock, cancelGraceMs: 500 });
-  const driver = new ReflexDriver(bot, runner, { now: time.clock.now });
+  const { bot, clock } = createFakeBot({ username: "DragonLimit", position: new Vec3(0, 64, 0) });
+  const runner = new ActionRunner({ clock, cancelGraceMs: 500 });
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   let calls = 0;
   const reflex = attachDragonReflex(bot, driver, {
     policy: new SurvivalPolicyState(bot),
@@ -117,12 +96,7 @@ test("the dragon evade with no progress is released after 30 s and stands down 1
       return { outcome: "stopped", reason: "cancelled", attacks: 0, healthBefore: null, healthAfter: null };
     },
   });
-  const pass = async (ms: number) => {
-    for (let passed = 0; passed < ms; passed += 50) {
-      bot.emit("physicsTick");
-      await time.advance(50);
-    }
-  };
+  const pass = (ms: number) => clock.advance(ms);
   await pass(29_000);
   assert.equal(runner.status().activeAction?.action, "dragon_reflex", "29 s: the window is open");
   await pass(2_000);
@@ -137,17 +111,9 @@ test("the dragon evade with no progress is released after 30 s and stands down 1
 });
 
 test("the dragon evade is kept alive by damage taken and by a blocked hit", async () => {
-  const time = handClock();
-  const client = new EventEmitter();
-  const bot = Object.assign(new EventEmitter(), {
-    username: "DragonHurt",
-    _client: client,
-    health: 20,
-    entities: {},
-    entity: { id: 1, position: new Vec3(0, 64, 0), onGround: true },
-  }) as unknown as Bot;
-  const runner = new ActionRunner({ clock: time.clock, cancelGraceMs: 500 });
-  const driver = new ReflexDriver(bot, runner, { now: time.clock.now });
+  const { bot, clock } = createFakeBot({ username: "DragonHurt", position: new Vec3(0, 64, 0) });
+  const runner = new ActionRunner({ clock, cancelGraceMs: 500 });
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const reflex = attachDragonReflex(bot, driver, {
     policy: new SurvivalPolicyState(bot),
     activeEngagement: () => null,
@@ -158,10 +124,9 @@ test("the dragon evade is kept alive by damage taken and by a blocked hit", asyn
     },
   });
   for (let step = 0; step < 90 * 20; step++) {
-    if (step % (25 * 20) === 0 && step > 0) bot.emit("entityHurt", bot.entity as never, undefined as never);
-    if (step % (25 * 20) === 12 * 20) client.emit("entity_status", { entityId: 1, entityStatus: 29 });
-    bot.emit("physicsTick");
-    await time.advance(50);
+    if (step % (25 * 20) === 0 && step > 0) bot.emit("entityHurt", bot.entity, undefined as never);
+    if (step % (25 * 20) === 12 * 20) bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 });
+    await clock.advance(50);
   }
   assert.equal(runner.status().activeAction?.action, "dragon_reflex", "a mark every 12 s for 90 s: never cut");
   await reflex[Symbol.asyncDispose]();

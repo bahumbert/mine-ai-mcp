@@ -1,30 +1,80 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../../navigation/index.js";
 import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
+import {
+  type FakeBot,
+  type FakeBotOptions,
+  type FakeClock,
+  type FakeEntitySpec,
+  createFakeBot,
+  createFakeClock,
+} from "../../../test-support/fake-bot/index.js";
 import type { FootingRecovery } from "../footing.js";
 
-import { botFixture } from "../../../test-support/bot.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
 
+/**
+ * A bot in the End on a mocked clock: the code under test reads `Date.now` and sets timers, so each test installs the
+ * clock (`using _timers = clock.install()`) before it builds a `PerchObservation`.
+ */
+function endScene(options: FakeBotOptions = {}) {
+  return createFakeBot({
+    dimension: "the_end",
+    clock: createFakeClock({ mode: "mocked" }),
+    ...options,
+    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
+    overrides: { deactivateItem: () => {}, ...options.overrides },
+  });
+}
+
+/** The ender dragon: metadata 9 is its health, 16 its native phase. */
+function dragonAt(position: Vec3, phase: number, extra: { yaw?: number; health?: number } = {}): FakeEntitySpec {
+  return { name: "ender_dragon", position, ...(extra.yaw === undefined ? {} : { yaw: extra.yaw }),
+    metadata: { 9: extra.health ?? 200, 16: phase } };
+}
+
+/** A dragon breath cloud of `radius`. */
+function breathCloud(position: Vec3, radius: number): FakeEntitySpec {
+  return { name: "area_effect_cloud", position, metadata: { 8: radius, 10: { type: "dragon_breath" } } };
+}
+
+/**
+ * The cloud enters the bot's view now, as the server spawns an entity (`entities.js`: it is added, then `entitySpawn`).
+ * Not on the shared fake: spawning an entity after the start (the same stopgap as `metLater` in `reflexes/hostile.test.ts`):
+ * a scratch fake builds the entity.
+ */
+function meetCloud(bot: FakeBot, id: number, spec: FakeEntitySpec): void {
+  bot.entities[id] = createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
+  bot.emit("entitySpawn", bot.entities[id]!);
+}
+
+/** One breath cloud per height in `ys`, at x 0 and z 6.5, with the entity id equal to the height. */
+function cloudColumn(ys: number[], radius: number): Record<number, FakeEntitySpec> {
+  return Object.fromEntries(ys.map(y => [y, breathCloud(new Vec3(0, y, 6.5), radius)]));
+}
+
+/** Run the clock on in 50 ms slices until `promise` settles, so the code under test gets its ticks and timers. */
+async function untilSettled<T>(clock: FakeClock, promise: Promise<T>, limitMs = 10_000): Promise<T> {
+  let done = false;
+  const outcome = promise.finally(() => { done = true; });
+  outcome.catch(() => undefined); // the caller awaits `outcome` below: this only keeps it handled while the clock runs
+  for (let passed = 0; !done && passed < limitMs; passed += 50) await clock.advance(50);
+  if (!done) throw new Error(`not settled after ${limitMs} ms of clock`);
+  return outcome;
+}
+
 test("perch diagnostics explain cloud-rejected endpoints without attempting navigation", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(30.5, 63, 0.5) },
-    { clearControlStates: () => {}, deactivateItem: () => {} });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 6 } } as unknown as Bot["entity"];
-  for (const y of [61, 63, 65, 67]) bot.entities[y] = { id: y, name: "area_effect_cloud", isValid: true,
-    position: new Vec3(0, y, 6.5), metadata: { 8: 20, 10: { type: "dragon_breath" } } } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(30.5, 63, 0.5), entities: {
+    42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([61, 63, 65, 67], 20) } });
+  using _timers = clock.install();
   const caller = new AbortController();
   let reported = false;
   const listeners = bot.listenerCount("physicsTick");
   using observation = new PerchObservation(bot, 42);
   const navigation = { navigate: () => assert.fail("geometry rejected all endpoints") } as unknown as NavigationRuntime;
-  await assert.rejects(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
     const event = JSON.parse(JSON.stringify(facts));
     if (event.reason !== "no_safe_striking_position") return;
     reported = true;
@@ -34,52 +84,44 @@ test("perch diagnostics explain cloud-rejected endpoints without attempting navi
     assert.ok(event.details.candidates.cloudBlocked > 0);
     assert.equal(event.currentCloudExposure, 0, "the bot is safe but all strike endpoints are clouded");
     caller.abort(new Error("diagnosis captured"));
-  }).perch(42, caller.signal, observation), /diagnosis captured/);
+  }).perch(42, caller.signal, observation)), /diagnosis captured/);
   assert.equal(reported, true);
   assert.equal(bot.listenerCount("physicsTick"), listeners + 1, "only the still-owned observation listener remains");
 });
 
 test("perch diagnostics retain a cached route failure and explain its retry condition", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(12.5, 64, 0.5) },
-    { clearControlStates: () => {}, deactivateItem: () => {} });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 6 } } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(12.5, 64, 0.5), entities: { 42: dragonAt(new Vec3(0, 68, 0), 6) } });
+  using _timers = clock.install();
   const caller = new AbortController();
   let routes = 0, cached = false;
   const navigation = { navigate: async () => { routes++; return { status: "failed", reason: "no path fixture" }; } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    await assert.rejects(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
-      const event = JSON.parse(JSON.stringify(facts));
-      if (event.reason !== "cached_route_failure") return;
-      cached = true;
-      assert.match(event.details.failure, /no path fixture/);
-      assert.match(event.details.retryWhen, /head moves/);
-      caller.abort(new Error("cached diagnosis captured"));
-    }).perch(42, caller.signal, observation), /cached diagnosis captured/);
-  } finally { clearInterval(physics); }
+  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+    const event = JSON.parse(JSON.stringify(facts));
+    if (event.reason !== "cached_route_failure") return;
+    cached = true;
+    assert.match(event.details.failure, /no path fixture/);
+    assert.match(event.details.retryWhen, /head moves/);
+    caller.abort(new Error("cached diagnosis captured"));
+  }).perch(42, caller.signal, observation)), /cached diagnosis captured/);
   assert.equal(cached, true);
   assert.equal(routes, 2, "try the head, then the body union once before waiting");
 });
 
 test("a cloud-blocked head searches safe body reach and swings the reached native part", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(12.5, 64, 0.5),
-    items: [{ name: "diamond_sword", count: 1 }] },
-    { clearControlStates: () => {}, deactivateItem: () => {}, lookAt: async () => {} });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 6 } } as unknown as Bot["entity"];
-  for (const y of [62, 64, 66]) bot.entities[y] = { id: y, name: "area_effect_cloud", isValid: true,
-    position: new Vec3(0, y, 6.5), metadata: { 8: 5, 10: { type: "dragon_breath" } } } as unknown as Bot["entity"];
   const caller = new AbortController();
   let routes = 0, swings = 0;
-  bot.attack = part => {
-    assert.equal(part.id, 45, "body is parent + 3, not the head or root");
-    swings++;
-    caller.abort(new Error("body swing observed"));
-  };
+  const { bot, clock } = endScene({ position: new Vec3(12.5, 64, 0.5), carried: { diamond_sword: 1 },
+    entities: { 42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([62, 64, 66], 5) },
+    overrides: {
+      // Not on the shared fake: the swing at a part. The scripted answer stands for the attack packet.
+      attack: part => {
+        assert.equal(part.id, 45, "body is parent + 3, not the head or root");
+        swings++;
+        caller.abort(new Error("body swing observed"));
+      },
+    } });
+  using _timers = clock.install();
   const navigation = { navigate: async ({ goal }: Parameters<NavigationRuntime["navigate"]>[0]) => {
     routes++;
     const resolved = goal.resolve({} as never);
@@ -93,23 +135,17 @@ test("a cloud-blocked head searches safe body reach and swings the reached nativ
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    await assert.rejects(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-      .perch(42, caller.signal, observation), /body swing observed/);
-    assert.equal(routes, 1, "do not restart head pursuit after reaching the body");
-    assert.equal(swings, 1);
-  } finally { clearInterval(physics); }
+  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation)), /body swing observed/);
+  assert.equal(routes, 1, "do not restart head pursuit after reaching the body");
+  assert.equal(swings, 1);
 });
 
 test("a late scanning request still pursues the head rather than preparing a tunnel", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(12.5, 64, 0.5) },
-    { clearControlStates: () => {}, deactivateItem: () => {} });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 6 } } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(12.5, 64, 0.5), entities: { 42: dragonAt(new Vec3(0, 68, 0), 6) } });
+  using _timers = clock.install();
   using observation = new PerchObservation(bot, 42);
-  for (let t = 0; t < 75; t++) bot.emit("physicsTick");
+  await clock.advance(75 * 50); // 75 physics ticks
   const caller = new AbortController();
   const navigation = { navigate: async ({ goal }: Parameters<NavigationRuntime["navigate"]>[0]) => {
     const resolved = goal.resolve({} as never);
@@ -118,18 +154,14 @@ test("a late scanning request still pursues the head rather than preparing a tun
     caller.abort(new Error("head pursuit observed"));
     caller.signal.throwIfAborted();
   } } as unknown as NavigationRuntime;
-  await assert.rejects(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, caller.signal, observation), /head pursuit observed/);
+  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation)), /head pursuit observed/);
 });
 
 test("head approach can walk below breath while a jump into the same cloud is refused", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(12.5, 63, 0.5) },
-    { clearControlStates: () => {}, deactivateItem: () => {} });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: Math.PI / 2,
-    metadata: { 9: 200, 16: 6 } } as unknown as Bot["entity"];
-  bot.entities[43] = { id: 43, name: "area_effect_cloud", isValid: true,
-    position: new Vec3(9.5, 65, 0.5), metadata: { 8: 5, 10: { type: "dragon_breath" } } } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(12.5, 63, 0.5), entities: {
+    42: dragonAt(new Vec3(0, 68, 0), 6, { yaw: Math.PI / 2 }), 43: breathCloud(new Vec3(9.5, 65, 0.5), 5) } });
+  using _timers = clock.install();
   const caller = new AbortController();
   const navigation = { navigate: async ({ goal, movements }: Parameters<NavigationRuntime["navigate"]>[0]) => {
     const resolved = goal.resolve({} as never);
@@ -149,14 +181,14 @@ test("head approach can walk below breath while a jump into the same cloud is re
     caller.signal.throwIfAborted();
   } } as unknown as NavigationRuntime;
   using observation = new PerchObservation(bot, 42);
-  await assert.rejects(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, caller.signal, observation), /cloud route checked/);
+  await assert.rejects(untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, caller.signal, observation)), /cloud route checked/);
 });
 
 test("a fireball dodge clears the growing cloud horizontally rather than dropping into a nearby shaft", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(0.5, 64, 0.5) });
-  bot.entities[7] = { id: 7, name: "dragon_fireball", isValid: true,
-    position: new Vec3(0.5, 65, 30), velocity: new Vec3(0, 0, -1) } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(0.5, 64, 0.5), entities: {
+    7: { name: "dragon_fireball", position: new Vec3(0.5, 65, 30), velocity: new Vec3(0, 0, -1) } } });
+  using _timers = clock.install();
   const navigation = { navigate: async ({ goal }: Parameters<NavigationRuntime["navigate"]>[0]) => {
     const resolved = goal.resolve({} as never);
     assert.equal(resolved.kind, "active");
@@ -168,55 +200,45 @@ test("a fireball dodge clears the growing cloud horizontally rather than droppin
     bot.entities[7]!.isValid = false;
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    const result = await new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-      .evade(new AbortController().signal);
-    assert.equal(result.outcome, "evaded");
-  } finally { clearInterval(physics); }
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal));
+  assert.equal(result.outcome, "evaded");
 });
 
 test("an ordinary scaffold blocking a resistant shelter sends retreat directly to escape", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(6.5, 63, 1.5),
-    blocks: { "6,62,1": "end_stone", "7,63,1": "cobbled_deepslate" },
-    items: [{ name: "end_stone", count: 20 }] }, {
-    version: "1.21.4",
-    placeBlock: () => assert.fail("Do not start a shelter whose required wall cannot be placed"),
-  });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 67, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
-    metadata: { 9: 200, 16: 4 } } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(6.5, 63, 1.5),
+    cells: { "6,62,1": "end_stone", "7,63,1": "cobbled_deepslate" },
+    carried: { end_stone: 20 },
+    entities: { 42: dragonAt(new Vec3(0, 67, 0), 4) },
+    overrides: {
+      // A guard, not a server answer: the test fails if the shelter starts placing.
+      placeBlock: () => assert.fail("Do not start a shelter whose required wall cannot be placed"),
+    } });
+  using _timers = clock.install();
   let moved = false;
   const navigation = { navigate: async () => {
     moved = true;
     bot.entity.position.set(20.5, 63, 1.5);
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    const result = await new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-      .evade(new AbortController().signal);
-    assert.equal(result.outcome, "evaded");
-    assert.equal(moved, true);
-  } finally { clearInterval(physics); }
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal));
+  assert.equal(result.outcome, "evaded");
+  assert.equal(moved, true);
 });
 
 test("takeoff observed during suspension still owes retreat, and failed retreat retains damage", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(6.5, 64, 0.5) },
-    { clearControlStates: () => {}, deactivateItem: () => {} });
-  const dragon = { id: 42, name: "ender_dragon", isValid: true,
-    position: new Vec3(0, 68, 0), velocity: new Vec3(0, 0, 0), yaw: Math.PI / 2,
-    metadata: { 9: 200, 16: 6 } };
-  bot.entities[42] = dragon as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(6.5, 64, 0.5), entities: {
+    42: dragonAt(new Vec3(0, 68, 0), 6, { yaw: Math.PI / 2 }) } });
+  using _timers = clock.install();
+  const dragon = bot.entities[42]!;
   using observation = new PerchObservation(bot, 42);
   observation.swung(13);
-  dragon.metadata[9] = 193;
-  dragon.metadata[16] = 4;
-  bot.emit("physicsTick");
+  Object.assign(dragon.metadata, { 9: 193, 16: 4 });
+  await clock.advance(50);
   const navigation = { navigate: async () => ({ status: "failed", reason: "blocked return" }) } as unknown as NavigationRuntime;
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
-  const result = await new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
-    .perch(42, new AbortController().signal, observation).finally(() => clearInterval(physics));
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, new AbortController().signal, observation));
   assert.equal(result.outcome, "stopped");
   assert.match(result.reason!, /PERCH_RETREAT_INCOMPLETE.*blocked return/);
   assert.equal(result.attacks, 1);
@@ -225,39 +247,27 @@ test("takeoff observed during suspension still owes retreat, and failed retreat 
 });
 
 test("breath interrupts a local bite and reaches evasion without swallowing caller cancellation", async () => {
-  const bot = botFixture();
-  bot.health = 20;
-  bot.food = 17;
-  bot.entities[42] = {
-    id: 42,
-    isValid: true,
-    name: "ender_dragon",
-    position: new Vec3(0, 95, 0),
-    velocity: new Vec3(0, 0, 0),
-    yaw: 0,
-    metadata: { 9: 200, 16: 0 },
-  } as unknown as Parameters<Bot["attack"]>[0];
-  bot.inventory.items = () => [{ name: "cooked_beef", count: 1 } as ReturnType<Bot["inventory"]["items"]>[number]];
-  bot.equip = async () => {};
-  bot.clearControlStates = () => {};
   let cancelBite: () => void = () => {};
-  bot.deactivateItem = () => {
-    bot.usingHeldItem = false;
-    cancelBite();
-  };
-  bot.consume = () =>
-    new Promise<void>((_resolve, reject) => {
-      cancelBite = () => reject(new Error("native consume interrupted"));
-      bot.usingHeldItem = true;
-      bot.entities[7] = {
-        id: 7,
-        isValid: true,
-        name: "area_effect_cloud",
-        position: bot.entity.position.clone(),
-        metadata: { 8: 5, 10: { type: "dragon_breath" } },
-      } as unknown as Parameters<Bot["attack"]>[0];
-      bot.emit("physicsTick");
-    });
+  const { bot, clock } = endScene({ food: 17, carried: { cooked_beef: 1 }, entities: {
+    42: dragonAt(new Vec3(0, 95, 0), 0),
+    },
+    overrides: {
+      // Not on the shared fake until M1 merges: the release of item use, which here also interrupts the bite.
+      deactivateItem: () => {
+        bot.usingHeldItem = false;
+        cancelBite();
+      },
+      // Not on the shared fake: `consume`. The scripted bite stays pending until the item use is released.
+      consume: () =>
+        new Promise<void>((_resolve, reject) => {
+          cancelBite = () => reject(new Error("native consume interrupted"));
+          bot.usingHeldItem = true;
+          meetCloud(bot, 7, breathCloud(new Vec3(0.5, 64, 0.5), 5)); // the breath cloud over the bot, seen as the bite starts
+          bot.emit("physicsTick");
+        }),
+    } });
+  using _timers = clock.install();
+  const listeners = bot.listenerCount("physicsTick");
   const caller = new AbortController();
   let escapes = 0;
   const navigation = {
@@ -270,45 +280,27 @@ test("breath interrupts a local bite and reaches evasion without swallowing call
   } as unknown as NavigationRuntime;
   const observation = new PerchObservation(bot, 42);
   await assert.rejects(
-    new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation),
+    untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation)),
     /caller cancelled after escape admission/,
   );
   assert.equal(escapes, 1);
   observation[Symbol.dispose]();
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("physicsTick"), listeners);
 });
 
 test("waiting for a perch is cancellable and releases entity listeners and controls", async () => {
   const controller = new AbortController();
-  let cleared = 0,
-    attacks = 0;
-  const bot = Object.assign(new EventEmitter(), {
-    registry: minecraftData("1.21.4"),
-    game: { dimension: "the_end" },
-    waitForTicks: async () => {},
-    health: 20,
-    food: 20,
-    inventory: { slots: [], items: () => [] },
-    entity: { position: new Vec3(0, 64, 0), onGround: true },
-    entities: {
-      42: {
-        id: 42,
-        isValid: true,
-        name: "ender_dragon",
-        position: new Vec3(0, 90, 0),
-        velocity: new Vec3(0, 0, 0),
-        metadata: { 9: 200, 16: 0 },
-      },
-    },
-
-    deactivateItem: () => {},
-    clearControlStates: () => {
-      cleared++;
-    },
-    attack: () => {
-      attacks++;
-    },
-  }) as unknown as Bot;
+  let attacks = 0;
+  const { bot, clock } = endScene({ position: new Vec3(0, 60, 6), entities: { 42: dragonAt(new Vec3(0, 90, 0), 0) },
+    // Not on the shared fake: the swing at a part.
+    overrides: { attack: () => { attacks++; } } });
+  using _timers = clock.install();
+  let cleared = 0;
+  const clearControlStates = bot.clearControlStates.bind(bot);
+  bot.clearControlStates = () => {
+    cleared++;
+    clearControlStates();
+  };
   const navigation = {
     navigate: async () => {
       throw new Error("A flying dragon has no melee approach");
@@ -318,11 +310,11 @@ test("waiting for a perch is cancellable and releases entity listeners and contr
   const observation = new PerchObservation(bot, 42);
   observation.preparationTarget = new Vec3(0, 60, 6);
   observation.preparedPosition = observation.preparationTarget.clone();
-  bot.entity.position = observation.preparedPosition.clone();
   const pending = new EndCombat(bot, navigation, footing).perch(42, controller.signal, observation);
-  await new Promise((resolve) => setImmediate(resolve));
+  const rejected = assert.rejects(pending, /caller cancelled/);
+  await clock.advance(50);
   controller.abort(new Error("caller cancelled"));
-  await assert.rejects(pending, /caller cancelled/);
+  await rejected;
   observation[Symbol.dispose]();
   assert.equal(attacks, 0);
   assert.equal(cleared, 1);
@@ -330,32 +322,31 @@ test("waiting for a perch is cancellable and releases entity listeners and contr
 });
 
 test("a newly observed breath cloud aborts perch sightline digging before any swing", async () => {
-  const bot = botFixture({ dimension: "the_end", position: new Vec3(2, 64, 5),
-    blocks: { "2,66,4": "end_stone" } }, { clearControlStates: () => {}, deactivateItem: () => {} });
-  const dragon = {
-    id: 42, isValid: true, name: "ender_dragon", position: new Vec3(0, 68, 0),
-    velocity: new Vec3(0, 0, 0), yaw: 0, metadata: { 9: 190, 16: 6 },
-  } as unknown as Bot["entity"];
-  bot.entities[42] = dragon;
-  const obstruction = bot.blockAt(new Vec3(2, 66, 4))!;
-  const obstructionHit = Object.assign(obstruction, { intersect: new Vec3(2.25, 66, 4.9) });
-  bot.blockAtCursor = () => null;
-  bot.world.raycast = (() => obstructionHit) as unknown as Bot["world"]["raycast"];
   let attacks = 0,
     escapes = 0,
     digAborted = false;
-  bot.attack = async () => {
-    attacks++;
-  };
+  const { bot, clock } = endScene({ position: new Vec3(2, 64, 5), cells: { "2,66,4": "end_stone" },
+    entities: {
+      42: dragonAt(new Vec3(0, 68, 0), 6, { health: 190 }),
+    },
+    overrides: {
+      // Not on the shared fake: the swing at a part, and the block under the cursor (none).
+      attack: async () => {
+        attacks++;
+      },
+      blockAtCursor: () => null,
+    } });
+  using _timers = clock.install();
+  const obstruction = bot.blockAt(new Vec3(2, 66, 4))!;
+  const obstructionHit = Object.assign(obstruction, { x: 2, y: 66, z: 4, face: 1, intersect: new Vec3(2.25, 66, 4.9) });
+  // Scripted: the ray the sightline check casts meets the end_stone at the point the dig will remove (x, y, z are
+  // the fields the typings' `RaycastResult` names).
+  bot.world.raycast = () => obstructionHit;
   const caller = new AbortController();
   const navigation = {
     breakBlockInPlace: async ({ signal }: { signal: AbortSignal }) => {
-      bot.entities[7] = {
-        id: 7, isValid: true, name: "area_effect_cloud", position: bot.entity.position.clone(),
-        metadata: { 8: 5, 10: { type: "dragon_breath" } },
-      } as unknown as Bot["entity"];
-      bot.emit("physicsTick");
-      await new Promise((resolve) => setImmediate(resolve));
+      meetCloud(bot, 7, breathCloud(new Vec3(2, 64, 5), 5)); // the breath cloud at the bot, seen as the dig starts
+      await bot.waitForTicks(1);
       digAborted = signal.aborted;
       signal.throwIfAborted();
       return { status: "broken" };
@@ -371,7 +362,7 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
   const observation = new PerchObservation(bot, 42);
   try {
     await assert.rejects(
-      new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation),
+      untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).perch(42, caller.signal, observation)),
       /stop after danger handling/,
     );
     assert.equal(digAborted, true);
@@ -383,23 +374,17 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
 });
 
 test("End escape waits for the observed landing before asking navigation for a route", async () => {
-  const bot = botFixture();
-  bot.health = 20;
+  const { bot, clock } = endScene({ entities: { 7: breathCloud(new Vec3(0.5, 64, 0.5), 5) } });
+  using _timers = clock.install();
   bot.entity.onGround = false;
-  bot.entities[7] = {
-    id: 7,
-    isValid: true,
-    name: "area_effect_cloud",
-    position: new Vec3(0.5, 64, 0.5),
-    metadata: { 8: 5, 10: { type: "dragon_breath" } },
-  } as unknown as Parameters<Bot["attack"]>[0];
   let ticks = 0,
     calls = 0;
-  const physics = setInterval(() => {
+  const listeners = bot.listenerCount("physicsTick");
+  // The landing, observed from the next tick on.
+  clock.every(() => {
     ticks++;
     bot.entity.onGround = true;
-    bot.emit("physicsTick");
-  }, 1);
+  }, 50);
   const navigation = {
     navigate: async () => {
       assert.equal(bot.entity.onGround, true);
@@ -409,60 +394,46 @@ test("End escape waits for the observed landing before asking navigation for a r
       return { status: "completed", elapsedMs: 1 };
     },
   } as unknown as NavigationRuntime;
-  const result = await new EndCombat(bot, navigation, { needed: false } as FootingRecovery).evade(
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery).evade(
     new AbortController().signal,
-  );
-  clearInterval(physics);
+  ));
   assert.equal(result.outcome, "evaded");
   assert.equal(calls, 1);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("physicsTick"), listeners);
 });
 
 test("a landing escape releases a safe bot when the dragon settles instead of finishing the obsolete route", async () => {
-  const bot = botFixture({
-    dimension: "the_end", blocks: { "0,63,0": "end_stone" },
-    items: [{ name: "end_stone", count: 10 }],
-  }, {
-    clearControlStates: () => {}, deactivateItem: () => {},
-    placeBlock: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),
-  });
-  bot.entity.position.set(0.5, 64, 0.5);
-  const dragon = {
-    id: 42, isValid: true, name: "ender_dragon", position: new Vec3(0, 68, 0),
-    velocity: new Vec3(0, 0, 0), yaw: 0, metadata: { 9: 190, 16: 3 },
-  };
-  bot.entities[42] = dragon as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ position: new Vec3(0.5, 64, 0.5),
+    cells: { "0,63,0": "end_stone" },
+    carried: { end_stone: 10 },
+    entities: { 42: dragonAt(new Vec3(0, 68, 0), 3, { health: 190 }) },
+    overrides: {
+      // Not on the shared fake: `findBlocks`. The scripted answer is no bedrock in range (no exit portal located).
+      findBlocks: () => [],
+      // A guard, not a server answer: the test fails if the escape places a block.
+      placeBlock: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),
+    } });
+  using _timers = clock.install();
+  const dragon = bot.entities[42]!;
   let moves = 0;
   const navigation = {
     navigate: async ({ stopSignal }: { stopSignal: AbortSignal }) => {
       moves++;
-      dragon.metadata[16] = 6;
-      bot.emit("physicsTick");
+      Object.assign(dragon.metadata, { 16: 6 });
+      bot.emit("physicsTick"); // the dragon's settling is seen at once, while the route is being asked for
       assert.equal(stopSignal.aborted, true, "the now-safe approach must not be carried away from the head");
       return { status: "cancelled", reason: "landing ended" };
     },
   } as unknown as NavigationRuntime;
-  const ticks = setInterval(() => bot.emit("physicsTick"), 1);
-  try {
-    const result = await new EndCombat(bot, navigation, { needed: false } as FootingRecovery).evade(new AbortController().signal);
-    assert.equal(result.outcome, "evaded");
-    assert.equal(moves, 1);
-  } finally {
-    clearInterval(ticks);
-  }
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal));
+  assert.equal(result.outcome, "evaded");
+  assert.equal(moves, 1);
 });
 
 test("damage-interrupted breath excavation gives the next escape a route without digging", async () => {
-  const bot = botFixture();
-  bot.health = 20;
-  bot.entity.onGround = true;
-  bot.entities[7] = {
-    id: 7,
-    isValid: true,
-    name: "area_effect_cloud",
-    position: bot.entity.position.clone(),
-    metadata: { 8: 5, 10: { type: "dragon_breath" } },
-  } as unknown as Bot["entity"];
+  const { bot, clock } = endScene({ entities: { 7: breathCloud(new Vec3(0.5, 64, 0.5), 5) } });
+  using _timers = clock.install();
   const footing = {
     needed: false,
     async recover() {
@@ -470,7 +441,6 @@ test("damage-interrupted breath excavation gives the next escape a route without
       return "landed";
     },
   } as unknown as FootingRecovery;
-  const physics = setInterval(() => bot.emit("physicsTick"), 1);
   let attempts = 0;
   const navigation = {
     async navigate(options: Parameters<NavigationRuntime["navigate"]>[0]) {
@@ -485,7 +455,7 @@ test("damage-interrupted breath excavation gives the next escape a route without
         assert.equal(options.movements.allowDigging, true);
         bot.health = 17;
         Object.assign(footing, { needed: true });
-        bot.emit("physicsTick");
+        bot.emit("physicsTick"); // the damage is seen at once, while the route is being asked for
         assert.equal(options.stopSignal?.aborted, true);
         return { status: "stopped", reason: "knockback", elapsedMs: 500 } as const;
       }
@@ -495,8 +465,7 @@ test("damage-interrupted breath excavation gives the next escape a route without
       return { status: "completed", elapsedMs: 500 } as const;
     },
   } as unknown as NavigationRuntime;
-  const result = await new EndCombat(bot, navigation, footing).evade(new AbortController().signal);
+  const result = await untilSettled(clock, new EndCombat(bot, navigation, footing).evade(new AbortController().signal));
   assert.equal(result.outcome, "evaded");
-  clearInterval(physics);
   assert.equal(attempts, 2);
 });

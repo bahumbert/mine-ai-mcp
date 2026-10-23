@@ -1,45 +1,33 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import prismarineBlock from "prismarine-block";
 import { Vec3 } from "vec3";
+import { type FakeCell, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { headInAir, swimBreathRoute, swimmingRoof } from "./swim-escape.js";
 
-const registry = minecraftData("1.21.4");
-const Block = prismarineBlock("1.21.4");
-const blockOf = (name: string) =>
-  name === "tall_seagrass_upper"
-    ? Block.fromProperties(registry.blocksByName.tall_seagrass!.id, { half: "upper" }, 0)
-    : Block.fromStateId(registry.blocksByName[name]!.defaultState, 0);
+const TALL_SEAGRASS_UPPER: FakeCell = { name: "tall_seagrass", properties: { half: "upper" } };
 
-/** A bot at feet 0 60 0 in a pocket of dirt, the cells named by `cells` ("x,y") at z 0 and every other cell dirt. */
-function pocketBot(cells: Readonly<Record<string, string>>): Bot {
-  return {
-    entity: { position: new Vec3(0.5, 60, 0.5) },
-    blockAt: (p: Vec3) => {
-      const at = p.floored();
-      return blockOf((at.z === 0 && cells[`${at.x},${at.y}`]) || "dirt");
-    },
-  } as unknown as Bot;
+/** A bot at feet 0 60 0 in solid ground, the cells named by `cells` ("x,y") at z 0 and every other cell stone. */
+function pocketBot(cells: Readonly<Record<string, string>>) {
+  const named = Object.fromEntries(
+    Object.entries(cells).map(([xy, name]) => [`${xy},0`, name === "tall_seagrass_upper" ? TALL_SEAGRASS_UPPER : name]),
+  );
+  return createFakeBot({ position: new Vec3(0.5, 60, 0.5), cells: named, groundY: 100 }).bot;
 }
 
 test("all four off-center shoulders detect the overhang beside a tall waterfall", () => {
+  const waterfall: Record<string, FakeCell> = {};
+  for (let y = -64; y <= 0; y++) waterfall[`0,${y},0`] = "water";
   for (const [x, z, roofX, roofZ] of [
     [0.03, 0.09, 0, -1],
     [0.97, 0.91, 0, 1],
     [0.09, 0.97, -1, 0],
     [0.91, 0.03, 1, 0],
   ] as const) {
-    const bot = {
-      entity: { position: new Vec3(x, -32.8, z) },
-      blockAt: (p: Vec3) => {
-        const at = p.floored();
-        const name =
-          at.x === roofX && at.y === -31 && at.z === roofZ ? "bedrock" : at.x === 0 && at.z === 0 ? "water" : "air";
-        return Block.fromStateId(registry.blocksByName[name]!.defaultState, 0);
-      },
-    } as unknown as Bot;
+    const { bot } = createFakeBot({
+      position: new Vec3(x, -32.8, z),
+      cells: { ...waterfall, [`${roofX},-31,${roofZ}`]: "bedrock" },
+      groundY: null,
+    });
     assert.equal(swimmingRoof(bot)?.name, "bedrock");
     bot.entity.position = new Vec3(0.5, -32.8, 0.5);
     assert.equal(swimmingRoof(bot), null);
