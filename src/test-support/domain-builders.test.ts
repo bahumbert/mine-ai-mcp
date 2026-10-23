@@ -44,17 +44,6 @@ test("craftingBot's craft takes the ingredients from the window and puts the res
   assert.equal(bot.inventory.count(idOf(bot, "oak_planks"), null), 8);
 });
 
-test("craftingBot's world age is the harness server's, plus what a test moves it by (the bridge kept for startServerClock)", async () => {
-  const { bot, harness } = craftingBot({});
-  const start = bot.time.age;
-  bot.time.age += 20;
-  assert.equal(bot.time.age, start + 20, "a test-written age (startServerClock) is kept");
-  await harness.clock.advance(1_000);
-  assert.equal(bot.time.age, start + 40, "the server's own time packet moves it too");
-  assert.equal(harness.server.age, start + 20, "the server's age is its own, without the written ticks");
-  assert.equal(bot.time.timeOfDay, harness.server.timeOfDay, "the other fields are the harness's");
-});
-
 test("craftingBot with a table finds a crafting table in the harness world", () => {
   const { bot, harness } = craftingBot({}, true);
   const table = bot.findBlock({ matching: idOf(bot, "crafting_table") });
@@ -64,24 +53,15 @@ test("craftingBot with a table finds a crafting table in the harness world", () 
 });
 
 test("observedFurnace on the harness stands a furnace in the harness world and carries the ore and fuel in its window", () => {
-  const { bot, harness } = observedFurnace({ cookMs: 100, raw: 3, coal: 2, onHarness: true });
-  assert.ok(harness);
+  const { bot, harness } = observedFurnace({ cookMs: 100, raw: 3, coal: 2 });
   assert.equal(harness.bot, bot);
   assert.equal(harness.world.blockAt(new Vec3(2, 64, 0))?.name, "furnace");
   assert.equal(bot.inventory.count(idOf(bot, "raw_iron"), null), 3);
   assert.equal(bot.inventory.count(idOf(bot, "coal"), null), 2);
 });
 
-test("observedFurnace without onHarness stays on the old fixture, whose items() is the carried array", () => {
-  const { bot, harness } = observedFurnace({ cookMs: 100 });
-  assert.equal(harness, undefined);
-  const items = bot.inventory.items() as { name: string; count: number }[];
-  items.push({ name: "furnace", count: 1 });
-  assert.ok(bot.inventory.items().some((item) => item.name === "furnace"), "a stack pushed onto items() is carried");
-});
-
 test("observedFurnace's input loaded and output taken move the harness window", async () => {
-  const { bot, dependencies } = observedFurnace({ cookMs: 100, raw: 3, coal: 1, onHarness: true });
+  const { bot, dependencies } = observedFurnace({ cookMs: 100, raw: 3, coal: 1 });
   const furnace = await dependencies.openFurnace(bot, bot.blockAt(new Vec3(2, 64, 0))!);
   await furnace.putInput(idOf(bot, "raw_iron"), null, 2);
   assert.equal(bot.inventory.count(idOf(bot, "raw_iron"), null), 1);
@@ -90,8 +70,7 @@ test("observedFurnace's input loaded and output taken move the harness window", 
 });
 
 test("structureWorld builds on the harness world: a stone floor at y 63 inside the area, air beyond it", () => {
-  const { bot, harness } = structureWorld({ onHarness: true });
-  assert.ok(harness);
+  const { bot, harness } = structureWorld();
   assert.equal(harness.bot, bot);
   assert.equal(bot.blockAt(new Vec3(0, 63, 0))?.name, "stone");
   assert.equal(bot.blockAt(new Vec3(0, 63, 7))?.name, "air");
@@ -99,8 +78,7 @@ test("structureWorld builds on the harness world: a stone floor at y 63 inside t
 });
 
 test("structureWorld's put and placements change the harness world's cells with the block's own states", async () => {
-  const { bot, put, blocks, physics, harness } = structureWorld({ carried: { oak_log: 2 }, onHarness: true });
-  assert.ok(harness);
+  const { bot, put, blocks, physics, harness } = structureWorld({ carried: { oak_log: 2 } });
   put(new Vec3(1, 64, 0), "dirt");
   assert.equal(blocks.get("1,64,0")?.name, "dirt");
   assert.equal(harness.world.blockAt(new Vec3(1, 64, 0))?.name, "dirt");
@@ -118,30 +96,23 @@ test("structureWorld's put and placements change the harness world's cells with 
 });
 
 test("structureWorld's loaded radius reads farther cells as unloaded", () => {
-  const { bot } = structureWorld({ loadedRadius: 4, onHarness: true });
+  const { bot } = structureWorld({ loadedRadius: 4 });
   assert.equal(bot.blockAt(new Vec3(10, 63, 0)), null);
   assert.equal(bot.blockAt(new Vec3(1, 63, 0))?.name, "stone");
 });
 
 test("waterFixture on the harness reads its air from the version's air_supply metadata", (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
-  assert.equal(fixture.harness?.bot, fixture.bot);
+  const fixture = waterFixture(t);
+  assert.equal(fixture.harness.bot, fixture.bot);
   assert.equal(fixture.entity, fixture.bot.entity);
-  fixture.harness?.breath.setAirSupply(7 * 15);
+  fixture.harness.breath.setAirSupply(7 * 15);
   const airIndex = (fixture.bot.registry.entitiesByName.player as { metadataKeys: string[] }).metadataKeys.indexOf("air_supply");
   assert.equal(fixture.bot.entity.metadata[airIndex], 7 * 15);
   assert.equal(fixture.bot.oxygenLevel, 7, "the server's air is what the client reads as its level");
   fixture.bot.setControlState("sneak", true);
   assert.deepEqual(fixture.controls, [["sneak", true]]);
   assert.equal(fixture.bot.controlState.sneak, true);
-  assert.ok(fixture.harness?.server.packets.some((packet) => packet.name === "player_input" || packet.name === "entity_action"), "the fake's own setter still sends the sneak (1.21.4: player_input)");
-});
-
-test("waterFixture without onHarness keeps the bare bot whose air_supply is metadata 0", (t) => {
-  const fixture = waterFixture(t);
-  assert.equal(fixture.harness, undefined);
-  fixture.bot.oxygenLevel = 7;
-  assert.equal(fixture.bot.entity.metadata[0], 7 * 15);
+  assert.ok(fixture.harness.server.packets.some((packet) => packet.name === "player_input" || packet.name === "entity_action"), "the fake's own setter still sends the sneak (1.21.4: player_input)");
 });
 
 test("FakeFarm keeps its plot in a fake world of real blocks; a cell never set reads as unloaded", () => {
@@ -180,18 +151,27 @@ test("craftingBot given a clock builds its harness on it, and its world age is t
 test("observedFurnace given a mocked clock moves the world age only with that clock, one time packet a second", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();
-  const { bot, harness } = observedFurnace({ cookMs: 100, onHarness: true, clock });
-  assert.equal(harness?.clock, clock);
+  const { bot, harness } = observedFurnace({ cookMs: 100, clock });
+  assert.equal(harness.clock, clock);
   const start = bot.time.age;
   await clock.advance(1_000);
-  assert.equal(bot.time.age, start + 20, "no wall-clock timer of its own moves it (startServerClock would add 20 per 10 ms)");
-  assert.equal(bot.time.age, harness?.server.age);
+  assert.equal(bot.time.age, start + 20, "no wall-clock timer of its own moves it");
+  assert.equal(bot.time.age, harness.server.age);
+});
+
+test("waterFixture given a clock stands on the harness built on that clock", async (t) => {
+  const clock = createFakeClock({ mode: "manual" });
+  const fixture = waterFixture(t, {}, {}, { clock });
+  assert.equal(fixture.harness.clock, clock);
+  const start = fixture.bot.time.age;
+  await clock.advance(1_000);
+  assert.equal(fixture.bot.time.age, start + 20, "the harness's server moves with the clock the test drives");
 });
 
 test("structureWorld given a clock stands on the harness built on that clock", () => {
   const clock = createFakeClock({ mode: "manual" });
   const { harness } = structureWorld({ clock });
-  assert.equal(harness?.clock, clock);
+  assert.equal(harness.clock, clock);
 });
 
 test("carriedCountField reads the sum of every stack of its item and rewrites the window when set", () => {

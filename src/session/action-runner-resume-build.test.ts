@@ -12,9 +12,7 @@ const WALL = { blocks: [2, 3, 4, 5].map((x) => ({ x, y: 64, z: 0, block_name: "c
 
 /** A build whose second placement never returns until the body is taken: the reflex arrives there. */
 function buildCutAtSecondPlacement() {
-  const world = structureWorld({ onHarness: true });
-  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
-  Object.assign(world.bot, { deactivateItem() {} });
+  const world = structureWorld();
   const navigation = { cancel() {} } as unknown as NavigationRuntime;
   let placed = 0;
   let cutAt: () => void = () => {};
@@ -65,9 +63,7 @@ test("a build whose reflex ends with a return verdict ends interrupted, unchange
 });
 
 test("two reflexes in a row on one build give two interruptions and one success", async () => {
-  const world = structureWorld({ onHarness: true });
-  // Stopgap until M1 merges `deactivateItem` into the shared fake: the body's release lowers the hand (`prepare-body.ts`).
-  Object.assign(world.bot, { deactivateItem() {} });
+  const world = structureWorld();
   const navigation = { cancel() {} } as unknown as NavigationRuntime;
   let placed = 0;
   const arrivals: (() => void)[] = [];

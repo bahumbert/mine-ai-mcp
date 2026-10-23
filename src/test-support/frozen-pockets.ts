@@ -5,7 +5,6 @@
  * water over the top as in the scene. `dirkItems` and `sanaItems` are what they carried.
  */
 import type { Bot } from "mineflayer";
-import type { FakeStack } from "./bot.js";
 import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot/index.js";
 import { type LayeredWorldSpec, layeredCells, layeredWorld } from "./layered-world.js";
 
@@ -71,14 +70,20 @@ const SANA_POCKET: LayeredWorldSpec = {
 };
 export const sanaPocket = (bot: Pick<Bot, "registry">) => layeredWorld(bot, SANA_POCKET);
 
+/** One stack a pocket's bot carried. */
+interface CarriedStack {
+  readonly name: string;
+  readonly count: number;
+}
+
 /** What each bot carried when the scene was frozen: a search counts the cobblestone as scaffold, so Dirk can pillar up one cell. */
-export const dirkItems = (): FakeStack[] => [
+export const dirkItems = (): CarriedStack[] => [
   { name: "stone_pickaxe", count: 1 }, { name: "wooden_pickaxe", count: 1 }, { name: "cobblestone", count: 10 }, { name: "oak_planks", count: 3 },
 ];
-export const sanaItems = (): FakeStack[] => [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 9 }, { name: "cobblestone", count: 13 }];
+export const sanaItems = (): CarriedStack[] => [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 9 }, { name: "cobblestone", count: 13 }];
 
 /** The pocket on the shared fake: its cells in the harness world, the bot at the start carrying what it carried. */
-function pocketHarness(spec: LayeredWorldSpec, start: { x: number; y: number; z: number }, items: FakeStack[], options: FakeBotOptions): FakeHarness {
+function pocketHarness(spec: LayeredWorldSpec, start: { x: number; y: number; z: number }, items: CarriedStack[], options: FakeBotOptions): FakeHarness {
   const carried: Record<string, number> = {};
   for (const { name, count } of items) carried[name] = (carried[name] ?? 0) + count;
   return createFakeBot({ cells: layeredCells(spec), groundY: null, position: { x: start.x + 0.5, y: start.y, z: start.z + 0.5 }, carried, ...options });

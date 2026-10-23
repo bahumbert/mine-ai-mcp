@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import minecraftData from "minecraft-data";
 import test from "node:test";
-import { registry } from "../test-support/bot.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../server/config.js";
 import blockTags from "./data/block-tags/1.21.4.json" with { type: "json" };
 import {
   isAir,
@@ -10,6 +11,8 @@ import {
   supportsFlatPlacement,
   type ClassifiedBlock,
 } from "./block-classification.js";
+
+const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
 
 const VERSION = "1.21.4";
 

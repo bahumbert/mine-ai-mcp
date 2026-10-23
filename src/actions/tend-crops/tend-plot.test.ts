@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import minecraftData from "minecraft-data";
 import test from "node:test";
 import { parseTendCropsRequest } from "./contract.js";
 import { block, PLOT_FACTS, cutAfter, cutBefore, FakeFarm } from "../../test-support/fake-farm.js";
-import { registry } from "../../test-support/bot.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import blockTags from "../../world/data/block-tags/1.21.4.json" with { type: "json" };
 import { isGroundCover } from "./farm-body.js";
 import { beginTendPlot, decideCell, tendPlot } from "./tend-plot.js";
+
+const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
 
 test("each cell is decided from its soil and what stands on it", () => {
   const air = block("air");

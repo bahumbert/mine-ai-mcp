@@ -26,8 +26,6 @@ function fixture(wide = false) {
   const harness = createFakeBot({
     position: new Vec3(0.8, 47, 0.5),
     groundY: null,
-    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
-    overrides: { deactivateItem: () => undefined },
   });
   const { bot } = harness;
   const entity = bot.entity;

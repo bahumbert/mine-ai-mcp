@@ -8,7 +8,6 @@ import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import {
   type FakeBot,
-  type FakeBotOptions,
   type FakeCell,
   type FakeClock,
   createFakeBot,
@@ -40,14 +39,6 @@ test("fire response selection replays from the observed escape availability", ()
   );
 });
 
-/** The bot of every scene here: the fire escape releases item use before it walks. */
-function fireBot(options: FakeBotOptions = {}) {
-  return createFakeBot({
-    ...options,
-    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
-    overrides: { deactivateItem: () => undefined },
-  });
-}
 
 /** The shared_flags metadata bit 0 the fire checks read as burning, at the version's index. */
 function setBurning(bot: FakeBot, burning: boolean): void {
@@ -73,7 +64,7 @@ async function tick(bot: FakeBot, count = 1): Promise<void> {
 }
 
 test("burning with no reachable water does not lock a Nether fight out of the body", async () => {
-  const { bot, clock } = fireBot();
+  const { bot, clock } = createFakeBot();
   setBurning(bot, true);
   const runner = stillRunner();
   let release!: () => void;
@@ -100,7 +91,7 @@ test("burning with no reachable water does not lock a Nether fight out of the bo
 });
 
 test("a failed airborne fire escape does not suppress a fresh attempt after landing", async () => {
-  const { bot, clock } = fireBot();
+  const { bot, clock } = createFakeBot();
   Object.assign(bot.entity, { isInLava: true, onGround: false });
   const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
@@ -129,7 +120,7 @@ function burningBesidePit(ringed: boolean, options: { clock?: FakeClock; startAg
       "3,64,1": "lava",
       "3,64,-1": "lava",
     });
-  const harness = fireBot({
+  const harness = createFakeBot({
     cells,
     groundY: 64,
     position: new Vec3(-0.5, 65, 0.5),
@@ -384,7 +375,7 @@ test("an endangered body during the wait returns the action with the danger mess
 });
 
 test("no escape in static lava is tried again 2 s later", async () => {
-  const { bot, clock } = fireBot();
+  const { bot, clock } = createFakeBot();
   Object.assign(bot.entity, { isInLava: true, onGround: false });
   const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
@@ -401,7 +392,7 @@ test("no escape in static lava is tried again 2 s later", async () => {
 });
 
 test("a throwing blockUpdate handler does not throw out of the emit", async () => {
-  const { bot, clock } = fireBot();
+  const { bot, clock } = createFakeBot();
   await using resources = new AsyncDisposableStack();
   const driver = resources.use(new ReflexDriver(bot, stillRunner(), { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));

@@ -5,7 +5,6 @@
  * offered and what the loop did about it, which a fake answers in a
  * millisecond rather than a thirty-second fixture.
  */
-import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { type MineflayerBlock, blockClass } from "../navigation/mineflayer/world.js";
@@ -23,9 +22,7 @@ export interface StructureWorldOptions {
   readonly carried?: Record<string, number>;
   /** Cells beyond this many blocks from the bot read as unloaded. */
   readonly loadedRadius?: number;
-  /** Build on the shared fake (see `structureWorld`); off, on the scene's own blocks. */
-  readonly onHarness?: boolean;
-  /** The harness's clock (a mocked one the test drives); implies `onHarness`. A new manual clock otherwise. */
+  /** The harness's clock (a mocked one the test drives). A new manual clock otherwise. */
   readonly clock?: FakeClock;
 }
 
@@ -75,7 +72,7 @@ class WorldBlocks extends Map<string, MineflayerBlock> {
 interface StructureScene {
   readonly bot: Bot;
   readonly blocks: Map<string, StructureBlock>;
-  readonly harness?: FakeHarness;
+  readonly harness: FakeHarness;
   /** Change a cell; returns `blocks`. */
   put(at: Vec3, name: string, properties?: Record<string, unknown>): Map<string, StructureBlock>;
   /** One of the item left the inventory (a placement). */
@@ -117,44 +114,13 @@ function sceneOnHarness(options: StructureWorldOptions, position: Vec3): Structu
 }
 
 /**
- * Kept for unmigrated importers (build-process incl. its in-place `stateId` edit at :426, action-runner-resume-build):
- * the scene on its own blocks, with a bounding box and exactly the states they were put
- * with (a slab put with `type` reads no `waterlogged`, as `build-process.test.ts:369` asserts).
- */
-function sceneOnOwnBlocks(options: StructureWorldOptions, position: Vec3): StructureScene {
-  const blocks = new Map<string, StructureBlock>();
-  const put = (at: Vec3, name: string, properties: Record<string, unknown> = {}) =>
-    blocks.set(key(at), { name, boundingBox: name === "air" ? "empty" : "block", position: at, getProperties: () => properties });
-  for (const [cell, name] of Object.entries(floorCells())) {
-    const [x, y, z] = cell.split(",").map(Number);
-    put(new Vec3(x!, y!, z!), String(name));
-  }
-  const carried = new Map(Object.entries(options.carried ?? DEFAULT_CARRIED));
-  const registry = minecraftData(STRUCTURE_VERSION);
-  const bot = {
-    game: { dimension: "overworld" },
-    registry, version: STRUCTURE_VERSION,
-    entity: { position, height: 1.8 },
-    inventory: {
-      items: () => [...carried].filter(([, count]) => count > 0).map(([name, count]) => ({ name, count })),
-    },
-    blockAt: (at: Vec3) => {
-      if (options.loadedRadius !== undefined && at.distanceTo(bot.entity.position) > options.loadedRadius) return null;
-      return blocks.get(key(at)) ?? { name: "air", boundingBox: "empty" as const, position: at, getProperties: () => ({}) };
-    },
-  } as unknown as Bot;
-  return { bot, blocks, put, useOne: (itemName) => void carried.set(itemName, (carried.get(itemName) ?? 0) - 1) };
-}
-
-/**
- * A stone floor at y 63 under air, a bot standing at `feet`, and the log of what the physics did. With `onHarness` the
- * bot is the shared fake's (`fake-bot/`, returned as `harness`): real blocks of the version, placed in their default
- * state with the placement states on top.
+ * A stone floor at y 63 under air, a bot standing at `feet`, and the log of what the physics did. The bot is the
+ * shared fake's (`fake-bot/`, returned as `harness`): real blocks of the version, placed in their default state with
+ * the placement states on top.
  */
 export function structureWorld(options: StructureWorldOptions = {}) {
   const position = (options.feet ?? new Vec3(0, 64, 0)).offset(0.5, 0, 0.5);
-  const onHarness = options.onHarness === true || options.clock !== undefined;
-  const { bot, blocks, put, useOne, harness } = onHarness ? sceneOnHarness(options, position) : sceneOnOwnBlocks(options, position);
+  const { bot, blocks, put, useOne, harness } = sceneOnHarness(options, position);
   const placements: string[] = [];
   /** The direction the bot looked for each placement that asked for one. */
   const looks: string[] = [];

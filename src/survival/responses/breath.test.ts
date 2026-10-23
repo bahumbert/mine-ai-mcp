@@ -21,9 +21,8 @@ const BOX = { x: [-25, 25], y: [-3, 6], z: [-3, 3] } as const;
  * block the bot cannot see blocks the way). Controls move the body 0.1 per tick; air refills when the head is in air.
  */
 function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: number, z: number) => Cell, start: Vec3, physical = seen, speed = SPEED) {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const { bot, harness } = fixture;
-  if (harness === undefined) throw new Error("waterFixture was asked for the shared fake");
   const digs: string[] = [];
   /** The air the scene holds, in bubbles: the server's count under water is not what these tests are about, so each tick sets it back (full with the head in air or after a roof dig, as the scene says). */
   let sceneAir = 8;
@@ -168,8 +167,8 @@ test("cells that were never loaded are no way to air", async (t) => {
 test("with the clock stopped the surfacing still ends on the wall clock", async (t) => {
   const world = swimWorld(t, tunnel, new Vec3(0.5, 0.2, 0.5));
   world.bot.dig = async () => { throw new Error("no dig"); };
-  // Not on the shared fake until M2 merges: the builder's clock (waterFixture's is manual, and the surfacing's wall
-  // clock reads the global timers), so a second, mocked clock stands for the wall clock; the builder's never advances.
+  // The surfacing's wall clock reads the global timers: a second, mocked clock stands for it, and the fixture's clock
+  // never advances, so no physics tick comes.
   const wall = createFakeClock({ mode: "mocked" });
   using _installed = wall.install();
   const started = performance.now();
@@ -272,8 +271,8 @@ function hangingDig(t: Parameters<typeof waterFixture>[0]) {
 
 test("the attempt's wall clock stops a dig in progress when physics ticks have stopped", async (t) => {
   const { world, stops } = hangingDig(t);
-  // Not on the shared fake until M2 merges: the builder's clock (see the clock-stopped test above): a second, mocked
-  // clock stands for the wall clock; the builder's never advances, so no physics tick comes.
+  // A second, mocked clock stands for the wall clock (see the clock-stopped test above); the fixture's never advances,
+  // so no physics tick comes.
   const wall = createFakeClock({ mode: "mocked" });
   using _installed = wall.install();
   const done = surface(world.bot, new AbortController().signal, new Budgets(), 2);

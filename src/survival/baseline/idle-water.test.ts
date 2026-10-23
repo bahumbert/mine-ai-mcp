@@ -21,7 +21,7 @@ function controlWhileMoving(fixture: ReturnType<typeof waterFixture>) {
 
 // The working mode (a foreground action standing in water) is in idle-water-working.test.ts.
 test("asserts jump while idle in water and releases it once dry", async (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const control = attachIdleWaterControl(fixture.bot, { active: false, steering: false }, fixture.reflex.runner);
 
   fixture.entity.isInWater = true;
@@ -48,7 +48,7 @@ test("asserts jump while idle in water and releases it once dry", async (t) => {
 });
 
 test("an idle body resists current after a cancelled interaction and yields to the next owner", async (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const control = controlWhileMoving(fixture);
   fixture.entity.isInWater = true;
   fixture.bot.emit("physicsTick");
@@ -63,7 +63,7 @@ test("an idle body resists current after a cancelled interaction and yields to t
 });
 
 test("relinquishes jump without writing false when Pathfinder starts moving", async (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const control = controlWhileMoving(fixture);
 
   fixture.entity.isInWater = true;
@@ -79,7 +79,7 @@ test("relinquishes jump without writing false when Pathfinder starts moving", as
 });
 
 test("observes the current Mineflayer entity rather than retaining a stale one", async (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const control = attachIdleWaterControl(fixture.bot, { active: false, steering: false }, fixture.reflex.runner);
 
   Object.assign(fixture.bot, { entity: { ...fixture.entity, isInWater: true } });
@@ -96,7 +96,7 @@ test("observes the current Mineflayer entity rather than retaining a stale one",
 });
 
 test("close releases jump when the attachment still owns it", async (t) => {
-  const fixture = waterFixture(t, {}, {}, { onHarness: true });
+  const fixture = waterFixture(t);
   const control = attachIdleWaterControl(fixture.bot, { active: false, steering: false }, fixture.reflex.runner);
 
   fixture.entity.isInWater = true;

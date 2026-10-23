@@ -43,8 +43,6 @@ function burningScene(
     groundY: 64,
     entities: options.entities,
     clock: options.clock,
-    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
-    overrides: { deactivateItem: () => undefined },
   });
   const { bot } = harness;
   const controls = bot.controlState;

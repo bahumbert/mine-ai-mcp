@@ -18,8 +18,7 @@ function shooterFixture(name: string, held: string | null, metadata: unknown[]) 
     position: new Vec3(0, 64, 0),
     entities: {
       21: {
-        // Not on the shared fake until M3 merges: entity.kind.
-        name, kind: "Hostile mobs",
+        name,
         width: 0.6, height: 1.8, eyeHeight: 1.6,
         position: new Vec3(0, 64, 9),
         // Facing the bot: yaw zero looks down -z, from +z toward the origin.

@@ -22,8 +22,6 @@ interface Mob {
   readonly x: number;
   readonly y?: number;
   readonly z?: number;
-  /** minecraft-data category; defaults to a hostile. */
-  readonly kind?: string;
   /** The `mob_flags` byte (bit 4: aggressive), written at the version's index for the mob. */
   readonly mobFlags?: number;
 }
@@ -51,8 +49,6 @@ function botWith(mobs: readonly Mob[], options: BotOptions = {}) {
           name: mob.name,
           displayName: mob.name,
           type: "hostile",
-          // Not on the shared fake until M3 merges: entity.kind.
-          kind: "kind" in mob ? mob.kind : "Hostile mobs",
           metadata: [],
           position: new Vec3(mob.x, mob.y ?? 0, mob.z ?? 0),
           width: 0.6,
@@ -87,7 +83,7 @@ function fieldFor(mobs: readonly Mob[], threats = context(), options: BotOptions
 test("nothing to avoid is no field at all", () => {
   assert.equal(fieldFor([]), null);
   // A cow is not a threat, and neither is a hostile the reflex already killed.
-  assert.equal(fieldFor([{ id: 7, name: "cow", x: 2, kind: "Passive mobs" }]), null);
+  assert.equal(fieldFor([{ id: 7, name: "cow", x: 2 }]), null);
   assert.equal(fieldFor([{ id: 7, name: "zombie", x: 2 }], context({ resolved: [7] })), null);
 });
 

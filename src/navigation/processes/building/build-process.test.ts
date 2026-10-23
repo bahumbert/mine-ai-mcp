@@ -3,17 +3,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
-import { type StructureWorldOptions, structureWorld as buildStructureWorld } from "../../../test-support/structure-world.js";
+import { structureWorld } from "../../../test-support/structure-world.js";
 import { build, BuildProgress, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
-
-/** The structure scene on the shared fake bot: its harness is the game's side of the scene. */
-function structureWorld(options: StructureWorldOptions = {}) {
-  const world = buildStructureWorld({ ...options, onHarness: true });
-  return { ...world, harness: world.harness! };
-}
 
 function cells(list: [number, number, number][], blockName = "cobblestone"): BuildCell[] {
   return list.map(([x, y, z]) => ({ position: { x, y, z }, blockName }));

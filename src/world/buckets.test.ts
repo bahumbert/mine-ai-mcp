@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import minecraftData from "minecraft-data";
 import test from "node:test";
-import { registry } from "../test-support/bot.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../server/config.js";
 import { bucketItem, bucketItems, EMPTY_BUCKET } from "./buckets.js";
 import { LIQUIDS } from "./liquid.js";
+
+const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
 
 test("each liquid's full bucket is an item of the registry, and so is the empty one", () => {
   assert.ok(registry.itemsByName[EMPTY_BUCKET], `no item ${EMPTY_BUCKET}`);

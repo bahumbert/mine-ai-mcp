@@ -83,7 +83,7 @@ test("the portal preset uses ten obsidian, four corner supports and six interior
 });
 
 test("a finished structure is reported complete with what was placed", async () => {
-  const { bot, physics } = structureWorld({ onHarness: true });
+  const { bot, physics } = structureWorld();
   const result = await buildStructure(
     bot,
     {
@@ -104,7 +104,7 @@ test("a finished structure is reported complete with what was placed", async () 
 });
 
 test("the audit says why each wrong cell was left, naming the block in the way and the shortfall", async () => {
-  const { bot, put, physics } = structureWorld({ carried: { cobblestone: 1 }, onHarness: true });
+  const { bot, put, physics } = structureWorld({ carried: { cobblestone: 1 } });
   put(new Vec3(2, 64, 0), "oak_leaves");
   const result = await buildStructure(
     bot,
@@ -138,7 +138,7 @@ test("the audit says why each wrong cell was left, naming the block in the way a
 });
 
 test("a block Minecraft does not have is refused before anything moves", async () => {
-  const { bot, physics, placements } = structureWorld({ onHarness: true });
+  const { bot, physics, placements } = structureWorld();
   const result = await buildStructure(
     bot,
     { cells: cells([[2, 64, 0]], "unobtainium"), removeWrongBlocks: false },
@@ -153,7 +153,7 @@ test("a block Minecraft does not have is refused before anything moves", async (
 });
 
 test("a structure is refused before any block is touched when a cell lies in a region someone else owns, and built in its own", async () => {
-  const { bot, physics } = structureWorld({ onHarness: true });
+  const { bot, physics } = structureWorld();
   Object.assign(bot, { username: "Ayla" });
   const region = (owner: string) => ({ regionId: 4, dimension: "overworld", min: { x: 3, y: 64, z: 0 }, max: { x: 5, y: 66, z: 2 }, owner, label: "Tom's place" });
   setProtectedRegionsProvider(bot, () => [region("Tom")]);
@@ -189,7 +189,7 @@ test("cells may ask a half and an axis, and one cell asked two ways is refused",
 });
 
 test("cells kept from earlier parts are never dug by the routes of this one", async () => {
-  const { bot, physics, protectedSets } = structureWorld({ onHarness: true });
+  const { bot, physics, protectedSets } = structureWorld();
   const request = parseBuildStructureRequest({
     blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }],
     keep: [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }],
@@ -241,7 +241,7 @@ function abortingAfterPlacement(physics: Physics, n: number, controller: AbortCo
 }
 
 test("a build cut short after two of four cells goes on with the other two, each counted once", async () => {
-  const { bot, physics, placements, blocks } = structureWorld({ onHarness: true });
+  const { bot, physics, placements, blocks } = structureWorld();
   const first = fresh();
   const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0], [5, 64, 0]]), removeWrongBlocks: false };
   const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 2, first, false), () => {});
@@ -254,7 +254,7 @@ test("a build cut short after two of four cells goes on with the other two, each
 });
 
 test("a placement that landed just before the abort threw is still counted", async () => {
-  const { bot, physics, placements } = structureWorld({ onHarness: true });
+  const { bot, physics, placements } = structureWorld();
   const first = fresh();
   const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
   const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 2, first, true), () => {});
@@ -265,7 +265,7 @@ test("a placement that landed just before the abort threw is still counted", asy
 });
 
 test("a cell built by someone else between the attempts is not placed again nor counted as ours", async () => {
-  const { bot, physics, put, placements } = structureWorld({ onHarness: true });
+  const { bot, physics, put, placements } = structureWorld();
   const first = fresh();
   const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
   const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 1, first, false), () => {});
@@ -278,7 +278,7 @@ test("a cell built by someone else between the attempts is not placed again nor 
 });
 
 test("water the fall reflex left in a cell to build is placed over, and a leftover block is dug when the request says so", async () => {
-  const { bot, physics, put, placements } = structureWorld({ onHarness: true });
+  const { bot, physics, put, placements } = structureWorld();
   const first = fresh();
   const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: true };
   const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 1, first, false), () => {});
@@ -292,7 +292,7 @@ test("water the fall reflex left in a cell to build is placed over, and a leftov
 });
 
 test("a build that already finished answers a second call with the same success and touches nothing", async () => {
-  const { bot, physics, placements } = structureWorld({ onHarness: true });
+  const { bot, physics, placements } = structureWorld();
   const request = { cells: cells([[2, 64, 0], [3, 64, 0]]), removeWrongBlocks: false };
   const run = beginBuildStructure(bot, request, physics, () => {});
   const done = await run({ signal: fresh().signal });
@@ -313,7 +313,7 @@ function scaffoldingFirstRoute(world: ReturnType<typeof structureWorld>, scaffol
         for (const [x, y, z] of scaffold) {
           world.put(new Vec3(x, y, z), "dirt");
           // The state the world holds there, as the route reads it back after its placement.
-          options.onPlacement?.({ position: { x, y, z }, stateId: world.harness!.world.getBlockStateId(new Vec3(x, y, z)) });
+          options.onPlacement?.({ position: { x, y, z }, stateId: world.harness.world.getBlockStateId(new Vec3(x, y, z)) });
         }
         afterScaffold?.();
       }
@@ -323,7 +323,7 @@ function scaffoldingFirstRoute(world: ReturnType<typeof structureWorld>, scaffol
 }
 
 test("scaffold standing when the reflex cut the build is taken down by the attempt that finishes it", async () => {
-  const world = structureWorld({ onHarness: true });
+  const world = structureWorld();
   const first = fresh();
   const physics = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2]], () => { aborted(first, "[FALL] reflex"); });
   const request = { cells: cells([[10, 64, 0], [11, 64, 0]]), removeWrongBlocks: false };
@@ -338,7 +338,7 @@ test("scaffold standing when the reflex cut the build is taken down by the attem
 });
 
 test("a build cut while taking its scaffold down resumes into the takedown and leaves none", async () => {
-  const world = structureWorld({ onHarness: true });
+  const world = structureWorld();
   const cut = fresh();
   const physics = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2], [9, 67, 2]]);
   let broken = 0;
@@ -361,7 +361,7 @@ test("a build cut while taking its scaffold down resumes into the takedown and l
 });
 
 test("scaffold that another bot already took down is skipped, not dug twice", async () => {
-  const world = structureWorld({ onHarness: true });
+  const world = structureWorld();
   const first = fresh();
   const dug: string[] = [];
   const base = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2]], () => { aborted(first, "[FALL] reflex"); });
@@ -392,7 +392,7 @@ const placedContainers = (data: ReturnType<typeof temporaryBotData>) =>
 
 test("a house's chest placed by build_structure is recorded, and the walls around it are not", async (t) => {
   const data = temporaryBotData({ closeAfter: t });
-  const world = structureWorld({ carried: { chest: 1, cobblestone: 4 }, onHarness: true });
+  const world = structureWorld({ carried: { chest: 1, cobblestone: 4 } });
 
   const result = await buildAsAction(world, data, [
     ...cells([[2, 64, 0], [3, 64, 0]]),
@@ -407,7 +407,7 @@ test("a house's chest placed by build_structure is recorded, and the walls aroun
 
 test("a chest already standing in the plan is not recorded: the bot did not place it", async (t) => {
   const data = temporaryBotData({ closeAfter: t });
-  const world = structureWorld({ carried: { cobblestone: 4 }, onHarness: true });
+  const world = structureWorld({ carried: { cobblestone: 4 } });
   world.put(new Vec3(4, 64, 0), "chest");
 
   const result = await buildAsAction(world, data, [{ x: 4, y: 64, z: 0, blockName: "chest" }]);

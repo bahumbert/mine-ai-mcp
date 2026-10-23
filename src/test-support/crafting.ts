@@ -4,7 +4,6 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { CarriedCounts } from "./carried-counts.js";
 import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
-import { letTestsWriteWorldAge } from "./written-world-age.js";
 
 export const craftingRegistry = minecraftData("1.21.4");
 
@@ -52,8 +51,8 @@ const TABLE = new Vec3(1, 64, 0);
  * `craft` that applies a recipe's delta to that window, as the server's slot updates would. `counts` is the window's
  * totals by item id (`CarriedCounts`: a test's `counts.set` rewrites the stacks). `tableAvailable` stands a crafting
  * table next to the bot and `findBlock` answers it. `recipes`: extra recipes offered before the fixture's own, as
- * Mineflayer lists other wood families first. `clock`: the harness's (a mocked one the test drives); given, the world age
- * is the server's own, which only that clock moves.
+ * Mineflayer lists other wood families first. `clock`: the harness's (a mocked one the test drives); the world age is
+ * the server's own, which only the harness clock moves.
  */
 export function craftingBot(
   carried: Readonly<Record<string, number>>,
@@ -81,8 +80,5 @@ export function craftingBot(
     },
   });
   const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
-  // Kept for importers that pass no clock, should one move the world age with `startServerClock` (none does after
-  // batch M2; see `written-world-age.ts`).
-  if (clock === undefined) letTestsWriteWorldAge(harness);
   return { bot: harness.bot, counts, craftCalls, harness };
 }

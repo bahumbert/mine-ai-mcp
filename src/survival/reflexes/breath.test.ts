@@ -2,9 +2,8 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
-import type { StallClock } from "../../actions/stall-watch.js";
 import type { ActionRunnerOptions } from "../../session/action-runner.js";
-import { type FakeClock, type FakeWorld, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { waterFixture } from "../../test-support/water.js";
 import { type SurvivalTransition } from "../control/contract.js";
 import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
@@ -13,7 +12,11 @@ import { attachBreathReflex } from "./breath.js";
 /** One bubble of the air bar is this many ticks on the server's meter. */
 const AIR_TICKS_PER_POINT = 15;
 
-/** The server's air meter: the player's `air_supply` metadata, at the index of the version's entity metadata. */
+/**
+ * The server's air meter: the player's `air_supply` metadata, at the index of the version's entity metadata. Written
+ * raw: the bot stands in no real water here, so the fake's own air (`harness.breath.setAirSupply`) would be refilled
+ * at once and the client would hear it.
+ */
 function setAirTicks(bot: Bot, ticks: number): void {
   const index = bot.registry.entitiesByName.player?.metadataKeys?.indexOf("air_supply") ?? -1;
   if (index < 0) throw new Error("no air_supply metadata for a player");
@@ -25,15 +28,9 @@ const setAir = (bot: Bot, points: number) => setAirTicks(bot, points * AIR_TICKS
 
 /** A bot at (0, 64, 0) in the shared fake with a reflex driver, its clock and the controls it set in order. */
 function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}) {
-  // Not on the shared fake until M2 merges: builder clocks. `waterFixture` builds the driver and the runner before it
-  // has the harness, so both read the harness clock through this reference once it is there.
-  let fake: FakeClock | undefined;
-  const clock: StallClock = { now: () => fake?.now() ?? 0, every: (tick, ms) => fake!.every(tick, ms) };
-  const fixture = waterFixture(t, { now: clock.now }, { ...runnerOptions, clock }, { onHarness: true });
-  const { harness } = fixture;
-  if (!harness) throw new Error("waterFixture did not build the shared fake");
-  fake = harness.clock;
-  return { ...fixture, harness, clock: harness.clock };
+  const clock = createFakeClock({ mode: "manual" });
+  const fixture = waterFixture(t, {}, runnerOptions, { clock });
+  return { ...fixture, clock };
 }
 
 test("an owned dive uses its escape floor and preserves the failed budget after ownership transfers", async (t) => {

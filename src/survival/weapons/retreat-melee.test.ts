@@ -16,8 +16,7 @@ function stolen(operation: string) {
 /** A size-2 magma cube two blocks from a bot holding a diamond sword, and with `neutral`, a piglin beside it. */
 function fixture(options: { neutral?: boolean } = {}) {
   const metadata: unknown[] = [];
-  // Not on the shared fake until M3 merges: entity.kind.
-  const cube = { kind: "Hostile mobs", width: 1.04, height: 1.04 };
+  const cube = { width: 1.04, height: 1.04 };
   const entities: Record<number, FakeEntitySpec> = {
     7: { name: "magma_cube", position: new Vec3(2, 64, 0), metadata, ...cube },
   };

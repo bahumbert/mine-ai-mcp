@@ -29,7 +29,7 @@ function carried(fixture: Fixture, name: string): number {
 }
 
 /** How many furnaces the bot carries, read and set in the harness's inventory window. */
-const carriedFurnaces = (fixture: Fixture) => carriedCountField(fixture.harness!, "furnace");
+const carriedFurnaces = (fixture: Fixture) => carriedCountField(fixture.harness, "furnace");
 
 /** Record what each attempt puts in the furnace. */
 function recordLoads(fixture: Fixture) {
@@ -252,7 +252,7 @@ function furnaceOperations(fixture: Fixture, calls: string[]): WorkstationOperat
     moveToOpenGround: async () => false,
     collect: async () => {
       calls.push("collect");
-      fixture.harness!.world.setCell(new Vec3(position.x, position.y, position.z), "air");
+      fixture.harness.world.setCell(new Vec3(position.x, position.y, position.z), "air");
       furnaces.count = 1;
       return { status: "succeeded" };
     },
