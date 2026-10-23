@@ -6,12 +6,12 @@ import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import { engagingCombat } from "../../test-support/combat.js";
 import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
 import { SurvivalObserver } from "../evidence/status.js";
-import { SurvivalPolicyState } from "../state/survival-policy.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
@@ -154,31 +154,6 @@ interface FixtureOptions extends Pick<FakeBotOptions, "entities" | "carried" | "
   readonly runner?: Omit<ActionRunnerOptions, "clock">;
 }
 
-/** A combat controller that engages through `engage` and is otherwise idle: no End fight, no recovery, safe at the end. */
-function idleCombatController(bot: FakeBot, engage: CombatController["engage"]): CombatController {
-  return {
-    resourceRefusal: () => null,
-    policy: new SurvivalPolicyState(bot),
-    engage,
-    stop: async () => undefined,
-    runEnd: async () => {
-      throw new Error("Unexpected End combat");
-    },
-    endDanger: () => false,
-    activePosition: () => null,
-    execution: () => null,
-    onDecision: () => () => {},
-    finish: async () => ({
-      observedAt: 1,
-      kind: "safe" as const,
-      basis: "clear" as const,
-      position: { x: 0, y: 64, z: 0 },
-    }),
-    canRecover: () => false,
-    activeEngagement: () => null,
-  };
-}
-
 /** The recorded encounters, oldest first, as `response -> outcome`. */
 function recordedEncounters(data: SqlBotData): string[] {
   return data
@@ -224,7 +199,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     cancel: () => undefined,
     navigate,
   } as unknown as NavigationRuntime;
-  const controller = idleCombatController(bot, engage);
+  const controller = engagingCombat(bot, engage);
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const perception = new CombatPerception(bot);
   const attached = attachHostileReflex(bot, driver, navigation, controller, perception);

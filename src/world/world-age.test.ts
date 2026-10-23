@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { waitForServerAnswer, waitForWorldAge } from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
@@ -8,16 +9,6 @@ function worldBot(age = 1_000, options: FakeBotOptions = {}) {
   const clock = createFakeClock({ mode: "manual" });
   const harness = createFakeBot({ clock, server: { startAge: age }, ...options });
   return { ...harness, timing: { now: clock.now, sleep: clock.sleep } };
-}
-
-/** Whether `pending` has ended, read at any time. */
-function watch<T>(pending: Promise<T>): { readonly over: boolean } {
-  const state = { over: false };
-  void pending.then(
-    () => (state.over = true),
-    () => (state.over = true),
-  );
-  return state;
 }
 
 test("resolves moved when the server age advanced the asked ticks, seen in jumps of 20", async () => {

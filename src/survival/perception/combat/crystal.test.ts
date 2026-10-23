@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
+import { TestEndCombat as EndCombat, engagingCombat, unexpectedEngage } from "../../../test-support/combat.js";
 import { type FakeBotOptions, type FakeEntitySpec, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import type { CombatController } from "../../control/combat/contract.js";
 import { CrystalObservation } from "./crystal.js";
@@ -122,31 +122,30 @@ test("a successful dragon takeover resumes the same crystal request and retains 
   const runner = new ActionRunner();
   let attempts = 0;
   let first: CrystalObservation | null = null;
-  const combat = {
-    async runEnd(request, signal) {
-      assert.equal(request.kind, "crystal");
-      if (request.kind !== "crystal") throw new Error("wrong request");
-      attempts++;
-      if (attempts === 1) {
-        first = request.observation;
-        first.released(8);
-        const cancelled = new Promise<void>((resolve) =>
-          signal.addEventListener("abort", () => resolve(), { once: true }),
-        );
-        const claim = runner.claim("dragon_reflex", "Dragon breath", async () => {
-          f.target.isValid = false;
-          delete f.bot.entities[42];
-          f.explode();
-          return { value: null, continuation: { kind: "resume" as const } };
-        });
-        assert.equal(claim.kind, "claimed");
-        await cancelled;
-        signal.throwIfAborted();
-      }
-      assert.equal(request.observation, first);
-      return f.end.crystal(42, signal, request.observation);
-    },
-  } as CombatController;
+  const runEnd: CombatController["runEnd"] = async (request, signal) => {
+    assert.equal(request.kind, "crystal");
+    if (request.kind !== "crystal") throw new Error("wrong request");
+    attempts++;
+    if (attempts === 1) {
+      first = request.observation;
+      first.released(8);
+      const cancelled = new Promise<void>((resolve) =>
+        signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      const claim = runner.claim("dragon_reflex", "Dragon breath", async () => {
+        f.target.isValid = false;
+        delete f.bot.entities[42];
+        f.explode();
+        return { value: null, continuation: { kind: "resume" as const } };
+      });
+      assert.equal(claim.kind, "claimed");
+      await cancelled;
+      signal.throwIfAborted();
+    }
+    assert.equal(request.observation, first);
+    return f.end.crystal(42, signal, request.observation);
+  };
+  const combat = engagingCombat(f.bot, unexpectedEngage, { runEnd });
   const result = await f.run(runner.run(createDestroyEndCrystalAction(f.bot, combat), { entity_id: 42 }));
   assert.equal(result.result.status, "succeeded");
   assert.equal(attempts, 2);
@@ -161,15 +160,14 @@ test("caller cancellation while waiting for server progress is final and release
   const f = fixture();
   const caller = new AbortController();
   let attempts = 0;
-  const combat = {
-    async runEnd(request, signal) {
-      if (request.kind !== "crystal") throw new Error("wrong request");
-      attempts++;
-      request.observation.released(8);
-      f.script.onTick = () => caller.abort("cancelled by user");
-      return f.end.crystal(42, signal, request.observation);
-    },
-  } as CombatController;
+  const runEnd: CombatController["runEnd"] = async (request, signal) => {
+    if (request.kind !== "crystal") throw new Error("wrong request");
+    attempts++;
+    request.observation.released(8);
+    f.script.onTick = () => caller.abort("cancelled by user");
+    return f.end.crystal(42, signal, request.observation);
+  };
+  const combat = engagingCombat(f.bot, unexpectedEngage, { runEnd });
   const result = await f.run(new ActionRunner().run(
     createDestroyEndCrystalAction(f.bot, combat),
     { entity_id: 42 },

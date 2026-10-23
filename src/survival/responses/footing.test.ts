@@ -3,17 +3,14 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { type FakeClock, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { watch } from "../../test-support/pending.js";
 import { FootingRecovery } from "./footing.js";
 
 /** Physics ticks `clock` runs until `pending` settles (at most `max`), as Mineflayer's ticks would drive it. */
 async function ticksUntilSettled(clock: FakeClock, pending: Promise<unknown>, max = 20): Promise<number> {
-  let settled = false;
-  void pending.then(
-    () => (settled = true),
-    () => (settled = true),
-  );
+  const settled = watch(pending);
   let ticks = 0;
-  while (!settled && ticks < max) {
+  while (!settled.over && ticks < max) {
     await clock.advance(50);
     ticks++;
   }

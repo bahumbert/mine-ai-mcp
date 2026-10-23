@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { carriedCount, INVENTORY_SETTLE_WALL_MS, settleInventoryCount } from "./inventory-count.js";
 
 /**
@@ -125,12 +126,11 @@ test("a stopped server clock ends the settle at the wall bound", async () => {
   const { bot, clock, server } = inventoryBot("cooked_beef", 2);
   using _timers = clock.install();
   server.stop();
-  let over = false;
   const settle = settleInventoryCount(bot, "cooked_beef", 1, { timeoutMs: 120 });
-  void settle.then(() => (over = true));
+  const over = watch(settle);
 
   await clock.advance(100);
-  assert.equal(over, false, "still waiting before the 120 ms wall bound");
+  assert.equal(over.over, false, "still waiting before the 120 ms wall bound");
   const settled = await clock.settle(settle, 50);
 
   assert.deepEqual(settled, { count: 2, confirmed: false });

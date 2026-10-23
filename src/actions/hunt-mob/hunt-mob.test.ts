@@ -8,10 +8,11 @@ import { Budgets } from "../../survival/state/budgets.js";
 import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { mobSourcesOf } from "../../world/mob-drops.js";
+import { engagingCombat } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { huntMobOutcomes, parseHuntMobRequest } from "./contract.js";
 import { createCollectMobDropAction, engageTarget, formatHuntMobResult, fruitlessKillLimit, huntMob, HUNT_FRUITLESS_KILLS, type HuntMobDependencies } from "./hunt-mob.js";
-import { died, outcome, dependencies, fakeCombat, engagingCombat, huntBot, EntitySpec, mob, fakeNavigation, unseen, droppedItem } from "./hunt-mob-fixtures.test.js";
+import { died, outcome, dependencies, fakeCombat, huntBot, EntitySpec, mob, fakeNavigation, unseen, droppedItem } from "./hunt-mob-fixtures.test.js";
 
 /** A harness bot that sees `targets` and nothing else of the hunt (engagement tests). */
 function engagementBot(targets: readonly EntitySpec[]): Bot {

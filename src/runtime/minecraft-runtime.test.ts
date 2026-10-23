@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { CombatDecision } from "../survival/control/combat/contract.js";
-import { SurvivalPolicyState } from "../survival/state/survival-policy.js";
 
 import type { Bot } from "mineflayer";
 import os from "node:os";
@@ -12,6 +11,7 @@ import { Vec3 } from "vec3";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
+import { engagingCombat } from "../test-support/combat.js";
 import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
@@ -26,36 +26,16 @@ function added(bot: Bot & Listened, event: string): number {
   return bot.listenerCount(event) - (idleListeners.get(bot)?.get(event) ?? 0);
 }
 
-const combatController = {
-  resourceRefusal: () => null,
-  policy: new SurvivalPolicyState(runtimeBot()),
-  engage: async (targetId: number) => ({
-    kind: "target_lost" as const,
-    targetId,
-    attacks: 0,
-    stylesUsed: [],
-    weaponsUsed: [],
-    shieldRaisedSwings: 0,
-    projectileGuards: 0,
-    explosions: 0,
-  }),
-  stop: async () => undefined,
-  runEnd: async () => {
-    throw new Error("Unexpected End combat");
-  },
-  endDanger: () => false,
-  activePosition: () => null,
-  execution: () => null,
-  onDecision: () => () => {},
-  finish: async () => ({
-    observedAt: 1,
-    kind: "safe" as const,
-    basis: "clear" as const,
-    position: { x: 0, y: 64, z: 0 },
-  }),
-  canRecover: () => false,
-  activeEngagement: () => null,
-};
+const combatController = engagingCombat(runtimeBot(), async (targetId) => ({
+  kind: "target_lost" as const,
+  targetId,
+  attacks: 0,
+  stylesUsed: [],
+  weaponsUsed: [],
+  shieldRaisedSwings: 0,
+  projectileGuards: 0,
+  explosions: 0,
+}));
 
 /**
  * The runtime's bot on the shared fake, `controlStates` recording each jump it sets; `rejectedListener` makes adding a

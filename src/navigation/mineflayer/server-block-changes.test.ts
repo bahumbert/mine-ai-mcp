@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { watch as watchPending } from "../../test-support/pending.js";
 import { changeCovers, SERVER_ANSWER_WALL_MS, type ServerBlockChange, subscribeServerBlockChanges, watchServerChange } from "./server-block-changes.js";
 
 /** A 1.21.4 bot on the shared fake, subscribed to the server's block packets: its protocol client carries them. */
@@ -87,10 +88,9 @@ test("a watch gives up on the wall clock when the server clock never moves", asy
   server.stop();
   const started = bot.time.age;
   const answer = watch.answer(new AbortController().signal, clock);
-  let over = false;
-  void answer.then(() => (over = true));
+  const over = watchPending(answer);
   await clock.advance(SERVER_ANSWER_WALL_MS - 100);
-  assert.equal(over, false, "still waiting inside the wall bound");
+  assert.equal(over.over, false, "still waiting inside the wall bound");
   assert.equal(await clock.settle(answer, 100), false);
   assert.equal(bot.time.age, started, "the server clock never moved");
   watch.dispose();

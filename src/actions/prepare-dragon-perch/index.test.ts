@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import type { CombatController } from "../../survival/control/combat/contract.js";
+import { engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { createPrepareDragonPerchAction } from "./index.js";
 
@@ -11,21 +13,20 @@ test("preparation delegates without attacking and publishes current staging read
     entities: { 17: { name: "ender_dragon", position: new Vec3(0, 70, 0), metadata: [] } },
   });
   let requestKind: string | null = null;
-  const combat = {
-    runEnd: async (request: { kind: string; observation: { preparedPosition: Vec3 | null; stage: string } }) => {
-      requestKind = request.kind;
-      request.observation.preparedPosition = bot.entity.position.clone();
-      request.observation.stage = "ready";
-      return {
-        outcome: "perch_ready",
-        attacks: 0,
-        healthBefore: null,
-        healthAfter: null,
-        reason: "Low staging position is ready.",
-      };
-    },
+  const runEnd: CombatController["runEnd"] = async (request) => {
+    if (request.kind !== "prepare_perch") throw new Error("wrong request");
+    requestKind = request.kind;
+    request.observation.preparedPosition = bot.entity.position.clone();
+    request.observation.stage = "ready";
+    return {
+      outcome: "perch_ready",
+      attacks: 0,
+      healthBefore: null,
+      healthAfter: null,
+      reason: "Low staging position is ready.",
+    };
   };
-  const action = createPrepareDragonPerchAction(bot, combat as never);
+  const action = createPrepareDragonPerchAction(bot, engagingCombat(bot, unexpectedEngage, { runEnd }));
   const lifetime = new AbortController();
   t.after(() => lifetime.abort());
   const evidence: { current?: () => { checkpoint: unknown; completion: { observed: boolean } } } = {};

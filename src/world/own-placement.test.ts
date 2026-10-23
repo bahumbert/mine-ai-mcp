@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeCell, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement } from "./own-placement.js";
 import type { WorldBlock } from "./placement.js";
 
@@ -79,12 +80,11 @@ test("wall bound when the server clock stops", async () => {
   server.stop();
   const own = startOwnPlacement();
   recordPlacementSent(own, [cell], bot.time.age);
-  let over = false;
   const waiting = awaitOwnPlacement(bot, own, isCobble, undefined, 120);
-  void waiting.then(() => (over = true));
+  const over = watch(waiting);
 
   await clock.advance(100);
-  assert.equal(over, false, "still waiting before the 120 ms wall bound");
+  assert.equal(over.over, false, "still waiting before the 120 ms wall bound");
   const seen = await clock.settle(waiting, 50);
 
   assert.deepEqual(seen, { kind: "not_landed" });

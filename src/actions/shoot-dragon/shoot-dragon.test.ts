@@ -3,7 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
-import { TestEndCombat } from "../../test-support/combat.js";
+import { TestEndCombat, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
 import { DragonShotObservation } from "../../survival/perception/combat/dragon-shot.js";
 import type { FootingRecovery } from "../../survival/responses/footing.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
@@ -65,7 +65,7 @@ test("caller cancellation during the draw does not release an arrow", async () =
 test("a released shot survives takeover, reports health loss, and is never fired twice", async () => {
   const f = fixture(), runner = new ActionRunner();
   let first: DragonShotObservation | undefined, attempts = 0;
-  const combat = { async runEnd(request, signal) {
+  const runEnd: CombatController["runEnd"] = async (request, signal) => {
     if (request.kind !== "dragon_bow") throw Error("wrong request");
     attempts++;
     if (attempts === 1) {
@@ -82,7 +82,8 @@ test("a released shot survives takeover, reports health loss, and is never fired
     }
     assert.equal(request.observation, first);
     return f.end.shootDragon(signal, request.observation);
-  } } as CombatController;
+  };
+  const combat = engagingCombat(f.bot, unexpectedEngage, { runEnd });
   const result = await f.clock.settle(runner.run(createShootDragonAction(f.bot, combat), { entity_id: 42 }), SHOT_MS);
   assert.equal(result.result.status, "succeeded");
   assert.equal(first!.attacks, 1);

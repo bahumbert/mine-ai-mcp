@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import { createFakeBot, itemOf } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { useItemAt } from "./item-use.js";
 
 /** One client tick, in ms of clock. */
@@ -52,16 +53,6 @@ function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, num
   };
   const stack = (name: string): Item => bot.inventory.items().find((item) => item.name === name)!;
   return { ...harness, calls, target, stack, obsidian: bot.blockAt(new Vec3(3, 62, 0))! };
-}
-
-/** Whether `pending` has ended, read at any time. */
-function watch<T>(pending: Promise<T>): { readonly over: boolean } {
-  const state = { over: false };
-  void pending.then(
-    () => (state.over = true),
-    () => (state.over = true),
-  );
-  return state;
 }
 
 test("equips, looks with force, uses, and confirms the cell and the hand", async () => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeClock } from "../../test-support/fake-bot/index.js";
+import { watch } from "../../test-support/pending.js";
 import { waterFixture } from "../../test-support/water.js";
 import { Budgets } from "../state/budgets.js";
 import { surface } from "./breath.js";
@@ -65,9 +66,8 @@ function swimWorld(t: Parameters<typeof waterFixture>[0], seen: (x: number, y: n
   });
   const run = async (ticks: number, maximumTicks = 600) => {
     const done = surface(bot, new AbortController().signal, new Budgets(), maximumTicks);
-    let finished = false;
-    void done.then(() => { finished = true; }, () => { finished = true; });
-    for (let n = 0; n < ticks && !finished; n++) await harness.clock.advance(50);
+    const finished = watch(done);
+    for (let n = 0; n < ticks && !finished.over; n++) await harness.clock.advance(50);
     return { outcome: await done, position: fixture.entity.position, digs };
   };
   return { run, bot, fixture, clock: harness.clock, world: harness.world, paint, digs, held, onTick };

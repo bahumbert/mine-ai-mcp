@@ -18,6 +18,7 @@ import {
   routePlan,
   stepUpStep,
 } from "../../test-support/navigation.js";
+import { watch } from "../../test-support/pending.js";
 import type { MovementPreparation } from "../bot.js";
 import type { PlannedStep } from "../movements/movement.js";
 import type { NavigationObservation, Position3 } from "../world/world.js";
@@ -354,12 +355,9 @@ test("route cancellation waits for an active physical effect to settle", async (
   await nextTurn();
   assert.equal(cancelCalled, true);
 
-  let routeSettled = false;
-  void execution.then(() => {
-    routeSettled = true;
-  });
+  const routeSettled = watch(execution);
   await nextTurn();
-  assert.equal(routeSettled, false);
+  assert.equal(routeSettled.over, false);
 
   settleEffect();
   assert.equal((await execution).kind, "cancelled");

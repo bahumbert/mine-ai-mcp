@@ -7,6 +7,7 @@ import { MemoryWorld } from "../world/memory-world.js";
 import type { Position3 } from "../world/world.js";
 import { createFakeBot, flush } from "../../test-support/fake-bot/index.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
+import { watch } from "../../test-support/pending.js";
 
 /** A Mineflayer surface that does nothing, standing on the origin, with the given parts replaced. */
 function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface {
@@ -751,10 +752,9 @@ function serverWatchedDig(answer: () => Promise<boolean>) {
 test("a break is accepted only once the server has answered for its cell, and the watch began before the dig", async () => {
   let answered!: (value: boolean) => void;
   const run = serverWatchedDig(() => new Promise<boolean>((resolve) => (answered = resolve)));
-  let settled = false;
-  void run.effect.completion.then(() => (settled = true));
+  const settled = watch(run.effect.completion);
   await flush();
-  assert.equal(settled, false, "mineflayer's own air write is not the server's answer");
+  assert.equal(settled.over, false, "mineflayer's own air write is not the server's answer");
   answered(true);
   assert.deepEqual(await run.effect.completion, { kind: "accepted" });
   assert.deepEqual(run.order, ["watch", "dig", "answer"]);

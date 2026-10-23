@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ReflexDriver } from "../survival/control/driver.js";
 import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { ActionRunner } from "./action-runner.js";
 import { stubAction } from "./action-runner-fixtures.test.js";
@@ -328,11 +329,8 @@ test("a waiting claim keeps its interrupted request pending until defence settle
     },
     { kind: "resumable_task" },
   );
-  let returned = false;
   const pending = runner.run(task, { block_name: "stone" }, undefined, 42);
-  void pending.then(() => {
-    returned = true;
-  });
+  const returned = watch(pending);
   while (attempts === 0) await Promise.resolve();
   let complete!: () => void;
   const claim = runner.claim("hostile_reflex", "contact", async () => {
@@ -343,7 +341,7 @@ test("a waiting claim keeps its interrupted request pending until defence settle
   });
   while (!complete) await Promise.resolve();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(returned, false);
+  assert.equal(returned.over, false);
   assert.equal(runner.status().owner, "takeover");
   assert.equal(runner.requestContext().requestId, 42);
   complete();

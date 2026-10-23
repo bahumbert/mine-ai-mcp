@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeCell, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { watch } from "../../test-support/pending.js";
 import { swimToBreathableCell } from "./swim-to-air.js";
 
 type Cell = "water" | "air" | "stone";
@@ -42,9 +43,8 @@ function swimmer(read: (x: number, y: number, z: number) => Cell, start: Vec3, o
   /** Runs the swim, a client tick at a time. */
   const swim = async (signal = new AbortController().signal, wallMs?: number) => {
     const done = swimToBreathableCell(bot, signal, wallMs);
-    let finished = false;
-    void done.then(() => { finished = true; }, () => { finished = true; });
-    for (let n = 0; n < 1_000 && !finished; n++) await clock.advance(50);
+    const finished = watch(done);
+    for (let n = 0; n < 1_000 && !finished.over; n++) await clock.advance(50);
     await done;
   };
   return { swim, held, entity, headInAir, bot, clock };

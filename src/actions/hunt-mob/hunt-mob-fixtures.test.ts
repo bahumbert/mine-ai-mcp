@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { type HuntTarget } from "../../navigation/processes/hunting/hunt-process.js";
-import type { CombatController, CombatOutcome } from "../../survival/index.js";
-import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
+import type { CombatOutcome } from "../../survival/index.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
+import { engagingCombat } from "../../test-support/combat.js";
 import { type FakeClock, type FakeEntitySpec, type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { type HuntMobDependencies, type TargetEngagement } from "./hunt-mob.js";
 
@@ -14,34 +14,6 @@ type Entity = Parameters<Bot["attack"]>[0];
 
 /** A mob or a dropped stack the harness puts in `bot.entities` under its id. */
 export type EntitySpec = FakeEntitySpec & { readonly id: number; readonly position: Vec3 };
-
-/**
- * The bot's combat, with its policy, fighting each engagement through `engage`: it stops at once, is never in the End,
- * finishes safe and clear at (0, 64, 0) and cannot recover on its own.
- */
-export function engagingCombat(bot: Bot, engage: CombatController["engage"]): CombatController {
-  return {
-    resourceRefusal: () => null,
-    policy: new SurvivalPolicyState(bot),
-    runEnd: async () => {
-      throw new Error("Unexpected End combat");
-    },
-    endDanger: () => false,
-    activePosition: () => null,
-    execution: () => null,
-    onDecision: () => () => {},
-    finish: async () => ({
-      observedAt: 1,
-      kind: "safe" as const,
-      basis: "clear" as const,
-      position: { x: 0, y: 64, z: 0 },
-    }),
-    canRecover: () => false,
-    activeEngagement: () => null,
-    stop: async () => {},
-    engage,
-  };
-}
 
 export function mob(id: number, entityType: number, name: string, x: number, kind = "Passive mobs"): EntitySpec {
   return { id, entityType, name, kind, position: new Vec3(x, 64, 0) };
