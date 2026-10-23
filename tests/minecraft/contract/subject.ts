@@ -7,12 +7,18 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { FakeCell, FakeHarness, Weather } from "../../../src/test-support/fake-bot/index.ts";
+import type { ArenaFrame } from "../arena/frame.ts";
+
+/** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
+export type LocalPoint = readonly [number, number, number];
 
 /** Mineflayer keeps the ridden entity on the bot too; its typings leave it out. */
 export type ContractBot = Bot & { vehicle?: Entity | null };
 
 export interface ContractSubject {
   readonly bot: ContractBot;
+  /** Where an arena-local point is in the world this subject runs in: a check names every cell and position through it, so one check runs in any lane. */
+  world(local: LocalPoint): Vec3;
   /** Let `ms` pass: real time on a server, `clock.advance` on the fake. */
   wait(ms: number): Promise<void>;
   /** Milliseconds on the monotonic clock the bot's own timers run on. */
@@ -23,7 +29,7 @@ export interface ContractSubject {
   seatedOnServer(vehicle: Entity): Promise<boolean>;
   /** Set the weather on the server (`/weather`); the levels then ramp, and the client hears each step. */
   setWeather(weather: Weather): Promise<void>;
-  /** The server spawns `stack` as an item entity at `position`, pickable after `pickupDelayTicks`; resolves with it once the client has it. */
+  /** The server spawns `stack` as an item entity at `position` (a world position: `world` of a local one), pickable after `pickupDelayTicks`; resolves with it once the client has it. */
   summonItem(stack: { readonly name: string; readonly count: number }, position: Vec3, pickupDelayTicks: number): Promise<Entity>;
 }
 
@@ -64,10 +70,11 @@ export async function holdsWithin(subject: ContractSubject, condition: () => boo
 }
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
-export function fakeContractSubject(harness: FakeHarness): ContractSubject {
+export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
   const { bot, clock, entities, server, world } = harness;
   return {
     bot,
+    world: (local) => new Vec3(...arena.world(local)),
     wait: (ms) => clock.advance(ms),
     now: () => clock.now(),
     async setBlock(cell, block) {
@@ -96,9 +103,9 @@ export function blockArgument(block: FakeCell): string {
   return `${block.name}[${properties.join(",")}]`;
 }
 
-/** Cells a real-server subject writes to answer `seatedOnServer`: a probe the server sets only for a seated rider, then a sentinel. */
-export const SEAT_PROBE_CELL = new Vec3(5, -60, 5);
-export const SEAT_SENTINEL_CELL = new Vec3(5, -60, 4);
+/** Arena-local cells a real-server subject writes (in its lane) to answer `seatedOnServer`: a probe the server sets only for a seated rider, then a sentinel. */
+const SEAT_PROBE_LOCAL: LocalPoint = [5, -60, 5];
+const SEAT_SENTINEL_LOCAL: LocalPoint = [5, -60, 4];
 const MARKER_BLOCK = "gold_block";
 
 /** Send a command and wait until `cell` reads `name` on the client; throws past the bound. */
@@ -114,10 +121,14 @@ async function commandUntil(bot: Bot, command: string, cell: Vec3, name: string)
 }
 
 /** A real server's subject: wall time, and op commands sent as chat (the fixture's player is op). */
-export function serverContractSubject(bot: Bot): ContractSubject {
+export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubject {
   const at = (cell: Vec3) => `${cell.x} ${cell.y} ${cell.z}`;
+  const world = (local: LocalPoint) => new Vec3(...arena.world(local));
+  const probe = world(SEAT_PROBE_LOCAL);
+  const sentinel = world(SEAT_SENTINEL_LOCAL);
   return {
     bot,
+    world,
     wait: (ms) => delay(ms),
     now: () => performance.now(),
     async setBlock(cell, block) {
@@ -126,11 +137,11 @@ export function serverContractSubject(bot: Bot): ContractSubject {
     },
     async seatedOnServer() {
       // Commands run in order: once the sentinel is set, the probe holds what the `on vehicle` branch did.
-      bot.chat(`/execute as ${bot.username} on vehicle run setblock ${at(SEAT_PROBE_CELL)} ${MARKER_BLOCK}`);
-      await commandUntil(bot, `setblock ${at(SEAT_SENTINEL_CELL)} ${MARKER_BLOCK}`, SEAT_SENTINEL_CELL, MARKER_BLOCK);
-      const seated = bot.blockAt(SEAT_PROBE_CELL)?.name === MARKER_BLOCK;
-      bot.chat(`/setblock ${at(SEAT_PROBE_CELL)} air`);
-      await commandUntil(bot, `setblock ${at(SEAT_SENTINEL_CELL)} air`, SEAT_SENTINEL_CELL, "air");
+      bot.chat(`/execute as ${bot.username} on vehicle run setblock ${at(probe)} ${MARKER_BLOCK}`);
+      await commandUntil(bot, `setblock ${at(sentinel)} ${MARKER_BLOCK}`, sentinel, MARKER_BLOCK);
+      const seated = bot.blockAt(probe)?.name === MARKER_BLOCK;
+      bot.chat(`/setblock ${at(probe)} air`);
+      await commandUntil(bot, `setblock ${at(sentinel)} air`, sentinel, "air");
       return seated;
     },
     // The command is sent and not awaited: the weather reaches the client as levels over the next ticks, which the check waits for.

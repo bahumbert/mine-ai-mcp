@@ -30,7 +30,7 @@ const QUIET_MS = 2_000;
 /** The bot's half width, the pickup reach sideways (the box grown by 1 block) and an item's half width: a bit past 1.425 is out of reach. */
 const INSIDE_REACH = 1.3;
 const OUTSIDE_REACH = 1.55;
-const FEET = new Vec3(0.5, -60, 0.5);
+const FEET = [0.5, -60, 0.5] as const;
 
 type Heard = { readonly kind: "playerCollect" | "updateSlot" | "entityGone"; readonly entityId?: number; readonly atMs: number };
 
@@ -72,20 +72,21 @@ export const itemPickupAfterDelay: ContractCheck = {
   fixture: { cells: {}, carried: { cobblestone: 64 - ROOM, ...Object.fromEntries(FILLER.map((name) => [name, 1])) }, position: [0.5, -60, 0.5] },
   async run(subject) {
     const { bot } = subject;
+    const feet = subject.world(FEET);
     const cobblestone = bot.registry.itemsByName.cobblestone!.id;
     const carried = () => bot.inventory.count(cobblestone, null);
     const { heard, stop } = listen(subject);
     try {
-      const outside = await summonAndWait(subject, 1, FEET.offset(OUTSIDE_REACH, 0, 0), 0, QUIET_MS);
+      const outside = await summonAndWait(subject, 1, feet.offset(OUTSIDE_REACH, 0, 0), 0, QUIET_MS);
       assert.equal(bot.entities[outside.entity.id], outside.entity, `an item ${OUTSIDE_REACH} blocks away was picked up`);
       assert.equal(heard.length, 0, `heard ${JSON.stringify(heard)} for an item out of reach`);
 
-      const inside = await summonAndWait(subject, 1, FEET.offset(INSIDE_REACH, 0, 0), 0, NO_DELAY_PICKUP_MS);
+      const inside = await summonAndWait(subject, 1, feet.offset(INSIDE_REACH, 0, 0), 0, NO_DELAY_PICKUP_MS);
       assert.equal(carried(), 64 - ROOM + 1, `the item ${INSIDE_REACH} blocks away (delay 0) was not picked up within ${NO_DELAY_PICKUP_MS} ms`);
       assert.equal(bot.entities[inside.entity.id], undefined, "the picked-up item is still an entity on the client");
       heard.length = 0;
 
-      const whole = await summonAndWait(subject, 3, FEET.offset(0, 0, 1), PICKUP_DELAY_TICKS, QUIET_MS);
+      const whole = await summonAndWait(subject, 3, feet.offset(0, 0, 1), PICKUP_DELAY_TICKS, QUIET_MS);
       assert.deepEqual(heard.map(({ kind }) => kind), ["playerCollect", "updateSlot", "entityGone"], "what the client heard of a pickup that fits");
       assert.ok(heard.every(({ entityId }) => entityId === undefined || entityId === whole.entity.id));
       const afterMs = heard[0]!.atMs - whole.spawnedAtMs;
@@ -94,14 +95,14 @@ export const itemPickupAfterDelay: ContractCheck = {
       assert.equal(carried(), 64 - ROOM + 1 + 3);
       heard.length = 0;
 
-      const partial = await summonAndWait(subject, 8, FEET.offset(0, 0, 1), PICKUP_DELAY_TICKS, QUIET_MS);
+      const partial = await summonAndWait(subject, 8, feet.offset(0, 0, 1), PICKUP_DELAY_TICKS, QUIET_MS);
       assert.deepEqual(heard.map(({ kind }) => kind), ["updateSlot"], "what the client heard of a pickup that fits in part");
       assert.equal(carried(), 64, "the stack filled up");
       assert.equal(bot.entities[partial.entity.id], partial.entity, "the partly picked-up entity is gone on the client");
       assert.equal(partial.entity.getDroppedItem()?.count, 8, "the client was told a new count for the partly picked-up entity");
       heard.length = 0;
 
-      const full = await summonAndWait(subject, 2, FEET.offset(0, 0, 0), 0, QUIET_MS);
+      const full = await summonAndWait(subject, 2, feet.offset(0, 0, 0), 0, QUIET_MS);
       assert.deepEqual(heard, [], "something was picked up with a full inventory");
       assert.equal(bot.entities[full.entity.id], full.entity);
     } finally {

@@ -1,20 +1,21 @@
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const cellSchema = z.tuple([z.number(), z.number(), z.number()]);
-const requestSchema = z.strictObject({
+const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** Client ticks the stance must read airborne at the same height before the navigate, or the setup did not reproduce ghost air. */
   holdTicks: z.number().int().positive(),
   /** Each case: the navigate target after the cell under the bot (its client copy becomes air; the server keeps its block). */
-  cases: z.array(z.strictObject({ target: cellSchema })).min(1),
+  cases: z.array(z.strictObject({ target: arenaPoint(arena) })).min(1),
   /** The chest under the first case must stay shut: the resend must not use an item or open a container. */
   openedWindowsAllowed: z.number().int().nonnegative(),
 });
 
 /** The client's copy of the cell under the bot is air, the server's is solid: the bot hangs, then a navigate must free it. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { holdTicks, cases, openedWindowsAllowed } = requestSchema.parse(context.scenario.params);
+  const { holdTicks, cases, openedWindowsAllowed } = requestSchemaIn(context.arena).parse(context.scenario.params);
   const details: string[] = [];
   for (const [index, { target }] of cases.entries()) {
     const start = context.client.body();

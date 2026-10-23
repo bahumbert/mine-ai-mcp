@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
-import { WATER_POOL_CELLS, getOffAndStand, mountBoat } from "./boat-seat.ts";
+import { WATER_POOL_CELLS, boatSummonedAt, getOffAndStand, mountBoat } from "./boat-seat.ts";
 
 /** The boat in the pool's middle at its surface; it floats down to its rest level in a second or two. */
 const BOAT_AT = [3.5, -60.111, 0.5] as const;
@@ -26,7 +26,7 @@ const NOT_SEATED_SHIFT = 0.3;
 
 /** Whether the boat stays at `x` for `QUIET_MS`. */
 async function staysAt(subject: ContractSubject, x: number): Promise<boolean> {
-  const boat = Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat")!;
+  const boat = boatSummonedAt(subject, BOAT_AT)!;
   return !(await holdsWithin(subject, () => Math.abs(boat.position.x - x) > TOLERANCE, QUIET_MS));
 }
 
@@ -37,7 +37,7 @@ export const boatFollowsVehicleMove: ContractCheck = {
   withoutRuntime: true,
   async run(subject) {
     const { bot } = subject;
-    const boat = Object.values(bot.entities).find((entity) => entity.name === "oak_boat");
+    const boat = boatSummonedAt(subject, BOAT_AT);
     assert.ok(boat !== undefined, "no oak_boat entity in view");
     await subject.wait(REST_WAIT_MS);
     const { y, z } = boat.position;
@@ -49,7 +49,7 @@ export const boatFollowsVehicleMove: ContractCheck = {
     bot._client.write("vehicle_move", { x: x + NOT_SEATED_SHIFT, y, z, yaw: -90, pitch: 0, onGround: false });
     assert.ok(await staysAt(subject, startX), "a vehicle_move from a bot not seated in the boat moved it");
     assert.equal(corrections.length, 0, "a vehicle_move from a bot not seated in the boat was answered");
-    await mountBoat(subject);
+    await mountBoat(subject, BOAT_AT);
     try {
       for (let step = 0; step < FREE_STEPS; step += 1) {
         x += STEP;

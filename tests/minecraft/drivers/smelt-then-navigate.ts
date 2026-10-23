@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { smeltItemResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
 const requestSchema = z.strictObject({
@@ -14,14 +15,14 @@ const requestSchema = z.strictObject({
 /** One workstation action that is not to be interrupted, then a route from where it left the bot. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { smelt, produced, navigate } = requestSchema.parse(context.scenario.params);
-  const smelted = await context.call("smelt_item", smelt);
+  const smelted = await context.call("smelt_item", arenaActionInput(smelt, context.arena));
   if (smelted.result.status !== "succeeded") return { status: "failed", detail: `smelt: ${smelted.summary}` };
   if (smelted.interruptions?.length) return { status: "failed", detail: `smelt interrupted: ${smelted.interruptions.join(" | ")}` };
   const receipt = smeltItemResultSchema.parse(smelted.result);
   if (receipt.smelt.produced !== produced) {
     return { status: "failed", detail: `smelt produced ${receipt.smelt.produced}, wanted ${produced}: ${smelted.summary}` };
   }
-  const routed = await context.call("navigate", navigate);
+  const routed = await context.call("navigate", arenaActionInput(navigate, context.arena));
   if (routed.result.status !== "succeeded") return { status: "failed", detail: `navigate after the smelt: ${routed.summary}` };
   return { status: "succeeded", detail: `${smelted.summary}; ${routed.summary}` };
 }

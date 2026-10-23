@@ -101,6 +101,11 @@ Every step must succeed, and the sequence stops on the first failure. Final
 inventory and world assertions stay in Mine Labs goals. Use a custom driver only
 when the scenario needs logic beyond an ordered list of successful calls.
 
+A scenario's `params` hold arena-local coordinates (the same YAML runs at offset zero and in a shared-server lane). A
+driver parses them through `arena/params.ts` built from `context.arena` (`arenaPoint`, `arenaCell`, `arenaX`), passes an
+action input taken from params through `arenaActionInput(input, context.arena)`, and compares an observed position only
+with those world-coordinate values; `drivers/lane-offset.test.ts` fails a driver that skips this.
+
 ## Combined behavior scenarios
 
 Related regressions share a fixture while retaining their own stage or physical

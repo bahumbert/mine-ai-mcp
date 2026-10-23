@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
 const requestSchema = z.strictObject({
@@ -19,7 +20,7 @@ const requestSchema = z.strictObject({
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { action, input, expect } = requestSchema.parse(context.scenario.params);
-  const output = await context.call(action, input);
+  const output = await context.call(action, arenaActionInput(input, context.arena));
   const { result } = output;
   if (("kind" in result && result.kind === "runtime_failure") || result.status === "cancelled") {
     return { status: "failed", detail: output.summary };

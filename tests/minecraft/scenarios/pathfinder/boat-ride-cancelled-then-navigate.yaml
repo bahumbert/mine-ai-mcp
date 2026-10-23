@@ -39,6 +39,7 @@ tick:
 params:
   target: [ 105, -60, 0 ]
   cancelPastX: 30
+  farBankX: 90
   settleWithinMs: 5000
 
 goal:

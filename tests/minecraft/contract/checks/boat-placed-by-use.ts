@@ -7,9 +7,8 @@
  */
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
-import { Vec3 } from "vec3";
 import type { ContractCheck } from "../checks.ts";
-import { type ContractSubject, holdsWithin } from "../subject.ts";
+import { type ContractSubject, type LocalPoint, holdsWithin } from "../subject.ts";
 import { WATER_POOL_CELLS, WATER_SURFACE_Y, getOffAndStand } from "./boat-seat.ts";
 
 const BOATS_CARRIED = 3;
@@ -21,12 +20,12 @@ const ABSENCE_MS = 1_500;
 const LOOK_SETTLE_MS = 300;
 const USE_HOLD_MS = 100;
 /** The reach lies between 4.40 (put) and 4.70 (not put): vanilla's block reach of 4.5. */
-const IN_REACH_AIM = new Vec3(0.5, -60, -3.59);
-const OUT_OF_REACH_AIM = new Vec3(0.5, -60, -3.91);
-const WATER_AIM = new Vec3(3.5, WATER_SURFACE_Y, 0.5);
+const IN_REACH_AIM: LocalPoint = [0.5, -60, -3.59];
+const OUT_OF_REACH_AIM: LocalPoint = [0.5, -60, -3.91];
+const WATER_AIM: LocalPoint = [3.5, WATER_SURFACE_Y, 0.5];
 /** The east face of the wall block at (-3, -60, 0). */
-const WALL_AIM = new Vec3(-2, -59.5, 0.5);
-const SKY_AIM = new Vec3(0.5, 20, 0.5);
+const WALL_AIM: LocalPoint = [-2, -59.5, 0.5];
+const SKY_AIM: LocalPoint = [0.5, 20, 0.5];
 /** A boat's rest level on water, below the surface (-60.477 from -60.111 on the server). */
 const REST_BELOW_SURFACE = 0.366;
 const REST_TOLERANCE = 0.05;
@@ -37,8 +36,9 @@ const SEAT_WALL_MS = 3_000;
 const EAST_ENTITY_YAW = (3 * Math.PI) / 2;
 
 /** Select hotbar slot `slot`, look at `aim`, use the held item once; the boat that appeared, or null after `ABSENCE_MS`. */
-async function useBoatAt(subject: ContractSubject, slot: number, aim: Vec3): Promise<Entity | null> {
+async function useBoatAt(subject: ContractSubject, slot: number, aimLocal: LocalPoint): Promise<Entity | null> {
   const { bot } = subject;
+  const aim = subject.world(aimLocal);
   bot.setQuickBarSlot(slot);
   await subject.wait(USE_HOLD_MS);
   const known = new Set(Object.values(bot.entities).map((entity) => entity.id));
@@ -66,9 +66,11 @@ export const boatPlacedByUse: ContractCheck = {
       assert.equal(await useBoatAt(subject, 0, aim), null, `a boat was put when used at ${label}`);
       assert.equal(carried(), BOATS_CARRIED, `the stack changed after a use at ${label}`);
     }
+    const waterAim = subject.world(WATER_AIM);
+    const inReachAim = subject.world(IN_REACH_AIM);
     const onWater = await useBoatAt(subject, 0, WATER_AIM);
     assert.ok(onWater !== null, "no boat entity after a use at water 3 blocks away");
-    assert.ok(Math.hypot(onWater.position.x - WATER_AIM.x, onWater.position.z - WATER_AIM.z) < POINT_TOLERANCE, `put at ${onWater.position}, not at the aimed point ${WATER_AIM}`);
+    assert.ok(Math.hypot(onWater.position.x - waterAim.x, onWater.position.z - waterAim.z) < POINT_TOLERANCE, `put at ${onWater.position}, not at the aimed point ${waterAim}`);
     assert.ok(Math.abs(onWater.position.y - WATER_SURFACE_Y) < POINT_TOLERANCE, `put at y ${onWater.position.y}, not at the water surface ${WATER_SURFACE_Y}`);
     assert.ok(Math.abs(onWater.yaw - EAST_ENTITY_YAW) < POINT_TOLERANCE, `facing ${onWater.yaw} rad: she looked east (${EAST_ENTITY_YAW})`);
     assert.ok(await holdsWithin(subject, () => carried() === BOATS_CARRIED - 1, PLACE_WALL_MS), "the stack did not lose its boat");
@@ -77,7 +79,7 @@ export const boatPlacedByUse: ContractCheck = {
     assert.equal(carried(), BOATS_CARRIED - 1, "the stack changed after a use on a held spot");
     const onGround = await useBoatAt(subject, 1, IN_REACH_AIM);
     assert.ok(onGround !== null, "no boat after a use at ground 4.4 blocks away");
-    assert.ok(onGround.position.distanceTo(IN_REACH_AIM) < POINT_TOLERANCE, `put at ${onGround.position}, not at ${IN_REACH_AIM}`);
+    assert.ok(onGround.position.distanceTo(inReachAim) < POINT_TOLERANCE, `put at ${onGround.position}, not at ${inReachAim}`);
     assert.ok(await holdsWithin(subject, () => carried() === BOATS_CARRIED - 2, PLACE_WALL_MS), "the second boat was not taken from its stack");
     // The first boat sinks to its rest level and stays (it bobs for about 1.5 s first).
     const rest = WATER_SURFACE_Y - REST_BELOW_SURFACE;

@@ -17,7 +17,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   // The selected hotbar slot outlives a trial in the player's data (2026-10-21: an equip check left slot 1); the fake starts at 0.
   context.bot.setQuickBarSlot(0);
   try {
-    await check.run(serverContractSubject(context.bot));
+    await check.run(serverContractSubject(context.bot, context.arena));
   } catch (cause) {
     return { status: "failed", detail: `${check.name}: ${cause instanceof Error ? cause.message : String(cause)}` };
   }

@@ -37,8 +37,9 @@ async function tryMount(subject: ContractSubject, boat: Entity): Promise<{ mount
 
 /** The fixture's boat standing at `x` `z`. */
 async function boatAt(subject: ContractSubject, x: number, z: number): Promise<Entity> {
-  const find = () => Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat" && Math.abs(entity.position.x - x) < 0.2 && Math.abs(entity.position.z - z) < 0.2);
-  assert.ok(await holdsWithin(subject, () => find() !== undefined, BOAT_SPAWN_WALL_MS), `no oak_boat entity at ${x} ${z}`);
+  const at = subject.world([x, -60, z]);
+  const find = () => Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat" && Math.abs(entity.position.x - at.x) < 0.2 && Math.abs(entity.position.z - at.z) < 0.2);
+  assert.ok(await holdsWithin(subject, () => find() !== undefined, BOAT_SPAWN_WALL_MS), `no oak_boat entity at ${at.x} ${at.z}`);
   return find()!;
 }
 

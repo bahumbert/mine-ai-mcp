@@ -1,14 +1,15 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const cellSchema = z.tuple([z.number(), z.number(), z.number()]);
-const requestSchema = z.strictObject({
+const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** A target far enough that the first navigate is still walking when physics stops. */
-  far: cellSchema,
+  far: arenaPoint(arena),
   /** A target at least five blocks from anywhere the first navigate can have walked to. */
-  near: cellSchema,
+  near: arenaPoint(arena),
   /** Wall-clock time the first navigate walks before physics stops. */
   walkMs: z.number().int().positive(),
   /** Wall-clock time the bot then stands with physics stopped before the cancel. */
@@ -19,7 +20,7 @@ const requestSchema = z.strictObject({
 
 /** Cancel a walking navigate while no physics tick comes: it must settle within seconds, and the body must walk again after. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { far, near, walkMs, silentMs, settleWithinMs } = requestSchema.parse(context.scenario.params);
+  const { far, near, walkMs, silentMs, settleWithinMs } = requestSchemaIn(context.arena).parse(context.scenario.params);
   const walk = ([x, y, z]: readonly [number, number, number]) => context.call("navigate", { x, y, z, range: 1, dig: false });
   const first = walk(far);
   await delay(walkMs);

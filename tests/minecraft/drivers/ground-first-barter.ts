@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { barterResultSchema, viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioRun } from "../scenario.ts";
 
 /** An existing reward must be collected without spending gold or offering it to a piglin. */
@@ -8,7 +9,7 @@ export const run: ScenarioRun = async (context) => {
   assert.equal(before.status, "succeeded");
   const piglin = before.situation.nearby.mobs.find((mob) => mob.name === "piglin" && mob.age === "adult");
   assert.ok(piglin, "The fixture must offer a real, loaded adult piglin to barter with.");
-  const output = await context.call("barter", { ...context.scenario.params, piglin_id: piglin.nearest.entityId });
+  const output = await context.call("barter", { ...arenaActionInput(context.scenario.params, context.arena), piglin_id: piglin.nearest.entityId });
   const result = barterResultSchema.parse(output.result);
   const after = viewStatusResultSchema.parse((await context.call("view_status", {})).result);
   assert.equal(after.status, "succeeded");

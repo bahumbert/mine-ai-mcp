@@ -28,6 +28,8 @@ const SEAT_BELOW_BOAT = -0.4125;
 const SEAT_TOLERANCE = 0.05;
 /** The client hears nothing of a broken boat's rider for this long: past any answer of a server on time. */
 const QUIET_MS = 2_000;
+/** The boat she rides, arena-local. */
+const RIDDEN_AT = [-2.5, -60, 0.5] as const;
 
 /** What the client heard while a rider's boat broke, with when. */
 interface Heard {
@@ -85,8 +87,9 @@ async function hitUntilGone(subject: ContractSubject, boat: Entity, gapMs: numbe
 
 /** The fixture's boat standing at `x` `z`. */
 function boatAt(subject: ContractSubject, x: number, z: number): Entity {
-  const boat = Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat" && Math.abs(entity.position.x - x) < 0.2 && Math.abs(entity.position.z - z) < 0.2);
-  assert.ok(boat !== undefined, `no oak_boat entity at ${x} ${z}`);
+  const at = subject.world([x, -60, z]);
+  const boat = Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat" && Math.abs(entity.position.x - at.x) < 0.2 && Math.abs(entity.position.z - at.z) < 0.2);
+  assert.ok(boat !== undefined, `no oak_boat entity at ${at.x} ${at.z}`);
   return boat;
 }
 
@@ -115,7 +118,7 @@ export const boatBrokenByAttack: ContractCheck = {
     entities: [
       { name: "oak_boat", position: [0.5, -60, 2.5] },
       { name: "oak_boat", position: [0.5, -60, -3.5] },
-      { name: "oak_boat", position: [-2.5, -60, 0.5] },
+      { name: "oak_boat", position: [...RIDDEN_AT] },
     ],
   },
   // Bare bot: our runtime would take the boat back itself (`takeBoatBack`).
@@ -126,12 +129,12 @@ export const boatBrokenByAttack: ContractCheck = {
     assert.ok(await holdsWithin(subject, () => boatsInView() === 3, 5_000), "the fixture's three boats");
     const quick = boatAt(subject, 0.5, 2.5);
     const slow = boatAt(subject, 0.5, -3.5);
-    const ridden = boatAt(subject, -2.5, 0.5);
+    const ridden = boatAt(subject, RIDDEN_AT[0], RIDDEN_AT[2]);
     const quickHits = await hitUntilGone(subject, quick, 250);
     assert.ok(HITS_BY_GAP_MS[250].includes(quickHits), `${quickHits} hits 250 ms apart broke the boat, not ${HITS_BY_GAP_MS[250].join(" or ")}`);
     const slowHits = await hitUntilGone(subject, slow, 400);
     assert.ok(HITS_BY_GAP_MS[400].includes(slowHits), `${slowHits} hits 400 ms apart broke the boat, not ${HITS_BY_GAP_MS[400].join(" to ")}: the damage decays a point a tick`);
-    await mountBoat(subject);
+    await mountBoat(subject, RIDDEN_AT);
     const seat = bot.entity.position;
     assert.ok(Math.hypot(seat.x - ridden.position.x, seat.z - ridden.position.z) < SEAT_TOLERANCE && Math.abs(seat.y - ridden.position.y - SEAT_BELOW_BOAT) < SEAT_TOLERANCE, `she sits at ${seat}, not at the boat ${ridden.position} (0.41 below its feet)`);
     const listening = listen(subject);

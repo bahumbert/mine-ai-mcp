@@ -7,12 +7,12 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import { type FakeColumn, type ListedColumn, createLoadedChunks } from "../../../../src/test-support/fake-bot/fake-world-columns.ts";
 import type { ContractCheck } from "../checks.ts";
-import { holdsWithin } from "../subject.ts";
+import { type LocalPoint, holdsWithin } from "../subject.ts";
 
-const STAIRS_CELL = new Vec3(2, -60, 0);
+const STAIRS_CELL = [2, -60, 0] as const;
 const STAIRS = { name: "oak_stairs", properties: { facing: "east", half: "top" } } as const;
-const GOLD_CELL = new Vec3(-3, -60, -4);
-const FEET = { x: 0.5, z: 0.5 };
+const GOLD_CELL = [-3, -60, -4] as const;
+const FEET = [0.5, -60, 0.5] as const;
 /** The server sends its chunks over the first seconds after the login. */
 const CHUNKS_ARRIVE_WITHIN_MS = 20_000;
 /** Time for a chunk still on its way to show up in the list before it is compared. */
@@ -37,7 +37,9 @@ export const columnsHoldCells: ContractCheck = {
   async run(subject) {
     const { bot } = subject;
     const world = bot.world as unknown as SyncWorld;
-    const expected = createLoadedChunks({ feet: FEET, namedChunks: [] }).list();
+    const feet = subject.world(FEET);
+    const stairsCell = subject.world(STAIRS_CELL);
+    const expected = createLoadedChunks({ feet, namedChunks: [] }).list();
     const arrived = await holdsWithin(subject, () => world.getColumns().length >= expected.length, CHUNKS_ARRIVE_WITHIN_MS);
     assert.ok(arrived, `${world.getColumns().length} of ${expected.length} chunks listed`);
     await subject.wait(LATE_CHUNK_GRACE_MS);
@@ -52,15 +54,15 @@ export const columnsHoldCells: ContractCheck = {
     assert.equal(listed[0]!.column.minY, minY);
     assert.equal(listed[0]!.column.worldHeight, height);
 
-    for (const cell of [STAIRS_CELL, GOLD_CELL, new Vec3(0, -61, 0), new Vec3(0, -60, 0), new Vec3(5, -57, -5)]) {
+    for (const cell of [STAIRS_CELL, GOLD_CELL, [0, -61, 0], [0, -60, 0], [5, -57, -5]].map((local) => subject.world(local as LocalPoint))) {
       assert.equal(stateInColumn(world, cell), bot.blockAt(cell)?.stateId, `${cell}: the column and blockAt differ`);
       assert.equal(bot.world.getBlockStateId(cell), bot.blockAt(cell)?.stateId, `${cell}: getBlockStateId and blockAt differ`);
     }
-    assert.notEqual(stateInColumn(world, STAIRS_CELL), bot.registry.blocksByName[STAIRS.name]!.defaultState, "the stairs kept their properties");
+    assert.notEqual(stateInColumn(world, stairsCell), bot.registry.blocksByName[STAIRS.name]!.defaultState, "the stairs kept their properties");
 
-    const held = world.getColumn(0, 0)!;
-    await subject.setBlock(STAIRS_CELL, "gold_block");
-    assert.equal(world.getColumn(0, 0), held, "a block update keeps the stored column");
-    assert.equal(held.getBlockStateId(new Vec3(2, -60, 0)), bot.registry.blocksByName.gold_block!.defaultState, "the held column holds the new block");
+    const held = world.getColumn(stairsCell.x >> 4, stairsCell.z >> 4)!;
+    await subject.setBlock(stairsCell, "gold_block");
+    assert.equal(world.getColumn(stairsCell.x >> 4, stairsCell.z >> 4), held, "a block update keeps the stored column");
+    assert.equal(held.getBlockStateId(new Vec3(stairsCell.x & 15, stairsCell.y, stairsCell.z & 15)), bot.registry.blocksByName.gold_block!.defaultState, "the held column holds the new block");
   },
 };

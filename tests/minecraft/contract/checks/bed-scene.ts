@@ -1,17 +1,16 @@
 /** The bed checks' shared scene and steps: a red bed beside the feet, what the client hears when it is slept in, and a sleep that is tried. */
 import assert from "node:assert/strict";
-import { Vec3 } from "vec3";
 import type { Block } from "prismarine-block";
 import type { ContractFixture } from "../checks.ts";
 import { type ContractBot, type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
 
 /** A red bed one block east of the feet, its head further east (`bed.js:parseBedMetadata`: facing east puts the head at +x). */
-export const BED_FOOT = new Vec3(1, -60, 0);
-export const BED_HEAD = new Vec3(2, -60, 0);
+export const BED_FOOT = [1, -60, 0] as const;
+export const BED_HEAD = [2, -60, 0] as const;
 export const BED_FIXTURE: ContractFixture = {
   cells: {
-    [BED_FOOT.toArray().join(",")]: { name: "red_bed", properties: { facing: "east", occupied: "false", part: "foot" } },
-    [BED_HEAD.toArray().join(",")]: { name: "red_bed", properties: { facing: "east", occupied: "false", part: "head" } },
+    [BED_FOOT.join(",")]: { name: "red_bed", properties: { facing: "east", occupied: "false", part: "foot" } },
+    [BED_HEAD.join(",")]: { name: "red_bed", properties: { facing: "east", occupied: "false", part: "head" } },
   },
   carried: {},
   position: [0.5, -60, 0.5],
@@ -25,15 +24,17 @@ export const BED_ANSWER_WALL_MS = 3_000;
 export const REFUSAL_WATCH_MS = 2_000;
 
 /** The bed's foot block as the client has it. */
-export function bedFoot(bot: ContractBot): Block {
-  const block = bot.blockAt(BED_FOOT);
-  assert.ok(block !== null && bot.isABed(block), `no bed at ${BED_FOOT}: ${String(block?.name)}`);
+export function bedFoot(subject: ContractSubject): Block {
+  const { bot } = subject;
+  const at = subject.world(BED_FOOT);
+  const block = bot.blockAt(at);
+  assert.ok(block !== null && bot.isABed(block), `no bed at ${at}: ${String(block?.name)}`);
   return block;
 }
 
 /** Whether the client's world shows the bed taken (`occupied=true`), which `sleep.ts` reads to skip a bed. */
-export function bedOccupied(bot: ContractBot): boolean {
-  return String(bedFoot(bot).getProperties().occupied) === "true";
+export function bedOccupied(subject: ContractSubject): boolean {
+  return String(bedFoot(subject).getProperties().occupied) === "true";
 }
 
 /** The player's `pose` and `sleeping_pos` as the client filed them from the metadata (`entities.js:481-484`), by the version's keys. */
@@ -56,18 +57,18 @@ export function countWrites(bot: ContractBot, name: string): { readonly count: (
 
 /** Sleep in the bed, resolved once the client heard `sleep`; the error Mineflayer or the server gave otherwise. */
 export async function trySleep(subject: ContractSubject): Promise<{ readonly slept: boolean; readonly error?: string; readonly atMs: number }> {
-  const settled = await settleWithin(subject, subject.bot.sleep(bedFoot(subject.bot)), SLEEP_WALL_MS);
+  const settled = await settleWithin(subject, subject.bot.sleep(bedFoot(subject)), SLEEP_WALL_MS);
   assert.ok(settled !== null, "bot.sleep never settled");
   return { slept: settled.error === undefined, error: settled.error?.message, atMs: settled.atMs };
 }
 
 /** Wait until the client's world shows the bed's occupied state as `occupied`. */
 export async function untilBedOccupied(subject: ContractSubject, occupied: boolean): Promise<void> {
-  assert.ok(await holdsWithin(subject, () => bedOccupied(subject.bot) === occupied, BED_ANSWER_WALL_MS), `the bed never showed occupied=${occupied}`);
+  assert.ok(await holdsWithin(subject, () => bedOccupied(subject) === occupied, BED_ANSWER_WALL_MS), `the bed never showed occupied=${occupied}`);
 }
 
 /** Use the bed without Mineflayer's sleep checks (`activateBlock`: the look, the packet, the swing), so the server's own answer is the one heard. */
 export async function useBed(subject: ContractSubject): Promise<void> {
-  const settled = await settleWithin(subject, subject.bot.activateBlock(bedFoot(subject.bot)), BED_ANSWER_WALL_MS);
+  const settled = await settleWithin(subject, subject.bot.activateBlock(bedFoot(subject)), BED_ANSWER_WALL_MS);
   assert.ok(settled !== null && settled.error === undefined, `activateBlock: ${settled?.error?.message ?? "never settled"}`);
 }

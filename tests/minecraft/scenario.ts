@@ -6,6 +6,7 @@
 import type { ClientCompletion, ScenarioDefinition } from "mine-labs/client";
 import type { Bot } from "mineflayer";
 import type { ActionOutput, ActionResult } from "@aibengineering/mine-ai-mcp";
+import type { ArenaFrame } from "./arena/frame.ts";
 
 /** Action evidence, independent of the test's expectation. */
 export interface ScenarioCall extends ActionOutput<string, ActionResult> {
@@ -14,6 +15,12 @@ export interface ScenarioCall extends ActionOutput<string, ActionResult> {
 
 export interface ScenarioContext {
   readonly scenario: ScenarioDefinition;
+  /**
+   * The lane this client runs in (`MINE_AI_ARENA`; the zero offset on a plain `mine-labs run`). A scenario's YAML `params`
+   * hold arena-local coordinates: a driver reads them through `tests/minecraft/arena/params.ts` and passes action inputs
+   * from params through `arenaActionInput`, so every coordinate it sends or compares is a world coordinate.
+   */
+  readonly arena: ArenaFrame;
   /** The bot, for reading state only (vehicle, position, inventory); every action goes through `call`. */
   readonly bot: Bot;
   /** Let a fixture settle after the trial starts, before taking action. */

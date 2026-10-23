@@ -5,7 +5,7 @@ import type { ContractCheck } from "../checks.ts";
 import { holdsWithin, settleWithin } from "../subject.ts";
 
 /** The floor block placed on, two blocks east of the feet, and the cell above it that receives the block. */
-const REFERENCE = new Vec3(2, -61, 0);
+const REFERENCE = [2, -61, 0] as const;
 const UP = new Vec3(0, 1, 0);
 /** Mineflayer's own placement wait is 5 s; a server on time answers in a tick or two. */
 const PLACEMENT_WALL_MS = 6_000;
@@ -16,12 +16,13 @@ export const placementBlockUpdate: ContractCheck = {
   fixture: { cells: {}, carried: { cobblestone: 4 }, position: [0.5, -60, 0.5] },
   async run(subject) {
     const { bot } = subject;
-    const destination = REFERENCE.plus(UP);
+    const reference = subject.world(REFERENCE);
+    const destination = reference.plus(UP);
     const updates: string[] = [];
     const onUpdate = (_before: unknown, after: { name: string } | null) => void updates.push(after?.name ?? "null");
     bot.on(`blockUpdate:${destination}` as "blockUpdate:(x, y, z)", onUpdate);
     try {
-      const settled = await settleWithin(subject, bot.placeBlock(bot.blockAt(REFERENCE)!, UP), PLACEMENT_WALL_MS);
+      const settled = await settleWithin(subject, bot.placeBlock(bot.blockAt(reference)!, UP), PLACEMENT_WALL_MS);
       assert.ok(settled !== null && settled.error === undefined, `placeBlock: ${settled?.error?.message ?? "never ended"}`);
     } finally {
       bot.off(`blockUpdate:${destination}` as "blockUpdate:(x, y, z)", onUpdate);

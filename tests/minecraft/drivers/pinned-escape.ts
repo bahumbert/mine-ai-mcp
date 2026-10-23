@@ -1,15 +1,7 @@
-import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
 import type { ScenarioContext } from "../scenario.ts";
+import { pinnedWindowParamsIn } from "./pinned-window-params.ts";
 import { forbidDigStraightDown } from "./styled-navigate.ts";
-
-const requestSchema = z.strictObject({
-  /** The runtime's pinned window, shortened from ten minutes: the host reads it. */
-  pinnedWindowMs: z.number().int().positive(),
-  target: z.tuple([z.number(), z.number(), z.number()]),
-  /** Ticks to stand in the corridor once the failures are in, a little longer than the window. */
-  waitTicks: z.number().int().positive(),
-});
 
 /**
  * A bot with the style override "never dig straight down" fails three navigates to a cave under its corridor, stays past the
@@ -17,7 +9,7 @@ const requestSchema = z.strictObject({
  * route and digs down.
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { target: [x, y, z], waitTicks } = requestSchema.parse(context.scenario.params);
+  const { target: [x, y, z], waitTicks } = pinnedWindowParamsIn(context.arena).parse(context.scenario.params);
   const refused = await forbidDigStraightDown(context);
   if (refused) return refused;
   const walk = () => context.call("navigate", { x, y, z, range: 0 });

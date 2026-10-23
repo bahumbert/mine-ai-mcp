@@ -39,7 +39,8 @@ export const bedSleepAndWake: ContractCheck = {
       assert.equal(bot.isSleeping, true);
       const { pose, sleepingPos } = sleepMetadataOf(bot);
       assert.equal(pose, SLEEPING_POSE, "her pose is sleeping");
-      assert.deepEqual(sleepingPos, { x: BED_HEAD.x, y: BED_HEAD.y, z: BED_HEAD.z }, "her sleeping position is the bed's head");
+      const head = subject.world(BED_HEAD);
+      assert.deepEqual(sleepingPos, { x: head.x, y: head.y, z: head.z }, "her sleeping position is the bed's head");
       await untilBedOccupied(subject, true);
 
       // A wake before the skip: at once, the night still on.
@@ -63,7 +64,7 @@ export const bedSleepAndWake: ContractCheck = {
       // The skip sets the time to the next dawn; the packet the client reads is that dawn a tick or two on (24001 was heard).
       assert.ok(bot.time.time >= DAWN_TICK && bot.time.time <= DAWN_TICK + DAWN_SLACK_TICKS, `dawn is the next multiple of a day: ${bot.time.time}`);
       assert.equal(bot.isSleeping, false);
-      assert.equal(bedOccupied(bot), false, "the bed is free again");
+      assert.equal(bedOccupied(subject), false, "the bed is free again");
       assert.ok(heardTimes.length > 0 && heardTimes.at(-1)! - DAWN_TICK <= DAWN_SLACK_TICKS, `the last time packet heard is the dawn: ${heardTimes.join(", ")}`);
       bot.off("time", onTime);
     } finally {

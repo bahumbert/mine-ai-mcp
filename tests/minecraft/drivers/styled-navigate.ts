@@ -1,11 +1,13 @@
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const requestSchema = z.strictObject({
+const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** The style override the persona carries: routes may not dig straight down. */
   noDigStraightDown: z.boolean(),
-  target: z.tuple([z.number(), z.number(), z.number()]),
+  target: arenaPoint(arena),
   range: z.number().nonnegative(),
 });
 
@@ -23,7 +25,7 @@ export async function forbidDigStraightDown(context: ScenarioContext): Promise<C
 
 /** Set the bot's style override as run 15's personas had it, then navigate; Mine Labs checks the final world. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { noDigStraightDown, target: [x, y, z], range } = requestSchema.parse(context.scenario.params);
+  const { noDigStraightDown, target: [x, y, z], range } = requestSchemaIn(context.arena).parse(context.scenario.params);
   if (noDigStraightDown) {
     const refused = await forbidDigStraightDown(context);
     if (refused) return refused;

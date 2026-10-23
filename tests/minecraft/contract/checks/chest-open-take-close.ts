@@ -5,7 +5,6 @@
  * ignored; a chest 7.5 blocks away never opens (1.21.4, 2026-10-23).
  */
 import assert from "node:assert/strict";
-import { Vec3 } from "vec3";
 import type { ContractCheck } from "../checks.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, slotsOf } from "../window-packets.ts";
@@ -14,8 +13,8 @@ const SERVER_ANSWER_MS = 1_000;
 const OPEN_WALL_MS = 5_000;
 const FAR_WAIT_MS = 3_000;
 /** In reach of a bot at x -4.5, and 7.5 blocks away from it. */
-const NEAR = new Vec3(0, -60, 0);
-const FAR = new Vec3(3, -60, 0);
+const NEAR = [0, -60, 0] as const;
+const FAR = [3, -60, 0] as const;
 const CHEST_SLOTS = [0, 1, 2, 3];
 /** The bot's first main slot (9) as the chest window numbers it. */
 const WINDOW_FIRST_MAIN_SLOT = 27;
@@ -36,7 +35,7 @@ export const chestOpenTakeClose: ContractCheck = {
   async run(subject) {
     const { bot, wait } = subject;
     const recording = recordWindowPackets(bot);
-    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(NEAR)!), OPEN_WALL_MS);
+    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), OPEN_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest in reach opened: ${opened?.error?.message ?? "never"}`);
     const window = opened.value;
     assert.deepEqual([window.type, window.id, window.slots.length], ["minecraft:generic_9x3", 1, 63]);
@@ -60,7 +59,7 @@ export const chestOpenTakeClose: ContractCheck = {
     assert.deepEqual(slotsOf(bot.inventory, [9, 10, 36]), { 9: "cobblestone x4", 10: "bread x1", 36: null }, "the window's player part is now the inventory");
     assert.deepEqual(recording.packets.splice(0), [], "the close brings no packet");
 
-    const again = await settleWithin(subject, bot.openContainer(bot.blockAt(NEAR)!), OPEN_WALL_MS);
+    const again = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), OPEN_WALL_MS);
     assert.ok(again?.value !== undefined, `the chest opened again: ${again?.error?.message ?? "never"}`);
     assert.equal(again.value.id, 2, "the second window has the next id");
     assert.deepEqual(slotsOf(again.value, CHEST_SLOTS), { 0: "cobblestone x2", 1: "cobblestone x64", 2: "torch x3", 3: "bread x3" }, "the server kept the chest's stacks");
@@ -75,7 +74,7 @@ export const chestOpenTakeClose: ContractCheck = {
     await wait(SERVER_ANSWER_MS);
     assert.deepEqual(recording.packets.splice(0), [], "a click on the closed window is ignored");
 
-    const far = await settleWithin(subject, bot.openContainer(bot.blockAt(FAR)!), FAR_WAIT_MS);
+    const far = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(FAR))!), FAR_WAIT_MS);
     recording.stop();
     assert.equal(far, null, "a chest out of reach never opens: the call stays pending");
     assert.deepEqual(recording.packets, [], "and nothing comes back");

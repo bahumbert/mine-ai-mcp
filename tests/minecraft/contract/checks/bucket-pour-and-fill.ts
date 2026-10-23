@@ -41,9 +41,11 @@ interface Heard {
   readonly order: string[];
 }
 
-/** Select hotbar slot `slot`, look at `aim`, use the held item once, and wait `waitMs` for what the server answers. */
-async function useBucketAt(subject: ContractSubject, slot: number, aim: Vec3, watching: Vec3, waitMs: number): Promise<Heard> {
+/** Select hotbar slot `slot`, look at `aimLocal` (arena-local, like `watchingLocal`), use the held item once, and wait `waitMs` for what the server answers. */
+async function useBucketAt(subject: ContractSubject, slot: number, aimLocal: Vec3, watchingLocal: Vec3, waitMs: number): Promise<Heard> {
   const { bot } = subject;
+  const aim = subject.world([aimLocal.x, aimLocal.y, aimLocal.z]);
+  const watching = subject.world([watchingLocal.x, watchingLocal.y, watchingLocal.z]);
   const heard: Heard = { cell: [], slots: {}, order: [] };
   const eventName = `blockUpdate:${watching}` as "blockUpdate:(x, y, z)";
   const onCell = (_before: unknown, after: { readonly name: string; getProperties(): Record<string, unknown> } | null) => {

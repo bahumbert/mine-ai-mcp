@@ -3,15 +3,14 @@
  * the server keeps it so: once on dry ground, once with the eye in water (5x or more; review #1 was a dig under water).
  */
 import assert from "node:assert/strict";
-import { Vec3 } from "vec3";
-import type { ContractSubject } from "../subject.ts";
+import type { ContractSubject, LocalPoint } from "../subject.ts";
 import type { ContractCheck } from "../checks.ts";
 import { settleWithin } from "../subject.ts";
 
 /** The dry target beside the feet, the wet one above it at eye level, and the head cell the water goes into. */
-const DRY_TARGET = new Vec3(1, -60, 0);
-const WET_TARGET = new Vec3(1, -59, 0);
-const HEAD_CELL = new Vec3(0, -59, 0);
+const DRY_TARGET = [1, -60, 0] as const;
+const WET_TARGET = [1, -59, 0] as const;
+const HEAD_CELL = [0, -59, 0] as const;
 /**
  * The look is forced (no turn: a non-forced one turns at 3 rad/s first, `physics.js:169`, ~1 s for half a turn on
  * the server run of 2026-10-21), so only the dig is timed; its end is read within a tick or two.
@@ -31,8 +30,9 @@ const GLASS_CELLS = [
 ];
 
 /** Dig `target`; returns the dig time Mineflayer expected, after checking the dig took it and the server kept the cell open. */
-async function digAndCheck(subject: ContractSubject, target: Vec3, label: string): Promise<number> {
+async function digAndCheck(subject: ContractSubject, local: LocalPoint, label: string): Promise<number> {
   const { bot } = subject;
+  const target = subject.world(local);
   const block = bot.blockAt(target)!;
   assert.equal(block.name, "dirt", `${label} target ${target}: ${block.name}`);
   const expectedMs = bot.digTime(block);
@@ -53,15 +53,15 @@ export const digTimeAndUpdate: ContractCheck = {
   fixture: {
     cells: {
       ...Object.fromEntries(GLASS_CELLS.map((cell) => [cell.join(","), "glass"])),
-      [`${DRY_TARGET.x},${DRY_TARGET.y},${DRY_TARGET.z}`]: "dirt",
-      [`${WET_TARGET.x},${WET_TARGET.y},${WET_TARGET.z}`]: "dirt",
+      [DRY_TARGET.join(",")]: "dirt",
+      [WET_TARGET.join(",")]: "dirt",
     },
     carried: {},
     position: [0.5, -60, 0.5],
   },
   async run(subject) {
     const dryMs = await digAndCheck(subject, DRY_TARGET, "dry");
-    await subject.setBlock(HEAD_CELL, "water");
+    await subject.setBlock(subject.world(HEAD_CELL), "water");
     // Let the water reach the feet and the body settle (or float against the roof) before the dig reads its inputs.
     await subject.wait(1_000);
     const wetMs = await digAndCheck(subject, WET_TARGET, "eye in water");

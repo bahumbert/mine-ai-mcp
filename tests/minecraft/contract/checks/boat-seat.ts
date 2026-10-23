@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import { getOff } from "../../../../src/actions/navigate/boat-get-off.ts";
 import type { ContractFixture } from "../checks.ts";
-import { type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
+import { type ContractSubject, type LocalPoint, holdsWithin, settleWithin } from "../subject.ts";
 
 /**
  * A boat on the floor two blocks east of the feet, in reach to mount. On land: a pool (2x3 water sources, 2026-10-21)
@@ -24,10 +24,20 @@ const BOAT_SPAWN_WALL_MS = 5_000;
 const SEAT_WALL_MS = 3_000;
 const GET_OFF_WALL_MS = 20_000;
 
-/** Find the summoned boat, mount it, and check both sides have her seated. */
-export async function mountBoat(subject: ContractSubject): Promise<Entity> {
+/** Where the seat fixture summons its boat, arena-local. */
+const BOAT_SUMMONED_AT = BOAT_FIXTURE.entities![0]!.position;
+
+/** The oak boat nearest where a fixture summoned it (arena-local `summonedAt`): another lane's boat, or one a scenario left, is not hers. */
+export function boatSummonedAt(subject: ContractSubject, summonedAtLocal: LocalPoint): Entity | undefined {
+  const summonedAt = subject.world(summonedAtLocal);
+  const boats = Object.values(subject.bot.entities).filter((entity) => entity.name === "oak_boat");
+  return boats.sort((a, b) => a.position.distanceTo(summonedAt) - b.position.distanceTo(summonedAt))[0];
+}
+
+/** Find the boat summoned at `summonedAt` (the seat fixture's by default), mount it, and check both sides have her seated. */
+export async function mountBoat(subject: ContractSubject, summonedAt: LocalPoint = BOAT_SUMMONED_AT): Promise<Entity> {
   const { bot } = subject;
-  const boatOf = () => Object.values(bot.entities).find((entity) => entity.name === "oak_boat");
+  const boatOf = () => boatSummonedAt(subject, summonedAt);
   assert.ok(await holdsWithin(subject, () => boatOf() !== undefined, BOAT_SPAWN_WALL_MS), "no oak_boat entity in view");
   const boat = boatOf()!;
   bot.mount(boat);

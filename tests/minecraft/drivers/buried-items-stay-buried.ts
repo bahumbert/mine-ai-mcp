@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioRun } from "../scenario.ts";
 
 const paramsSchema = z.strictObject({
@@ -20,7 +21,7 @@ export const run: ScenarioRun = async (context) => {
   const { actions, carried_at_most } = paramsSchema.parse(context.scenario.params);
   const summaries: string[] = [];
   for (const [index, { action, input, expect, error_contains }] of actions.entries()) {
-    const output = await context.call(action, input);
+    const output = await context.call(action, arenaActionInput(input, context.arena));
     summaries.push(`${index + 1}. ${output.summary}`);
     const error = "error" in output.result ? String(output.result.error) : "";
     if (output.result.status !== expect || (error_contains !== undefined && !error.includes(error_contains))) {

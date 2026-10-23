@@ -1,13 +1,17 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaPoint, arenaX } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const requestSchema = z.strictObject({
+const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** The far land the navigate is aimed at, over a sea the bot crosses by boat. */
-  target: z.tuple([z.number(), z.number(), z.number()]),
+  target: arenaPoint(arena),
   /** The cancel comes once the bot sits in a boat and is past this x. */
-  cancelPastX: z.number(),
+  cancelPastX: arenaX(arena),
+  /** The bank the ride ends at: leaving the boat west of this x, on the second navigate, is a broken ride. */
+  farBankX: arenaX(arena),
   /** How long after the cancel the navigate may take to settle, and the stopped boat to be looked at. */
   settleWithinMs: z.number().int().positive(),
 });
@@ -19,7 +23,7 @@ const boatNamed = (name: string | undefined) => name !== undefined && (name.ends
  * not drop the boat), and the next navigate must take the boat back and cross.
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { target: [x, y, z], cancelPastX, settleWithinMs } = requestSchema.parse(context.scenario.params);
+  const { target: [x, y, z], cancelPastX, farBankX, settleWithinMs } = requestSchemaIn(context.arena).parse(context.scenario.params);
   const { bot } = context;
   const first = context.call("navigate", { x, y, z, range: 2 });
   const startedAt = performance.now();
@@ -53,7 +57,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       const item = seat === null ? undefined : Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
       if (item !== undefined) broken ??= "a boat item lay on the water";
       else if (seat !== null && seat !== boat) broken ??= "the bot sat in another boat";
-      else if (seat === null && bot.entity.position.x < 90) broken ??= "the bot left the boat before the far bank";
+      else if (seat === null && bot.entity.position.x < farBankX) broken ??= "the bot left the boat before the far bank";
       await delay(100);
     }
   };

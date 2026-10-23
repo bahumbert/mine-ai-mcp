@@ -38,7 +38,7 @@ import { worldAgePerSecond } from "./checks/world-age-per-second.ts";
 type Cell = readonly [number, number, number];
 
 /**
- * The world a check starts in, the same on both sides: a stone floor at y -61 (the fake's ground, `setupCommands` on
+ * The world a check starts in, in arena-local coordinates (a check reaches the world position through `subject.world`), the same on both sides: a stone floor at y -61 (the fake's ground, `setupCommands` on
  * the server), open air above it, these cells, the carried stacks, the bot's feet and the entities summoned.
  */
 export interface ContractFixture {

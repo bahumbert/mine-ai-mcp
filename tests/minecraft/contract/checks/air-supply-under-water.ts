@@ -4,12 +4,11 @@
  * Mineflayer files it at the player's `air_supply` key and reads `oxygenLevel` from it (`entities.js:515-518`).
  */
 import assert from "node:assert/strict";
-import { Vec3 } from "vec3";
 import type { ContractCheck } from "../checks.ts";
 import { holdsWithin } from "../subject.ts";
 
 /** The top pool cell, empty at the start (the eye in air), then water, then air again. */
-const HEAD_CELL = new Vec3(0, -59, 0);
+const HEAD_CELL = [0, -59, 0] as const;
 /** The pool: the bot's feet cell is water, held by glass on its four sides and by the top glass of the floor below. */
 const GLASS_CELLS = [
   [-1, -60, 0], [1, -60, 0], [0, -60, -1], [0, -60, 1],
@@ -77,7 +76,7 @@ export const airSupplyUnderWater: ContractCheck = {
       assert.equal(airHeard(), undefined, "the client knows no air from a full meter");
       assert.equal(readings.length, 0, "no air packet for a full meter with the eye in air");
 
-      await subject.setBlock(HEAD_CELL, "water");
+      await subject.setBlock(subject.world(HEAD_CELL), "water");
       assert.ok(await holdsWithin(subject, () => readings.length > 0, FIRST_PACKET_WALL_MS), "no air packet within the wall bound with the eye under water");
       const diveFrom = readings.length - 1;
       assert.equal(readings[diveFrom]!.air, FULL_AIR - AIR_LOST_PER_TICK, "the first tick under water takes 1 from the full meter");
@@ -87,7 +86,7 @@ export const airSupplyUnderWater: ContractCheck = {
       const lost = dive[0]!.air - dive.at(-1)!.air;
       assert.ok(Math.abs(lost - DIVE_MS / TICK_MS) <= LAG_SLACK_TICKS, `${lost} air lost in ${DIVE_MS} ms: ${DIVE_MS / TICK_MS} within ${LAG_SLACK_TICKS}`);
 
-      await subject.setBlock(HEAD_CELL, "air");
+      await subject.setBlock(subject.world(HEAD_CELL), "air");
       assert.ok(await holdsWithin(subject, () => airHeard() === FULL_AIR, DIVE_MS), `the air is ${String(airHeard())}, not refilled`);
       const refill = refillOf(readings);
       const steps = stepsOf(refill);

@@ -18,6 +18,7 @@ import { createScenarioBot, prepareScenarioBot, closeScenarioBot } from "./scena
 import { openScenarioHighlighter } from "./scenario-highlighter.ts";
 import type { ScenarioContext, ScenarioRun, ScenarioCall } from "./scenario.ts";
 import { WITHOUT_RUNTIME_FLAG, parseClientHostArgs } from "./client-host-args.ts";
+import { arenaFrame, decodeArena, type ArenaFrame } from "./arena/frame.ts";
 
 const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
@@ -25,10 +26,12 @@ await runNodeClient((session) => runScenario(driverFile, withRuntime, session));
 
 async function runScenario(file: string, withRuntime: boolean, session: NodeClientSession): Promise<void> {
   const driver = await loadDriver(file);
+  // Read before the bot exists: a malformed lane offset must fail the client, never run it at offset zero inside a lane.
+  const arena = arenaFrame(decodeArena(process.env));
   const bot = createScenarioBot(session);
   try {
     await prepareScenarioBot(bot, session);
-    const completion = withRuntime ? await runWithRuntime(driver, bot, session) : await runWithoutRuntime(driver, bot, session);
+    const completion = withRuntime ? await runWithRuntime(driver, bot, session, arena) : await runWithoutRuntime(driver, bot, session, arena);
     session.signal.throwIfAborted();
     if (completion.status === "failed") session.log(`scenario driver failed: ${completion.detail}`);
     session.finish(completion);
@@ -40,7 +43,7 @@ async function runScenario(file: string, withRuntime: boolean, session: NodeClie
 }
 
 /** The runtime is disposed before this promise resolves and completion is reported. */
-async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession): Promise<ClientCompletion> {
+async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession, arena: ArenaFrame): Promise<ClientCompletion> {
   const retainEvidence = process.env.MINE_AI_SCENARIO_EVIDENCE === "1";
   const artifacts = retainEvidence ? process.env.MINE_LABS_ARTIFACTS_DIR : undefined;
   if (retainEvidence && !artifacts) throw new Error("Retaining scenario evidence requires MINE_LABS_ARTIFACTS_DIR.");
@@ -52,26 +55,27 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
   await using overlay = await openScenarioHighlighter(bot, session);
   await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter });
   overlay?.follow(runtime.navigation);
-  const context = scenarioContextOf(bot, session, (action, input) => callScenarioAction(runtime, session, action, input));
+  const context = scenarioContextOf(bot, session, arena, (action, input) => callScenarioAction(runtime, session, action, input));
   return await runTimedDriver(driver, context, session);
 }
 
 /** The driver on the bare bot, no runtime created (`--without-runtime`): `call` refuses, everything else is the same. */
-async function runWithoutRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession): Promise<ClientCompletion> {
-  const context = scenarioContextOf(bot, session, async (action) => {
+async function runWithoutRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession, arena: ArenaFrame): Promise<ClientCompletion> {
+  const context = scenarioContextOf(bot, session, arena, async (action) => {
     throw new Error(`'${action}' cannot run: this scenario's client runs ${WITHOUT_RUNTIME_FLAG}`);
   });
   return await runTimedDriver(driver, context, session);
 }
 
-/** What a driver receives: the scenario, the bot and its client-side controls, and `call` for actions. */
-function scenarioContextOf(bot: Bot, session: NodeClientSession, call: ScenarioContext["call"]): ScenarioContext {
+/** What a driver receives: the scenario, its lane, the bot and its client-side controls, and `call` for actions. */
+function scenarioContextOf(bot: Bot, session: NodeClientSession, arena: ArenaFrame, call: ScenarioContext["call"]): ScenarioContext {
   let windowsOpened = 0;
   bot.on("windowOpen", () => {
     windowsOpened += 1;
   });
   return {
     scenario: session.scenario,
+    arena,
     bot,
     waitForTicks: async (ticks) => {
       await bot.waitForTicks(ticks);

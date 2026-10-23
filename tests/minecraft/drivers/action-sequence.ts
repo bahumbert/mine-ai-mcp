@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
 const requestSchema = z.strictObject({
@@ -19,7 +20,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const summaries: string[] = [];
   for (const [index, { action, input, expect, waitTicks }] of actions.entries()) {
     if (waitTicks > 0) await context.waitForTicks(waitTicks);
-    const output = await context.call(action, input);
+    const output = await context.call(action, arenaActionInput(input, context.arena));
     summaries.push(`${index + 1}. ${output.summary}`);
     if (output.result.status !== expect) {
       return { status: "failed", detail: summaries.join("; ") };

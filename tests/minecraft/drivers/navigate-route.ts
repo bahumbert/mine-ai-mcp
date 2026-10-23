@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const routeSchema = z.strictObject({
+const routeSchemaIn = (arena: ArenaFrame) => z.strictObject({
   dig: z.boolean().default(false),
   legs: z.array(z.strictObject({
-    target: z.tuple([z.number(), z.number(), z.number()]),
+    target: arenaPoint(arena),
     range: z.number().nonnegative(),
     label: z.string(),
   })).min(1),
@@ -14,7 +16,7 @@ const routeSchema = z.strictObject({
 
 /** Verify each named arrival before continuing; only excavation courses permit digging. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { legs, dig } = routeSchema.parse(context.scenario.params);
+  const { legs, dig } = routeSchemaIn(context.arena).parse(context.scenario.params);
   const completed: string[] = [];
   for (const { target: [x, y, z], range, label } of legs) {
     const output = await context.call("navigate", { x, y, z, range, dig, scaffold: false });

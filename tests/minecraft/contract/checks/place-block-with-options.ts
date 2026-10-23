@@ -24,6 +24,8 @@ const UP = new Vec3(0, 1, 0);
 /** The stone blocks the placements click on, with the cell each puts its block in (west of it). */
 const REFERENCES = { slabTop: 0, slabBottom: 2, slabDelta: -2, stairTop: 4, offHand: -4, refused: 6 } as const;
 const referenceOf = (z: number) => new Vec3(2, -60, z);
+/** An arena-local cell (a `Vec3` constant here) as the world cell of the subject's lane. */
+const laneCell = (subject: ContractSubject, local: Vec3): Vec3 => subject.world([local.x, local.y, local.z]);
 /** The off hand's slot in a window (`inventory.js`). */
 const OFF_HAND_SLOT = 45;
 const LOOK_TOLERANCE = 0.05;
@@ -52,8 +54,9 @@ function placeAt(subject: ContractSubject, z: number, options: PlacementOptions,
 }
 
 /** Place with `options` against `face` of the block at `reference`, and report what the client heard. */
-async function placeAgainst(subject: ContractSubject, reference: Vec3, face: Vec3, options: PlacementOptions, refusal?: RegExp): Promise<Heard> {
+async function placeAgainst(subject: ContractSubject, referenceLocal: Vec3, face: Vec3, options: PlacementOptions, refusal?: RegExp): Promise<Heard> {
   const { bot } = subject;
+  const reference = laneCell(subject, referenceLocal);
   const heard: Heard = { changes: [], packets: [] };
   const destination = reference.plus(face);
   const eventName = `blockUpdate:${destination}` as "blockUpdate:(x, y, z)";
@@ -104,11 +107,11 @@ export const placeBlockWithOptions: ContractCheck = {
     // The server sends the clicked block, the placed block twice (the chunk's change and the click's own update; the client's `blockUpdate` follows each), the slot, then the acknowledgement.
     assert.equal(top.changes[0], "oak_slab top", `a slab put with half 'top': the cell heard ${top.changes.join(", ")}`);
     assert.deepEqual(top.packets, ["block_change ref", "block_change dest", "block_change dest", "set_slot 36", "ack"], "the packets");
-    assert.equal(String(bot.blockAt(referenceOf(REFERENCES.slabTop).plus(WEST))!.getProperties().waterlogged), "false", "a slab put in air is not waterlogged");
+    assert.equal(String(bot.blockAt(laneCell(subject, referenceOf(REFERENCES.slabTop).plus(WEST)))!.getProperties().waterlogged), "false", "a slab put in air is not waterlogged");
     const bottom = await placeAt(subject, REFERENCES.slabBottom, { half: "bottom", swingArm: "right" });
     assert.equal(bottom.changes[0], "oak_slab bottom", `a slab put with half 'bottom': the cell heard ${bottom.changes.join(", ")}`);
     // A click whose destination is taken: the server only acknowledges (no correction of either cell), so Mineflayer's own wait runs out.
-    const refused = await placeAt(subject, REFERENCES.refused, { half: "bottom", swingArm: "right" }, /Event blockUpdate:\(1, -60, 6\) did not fire within timeout of 5000ms/u);
+    const refused = await placeAt(subject, REFERENCES.refused, { half: "bottom", swingArm: "right" }, new RegExp(`Event blockUpdate:\\(${laneCell(subject, new Vec3(1, -60, 6)).toArray().join(", ")}\\) did not fire within timeout of 5000ms`, "u"));
     assert.deepEqual(refused.packets, ["ack"], "the packets of a refused placement");
     assert.equal(slotOf(36), "oak_slab x2", "a refused placement takes nothing from the stack");
     // `delta` is the click's place in the face, and `forceLook: 'ignore'` leaves the look where it was.
@@ -131,8 +134,8 @@ export const placeBlockWithOptions: ContractCheck = {
     const bed = await placeAgainst(subject, BED_FLOOR, UP, { forceLook: "ignore", swingArm: "right" });
     // One resend of the placed cell only: the chunk's own change carries both halves, as one `multi_block_change`.
     assert.deepEqual(bed.packets, ["block_change ref", "block_change dest", "set_slot 39", "ack"], "the packets of a bed");
-    assert.ok(await holdsWithin(subject, () => bot.blockAt(BED_HEAD)?.name === "red_bed", SLOT_WALL_MS), "the bed's head half never came");
-    const halves = [BED_FOOT, BED_HEAD].map((cell) => bot.blockAt(cell)!.getProperties());
+    assert.ok(await holdsWithin(subject, () => bot.blockAt(laneCell(subject, BED_HEAD))?.name === "red_bed", SLOT_WALL_MS), "the bed's head half never came");
+    const halves = [BED_FOOT, BED_HEAD].map((cell) => bot.blockAt(laneCell(subject, cell))!.getProperties());
     assert.deepEqual(halves.map(({ part, facing, occupied }) => [part, facing, String(occupied)]), [["foot", "east", "false"], ["head", "east", "false"]], `the bed: ${JSON.stringify(halves)}`);
     bot.setQuickBarSlot(1);
     await subject.wait(100);

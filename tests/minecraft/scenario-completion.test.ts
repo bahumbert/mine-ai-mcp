@@ -4,25 +4,12 @@ import { scenarioDefinitionSchema } from "mine-labs";
 import type { ActionResult } from "@aibengineering/mine-ai-mcp";
 import { run } from "./drivers/single-action.ts";
 import { run as runSequence } from "./drivers/action-sequence.ts";
-import { createFakeBot } from "../../src/test-support/fake-bot/index.ts";
-
-/** These drivers never stop physics. */
-const NO_PHYSICS = { pause: () => {}, resume: () => {} };
-/** These drivers never read the bot's own world. */
-const NO_CLIENT = { setCell: async () => {}, body: () => ({ x: 0, y: 0, z: 0, onGround: true }), windowsOpened: () => 0 };
-
-/** ...and never read the bot. */
-const NO_BOT = createFakeBot().bot;
+import { scenarioTestContext } from "./scenario-test-context.ts";
 
 test("a sequence stops before later actions when a step does not succeed", async () => {
   for (const status of ["partial", "failed", "cancelled"] as const) {
     const called: string[] = [];
-    const completion = await runSequence({
-      waitForTicks: async () => {},
-      physics: NO_PHYSICS,
-      client: NO_CLIENT,
-
-      bot: NO_BOT,
+    const completion = await runSequence(scenarioTestContext({
       scenario: scenarioDefinitionSchema.parse({
         params: { actions: ["first", "stop", "never"].map((action) => ({ action, input: {} })) },
         goal: { kind: "completion" },
@@ -32,7 +19,7 @@ test("a sequence stops before later actions when a step does not succeed", async
         const result: ActionResult = action === "first" ? { status: "succeeded" } : { status, error: "stopped" };
         return { action, durationMs: 1, result, summary: action };
       },
-    });
+    }));
     assert.equal(completion.status, "failed");
     assert.deepEqual(called, ["first", "stop"]);
   }
@@ -40,18 +27,13 @@ test("a sequence stops before later actions when a step does not succeed", async
 
 test("an interruption expectation cannot pass on success alone or a different reflex", async () => {
   for (const interruptions of [undefined, ["Equip an available shield"], ["[HOSTILE_CONTACT] fight response"]]) {
-    const completion = await run({
-      waitForTicks: async () => {},
-      physics: NO_PHYSICS,
-      client: NO_CLIENT,
-
-      bot: NO_BOT,
+    const completion = await run(scenarioTestContext({
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "succeeded", interruptionContains: "[HOSTILE_CONTACT]" } },
         goal: { kind: "completion" },
       }),
       call: async (action) => ({ action, durationMs: 1, result: { status: "succeeded" }, summary: "collected", interruptions }),
-    });
+    }));
     assert.equal(completion.status, interruptions?.[0]?.includes("HOSTILE_CONTACT") ? "succeeded" : "failed");
   }
 });
@@ -60,18 +42,13 @@ test("an interruption expectation cannot pass on success alone or a different re
 test("partial, failed and cancelled actions cannot satisfy successful completion", async () => {
   for (const status of ["partial", "failed", "cancelled"] as const) {
     const result: ActionResult = { status, error: "not completed" };
-    const completion = await run({
-      waitForTicks: async () => {},
-      physics: NO_PHYSICS,
-      client: NO_CLIENT,
-
-      bot: NO_BOT,
+    const completion = await run(scenarioTestContext({
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: { block_name: "coal_ore", count: 5 } },
         goal: { kind: "completion" },
       }),
       call: async (action) => ({ action, durationMs: 1, result, summary: "not completed" }),
-    });
+    }));
     assert.equal(completion.status, "failed");
     assert.match(completion.detail ?? "", /not completed/);
   }
@@ -88,18 +65,13 @@ test("explicit expectations require both the action status and literal error tex
   ] as const;
   for (const { expected, status, error, passes } of cases) {
     const result: ActionResult = status === "succeeded" ? { status } : { status, error };
-    const completion = await run({
-      waitForTicks: async () => {},
-      physics: NO_PHYSICS,
-      client: NO_CLIENT,
-
-      bot: NO_BOT,
+    const completion = await run(scenarioTestContext({
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: expected, errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
       }),
       call: async (action) => ({ action, durationMs: 1, result, summary: "action evidence" }),
-    });
+    }));
     assert.equal(completion.status, passes ? "succeeded" : "failed");
     if (!passes) assert.match(completion.detail ?? "", /Expected .*INVENTORY_FULL.*action evidence/);
   }
@@ -111,33 +83,23 @@ test("expected failure cannot accept runtime failures or cancellations", async (
     { kind: "runtime_failure", status: "cancelled", error: "[INVENTORY_FULL]" },
     { status: "cancelled", error: "[INVENTORY_FULL]" },
   ] as const) {
-    const completion = await run({
-      waitForTicks: async () => {},
-      physics: NO_PHYSICS,
-      client: NO_CLIENT,
-
-      bot: NO_BOT,
+    const completion = await run(scenarioTestContext({
       scenario: scenarioDefinitionSchema.parse({
         params: { action: "collect_block", input: {}, expect: { status: "failed", errorContains: "[INVENTORY_FULL]" } },
         goal: { kind: "completion" },
       }),
       call: async (action) => ({ action, durationMs: 1, result, summary: "runtime stopped" }),
-    });
+    }));
     assert.equal(completion.status, "failed");
   }
 });
 
 test("ordinary single-action scenarios still pass without an expectation", async () => {
-  const completion = await run({
-    waitForTicks: async () => {},
-    physics: NO_PHYSICS,
-    client: NO_CLIENT,
-
-    bot: NO_BOT,
+  const completion = await run(scenarioTestContext({
     scenario: scenarioDefinitionSchema.parse({
       params: { action: "view_status", input: {} }, goal: { kind: "completion" },
     }),
     call: async (action) => ({ action, durationMs: 1, result: { status: "succeeded" }, summary: "observed" }),
-  });
+  }));
   assert.deepEqual(completion, { status: "succeeded", detail: "observed" });
 });

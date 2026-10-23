@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { viewBlocksResultSchema } from "@aibengineering/mine-ai-mcp";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioRun } from "../scenario.ts";
 import { run as runAction } from "./single-action.ts";
 
 /** Count the actual bank before and after: inventory alone cannot expose excessive excavation. */
 export const run: ScenarioRun = async (context) => {
   const remainingBank = async () => {
-    const output = await context.call("view_blocks", {
+    const output = await context.call("view_blocks", arenaActionInput({
       box: { x: 0, y: -56, z: 0, half_width: 4, half_height: 3 },
-    });
+    }, context.arena));
     const observed = viewBlocksResultSchema.parse(output.result);
     assert.equal(observed.status, "succeeded", output.summary);
     assert.ok(observed.blocks.box);

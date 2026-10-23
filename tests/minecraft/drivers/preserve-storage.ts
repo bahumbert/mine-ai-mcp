@@ -1,20 +1,22 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { containerContentSchema, useContainerResultSchema } from "@aibengineering/mine-ai-mcp";
+import { arenaActionInput, type ArenaFrame } from "../arena/frame.ts";
+import { arenaCell } from "../arena/params.ts";
 import type { ScenarioRun } from "../scenario.ts";
 
-const paramsSchema = z.strictObject({
+const paramsSchemaIn = (arena: ArenaFrame) => z.strictObject({
   steps: z.array(z.strictObject({ label: z.string(), action: z.string(), input: z.record(z.string(), z.unknown()) })).min(1),
-  protected_container: z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() }),
+  protected_container: arenaCell(arena),
   expected_contents: z.array(containerContentSchema),
 });
 
 /** Mine Labs checks surviving blocks; this driver also opens storage to verify its actual contents. */
 export const run: ScenarioRun = async (context) => {
-  const { steps, protected_container, expected_contents } = paramsSchema.parse(context.scenario.params);
+  const { steps, protected_container, expected_contents } = paramsSchemaIn(context.arena).parse(context.scenario.params);
   const completed: string[] = [];
   for (const { label, action, input } of steps) {
-    const output = await context.call(action, input);
+    const output = await context.call(action, arenaActionInput(input, context.arena));
     completed.push(`${label}: ${output.summary}`);
     if (output.result.status !== "succeeded") return { status: "failed", detail: completed.join("; ") };
   }
