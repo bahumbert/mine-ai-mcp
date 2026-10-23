@@ -20,7 +20,7 @@ async function supervised(
   t: TestContext,
   instanceId: string,
   launch?: (directory: string) => { executable: string; args: string[] },
-  deadlines?: { startupMs: number; unresponsiveMs: number },
+  deadlines?: McpSupervisorOptions["deadlines"],
   restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
@@ -48,6 +48,12 @@ async function supervised(
   return { supervisor, url: `http://127.0.0.1:${address.port}`, directory };
 }
 
+/** The wedged runtime with child-side waits shortened (`--pause-ms=<ms>`, `--slow-ms=<ms>`). */
+const wedgedWith = (...waits: string[]) => (): { executable: string; args: string[] } => ({ executable, args: [...args, ...waits] });
+
+/** Deadlines short enough for a test: a hang is declared after one second of silence instead of five. */
+const fastDeadlines = { startupMs: 10_000, unresponsiveMs: 1_000 };
+
 /** Every test acts only once the runtime is answering for itself. */
 async function whenHealthy(url: string): Promise<void> {
   while (!(await fetch(`${url}/health`)).ok) await delay(20);
@@ -57,7 +63,8 @@ test(
   "a shared scheduling pause gets a fresh liveness window when the supervisor resumes",
   { timeout: 15_000 },
   async (t) => {
-    const { url } = await supervised(t, "observer-stall");
+    // The child pauses 3 s, the supervisor 2.5 s: past its 1.5 s deadline, so it sees its own blind gap.
+    const { url } = await supervised(t, "observer-stall", wedgedWith("--pause-ms=3000"), { startupMs: 10_000, unresponsiveMs: 1_500 });
     await whenHealthy(url);
     await delay(350);
     assert.equal(await (await fetch(`${url}/pause`)).text(), "accepted");
@@ -65,7 +72,7 @@ test(
     // supervisor cannot diagnose a child-only hang during its own blind gap.
     await new Promise<void>((resolve) =>
       setTimeout(() => {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6500);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
         resolve();
       }, 100),
     );
@@ -84,7 +91,7 @@ test(
   "retains active request and restored phase after the client and entry event are gone",
   { timeout: 40_000 },
   async (t) => {
-    const { url } = await supervised(t, "attribution");
+    const { url } = await supervised(t, "attribution", undefined, fastDeadlines);
     await whenHealthy(url);
     assert.equal(await (await fetch(`${url}/background`)).text(), "accepted");
     await delay(350);
@@ -120,8 +127,8 @@ test(
 );
 
 for (const fault of ["hang", "microtask", "sse-hang", "crash"] as const) {
-  test(`supervisor returns a saved failure when the runtime ${fault}s`, { timeout: 20_000 }, async (t) => {
-    const { url } = await supervised(t, fault);
+  test(`supervisor returns a saved failure when the runtime ${fault}s`, { timeout: 8_000 }, async (t) => {
+    const { url } = await supervised(t, fault, undefined, fastDeadlines);
     await whenHealthy(url);
 
     const response = await fetch(`${url}/${fault}`, {
@@ -156,8 +163,9 @@ for (const fault of ["hang", "microtask", "sse-hang", "crash"] as const) {
   });
 }
 
-test("a long operation with a live event loop is not timed out", { timeout: 15_000 }, async (t) => {
-  const { supervisor, url } = await supervised(t, "healthy");
+test("a long operation with a live event loop is not timed out", { timeout: 8_000 }, async (t) => {
+  // The operation (2 s) outlasts the silence deadline (1 s).
+  const { supervisor, url } = await supervised(t, "healthy", wedgedWith("--slow-ms=2000"), fastDeadlines);
   await whenHealthy(url);
 
   const cancellation = new AbortController();
@@ -217,7 +225,6 @@ const mcpCall = (url: string, id: number, tool: string) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: tool } }),
   });
-const fastDeadlines = { startupMs: 10_000, unresponsiveMs: 1_000 };
 const stateOf = async (url: string): Promise<string> => (await (await fetch(`${url}/diagnostics/runtime`)).json()).state;
 
 test("a runtime killed as unresponsive is started again and answers", { timeout: 25_000 }, async (t) => {
@@ -246,6 +253,31 @@ test("a second failure inside the restart window stays down and says it restarte
     body: JSON.stringify({ jsonrpc: "2.0", id: 93, method: "tools/list" }),
   });
   assert.match(await afterwards.text(), /RUNTIME_UNRESPONSIVE/);
+});
+
+/** A runtime that reports ready on a port nobody serves and then ignores SIGTERM, as a runtime whose own close hangs. */
+const sigtermIgnoringRuntime = (): { executable: string; args: string[] } => ({
+  executable,
+  args: ["-e", 'process.on("SIGTERM", () => {}); process.once("disconnect", () => process.exit(0)); process.send({ kind: "ready", port: 1 }); setInterval(() => {}, 1_000);'],
+});
+
+test("a runtime that ignores SIGTERM is killed once the kill grace has passed", { timeout: 8_000 }, async (t) => {
+  const { supervisor, url } = await supervised(t, "kill-grace", sigtermIgnoringRuntime, { startupMs: 60_000, unresponsiveMs: 60_000, killGraceMs: 200 });
+  while ((await stateOf(url)) !== "ready") await delay(20);
+  const closing = performance.now();
+  await supervisor.close();
+  const closedAfterMs = performance.now() - closing;
+  assert.ok(closedAfterMs < 2_000, `close took ${Math.round(closedAfterMs)} ms with a 200 ms kill grace`);
+});
+
+test("the watchdog judges the runtime only on its own ticks, every heartbeatMs", { timeout: 8_000 }, async (t) => {
+  const started = performance.now(); // Before the supervisor starts: its first tick comes 3 s later at the earliest.
+  // A watchdog interval past the silence deadline: a gap of one interval is the watchdog's own rhythm, not a blind gap.
+  const { url } = await supervised(t, "heartbeat-interval", undefined, { startupMs: 10_000, unresponsiveMs: 500, heartbeatMs: 3_000 });
+  await whenHealthy(url);
+  assert.match(await (await mcpCall(url, 98, "hang")).text(), /RUNTIME_UNRESPONSIVE/);
+  const declaredAfterMs = performance.now() - started;
+  assert.ok(declaredAfterMs >= 2_950, `the hang was declared ${Math.round(declaredAfterMs)} ms after start, before the first 3 s tick`);
 });
 
 test("a supervisor stopped during a restart leaves no runtime behind", { timeout: 25_000 }, async (t) => {

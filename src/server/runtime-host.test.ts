@@ -8,7 +8,7 @@ import { test, type TestContext } from "node:test";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
-import { botFixture, type BotFixtureOptions } from "../test-support/bot.js";
+import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
@@ -28,26 +28,20 @@ async function configuration(t: TestContext) {
   return { ...parseHostOptions(["--data-root", directory]), listenPort: 0 };
 }
 
-function connectedBot(t: TestContext, fixture: BotFixtureOptions = {}) {
-  const client = Object.assign(new EventEmitter(), { uuid: "host-test", write: () => {} });
-  const bot = botFixture(
-    fixture,
-    {
-      _client: client,
-      tool: { equipForBlock: async () => {} },
-      getControlState: () => false,
-      clearControlStates: () => {},
-      quit: () => bot.emit("end", "Host test closed"),
-    },
-  );
-  Object.assign(bot.world, { getColumn: () => undefined });
-  // Mineflayer indexes equipment by window slot; the fixture takes a record.
-  const slots = new Array(46).fill(null);
-  for (const [slot, item] of Object.entries(fixture.slots ?? {})) slots[Number(slot)] = item;
-  bot.inventory.slots = slots;
+function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
+  const { bot } = createFakeBot({
+    slots,
+    // `kick.js`: quit ends the client, whose end Mineflayer re-emits as the bot's `end` (`loader.js:113`).
+    overrides: { quit: () => bot.emit("end", "Host test closed") },
+  });
+  bot._client.uuid = "host-test";
+  // The tool plugin as `loadBotPlugins` finds it already installed: the fake bot has no `loadPlugin`.
+  Object.assign(bot, { tool: { equipForBlock: async () => {} } });
+  // No chunk column is loaded: the frontier observes none. The fake world keeps blocks, not columns.
+  Object.assign(bot.world, { getColumns: () => [], getColumn: () => undefined });
   t.mock.method(mineflayer, "createBot", () => {
     queueMicrotask(() => {
-      client.emit("login", { worldState: { hashedSeed: 1n } });
+      bot._client.emit("login", { worldState: { hashedSeed: 1n } });
       bot.emit("spawn");
     });
     return bot;
@@ -172,10 +166,7 @@ test(
 
 test("health publishes the bot's own slots and the calls an observer cannot otherwise see", async (t) => {
   const options = await configuration(t);
-  connectedBot(t, {
-    items: [{ name: "cobblestone", count: 12, slot: 36 }],
-    slots: { 5: { name: "iron_helmet", count: 1 } },
-  });
+  connectedBot(t, { 36: { name: "cobblestone", count: 12 }, 5: { name: "iron_helmet", count: 1 } });
   await using host = await startRuntimeHost(source, options);
   const address = host.server.address();
   assert.ok(address && typeof address === "object");
@@ -185,7 +176,9 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
   // A Minecraft client is sent only another player's six equipment slots, so
   // the worn helmet and the carried stack can come only from this endpoint.
   assert.deepEqual(health.minecraft.inventory, [
-    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: null },
+    // A worn stack is a prismarine Item, as the real window holds: its maximum is the 1.21.4 data's
+    // (`prismarine-item` index.js:41, 50-51) and a new helmet has used none. No contract check covers armour yet.
+    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 } },
     { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null },
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);

@@ -52,8 +52,17 @@ export interface McpSupervisorOptions {
   readonly instanceId: string;
   readonly source: SourceIdentity;
   readonly incidents: { directory: string; retention: IncidentRetention };
-  /** Silence allowed before `ready` and after it; for tests that cannot wait the real deadlines. */
-  readonly deadlines?: { readonly startupMs: number; readonly unresponsiveMs: number };
+  /**
+   * Silence allowed before `ready` and after it, the watchdog's interval (default {@link RUNTIME_HEARTBEAT_MS}) and the
+   * wait between SIGTERM and SIGKILL at close (default {@link RUNTIME_UNRESPONSIVE_MS}); for tests that cannot wait
+   * the real deadlines, since the runtime is a real child process no fake clock reaches.
+   */
+  readonly deadlines?: {
+    readonly startupMs: number;
+    readonly unresponsiveMs: number;
+    readonly heartbeatMs?: number;
+    readonly killGraceMs?: number;
+  };
   /** One restart of a killed runtime per this window (default {@link RUNTIME_RESTART_WINDOW_MS}); 0 never restarts. For tests. */
   readonly restartWindowMs?: number;
 }
@@ -66,6 +75,9 @@ interface SupervisorState {
   runtime: RuntimeState;
   lastHeartbeat: number;
   observationResumedAt: number;
+  /** When the watchdog last ran, and how late that run was past its interval (the supervisor's own blind gap). */
+  lastWatchdogTick: number;
+  watchdogDelayMs: number;
   stopping: boolean;
   child: ChildProcess | null;
   lastRestartAt: number | null;
@@ -78,8 +90,6 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
   // Docker binds all container interfaces; Compose restricts the published port to host loopback.
   if (!["127.0.0.1", "localhost", "::1", "0.0.0.0"].includes(options.host)) throw new Error("MCP must bind to loopback or 0.0.0.0 for container port forwarding.");
   const startedAt = performance.now();
-  let lastWatchdogTick = startedAt;
-  let watchdogDelayMs = 0;
   let closing: Promise<void> | null = null;
   const pending = new Set<PendingRequest>();
   const recorder = new IncidentRecorder(
@@ -101,6 +111,8 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     runtime: { kind: "starting" },
     lastHeartbeat: startedAt,
     observationResumedAt: startedAt,
+    lastWatchdogTick: startedAt,
+    watchdogDelayMs: 0,
     stopping: false,
     child: null,
     lastRestartAt: null,
@@ -134,7 +146,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       message,
       pid: sup.child?.pid,
       heartbeatAgeMs: performance.now() - sup.lastHeartbeat,
-      supervisorTickDelayMs: watchdogDelayMs,
+      supervisorTickDelayMs: sup.watchdogDelayMs,
       activity: sup.activity,
       activityAgeMs: sup.activity === null ? null : Date.now() - sup.activity.observedAt,
       pending: [...pending].map(({ id, method, tool, path, httpMethod }) => ({ id, method, tool, path, httpMethod })),
@@ -263,28 +275,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     });
   };
   startChild();
-  const watchdog = setInterval(() => {
-    const now = performance.now();
-    watchdogDelayMs = Math.max(0, now - lastWatchdogTick - RUNTIME_HEARTBEAT_MS);
-    lastWatchdogTick = now;
-    // A watchdog that missed its own liveness window cannot attribute that
-    // gap to the child. Resume observation before judging it; queued IPC and
-    // a child recovering from the same scheduling pause get a full window.
-    const deadlineMs = sup.runtime.kind === "starting" ? (options.deadlines?.startupMs ?? RUNTIME_STARTUP_MS) : (options.deadlines?.unresponsiveMs ?? RUNTIME_UNRESPONSIVE_MS);
-    if (watchdogDelayMs >= deadlineMs) {
-      sup.observationResumedAt = now;
-      recorder.record("supervisor_observation_resumed", {
-        supervisorTickDelayMs: watchdogDelayMs,
-        heartbeatAgeMs: now - sup.lastHeartbeat,
-      });
-    }
-    const age = now - Math.max(sup.lastHeartbeat, sup.observationResumedAt);
-    if (age >= deadlineMs)
-      void fail(
-        "RUNTIME_UNRESPONSIVE",
-        `Runtime event-loop heartbeat absent for ${Math.round(now - sup.lastHeartbeat)} ms.`,
-      );
-  }, RUNTIME_HEARTBEAT_MS);
+  const watchdog = startWatchdog(sup, fail);
   const stop = async () => {
     sup.stopping = true;
     clearInterval(watchdog);
@@ -293,7 +284,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       sup.child.kill("SIGTERM");
       // Normal disposal gets the same liveness allowance as execution. A
       // cleanup loop must not keep the owned child alive after service stop.
-      const force = setTimeout(() => sup.child?.kill("SIGKILL"), RUNTIME_UNRESPONSIVE_MS);
+      const force = setTimeout(() => sup.child?.kill("SIGKILL"), options.deadlines?.killGraceMs ?? RUNTIME_UNRESPONSIVE_MS);
       try {
         await stopped;
       } finally {
@@ -317,6 +308,37 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     close,
     [Symbol.asyncDispose]: close,
   };
+}
+
+/**
+ * Every `heartbeatMs` (default {@link RUNTIME_HEARTBEAT_MS}), declares the runtime unresponsive once its silence passes
+ * the deadline of its state (starting or ready).
+ */
+function startWatchdog(sup: SupervisorState, fail: (code: ObservedFailureCode, message: string) => Promise<void>): NodeJS.Timeout {
+  const { deadlines } = sup.options;
+  const heartbeatMs = deadlines?.heartbeatMs ?? RUNTIME_HEARTBEAT_MS;
+  return setInterval(() => {
+    const now = performance.now();
+    sup.watchdogDelayMs = Math.max(0, now - sup.lastWatchdogTick - heartbeatMs);
+    sup.lastWatchdogTick = now;
+    // A watchdog that missed its own liveness window cannot attribute that
+    // gap to the child. Resume observation before judging it; queued IPC and
+    // a child recovering from the same scheduling pause get a full window.
+    const deadlineMs = sup.runtime.kind === "starting" ? (deadlines?.startupMs ?? RUNTIME_STARTUP_MS) : (deadlines?.unresponsiveMs ?? RUNTIME_UNRESPONSIVE_MS);
+    if (sup.watchdogDelayMs >= deadlineMs) {
+      sup.observationResumedAt = now;
+      sup.recorder.record("supervisor_observation_resumed", {
+        supervisorTickDelayMs: sup.watchdogDelayMs,
+        heartbeatAgeMs: now - sup.lastHeartbeat,
+      });
+    }
+    const age = now - Math.max(sup.lastHeartbeat, sup.observationResumedAt);
+    if (age >= deadlineMs)
+      void fail(
+        "RUNTIME_UNRESPONSIVE",
+        `Runtime event-loop heartbeat absent for ${Math.round(now - sup.lastHeartbeat)} ms.`,
+      );
+  }, heartbeatMs);
 }
 
 /** Applies one message of the current runtime child; a failed, failing or replaced child's messages are ignored. */
