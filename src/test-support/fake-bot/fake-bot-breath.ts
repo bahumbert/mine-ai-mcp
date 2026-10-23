@@ -28,6 +28,14 @@ export interface FakeBreath {
   readonly airSupply: number;
   /** The server sets the air and tells the client at once (a test's scene); the next tick goes on from it. */
   setAirSupply(ticks: number): void;
+  /**
+   * The server sets the air and keeps it there (a test's scene: the water or the roof the real server would count
+   * against is not built): no tick changes it, so it neither falls under water nor refills out of it, until `release`.
+   */
+  hold(ticks: number): void;
+  /** The air counts again from where it stands, at the measured rates. Nothing happens when nothing is held. */
+  release(): void;
+  readonly held: boolean;
 }
 
 export interface FakeBreathParts {
@@ -80,7 +88,9 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
     bot.emit("breath");
   };
   const send = (ticks: number) => parts.server.answer(() => hear(ticks));
+  let held = false;
   onServerTick(parts.clock, parts.server, () => {
+    if (held) return;
     const next = eyeInWater(bot) ? Math.max(0, air - AIR_LOST_PER_TICK) : Math.min(FULL_AIR, air + AIR_GAINED_PER_TICK);
     if (next === air) return;
     air = next;
@@ -96,6 +106,17 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
     setAirSupply(ticks) {
       air = ticks;
       hear(air);
+    },
+    hold(ticks) {
+      held = true;
+      air = ticks;
+      send(air);
+    },
+    release() {
+      held = false;
+    },
+    get held() {
+      return held;
     },
   };
 }

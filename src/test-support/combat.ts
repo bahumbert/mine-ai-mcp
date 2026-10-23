@@ -7,6 +7,7 @@ import { createCombatController } from "../survival/control/combat/controller.js
 import { CombatExecution } from "../survival/control/combat/execution.js";
 import { combatResourceRefusal } from "../survival/control/combat/preparation.js";
 import type { CombatController } from "../survival/index.js";
+import type { FakeServer } from "./fake-bot/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { CreeperClearance } from "../survival/perception/combat/creepers.js";
 import { DEFAULT_COMBAT_POLICY } from "../survival/policy/combat/contract.js";
@@ -124,3 +125,18 @@ export function engagingCombat(
 export const unexpectedEngage: CombatController["engage"] = async () => {
   throw new Error("Unexpected engage");
 };
+
+/** The ids of the entities the client hit (`use_entity`, left click), in order, as the server received them. */
+export const attackedIds = ({ packets }: Pick<FakeServer, "packets">): number[] =>
+  packets.filter((packet) => packet.name === "use_entity" && (packet.data as { mouse: number }).mouse === 1).map((packet) => (packet.data as { target: number }).target);
+
+/**
+ * `react` to each hit the client writes, at the moment it writes it. The target need not be an entity the server
+ * knows: the dragon's parts are ids the server alone holds, so the packet is all the fake can show of the swing.
+ */
+export function onAttack(server: Pick<FakeServer, "onPacket">, react: (targetId: number) => void): () => void {
+  return server.onPacket("use_entity", (data) => {
+    const { target, mouse } = data as { target: number; mouse: number };
+    if (mouse === 1) react(target);
+  });
+}

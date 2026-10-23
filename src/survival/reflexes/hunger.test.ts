@@ -110,24 +110,16 @@ test("a hunt's raw drops stand the reflex down with the policy's reason until an
   }
 });
 
+/** How long Mineflayer's `consume` waits for the server's answer before it gives up (`inventory.js` CONSUME_TIMEOUT). */
+const CONSUME_TIMEOUT_MS = 2_500;
+
 test("revoking raw food releases the active bite without waiting for its native timeout, preserving unrelated edits", async () => {
   let began!: () => void;
   const biting = new Promise<void>((resolve) => { began = resolve; });
-  let finish!: () => void;
-  let deactivations = 0;
-  const { bot, clock } = createFakeBot({
-    food: 6,
-    carried: { beef: 3 },
-    // Not on the shared fake: the bite Mineflayer leaves pending until its own timeout, and the hand's release.
-    overrides: {
-      consume: () => new Promise<void>((_resolve, reject) => {
-        bot.usingHeldItem = true;
-        finish = () => reject(new Error("bite released"));
-        began();
-      }),
-      deactivateItem: () => { deactivations++; bot.usingHeldItem = false; },
-    },
-  });
+  const { bot, clock, server } = createFakeBot({ food: 6, carried: { beef: 3 } });
+  server.onPacket("use_item", began);
+  /** The releases of the hand the server received (`block_dig` status 5). */
+  const deactivations = () => server.packets.filter(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 5).length;
   const policy = new SurvivalPolicyState(bot);
   const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
   const reflex = attachHungerReflex(bot, driver, { activeEngagement: () => null }, policy);
@@ -136,23 +128,21 @@ test("revoking raw food releases the active bite without waiting for its native 
     await biting;
     await policy.edit({ operation: "set", expected_revision: policy.snapshot().revision,
       changes: { combat: { bow: false } }, lifetime: { kind: "session" }, reason: "keep arrows" });
-    assert.equal(deactivations, 0, "an unrelated edit leaves the meal alone");
+    assert.equal(deactivations(), 0, "an unrelated edit leaves the meal alone");
     const edit = policy.edit({ operation: "set", expected_revision: policy.snapshot().revision,
       changes: { food: { raw: { allow: "never" } } }, lifetime: { kind: "session" }, reason: "keep meat" });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(deactivations, 1);
+    assert.equal(deactivations(), 1);
     // The released hand is what the edit waits on. Mineflayer leaves consume
     // pending until its own timeout, and that bookkeeping must not hold the
     // policy in settlement.
     await edit;
     assert.equal(policy.settling, false, "settled without the native consume releasing");
-    finish();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await clock.advance(CONSUME_TIMEOUT_MS);
     assert.equal(bot.inventory.count(bot.registry.itemsByName.beef!.id, null), 3);
     assert.equal(driver.snapshot()[0]?.response, null);
     assert.deepEqual(driver.answered.snapshot(), [], "policy cancellation is not a failed capability");
   } finally {
-    finish?.();
     await reflex[Symbol.asyncDispose]();
     await driver[Symbol.asyncDispose]();
   }

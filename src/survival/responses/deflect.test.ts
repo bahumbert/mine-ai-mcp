@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { onAttack } from "../../test-support/combat.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { incomingFireball } from "../perception/combat/fireball.js";
 import { deflectFireball } from "./deflect.js";
@@ -14,14 +15,11 @@ function fixture() {
   const harness = createFakeBot({
     position: new Vec3(0.5, 0, 0),
     entities: { 2: { name: "fireball", position: new Vec3(4.17, 1.5, 0), velocity: new Vec3(-1.06, 0, 0) } },
-    overrides: {
-      // Not on the shared fake: the swing the server answers; until M1 merges, the release of item use (a packet, no answer).
-      deactivateItem: () => undefined,
-      attack: () => {
-        swings += 1;
-        harness.server.answer(() => onHit());
-      },
-    },
+  });
+  // Not on the shared fake: a hit on a projectile (no check measured a deflection). The test's server answers each swing it receives with `onHit`. Asked of the master: a contract check for the deflection.
+  onAttack(harness.server, () => {
+    swings += 1;
+    harness.server.answer(() => onHit());
   });
   const ball = harness.bot.entities[2]!;
   return {

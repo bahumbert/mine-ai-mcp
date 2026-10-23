@@ -6,7 +6,6 @@ import { bowReleaseInTicks, trackBowDraws } from "./bow-timing.js";
 import { observeProjectileDefence } from "../../weapons/shield-facing.js";
 
 test("observed draw transitions rank the due shooter ahead of entity order and survive lost sight", async () => {
-  // Stopgap until M3 merges entity.kind: entities.js:184 sets `entity.kind = entityData.category`.
   const enemy = (z: number) => ({ name: "skeleton", kind: "Hostile mobs", position: new Vec3(0, 64, z), metadata: { 8: 0 }, headYaw: z > 0 ? 0 : Math.PI });
   const { bot, clock } = createFakeBot({ position: new Vec3(0, 64, 0), entities: { 5: enemy(8), 6: enemy(-8) } });
   bot.world.raycast = () => null;

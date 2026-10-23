@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../../navigation/index.js";
-import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
+import { TestEndCombat as EndCombat, attackedIds, onAttack } from "../../../test-support/combat.js";
 import {
-  type FakeBot,
   type FakeBotOptions,
   type FakeEntitySpec,
   createFakeBot,
@@ -23,8 +22,6 @@ function endScene(options: FakeBotOptions = {}) {
     dimension: "the_end",
     clock: createFakeClock({ mode: "mocked" }),
     ...options,
-    // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
-    overrides: { deactivateItem: () => {}, ...options.overrides },
   });
 }
 
@@ -37,16 +34,6 @@ function dragonAt(position: Vec3, phase: number, extra: { yaw?: number; health?:
 /** A dragon breath cloud of `radius`. */
 function breathCloud(position: Vec3, radius: number): FakeEntitySpec {
   return { name: "area_effect_cloud", position, metadata: { 8: radius, 10: { type: "dragon_breath" } } };
-}
-
-/**
- * The cloud enters the bot's view now, as the server spawns an entity (`entities.js`: it is added, then `entitySpawn`).
- * Not on the shared fake: spawning an entity after the start (the same stopgap as `metLater` in `reflexes/hostile.test.ts`):
- * a scratch fake builds the entity.
- */
-function meetCloud(bot: FakeBot, id: number, spec: FakeEntitySpec): void {
-  bot.entities[id] = createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
-  bot.emit("entitySpawn", bot.entities[id]!);
 }
 
 /** One breath cloud per height in `ys`, at x 0 and z 6.5, with the entity id equal to the height. */
@@ -103,16 +90,14 @@ test("perch diagnostics retain a cached route failure and explain its retry cond
 test("a cloud-blocked head searches safe body reach and swings the reached native part", async () => {
   const caller = new AbortController();
   let routes = 0, swings = 0;
-  const { bot, clock } = endScene({ position: new Vec3(12.5, 64, 0.5), carried: { diamond_sword: 1 },
-    entities: { 42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([62, 64, 66], 5) },
-    overrides: {
-      // Not on the shared fake: the swing at a part. The scripted answer stands for the attack packet.
-      attack: part => {
-        assert.equal(part.id, 45, "body is parent + 3, not the head or root");
-        swings++;
-        caller.abort(new Error("body swing observed"));
-      },
-    } });
+  const { bot, clock, server } = endScene({ position: new Vec3(12.5, 64, 0.5), carried: { diamond_sword: 1 },
+    entities: { 42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([62, 64, 66], 5) } });
+  // The dragon's parts are ids only the server holds: the hit at one is the packet the client writes.
+  onAttack(server, part => {
+    assert.equal(part, 45, "body is parent + 3, not the head or root");
+    swings++;
+    caller.abort(new Error("body swing observed"));
+  });
   using _timers = clock.install();
   const navigation = { navigate: async ({ goal }: Parameters<NavigationRuntime["navigate"]>[0]) => {
     routes++;
@@ -240,25 +225,11 @@ test("takeoff observed during suspension still owes retreat, and failed retreat 
 });
 
 test("breath interrupts a local bite and reaches evasion without swallowing caller cancellation", async () => {
-  let cancelBite: () => void = () => {};
-  const { bot, clock } = endScene({ food: 17, carried: { cooked_beef: 1 }, entities: {
+  const { bot, clock, server, entities } = endScene({ food: 17, carried: { cooked_beef: 1 }, entities: {
     42: dragonAt(new Vec3(0, 95, 0), 0),
-    },
-    overrides: {
-      // Not on the shared fake until M1 merges: the release of item use, which here also interrupts the bite.
-      deactivateItem: () => {
-        bot.usingHeldItem = false;
-        cancelBite();
-      },
-      // Not on the shared fake: `consume`. The scripted bite stays pending until the item use is released.
-      consume: () =>
-        new Promise<void>((_resolve, reject) => {
-          cancelBite = () => reject(new Error("native consume interrupted"));
-          bot.usingHeldItem = true;
-          meetCloud(bot, 7, breathCloud(new Vec3(0.5, 64, 0.5), 5)); // the breath cloud over the bot, seen as the bite starts
-          bot.emit("physicsTick");
-        }),
-    } });
+  } });
+  // The breath cloud comes over the bot as the bite starts: the server receives the item use.
+  server.onPacket("use_item", () => void entities.spawn({ id: 7, ...breathCloud(new Vec3(0.5, 64, 0.5), 5) }));
   using _timers = clock.install();
   const listeners = bot.listenerCount("physicsTick");
   const caller = new AbortController();
@@ -283,10 +254,7 @@ test("breath interrupts a local bite and reaches evasion without swallowing call
 
 test("waiting for a perch is cancellable and releases entity listeners and controls", async () => {
   const controller = new AbortController();
-  let attacks = 0;
-  const { bot, clock } = endScene({ position: new Vec3(0, 60, 6), entities: { 42: dragonAt(new Vec3(0, 90, 0), 0) },
-    // Not on the shared fake: the swing at a part.
-    overrides: { attack: () => { attacks++; } } });
+  const { bot, clock, server } = endScene({ position: new Vec3(0, 60, 6), entities: { 42: dragonAt(new Vec3(0, 90, 0), 0) } });
   using _timers = clock.install();
   let cleared = 0;
   const clearControlStates = bot.clearControlStates.bind(bot);
@@ -309,25 +277,17 @@ test("waiting for a perch is cancellable and releases entity listeners and contr
   controller.abort(new Error("caller cancelled"));
   await rejected;
   observation[Symbol.dispose]();
-  assert.equal(attacks, 0);
+  assert.deepEqual(attackedIds(server), []);
   assert.equal(cleared, 1);
   assert.equal(bot.listenerCount("entityDead"), 0);
 });
 
 test("a newly observed breath cloud aborts perch sightline digging before any swing", async () => {
-  let attacks = 0,
-    escapes = 0,
+  let escapes = 0,
     digAborted = false;
-  const { bot, clock } = endScene({ position: new Vec3(2, 64, 5), cells: { "2,66,4": "end_stone" },
+  const { bot, clock, server, entities } = endScene({ position: new Vec3(2, 64, 5), cells: { "2,66,4": "end_stone" },
     entities: {
       42: dragonAt(new Vec3(0, 68, 0), 6, { health: 190 }),
-    },
-    overrides: {
-      // Not on the shared fake: the swing at a part, and the block under the cursor (none).
-      attack: async () => {
-        attacks++;
-      },
-      blockAtCursor: () => null,
     } });
   using _timers = clock.install();
   const obstruction = bot.blockAt(new Vec3(2, 66, 4))!;
@@ -338,7 +298,7 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
   const caller = new AbortController();
   const navigation = {
     breakBlockInPlace: async ({ signal }: { signal: AbortSignal }) => {
-      meetCloud(bot, 7, breathCloud(new Vec3(2, 64, 5), 5)); // the breath cloud at the bot, seen as the dig starts
+      entities.spawn({ id: 7, ...breathCloud(new Vec3(2, 64, 5), 5) }); // the breath cloud at the bot, seen as the dig starts
       await bot.waitForTicks(1);
       digAborted = signal.aborted;
       signal.throwIfAborted();
@@ -347,7 +307,7 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
     navigate: async () => {
       escapes++;
       assert.equal(digAborted, true);
-      assert.equal(attacks, 0);
+      assert.deepEqual(attackedIds(server), []);
       caller.abort(new Error("stop after danger handling"));
       caller.signal.throwIfAborted();
     },
@@ -360,7 +320,7 @@ test("a newly observed breath cloud aborts perch sightline digging before any sw
     );
     assert.equal(digAborted, true);
     assert.equal(escapes, 1);
-    assert.equal(attacks, 0);
+    assert.deepEqual(attackedIds(server), []);
   } finally {
     observation[Symbol.dispose]();
   }
@@ -398,11 +358,11 @@ test("End escape waits for the observed landing before asking navigation for a r
 test("a landing escape releases a safe bot when the dragon settles instead of finishing the obsolete route", async () => {
   const { bot, clock } = endScene({ position: new Vec3(0.5, 64, 0.5),
     cells: { "0,63,0": "end_stone" },
+    // Only the chunk the bot stands in is loaded: the landing search for the exit portal's bedrock (128 blocks) reads it alone.
+    loadedColumns: [[0, 0]],
     carried: { end_stone: 10 },
     entities: { 42: dragonAt(new Vec3(0, 68, 0), 3, { health: 190 }) },
     overrides: {
-      // Not on the shared fake: `findBlocks`. The scripted answer is no bedrock in range (no exit portal located).
-      findBlocks: () => [],
       // A guard, not a server answer: the test fails if the escape places a block (`placement.ts` calls `_placeBlockWithOptions`, a direct caller `placeBlock`).
       placeBlock: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),
       _placeBlockWithOptions: () => assert.fail("Landing must preserve the prepared head sightline, even with shelter supplies."),

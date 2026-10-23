@@ -199,11 +199,14 @@ function sealedPocket(fixture: ReturnType<typeof diver>, inWater: boolean, digga
   entity.isInWater = inWater;
   entity.position.set(0.5, 64, 0.5);
   fill(harness.world, diggable ? "netherrack" : "bedrock", new Vec3(-2, 62, -2), new Vec3(3, 75, 3));
-  setAir(bot, 8);
+  // The pocket's water cells are not built, so the server's air is held at 8 bubbles (as a bot under water that lost them) until the roof is through.
+  harness.breath.hold(8 * AIR_TICKS_PER_POINT);
   bot.on("diggingCompleted", () => {
     digs.push("roof");
-    // Not on the fake: the server's air once the roof is through (the dug cell lets the next breath in).
-    if (diggable) setAir(bot, 20);
+    if (!diggable) return;
+    // The way through the roof opens the pocket to the open air: the next breath comes in, at the server's rate.
+    fill(harness.world, "air", new Vec3(0, 64, 0), new Vec3(0, 75, 0));
+    harness.breath.release();
   });
   return { digs };
 }

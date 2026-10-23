@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { combatTestContext } from "../../test-support/combat.js";
+import { attackedIds, combatTestContext, onAttack } from "../../test-support/combat.js";
 import {
   type FakeBot,
   type FakeBotOptions,
@@ -38,21 +38,14 @@ type SceneOptions = Omit<FakeBotOptions, "clock" | "overrides"> & {
 
 /**
  * A bot on the shared fake, standing on stone with the sky above it (stone at y 63 and below) unless the test says
- * otherwise. The hide releases item use first thing, and takes the held block out of the hand before a fight; the
- * fake has neither.
+ * otherwise.
  */
 function scene(options: SceneOptions = {}) {
   const { overrides, mockedClock, ...bot } = options;
   return createFakeBot({
     ...bot,
     clock: createFakeClock({ mode: mockedClock ? "mocked" : "manual" }),
-    overrides: {
-      // Not on the shared fake until M1 merges: deactivateItem (the hide releases any item use before it begins).
-      deactivateItem: () => undefined,
-      // Not on the shared fake: unequip. Stands for the server taking the held block out of the hand (a fight with nothing to wield).
-      unequip: async () => undefined,
-      ...overrides,
-    },
+    overrides,
   });
 }
 
@@ -247,25 +240,22 @@ test("breaking a block without falling into its cell is a failed hide, even at f
 
 /** A hostile mob inside the bot's cell column, the shelter shell's near side. */
 function closeMob(name: string): FakeEntitySpec {
-  // Not on the shared fake until M3 merges: entity.kind (the hide reads the mob's kind).
   return { name, kind: "Hostile mobs", metadata: [], position: new Vec3(0.5, 64, 0.9) };
 }
 
 test("hide repels an authorized intruder before building and uses the observed landing cell", async () => {
   let attacks = 0;
-  const { bot, clock } = scene({
+  const { bot, clock, server } = scene({
     health: 20,
     carried: { cobblestone: 32 },
     entities: { 2: closeMob("wither_skeleton") },
-    overrides: {
-      ...refuseEquip("placement boundary"),
-      // Not on the shared fake: attack. The strike knocks the mob away and the bot into the next cell.
-      attack: () => {
-        attacks++;
-        bot.entities[2]!.position.x = 10;
-        bot.entity.position.x = 3.5;
-      },
-    },
+    overrides: refuseEquip("placement boundary"),
+  });
+  // The fake models no knockback (runtime-pitfalls "Fights"): as the strike is written, the test moves the mob away and the bot into the next cell, as the server's velocity would.
+  onAttack(server, () => {
+    attacks++;
+    bot.entities[2]!.position.x = 10;
+    bot.entity.position.x = 3.5;
   });
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(attacks, 1);
@@ -274,57 +264,43 @@ test("hide repels an authorized intruder before building and uses the observed l
 });
 
 test("a neutral piglin sharing the construction space is not permission to attack", async () => {
-  const { bot, clock } = scene({
+  const { bot, clock, server } = scene({
     health: 20,
     carried: { cobblestone: 32 },
     entities: { 2: closeMob("piglin") },
-    overrides: {
-      ...refuseEquip("placement boundary"),
-      // Not on the shared fake: attack.
-      attack: () => {
-        throw new Error("neutral mob attacked");
-      },
-    },
+    overrides: refuseEquip("placement boundary"),
   });
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.deepEqual(attackedIds(server), [], "the neutral mob was not attacked");
   assert.equal(result.swings, 0);
   assert.equal(result.kind, "failed");
 });
 
 test("shelter contact uses a ready shield and a non-sweeping tool beside a neutral Enderman", async () => {
-  let raised = false;
   let ticks = 0;
-  let raisedAt = 0;
-  const { bot, clock } = scene({
+  let raisedAt: number | undefined;
+  const { bot, clock, server, entities } = scene({
     health: 20,
     carried: { iron_sword: 1, iron_pickaxe: 1, shield: 1, cobblestone: 32 },
     entities: {
       2: closeMob("wither_skeleton"),
       3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) },
     },
-    overrides: {
-      // Not on the shared fake: activateItem and deactivateItem, until M1 merges (the shield use the hide commands).
-      activateItem: () => {
-        if (!raised) raisedAt = ticks;
-        raised = true;
-        bot.usingHeldItem = true;
-      },
-      deactivateItem: () => {
-        raised = false;
-        bot.usingHeldItem = false;
-      },
-      // Not on the shared fake: attack.
-      attack: (target) => {
-        assert.equal(target.id, intruder.id);
-        assert.equal(bot.heldItem?.name, "iron_pickaxe");
-        assert.equal(raised, true);
-        assert.ok(ticks - raisedAt >= 5);
-        delete bot.entities[2];
-      },
-    },
   });
   const intruder = bot.entities[2]!;
   const bystander = bot.entities[3]!;
+  // The first use request the server receives is the shield's.
+  server.onPacket("use_item", () => {
+    raisedAt ??= ticks;
+  });
+  // Not on the shared fake: the damage of an iron pickaxe (no check measured it; the fake throws for it). The intruder is gone as the strike is written. Asked of the master: a contract check for the pickaxe.
+  onAttack(server, (target) => {
+    assert.equal(target, intruder.id);
+    assert.equal(bot.heldItem?.name, "iron_pickaxe");
+    assert.equal(bot.usingHeldItem, true);
+    assert.ok(raisedAt !== undefined && ticks - raisedAt >= 5);
+    entities.remove(intruder.id);
+  });
   bot.on("physicsTick", () => {
     ticks++;
   });
@@ -338,7 +314,7 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.swings, 1);
   assert.equal(bystander.isValid, true);
-  assert.equal(raised, false, "the construction owner releases its shield on settlement");
+  assert.equal(bot.usingHeldItem, false, "the construction owner releases its shield on settlement");
 });
 
 test("a stopped physics stream does not prevent hide cancellation", async () => {
@@ -365,20 +341,18 @@ test("a stopped physics stream does not prevent hide cancellation", async () => 
 
 test("an intruder arriving during centering interrupts steering before construction", async () => {
   let arrived = false;
-  const { bot, clock } = scene({
+  const { bot, clock, server, entities } = scene({
     health: 20,
     position: new Vec3(0.5, 64, 0.146),
     carried: { cobblestone: 32 },
     // Starts well outside the shell; the first tick brings it in.
     entities: { 2: { ...closeMob("wither_skeleton"), position: new Vec3(20, 64, 20) } },
-    overrides: {
-      ...refuseEquip("placement boundary"),
-      // Not on the shared fake: attack.
-      attack: () => {
-        delete bot.entities[2];
-        bot.entity.position.z = 0.5;
-      },
-    },
+    overrides: refuseEquip("placement boundary"),
+  });
+  // The strike drives the intruder off and the bot back to the middle of its cell, as the server's velocity would.
+  onAttack(server, () => {
+    entities.remove(2);
+    bot.entity.position.z = 0.5;
   });
   bot.on("physicsTick", () => {
     if (arrived) return;
@@ -542,7 +516,7 @@ test("an intruder that cannot be struck does not starve the event loop", async (
 });
 
 test("an intruder that leaves while the bot turns to it does not stop the shelter being built", async () => {
-  const { bot, clock } = scene({
+  const { bot, clock, server } = scene({
     health: 20,
     carried: { cobblestone: 32 },
     entities: { 2: closeMob("wither_skeleton") },
@@ -552,13 +526,10 @@ test("an intruder that leaves while the bot turns to it does not stop the shelte
       lookAt: async () => {
         delete bot.entities[2];
       },
-      // Not on the shared fake: attack.
-      attack: () => {
-        throw new Error("nothing was left to attack");
-      },
     },
   });
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.deepEqual(attackedIds(server), [], "nothing was left to attack");
   assert.equal(result.swings, 0);
   assert.match(result.error ?? "", /placement boundary/);
 });

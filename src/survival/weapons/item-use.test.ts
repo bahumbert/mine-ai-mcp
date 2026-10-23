@@ -4,37 +4,32 @@ import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { CombatItemUse } from "./item-use.js";
 
 test("drawing a bow releases server shield use even after local posture was invalidated", async () => {
-  let serverHand: "shield" | "bow" | null = null;
-  let arrows = 0;
-  const { bot, server } = createFakeBot({
-    // Not on the shared fake: the use requests, answered here as vanilla does.
-    overrides: {
-      activateItem: (offHand = false) => {
-        // Native use requests cannot switch hands while another hand is active.
-        serverHand ??= offHand ? "shield" : "bow";
-      },
-      deactivateItem: () => {
-        if (serverHand === "bow") arrows++;
-        serverHand = null;
-      },
-    },
-  });
-  // A held slot change ends the item use on the server.
-  server.onPacket("held_item_slot", () => {
-    serverHand = null;
-  });
+  // The server ignores a use request while another hand is active, and ends a main-hand use when the held slot changes.
+  const { bot, clock } = createFakeBot({ carried: { bow: 1, arrow: 4 }, slots: { 45: { name: "shield", count: 1 } } });
+  const arrowsFlying = () => Object.values(bot.entities).filter((entity) => entity.name === "arrow").length;
+  const handInUse = () => (Number(bot.entity.metadata[bot.registry.entitiesByName.player!.metadataKeys!.indexOf("living_entity_flags")]) & 1) === 1;
   const use = new CombatItemUse(bot, async () => {});
   await use.raiseShield();
+  await clock.advance(100);
+  assert.equal(handInUse(), true, "the server holds the shield up");
   use.invalidateShield(); // Refused construction did not release the native use.
   using draw = use.drawBow();
+  await clock.advance(200);
   draw.release();
-  assert.equal(arrows, 1, "release must fire a bow, not merely lower the still-active shield");
-  assert.equal(serverHand, null);
+  await clock.advance(100);
+  assert.equal(arrowsFlying(), 1, "release must fire a bow, not merely lower the still-active shield");
+  assert.equal(bot.inventory.count(bot.registry.itemsByName.arrow!.id, null), 3);
+  assert.equal(handInUse(), false);
 });
 
 /** The shared fake bot with its item release and control clearing written to `order`. */
 function recordedBot(order: string[]) {
-  const harness = createFakeBot({ overrides: { deactivateItem: () => void order.push("release use") } });
+  const harness = createFakeBot();
+  const release = harness.bot.deactivateItem.bind(harness.bot);
+  harness.bot.deactivateItem = () => {
+    order.push("release use");
+    release();
+  };
   const clear = harness.bot.clearControlStates.bind(harness.bot);
   harness.bot.clearControlStates = () => {
     order.push("clear movement");
@@ -64,8 +59,7 @@ test("cleanup settles the body after the final item-release tick can deliver kno
 });
 
 test("body cancellation settles item release even when physics has stopped", async () => {
-  // Not on the shared fake until M1 merges: the release of item use (a packet, no answer).
-  const { bot } = createFakeBot({ overrides: { deactivateItem: () => undefined } });
+  const { bot } = createFakeBot();
   const owner = new AbortController();
   let settled = false;
   const cleanup = new CombatItemUse(bot, async () => {}).neutralise(async () => {
