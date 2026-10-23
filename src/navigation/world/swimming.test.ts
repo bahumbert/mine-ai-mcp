@@ -35,6 +35,17 @@ test("open-water admission accounts for the slow descent, work and escape; a roo
   assert.equal(openWaterSurface(read, { x: 12, y: 61, z: 0 }), null);
 });
 
+test("a return to air admits a cell while its way up fits the air left, without the dive's reserve", () => {
+  const world = pool();
+  const read = (x: number, y: number, z: number) => world.blockAt(x, y, z);
+  const feet = { x: 0, y: 61, z: 0 };
+  // From the stop's own cell: 8 ticks to set off plus 28 up to the surface at y 63 (two strokes up and the start).
+  const wayUp = swimTravelTicks(feet, feet) + swimAscent(read, feet)!.ticks;
+  assert.ok(admitsDive(read, feet, { origin: feet, airTicks: wayUp, toAir: true }));
+  assert.equal(admitsDive(read, feet, { origin: feet, airTicks: wayUp - 1, toAir: true }), false);
+  assert.equal(admitsDive(read, feet, { origin: feet, airTicks: wayUp }), false, "the dive keeps its reserve");
+});
+
 test("a body in a thin flowing stream with its head in air is no swim from a breath, and may still dive", () => {
   // One cell of flowing water over a stone floor, air above: no source column to the surface, but the head is dry.
   const world = new MemoryWorld();

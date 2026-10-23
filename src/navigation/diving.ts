@@ -6,13 +6,15 @@ import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
 import { timeoutSignal } from "../utils/wall-timers.js";
 import { waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
-import type { Navigate, NavigateOptions } from "./navigate.js";
+import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
-import type { WorldView } from "./world/world.js";
+import type { BlockPosition, WorldView } from "./world/world.js";
 import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
+/** Why a return to air ended on a death or a respawn: the stop's own message would tell a dead bot to go and breathe. */
+const RETURN_DIED = "died during the return to air";
 interface DiveSession {
   readonly cancelled: AbortController;
   owned: boolean;
@@ -152,11 +154,8 @@ export class Diving {
         // A process's quantity signal ends its route, but still owes a safe
         // handoff. Action cancellation and defensive takeover always win.
         const returnStop = returnToProcess ? session.cancelled.signal : options.stopSignal;
-        const returned = await navigate({ movements, goal: exactBlockGoal(surface), signal: options.signal,
-          stopSignal: returnStop, timeoutMs: 15_000 });
-        if (returned.status !== "completed") return returned;
-        const breath = await waitForFullAir(this.bot, lifetime, returnStop);
-        if (breath !== "full") return { status: "stopped" as const, reason: breath === "stopped" ? "Request stopped while breathing" : FULL_AIR_NOT_OBSERVED, elapsedMs: Date.now() - started };
+        const unbreathed = await this.#breatheAtSurface(session, options, navigate, surface, lifetime, returnStop);
+        if (unbreathed) return { ...unbreathed, elapsedMs: Date.now() - started };
         session.returning = false;
         session.stop = new AbortController();
         this.report("resumed");
@@ -176,6 +175,18 @@ export class Diving {
       this.#session = null;
       if (session.owned) this.report("released");
     }
+  }
+
+  /** The breathing stop's swim to `surface` and wait for full air; why it ended without full air, or null. */
+  async #breatheAtSurface(session: DiveSession, options: NavigateOptions, navigate: Navigate, surface: BlockPosition,
+    lifetime: AbortSignal, returnStop: AbortSignal | undefined): Promise<Omit<Extract<NavigationResult, { status: "stopped" }>, "elapsedMs"> | null> {
+    const returned = await this.#returnToAir(session, options, navigate, exactBlockGoal(surface), 15_000, returnStop);
+    // The route's own failure fields are kept (the pinned watch reads `routeFailed`). A cancel, a takeover or a death keeps
+    // its own reason; a return that found no way says so and what the model can do next.
+    if (returned.status !== "completed") return session.cancelled.signal.aborted || returnStop?.aborted || returned.reason === RETURN_DIED
+      ? returned : { ...returned, reason: `${BREATHING_STOP}: the swim back to air did not get there (${returned.reason}); breathe at the surface before trying this way again` };
+    const breath = await waitForFullAir(this.bot, lifetime, returnStop);
+    return breath === "full" ? null : { status: "stopped", reason: breath === "stopped" ? "Request stopped while breathing" : FULL_AIR_NOT_OBSERVED };
   }
 
   /** The air the server has not reported yet, observed before the first route is planned. */
@@ -234,17 +245,31 @@ export class Diving {
     if (!botEyesInWater(this.bot)) return;
     const air = airSupplyTicks(this.bot);
     const budgetMs = air === null ? SWIM_BACK_TIMEOUT_MS : Math.min(SWIM_BACK_TIMEOUT_MS, Math.max(2_000, air * TICK_MS));
+    try {
+      await this.#returnToAir(session, options, navigate, exactBlockGoal(target), budgetMs,
+        AbortSignal.any([timeoutSignal(budgetMs), ...(options.signal ? [options.signal] : [])]));
+    } catch {
+      // The route back failed: the body stays where it is for the breath reflex, which owns the last resort.
+    }
+  }
+
+  /**
+   * A swim to air from where the body is: admitted while each cell's way up fits the air left, with no reserve (the
+   * dive's own admission refuses every cell once the air is at most the way up plus the reserve, which is when a stop
+   * fires: T5 probe 2026-10-21). A death or a respawn ends it.
+   */
+  async #returnToAir(session: DiveSession, options: NavigateOptions, navigate: Navigate, goal: NavigateOptions["goal"],
+    timeoutMs: number, stopSignal: AbortSignal | undefined): ReturnType<Navigate> {
     const ended = new AbortController();
-    const onEnd = () => ended.abort("died during the swim back");
+    const onEnd = () => ended.abort(RETURN_DIED);
     this.bot.once("death", onEnd);
     this.bot.once("respawn", onEnd);
     try {
-      const origin = this.bot.entity.position.clone();
-      await navigate({ movements: { ...options.movements, ...(options.movements.allowSwimming ? { dive: { origin, airTicks: air ?? FULL_AIR_TICKS } } : {}) },
-        goal: exactBlockGoal(target), timeoutMs: budgetMs,
-        stopSignal: AbortSignal.any([ended.signal, timeoutSignal(budgetMs), ...(options.signal ? [options.signal] : [])]) });
-    } catch {
-      // The route back failed: the body stays where it is for the breath reflex, which owns the last resort.
+      // Air not reported here was never seen running down (the swim back's rule before T6): taken as full.
+      const air = airSupplyTicks(this.bot) ?? FULL_AIR_TICKS;
+      const dive = options.movements.allowSwimming ? { dive: { origin: this.bot.entity.position.clone(), airTicks: air, toAir: true } } : {};
+      return await navigate({ movements: { ...options.movements, ...dive }, goal, signal: options.signal, timeoutMs,
+        stopSignal: AbortSignal.any([ended.signal, ...(stopSignal ? [stopSignal] : [])]) });
     } finally {
       this.bot.off("death", onEnd);
       this.bot.off("respawn", onEnd);

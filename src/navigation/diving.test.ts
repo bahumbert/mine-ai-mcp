@@ -78,6 +78,92 @@ test("planned breathing returns to the original goal after observing full air", 
   assert.equal(bot.listenerCount("physicsTick"), 0);
 });
 
+/** The return-to-air admission a request carries: from where the body is, with the air it has left (T6 2026-10-21). */
+function returnAdmission(request: Parameters<Parameters<Diving["run"]>[1]>[0]) {
+  const dive = request.movements.dive;
+  return dive && { origin: { x: dive.origin.x, y: dive.origin.y, z: dive.origin.z }, airTicks: dive.airTicks, toAir: dive.toAir };
+}
+
+// T5 probe 2026-10-21: a roof laid over the pond mid-dive fired the stop at air 228, and the return planned with the
+// dive's own admission (origin where the dive began, the 65-tick reserve) refused every cell: "shut in at the start".
+test("a breathing stop returns to air planning from where the body is with the air it has left", async () => {
+  const { world, bot } = fixture();
+  const states: string[] = [];
+  const diving = new Diving(bot, world, (state) => states.push(state));
+  const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
+  let calls = 0;
+  let admission: ReturnType<typeof returnAdmission>;
+  const result = await diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.y = 60;
+      Reflect.set(bot.entity.metadata, 0, 60);
+      bot.emit("physicsTick");
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    if (calls === 2) {
+      admission = returnAdmission(request);
+      bot.entity.position.y = 63.5;
+      Reflect.set(bot.entity.metadata, 0, 300);
+    }
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(admission, { origin: { x: 0.5, y: 60, z: 0.5 }, airTicks: 60, toAir: true });
+  assert.deepEqual(states, ["breathing", "resumed", "released"]);
+  // The next request starts clean from the state the stop left.
+  assert.equal(diving.active, false);
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal((await diving.run({ movements: createMovementPolicy(), goal }, async () => ({ status: "completed", elapsedMs: 0 }))).status, "completed");
+});
+
+test("a breathing stop whose return finds no way keeps the route's failure and says what to do next", async () => {
+  const { world, bot } = fixture();
+  const diving = new Diving(bot, world);
+  let calls = 0;
+  let swimBack: ReturnType<typeof returnAdmission>;
+  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.y = 62.5; // Eyes in the air: the last breathable cell, where the swim back goes.
+      bot.emit("physicsTick");
+      bot.entity.position.y = 60;
+      Reflect.set(bot.entity.metadata, 0, 60);
+      bot.emit("physicsTick");
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    if (calls === 3) swimBack = returnAdmission(request);
+    Reflect.set(bot.entity.metadata, 0, 40);
+    return { status: "stopped", reason: "no path", routeFailed: true, elapsedMs: 0 };
+  });
+  assert.ok(result.status === "stopped" && result.routeFailed, "the pinned watch still sees the route failure");
+  assert.match(result.status === "stopped" ? result.reason : "", /Planned breathing stop: the swim back to air did not get there \(no path\); breathe at the surface/u);
+  // The swim back after the failed run plans the same way: from the body, with the air it has left.
+  assert.deepEqual(swimBack, { origin: { x: 0.5, y: 60, z: 0.5 }, airTicks: 40, toAir: true });
+});
+
+test("a death during the breathing stop's return ends it: no resume, no listener left", async () => {
+  const { world, bot } = fixture();
+  const states: string[] = [];
+  const diving = new Diving(bot, world, (state) => states.push(state));
+  let calls = 0;
+  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      Reflect.set(bot.entity.metadata, 0, 60);
+      bot.emit("physicsTick");
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    bot.emit("death");
+    assert.equal(request.stopSignal?.aborted, true, "the return ends on the death");
+    return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+  });
+  assert.equal(result.status, "stopped");
+  assert.equal(result.status === "stopped" ? result.reason : "", "died during the return to air", "a dead bot is not told to go and breathe");
+  assert.equal(states.includes("resumed"), false);
+  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") + bot.listenerCount("physicsTick"), 0);
+});
+
 test("floating work with dry eyes keeps the existing surface-mining contract", () => {
   const { world, bot } = fixture();
   bot.entity.position.y = 62.5; // The floored head cell is water, but the actual eyes are above it.

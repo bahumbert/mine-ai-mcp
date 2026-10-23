@@ -3,9 +3,15 @@ import type { BlockPosition, Position3, WorldView } from "./world.js";
 
 // Measured on our pinned 1.21.4 physics: sink .025, rise .175 blocks/tick.
 // Include acceleration and centring, rather than pricing terminal speed alone.
+// Horizontal, counted on the real server (scenario swim-stroke-ticks, 2026-10-23, 5 quiet and 3 loaded runs, 109 one-block
+// steps): median 15, 13..16 for 9 in 10; a stroke straight on 14 (13..15), one turning at its end 16 (15..17). It was priced
+// 14 and the way back to air then ran out of air at the last siphon (plan red-flaky-scenarios T6, T7). Up and down stay: their
+// whole legs swam under the price (up 20..21 of 28, 34 of 38; down 95..139 of 140).
 export const SWIM_DOWN_TICKS = 44;
 export const SWIM_UP_TICKS = 10;
-export const SWIM_HORIZONTAL_TICKS = 14;
+export const SWIM_HORIZONTAL_TICKS = 16;
+/** Ticks added once to a swim for the first stroke from rest. */
+export const SWIM_START_TICKS = 8;
 export const DIVE_RESERVE_TICKS = 65;
 export const DIVE_BACKSTOP_TICKS = 25;
 
@@ -137,7 +143,7 @@ export function swimBreathPath(read: SwimCellReader, start: BlockPosition, radiu
 
 export function swimTravelTicks(from: Position3, to: Position3): number {
   return Math.hypot(to.x - from.x, to.z - from.z) * SWIM_HORIZONTAL_TICKS +
-    Math.max(0, from.y - to.y) * SWIM_DOWN_TICKS + Math.max(0, to.y - from.y) * SWIM_UP_TICKS + 8;
+    Math.max(0, from.y - to.y) * SWIM_DOWN_TICKS + Math.max(0, to.y - from.y) * SWIM_UP_TICKS + SWIM_START_TICKS;
 }
 
 /**
@@ -158,11 +164,17 @@ export function holdSwimDepth(y: number, velocityY: number, targetY: number): bo
 export interface DiveAdmission {
   readonly origin: Position3;
   readonly airTicks: number;
+  /**
+   * A return to air (the breathing stop's, the swim back after a failed run): a cell is admitted while its way up still
+   * fits the air left, with no reserve. The stop fires once the air is at most the way up plus the reserve, so a return
+   * that kept the reserve was refused every cell of its way up (T5 probe 2026-10-21: "shut in at the start").
+   */
+  readonly toAir?: boolean;
 }
 
 /** Ticks to swim the exit path from its first stroke, each stroke priced by its direction as `swimTravelTicks` does. */
 function exitTravelTicks(from: BlockPosition, path: readonly BlockPosition[]): number {
-  let ticks = 8;
+  let ticks = SWIM_START_TICKS;
   let at = from;
   for (const next of path) {
     ticks += next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS;
@@ -177,7 +189,7 @@ function breathTravelTicks(read: SwimCellReader, from: BlockPosition, path: read
   let at = from;
   for (const next of path) {
     if (read(at.x, at.y + 1, at.z) === "water" || read(next.x, next.y + 1, next.z) === "water")
-      ticks += (ticks === 0 ? 8 : 0) + (next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS);
+      ticks += (ticks === 0 ? SWIM_START_TICKS : 0) + (next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS);
     at = next;
   }
   return ticks;
@@ -222,6 +234,6 @@ export function swimAscent(read: WorldView["blockAt"], feet: BlockPosition): Swi
 
 export function admitsDive(read: WorldView["blockAt"], feet: BlockPosition, budget: DiveAdmission, workTicks = 0): boolean {
   const ascent = swimAscent(read, feet);
-  return ascent !== null && swimTravelTicks(budget.origin, feet) + workTicks + ascent.ticks + DIVE_RESERVE_TICKS <=
-    budget.airTicks;
+  const reserve = budget.toAir ? 0 : DIVE_RESERVE_TICKS;
+  return ascent !== null && swimTravelTicks(budget.origin, feet) + workTicks + ascent.ticks + reserve <= budget.airTicks;
 }
