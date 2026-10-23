@@ -12,11 +12,12 @@ import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
-import { attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
+import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
-import { attachFakeVehicle } from "./fake-bot-vehicle.js";
+import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
+import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
 import { attachFakeWindows } from "./fake-bot-windows.js";
 import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeClock, createFakeClock } from "./fake-clock.js";
@@ -41,6 +42,8 @@ type Point = Vec3 | { readonly x: number; readonly y: number; readonly z: number
 export interface FakeEntitySpec {
   readonly name: string;
   readonly position: Point;
+  /** Entities (by name) riding it from the start, seated on the server and on the client. */
+  readonly passengers?: readonly string[];
   readonly [extra: string]: unknown;
 }
 
@@ -200,10 +203,12 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   server.onPosition(({ x, y, z }) => client.emit("position", { x, y, z, yaw: 0, pitch: 0, flags: {}, teleportId: 0 }));
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
-  attachFakeVehicle(bot, server);
+  const serverEntities = attachFakeEntities(bot, { clock, server, inventory, entities });
+  attachFakeVehicle(bot, { clock, server });
+  attachFakeBoatDamage(bot, { clock, server, entities: serverEntities });
+  seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
   const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {} });
   attachFakeUse(bot, { clock, server, world, inventory, entities });
-  const serverEntities = attachFakeEntities(bot, { clock, server, inventory, entities });
   attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn, windows });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
@@ -220,7 +225,21 @@ function spawnedEntities(
   return Object.fromEntries(
     Object.entries(specs).map(([id, { name, position, ...extra }]) => {
       const entity = make(name, new Vec3(position.x, position.y, position.z), Number(id));
-      return [id, Object.assign(entity, extra)];
+      return [id, Object.assign(entity, withoutPassengers(extra))];
     }),
   );
+}
+
+/** The extra fields of an entity spec without `passengers`, which is not a field of the entity but its riders. */
+function withoutPassengers(extra: Record<string, unknown>): Record<string, unknown> {
+  const { passengers: _passengers, ...rest } = extra;
+  return rest;
+}
+
+/** The riders the specs name, made and seated on their vehicles (the server's `Passengers` at the start). */
+function seatPassengersOfSpecs(bot: FakeBot, server: FakeServer, entities: FakeEntities, specs: Readonly<Record<number, FakeEntitySpec>>): void {
+  for (const [id, { passengers = [] }] of Object.entries(specs)) {
+    const vehicle = bot.entities[Number(id)]!;
+    seatStartingPassengers(bot, server, vehicle, passengers.map((name) => entities.make(name, vehicle.position, entities.nextId())));
+  }
 }

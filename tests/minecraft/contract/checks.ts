@@ -13,7 +13,10 @@ import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
+import { boatBrokenByAttack } from "./checks/boat-broken-by-attack.ts";
+import { boatMountRefused } from "./checks/boat-mount-refused.ts";
 import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
+import { boatShiftWithinOneTick } from "./checks/boat-shift-within-one-tick.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
@@ -45,13 +48,17 @@ export interface ContractFixture {
   readonly containers?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   /** The bot's feet, on the floor. */
   readonly position: Cell;
-  readonly entities?: readonly { readonly name: string; readonly position: Cell }[];
   /** The day time set before the check (`time set`); the template's world stands at noon. */
   readonly timeOfDay?: number;
   /** Whether the day cycle runs: the template stops it, and a night is skipped only by a world whose time runs. */
   readonly daylightCycle?: boolean;
   /** The weather set before the check; the template's world is clear. */
   readonly weather?: Weather;
+  /**
+   * `nbt` is the raw SNBT the server summons the entity with (Mine Labs `entities[].nbt`); the fake does not read it.
+   * `passengers` are entities (by name) that ride it from the start, on both sides: the server gets them as `Passengers` nbt.
+   */
+  readonly entities?: readonly { readonly name: string; readonly position: Cell; readonly nbt?: string; readonly passengers?: readonly string[] }[];
 }
 
 export interface ContractCheck {
@@ -78,6 +85,9 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   boatDismountIgnored,
   boatPlacedByUse,
   boatFollowsVehicleMove,
+  boatBrokenByAttack,
+  boatShiftWithinOneTick,
+  boatMountRefused,
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,

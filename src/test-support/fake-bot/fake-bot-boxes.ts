@@ -40,3 +40,10 @@ function cellsReachedBy(box: Box): [number, number, number][] {
 export function boxMeetsEntity(base: Vec3, width: number, height: number, other: Entity): boolean {
   return boxesOverlap(boxAt(base, width, height), boxAt(other.position, other.width, other.height));
 }
+
+/** How far `point` is from the nearest point of the box of `width` x `height` standing at `base` (0 inside it). */
+export function distanceToBox(point: Vec3, base: Vec3, width: number, height: number): number {
+  const [minX, minY, minZ, maxX, maxY, maxZ] = boxAt(base, width, height);
+  const gap = (value: number, min: number, max: number) => Math.max(min - value, 0, value - max);
+  return Math.hypot(gap(point.x, minX, maxX), gap(point.y, minY, maxY), gap(point.z, minZ, maxZ));
+}

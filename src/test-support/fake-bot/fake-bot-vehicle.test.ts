@@ -49,7 +49,7 @@ test("a vehicle_move moves the server's boat and the client sees it follow; a mo
   assert.equal(bot.entities[BOAT_ID]!.position.x, LAST_FREE_X);
   assert.deepEqual(moved, [3.7, 3.9, 4.1, LAST_FREE_X]);
   assert.equal(server.serverPositionOf(BOAT_ID)!.x, LAST_FREE_X);
-  assert.equal(bot.entity.position.x, 0.5, "Mineflayer does not move a rider with her vehicle (entities.js: only the passenger list is read)");
+  assert.equal(bot.entity.position.x, 3.5, "put at the seat when seated (contract check boat-broken-by-attack); the boat's later moves do not move her again (unmeasured)");
   // A move into the bank block (the boat is 1.375 wide: edge 5.19 against the block at x 5) is put back.
   const corrections: unknown[] = [];
   bot._client.on("vehicle_move", (packet: unknown) => void corrections.push(packet));

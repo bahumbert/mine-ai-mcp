@@ -74,7 +74,7 @@ export function fakeContractSubject(harness: FakeHarness): ContractSubject {
       server.answer(() => world.setCell(cell, block));
       await clock.advance(50);
     },
-    seatedOnServer: async (vehicle) => server.riderOf(vehicle.id) === bot.entity.id,
+    seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
     async setWeather(weather) {
       server.answer(() => server.setWeather(weather));
       await clock.advance(50);

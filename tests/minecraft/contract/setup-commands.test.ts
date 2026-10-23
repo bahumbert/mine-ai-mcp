@@ -82,3 +82,26 @@ test("setupCommands fills a container's slots from 0 after its setblock, splitti
   assert.equal(setupCommands({ cells, carried: {}, position: [0.5, -60, 0.5] }).setup.length, 3);
   assert.throws(() => setupCommands({ cells: {}, carried: {}, containers: { "0,-60,0": { dirt: 1 } }, position: [0.5, -60, 0.5] }), /no block in cells/);
 });
+
+test("setupCommands hands an entity's nbt to the YAML and leaves the key out of an entity with none", () => {
+  const { entities } = setupCommands({
+    cells: {},
+    carried: {},
+    position: [0.5, -60, 0.5],
+    entities: [
+      { name: "oak_boat", position: [2.5, -60, 0.5], nbt: '{Passengers:[{id:"minecraft:armor_stand"}]}' },
+      { name: "oak_boat", position: [-2.5, -60, 0.5] },
+    ],
+  });
+  assert.deepEqual(entities, [
+    { type: "oak_boat", pos: [2.5, -60, 0.5], nbt: '{Passengers:[{id:"minecraft:armor_stand"}]}' },
+    { type: "oak_boat", pos: [-2.5, -60, 0.5] },
+  ]);
+});
+
+test("setupCommands summons an entity's passengers with it as Passengers nbt, and refuses passengers beside a raw nbt", () => {
+  const boat = { name: "oak_boat", position: [2.5, -60, 0.5] as const };
+  const { entities } = setupCommands({ cells: {}, carried: {}, position: [0.5, -60, 0.5], entities: [{ ...boat, passengers: ["armor_stand", "armor_stand"] }] });
+  assert.deepEqual(entities, [{ type: "oak_boat", pos: [2.5, -60, 0.5], nbt: '{Passengers:[{id:"minecraft:armor_stand"},{id:"minecraft:armor_stand"}]}' }]);
+  assert.throws(() => setupCommands({ cells: {}, carried: {}, position: [0.5, -60, 0.5], entities: [{ ...boat, nbt: "{}", passengers: ["armor_stand"] }] }), /nbt or passengers/);
+});

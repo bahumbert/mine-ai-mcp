@@ -36,7 +36,7 @@ test("the server letting her off (her boat's passenger list without her) forgets
   assert.deepEqual(boat.passengers, []);
   assert.deepEqual(dismounts, [boat]);
   assert.equal(positions.length, 1, "physics is switched back on where she is");
-  assert.deepEqual([positions[0]!.x, positions[0]!.y, positions[0]!.z], [20.5, 62.96, 0.5]);
+  assert.deepEqual([positions[0]!.x, positions[0]!.y, positions[0]!.z], self.position.toArray(), "where she is: at the seat the server put her client at");
   stop();
 });
 

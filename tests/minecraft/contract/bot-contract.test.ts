@@ -14,8 +14,8 @@ const FIRST_FIXTURE_ENTITY_ID = 100;
 /** The fixture's world on the fake: the cells, stacks and feet as given, the floor at the fake's default ground. */
 function fakeHarnessFor(fixture: ContractFixture) {
   const entities: Record<number, FakeEntitySpec> = {};
-  (fixture.entities ?? []).forEach(({ name, position }, index) => {
-    entities[FIRST_FIXTURE_ENTITY_ID + index] = { name, position: new Vec3(...position) };
+  (fixture.entities ?? []).forEach(({ name, position, passengers }, index) => {
+    entities[FIRST_FIXTURE_ENTITY_ID + index] = { name, position: new Vec3(...position), ...(passengers !== undefined && { passengers }) };
   });
   return createFakeBot({
     clock: createFakeClock({ mode: "mocked" }),

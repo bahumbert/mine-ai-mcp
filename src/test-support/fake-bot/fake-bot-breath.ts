@@ -9,6 +9,7 @@ import type { FakeBot } from "./fake-bot.js";
 import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
+import { onServerTick } from "./fake-bot-server-ticks.js";
 
 /** The full air (`LivingEntity.getMaxAirSupply`): 15 ticks a bubble, 20 bubbles; its client reading is `Math.round(air / 15)`. */
 const FULL_AIR = 300;
@@ -16,7 +17,6 @@ const TICKS_PER_BUBBLE = 15;
 /** Air lost per server tick under water and gained per tick out of it (contract check `air-supply-under-water`). */
 const AIR_LOST_PER_TICK = 1;
 const AIR_GAINED_PER_TICK = 4;
-const TICK_MS = 50;
 /** `Entity.updateFluidOnEyes`: the point a ninth of a block under the eye is tested against the fluid of its cell. */
 const EYE_FLUID_MARGIN = 1 / 9;
 /** Blocks whose fluid is water in the game (a waterlogged block is read from its property). */
@@ -80,15 +80,11 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
     bot.emit("breath");
   };
   const send = (ticks: number) => parts.server.answer(() => hear(ticks));
-  let accumulatedMs = 0;
-  parts.clock.onSlice("server", (sliceMs) => {
-    if (!parts.server.isRunning) return;
-    for (accumulatedMs += sliceMs; accumulatedMs >= TICK_MS; accumulatedMs -= TICK_MS) {
-      const next = eyeInWater(bot) ? Math.max(0, air - AIR_LOST_PER_TICK) : Math.min(FULL_AIR, air + AIR_GAINED_PER_TICK);
-      if (next === air) continue;
-      air = next;
-      send(air);
-    }
+  onServerTick(parts.clock, parts.server, () => {
+    const next = eyeInWater(bot) ? Math.max(0, air - AIR_LOST_PER_TICK) : Math.min(FULL_AIR, air + AIR_GAINED_PER_TICK);
+    if (next === air) return;
+    air = next;
+    send(air);
   });
   // Mineflayer's `oxygenLevel` is a plain property the packet writes; this one is too, with the level also kept here
   // so a test replacing the property (`waterFixture`) leaves the packet's write alone.

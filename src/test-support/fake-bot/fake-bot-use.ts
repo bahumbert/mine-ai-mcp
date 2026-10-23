@@ -12,6 +12,7 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
+import { BOAT_NAME } from "./fake-bot-entity-reach.js";
 import { boxMeetsBlocks, boxMeetsEntity } from "./fake-bot-boxes.js";
 import type { FakeEntities } from "./fake-bot-items.js";
 import { holdsWater } from "../../navigation/world/deep-water.js";
@@ -37,8 +38,6 @@ const BLOCK_REACH = 4.5;
 /** The look is walked in steps of this length to meet a fluid, then the meeting is narrowed by halving. */
 const FLUID_STEP = 0.02;
 const FLUID_REFINEMENTS = 12;
-/** The boats' items are named like their entities (`oak_boat`, `bamboo_raft`): the entity put down is the item's name. */
-const BOAT_ITEM_NAME = /_(boat|raft)$/;
 /** A boat on water sinks to rest this far below the surface, about 1.5 s after it is put (-60.111 to -60.477 measured). */
 const REST_BELOW_SURFACE = 0.366;
 const REST_AFTER_MS = 1_500;
@@ -125,7 +124,7 @@ function restOnWater(bot: FakeBot, parts: UseParts, boat: Entity, surface: numbe
 /** The server's side of a `use_item`: a boat item held is put where the look meets, one taken from the stack outside creative. */
 function answerUse(bot: FakeBot, parts: UseParts, hand: number, rotation: { x: number; y: number }): void {
   const held = heldIn(parts.inventory, hand);
-  const entity = held === null || !BOAT_ITEM_NAME.test(held.name) ? undefined : bot.registry.entitiesByName[held.name];
+  const entity = held === null || !BOAT_NAME.test(held.name) ? undefined : bot.registry.entitiesByName[held.name];
   if (held === null || entity === undefined) return;
   const eye = (parts.server.serverPositionOf(bot.entity.id) ?? bot.entity.position).offset(0, eyeHeightOf(bot.entity), 0);
   const meeting = lookMeeting(bot, eye, lookDirection(rotation));

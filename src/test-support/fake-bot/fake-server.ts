@@ -69,10 +69,13 @@ export interface FakeServer {
   onWeatherPacket(listener: (packet: WeatherPacket) => void): () => void;
   /** Set the day time and tell the client at once (`ServerLevel.setDayTime`: the skip of a night). */
   setDayTime(ticks: number): void;
-  /** The server's record of who sits in `vehicleId` (an entity id), which the client never hears about. */
+  /** The server's record of who sits in `vehicleId` (an entity id), which the client never hears about: the first rider. */
   riderOf(vehicleId: number): number | null;
+  /** Every rider of `vehicleId`, in the order they sat (a boat has two seats). */
+  ridersOf(vehicleId: number): readonly number[];
   seatRider(vehicleId: number, riderId: number): void;
-  freeRider(vehicleId: number): void;
+  /** `riderId` leaves `vehicleId`; without one, everyone does. */
+  freeRider(vehicleId: number, riderId?: number): void;
   /** Record a packet the client wrote and hand it to the handlers of its name. */
   receive(name: string, data: unknown): void;
   /** React to the client's packets of `name` (the server's side of a dig, a placement, a shift). */
@@ -144,13 +147,26 @@ function createPositions(): Pick<FakeServer, "serverPositionOf" | "setServerPosi
   };
 }
 
+/** The server's record of riders: `riderId` sits last in `vehicleId`. */
+function seatInRecord(riders: Map<number, number[]>, vehicleId: number, riderId: number): void {
+  riders.set(vehicleId, [...(riders.get(vehicleId) ?? []).filter((id) => id !== riderId), riderId]);
+}
+
+/** `riderId` leaves `vehicleId` in the record; without one, everyone does. */
+function freeFromRecord(riders: Map<number, number[]>, vehicleId: number, riderId?: number): void {
+  const left = riderId === undefined ? [] : (riders.get(vehicleId) ?? []).filter((id) => id !== riderId);
+  if (left.length === 0) riders.delete(vehicleId);
+  else riders.set(vehicleId, left);
+}
+
 /** The server's record of who sits in which vehicle, which the client never hears about. */
-function createRiders(): Pick<FakeServer, "riderOf" | "seatRider" | "freeRider"> {
-  const riders = new Map<number, number>();
+function createRiders(): Pick<FakeServer, "riderOf" | "ridersOf" | "seatRider" | "freeRider"> {
+  const riders = new Map<number, number[]>();
   return {
-    riderOf: (vehicleId) => riders.get(vehicleId) ?? null,
-    seatRider: (vehicleId, riderId) => void riders.set(vehicleId, riderId),
-    freeRider: (vehicleId) => void riders.delete(vehicleId),
+    riderOf: (vehicleId) => riders.get(vehicleId)?.[0] ?? null,
+    ridersOf: (vehicleId) => riders.get(vehicleId) ?? [],
+    seatRider: (vehicleId, riderId) => seatInRecord(riders, vehicleId, riderId),
+    freeRider: (vehicleId, riderId) => freeFromRecord(riders, vehicleId, riderId),
   };
 }
 

@@ -731,18 +731,18 @@ test("a cancel while a stopped route is judged ends the navigate with the cancel
 });
 
 test("at sea with a boat carried the route is unchanged: no land leg", async () => {
-  // The boat is put down and ridden on the shared fake's server (the crossing waits on the wall clock: a mocked one); the ride
-  // ends on `bot.attack` (taking the boat back), which the fake has from T3b-A2: this test asserts the land leg only.
+  // The boat is put down, ridden and taken back on the shared fake's server (the crossing waits on the wall clock: a mocked one).
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();
   const { bot } = wideSeaBot(-30, 9, { carried: { oak_boat: 1 }, clock });
-  let calls = 0;
+  const startedAtX: number[] = [];
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
-    calls++;
+    startedAtX.push(bot.entity.position.x);
     return { status: "stopped", reason: "no path found", elapsedMs: 5 };
   }));
   await clock.settle(new ActionRunner().run(action, { x: -60, y: 64, z: 0 }), 120_000);
-  assert.equal(calls, 1);
+  assert.equal(startedAtX[0], 0.5, "the first leg starts where she is: no swim to land first");
+  assert.ok(startedAtX.length > 1 && startedAtX.at(-1)! < -28, "the boat took her over the sea, and the planner went on from the far bank");
 });
 
 test("a bot on land is not sent to land first", async () => {

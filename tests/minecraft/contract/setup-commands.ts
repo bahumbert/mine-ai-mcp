@@ -13,7 +13,7 @@ export interface ContractArrangement {
   /** The YAML's `setup` lines, in order. */
   readonly setup: readonly string[];
   readonly player: { readonly pos: readonly [number, number, number]; readonly inventory: readonly { item: string; count: number }[] };
-  readonly entities: readonly { readonly type: string; readonly pos: readonly [number, number, number] }[];
+  readonly entities: readonly { readonly type: string; readonly pos: readonly [number, number, number]; readonly nbt?: string }[];
 }
 
 /** Throws when a cell or the feet leave the arena: outside it the reset and the snapshot do not reach. */
@@ -54,8 +54,18 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
       ...worldLines,
     ],
     player: { pos: fixture.position, inventory: Object.entries(fixture.carried).map(([item, count]) => ({ item, count })) },
-    entities: (fixture.entities ?? []).map(({ name, position }) => ({ type: name, pos: position })),
+    entities: (fixture.entities ?? []).map((entity) => {
+      const nbt = entityNbt(entity);
+      return { type: entity.name, pos: entity.position, ...(nbt !== undefined && { nbt }) };
+    }),
   };
+}
+
+/** The SNBT an entity is summoned with: its raw `nbt`, or its `passengers` as the `Passengers` it rides with; both is a mistake. */
+function entityNbt({ nbt, passengers }: NonNullable<ContractFixture["entities"]>[number]): string | undefined {
+  if (nbt !== undefined && passengers !== undefined) throw new Error("an entity takes nbt or passengers, not both: passengers are nbt");
+  if (passengers === undefined) return nbt;
+  return `{Passengers:[${passengers.map((name) => `{id:"minecraft:${name}"}`).join(",")}]}`;
 }
 
 /** The YAML's `client.args`: the host and the contract driver, bare when the check measures the server alone. */
