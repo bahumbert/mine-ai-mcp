@@ -212,7 +212,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeVehicle(bot, { clock, server });
   attachFakeBoatDamage(bot, { clock, server, entities: serverEntities });
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
-  const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {} });
+  const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {}, spawn: serverEntities.spawn });
   attachFakeUse(bot, { clock, server, world, inventory, entities });
   attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
   attachFakePlacement(bot, { clock, server, world, inventory, windows });

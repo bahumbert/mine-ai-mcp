@@ -1,5 +1,6 @@
 /** What a window check reads of the packets between server and client: their names in arrival order, and the slots they carry. */
 import type { Bot } from "mineflayer";
+import { createRequire } from "node:module";
 
 export interface WindowPacket {
   readonly name: string;
@@ -40,4 +41,38 @@ export function variantStackOf(item: { readonly name: string; readonly count: nu
 /** The stacks of `slots` of a window, by slot number. */
 export function slotsOf(window: { readonly slots: readonly ({ readonly name: string; readonly count: number } | null)[] }, slots: readonly number[]): Record<number, string | null> {
   return Object.fromEntries(slots.map((slot) => [slot, stackOf(window.slots[slot])]));
+}
+
+/** What the client got of one answer: the slot it carries (`set_slot` only) and the stack as `variantStackOf` reads it (`null` for an empty slot). */
+export interface WindowAnswer {
+  readonly name: "set_slot" | "set_cursor_item";
+  /** `set_slot` only: the window the slot is in (0 is the player's). */
+  readonly windowId?: number;
+  readonly slot?: number;
+  readonly stack: string | null;
+}
+
+/** Record the stacks the server's `set_slot` and `set_cursor_item` carry (decoded as Mineflayer decodes a window's items) until `stop()`: the server's own view of a slot and of the hand, whatever the client predicted. */
+export function recordWindowAnswers(bot: Bot): { readonly answers: WindowAnswer[]; stop(): void } {
+  const answers: WindowAnswer[] = [];
+  const ItemClass = createRequire(import.meta.url)("prismarine-item")(bot.registry) as { fromNotch(notch: unknown): Parameters<typeof variantStackOf>[0] };
+  const onSlot = (packet: { windowId: number; slot: number; item: unknown }) => void answers.push({ name: "set_slot", windowId: packet.windowId, slot: packet.slot, stack: variantStackOf(ItemClass.fromNotch(packet.item)) });
+  const onCursor = (packet: { contents: unknown }) => void answers.push({ name: "set_cursor_item", stack: variantStackOf(ItemClass.fromNotch(packet.contents)) });
+  bot._client.on("set_slot", onSlot);
+  bot._client.on("set_cursor_item", onCursor);
+  return {
+    answers,
+    stop: () => {
+      bot._client.off("set_slot", onSlot);
+      bot._client.off("set_cursor_item", onCursor);
+    },
+  };
+}
+
+/** Make the client's hand follow the server's `set_cursor_item` (Mineflayer has no handler for it), so the next click is predicted from the stack the server holds. */
+export function followServerCursor(bot: Bot, window: { selectedItem: unknown }): () => void {
+  const ItemClass = createRequire(import.meta.url)("prismarine-item")(bot.registry) as { fromNotch(notch: unknown): unknown };
+  const onCursor = (packet: { contents: unknown }) => void (window.selectedItem = ItemClass.fromNotch(packet.contents));
+  bot._client.on("set_cursor_item", onCursor);
+  return () => bot._client.off("set_cursor_item", onCursor);
 }

@@ -5,7 +5,7 @@ import minecraftData from "minecraft-data";
 import type { Item } from "prismarine-item";
 import { itemOf } from "../test-support/fake-bot/fake-inventory.js";
 import { variantItemOf } from "../test-support/fake-bot/item-variants.js";
-import { itemVariantKey, sameItemVariant } from "./item-variant.js";
+import { isPlainItem, itemVariantKey, sameItemVariant } from "./item-variant.js";
 
 const registry = minecraftData("1.21.4");
 const ItemClass = (createRequire(import.meta.url)("prismarine-item") as (registry: unknown) => typeof Item)(registry);
@@ -68,4 +68,13 @@ test("an item of a version with no components keys by its nbt: equal nbt the sam
   assert.equal(sameItemVariant(named("a"), named("a")), true);
   assert.equal(sameItemVariant(named("a"), named("b")), false);
   assert.equal(sameItemVariant(named("a"), new OldItem(cobblestone, 1, 0)), false);
+});
+
+test("only a stack with no components and none removed is plain: a renamed, enchanted, damaged or default-stripped one is not, a plain pickaxe is despite its Damage nbt", () => {
+  assert.equal(isPlainItem(itemOf(registry, "cobblestone", 4)), true);
+  assert.equal(isPlainItem(notchItem("cobblestone", [])), true, "fromNotch with empty lists");
+  assert.equal(isPlainItem(itemOf(registry, "diamond_pickaxe")), true, "a pickaxe built by the constructor carries Damage 0 in nbt");
+  assert.equal(isPlainItem(notchItem("diamond_pickaxe", [])), true, "and one from the server too");
+  for (const variant of ["renamed_first_cobblestone", "enchanted_cobblestone", "damaged_diamond_pickaxe"] as const) assert.equal(isPlainItem(variantItemOf(registry, variant, 1)), false, variant);
+  assert.equal(isPlainItem(notchItem("cobblestone", [], [{ type: "max_stack_size" }])), false, "a removed default component");
 });

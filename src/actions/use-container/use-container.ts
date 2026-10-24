@@ -177,7 +177,7 @@ async function executeTransferBatch(
     const available = operation === "deposit" ? bot.inventory.count(itemType, null) : itemCount(before, item.itemName);
     const attempted = Math.min(available, item.count - alreadyMoved[index]!);
     const attempt =
-      attempted <= 0 ? { kind: "not_attempted" as const } : await container.transfer(operation, itemType, attempted);
+      attempted <= 0 ? { kind: "not_attempted" as const } : await container.transfer(operation, itemType, attempted, signal);
     executions.push({ ...item, available, attempt });
   }
   return {

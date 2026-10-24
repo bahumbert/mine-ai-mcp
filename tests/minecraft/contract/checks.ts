@@ -25,6 +25,7 @@ import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
 import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
 import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
+import { variantTransferClicks } from "./checks/variant-transfer-clicks.ts";
 import { boatBrokenByAttack } from "./checks/boat-broken-by-attack.ts";
 import { boatMountRefused } from "./checks/boat-mount-refused.ts";
 import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
@@ -119,6 +120,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   clickWindowShiftMove,
   clickWindowOntoVariant,
   clickWindowVariantSplit,
+  variantTransferClicks,
   chestOpenTakeClose,
   itemVariantComponents,
   itemPickupAfterDelay,

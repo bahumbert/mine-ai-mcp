@@ -7,6 +7,7 @@
 import type { Bot } from "mineflayer";
 import { createRequire } from "node:module";
 import type { FakeBot } from "./fake-bot.js";
+import type { ServerEntities } from "./fake-bot-entities.js";
 import type { FakeInventory } from "./fake-inventory.js";
 import { type FakeWindowServer, type FakeWindows, LOGIN_PLAYER_STATE_ID, createWindowServer } from "./fake-window-server.js";
 import type { FakeServer } from "./fake-server.js";
@@ -128,7 +129,7 @@ function followClientPredictions(bot: FakeBot, windows: FakeWindowServer): void 
 /** The windows are installed at the first call: the plugins add some thirty client listeners, which most tests never need. */
 export function attachFakeWindows(
   bot: FakeBot,
-  parts: { server: FakeServer; world: FakeWorld; inventory: FakeInventory; containers: Readonly<Record<string, Readonly<Record<string, number>>>> },
+  parts: { server: FakeServer; world: FakeWorld; inventory: FakeInventory; containers: Readonly<Record<string, Readonly<Record<string, number>>>>; spawn: ServerEntities["spawn"] },
 ): FakeWindows {
   const windows: FakeWindowServer = createWindowServer(bot, parts);
   let installed: WindowApi | undefined;

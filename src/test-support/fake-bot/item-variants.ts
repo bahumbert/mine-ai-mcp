@@ -67,3 +67,11 @@ export function stackNameOf(registry: Registry, item: Item): string {
   const variant = (Object.keys(ITEM_VARIANTS) as ItemVariantName[]).find((name) => sameItemVariant(item, variantItemOf(registry, name, 1)));
   return variant ?? item.name;
 }
+
+/** A stack as tests read it: `name xN`, with its custom name when it has one (`cobblestone x5 "first"`), or null for an empty slot. */
+export function stackText(item: { readonly name: string; readonly count: number } | null | undefined): string | null {
+  if (!item) return null;
+  const components = (Reflect.get(item, "components") ?? []) as { type: string; data: { value?: string } }[];
+  const renamed = components.find(({ type }) => type === "custom_name")?.data.value;
+  return `${item.name} x${item.count}${renamed === undefined ? "" : ` "${renamed}"`}`;
+}

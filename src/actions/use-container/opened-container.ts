@@ -3,6 +3,7 @@ import type { Bot } from "mineflayer";
 import type { ContainerContent } from "../../bot-data/index.js";
 import { itemVariantKey, sameItemVariant } from "../../world/item-variant.js";
 import { useContainerOutcomes } from "./contract.js";
+import { transferByVariant } from "./variant-transfer.js";
 import { type ClickWaitTiming, watchClickAnswer } from "./window-answer.js";
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
@@ -105,14 +106,18 @@ export class OpenedContainer implements Disposable {
     };
   }
 
+  /**
+   * Move up to `count` of an item between the inventory and the container by clicks that tell variants apart (`transferByVariant`; Mineflayer's
+   * `deposit` and `withdraw` match by `nbt`, null on 1.21.4). An abort rejects the attempt with the signal's reason after the stack in hand went back.
+   */
   async transfer(
     operation: "deposit" | "withdraw",
     itemType: number,
     count: number,
+    signal?: AbortSignal,
   ): Promise<ContainerOperationAttempt> {
     try {
-      if (operation === "deposit") await this.window.deposit(itemType, null, count);
-      else await this.window.withdraw(itemType, null, count);
+      await transferByVariant(this.bot, this.window, operation, itemType, count, { ...(signal && { signal }), ...(this.timing && { timing: this.timing }) });
       return { kind: "completed" };
     } catch (cause) {
       return { kind: "failed", cause };

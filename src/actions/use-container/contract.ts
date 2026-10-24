@@ -245,7 +245,7 @@ export const useContainerOutcomes = {
   openFailed: (cause: unknown) =>
     `[CONTAINER_OPEN_FAILED] Mineflayer could not open the observed container: ${cause instanceof Error ? cause.message : String(cause)}`,
   transferFailed: (operation: "deposit" | "withdraw", cause: unknown) =>
-    `[CONTAINER_TRANSFER_FAILED] Mineflayer could not ${operation}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    `[CONTAINER_TRANSFER_FAILED] Could not ${operation}: ${cause instanceof Error ? cause.message : String(cause)}`,
   transferIncomplete: (operation: "deposit" | "withdraw", transferred: number, requested: number) =>
     `[CONTAINER_TRANSFER_INCOMPLETE] Observed ${operation} transfer ${transferred}/${requested}.`,
   batchIncomplete: (items: readonly ContainerTransferResult[]) =>

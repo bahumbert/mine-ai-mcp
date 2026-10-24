@@ -1,21 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, stackText } from "../../test-support/fake-bot/index.js";
 import { CLICK_ANSWER_WALL_MS } from "./window-answer.js";
 import { OpenedContainer } from "./opened-container.js";
 
 const CELL = "1,64,1";
 /** Ticks the world age moves before "the server sent nothing" is its answer (`SERVER_ANSWER_TICKS`). */
 const QUIET_TICKS = 40;
-
-/** A stack as these tests read it: `name xN`, with its custom name when it has one. */
-function stackText(item: { readonly name: string; readonly count: number } | null | undefined): string | null {
-  if (!item) return null;
-  const components = (Reflect.get(item, "components") ?? []) as { type: string; data: { value?: string } }[];
-  const renamed = components.find(({ type }) => type === "custom_name")?.data.value;
-  return `${item.name} x${item.count}${renamed === undefined ? "" : ` "${renamed}"`}`;
-}
 
 /** The bot beside a chest at CELL holding `stacks` (names of items or of `ITEM_VARIANTS`, by slot); the waits under test read the harness clock. */
 function chest(stacks: readonly { slot: number; name: string; count: number }[]) {

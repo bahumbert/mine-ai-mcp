@@ -39,3 +39,12 @@ export function itemVariantKey(item: ItemVariantFields): string {
 export function sameItemVariant(left: ItemVariantFields, right: ItemVariantFields): boolean {
   return itemVariantKey(left) === itemVariantKey(right);
 }
+
+/**
+ * Whether the stack has no components and removes none: the plain item a request by name means (a renamed or enchanted one is a
+ * variant). `nbt` is not read: a damageable 1.21.4 item gets Prismarine's own `Damage` 0 there whatever its damage (contract check
+ * `item-variant-components`), so a plain pickaxe has one.
+ */
+export function isPlainItem(item: ItemVariantFields): boolean {
+  return sortedEntries(item, "components").length === 0 && sortedEntries(item, "removedComponents").length === 0;
+}

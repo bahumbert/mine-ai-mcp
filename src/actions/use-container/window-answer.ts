@@ -55,7 +55,7 @@ export function watchClickAnswer(bot: Bot, window: ContainerWindow, timing?: Cli
         const waited = await waitForServerAnswer(bot, sentAtAge, { wallMs: CLICK_ANSWER_WALL_MS, until: () => corrected, ...(signal && { signal }), ...(timing && { now: timing.now, sleep: (ms: number) => timing.sleep(ms, signal) }) });
         if (waited === "timeout") {
           throw new Error(
-            `The server did not answer the click on slot ${slot} within ${CLICK_ANSWER_WALL_MS} ms (world age ${bot.time?.age ?? "unknown"}): it is lagging or stopped. Reopen the container and read its layout before organizing again.`,
+            `The server did not answer the click on slot ${slot} within ${CLICK_ANSWER_WALL_MS} ms (world age ${bot.time?.age ?? "unknown"}): it is lagging or stopped. Reopen the container and read its layout before moving more.`,
           );
         }
         if (corrected) await (timing?.sleep ?? sleepMs)(CURSOR_FOLLOWS_SLOT_MS, signal);

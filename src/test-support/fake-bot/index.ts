@@ -9,3 +9,4 @@ export { EQUIPMENT_SLOTS, type FakeInventory, type FakeInventoryOptions, createF
 export { type FakeServer, type FakeServerOptions, type ReceivedPacket, type Weather, type WeatherPacket, createFakeServer } from "./fake-server.js";
 export { type FakeCell, type FakeWorld, type FakeWorldOptions, blockUpdateEventOf, createFakeWorld } from "./fake-world.js";
 export { type ChunkCoords, DEFAULT_LOADED_CHUNK_RADIUS, type FakeColumn, type ListedColumn } from "./fake-world-columns.js";
+export { stackText } from "./item-variants.js";
