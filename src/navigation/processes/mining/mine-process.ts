@@ -41,7 +41,7 @@ import { CastTargets } from "./cast-targets.js";
 import { DROP_PICKUP_TIMEOUT_MS, MineDropTracker } from "./mine-drops.js";
 import { clearMiningWater } from "./mining-water.js";
 import { waterMiningStance } from "../../world/water.js";
-import { lavaClosuresOf, lavaFacesOf, type MineTargetDecision } from "./target-safety.js";
+import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
 
 /** A loaded Mineflayer block, which is what `matches` is asked about. */
 export type MinecraftBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
@@ -342,12 +342,10 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
       rejections.set(decision.reason, (rejections.get(decision.reason) ?? 0) + 1);
       continue;
     }
-    blocks.push({
-      position: block.position,
-      kind: "block",
-      routeMayBreak: decision.routeMayBreak,
-      excludedStances: blacklist.blockStances.get(key) ?? new Set(),
-    });
+    // The block under the bot's feet stays a target; only its top cell stops being a stance to work it from.
+    const excludedStances = new Set(blacklist.blockStances.get(key));
+    if (standsOnBlock(bot, block.position)) excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
+    blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances });
     if (blocks.length === MAX_MINE_TARGETS) break;
   }
 

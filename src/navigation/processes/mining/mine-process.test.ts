@@ -1660,3 +1660,29 @@ test("a swimmer waiting to settle while physics has stopped gives up on the arri
   assert.equal(breakAttempts, 0);
   assert.ok(tickWaitAtMs !== undefined && tickWaitAtMs < 3_000, `the dig wait gave up after ${tickWaitAtMs} ms`);
 });
+
+/**
+ * `collect/mixed-sand`: the bot walks onto the one-block stump of a column to take its drops, and that stump is the last
+ * match. Standing on it is a problem of the stance, not of the block: the run steps off and mines it from the side.
+ */
+test("a bot standing on the only match steps off it and mines it from the side", async () => {
+  const target = new Vec3(0, 63, 0);
+  using scene = mineScene({ blocks: [target], solids: [new Vec3(1, 63, 0)], feet: new Vec3(0.5, 64, 0.5) });
+  const stancesAtBreak: string[] = [];
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => stancesAtBreak.length > 0,
+    breakInPlace: async ({ position }) => {
+      stancesAtBreak.push(`${Math.floor(scene.bot.entity.position.x)},${Math.floor(scene.bot.entity.position.z)}`);
+      scene.world.setCell(cellAt(position), "air");
+      return { status: "broken" };
+    },
+    route: async () => {
+      scene.bot.entity.position = new Vec3(1.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(stancesAtBreak, ["1,0"]);
+});

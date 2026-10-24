@@ -153,6 +153,23 @@ export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, p
 }
 
 /**
+ * Whether the bot stands on the block at `position`, on the ground or dry. Such a block is a fine target but its top cell
+ * is no stance to work it from: the scan excludes that stance and the route steps off (a wader breaking it in place
+ * would let the water into the hole). A swimmer afloat over a submerged block keeps the top stance, the one water
+ * work uses (`sealAndBreakInReach` lets a floating body dig).
+ */
+export function standsOnBlock(bot: Bot, position: BlockPosition): boolean {
+  const feet = bot.entity.position;
+  const floating = Reflect.get(bot.entity, "isInWater") === true && !bot.entity.onGround;
+  return (
+    !floating &&
+    position.x === Math.floor(feet.x) &&
+    position.z === Math.floor(feet.z) &&
+    position.y === Math.ceil(feet.y) - 1
+  );
+}
+
+/**
  * The mine process's one target rule. Callers hand it a loaded matching block;
  * it answers whether the block can come out with the available placement
  * budget, and what has to happen first.
@@ -166,11 +183,7 @@ export function evaluateMineTarget(
 ): MineTargetDecision {
   if (!plausibleToBreak(block)) return { kind: "prohibited", reason: `${block.name} cannot be broken at all` };
   const position = { x: block.position.x, y: block.position.y, z: block.position.z };
-  // Never the block under the bot's own feet, nor a walkway it built over a drop.
-  const feet = bot.entity.position;
-  if (position.x === Math.floor(feet.x) && position.z === Math.floor(feet.z) && position.y === Math.ceil(feet.y) - 1) {
-    return { kind: "prohibited", reason: "the block the bot stands on" };
-  }
+  // Never a walkway the bot built over a drop. The block under its feet is a question of stance (`standsOnBlock`).
   if (isWalkwayOverDrop(movements, world, position)) {
     return { kind: "prohibited", reason: "a walkway over a drop: mining it would strand the bot" };
   }

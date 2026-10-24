@@ -4,7 +4,7 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { flatWorld } from "../../../test-support/navigation.js";
 import { createMovementPolicy } from "../../movements/policy.js";
-import { evaluateMineTarget, lavaClosuresOf } from "./target-safety.js";
+import { evaluateMineTarget, lavaClosuresOf, standsOnBlock } from "./target-safety.js";
 import { BREAK_UNDER_WATER, createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../mineflayer/world.js";
 import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
@@ -126,8 +126,24 @@ test("a bridge over a deep drop is never a mining target, the same block on the 
   assert.match((reasonFor(3) as { reason: string }).reason, /walkway over a drop/);
   assert.equal(reasonFor(1).kind, "mineable", "on the ground");
   assert.deepEqual(reasonFor(0), { kind: "mineable", routeMayBreak: true }, "the ground end of the bridge");
+  // Standing on the ground end is a stance problem the scan answers, not a property of the block.
   bot.entity.position = new Vec3(1.5, 65, 0.5);
-  assert.deepEqual(reasonFor(1), { kind: "prohibited", reason: "the block the bot stands on" });
+  assert.equal(reasonFor(1).kind, "mineable");
+  // Standing over the gap, the block is still the walkway that strands the bot.
+  bot.entity.position = new Vec3(3.5, 65, 0.5);
+  assert.match((reasonFor(3) as { reason: string }).reason, /walkway over a drop/);
+});
+
+test("standsOnBlock: on the block, not beside it or lower in its column; a swimmer afloat over it does not", () => {
+  const { bot } = createFakeBot({ position: new Vec3(1.5, 65, 0.5), groundY: 64 });
+  const block = { x: 1, y: 64, z: 0 };
+  assert.equal(standsOnBlock(bot, block), true);
+  assert.equal(standsOnBlock(bot, { x: 2, y: 64, z: 0 }), false, "the next column");
+  assert.equal(standsOnBlock(bot, { x: 1, y: 63, z: 0 }), false, "a block lower in the column");
+  Object.assign(bot.entity, { isInWater: true, onGround: true });
+  assert.equal(standsOnBlock(bot, block), true, "wading on the block: breaking it in place would let the water in");
+  Object.assign(bot.entity, { onGround: false });
+  assert.equal(standsOnBlock(bot, block), false, "a swimmer afloat works from the top stance");
 });
 
 test("standing mid-bridge over a 20-deep gap, no bridge block is a target; cobblestone on the ground still is", () => {
