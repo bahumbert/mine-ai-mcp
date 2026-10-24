@@ -19,6 +19,8 @@ export interface Trade {
   readonly state: TradeState;
   readonly createdAt: number;
   readonly agreedAt: number | null;
+  /** When their payment last came in (null before any; an old note has none): the clock of the deadline for my give. */
+  readonly receivedAt: number | null;
   /** When my side was handed over. */
   readonly gaveAt: number | null;
   /** Credited so far from the partner. */

@@ -105,10 +105,13 @@ export interface UnfinishedHouse {
   readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
+/** Why a skill failed, for the code that must tell failures apart (the detail is for the model and the journal only). */
+export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come";
+
 export type SkillResult =
   /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */
   | { readonly status: "done"; readonly detail: string; readonly taken?: number }
-  | { readonly status: "failed"; readonly detail: string }
+  | { readonly status: "failed"; readonly detail: string; readonly reason?: FailReason }
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
 
@@ -361,15 +364,25 @@ async function give(context: SkillContext, player: string, item: string, count: 
   return result.status === "done" && taken !== null ? { ...result, taken } : result;
 }
 
-/** A hand-over to a player: how it went, and how many of the items the recipient took (null when the runtime says nothing of a recipient). */
-export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null }> {
+/**
+ * A hand-over to a player: how it went, how many of the items the recipient took (null when the runtime says nothing of a
+ * recipient), and whether the answer is settled: false when the server had not said yet (late or stopped), so the count
+ * may be short of what happened. An old runtime names no `settled`: read as settled.
+ */
+export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null; readonly settled: boolean }> {
   const approach = await come(context, player);
-  if (approach.status !== "done") return { result: approach, taken: null };
+  if (approach.status !== "done") return { result: approach, taken: null, settled: true };
   const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
-  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null };
-  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null };
+  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true };
+  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null, settled: true };
   const detail = handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}`;
-  return { result: { status: "done", detail }, taken: recipientTook(outcome.result) };
+  return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result) };
+}
+
+/** Whether the runtime's answer to a hand-over is final (`drop.recipient.settled`); true when it names no such field. */
+function recipientSettled(result: Readonly<Record<string, unknown>> | undefined): boolean {
+  const settled = ((result?.drop as { recipient?: { settled?: unknown } | null } | undefined)?.recipient)?.settled;
+  return typeof settled === "boolean" ? settled : true;
 }
 
 /** How many items the recipient picked up (the action's `drop.recipient.collectedCount`); null when the result names no recipient. */

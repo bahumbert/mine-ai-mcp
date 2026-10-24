@@ -12,7 +12,7 @@ const snapshotWithTheoAt = (x: number | null): BotSnapshot => ({
   inventory: [{ name: "bread", count: 10 }],
   players: x === null ? [] : [{ username: "Theo", position: { x, y: 64, z: 0 } }],
 });
-const openTrade = (over: Partial<Trade> = {}): Trade => ({ id: "Ayla-Theo-1", partner: "Theo", give: [], get: [], first: "me", state: "proposed", createdAt: 1, agreedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "", ...over });
+const openTrade = (over: Partial<Trade> = {}): Trade => ({ id: "Ayla-Theo-1", partner: "Theo", give: [], get: [], first: "me", state: "proposed", createdAt: 1, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "", ...over });
 const check = (d: TradeDecision, theoAt: number | null, over: { trades?: Trade[]; maxOpenTrades?: number } = {}) =>
   checkTradeDecision({ decision: d, speaker: "Theo", snapshot: snapshotWithTheoAt(theoAt), trades: over.trades ?? [], maxOpenTrades: over.maxOpenTrades ?? 3, reach: 32 });
 

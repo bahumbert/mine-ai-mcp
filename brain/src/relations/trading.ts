@@ -10,6 +10,7 @@ import type { SkillResult } from "../skills.ts";
 import type { TradeController } from "./controller.ts";
 import { minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "../time-spent.ts";
 import { stackSizeOf } from "./item-ids.ts";
+import { carriedOf, sideText } from "./items.ts";
 import { AGREED_STATES } from "./trade.ts";
 import type { ItemCount, Trade } from "./types.ts";
 
@@ -24,11 +25,8 @@ const MAX_NEEDS = 3;
 const MAX_OFFER_STACKS = 5;
 /** Longest run of words that makes one item id ("iron ingot" = 2, "white stained glass" = 3). */
 const MAX_ID_WORDS = 3;
-/** What socialise says when no talk took place: no refusal is recorded then. */
 /** A deliberate trading opening waits this long (wall clock) for the model, a conversation slot or its own talk to end. */
 export const OPENING_WAIT_MS = 45_000;
-const NO_TALK = /did not come|had nothing to say/u;
-const DID_NOT_COME = /did not come/u;
 
 type Inventory = BotSnapshot["inventory"];
 
@@ -60,8 +58,6 @@ export function offerFrom(inventory: Inventory, want: readonly string[]): ItemCo
     .map((stack) => ({ item: stack.name, count: stack.count }));
 }
 
-const carries = (inventory: Inventory, item: string): boolean => inventory.some((stack) => stack.name === item && stack.count > 0);
-
 /** The items the bot could not get, for a few minutes. */
 class Needs {
   private items: readonly string[] = [];
@@ -74,7 +70,7 @@ class Needs {
 
   current(now: number, inventory: Inventory): string[] {
     if (now - this.at > ASK_MEMORY_MS) this.items = [];
-    this.items = this.items.filter((item) => !carries(inventory, item));
+    this.items = this.items.filter((item) => carriedOf(inventory, item) === 0);
     return this.items.slice(0, MAX_NEEDS);
   }
 
@@ -129,7 +125,7 @@ export class TradeAsks {
 
   /** An own objective failed: the items it was out to get and does not carry are what it could trade for; a different need ends the pause. */
   failed(wanted: Iterable<string>, inventory: Inventory, now: number): void {
-    const missing = [...wanted].filter((item) => stackSizeOf(item) !== null && !carries(inventory, item));
+    const missing = [...wanted].filter((item) => stackSizeOf(item) !== null && carriedOf(inventory, item) === 0);
     if (missing.length === 0) return;
     if (!this.needs.sameAs(missing)) this.resume();
     this.needs.set(missing, now);
@@ -236,7 +232,7 @@ export function tradeNeedsFacts(needs: readonly string[], partners: readonly str
 export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number, inReach: readonly string[] = partners): { readonly want: string[]; readonly partner: string } | { readonly failed: string } {
   // An item the objective names that it carries is what it offers, not what it asks for.
   const mentioned = wantedItems(objective, []);
-  const named = mentioned.filter((item) => !carries(snapshot.inventory, item));
+  const named = mentioned.filter((item) => carriedOf(snapshot.inventory, item) === 0);
   // Every item it names is already in the bags: what it carries is the offer, and it asks for the needs.
   if (mentioned.length > 0 && named.length === 0 && needs.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
   const want = named.length > 0 ? named : [...needs];
@@ -258,7 +254,6 @@ export interface TradeRoutineDeps extends Omit<SocialiseDeps, "openFacts"> {
 
 /** A trade the partner turned down or let fall apart: a no, whether or not the ask was heard by the code. */
 const DECLINED = new Set(["cancelled", "broken"]);
-const sideText = (items: readonly ItemCount[]): string => items.map((i) => `${i.count} ${i.item}`).join(", ");
 
 /** What a trading objective reports when a trade was agreed: who with and the terms. */
 export const agreedDetail = (partner: string, trade: Pick<Trade, "give" | "get">): string => `agreed with ${partner}: ${sideText(trade.give)} for ${sideText(trade.get)}`;
@@ -279,13 +274,13 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
   talks.carryIntent(partner, intent);
   try {
     const talk = (from: number) => socialise({ ...deps, since: from, openWaitMs: OPENING_WAIT_MS, openFacts: { ...deps.openFacts, intent } });
-    // A partner who did not come is a miss like one who never let the bot ask; a model with nothing to say is neither.
+    // No talk took place (the reason says so): no refusal is recorded then. A partner who did not come is a miss like one who never let the bot ask; a model with nothing to say is neither.
     const noTalk = (talked: SkillResult & { status: "failed" }): SkillResult => {
-      if (DID_NOT_COME.test(talked.detail)) asks.refused.missed(partner, want, now());
+      if (talked.reason === "did_not_come") asks.refused.missed(partner, want, now());
       return talked;
     };
     const unfinished = (talked: SkillResult): SkillResult | null =>
-      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && NO_TALK.test(talked.detail) ? noTalk(talked) : null;
+      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && (talked.reason === "no_talk" || talked.reason === "did_not_come") ? noTalk(talked) : null;
     let ended = unfinished(await talk(since));
     if (ended !== null) return ended;
     asks.resume();

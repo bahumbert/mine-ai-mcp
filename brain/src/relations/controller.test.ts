@@ -857,3 +857,47 @@ test("F10: the reach comes from the settings: a partner 50 blocks away passes wi
   assert.match(harness().c.checkDecision(decision({ action: "propose" }), "Theo", far) ?? "", /too far away/u);
   assert.equal(harness().c.checkDecision(decision({ action: "decline", give: [], get: [] }), "Theo", far), null);
 });
+
+test("D1: a give the partner does not take twice ends broken by me, naming the items; the retake waits 30 s and the partner near", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  await h.c.handoffEnded(id, "not_taken", "Theo did not take 5 bread");
+  assert.equal(theirTrade(h).state, "agreed", "one try is not the end");
+  h.state.now += 31_000;
+  await h.c.tick(snapshot({ theo: { x: 100, y: 64, z: 0 } }), new Set(), signal);
+  assert.equal(h.handoffs.length, 1, "30 s passed but the partner is far");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "30 s passed and the partner is near");
+  await h.c.handoffEnded(id, "not_taken", "Theo did not take 5 bread");
+  assert.equal(theirTrade(h).state, "broken");
+  assert.equal(theirTrade(h).brokenBy, "me");
+  assert.equal(theirTrade(h).note, "Theo did not take 5 bread (2 tries); I kept them");
+  assert.equal(h.book.get("Theo")!.facts.iFailedToPay, 1);
+  h.state.now += 10 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "an ended trade is never retaken");
+});
+
+test("D1: after the first not_taken the retake waits 30 s even with the partner near", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await h.c.handoffEnded(theirTrade(h).id, "not_taken", "Theo did not take 5 bread");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 1, "not at once");
+});
+
+test("D1: a dropped give (a stop) does not count toward the attempts", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  for (let i = 0; i < 3; i += 1) {
+    h.c.handoffDropped(theirTrade(h).id);
+    h.state.now += 31_000;
+    await h.c.tick(s, new Set(), signal);
+  }
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.equal(h.handoffs.length, 4);
+});

@@ -1,14 +1,14 @@
 // The checks a trade decision passes before it becomes a trade: ids, what I carry, limits, room for what I get.
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
-import { stackSizeOf } from "./item-ids.ts";
+import { DEFAULT_STACK, stackSizeOf } from "./item-ids.ts";
+import { carriedOf } from "./items.ts";
 import { isOpen } from "./trade.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, Trade } from "./types.ts";
 
 const MAX_SIDE_ENTRIES = 4;
 const INVENTORY_SLOTS = 36;
-const DEFAULT_STACK = 64;
 
 export interface CheckInput {
   readonly decision: TradeDecision;
@@ -21,8 +21,6 @@ export interface CheckInput {
   /** Items of my side the partner already took (a give outside a hand-off), per item: they count as carried. */
   readonly givenOutside?: ReadonlyMap<string, number>;
 }
-
-const carriedOf = (inventory: BotSnapshot["inventory"], item: string): number => inventory.filter((s) => s.name === item).reduce((sum, s) => sum + s.count, 0);
 
 /** What other trades I already promised and have not handed over, per item. */
 function promisedOf(trades: readonly Trade[], item: string, except: string | undefined): number {

@@ -1179,7 +1179,7 @@ test("the gist without relations asks no partners and returns []", async () => {
 
 test("judgeRelation parses the judgment, and a bad reply is null", async () => {
   const { chat, mind } = scriptedMind();
-  const trade = { id: "t", partner: "Theo", give: [], get: [], first: "me" as const, state: "broken" as const, createdAt: 0, agreedAt: 0, gaveAt: 0, received: [], endedAt: 1, brokenBy: "them" as const, late: false, note: "they paid 0 of 5 iron_ingot" };
+  const trade = { id: "t", partner: "Theo", give: [], get: [], first: "me" as const, state: "broken" as const, createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: 0, received: [], endedAt: 1, brokenBy: "them" as const, late: false, note: "they paid 0 of 5 iron_ingot" };
   const input = { persona: testPersona(), partner: "Theo", block: "You and Theo: new.", trade };
   chat.reply({ feeling: -2, word: "wary", why: "did not pay" }, { feeling: "lots" });
   assert.deepEqual(await mind.judgeRelation(input, signal), { feeling: -2, word: "wary", why: "did not pay" });

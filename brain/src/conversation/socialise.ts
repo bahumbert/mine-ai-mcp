@@ -86,10 +86,10 @@ export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
       position = positionOf(snapshot, partner);
       if (position !== null && manhattan(snapshot.position, position) <= limits.openingDistance) break;
       // The record is gone before they came (the tick ended it): the call failed, it is not made again.
-      if (talks.current === null) return { status: "failed", detail: `${partner} did not come` };
+      if (talks.current === null) return { status: "failed", detail: `${partner} did not come`, reason: "did_not_come" };
       if (clock.now() >= deadline) {
         talks.end("out_of_range", signal);
-        return { status: "failed", detail: `${partner} did not come` };
+        return { status: "failed", detail: `${partner} did not come`, reason: "did_not_come" };
       }
     }
   } else if (manhattan(snapshot.position, position) > limits.openingDistance) {
@@ -133,8 +133,8 @@ function talked(talk: { readonly topic: string; readonly gist: string } | null, 
   return { status: "done", detail: `talked with ${partner}${gist === "" ? "" : `: ${gist}`}` };
 }
 
-/** The routine could not open: the words trading matches on, then why the controller held back (when it was not the model that had nothing to say). */
+/** The routine could not open (reason `no_talk`, which trading reads), then why the controller held back (when it was not the model that had nothing to say). */
 function noOpening(talks: ConversationController, partner: string): SkillResult {
   const why = talks.openRefusal;
-  return { status: "failed", detail: `had nothing to say to ${partner}${why === null ? "" : ` (${why})`}` };
+  return { status: "failed", detail: `had nothing to say to ${partner}${why === null ? "" : ` (${why})`}`, reason: "no_talk" };
 }

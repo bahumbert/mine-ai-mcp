@@ -6,7 +6,7 @@ interface Registry {
 }
 
 const REGISTRY_VERSION = (minecraftData as unknown as { readonly supportedVersions: { readonly pc: readonly string[] } }).supportedVersions.pc.at(-1) ?? "";
-const DEFAULT_STACK = 64;
+export const DEFAULT_STACK = 64;
 
 /** The slot size of an item id from the newest registry minecraft-data ships; null when no such item. */
 export function stackSizeOf(item: string): number | null {

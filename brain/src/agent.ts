@@ -618,11 +618,15 @@ export class Agent {
     this.wake?.();
   }
 
-  /** A trade's hand-off goes on top of what it does, like an order that takes the body; its own decision, so no authority is asked. */
+  /** A trade's hand-off goes on top of what it does, like an order that takes the body; its own decision, so no authority is asked. A player's running order is not interrupted: the hand-off waits just below it. */
   private takeHandoff(h: Handoff): void {
+    const objective = { text: describeHandoff(h), requester: null, purpose: null, handoff: h };
+    if (this.stack.at(-1)?.objective.requester != null) {
+      this.queue(objective);
+      return;
+    }
     this.stack.at(-1)?.step?.abort();
     this.sheltering?.abort();
-    const objective = { text: describeHandoff(h), requester: null, purpose: null, handoff: h };
     this.stack.push(newWork(objective));
     this.journalObjective("taken", objective);
     this.wake?.();

@@ -73,7 +73,7 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
   const give: ItemCount[] = [{ item: "oak_log", count: 4 }];
   const get: ItemCount[] = [{ item: "iron_ingot", count: 3 }];
   const setTrade = (state: TradeState | null) => {
-    found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "" } as Trade);
+    found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "" } as Trade);
   };
   // The fake clock jumps instead of waiting: only for the runs that wait on a partner who never comes (a fake sleep in the follow loop would never yield).
   const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number } = {}) => tradeRoutine({
@@ -124,7 +124,7 @@ test("a partner who never came once is no refusal", async () => {
   const t = setup([]);
   t.chat.reply(OPEN);
   const result = await t.run({ fake: true });
-  assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
+  assert.deepEqual(result, { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], t.now()), false);
   assert.deepEqual(t.reads, []);
 });
@@ -133,7 +133,7 @@ test("a partner who did not come twice within 10 minutes is a refusal, and tradi
   const t = setup([]);
   for (let run = 0; run < 2; run++) {
     t.chat.reply(OPEN);
-    assert.deepEqual(await t.run({ fake: true, since: t.now() + 1 }), { status: "failed", detail: "Theo did not come" });
+    assert.deepEqual(await t.run({ fake: true, since: t.now() + 1 }), { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
   }
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], t.now()), true);
   assert.deepEqual(withoutRefusedTrading(["exploring", "trading"], ["Theo"], t.asks, t.now()), ["exploring"]);
@@ -472,7 +472,7 @@ test("a full conversation cap makes the trading routine fail 'had nothing to say
   t.talks.openSocial = async () => false;
   Object.defineProperty(t.talks, "openRefusal", { get: () => "conversation limit" });
   const result = await t.run();
-  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
 });
 

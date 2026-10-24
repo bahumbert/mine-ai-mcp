@@ -7,6 +7,7 @@ import type { BoardOffer, BoardPeer, TradeBoard } from "./board.ts";
 import type { RelationBook } from "./book.ts";
 import { checkTradeDecision } from "./checks.ts";
 import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./handoff.ts";
+import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
 import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, proposeTrade, settleTrade } from "./trade.ts";
@@ -54,7 +55,6 @@ interface PendingJudgment {
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const EVENT_OF_STATE: Partial<Record<Trade["state"], EventName>> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
-const sideText = (items: readonly { item: string; count: number }[]): string => items.map((i) => `${i.count} ${i.item}`).join(", ");
 
 const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
 const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
@@ -71,6 +71,8 @@ export class TradeController implements BoardPeer {
   private readonly pending = new Map<string, "give" | "collect">();
   private readonly giveFailures = new Map<string, number>();
   private readonly droppedAt = new Map<string, number>();
+  /** Trade id -> when its give was handed to the agent: a give pending longer than the pay-back time is stuck (queued behind an order), and no longer holds the deadline back. */
+  private readonly giveTakenAt = new Map<string, number>();
   /** Trades whose wait for their side was taken and not dropped (a wait that ended is not taken again). */
   private readonly awaited = new Set<string>();
   /** Trades whose wait is on the agent's stack now. */
@@ -334,8 +336,8 @@ export class TradeController implements BoardPeer {
     return waiting || this.pending.size > 0 || this.judging.length > 0 || this.running.size > 0;
   }
 
-  /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near). */
-  handoffEnded(tradeId: string, outcome: "done" | "items_gone" | "failed", detail: string): Promise<void> {
+  /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */
+  handoffEnded(tradeId: string, outcome: "done" | "items_gone" | "not_taken" | "failed", detail: string): Promise<void> {
     return this.exclusive(async () => {
       const kind = this.pending.get(tradeId) ?? "give";
       this.pending.delete(tradeId);
@@ -352,8 +354,10 @@ export class TradeController implements BoardPeer {
       } else {
         const failures = (this.giveFailures.get(tradeId) ?? 0) + 1;
         this.giveFailures.set(tradeId, failures);
-        if (failures >= GIVE_ATTEMPTS) await this.record(failTrade(trade, now, detail), "broken");
-        else this.deps.log(`trade: the give for ${tradeId} failed (${detail}); it stays due`);
+        const why = outcome === "not_taken" ? `${trade.partner} did not take ${sideText(this.leftToGiveOf(trade) ?? trade.give)} (${GIVE_ATTEMPTS} tries); I kept them` : detail;
+        if (failures >= GIVE_ATTEMPTS) await this.record(failTrade(trade, now, why), "broken");
+        else this.deps.log(`trade: the give for ${tradeId} ${outcome === "not_taken" ? "was not taken" : "failed"} (${detail}); it stays due`);
+        if (outcome === "not_taken") this.droppedAt.set(tradeId, now);
       }
     });
   }
@@ -451,6 +455,7 @@ export class TradeController implements BoardPeer {
     this.nobodyGave.delete(trade.id);
     this.watches.delete(trade.id);
     this.givenOutside.delete(trade.id);
+    this.giveTakenAt.delete(trade.id);
     // A cancelled trade moved nothing: there is nothing to judge.
     if (trade.state !== "cancelled") this.judging.push({ partner: trade.partner, trade, since: this.deps.now() });
   }
@@ -490,7 +495,7 @@ export class TradeController implements BoardPeer {
   /** Runs every open trade's clock; a state the clock changed is saved, and a give that came due is handed to the agent. */
   private async settleOpen(now: number): Promise<void> {
     for (const trade of this.deps.book.trades().filter(isOpen)) {
-      const settled = settleTrade(trade, now, this.deps.settings);
+      const settled = settleTrade(trade, now, this.deps.settings, { givePending: this.giveRunning(trade.id, now) });
       if (settled.nobodyGave) this.nobodyGave.add(trade.id);
       else this.nobodyGave.delete(trade.id);
       if (settled.trade.state !== trade.state) await this.record(settled.trade, EVENT_OF_STATE[settled.trade.state] ?? "gave");
@@ -518,14 +523,20 @@ export class TradeController implements BoardPeer {
     const mineToGive = t.gaveAt === null && t.give.length > 0 && (t.state === "they_gave" || (t.state === "agreed" && t.first === "me"));
     if (!mineToGive || this.pending.has(t.id)) return false;
     const dropped = this.droppedAt.get(t.id);
-    if (dropped !== undefined) return now - dropped >= RETAKE_AFTER_MS;
+    if (dropped !== undefined && now - dropped < RETAKE_AFTER_MS) return false;
     if ((this.giveFailures.get(t.id) ?? 0) === 0) return true;
     const there = this.partners.get(t.partner) ?? null;
     return at !== null && there !== null && manhattan(at, there) <= this.deps.persona.settings.conversation.openingDistance;
   }
 
+  /** A give for the trade is pending and was taken less than the pay-back time ago: it is bounded by its own walk, toss and wait. */
+  private giveRunning(tradeId: string, now: number): boolean {
+    return this.pending.get(tradeId) === "give" && now - (this.giveTakenAt.get(tradeId) ?? now) < this.deps.settings.payBackMinutes * 60_000;
+  }
+
   private takeGive(t: Trade): void {
     this.pending.set(t.id, "give");
+    this.giveTakenAt.set(t.id, this.deps.now());
     this.droppedAt.delete(t.id);
     this.deps.takeHandoff({ kind: "give", tradeId: t.id, partner: t.partner, items: t.give });
   }

@@ -191,3 +191,41 @@ test("a recently near partner ranks as at hand-off distance: after one really ne
   const out = attribute({ trades: [theo, bruno], partners: new Map([["Bruno", at(1)]]), recentlyNear: new Set(["theo"]), gains: [{ item: "oak_log", count: 5 }] });
   assert.deepEqual([...out.keys()], [bruno.id], "Bruno, 1 block away, comes first");
 });
+
+test("D2: a trade starts with no receivedAt and creditTrade stamps it with the time the payment came", () => {
+  const t = deal("them");
+  assert.equal(t.receivedAt, null);
+  const paid = creditTrade(t, ingots, t0 + 2 * MIN).trade;
+  assert.equal(paid.state, "they_gave");
+  assert.equal(paid.receivedAt, t0 + 2 * MIN);
+  const part = creditTrade(t, [{ item: "iron_ingot", count: 2 }], t0 + MIN).trade;
+  assert.equal(part.receivedAt, t0 + MIN, "a part payment stamps it too");
+});
+
+test("D2: a they_gave trade whose give never ran ends broken by me 10 min after their payment, on the wall clock alone", () => {
+  const paid = creditTrade(deal("them"), ingots, t0 + 2 * MIN).trade;
+  assert.equal(settleTrade(paid, t0 + 12 * MIN - 1, settings).trade.state, "they_gave");
+  const broken = settleTrade(paid, t0 + 12 * MIN, settings).trade;
+  assert.equal(broken.state, "broken");
+  assert.equal(broken.brokenBy, "me");
+  assert.equal(broken.endedAt, t0 + 12 * MIN);
+  assert.equal(broken.note, "could not hand over 5 bread within 10 min");
+});
+
+test("D2: the deadline does not fire while the give is pending", () => {
+  const paid = creditTrade(deal("them"), ingots, t0).trade;
+  assert.equal(settleTrade(paid, t0 + 60 * MIN, settings, { givePending: true }).trade.state, "they_gave");
+});
+
+test("D2: an old note without receivedAt counts from agreedAt", () => {
+  const { receivedAt: _dropped, ...old } = creditTrade(deal("them"), ingots, t0 + 2 * MIN).trade;
+  const trade = old as unknown as Trade;
+  assert.equal(settleTrade(trade, t0 + 10 * MIN - 1, settings).trade.state, "they_gave");
+  assert.equal(settleTrade(trade, t0 + 10 * MIN, settings).trade.state, "broken");
+});
+
+test("D2: a give already made (done or i_gave) is untouched by the deadline", () => {
+  const done = markGave(creditTrade(deal("them"), ingots, t0).trade, t0 + MIN);
+  assert.equal(done.state, "done");
+  assert.equal(settleTrade(done, t0 + 60 * MIN, settings).trade.state, "done");
+});

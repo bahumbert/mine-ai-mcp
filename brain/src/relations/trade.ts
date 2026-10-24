@@ -1,6 +1,7 @@
 // The trade state machine and payment attribution: pure, every clock is a wall-clock `now` passed in.
 import { manhattan } from "../conversation/state.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
+import { sideText } from "./items.ts";
 import type { ItemCount, Trade, TradeSettings } from "./types.ts";
 
 const MINUTE_MS = 60_000;
@@ -17,7 +18,7 @@ interface DealArgs {
 function newTrade(a: DealArgs, state: "proposed" | "agreed"): Trade {
   return {
     id: `${a.self}-${a.partner}-${a.now}`, partner: a.partner, give: a.give, get: a.get, first: a.first, state,
-    createdAt: a.now, agreedAt: state === "agreed" ? a.now : null, gaveAt: null, received: [], endedAt: null,
+    createdAt: a.now, agreedAt: state === "agreed" ? a.now : null, receivedAt: null, gaveAt: null, received: [], endedAt: null,
     brokenBy: null, late: false, note: "",
   };
 }
@@ -93,7 +94,7 @@ export function creditTrade(t: Trade, gains: readonly ItemCount[], now: number):
     if (have > 0) used.push({ item: o.item, count: Math.min(have, o.count) });
   }
   if (used.length === 0) return { trade: t, used };
-  return { trade: advance({ ...t, received: mergeCounts(t.received, used) }, now), used };
+  return { trade: advance({ ...t, received: mergeCounts(t.received, used), receivedAt: now }, now), used };
 }
 
 /** My give failed: the trade is broken by me. */
@@ -105,8 +106,11 @@ export function cancelTrade(t: Trade, now: number, why: string): Trade {
   return { ...t, state: "cancelled", endedAt: now, note: why };
 }
 
-/** Applies the clock to a trade: expiry, nobody-gave, the pay-back deadline; `giveDue` when they paid first. */
-export function settleTrade(trade: Trade, now: number, s: TradeSettings): { trade: Trade; nobodyGave: boolean; giveDue: boolean } {
+/**
+ * Applies the clock to a trade: expiry, nobody-gave, the pay-back deadline (for their payment, and for my give once they
+ * paid, unless a hand-off for it is pending: `givePending`); `giveDue` when they paid first.
+ */
+export function settleTrade(trade: Trade, now: number, s: TradeSettings, o: { readonly givePending?: boolean } = {}): { trade: Trade; nobodyGave: boolean; giveDue: boolean } {
   const t = advance(trade, now);
   const startMs = s.startMinutes * MINUTE_MS;
   const payBackMs = s.payBackMinutes * MINUTE_MS;
@@ -118,6 +122,9 @@ export function settleTrade(trade: Trade, now: number, s: TradeSettings): { trad
     return result({ ...t, state: "broken", brokenBy: "them", endedAt: now, note: `they paid ${describePaid(t)}` });
   }
   if (t.state === "agreed") return result(...settleUnstarted(t, now, startMs, payBackMs));
+  if (t.state === "they_gave" && t.gaveAt === null && o.givePending !== true && now - (t.receivedAt ?? t.agreedAt ?? t.createdAt) >= payBackMs) {
+    return result(failTrade(t, now, `could not hand over ${sideText(t.give)} within ${s.payBackMinutes} min`));
+  }
   return result(t);
 }
 

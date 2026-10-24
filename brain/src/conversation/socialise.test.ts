@@ -59,7 +59,7 @@ test("calls a partner out of sight with one shout, and gives up after 60 s", asy
   const t = setup(true, []);
   t.chat.reply(OPEN);
   const result = await t.run({ clock: t.clock });
-  assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
+  assert.deepEqual(result, { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
   assert.equal(t.spoken.length, 1);
   assert.equal(t.spoken[0]?.shout, true);
   assert.equal(t.talks.current, null, "the record ended out_of_range");
@@ -92,7 +92,7 @@ test("with the agent's tick running, an unanswered call fails once: no second ca
     sleep: async (ms, signal) => { await t.clock.sleep(ms, signal); await t.talks.tick(await t.runtime.status(), signal); },
   };
   const result = await t.run({ clock });
-  assert.deepEqual(result, { status: "failed", detail: "Theo did not come" });
+  assert.deepEqual(result, { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
   assert.equal(t.spoken.length, 1, "one shouted call only");
   assert.deepEqual(t.runtime.submitted.map((call) => call.tool), []);
 });
@@ -133,7 +133,7 @@ test("a full conversation cap with no wait fails at once: 'had nothing to say', 
   t.budget.tryTake();
   t.budget.tryTake();
   const result = await t.run();
-  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
 });
 
 test("with openWaitMs the routine waits for a conversation slot and then opens", async () => {
@@ -153,5 +153,5 @@ test("with openWaitMs a cap that stays full fails at the deadline with the reaso
   t.budget.tryTake();
   t.budget.tryTake();
   const result = await t.run({ openWaitMs: 60 });
-  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)" });
+  assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
 });

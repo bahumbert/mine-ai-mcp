@@ -1,5 +1,6 @@
 // The relationship record's rules: facts counted from ended trades, the model's feeling, what a partner said, the note form.
 import { z } from "zod";
+import { sideText } from "./items.ts";
 import { isOpen } from "./trade.ts";
 import type { ItemCount, Judged, Relation, RelationFacts, SaidItem, Trade } from "./types.ts";
 
@@ -81,7 +82,6 @@ export function forgetOldSaid(r: Relation, now: number, minutes: number): Relati
   return { ...r, saidHas: r.saidHas.filter(recent), saidNeeds: r.saidNeeds.filter(recent) };
 }
 
-const side = (items: readonly ItemCount[]) => items.map((i) => `${i.count} ${i.item}`).join(", ");
 const minutesAgo = (at: number, now: number) => Math.max(0, Math.floor((now - at) / MINUTE_MS));
 
 function owedText(t: Trade): string {
@@ -91,10 +91,10 @@ function owedText(t: Trade): string {
 
 function describeTrade(t: Trade, partner: string, now: number): string {
   const ago = minutesAgo(t.gaveAt ?? t.agreedAt ?? t.createdAt, now);
-  if (t.state === "proposed") return `you proposed giving ${side(t.give) || "nothing"} for ${side(t.get) || "nothing"} ${ago} min ago, no answer yet`;
-  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${side(t.give) || "nothing"}, ${partner} gives ${side(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first`;
-  if (t.state === "i_gave") return `you gave ${side(t.give)} ${ago} min ago, ${partner} owes ${owedText(t)}`;
-  if (t.state === "they_gave") return `${partner} gave ${side(t.get)}, you owe ${side(t.give)}`;
+  if (t.state === "proposed") return `you proposed giving ${sideText(t.give) || "nothing"} for ${sideText(t.get) || "nothing"} ${ago} min ago, no answer yet`;
+  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first`;
+  if (t.state === "i_gave") return `you gave ${sideText(t.give)} ${ago} min ago, ${partner} owes ${owedText(t)}`;
+  if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}, you owe ${sideText(t.give)}`;
   return `${partner} did not pay in time (${t.note}), still owes ${owedText(t)}`;
 }
 
@@ -124,7 +124,7 @@ const itemCount = z.object({ item: z.string(), count: z.number() });
 const tradeSchema = z.object({
   id: z.string(), partner: z.string(), give: z.array(itemCount), get: z.array(itemCount), first: z.enum(["me", "them"]),
   state: z.enum(["proposed", "agreed", "i_gave", "they_gave", "done", "broken", "cancelled"]),
-  createdAt: z.number(), agreedAt: z.number().nullable(), gaveAt: z.number().nullable(), received: z.array(itemCount),
+  createdAt: z.number(), agreedAt: z.number().nullable(), receivedAt: z.number().nullable().default(null), gaveAt: z.number().nullable(), received: z.array(itemCount),
   endedAt: z.number().nullable(), brokenBy: z.enum(["me", "them"]).nullable(), late: z.boolean(), note: z.string(),
 });
 const said = z.object({ item: z.string(), count: z.number().nullable(), at: z.number() });

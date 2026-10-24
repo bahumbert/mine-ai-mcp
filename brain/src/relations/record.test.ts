@@ -118,3 +118,9 @@ test("relation note round trip and a bad note", () => {
   assert.equal(parseRelationNote("{bad"), null);
   assert.equal(parseRelationNote('{"partner":"Theo"}'), null);
 });
+
+test("D2: an old relation note whose trades have no receivedAt parses, with receivedAt null", () => {
+  const relation = { ...newRelation("Theo", 1), trades: [{ id: "a", partner: "Theo", give: [], get: [], first: "me", state: "agreed", createdAt: 1, agreedAt: 1, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "" }] };
+  const parsed = parseRelationNote(JSON.stringify(relation));
+  assert.equal(parsed?.trades[0]?.receivedAt, null);
+});
