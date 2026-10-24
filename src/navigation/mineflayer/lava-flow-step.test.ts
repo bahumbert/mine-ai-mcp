@@ -7,7 +7,7 @@ import { LAVA_SPREAD_ESCAPE_COST, relaxedForEscape } from "../orchestration/esca
 import { createNavigator } from "../orchestration/navigator.js";
 import { createMovements } from "../runtime.js";
 import type { NavigationEvent } from "../telemetry/index.js";
-import type { MemoryWorld } from "../world/memory-world.js";
+import { MemoryWorld } from "../world/memory-world.js";
 
 /**
  * Run 15, `spreading-lava-obstacle-course` (red 3 of 3): a route cell was priced on what it holds now, so a cell the
@@ -146,4 +146,90 @@ test("a falling column with lava or air under it pours on: the cell beside it st
   lavaAt(overAir, { x: 1, y: 63, z: 0 }, FALLING);
   overAir.load({ x: 1, y: 62, z: 0 }, { stateId: 0 });
   assert.equal(decide(overAir).kind, "allowed", "air under the falling cell");
+});
+
+/** The world with the cell under `lava` never loaded (a chunk the server has not sent): `flatWorld` loads every cell of its square. */
+function worldWithoutFloorUnder(lava: { x: number; y: number; z: number }): MemoryWorld {
+  const world = flatWorld();
+  const unloaded = new MemoryWorld();
+  for (let x = -5; x <= 5; x += 1)
+    for (let z = -5; z <= 5; z += 1)
+      for (let y = 62; y <= 65; y += 1) {
+        if (x === lava.x && y === lava.y - 1 && z === lava.z) continue;
+        const block = world.blockAt(x, y, z);
+        if (block.kind === "loaded") unloaded.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
+      }
+  return unloaded;
+}
+
+const BESIDE = { x: 1, y: 63, z: 0 };
+const BELOW_BESIDE = { x: 1, y: 62, z: 0 };
+
+/**
+ * `obsidian-lava-approach`: the goal cell (51, -20, 71) had a flowing level 2 beside it over falling lava. Lava not held up
+ * by a floor pours down and does not spread sideways (contract check `lava-over-hole`), so the cell beside it stays open.
+ */
+test("flowing lava over falling lava or over air, in the overworld and the Nether, does not spread to the cell beside it: the step stays open", () => {
+  for (const dimension of ["overworld", "the_nether"]) {
+    const overFalling = flatWorld();
+    lavaAt(overFalling, BESIDE, 2);
+    lavaAt(overFalling, BELOW_BESIDE, FALLING);
+    assert.equal(decide(overFalling, dimension).kind, "allowed", `${dimension}: level 2 over falling lava`);
+    const overAir = flatWorld();
+    lavaAt(overAir, BESIDE, 2);
+    overAir.load(BELOW_BESIDE, { stateId: 0 });
+    assert.equal(decide(overAir, dimension).kind, "allowed", `${dimension}: level 2 over air`);
+  }
+});
+
+test("flowing lava on a floor, a source over a hole, and flowing lava over a cell not loaded still spread to the cell beside them", () => {
+  const onFloor = flatWorld();
+  lavaAt(onFloor, BESIDE, 2);
+  assert.equal(decide(onFloor).kind, "prohibited", "level 2 on a floor");
+  const sourceOverHole = flatWorld();
+  lavaAt(sourceOverHole, BESIDE, 0);
+  sourceOverHole.load(BELOW_BESIDE, { stateId: 0 });
+  assert.equal(decide(sourceOverHole).kind, "prohibited", "a source over air");
+  const unknownBelow = worldWithoutFloorUnder(BESIDE);
+  lavaAt(unknownBelow, BESIDE, 2);
+  assert.equal(decide(unknownBelow).kind, "prohibited", "level 2 over an unloaded cell");
+  const fallingUnknown = worldWithoutFloorUnder(BESIDE);
+  lavaAt(fallingUnknown, BESIDE, FALLING);
+  assert.equal(decide(fallingUnknown).kind, "prohibited", "a falling column over an unloaded cell");
+});
+
+test("a cell lava cannot enter under flowing lava holds it up: the cell beside it is avoided", () => {
+  const onWater = flatWorld();
+  lavaAt(onWater, BESIDE, 2);
+  onWater.load(BELOW_BESIDE, {
+    stateId: registry.blocksByName.water.minStateId,
+    collisionShapes: [],
+    traits: { empty: true, liquid: "water", liquidSource: true, liquidLevel: 0 },
+  });
+  assert.equal(decide(onWater).kind, "prohibited", "water under it");
+  const onLadder = flatWorld();
+  lavaAt(onLadder, BESIDE, 2);
+  onLadder.load(BELOW_BESIDE, { stateId: registry.blocksByName.ladder.minStateId, collisionShapes: [], traits: { empty: false, climbable: true } });
+  assert.equal(decide(onLadder).kind, "prohibited", "a ladder under it");
+  // A rail, glow lichen or a coral fan takes water in, so it takes no lava: the registry's `waterlogged` property says so.
+  const onRail = flatWorld();
+  lavaAt(onRail, BESIDE, 2);
+  onRail.load(BELOW_BESIDE, { stateId: registry.blocksByName.rail.minStateId, collisionShapes: [], traits: { empty: true, waterloggable: true } });
+  assert.equal(decide(onRail).kind, "prohibited", "a rail under it");
+});
+
+test("the scene of obsidian-lava-approach: the goal cell with level 2 over falling lava beside it is allowed", () => {
+  // (51, -20, 71) seen from the goal: level 2 at (51, -20, 72) over falling lava at (51, -21, 72), the rest standable air over a floor.
+  const world = new MemoryWorld();
+  for (let x = 50; x <= 52; x += 1)
+    for (let z = 70; z <= 72; z += 1) {
+      world.load({ x, y: -21, z }, { stateId: 1 });
+      world.load({ x, y: -20, z }, { stateId: 0 });
+      world.load({ x, y: -19, z }, { stateId: 0 });
+      world.load({ x, y: -18, z }, { stateId: 0 });
+    }
+  lavaAt(world, { x: 51, y: -20, z: 72 }, 2);
+  lavaAt(world, { x: 51, y: -21, z: 72 }, FALLING);
+  const { bot } = createFakeBot();
+  assert.equal(createMovements(bot).decideStep(51, -20, 71, world).kind, "allowed");
 });

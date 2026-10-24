@@ -365,8 +365,8 @@ test("a pour with no face even from the nearest stance still names the missing f
 });
 
 /** The pool world with a useItem that also takes a scooped source out of its cell, and a navigate that arrives. */
-function bucketRequestWorld(held: string) {
-  const world = poolWorld(held);
+function bucketRequestWorld(held: string, cells: Record<string, FakeCell> = poolCells()) {
+  const world = poolWorld(held, cells);
   const useItem = world.dependencies.useItem;
   const dependencies: UseBucketDependencies = {
     ...world.dependencies,
@@ -538,9 +538,9 @@ test("a fill resumed after the bucket counts changed elsewhere with its source s
 const LAVA_BESIDE_POOL = new Vec3(7, 64, 0);
 const POUR_INTO_LAVA = { action: "pour", liquid: "water", cell: { x: 7, y: 64, z: 0 } } as const;
 
-/** A lava source in the pour's cell, as a lava cover over the pit is. */
-function lavaInPourCell(world: ReturnType<typeof bucketRequestWorld>): void {
-  world.setCell(LAVA_BESIDE_POOL, "lava");
+/** The pool with a lava source in the pour's cell, as a lava cover over the pit is: a start cell, which the fake never flows (lava set later would spread over the bot's footing in 30 ticks). */
+function bucketWorldWithLavaInPourCell(held: string) {
+  return bucketRequestWorld(held, { ...poolCells(), [key(LAVA_BESIDE_POOL)]: "lava" });
 }
 
 /** The pour's cell becomes `cell` once the cast lands, as the game makes a block of lava and water meeting. */
@@ -557,8 +557,7 @@ function pourMakes(world: ReturnType<typeof bucketRequestWorld>, cell: FakeCell)
 }
 
 test("a lava cover cut after the cast whose cell turned to stone is not poured again", async () => {
-  const world = bucketRequestWorld("water_bucket");
-  lavaInPourCell(world);
+  const world = bucketWorldWithLavaInPourCell("water_bucket");
   pourMakes(world, "stone");
   const owner = new AbortController();
   abortAfterUse(world, owner);
@@ -575,8 +574,7 @@ test("a lava cover cut after the cast whose cell turned to stone is not poured a
 });
 
 test("a pour cut after the cast whose lava cell still holds lava is cast again", async () => {
-  const world = bucketRequestWorld("water_bucket");
-  lavaInPourCell(world);
+  const world = bucketWorldWithLavaInPourCell("water_bucket");
   world.setCarried("water_bucket", 2);
   const owner = new AbortController();
   abortInRoute(world, owner);
@@ -592,8 +590,7 @@ test("a pour cut after the cast whose lava cell still holds lava is cast again",
 });
 
 test("a pour cut after the cast whose cell holds flowing water now is cast again", async () => {
-  const world = bucketRequestWorld("water_bucket");
-  lavaInPourCell(world);
+  const world = bucketWorldWithLavaInPourCell("water_bucket");
   // A second full bucket is carried: the first one is an empty bucket after its cast, as the game has it.
   world.setCarried("water_bucket", 2);
   // Flowing water has no collision box and is not a source: it does not show this pour.

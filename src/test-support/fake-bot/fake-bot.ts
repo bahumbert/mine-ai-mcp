@@ -13,6 +13,7 @@ import { attachFakeDigging } from "./fake-bot-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
+import { attachFakeLavaFlow } from "./fake-bot-lava-flow.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
 import { type PlaceBlockWithOptions, attachFakePlacement } from "./fake-bot-placement.js";
 import { attachFakePlugins, offlineUuidOf } from "./fake-bot-plugins.js";
@@ -217,6 +218,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
   attachFakePlacement(bot, { clock, server, world, inventory, windows });
   const combat = attachFakeCombat(bot, { clock, server, inventory, entities: serverEntities });
+  attachFakeLavaFlow({ clock, server, world });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { clock, server });
   attachFakeSleep(bot, { clock, server, world });

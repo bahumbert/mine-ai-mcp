@@ -38,6 +38,7 @@ import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
+import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
@@ -144,6 +145,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackMobKnockback,
   bucketPourAndFill,
   placeBlockWithOptions,
+  lavaOverHole,
 ];
 
 /** The check of that name; throws listing the known names. */

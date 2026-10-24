@@ -10,28 +10,42 @@ export function lavaLevel(block: NonNullable<ReturnType<Bot["blockAt"]>>): numbe
 
 /**
  * Could lava of this `level` (0 source .. 7 flowing, 8 falling) flow into a dry cell on its next update? Lava above a cell
- * falls into it; falling lava spreads again after reaching a floor; beside it, overworld lava loses two levels per step and
- * the Nether's one, so it spreads while a level is left. The one rule behind the fire reflex and the route planner.
- * `floorBelow`: whether the lava cell rests on a floor, when the caller knows (the planner does; the reflex assumes it).
+ * falls into it; a falling column and flowing lava pour on down where nothing holds them up and spread sideways only once a
+ * floor stops them (contract check `lava-over-hole`: a level 2 over a hole filled no cell beside it); a source spreads
+ * either way. Beside it, overworld lava loses two levels per step and the Nether's one, so it spreads while a level is left.
+ * The one rule behind the fire reflex and the route planner.
+ * `floorBelow`: whether the lava cell rests on a floor (false: the cell under it is open), when the caller knows (the planner
+ * does; the reflex assumes a floor, and so does the planner for a cell under it that is not loaded).
  */
 export function lavaSpreadsFrom(level: number, above: boolean, dimension: string, floorBelow?: boolean): boolean {
   if (above) return true;
-  // A falling column pours on down; it spreads sideways only where a floor stops it (unknown: assume it does).
-  if (level >= 8) return floorBelow !== false;
+  if (floorBelow === false && level !== 0) return false;
+  if (level >= 8) return true;
   return level + (dimension === "the_nether" ? 1 : 2) < 8;
 }
 
 const SPREAD_NEIGHBOURS: readonly (readonly [number, number, number])[] = [[-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1], [0, 1, 0]];
 
-/** Whether the cell under (x, y, z) stops a fall: a block with collision. Lava or air under it lets a falling column pour on. */
-function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean {
+/**
+ * Whether the cell under (x, y, z) holds lava up: a block with collision, water (lava meeting it sets stone, which is a
+ * floor next), or a block with none that lava cannot enter (a ladder, a door, a sign, a bubble column, and every block that
+ * takes water in: a rail, glow lichen, a coral fan; a vine or a button counts too, which keeps the sideways spread).
+ * Lava or air under it, or a block lava replaces, lets lava pour on: false. Sugar cane and portals hold lava up too and
+ * show no trait: they read as open.
+ * A cell not loaded is not known: undefined, which `lavaSpreadsFrom` reads as a floor.
+ */
+function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
   const below = world.blockAt(x, y - 1, z);
-  return below.kind === "loaded" && below.collisionShapes.length > 0;
+  if (below.kind !== "loaded") return undefined;
+  if (below.collisionShapes.length > 0 || below.traits.liquid === "water") return true;
+  const { climbable, openable, interactive, current, waterloggable } = below.traits;
+  return climbable || openable || interactive || waterloggable || current === true;
 }
 
 /**
  * Could lava beside or above the feet cell (x, y, z) or the head cell over it flow into one of them on its next update?
  * The route planner's reading of `advancingLavaAt`, on its world view: a solid cell or one holding water takes no lava.
+ * Flowing lava over a cell that lets it pour on (`restsOnFloor`) does not spread sideways, so the cell beside it stays open.
  */
 export function lavaSpreadsIntoBody(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number, dimension: string): boolean {
   for (let rise = 0; rise <= 1; rise += 1) {

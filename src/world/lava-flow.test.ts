@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeCell, createFakeBot } from "../test-support/fake-bot/index.js";
-import { advancingLavaAt, lavaChangedNear, lavaFlowDelayTicks } from "./lava-flow.js";
+import { advancingLavaAt, lavaChangedNear, lavaFlowDelayTicks, lavaSpreadsFrom } from "./lava-flow.js";
 
 const lavaOfLevel = (level: number): FakeCell => ({ name: "lava", properties: { level } });
 
@@ -90,4 +90,16 @@ test("the same state again does not count", () => {
 test("nether flow delay is 10 ticks, overworld 30", () => {
   assert.equal(lavaFlowDelayTicks(changeBot("the_nether").bot), 10);
   assert.equal(lavaFlowDelayTicks(changeBot("overworld").bot), 30);
+});
+
+test("lava with open cell under it pours down: flowing and falling lava spread sideways only on a floor or when the floor is not known, a source always", () => {
+  for (const level of [1, 2, 7, 8]) {
+    assert.equal(lavaSpreadsFrom(level, false, "overworld", false), false, `level ${level} over a hole`);
+    assert.equal(lavaSpreadsFrom(level, false, "the_nether", false), false, `level ${level} over a hole in the nether`);
+  }
+  assert.equal(lavaSpreadsFrom(0, false, "overworld", false), true, "a source over a hole");
+  assert.equal(lavaSpreadsFrom(2, false, "overworld", true), true, "level 2 on a floor");
+  assert.equal(lavaSpreadsFrom(2, false, "overworld"), true, "level 2, floor not known (the reflex)");
+  assert.equal(lavaSpreadsFrom(7, false, "overworld", true), false, "level 7 on a floor has no level left");
+  assert.equal(lavaSpreadsFrom(2, true, "overworld", false), true, "lava above the cell falls into it whatever is under the lava");
 });
