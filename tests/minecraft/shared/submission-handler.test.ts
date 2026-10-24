@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GameruleDefaultsCache } from "./gamerule-defaults.ts";
@@ -77,6 +79,37 @@ test("the submitter's variables reach the scenario's client env, and the YAML's 
   assert.equal(env.MINE_AI_SCENARIO_EVIDENCE, "1");
   rig.running[0]!.finish();
   await running.finished;
+});
+
+test("a scenario whose client entry cannot be resolved gets a server of its own and the rest of the submission is queued as usual", async () => {
+  const { rig, sent, base } = setup();
+  rig.sample();
+  const folder = mkdtempSync(join(tmpdir(), "submission-client-"));
+  try {
+    const typo = join(folder, "typo-client.yaml");
+    const templatePath = fileURLToPath(new URL("../templates/flat-single-action.yaml", import.meta.url));
+    writeFileSync(typo, [
+      ["../../templates/flat-single-action.yaml", templatePath],
+      ["name: contract-air-supply-under-water", "name: typo-client"],
+      ["cwd: ../..", "cwd: ."],
+      ["- client-host.ts", "- no-such-host.ts"],
+    ].reduce((text, [from, to]) => {
+      assert.ok(text.includes(from!), `the contract YAML no longer holds '${from}'`);
+      return text.replace(from!, to!);
+    }, readFileSync(ONE_FILE, "utf8")));
+    const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE, typo], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: {} });
+    await rig.until(() => sent.some(message => message.type === "info" && message.text.includes("scenarios:")), "the placement summary");
+    const info = sent.find(message => message.type === "info" && message.text.includes("scenarios:"));
+    const text = info?.type === "info" ? info.text : "";
+    assert.match(text, /2 scenarios: 1 on lanes, 1 on servers of their own/u);
+    assert.match(text, /own server: .*typo-client.*its client entry .*no-such-host\.ts could not be resolved \(ENOENT\)/u);
+    await rig.drain();
+    await running.finished;
+    const done = sent.at(-1);
+    assert.equal(done?.type === "done" ? done.runs : 0, 2, "both scenarios were queued and ran");
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 });
 
 test("a gamerule probe server that fails to start ends the submission with an error and a done instead of rejecting (a rejection would kill the daemon)", async () => {

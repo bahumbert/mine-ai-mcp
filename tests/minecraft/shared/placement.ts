@@ -1,4 +1,7 @@
 // Where a scenario runs: a lane on a server of its settings key, or a server of its own at offset 0.
+import { realpathSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { canResetScenario, worldCompatibilityKey, type Scenario } from "mine-labs";
 import { laneOf, type Lane } from "../arena/lanes.ts";
 import { settingsOf, type GameruleDefaults, type WorldSettings } from "../arena/settings.ts";
@@ -51,8 +54,30 @@ export function reservePlacement(placement: Placement, submissionId: number): Pl
   return { ...placement, key: `${placement.key}#batch${submissionId}`, reservedFor: submissionId };
 }
 
+/** Our client host, the only client that reads the arena frame (`MINE_AI_ARENA`); a missing file here means our install is broken, so it throws at load. */
+const OUR_CLIENT_HOST = realpathSync(fileURLToPath(new URL("../client-host.ts", import.meta.url)));
+
+const NOT_FRAME_AWARE = "does not read the arena frame (MINE_AI_ARENA): its coordinates would stay at offset zero (only tests/minecraft/client-host.ts gets a lane)";
+
+/** Why the scenario's client cannot run in a lane (it is not our client host, so nothing moves its coordinates into the lane); null when it is our host. */
+function clientRefusal(scenario: Scenario): string | null {
+  const { command, args, cwd } = scenario.client;
+  const runner = path.basename(command).replace(/\.exe$/iu, "");
+  if (runner !== "bun") return `its client command ${command} ${NOT_FRAME_AWARE}`;
+  const entry = args[0];
+  if (entry === undefined) return `its client has no entry file and ${NOT_FRAME_AWARE}`;
+  const resolved = path.resolve(cwd ?? process.cwd(), entry);
+  try {
+    return realpathSync(resolved) === OUR_CLIENT_HOST ? null : `its client ${resolved} ${NOT_FRAME_AWARE}`;
+  } catch (error) {
+    return `its client entry ${resolved} could not be resolved (${(error as NodeJS.ErrnoException).code ?? String(error)}): client.args[0] must be the entry file`;
+  }
+}
+
 /** Decide where `scenario` runs, once, when it is queued. */
 export function placeScenario(scenario: Scenario, defaults: GameruleDefaults, ports: ArenaPorts = REAL_PORTS): Placement {
+  const clientReason = clientRefusal(scenario);
+  if (clientReason) return own(scenario, clientReason, ports);
   let lifted;
   try {
     lifted = ports.settingsOf(scenario, defaults);

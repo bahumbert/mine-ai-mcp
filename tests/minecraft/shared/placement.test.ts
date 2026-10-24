@@ -1,10 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { Scenario } from "mine-labs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadScenario, type Scenario } from "mine-labs";
 import { laneOf } from "../arena/lanes.ts";
+import { loadAllScenarios } from "../arena/all-scenarios.ts";
+import { FRESH_SERVER_GAMERULES } from "../arena/gamerule-defaults.ts";
 import { settingsOf } from "../arena/settings.ts";
+import { shiftScenario } from "../arena/shift-scenario.ts";
 import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, type ArenaPorts } from "./placement.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
+
+const MINECRAFT_DIR = fileURLToPath(new URL("..", import.meta.url));
+const OUR_CLIENT_HOST = path.join(MINECRAFT_DIR, "client-host.ts");
+const LEGACY_SMELT_YAML = fileURLToPath(new URL("../../../scenarios/flat/craft/smelt-batch-normal.yaml", import.meta.url));
 
 const accepting: ArenaPorts = {
   settingsOf: (scenario, defaults) => ({ ...settingsOf(scenario, defaults), key: "key-of-" + scenario.name }),
@@ -58,6 +69,58 @@ test("a scenario whose settings cannot be read is placed on a server of its own"
   const placement = placeScenario(fixtureScenario(10), {}, broken);
   assert.equal(placement.kind, "own");
   assert.match(placement.kind === "own" ? placement.reason : "", /odd rule/u);
+});
+
+function withClient(scenario: Scenario, client: Partial<Scenario["client"]>): Scenario {
+  return { ...scenario, client: { ...scenario.client, ...client } };
+}
+
+function ownReason(placement: ReturnType<typeof placeScenario>): string {
+  assert.equal(placement.kind, "own");
+  return placement.kind === "own" ? placement.reason : "";
+}
+
+test("a legacy scenario whose client never reads the arena frame gets a server of its own with the reason, whether or not the shift would accept it", async () => {
+  const legacy = await loadScenario(LEGACY_SMELT_YAML);
+  const shiftRefuses: ArenaPorts = { ...accepting, shiftScenario: () => ({ ok: false, reason: "world.type is default" }) };
+  for (const ports of [accepting, shiftRefuses]) {
+    const reason = ownReason(placeScenario(legacy, {}, ports));
+    assert.match(reason, /client .*client-host\.ts does not read the arena frame \(MINE_AI_ARENA\)/u);
+    assert.match(reason, /coordinates would stay at offset zero/u);
+  }
+});
+
+const UNUSABLE_CLIENTS: readonly { readonly what: string; readonly client: Partial<Scenario["client"]>; readonly reason: RegExp }[] = [
+  { what: "an entry that does not exist", client: { args: ["no-such-host.ts"] }, reason: /its client entry .*no-such-host\.ts could not be resolved \(ENOENT\)/u },
+  { what: "a flag in place of the entry", client: { args: ["--smol", "client-host.ts"] }, reason: /its client entry .*--smol could not be resolved/u },
+  { what: "a command other than bun", client: { command: "node" }, reason: /command node.*arena frame/u },
+  { what: "no arguments", client: { args: [] }, reason: /no entry.*arena frame/u },
+];
+
+for (const { what, client, reason } of UNUSABLE_CLIENTS) {
+  test(`a client with ${what} is a server of its own with the reason, and placement does not throw`, () => {
+    assert.match(ownReason(placeScenario(withClient(fixtureScenario(10), client), {}, accepting)), reason);
+  });
+}
+
+test("our client host named through a template, a symlink or a .. segment stays on a lane", async () => {
+  const templated = await loadScenario(path.join(MINECRAFT_DIR, "scenarios/collect/parkour-ore-gap.yaml"));
+  assert.equal(placeScenario(templated, {}, accepting).kind, "lane");
+  const folder = mkdtempSync(path.join(tmpdir(), "placement-client-"));
+  try {
+    symlinkSync(OUR_CLIENT_HOST, path.join(folder, "host-link.ts"));
+    assert.equal(placeScenario(withClient(fixtureScenario(10), { cwd: folder, args: ["host-link.ts"] }), {}, accepting).kind, "lane");
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+  assert.equal(placeScenario(withClient(fixtureScenario(10), { cwd: MINECRAFT_DIR, args: ["shared/../client-host.ts"] }), {}, accepting).kind, "lane");
+});
+
+test("no scenario of the census moves to a server of its own because of its client", async () => {
+  for (const { file, scenario } of await loadAllScenarios()) {
+    const shiftable = shiftScenario(settingsOf(scenario, FRESH_SERVER_GAMERULES).scenario, laneOf(1)).ok;
+    assert.equal(placeScenario(scenario, FRESH_SERVER_GAMERULES).kind === "lane", shiftable, file);
+  }
 });
 
 test("a gamerule answer yields its value", () => {
