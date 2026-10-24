@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import * as mineLabs from "mine-labs";
-import type { ClientCompletion } from "mine-labs/client";
+import { parseClientEvent, type ClientCompletion } from "mine-labs/client";
+import { CLIENT_BOOTED_MESSAGE } from "./client-boot-marker.ts";
 
 /**
  * The real client host, booted ahead of its trial and handed over (Mine Labs' `clientProvider`), or started the old way.
@@ -103,4 +104,18 @@ test("a lane value in init.env wins over the one the host was spawned with, and 
   await until(() => old.completions.length > 0, "the arena failure of the old path");
   assert.match(old.completions[0]!.detail ?? "", /JSON|Unexpected|parse/iu);
   await old.client.stop("test complete");
+});
+
+test("a host booted ahead says so once its driver is loaded, and still waits for init", { timeout: 60_000 }, async () => {
+  const driver = await writeDriver("booted-driver.ts", MARKER_DRIVER(join(directory, "booted-driver-loaded")));
+  const ahead = mineLabs.spawnClientAhead(clientSpec(driver).client);
+  try {
+    await until(() => ahead.recentOutput().some(({ line }) => line.includes(CLIENT_BOOTED_MESSAGE)), "the booted line");
+    assert.equal(ahead.child.exitCode, null, "the host waits for init after it said it booted");
+    const lines = ahead.recentOutput().filter(({ line }) => line.includes(CLIENT_BOOTED_MESSAGE));
+    assert.equal(lines.length, 1);
+    assert.deepEqual(parseClientEvent(lines[0]!.line), { type: "log", message: CLIENT_BOOTED_MESSAGE }, "a log event the protocol accepts: Mine Labs logs it and goes on");
+  } finally {
+    ahead.child.kill();
+  }
 });

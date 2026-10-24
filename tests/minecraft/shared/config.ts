@@ -13,6 +13,27 @@ export interface ScenarioServerConfig {
   readonly cpuCalm: number;
   /** Resident memory of one scenario client at full size: 210-221 MB peak measured by T1 (client-footprint.sh), 250 MB covers every run seen. */
   readonly clientMemMb: number;
+  /**
+   * Resident memory of a scenario client booted and waiting for `init`, before it logs in: 111-122 MB in 10 boots measured 2026-10-25 on WSL
+   * (`.agent/scripts/client-boot-measure.ts`, the contract driver without and `single-action.ts` with the runtime; 125 covers them all). A client
+   * spawned ahead reserves this from its spawn; its trial reserves only `clientMemMb - clientBootedMemMb` (what logging in adds). The logged-in
+   * size is still T1's peak (`clientMemMb`): its size right after the login, and so the true difference, is to measure on a running trial (`ps`).
+   */
+  readonly clientBootedMemMb: number;
+  /** Cpu seconds of one client boot (1.07-1.17 s in 10 boots, 2026-10-25, `client-boot-measure.ts`; 1.2 covers them): the scheduler adds it, over a sample window, to the busy cpu for each client it boots in one pass, so a pass cannot boot a whole cap of them into a machine at the bound. */
+  readonly clientBootCpuSeconds: number;
+  /**
+   * Clients a submission may have booted or booting and not yet handed to a trial: one wave of the starting target, so the trials of the first
+   * pass boot while they wait for the arrangement mutex. The memory ledger and the cpu bound decide whether one starts; this only bounds the
+   * waste a submission that never reaches them can leave (to measure: T7g's `join` median).
+   */
+  readonly clientsAhead: number;
+  /** Clients booted ahead in all submissions: two waves, so a second submission still boots its first wave beside a running one. */
+  readonly clientsAheadMax: number;
+  /** A client spawned ahead that has not said it booted after this long counts as a failed boot and is killed (Mine Labs waits 60 s for `ready` after a handover). */
+  readonly clientBootBoundMs: number;
+  /** Failed boots in a row (no boot succeeded between) after which a submission's trials of that client command fail with the boot's stderr and none is respawned. */
+  readonly clientBootFailureLimit: number;
   /** A client counts as young (memory still growing) for this long after its admission. */
   readonly clientRampMs: number;
   readonly serverMemMarginMb: number;
@@ -66,6 +87,12 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   cpuAdmit: ["CPU_ADMIT", 0.85, 1],
   cpuCalm: ["CPU_CALM", 0.6, 1],
   clientMemMb: ["CLIENT_MEM_MB", 250],
+  clientBootedMemMb: ["CLIENT_BOOTED_MEM_MB", 125],
+  clientBootCpuSeconds: ["CLIENT_BOOT_CPU_SECONDS", 1.2],
+  clientsAhead: ["CLIENTS_AHEAD", 28],
+  clientsAheadMax: ["CLIENTS_AHEAD_MAX", 56],
+  clientBootBoundMs: ["CLIENT_BOOT_BOUND_MS", 60_000],
+  clientBootFailureLimit: ["CLIENT_BOOT_FAILURE_LIMIT", 2],
   clientRampMs: ["CLIENT_RAMP_MS", 30_000],
   serverMemMarginMb: ["SERVER_MEM_MARGIN_MB", 1_024],
   serverOverheadMb: ["SERVER_OVERHEAD_MB", 512],
@@ -116,6 +143,7 @@ export function loadScenarioServerConfig(env: Record<string, string | undefined>
     Object.entries(NUMBER_CONSTANTS).map(([name, [suffix, fallback, max]]) => [name, numberFromEnv(env, suffix, fallback, max)]),
   ) as Record<NumberKey, number>;
   if (!Number.isInteger(numbers.serversPerKey)) throw new Error(`${ENV_PREFIX}SERVERS_PER_KEY=${numbers.serversPerKey} is not a whole number from 1`);
+  if (!Number.isInteger(numbers.clientBootFailureLimit)) throw new Error(`${ENV_PREFIX}CLIENT_BOOT_FAILURE_LIMIT=${numbers.clientBootFailureLimit} is not a whole number from 1`);
   return { ...numbers, socketPath: env[`${ENV_PREFIX}SOCKET_PATH`] || DEFAULT_SOCKET };
 }
 

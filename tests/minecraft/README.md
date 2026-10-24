@@ -246,10 +246,15 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
   the next server of the key (a new one, when memory allows) takes the trial; when no new server can start, the trial
   takes the server with the shortest queue rather than wait. `MINE_AI_SCENARIO_SERVERS_PER_KEY` (default 1) above 1 starts that many
   servers of a key at once when it has `SERVERS_PER_KEY x (MAX_PLAYERS - 2) / 2` trials queued, each trial on the shortest queue.
+- **The daemon boots a submission's clients before their trials** (`CLIENTS_AHEAD` per submission, `CLIENTS_AHEAD_MAX` in all): a
+  client host (`bun client-host.ts <driver>`) loads its driver and waits for `init`, so a lane's `join` is only the login. Never
+  beside a timing trial (`--lock`, `exclusive`), at `CPU_ADMIT`, or past the memory ledger; never shared between submissions; a
+  client command that fails to boot twice in a row (`CLIENT_BOOT_FAILURE_LIMIT`) fails its submission's trials with the client's
+  stderr; a cancelled or ended submission kills the clients it did not use. Log: `client boot s<n> <command>: boot=<ms> ms`.
 - **The daemon log** (`.tmp/scenario-server/daemon.log`) has, per sample, `sample: ... | cpu= own= load1= mem= ledger=
   target= running= queued= servers= starts= held=<bound:count,...>` (and `target change: halved|foreign load|grew`),
-  per settled trial `trial <name> lane <k|own> server <id> queue= serverWait= mutexWait= arrange= join= trial=
-  restoreWait= restore= hold=` (ms: submission to admission, server not yet ready, the six phases of the run log, admission
+  per settled trial `trial <name> lane <k|own> server <id> queue= serverWait= mutexWait= arrange= [settle=] join= trial=
+  restoreWait= restore= hold=` (ms: submission to admission, server not yet ready, the phases of the run log (`settle`, arrangement to the first `init`, only when the runner asked for a client; `join` then runs from `init`), admission
   to the lane's return), and per server `server <id> (...) starting: <reason>` / `stopping: <reason>`.
 - **Killing the submitter ends its trials, not the daemon.** `submit` going away (Ctrl-C, `kill`, even `kill -9` of a
   script that wraps it) closes its socket: the daemon cancels that submission's queued and running trials and goes on

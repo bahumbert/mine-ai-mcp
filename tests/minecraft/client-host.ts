@@ -19,6 +19,7 @@ import { openScenarioHighlighter } from "./scenario-highlighter.ts";
 import type { ScenarioContext, ScenarioRun, ScenarioCall } from "./scenario.ts";
 import { WITHOUT_RUNTIME_FLAG, parseClientHostArgs } from "./client-host-args.ts";
 import { arenaFrame, decodeArena, type ArenaFrame } from "./arena/frame.ts";
+import { clientBootedLine } from "./client-boot-marker.ts";
 
 const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
@@ -28,6 +29,10 @@ const driverLoading = loadDriver(driverFile).then(
   (driver) => ({ driver }),
   (cause: unknown) => ({ cause }),
 );
+
+// The daemon times a host's boot from this line (client boot ahead, T7h-b); it comes whether the driver loaded or failed, a failure
+// being the trial's to report once init arrives.
+void driverLoading.then(() => process.stdout.write(clientBootedLine()));
 
 await runNodeClient((session) => runScenario(withRuntime, session));
 

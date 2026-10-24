@@ -102,3 +102,8 @@ export function gameruleNamesOf(scenario: Scenario, ports: ArenaPorts = REAL_POR
     return [];
   }
 }
+
+/** Whether the scenario's client is our client host: the one that writes its booted line, so the only one the daemon can boot ahead of its trial. */
+export function runsOurClientHost(scenario: Scenario): boolean {
+  return clientRefusal(scenario) === null;
+}

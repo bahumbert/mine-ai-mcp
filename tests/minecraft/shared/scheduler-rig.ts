@@ -1,6 +1,8 @@
 // A scheduler on fake servers and a runner the test finishes by hand, for the scheduler and daemon tests.
-import type { RunResult } from "mine-labs";
+import type { ClientAhead, RunResult, Scenario } from "mine-labs";
 import { settingsOf } from "../arena/settings.ts";
+import { ClientsAhead } from "./client-ahead.ts";
+import type { ScriptedClients } from "./scripted-clients.ts";
 import { loadScenarioServerConfig, type ScenarioServerConfig } from "./config.ts";
 import { FakeFactory } from "./fake-servers.ts";
 import type { Placement } from "./placement.ts";
@@ -11,6 +13,8 @@ import type { TrialRunInput } from "./trial.ts";
 
 export interface RunningTrial {
   readonly input: TrialRunInput;
+  /** What the provider answered for each of the scenario's players (a runner that asks, as Mine Labs does after the arrangement); empty without clients ahead. */
+  readonly clients: readonly (ClientAhead | undefined)[];
   /** Ends the trial with this outcome (after it has been prepared). */
   finish(outcome?: RunResult["outcome"]): void;
 }
@@ -39,32 +43,40 @@ export class SchedulerRig {
   arrangeGate: Promise<void> | null = null;
   clock = 100_000;
 
-  constructor(env: Record<string, string> = {}) {
+  /** The clients booted ahead, present when the rig was given a `ScriptedClients`. */
+  readonly ahead: ClientsAhead | null;
+
+  constructor(env: Record<string, string> = {}, options: { readonly clients?: ScriptedClients } = {}) {
     this.config = loadScenarioServerConfig({ ...TEST_CONFIG_ENV, ...env });
     this.pool = new ServerPool(this.factory, this.config, message => this.logs.push(message));
+    this.ahead = options.clients ? new ClientsAhead({ config: this.config, log: message => this.logs.push(message), spawn: options.clients.spawn, now: () => this.clock }) : null;
     this.scheduler = new Scheduler({
       pool: this.pool, config: this.config, now: () => this.clock, log: message => this.logs.push(message),
       runTrial: input => this.#runTrial(input),
       runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
+      clientsAhead: this.ahead ?? undefined,
     });
   }
 
   #runTrial(input: TrialRunInput): Promise<RunResult> {
-    return new Promise(resolve => {
+    return new Promise((resolve, reject) => {
+      const clients: (ClientAhead | undefined)[] = [];
       void (async () => {
         await this.arrangeGate;
         await input.onArranged();
+        // Mine Labs launches each player's client between the arrangement and the preparation.
+        for (const player of input.scenario.players) clients.push(input.clientProvider?.(input.scenario.client, player.name));
         await input.onPrepared();
       })().then(() => {
         input.deferReset(async () => {});
         this.running.push({
-          input,
+          input, clients,
           finish: (outcome = "pass") => {
             this.running.splice(this.running.findIndex(trial => trial.input === input), 1);
             resolve({ scenario: input.scenario.name ?? "demo", outcome, elapsedMs: 1, goal: { state: "passed", detail: "ok" }, goalText: "" });
           },
         });
-      });
+      }, reject);
     });
   }
 
@@ -73,10 +85,11 @@ export class SchedulerRig {
     this.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 28_000, threads: 24, ...overrides }, this.clock);
   }
 
-  submit(entries: { name: string; placement: Placement }[], overrides: Partial<SubmissionSpec> = {}): SubmissionHandle {
+  submit(entries: { name: string; placement: Placement; /** Fields of this scenario's client command to change (another driver, another command). */ client?: Partial<Scenario["client"]> }[], overrides: Partial<SubmissionSpec> = {}): SubmissionHandle {
     return this.scheduler.submit({
       entries: entries.map(entry => {
-        const scenario = fixtureScenario(60, entry.name);
+        const base = fixtureScenario(60, entry.name);
+        const scenario = entry.client ? { ...base, client: { ...base.client, ...entry.client } } : base;
         return { name: entry.name, scenario, placement: entry.placement.kind === "lane" ? { ...entry.placement, scenario } : entry.placement };
       }),
       repeat: 1, maxLanes: null, lock: false, hold: false, outDir: "/tmp/out", emit: event => this.events.push(event), ...overrides,

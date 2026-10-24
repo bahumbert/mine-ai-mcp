@@ -2,6 +2,7 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Scenario } from "mine-labs";
+import { ClientsAhead } from "./client-ahead.ts";
 import { loadScenarioServerConfig, portBlockOf, type PortBlock, type ScenarioServerConfig } from "./config.ts";
 import { sampleLine } from "./daemon-lines.ts";
 import { serveSocket } from "./daemon-socket.ts";
@@ -32,6 +33,8 @@ export interface DaemonOptions {
   readonly machine?: SamplerDeps["machine"];
   readonly residentMbOf?: SamplerDeps["residentMbOf"];
   readonly runIo?: RunIo;
+  /** Boots the scenario clients ahead of their trials; by default only with the real trial runner (a test's runner never takes one). */
+  readonly clientsAhead?: ClientsAhead;
 }
 
 export interface Daemon {
@@ -66,7 +69,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const factory = options.factory ?? new LabsServerFactory({ serverRoot, ports: new PortPairs(options.portBlock), pidFile, config, log });
   const pool = new ServerPool(factory, config, log);
-  const scheduler = new Scheduler({ pool, config, now, log, runTrial: options.runTrial ?? runLabsTrial, runIo: options.runIo });
+  const clientsAhead = options.clientsAhead ?? (options.runTrial ? undefined : new ClientsAhead({ config, log, now }));
+  const scheduler = new Scheduler({ pool, config, now, log, runTrial: options.runTrial ?? runLabsTrial, runIo: options.runIo, clientsAhead });
   const defaults = new GameruleDefaultsCache(probeServers(pool, config, now));
   const submissions = new Set<RunningSubmission>();
   const stopped = Promise.withResolvers<void>();

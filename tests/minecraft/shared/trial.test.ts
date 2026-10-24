@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { RunResult, Scenario } from "mine-labs";
+import type { ClientProvider, RunResult, Scenario } from "mine-labs";
 import { fixtureScenario } from "./scenario-fixture.ts";
 import { laneOf } from "../arena/lanes.ts";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
@@ -441,4 +441,67 @@ test("a scenario on its own server has no queue to mark", async () => {
   const events: string[] = [];
   await executeTrial({ runTrial: runnerOf(), config }, job({ lane: null, queue: queueMarks(events) }));
   assert.deepEqual(events, []);
+});
+
+// T7h-b: a client booted ahead moves the boot out of `join`: join runs from the first `init`, the settle delay before it is its own phase.
+function providedClient(): ClientProvider {
+  return () => undefined;
+}
+
+test("a runner that asks for its client after the settle delay gets a settle phase, and join runs from that ask to prepared", async () => {
+  const lines: string[] = [];
+  const asking: TrialRunner = async input => {
+    await input.onArranged();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    input.clientProvider?.({ command: "bun", args: [], env: {} }, "Walker");
+    await new Promise(resolve => setTimeout(resolve, 25));
+    await input.onPrepared();
+    input.deferReset(async () => {});
+    return result("pass");
+  };
+  const end = await executeTrial({ runTrial: asking, config }, job({ log: line => lines.push(line), scenario: scenario(60), clientProvider: providedClient() }));
+  const phases = end.phases!;
+  assert.ok((phases.settleMs ?? 0) >= 35, `settle ${phases.settleMs}`);
+  assert.ok(phases.joinMs >= 20 && phases.joinMs < 38, `join ${phases.joinMs}: the 40 ms before the ask are not in it`);
+  assert.match(lines.find(text => text.startsWith("phases: "))!, /^phases: mutexWait=\d+ arrange=\d+ settle=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+$/u);
+});
+
+test("the provider the scheduler gave is the one the runner is handed, and its answer is passed on unchanged", async () => {
+  const asked: string[] = [];
+  const provider: ClientProvider = (_client, username) => { asked.push(username); return undefined; };
+  let handed: ClientProvider | undefined;
+  const runner: TrialRunner = async input => {
+    handed = input.clientProvider;
+    await input.onPrepared();
+    input.deferReset(async () => {});
+    return result("pass");
+  };
+  await executeTrial({ runTrial: runner, config }, job({ clientProvider: provider }));
+  assert.equal(handed?.({ command: "bun", args: [], env: {} }, "Walker"), undefined);
+  assert.deepEqual(asked, ["Walker"]);
+});
+
+test("a trial given no provider hands its runner none, and its phases keep today's six", async () => {
+  let handed: ClientProvider | undefined = providedClient();
+  const runner: TrialRunner = async input => { handed = input.clientProvider; return runnerOf()(input); };
+  const lines: string[] = [];
+  const end = await executeTrial({ runTrial: runner, config }, job({ log: line => lines.push(line) }));
+  assert.equal(handed, undefined);
+  assert.equal(end.phases?.settleMs, undefined);
+  assert.match(lines.find(text => text.startsWith("phases: "))!, /^phases: mutexWait=\d+ arrange=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+$/u);
+});
+
+test("a provider that throws ends the trial with its message, the lane freed", async () => {
+  const mutex = new ArrangementMutex();
+  const provider: ClientProvider = () => { throw new Error("scenario client 'bun client-host.ts' failed to boot 2 times in a row"); };
+  const runner: TrialRunner = async input => {
+    await input.onArranged();
+    input.clientProvider?.({ command: "bun", args: [], env: {} }, "Walker");
+    return result("pass");
+  };
+  const end = await executeTrial({ runTrial: runner, config }, job({ mutex, clientProvider: provider }));
+  assert.equal(end.result.outcome, "error");
+  assert.match(end.result.error ?? "", /trial threw: scenario client 'bun client-host\.ts' failed to boot 2 times in a row/u);
+  assert.equal(end.lane, "quarantined");
+  (await mutex.acquire())();
 });

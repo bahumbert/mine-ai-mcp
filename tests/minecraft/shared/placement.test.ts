@@ -10,7 +10,7 @@ import { loadAllScenarios } from "../arena/all-scenarios.ts";
 import { FRESH_SERVER_GAMERULES } from "../arena/gamerule-defaults.ts";
 import { settingsOf } from "../arena/settings.ts";
 import { shiftScenario } from "../arena/shift-scenario.ts";
-import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, type ArenaPorts } from "./placement.ts";
+import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, runsOurClientHost, type ArenaPorts } from "./placement.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 
 const MINECRAFT_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -163,4 +163,11 @@ test("a locked batch's placement gets a pool key of its own that no other batch'
   assert.match(one.key, /^key-of-a/u);
   assert.equal(one.reservedFor, 3);
   assert.equal(lane.reservedFor, undefined, "the original placement is not changed");
+});
+
+test("only our client host is booted ahead: it is the one that says when it booted", () => {
+  const scenario = fixtureScenario(60);
+  assert.equal(runsOurClientHost(scenario), true);
+  assert.equal(runsOurClientHost({ ...scenario, client: { ...scenario.client, command: "node" } }), false, "another runner never writes the booted line");
+  assert.equal(runsOurClientHost({ ...scenario, client: { ...scenario.client, args: [] } }), false, "no entry file to check");
 });

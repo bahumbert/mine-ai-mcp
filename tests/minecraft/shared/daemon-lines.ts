@@ -1,6 +1,6 @@
 // The lines the daemon writes to its log about the trials and the samples (the evidence of a batch: where its time went).
 import type { AdmissionEvent } from "./admission.ts";
-import type { TrialPhases } from "./trial.ts";
+import { phaseFields, type TrialPhases } from "./trial.ts";
 
 export interface TrialLineInput {
   readonly name: string;
@@ -17,12 +17,10 @@ export interface TrialLineInput {
   readonly holdMs: number;
 }
 
-/** One line per settled trial: `trial <name> lane <k|own> server <id> queue serverWait <six phases> hold`. */
+/** One line per settled trial: `trial <name> lane <k|own> server <id> queue serverWait <the phases> hold` (the six of the trial, `settle` before `join` when it asked for a client). */
 export function trialLine(trial: TrialLineInput): string {
   const { phases } = trial;
-  const phaseText = phases
-    ? `mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`
-    : "phases=none";
+  const phaseText = phases ? phaseFields(phases) : "phases=none";
   return `trial ${trial.name} lane ${trial.lane ?? "own"} server ${trial.serverId} queue=${trial.queueMs} serverWait=${trial.serverWaitMs} ${phaseText} hold=${trial.holdMs}`;
 }
 

@@ -1,5 +1,5 @@
 // Runs one trial on a server under the wall-clock bounds: the arrangement mutex, the abort at goal timeout + slack, the lane's restore.
-import type { ArenaTrialOptions, RunResult, Scenario } from "mine-labs";
+import type { ArenaTrialOptions, ClientProvider, RunResult, Scenario } from "mine-labs";
 import { controlChunkOf, type Lane } from "../arena/lanes.ts";
 import type { ArrangementMutex } from "./arrangement-mutex.ts";
 import type { ScenarioServerConfig } from "./config.ts";
@@ -24,6 +24,8 @@ export interface TrialRunInput {
   readonly onArranged: () => Promise<void>;
   /** The clients joined; a no-op after `onArranged`, the call that frees the mutex when a runner never makes the first. */
   readonly onPrepared: () => Promise<void>;
+  /** Hands the trial a client booted before it (Mine Labs' `clientProvider`); absent when the daemon boots none, and the runner spawns its clients as before. */
+  readonly clientProvider?: ClientProvider;
 }
 
 export type TrialRunner = (input: TrialRunInput) => Promise<RunResult>;
@@ -43,6 +45,8 @@ export interface TrialJob {
   readonly reuseServer: boolean;
   /** Where this trial stands in its server's arrangement queue (the pool's count for admission); absent on a server of its own. */
   readonly queue?: MutexQueueMarks;
+  /** The clients the daemon booted for this trial's submission (see `TrialRunInput.clientProvider`). */
+  readonly clientProvider?: ClientProvider;
 }
 
 export interface TrialEnd {
@@ -65,7 +69,12 @@ export interface TrialPhases {
   readonly mutexWaitMs: number;
   /** Holding the mutex: the arena snapshot and every command that builds the scenario. */
   readonly arrangeMs: number;
-  /** Not holding it: the settle delay, the clients' boot and their login. */
+  /**
+   * Not holding the mutex, before the first client gets its `init`: the settle delay. Set only for a trial whose runner asked for a client
+   * (`clientProvider`); without it the phase is not measured and `joinMs` still starts at the arrangement's end.
+   */
+  readonly settleMs?: number;
+  /** Not holding the mutex, from the first `init` to the clients' preparation: a client booted ahead only logs in; one spawned on the spot boots here too. */
   readonly joinMs: number;
   /** The goal measured, to the trial's end. */
   readonly trialMs: number;
@@ -80,6 +89,7 @@ class TrialMarks {
   readonly #queuedAt = performance.now();
   #acquiredAt: number | undefined;
   #arrangedAt: number | undefined;
+  #initAt: number | undefined;
   #preparedAt: number | undefined;
   #settledAt: number | undefined;
   #restoreQueuedAt: number | undefined;
@@ -93,6 +103,8 @@ class TrialMarks {
   /** Marks only while the trial has not been prepared, and only once. */
   arranged(): void { if (this.#preparedAt === undefined) this.#arrangedAt ??= performance.now(); }
   prepared(): void { this.#preparedAt ??= performance.now(); }
+  /** The first client was asked for: its `init` is written right after. */
+  initSent(): void { this.#initAt ??= performance.now(); }
   settled(): void { this.#settledAt ??= performance.now(); }
 
   phases(): TrialPhases {
@@ -105,7 +117,8 @@ class TrialMarks {
     return {
       mutexWaitMs: ms(this.#queuedAt, acquiredAt),
       arrangeMs: ms(acquiredAt, arrangedAt),
-      joinMs: ms(arrangedAt, preparedAt),
+      ...(this.#initAt === undefined ? {} : { settleMs: ms(arrangedAt, this.#initAt) }),
+      joinMs: ms(this.#initAt ?? arrangedAt, preparedAt),
       trialMs: ms(preparedAt, end),
       // A restore still queued or running when the phases are read (the bound gave up on it) counts up to now.
       restoreWaitMs: this.#restoreQueuedAt === undefined ? 0 : ms(this.#restoreQueuedAt, this.#restoreStartedAt ?? now),
@@ -114,8 +127,14 @@ class TrialMarks {
   }
 }
 
+/** The phases as `name=ms` fields in the order they happen (`settle` only for a trial that asked for a client); the trial's log line and the daemon's trial line both use it. */
+export function phaseFields(phases: TrialPhases): string {
+  const settle = phases.settleMs === undefined ? "" : ` settle=${phases.settleMs}`;
+  return `mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs}${settle} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`;
+}
+
 function phasesLine(phases: TrialPhases): string {
-  return `phases: mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`;
+  return `phases: ${phaseFields(phases)}`;
 }
 
 type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs"> };
@@ -199,6 +218,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
       deferReset: handed => { restore = handed; },
       onArranged: async () => { marks.arranged(); queue?.arranged(); release(); },
       onPrepared: async () => { marks.prepared(); queue?.arranged(); release(); },
+      clientProvider: job.clientProvider && ((client, username) => { marks.initSent(); return job.clientProvider!(client, username); }),
     });
     const settled = await Promise.race([trial.then(result => ({ result }), (error: unknown) => ({ error })), late.promise]);
     marks.settled();

@@ -28,6 +28,11 @@ export interface AdmissionSample {
   readonly ownTrials: number;
   /** Clients admitted less than `clientRampMs` ago, still growing into their memory. */
   readonly youngClients: number;
+  /**
+   * What the young clients still have to grow into, in MB, when it is not `youngClients` whole clients: a trial that took a client booted
+   * ahead reserves only its difference to a logged-in client, and a client booted ahead for a queued trial reserves its booted size.
+   */
+  readonly youngClientsMb?: number;
 }
 
 /** What has been admitted since the sample was read (the sample itself does not know). */
@@ -67,6 +72,8 @@ export interface AdmissionRequest {
   readonly candidates: readonly string[];
   /** The mutex queue of each shared candidate; a server not listed has none. */
   readonly queues?: ReadonlyMap<string, ServerQueue>;
+  /** What this trial's client adds to the ledger when it is not a whole client (`clientMemMb`): the client was booted ahead, so only its login is still to come. */
+  readonly clientReserveMb?: number;
   /** Heap of the server a new start would create. */
   readonly newServerHeapMb: number;
   /** The key has enough trials queued to fill `serversPerKey` servers and fewer servers than that: a new one starts now, whatever the candidates could take. */
@@ -100,7 +107,7 @@ function growthMb(server: ServerReading, config: ScenarioServerConfig): number {
  */
 export function ledgerMb(sample: AdmissionSample, tally: AdmissionTally, config: ScenarioServerConfig): number {
   const serversStillGrowing = sample.servers.reduce((sum, server) => sum + (server.busy ? growthMb(server, config) : 0), 0);
-  return sample.memAvailableMb - serversStillGrowing - sample.youngClients * config.clientMemMb - tally.reservedMb;
+  return sample.memAvailableMb - serversStillGrowing - (sample.youngClientsMb ?? sample.youngClients * config.clientMemMb) - tally.reservedMb;
 }
 
 function serverRefusal(reading: ServerReading | undefined, id: string, state: AdmissionState, config: ScenarioServerConfig): string | null {
@@ -140,8 +147,8 @@ function cpuRefusalFor(sample: AdmissionSample, request: AdmissionRequest, runni
 }
 
 /** The memory one more trial reserves on this server: its client, and the growth the trial wakes when the server is idle. */
-function reserveOn(reading: ServerReading, config: ScenarioServerConfig): number {
-  return config.clientMemMb + (reading.busy ? 0 : growthMb(reading, config));
+function reserveOn(reading: ServerReading, clientMb: number, config: ScenarioServerConfig): number {
+  return clientMb + (reading.busy ? 0 : growthMb(reading, config));
 }
 
 /** A shared server that could take the trial: its mutex queue and what the trial reserves on it. */
@@ -163,14 +170,15 @@ export function decideAdmission(input: {
 }): AdmissionDecision {
   const { sample, state, tally, request, config } = input;
   const running = sample.ownTrials + tally.trials;
+  const clientMb = request.clientReserveMb ?? config.clientMemMb;
   const available = ledgerMb(sample, tally, config);
-  if (available < config.clientMemMb) {
-    return refusal("memory", `memory ledger ${available} MB does not cover a client (${config.clientMemMb} MB)`);
+  if (available < clientMb) {
+    return refusal("memory", `memory ledger ${available} MB does not cover a client (${clientMb} MB)`);
   }
   const cpuRefusal = cpuRefusalFor(sample, request, running, config);
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
-  const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
+  const needed = clientMb + request.newServerHeapMb + config.serverMemMarginMb;
   // A spread start is the key's servers starting together, not the next server of a sample: only the ledger holds it.
   if (request.spreadToNewServer && available >= needed) return { admit: true, server: "new", reserveMb: needed, spread: true };
   const refusals: string[] = [];
@@ -187,9 +195,9 @@ export function decideAdmission(input: {
       if (refusal) refusals.push(refusal);
       continue;
     }
-    const reserveMb = reserveOn(reading, config);
+    const reserveMb = reserveOn(reading, clientMb, config);
     if (available < reserveMb) {
-      unaffordable.push(`${id} is idle: its client and the ${reserveMb - config.clientMemMb} MB it grows by need ${reserveMb} MB, the ledger has ${available} MB`);
+      unaffordable.push(`${id} is idle: its client and the ${reserveMb - clientMb} MB it grows by need ${reserveMb} MB, the ledger has ${available} MB`);
       continue;
     }
     const wait = reading.shared ? queueWaitMs(request.queues?.get(id), config) : 0;

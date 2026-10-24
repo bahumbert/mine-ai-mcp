@@ -46,3 +46,10 @@ test("a target change of the sample is said at the end of the line", () => {
   assert.match(sampleLine({ ...report, event: "foreign load" }, []), / held=target:4,new-server-per-sample:2 target change: foreign load$/u);
   assert.match(sampleLine({ ...report, event: "grew" }, []), / target change: grew$/u);
 });
+
+test("a trial that asked for a client has its settle phase between arrange and join", () => {
+  assert.equal(
+    trialLine({ name: "air-supply", lane: 3, serverId: "s2", queueMs: 14_000, serverWaitMs: 0, phases: { ...phases, settleMs: 1_500, joinMs: 3_600 }, holdMs: 19_800 }),
+    "trial air-supply lane 3 server s2 queue=14000 serverWait=0 mutexWait=120 arrange=450 settle=1500 join=3600 trial=12000 restoreWait=30 restore=350 hold=19800",
+  );
+});

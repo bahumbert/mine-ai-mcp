@@ -57,3 +57,18 @@ test("a port block that meets another daemon, the isolated runs or the live host
   assert.throws(() => portBlockOf(26_000), /25575/u);
   assert.throws(() => portBlockOf(0), /port/u);
 });
+
+test("the clients booted ahead: the booted size measured by T7h-b, one wave per submission, two in all, the boot bound and the failure limit", () => {
+  const config = loadScenarioServerConfig({});
+  assert.equal(config.clientBootedMemMb, 125);
+  assert.ok(config.clientBootedMemMb < config.clientMemMb, "a booted client is smaller than a logged-in one: the difference is what its trial reserves");
+  assert.equal(config.clientBootCpuSeconds, 1.2);
+  assert.equal(config.clientsAhead, config.targetStart);
+  assert.equal(config.clientsAheadMax, 2 * config.clientsAhead);
+  assert.equal(config.clientBootBoundMs, 60_000);
+  assert.equal(config.clientBootFailureLimit, 2);
+});
+
+test("a failure limit that is not a whole number is refused, naming its variable", () => {
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_CLIENT_BOOT_FAILURE_LIMIT: "1.5" }), /MINE_AI_SCENARIO_CLIENT_BOOT_FAILURE_LIMIT/u);
+});

@@ -506,3 +506,35 @@ test("a server backed off after a wall-bound hit (its tick time fine) stops the 
   assert.equal(targets[3], config.targetStart, "backed off at 20 s");
   assert.equal(targets.at(-1)! > config.targetStart, true, "growth resumes once it recovered and 60 s passed");
 });
+
+// A client booted ahead is already in MemAvailable: its trial reserves only what a logged-in client adds (T7h-b).
+test("a trial whose client was booted ahead reserves the difference to a logged-in client, not the whole client", () => {
+  const difference = config.clientMemMb - config.clientBootedMemMb;
+  const request: AdmissionRequest = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, clientReserveMb: difference };
+  assert.deepEqual(ask(sample(), initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s1", reserveMb: difference });
+  // The memory line moves down by the booted size: the ledger needs the difference, not the whole client.
+  const line = 2_084 + difference;
+  assert.equal(ask(sample({ memAvailableMb: line }), initialAdmissionState(config), EMPTY_TALLY, request).admit, true);
+  assert.equal(refusedBound(ask(sample({ memAvailableMb: line - 1 }), initialAdmissionState(config), EMPTY_TALLY, request)), "memory");
+});
+
+test("an idle server's growth and a new server's need are added to the reduced client reserve, not to a whole client", () => {
+  const difference = config.clientMemMb - config.clientBootedMemMb;
+  const idle = server({ busy: false, heapMb: 2_048, residentMb: 900 });
+  const request: AdmissionRequest = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, clientReserveMb: difference };
+  assert.deepEqual(ask(sample({ servers: [idle] }), initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s1", reserveMb: difference + 1_660 });
+  const fresh = ask(sample({ servers: [] }), initialAdmissionState(config), EMPTY_TALLY, { ...request, candidates: [] });
+  assert.deepEqual(fresh, { admit: true, server: "new", reserveMb: difference + config.sharedHeapMb + config.serverMemMarginMb });
+});
+
+test("the ledger counts the memory clients booted ahead are still growing into, beside the young clients of trials", () => {
+  const base = sample({ youngClients: 2, youngClientsMb: 2 * config.clientMemMb + 3 * config.clientBootedMemMb, memAvailableMb: 20_000 });
+  assert.equal(ledgerMb(base, EMPTY_TALLY, config), 20_000 - 2_084 - 2 * config.clientMemMb - 3 * config.clientBootedMemMb);
+  assert.equal(ledgerMb(sample({ youngClients: 2, memAvailableMb: 20_000 }), EMPTY_TALLY, config), 20_000 - 2_084 - 2 * config.clientMemMb, "absent: the young clients are whole ones, as before");
+});
+
+test("boot cpu of our own with no trial of ours running does not halve the target", () => {
+  // Clients booted ahead are our children, so the process tree counts their boots as ours; the halving needs a trial of ours running.
+  const booting = sample({ cpuBusy: 0.95, ownCpu: 0.9, ownTrials: 0 });
+  assert.equal(advanceAdmissionState(initialAdmissionState(config), booting, true, config).target, config.targetStart);
+});

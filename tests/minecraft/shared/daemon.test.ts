@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunResult } from "mine-labs";
+import { ClientsAhead } from "./client-ahead.ts";
 import { loadScenarioServerConfig } from "./config.ts";
 import { daemonListens, exchange } from "./daemon-client.ts";
 import { startDaemon, type Daemon } from "./daemon.ts";
 import { FakeFactory } from "./fake-servers.ts";
 import type { DaemonMessage } from "./protocol.ts";
+import { ScriptedClients } from "./scripted-clients.ts";
 import type { TrialRunner } from "./trial.ts";
 
 const ONE_FILE = fileURLToPath(new URL("../contract/scenarios/air-supply-under-water.yaml", import.meta.url));
@@ -174,4 +176,31 @@ test("the daemon logs one sample line with the machine, the ledger, the target a
     assert.ok(logs.some(line => /^trial air-supply-under-water lane 1 server s\d+ queue=\d+ serverWait=\d+ mutexWait=\d+ arrange=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+ hold=\d+$/u.test(line)), "a trial line");
     assert.ok(logs.some(line => /^server s\d+ \(shared, key .*\) starting: new key$/u.test(line)), "a start with its reason");
   });
+});
+
+test("a daemon given clients ahead boots one for the scenario it runs and kills it when the submission ends unused", async () => {
+  const clients = new ScriptedClients();
+  const dir = await mkdtemp(join(tmpdir(), "daemon-ahead-"));
+  const socketPath = join(dir, "d.sock");
+  const factory = new FakeFactory();
+  const logs: string[] = [];
+  probeAnswers(factory);
+  const config = loadScenarioServerConfig({ MINE_AI_SCENARIO_SAMPLE_EVERY_MS: "20", MINE_AI_SCENARIO_SOCKET_PATH: socketPath });
+  const daemon = await startDaemon({
+    socketPath, config, stateDir: join(dir, "state"), portBlock: { first: 25_400, last: 25_559 }, log: line => logs.push(line),
+    factory, runTrial: passing, clientsAhead: new ClientsAhead({ config, log: line => logs.push(line), spawn: clients.spawn }),
+    machine: { read: async () => ({ cpuBusy: 0.1, memAvailableMb: 20_000, threads: 24 }) }, residentMbOf: async () => 900,
+    runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
+  });
+  try {
+    const messages = await submitAndCollect(socketPath, [ONE_FILE]);
+    assert.equal(messages.at(-1)?.type, "done");
+    assert.equal(clients.spawned.length, 1, "one client for the one scenario, booted in the pass that admitted it");
+    await clients.spawned[0]!.ahead.closed;
+    assert.equal(clients.spawned[0]!.ahead.child.signalCode, "SIGKILL", "this runner never asked for it: it died with the submission");
+  } finally {
+    await daemon.stop();
+    await clients.stopAll();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
