@@ -5,11 +5,11 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { serverQuiet } from "../server-answer.ts";
 import type { ContractBot } from "../subject.ts";
 import { countWrites } from "./bed-scene.ts";
 import { CALL_WALL_MS, finishWithin } from "./combat-scene.ts";
 
-const SETTLE_MS = 500;
 const FIRST_MAIN_SLOT = 9;
 const FIRST_HOTBAR_SLOT = 36;
 /** Nine stacks, so the hotbar is full (the join gives it first). */
@@ -28,7 +28,8 @@ export const unequipHand: ContractCheck = {
     try {
       assert.equal(heldName(bot), "stone");
       await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
-      await subject.wait(SETTLE_MS);
+      // The server answers the click with the slot packets (or corrects it): read after they came and the server ran on.
+      await serverQuiet(subject, "the first unequip click");
       assert.equal(heldName(bot), undefined, "a full hotbar: the hand is not empty");
       assert.equal(bot.quickBarSlot, 0, "a full hotbar: the selected slot moved");
       assert.equal(bot.inventory.slots[FIRST_MAIN_SLOT]?.name, "stone", "a full hotbar: the stack is not in the first free main slot");
@@ -42,7 +43,7 @@ export const unequipHand: ContractCheck = {
       assert.equal(heldName(bot), "dirt");
       assert.equal(bot.quickBarSlot, 1);
       await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
-      await subject.wait(SETTLE_MS);
+      await serverQuiet(subject, "the second unequip click");
       assert.equal(heldName(bot), undefined, "a free slot: the hand is not empty");
       assert.equal(bot.quickBarSlot, 0, "a free slot: the first free hotbar slot was not selected");
       assert.equal(bot.inventory.slots[FIRST_HOTBAR_SLOT + 1]?.name, "dirt", "a free slot: the held stack moved");

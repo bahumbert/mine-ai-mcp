@@ -2,7 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-attack-mob-knockback
 tags:
   - contract
-description: "A mob the bot hits is pushed 0.4 away (0.7 with a sprint bonus) as two entity_velocity packets a tick later; a mob with no AI never moves and its velocity decays by 0.98 a tick to zero. Contract check tests/minecraft/contract/checks/attack-mob-knockback.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+description: "A mob with no AI that the bot hits with a sword, on the diagonal and with a wall behind it, is pushed 0.4 away as two entity_velocity packets a tick later and never moves. Contract check tests/minecraft/contract/checks/attack-mob-knockback.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun
   cwd: ../..
@@ -25,12 +25,6 @@ entities:
     pos:
       - -1.5
       - -60
-      - 0.5
-    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
-  - type: zombie
-    pos:
-      - -1.5
-      - -60
       - -1.5
     nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
   - type: zombie
@@ -38,12 +32,6 @@ entities:
       - 2.5
       - -60
       - 0.5
-    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
-  - type: zombie
-    pos:
-      - -1.5
-      - -60
-      - 3.5
     nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
 players:
   - name: Actor

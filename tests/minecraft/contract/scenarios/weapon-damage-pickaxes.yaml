@@ -1,8 +1,8 @@
 template: ../../templates/flat-single-action.yaml
-name: contract-weapon-damage-tools
+name: contract-weapon-damage-pickaxes
 tags:
   - contract
-description: "Each tool the tests swing costs three unarmored zombies its vanilla damage at its vanilla swing speed. Contract check tests/minecraft/contract/checks/weapon-damage-tools.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+description: "Each pickaxe the tests swing costs three unarmored zombies its vanilla damage at its vanilla swing speed. Contract check tests/minecraft/contract/checks/weapon-damage-pickaxes.ts (table: weapon-tools.ts), also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun
   cwd: ../..
@@ -11,7 +11,7 @@ client:
     - drivers/bot-contract.ts
     - --without-runtime
 params:
-  check: weapon-damage-tools
+  check: weapon-damage-pickaxes
 setup:
   - fill -6 -61 -6 6 -61 6 stone
   - fill -6 -60 -6 6 -55 6 air
@@ -266,24 +266,6 @@ players:
       - 0.5
     op: true
     inventory:
-      - item: wooden_sword
-        count: 1
-      - item: stone_sword
-        count: 1
-      - item: iron_sword
-        count: 1
-      - item: golden_sword
-        count: 1
-      - item: diamond_sword
-        count: 1
-      - item: wooden_axe
-        count: 1
-      - item: stone_axe
-        count: 1
-      - item: iron_axe
-        count: 1
-      - item: diamond_axe
-        count: 1
       - item: wooden_pickaxe
         count: 1
       - item: stone_pickaxe
@@ -295,18 +277,6 @@ players:
       - item: diamond_pickaxe
         count: 1
       - item: netherite_pickaxe
-        count: 1
-      - item: wooden_shovel
-        count: 1
-      - item: stone_shovel
-        count: 1
-      - item: diamond_shovel
-        count: 1
-      - item: wooden_hoe
-        count: 1
-      - item: stone_hoe
-        count: 1
-      - item: iron_hoe
         count: 1
 goal:
   kind: all

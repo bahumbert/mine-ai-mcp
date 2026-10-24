@@ -12,9 +12,10 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { answerSettled } from "../server-answer.ts";
 import type { ContractSubject, ProjectileName } from "../subject.ts";
 import { type DamageEvent, type HealthPacket, NIGHT, STILL_MOB_NBT, TICK_MS, burning, damageTypeId, mobAt } from "./combat-scene.ts";
-import { type PacketLog, logPackets } from "./packet-log.ts";
+import { type LoggedPacket, type PacketLog, logPackets } from "./packet-log.ts";
 
 /** One tick of the server's physics on a player knocked up from the ground: horizontal friction 0.91 * 0.6, then gravity and drag. */
 const PUSH_SIDEWAYS = 0.4 * 0.546;
@@ -26,7 +27,6 @@ const LOSS_TOLERANCE = 0.05;
 const REGENERATED_IN_THE_TICK = 1;
 /** The hit follows the spawn by 1 to 3 ticks from 3 blocks (a tick of jitter either way; a server behind on a shared host stretches it: 317 ms seen under 12 lanes). */
 const FLIGHT_MS = { min: TICK_MS - 40, max: 10 * TICK_MS } as const;
-const HIT_SETTLE_MS = 400;
 const BURN_AT_MS = [1_000, 2_000, 3_000, 4_000];
 const BURN_JITTER_MS = 150;
 const FIRE_OUT_MS = 5_000;
@@ -66,11 +66,13 @@ export const projectileHitBot: ContractCheck = {
         assert.equal(burning(bot), false, "the bot burns before the shot");
         const healthBefore = bot.health;
         await subject.shootBot(projectile, shooter.id);
-        await subject.wait(HIT_SETTLE_MS);
+        await awaitHitAnswer(subject, log, gone, projectile);
         assert.equal(spawned.length, 1, `${projectile}: one projectile heard spawning`);
         const flying = spawned[0]!;
-        const damage = log.packets.filter(({ name, packet }) => name === "damage_event" && packet.entityId === bot.entity.id);
-        assert.equal(damage.length, 1, `${projectile}: one damage_event for the bot`);
+        // A fireball's fire hurts her too (`on_fire`, 1 s on): only the projectile's own damage type is the hit.
+        const hitType = damageTypeId(bot.registry, damageType);
+        const damage = log.packets.filter(({ name, packet }) => name === "damage_event" && packet.entityId === bot.entity.id && (packet as unknown as DamageEvent).sourceTypeId === hitType);
+        assert.equal(damage.length, 1, `${projectile}: one ${damageType} damage_event for the bot`);
         const event = damage[0]!.packet as unknown as DamageEvent;
         const hitAtMs = damage[0]!.atMs;
         assert.deepEqual(
@@ -98,7 +100,6 @@ export const projectileHitBot: ContractCheck = {
         assert.ok(push.atMs - hitAtMs <= TICK_MS * 3, `${projectile}: the push came ${push.atMs - hitAtMs} ms after the hit`);
         assert.equal(burning(bot), fire, `${projectile}: ${fire ? "no fire" : "fire"} on the bot after the hit`);
         if (fire) await assertBurns(subject, log, hitAtMs);
-        await subject.wait(HIT_SETTLE_MS * 2);
       } finally {
         bot.off("entitySpawn", onSpawn);
         bot.off("entityGone", onGone);
@@ -108,7 +109,25 @@ export const projectileHitBot: ContractCheck = {
   },
 };
 
-/** The four `on_fire` hurts at whole seconds after the hit (a source of none; each costs 1, measured 18.5 to 17.5 four times, but a regeneration can share its tick, so the amount is not asserted), and the flag out at 5 s. */
+/**
+ * The shot's answer, awaited and then seen to be the only one: the projectile gone, the `update_health` and the push after the hit
+ * (the awaited values), then the server runs on (`serverQuiet`) so a second spawn, hit or removal would have been heard, and past the 10 ticks of the bot's hurt window for the next shot.
+ */
+async function awaitHitAnswer(subject: ContractSubject, log: PacketLog, gone: readonly unknown[], projectile: ProjectileName): Promise<void> {
+  const { bot } = subject;
+  const hitAt = () => log.packets.find(({ name, packet }) => name === "damage_event" && packet.entityId === bot.entity.id)?.atMs;
+  const heardSinceHit = (wanted: (heard: LoggedPacket) => boolean) => {
+    const hit = hitAt();
+    return hit !== undefined && log.packets.some((heard) => heard.atMs >= hit && wanted(heard));
+  };
+  const answered = () => gone.length > 0 && heardSinceHit(({ name }) => name === "update_health") && heardSinceHit(({ name, packet }) => name === "entity_velocity" && packet.entityId === bot.entity.id);
+  await answerSettled(subject, answered, `${projectile}: the hit's answer (hit ${hitAt() !== undefined}, gone ${gone.length})`);
+}
+
+/**
+ * The four `on_fire` hurts at whole seconds after the hit (a source of none; each costs 1, measured 18.5 to 17.5 four times, but a regeneration can share its tick, so the amount is not asserted), and the flag out at 5 s.
+ * The seconds are server ticks read on the wall clock: the check runs on a server of its own (`exclusive`), where no other lane's command stalls it.
+ */
 async function assertBurns(subject: ContractSubject, log: PacketLog, hitAtMs: number): Promise<void> {
   const { bot } = subject;
   await subject.wait(hitAtMs + FIRE_OUT_MS + FIRE_OUT_JITTER_MS - log.sinceStartMs());

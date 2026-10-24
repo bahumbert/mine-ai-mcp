@@ -9,14 +9,13 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { holdsWithin } from "../subject.ts";
+import { answerArrives, answerSettled } from "../server-answer.ts";
 import { type DamageEvent, type PacketListening, damageTypeId } from "./combat-scene.ts";
 
 /** Arena-local; `subject.world` puts it in the lane. */
 const BLAST_LOCAL = [-4.5, -60, 0.5] as const;
 const REACH = 6;
 const KNOCKBACK_TOLERANCE = 0.02;
-const SETTLE_MS = 800;
 const EYE_HEIGHT = 1.62;
 /** On easy the blast costs `min(raw / 2 + 1, raw)` of `raw = (d * d + d) / 2 * 42 + 1` (3.54 for 5.08 at 5 blocks, a float). */
 const easy = (raw: number) => Math.min(raw / 2 + 1, raw);
@@ -53,9 +52,11 @@ export const explosionKnockback: ContractCheck = {
     try {
       const feet = bot.entity.position.clone();
       await subject.explode(blast);
-      assert.ok(await holdsWithin(subject, () => bot.health < 20, SETTLE_MS), "the blast did not hurt the bot");
+      await answerArrives(subject, () => bot.health < 20, "the blast did not hurt the bot");
       const lost = 20 - bot.health;
-      await subject.wait(SETTLE_MS);
+      // The rest of the answer (the packet, the hurt, the damage event, the creeper's removal) comes in the same tick or the next; each is awaited, then the server runs on to show there is no second one.
+      const answered = () => packets.length > 0 && hurts.some(({ entity }) => entity === bot.entity) && damage.length > 0 && gone.some((entity) => entity.name === "creeper");
+      await answerSettled(subject, answered, `the blast's answer (${packets.length} packets, ${hurts.length} hurts, ${damage.length} damage events, ${gone.length} removals)`);
       assert.equal(packets.length, 1, "one explosion packet");
       const packet = packets[0]!;
       assert.ok(blast.distanceTo(new Vec3(packet.x, packet.y, packet.z)) < 0.1, `the explosion is at ${packet.x} ${packet.y} ${packet.z}, not ${blast}`);

@@ -19,7 +19,7 @@ export const NOT_HURTABLE_TYPES: ReadonlySet<string> = new Set(["player", "proje
 
 /**
  * The hand and the weapons the checks measured (armor off): the iron sword and axe by `attack-cooldown-damage` (6 and 9, speeds from
- * the swing periods of 12.5 and 22 ticks), the others by `weapon-damage-tools`, which hit three zombies per tool (a full swing, 10 ticks
+ * the swing periods of 12.5 and 22 ticks), the others by `weapon-damage-swords`, `-axes`, `-pickaxes` and `-shovels-hoes`, which hit three zombies per tool (a full swing, 10 ticks
  * after it, 2 ticks after that): the tools the importers' tests name, 3 runs on the 1.21.4 server, vanilla's numbers every time.
  */
 const HAND: Weapon = { damage: 1, attackSpeed: 4 };
@@ -78,7 +78,7 @@ export function swingDamage(weapon: Weapon, ticksSinceLastSwing: number): number
   return weapon.damage * (0.2 + 0.8 * strength * strength);
 }
 
-/** A sprinting hit with a swing past 0.9 of its strength adds a second push of 0.5 along the way the attacker looks (`Player.attack`; contract check `attack-mob-knockback`: 0.7 in all with the first). */
+/** A sprinting hit with a swing past 0.9 of its strength adds a second push of 0.5 along the way the attacker looks (`Player.attack`; contract check `attack-mob-knockback-sprint`: 0.7 in all with the first). */
 export const SPRINT_BONUS_ABOVE_STRENGTH = 0.9;
 export const SPRINT_KNOCKBACK = 0.5;
 

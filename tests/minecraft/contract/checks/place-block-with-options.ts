@@ -11,14 +11,15 @@ import type { Block } from "prismarine-block";
 import type { ContractCheck } from "../checks.ts";
 import { type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
 import { stackOf } from "../window-packets.ts";
+import { afterClientTicks, afterServerTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 
 /** Mineflayer's own wait for the block update is 5 s; a server on time answers in a tick or two. */
 const PLACEMENT_WALL_MS = 6_000;
 const SLOT_WALL_MS = 2_000;
-/** The rest of an answer arrives in the same server tick as its first packet; this long covers a server a tick behind. */
-const AFTER_ANSWER_MS = 500;
-/** The setup has just put her on the floor: the first click of a run was once lost (Mine Labs 2026-10-23, 1 run in 3). */
-const START_SETTLE_MS = 1_000;
+/** The rest of an answer comes in the same server tick as its acknowledgement, the last packet of it: one more tick proven shows no packet followed (`serverQuiet` would add 20 ticks to each of seven placements). */
+const AFTER_ACK_TICKS = 1;
+/** The look the placements read goes out with the client's next physics tick (its own clock; the server reads the packets in the order sent). */
+const LOOK_CLIENT_TICKS = 2;
 const WEST = new Vec3(-1, 0, 0);
 const UP = new Vec3(0, 1, 0);
 /** The stone blocks the placements click on, with the cell each puts its block in (west of it). */
@@ -79,7 +80,9 @@ async function placeAgainst(subject: ContractSubject, referenceLocal: Vec3, face
     const settled = await settleWithin(subject, placing, PLACEMENT_WALL_MS);
     if (refusal === undefined) assert.ok(settled !== null && settled.error === undefined, `_placeBlockWithOptions at ${destination}: ${settled?.error?.message ?? "never ended"}`);
     else assert.match(settled?.error?.message ?? "never ended", refusal, `_placeBlockWithOptions at ${destination} was not refused as expected: ${settled?.error?.message ?? "never ended"} (${heard.packets.join(", ")})`);
-    await subject.wait(AFTER_ANSWER_MS);
+    // A placement ends in its acknowledgement (a refusal in nothing else); the packets of one answer arrive together, so they are read once the server has run on.
+    await answerArrives(subject, () => heard.packets.includes("ack"), `the placement at ${destination} (${heard.packets.join(", ")})`);
+    await afterServerTicks(subject, AFTER_ACK_TICKS, `the placement at ${destination}`);
   } finally {
     bot.off(eventName, onCell);
     bot._client.off("block_change", onChange);
@@ -102,7 +105,7 @@ export const placeBlockWithOptions: ContractCheck = {
   async run(subject) {
     const { bot } = subject;
     const slotOf = (slot: number) => stackOf(bot.inventory.slots[slot]);
-    await subject.wait(START_SETTLE_MS);
+    await serverQuiet(subject, "the join");
     const top = await placeAt(subject, REFERENCES.slabTop, { half: "top", swingArm: "right" });
     // The server sends the clicked block, the placed block twice (the chunk's change and the click's own update; the client's `blockUpdate` follows each), the slot, then the acknowledgement.
     assert.equal(top.changes[0], "oak_slab top", `a slab put with half 'top': the cell heard ${top.changes.join(", ")}`);
@@ -116,21 +119,19 @@ export const placeBlockWithOptions: ContractCheck = {
     assert.equal(slotOf(36), "oak_slab x2", "a refused placement takes nothing from the stack");
     // `delta` is the click's place in the face, and `forceLook: 'ignore'` leaves the look where it was.
     await bot.look(2, 0.3, true);
-    await subject.wait(300);
+    await afterClientTicks(subject, LOOK_CLIENT_TICKS, "the look");
     const lookBefore = { yaw: bot.entity.yaw, pitch: bot.entity.pitch };
     const delta = await placeAt(subject, REFERENCES.slabDelta, { delta: new Vec3(0, 0.9, 0.5), forceLook: "ignore", swingArm: "right" });
     assert.equal(delta.changes[0], "oak_slab top", `a slab put with a delta at 0.9: the cell heard ${delta.changes.join(", ")}`);
     assert.ok(Math.abs(bot.entity.yaw - lookBefore.yaw) < LOOK_TOLERANCE && Math.abs(bot.entity.pitch - lookBefore.pitch) < LOOK_TOLERANCE, `forceLook 'ignore' moved the look from ${JSON.stringify(lookBefore)} to ${bot.entity.yaw}, ${bot.entity.pitch}`);
     assert.equal(slotOf(36), "oak_slab x1", "three slabs were taken from the main hand's stack");
     bot.setQuickBarSlot(1);
-    await subject.wait(100);
     const stairs = await placeAt(subject, REFERENCES.stairTop, { half: "top", swingArm: "right" });
     assert.equal(stairs.changes[0], "oak_stairs top", `stairs put with half 'top': the cell heard ${stairs.changes.join(", ")}`);
     // A bed: put looking east, its foot is where the click lands and its head one block on, the way she looked.
     bot.setQuickBarSlot(BED_HOTBAR_SLOT);
-    await subject.wait(100);
     await bot.look(EAST_YAW, 0, true);
-    await subject.wait(300);
+    await afterClientTicks(subject, LOOK_CLIENT_TICKS, "the look");
     const bed = await placeAgainst(subject, BED_FLOOR, UP, { forceLook: "ignore", swingArm: "right" });
     // One resend of the placed cell only: the chunk's own change carries both halves, as one `multi_block_change`.
     assert.deepEqual(bed.packets, ["block_change ref", "block_change dest", "set_slot 39", "ack"], "the packets of a bed");
@@ -138,7 +139,6 @@ export const placeBlockWithOptions: ContractCheck = {
     const halves = [BED_FOOT, BED_HEAD].map((cell) => bot.blockAt(laneCell(subject, cell))!.getProperties());
     assert.deepEqual(halves.map(({ part, facing, occupied }) => [part, facing, String(occupied)]), [["foot", "east", "false"], ["head", "east", "false"]], `the bed: ${JSON.stringify(halves)}`);
     bot.setQuickBarSlot(1);
-    await subject.wait(100);
     // The off hand: the block it holds is placed and taken from it, the main hand's stack is left alone.
     await bot.equip(bot.inventory.items().find((item) => item.name === "cobblestone")!, "off-hand");
     assert.equal(slotOf(OFF_HAND_SLOT), "cobblestone x1", "the cobblestone is in the off hand");

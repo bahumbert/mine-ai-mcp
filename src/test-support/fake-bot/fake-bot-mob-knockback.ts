@@ -1,5 +1,5 @@
 /**
- * What the client hears of a mob that a hit pushed (contract check `attack-mob-knockback`, Mine Labs 1.21.4, 2026-10-24). A mob
+ * What the client hears of a mob that a hit pushed (contract checks `attack-mob-knockback`, `-decay` and `-sprint`, Mine Labs 1.21.4, 2026-10-24). A mob
  * with no AI (every mob of the fake is one) keeps the push as a motion that never moves it: a tick after the hit its
  * `entity_velocity` is told twice (around the health metadata), then its motion decays by 0.98 a tick, a component under 0.003 is
  * dropped, and the tracker tells the velocity every 3 ticks when it changed by more than 0.0003 since the last one told (else

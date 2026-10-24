@@ -8,7 +8,12 @@ import { attackCooldownDamage } from "./checks/attack-cooldown-damage.ts";
 import { attackHurtsAndKills } from "./checks/attack-hurts-and-kills.ts";
 import { attackOutOfReach } from "./checks/attack-out-of-reach.ts";
 import { attackMobKnockback } from "./checks/attack-mob-knockback.ts";
-import { weaponDamageTools } from "./checks/weapon-damage-tools.ts";
+import { attackMobKnockbackDecay } from "./checks/attack-mob-knockback-decay.ts";
+import { attackMobKnockbackSprint } from "./checks/attack-mob-knockback-sprint.ts";
+import { weaponDamageAxes } from "./checks/weapon-damage-axes.ts";
+import { weaponDamagePickaxes } from "./checks/weapon-damage-pickaxes.ts";
+import { weaponDamageShovelsHoes } from "./checks/weapon-damage-shovels-hoes.ts";
+import { weaponDamageSwords } from "./checks/weapon-damage-swords.ts";
 import { projectileHitBot } from "./checks/projectile-hit-bot.ts";
 import { deflectFireball } from "./checks/deflect-fireball.ts";
 import { bowDrawAndRelease } from "./checks/bow-draw-and-release.ts";
@@ -147,8 +152,13 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   unequipHand,
   deflectFireball,
   projectileHitBot,
-  weaponDamageTools,
+  weaponDamageSwords,
+  weaponDamageAxes,
+  weaponDamagePickaxes,
+  weaponDamageShovelsHoes,
   attackMobKnockback,
+  attackMobKnockbackDecay,
+  attackMobKnockbackSprint,
   bucketPourAndFill,
   placeBlockWithOptions,
   lavaOverHole,

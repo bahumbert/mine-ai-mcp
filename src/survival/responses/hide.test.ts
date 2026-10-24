@@ -302,7 +302,7 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   });
   const intruder = bot.entities[2]!;
   const bystander = bot.entities[3]!;
-  const resolvedIds = killableIntruder(bot, intruder.id, 3); // the pickaxe's one hit is 4 at a full swing (`weapon-damage-tools`)
+  const resolvedIds = killableIntruder(bot, intruder.id, 3); // the pickaxe's one hit is 4 at a full swing (`weapon-damage-pickaxes`)
   // The first use request the server receives is the shield's.
   server.onPacket("use_item", () => {
     raisedAt ??= ticks;

@@ -14,7 +14,8 @@ test("a directory loads every YAML in it, sorted, with ids relative to the direc
   assert.deepEqual(errors, []);
   assert.ok(scenarios.length >= 12, `${scenarios.length} contract scenarios`);
   assert.equal(scenarios.find(entry => entry.id === "air-supply-under-water")?.scenario.name, "contract-air-supply-under-water");
-  assert.deepEqual(scenarios.map(entry => entry.id), [...scenarios.map(entry => entry.id)].sort((a, b) => a.localeCompare(b)));
+  // Sorted by file name, extension included: a check whose name begins another's (`attack-mob-knockback` and `attack-mob-knockback-decay`) sorts after it, which its id alone would not.
+  assert.deepEqual(scenarios.map(entry => entry.file), [...scenarios.map(entry => entry.file)].sort((a, b) => a.localeCompare(b)));
 });
 
 test("a single file keeps its basename as id", async () => {
