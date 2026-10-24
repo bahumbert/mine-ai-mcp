@@ -50,54 +50,36 @@ function dropBot(options: DropBotOptions) {
   }
 
   /** Mineflayer tosses one identified stack, not "n of this name", so the fake must too. */
-  const removeStack = (stack: FakeStack) => {
-    const index = items.indexOf(stack);
-    if (index >= 0) items.splice(index, 1);
-  };
   const removeFrom = (stack: FakeStack, count: number) => {
     stack.count -= Math.min(stack.count, count);
-    if (stack.count === 0) removeStack(stack);
+    if (stack.count === 0 && items.includes(stack)) items.splice(items.indexOf(stack), 1);
+  };
+  /** A toss the server accepts leaves the inventory, spawns an entity, may come back and may be announced picked up. */
+  const tossOut = (stack: FakeStack, count: number) => {
+    if (stack.name === options.rejects) throw new Error("server refused");
+    if (stack.name === options.swallows) return;
+    const thrown = { ...stack, count };
+    removeFrom(stack, count);
+    spawnTossed(stack.name);
+    comeBack(thrown);
+    announceCollect(thrown);
   };
 
-  const itemEntity = (id: number, name: string, distance = 1) => ({
-    id,
-    name: "item",
-    position: new Vec3(0, 64, distance),
-    getDroppedItem: () => ({ name, count: options.spawnedCount ?? 1 }),
-  });
   const entities: Record<number, unknown> = {};
   for (const existing of options.existingItems ?? []) {
-    entities[existing.id] = itemEntity(existing.id, existing.name, existing.distance);
+    entities[existing.id] = itemEntity(existing.id, existing.name, options.spawnedCount, existing.distance);
   }
   /** A successful toss makes the server spawn the item beside the bot. */
   const spawnTossed = (name: string) => {
     if (options.spawnsEntityId === undefined) return;
-    entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name);
+    entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name, options.spawnedCount);
   };
   const client = new EventEmitter();
-  /** The server tells the bot who picked a tossed item up, with the count it took. */
-  const announceCollect = (stack: FakeStack) => {
-    const collects = [options.collects ?? []].flat();
-    if (options.spawnsEntityId === undefined || !entities[options.spawnsEntityId]) return;
-    for (const collect of collects) {
-      setTimeout(() => {
-        if (collect.by === "giver") items.push({ ...stack, count: collect.count ?? stack.count });
-        const collectorEntityId = { giver: 1, other: OTHER_PLAYER_ID, recipient: Object.values(bot.players)[0]?.entity?.id ?? 0 }[collect.by];
-        client.emit("collect", { collectedEntityId: options.spawnsEntityId, collectorEntityId, pickupItemCount: collect.count ?? stack.count });
-      }, collect.afterMs);
-    }
-  };
+  const announceCollect = (stack: FakeStack) => emitCollect({ bot, client, items, entities, options }, stack);
   for (const [name, player] of Object.entries(options.players ?? {})) {
     entities[player.id] = { id: player.id, username: name, name: "player" };
   }
   entities[OTHER_PLAYER_ID] = { id: OTHER_PLAYER_ID, username: "Other", name: "player" };
-  /** The world age moves in jumps of 20 ticks, each announced by a `time` packet, as the server sends them. */
-  const advanceAge = (ticks: number) => {
-    for (let moved = 0; moved < ticks; moved += 20) {
-      (bot.time as { age: number }).age += 20;
-      bot.emit("time");
-    }
-  };
 
   // eslint-disable-next-line prefer-const
   let bot: ReturnType<typeof botFixture>;
@@ -128,27 +110,47 @@ function dropBot(options: DropBotOptions) {
       lookAt: async (position: { x: number; y: number; z: number }) => {
         lookedAt.push({ x: position.x, y: position.y, z: position.z });
       },
-      tossStack: async (stack: FakeStack) => {
-        if (stack.name === options.rejects) throw new Error("server refused");
-        if (stack.name === options.swallows) return;
-        removeStack(stack);
-        spawnTossed(stack.name);
-        comeBack({ ...stack });
-        announceCollect({ ...stack });
-      },
+      tossStack: async (stack: FakeStack) => tossOut(stack, stack.count),
       toss: async (type: number, _metadata: number | null, count: number) => {
         const stack = items.find((candidate) => candidate.type === type);
-        if (!stack) return;
-        if (stack.name === options.rejects) throw new Error("server refused");
-        if (stack.name === options.swallows) return;
-        removeFrom(stack, count);
-        spawnTossed(stack.name);
-        comeBack({ ...stack, count });
-        announceCollect({ ...stack, count });
+        if (stack) tossOut(stack, count);
       },
     },
   );
-  return { bot, items, lookedAt, entities, advanceAge };
+  return { bot, items, lookedAt, entities, advanceAge: (ticks: number) => advanceAge(bot, ticks) };
+}
+
+/** A dropped-item entity `distance` blocks from the bot, reporting a stack of `count`. */
+function itemEntity(id: number, name: string, count = 1, distance = 1) {
+  return { id, name: "item", position: new Vec3(0, 64, distance), getDroppedItem: () => ({ name, count }) };
+}
+
+interface CollectFake {
+  readonly bot: ReturnType<typeof botFixture>;
+  readonly client: EventEmitter;
+  readonly items: FakeStack[];
+  readonly entities: Record<number, unknown>;
+  readonly options: DropBotOptions;
+}
+
+/** The server tells the bot who picked a tossed item up, with the count it took; the giver's pickup puts it back in its inventory. */
+function emitCollect({ bot, client, items, entities, options }: CollectFake, stack: FakeStack): void {
+  if (options.spawnsEntityId === undefined || !entities[options.spawnsEntityId]) return;
+  for (const collect of [options.collects ?? []].flat()) {
+    setTimeout(() => {
+      if (collect.by === "giver") items.push({ ...stack, count: collect.count ?? stack.count });
+      const collectorEntityId = { giver: 1, other: OTHER_PLAYER_ID, recipient: Object.values(bot.players)[0]?.entity?.id ?? 0 }[collect.by];
+      client.emit("collect", { collectedEntityId: options.spawnsEntityId, collectorEntityId, pickupItemCount: collect.count ?? stack.count });
+    }, collect.afterMs);
+  }
+}
+
+/** The world age moves in jumps of 20 ticks, each announced by a `time` packet, as the server sends them. */
+function advanceAge(bot: ReturnType<typeof botFixture>, ticks: number): void {
+  for (let moved = 0; moved < ticks; moved += 20) {
+    (bot.time as { age: number }).age += 20;
+    bot.emit("time");
+  }
 }
 
 function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependencies {
