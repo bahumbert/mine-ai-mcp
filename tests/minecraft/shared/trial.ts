@@ -19,7 +19,9 @@ export interface TrialRunInput {
   readonly arena?: ArenaTrialOptions;
   /** Hands over the arena restore to run after the trial (Mine Labs' `deferReset`). */
   readonly deferReset: (restore: (log: (message: string) => void) => Promise<void>) => void;
-  /** The arrangement is done and the clients joined: the next lane may arrange. */
+  /** Every command that changes the world is done (the settle delay, the clients' boot and join are not): the next lane may arrange. */
+  readonly onArranged: () => Promise<void>;
+  /** The clients joined; a no-op after `onArranged`, the call that frees the mutex when a runner never makes the first. */
   readonly onPrepared: () => Promise<void>;
 }
 
@@ -50,6 +52,67 @@ export interface TrialEnd {
   /** A restore ran and finished. */
   readonly restored: boolean;
   readonly mutexWaitMs: number;
+  /** Where the trial's time went; absent on an end the scheduler made without running the trial. */
+  readonly phases?: TrialPhases;
+}
+
+/** The time of one trial, phase by phase, in ms (a phase the trial never reached is 0). */
+export interface TrialPhases {
+  /** Queued behind other lanes' arrangements and restores. */
+  readonly mutexWaitMs: number;
+  /** Holding the mutex: the arena snapshot and every command that builds the scenario. */
+  readonly arrangeMs: number;
+  /** Not holding it: the settle delay, the clients' boot and their login. */
+  readonly joinMs: number;
+  /** The goal measured, to the trial's end. */
+  readonly trialMs: number;
+  /** The finished trial's restore queued on the mutex. */
+  readonly restoreWaitMs: number;
+  /** The restore commands, holding the mutex. */
+  readonly restoreMs: number;
+}
+
+/** The marks of one trial on a monotonic clock; `phases()` turns them into the durations. */
+class TrialMarks {
+  readonly #queuedAt = performance.now();
+  #acquiredAt: number | undefined;
+  #arrangedAt: number | undefined;
+  #preparedAt: number | undefined;
+  #settledAt: number | undefined;
+  #restoreQueuedAt: number | undefined;
+  #restoreStartedAt: number | undefined;
+  #restoreEndedAt: number | undefined;
+
+  acquired(): void { this.#acquiredAt = performance.now(); }
+  restoreQueued(): void { this.#restoreQueuedAt = performance.now(); }
+  restoreStarted(): void { this.#restoreStartedAt = performance.now(); }
+  restoreEnded(): void { this.#restoreEndedAt = performance.now(); }
+  /** Marks only while the trial has not been prepared, and only once. */
+  arranged(): void { if (this.#preparedAt === undefined) this.#arrangedAt ??= performance.now(); }
+  prepared(): void { this.#preparedAt ??= performance.now(); }
+  settled(): void { this.#settledAt ??= performance.now(); }
+
+  phases(): TrialPhases {
+    const now = performance.now();
+    const end = this.#settledAt ?? now;
+    const acquiredAt = this.#acquiredAt ?? end;
+    const arrangedAt = this.#arrangedAt ?? this.#preparedAt ?? end;
+    const preparedAt = this.#preparedAt ?? end;
+    const ms = (from: number, to: number) => Math.max(0, Math.round(to - from));
+    return {
+      mutexWaitMs: ms(this.#queuedAt, acquiredAt),
+      arrangeMs: ms(acquiredAt, arrangedAt),
+      joinMs: ms(arrangedAt, preparedAt),
+      trialMs: ms(preparedAt, end),
+      // A restore still queued or running when the phases are read (the bound gave up on it) counts up to now.
+      restoreWaitMs: this.#restoreQueuedAt === undefined ? 0 : ms(this.#restoreQueuedAt, this.#restoreStartedAt ?? now),
+      restoreMs: this.#restoreStartedAt === undefined ? 0 : ms(this.#restoreStartedAt, this.#restoreEndedAt ?? now),
+    };
+  }
+}
+
+function phasesLine(phases: TrialPhases): string {
+  return `phases: mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`;
 }
 
 type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs"> };
@@ -100,16 +163,25 @@ async function takeArrangementTurn(job: TrialJob): Promise<() => void> {
  * outlasts the bound marks the server sick instead of freeing a lane that may still be changing.
  */
 export async function executeTrial(deps: TrialDeps, job: TrialJob): Promise<TrialEnd> {
+  const marks = new TrialMarks();
+  const end = await runTrialJob(deps, job, marks);
+  marks.settled();
+  const phases = marks.phases();
+  job.log(phasesLine(phases));
+  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases };
+}
+
+async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): Promise<Omit<TrialEnd, "mutexWaitMs" | "phases">> {
   const queuedAt = Date.now();
   let release: () => void;
   try {
     release = await takeArrangementTurn(job);
   } catch {
     const cancelled: RunResult = { ...errorResult(job, queuedAt, "trial cancelled before its arrangement"), outcome: "cancelled" };
-    return { result: cancelled, lane: "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: Date.now() - queuedAt };
+    return { result: cancelled, lane: "free", serverSick: false, hitWallBound: false, restored: false };
   }
+  marks.acquired();
   const startedAt = Date.now();
-  const mutexWaitMs = startedAt - queuedAt;
   const wall = new AbortController();
   const timeoutMs = (job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS) * 1000 + deps.config.trialSlackMs;
   const wallTimer = setTimeout(() => wall.abort("wall-clock bound"), timeoutMs);
@@ -121,21 +193,23 @@ export async function executeTrial(deps: TrialDeps, job: TrialJob): Promise<Tria
       server: job.server, scenario: job.scenario, runDir: job.runDir, log: job.log, signal, reuseServer: job.reuseServer,
       arena: job.lane ? arenaOf(job.lane) : undefined,
       deferReset: handed => { restore = handed; },
-      onPrepared: async () => { release(); },
+      onArranged: async () => { marks.arranged(); release(); },
+      onPrepared: async () => { marks.prepared(); release(); },
     });
     const settled = await Promise.race([trial.then(result => ({ result }), (error: unknown) => ({ error })), late.promise]);
+    marks.settled();
     const hitWallBound = wall.signal.aborted;
     if (settled === "late") {
       const result = errorResult(job, startedAt, `trial did not settle within ${deps.config.restoreBoundMs} ms after it was aborted`);
-      return { result, lane: "held", serverSick: true, hitWallBound, restored: false, mutexWaitMs };
+      return { result, lane: "held", serverSick: true, hitWallBound, restored: false };
     }
     if ("error" in settled) {
       const detail = settled.error instanceof Error ? settled.error.message : String(settled.error);
-      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false, mutexWaitMs };
+      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false };
     }
-    // A trial that failed before `onPrepared` still holds its arrangement turn; its own restore must not wait behind it.
+    // A trial that failed before `onArranged` still holds its arrangement turn; its own restore must not wait behind it.
     release();
-    return { ...(await restoreArena(deps, job, restore, settled.result)), hitWallBound, mutexWaitMs };
+    return { ...(await restoreArena(deps, job, restore, settled.result, marks)), hitWallBound };
   } finally {
     clearTimeout(wallTimer);
     late.cancel();
@@ -150,11 +224,14 @@ async function restoreArena(
   job: TrialJob,
   restore: ((log: (message: string) => void) => Promise<void>) | undefined,
   result: RunResult,
+  marks: TrialMarks,
 ): Promise<RestoreEnd> {
   if (!restore) return { result, lane: "free", serverSick: false, restored: false };
   const restoring = (async () => {
+    marks.restoreQueued();
     const turn = await takeRestoreTurn(job);
-    try { await restore(job.log); } finally { turn(); }
+    marks.restoreStarted();
+    try { await restore(job.log); } finally { marks.restoreEnded(); turn(); }
   })();
   let failure: unknown;
   const outcome = await within(restoring.catch((error: unknown) => { failure = error; }), deps.config.restoreBoundMs);

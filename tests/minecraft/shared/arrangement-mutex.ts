@@ -1,4 +1,6 @@
-// One arrangement or restore at a time per server, so the fill, clone and pins of two lanes never interleave.
+// One arrangement or restore at a time per server, so the fill, clone and pins of two lanes never interleave. A lane's
+// own player commands, scoped unpin, settle delay and client join run outside it (T7b): lane cells are 512 blocks apart
+// and an arena reaches at most 88, so those touch no chunk another lane uses (arena/lanes.ts).
 
 interface Waiter { readonly grant: () => void; readonly onAbort: () => void }
 

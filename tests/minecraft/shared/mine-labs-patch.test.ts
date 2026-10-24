@@ -24,7 +24,7 @@ test("the patched mine-labs exports what the scenario server runs a trial with",
 });
 
 /** A server that is never started: only its generated `server.properties` is read. */
-async function serverProperties(extra: { enableCommandBlocks?: boolean; maxHeap?: string }): Promise<string[]> {
+async function serverProperties(extra: { enableCommandBlocks?: boolean; maxHeap?: string; pauseWhenEmptySeconds?: number }): Promise<string[]> {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-"));
   try {
     const server = new mineLabs.MinecraftServer(
@@ -47,6 +47,7 @@ test("a server created without the new options writes no command block line and 
   const properties = await serverProperties({});
   assert.equal(properties.some((line) => line.startsWith("enable-command-block")), false);
   assert.ok(properties.includes("max-players=10"));
+  assert.equal(properties.some((line) => line.startsWith("pause-when-empty-seconds")), false, "without the option the game's own default stands");
   assert.deepEqual(mineLabs.serverJavaArgs({ maxHeap: undefined }, "server.jar"), ["-Xms512M", "-Xmx2G", "-jar", "server.jar", "nogui"]);
 });
 
@@ -56,7 +57,13 @@ test("a server asked for command blocks and a heap writes the line and passes -X
   assert.deepEqual(mineLabs.serverJavaArgs({ maxHeap: "4G" }, "server.jar"), ["-Xms512M", "-Xmx4G", "-jar", "server.jar", "nogui"]);
 });
 
-const LANE_BOX = { minX: -512, minY: -64, minZ: 1024 - 256, maxX: 1535, maxY: 319, maxZ: 1024 + 255 };
+test("a server asked never to pause when empty writes pause-when-empty-seconds=0", async () => {
+  const properties = await serverProperties({ pauseWhenEmptySeconds: 0 });
+  assert.ok(properties.includes("pause-when-empty-seconds=0"));
+  assert.ok((await serverProperties({ pauseWhenEmptySeconds: 30 })).includes("pause-when-empty-seconds=30"));
+});
+
+const LANE_BOX ={ minX: -512, minY: -64, minZ: 1024 - 256, maxX: 1535, maxY: 319, maxZ: 1024 + 255 };
 
 /** A resettable scenario with a tick command and an entity, as a lane runs one. */
 function laneScenario() {

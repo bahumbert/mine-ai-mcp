@@ -187,22 +187,195 @@ test("a scenario that cannot be reset runs without reuse and has no restore to w
   assert.equal(end.restored, false);
 });
 
-test("the time spent waiting for the arrangement mutex is reported", async () => {
-  const mutex = new ArrangementMutex();
-  const holder = await mutex.acquire();
-  const running = executeTrial({ runTrial: runnerOf(), config }, job({ mutex, scenario: scenario(60) }));
-  setTimeout(() => { holder(); }, 30);
-  const end = await running;
-  assert.ok(end.mutexWaitMs >= 25, `waited ${end.mutexWaitMs} ms`);
-});
-
 test("a trial that fails during its arrangement (before it was prepared) still restores its lane: the restore does not wait behind its own mutex", async () => {
   const failsInArrangement: TrialRunner = async input => {
     input.deferReset(async () => {});
     return { ...result("error"), error: "client exited" };
   };
-  const end = await executeTrial({ runTrial: failsInArrangement, config }, job({ scenario: scenario(60) }));
+  const mutex = new ArrangementMutex();
+  const end = await executeTrial({ runTrial: failsInArrangement, config }, job({ mutex, scenario: scenario(60) }));
+  (await mutex.acquire())();
   assert.equal(end.serverSick, false);
   assert.equal(end.lane, "free");
   assert.equal(end.restored, true);
+  assert.equal(end.phases?.joinMs, 0, "an arrangement that failed has no join or trial time");
+  assert.equal(end.phases?.trialMs, 0);
+});
+
+/** A runner that has arranged its lane but is still booting its client: it waits for `joined` before it prepares. */
+function joiningRunner(steps: { events?: string[]; joined: Promise<void> }): TrialRunner {
+  return async input => {
+    steps.events?.push(`arranged ${input.arena?.id}`);
+    await input.onArranged();
+    await steps.joined;
+    await input.onPrepared();
+    input.deferReset(async () => { steps.events?.push(`restore ${input.arena?.id}`); });
+    return result("pass");
+  };
+}
+
+/** The mutex turn if it is free within `ms`, else null. */
+async function turnWithin(mutex: ArrangementMutex, ms: number): Promise<(() => void) | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const none = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms); });
+  try {
+    return await Promise.race([mutex.acquire(), none]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test("the arrangement mutex is free once the lane is arranged: the next lane arranges while the first lane's client still joins", async () => {
+  const mutex = new ArrangementMutex();
+  const events: string[] = [];
+  let finishJoin!: () => void;
+  const joined = new Promise<void>(resolve => { finishJoin = resolve; });
+  const first = executeTrial({ runTrial: joiningRunner({ events, joined }), config }, job({ mutex, lane: laneOf(1), scenario: scenario(60) }));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const secondTurn = await turnWithin(mutex, 100);
+  assert.notEqual(secondTurn, null, "the first lane is still joining and no longer holds the mutex");
+  secondTurn?.();
+  finishJoin();
+  await first;
+  assert.deepEqual(events, ["arranged lane-1", "restore lane-1"]);
+});
+
+test("a client that never joins leaves the mutex free until the wall bound aborts the trial, then the restore takes it again", async () => {
+  const mutex = new ArrangementMutex();
+  const events: string[] = [];
+  const neverJoins: TrialRunner = async input => {
+    await input.onArranged();
+    input.deferReset(async () => { events.push("restore"); });
+    await new Promise<void>(resolve => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+    events.push("aborted");
+    return result("cancelled");
+  };
+  // The wall bound (0.3 s goal timeout + 20 ms slack) comes well after the 100 ms window: only onArranged can free the mutex inside it.
+  const running = executeTrial({ runTrial: neverJoins, config }, job({ mutex, lane: laneOf(1), scenario: scenario(0.3) }));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const other = await turnWithin(mutex, 100);
+  assert.notEqual(other, null, "another lane can arrange while this client never joins");
+  other?.();
+  const end = await running;
+  assert.equal(end.hitWallBound, true);
+  assert.equal(end.lane, "free");
+  assert.equal(end.restored, true);
+  assert.deepEqual(events, ["aborted", "restore"]);
+});
+
+test("a restore after an abort between arranged and prepared queues behind a lane that is arranging", async () => {
+  const mutex = new ArrangementMutex();
+  const cancel = new AbortController();
+  const events: string[] = [];
+  const abortedWhileJoining: TrialRunner = async input => {
+    await input.onArranged();
+    input.deferReset(async () => { events.push("restore"); });
+    await new Promise<void>(resolve => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+    return result("cancelled");
+  };
+  const running = executeTrial({ runTrial: abortedWhileJoining, config }, job({ mutex, lane: laneOf(1), signal: cancel.signal, scenario: scenario(60) }));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const arranging = await mutex.acquire();
+  cancel.abort("submitter left");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(events, [], "the restore waits for the lane that is arranging");
+  arranging();
+  const end = await running;
+  assert.deepEqual(events, ["restore"]);
+  assert.equal(end.lane, "free");
+});
+
+test("an onArranged that comes after the mutex was released, or twice, changes nothing", async () => {
+  const mutex = new ArrangementMutex();
+  const odd: TrialRunner = async input => {
+    await input.onPrepared();
+    await input.onArranged();
+    await input.onArranged();
+    input.deferReset(async () => {});
+    return result("pass");
+  };
+  const end = await executeTrial({ runTrial: odd, config }, job({ mutex }));
+  assert.equal(end.lane, "free");
+  (await mutex.acquire())();
+});
+
+test("the six trial phases are measured apart and written as one line to the run's log", async () => {
+  const mutex = new ArrangementMutex();
+  const lines: string[] = [];
+  const holder = await mutex.acquire();
+  const phased: TrialRunner = async input => {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await input.onArranged();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    await input.onPrepared();
+    input.deferReset(async () => { await new Promise(resolve => setTimeout(resolve, 15)); });
+    await new Promise(resolve => setTimeout(resolve, 40));
+    return result("pass");
+  };
+  const running = executeTrial({ runTrial: phased, config }, job({ mutex, log: line => lines.push(line), scenario: scenario(60) }));
+  setTimeout(() => { holder(); }, 25);
+  const end = await running;
+  const phases = end.phases;
+  assert.ok(phases, "a trial that ran reports its phases");
+  assert.ok(phases.mutexWaitMs >= 20, `mutexWait ${phases.mutexWaitMs}`);
+  assert.ok(phases.arrangeMs >= 15, `arrange ${phases.arrangeMs}`);
+  assert.ok(phases.joinMs >= 25, `join ${phases.joinMs}`);
+  assert.ok(phases.trialMs >= 35, `trial ${phases.trialMs}`);
+  assert.ok(phases.restoreMs >= 10, `restore ${phases.restoreMs}`);
+  assert.equal(phases.mutexWaitMs, end.mutexWaitMs);
+  const written = lines.filter(text => text.startsWith("phases: "));
+  assert.equal(written.length, 1);
+  assert.match(written[0]!, /^phases: mutexWait=\d+ arrange=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+$/u);
+});
+
+test("the restore wait is told apart from the restore itself when another lane holds the mutex", async () => {
+  const mutex = new ArrangementMutex();
+  const runner: TrialRunner = async input => {
+    await input.onPrepared();
+    input.deferReset(async () => {});
+    const neighbour = await mutex.acquire();
+    setTimeout(neighbour, 40);
+    return result("pass");
+  };
+  const end = await executeTrial({ runTrial: runner, config }, job({ mutex, scenario: scenario(60) }));
+  assert.ok((end.phases?.restoreWaitMs ?? 0) >= 30, `waited ${end.phases?.restoreWaitMs} ms`);
+  assert.ok((end.phases?.restoreMs ?? 99) < (end.phases?.restoreWaitMs ?? 0), `restore took ${end.phases?.restoreMs} ms`);
+});
+
+test("a restore the bound gave up on reports the time it had waited or run so far, not 0", async () => {
+  const mutex = new ArrangementMutex();
+  let neighbour!: () => void;
+  const neighbourArranges: TrialRunner = async input => {
+    await input.onPrepared();
+    input.deferReset(async () => {});
+    neighbour = await mutex.acquire();
+    return result("pass");
+  };
+  const stuckBehindNeighbour = await executeTrial({ runTrial: neighbourArranges, config }, job({ mutex, scenario: scenario(60) }));
+  assert.equal(stuckBehindNeighbour.serverSick, true);
+  assert.ok((stuckBehindNeighbour.phases?.restoreWaitMs ?? 0) >= 50, `waited ${stuckBehindNeighbour.phases?.restoreWaitMs} ms`);
+  assert.equal(stuckBehindNeighbour.phases?.restoreMs, 0, "it never got its turn");
+  neighbour();
+  const hangs = await executeTrial({ runTrial: runnerOf({ restore: () => new Promise(() => {}) }), config }, job({ scenario: scenario(60) }));
+  assert.ok((hangs.phases?.restoreMs ?? 0) >= 50, `ran ${hangs.phases?.restoreMs} ms`);
+});
+
+test("a scenario on its own server has no mutex wait and no restore wait in its phases", async () => {
+  const end = await executeTrial({ runTrial: runnerOf(), config }, job({ lane: null }));
+  assert.equal(end.phases?.mutexWaitMs, 0);
+  assert.equal(end.phases?.restoreWaitMs, 0);
+});
+
+test("a trial cancelled while it waits for the mutex still reports its phases", async () => {
+  const mutex = new ArrangementMutex();
+  const holder = await mutex.acquire();
+  const cancel = new AbortController();
+  const lines: string[] = [];
+  const running = executeTrial({ runTrial: runnerOf(), config }, job({ mutex, signal: cancel.signal, log: line => lines.push(line), scenario: scenario(60) }));
+  setTimeout(() => cancel.abort("left"), 15);
+  const end = await running;
+  holder();
+  assert.ok((end.phases?.mutexWaitMs ?? 0) >= 10);
+  assert.equal(end.phases?.arrangeMs, 0);
+  assert.ok(lines.some(text => text.startsWith("phases: ")));
 });

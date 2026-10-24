@@ -36,6 +36,8 @@ export class LabsServerFactory implements ServerFactory {
       version: request.scenario.minecraft.version, root, log: message => log(`[${request.id}] ${message}`), preferPort: port,
       worldType: world.type, seed: world.seed, structures: world.structures,
       maxPlayers: request.kind === "shared" ? config.maxPlayers : undefined,
+      // 1.21.4 pauses a server empty for 60 s (32 times in step 6b, 2026-10-23): the first trial after a pause differs from the others'.
+      pauseWhenEmptySeconds: 0,
       enableCommandBlocks: request.kind === "shared", maxHeap: `${request.heapMb}M`,
     };
     let labs: MinecraftServer | undefined;

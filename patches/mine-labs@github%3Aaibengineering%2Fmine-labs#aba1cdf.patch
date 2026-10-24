@@ -277,13 +277,15 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
        if (!succeeded && !options.acceptedNoOp?.test(output)) {
          throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
 diff --git a/src/server/server.ts b/src/server/server.ts
-index 51aeb8961776014337dacca592d98d9d0d3889a7..58875f504c108d4a4cf7ac8c5d75786ddc001e55 100644
+index 51aeb8961776014337dacca592d98d9d0d3889a7..152d0f228c5f3a83ac853d1052b6c02e7541beb5 100644
 --- a/src/server/server.ts
 +++ b/src/server/server.ts
-@@ -94,6 +94,18 @@ export interface ServerConfig {
+@@ -94,6 +94,20 @@ export interface ServerConfig {
    structures: boolean;
    operators: OperatorProfile[];
    maxPlayers?: number;
++  /** Seconds an empty server waits before it pauses; 0 never pauses. Absent keeps the game's default (60 on 1.21.4). */
++  pauseWhenEmptySeconds?: number;
 +  /** Command blocks run only when the server is asked to allow them (vanilla default: off). */
 +  enableCommandBlocks?: boolean;
 +  /** Java heap cap, `-Xmx` syntax ("4G"); absent keeps the default heap. */
@@ -299,33 +301,36 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..58875f504c108d4a4cf7ac8c5d75786d
  }
  
  export class MinecraftServer {
-@@ -135,6 +147,8 @@ export class MinecraftServer {
+@@ -135,6 +149,9 @@ export class MinecraftServer {
      seed?: number | string;
      structures?: boolean;
      maxPlayers?: number;
++    pauseWhenEmptySeconds?: number;
 +    enableCommandBlocks?: boolean;
 +    maxHeap?: string;
      spectatorNames?: string[];
    }): Promise<MinecraftServer> {
      // Validate local configuration before acquiring resources that need release.
-@@ -153,6 +167,8 @@ export class MinecraftServer {
+@@ -153,6 +170,9 @@ export class MinecraftServer {
        seed: opts.seed,
        structures: opts.structures ?? false,
        maxPlayers: opts.maxPlayers,
++      pauseWhenEmptySeconds: opts.pauseWhenEmptySeconds,
 +      enableCommandBlocks: opts.enableCommandBlocks,
 +      maxHeap: opts.maxHeap,
        operators: [...operators, ...(opts.spectatorNames ?? []).map((name): OperatorProfile => ({
          name, uuid: offlinePlayerUuid(name), level: 2, bypassesPlayerLimit: true,
        }))],
-@@ -205,6 +221,7 @@ export class MinecraftServer {
+@@ -205,6 +225,8 @@ export class MinecraftServer {
        "view-distance=8",
        "simulation-distance=8",
        `max-players=${this.cfg.maxPlayers ?? 10}`,
++      ...(this.cfg.pauseWhenEmptySeconds === undefined ? [] : [`pause-when-empty-seconds=${this.cfg.pauseWhenEmptySeconds}`]),
 +      ...(this.cfg.enableCommandBlocks ? ["enable-command-block=true"] : []),
      ];
      const root = join(this.cfg.worldDir, "..");
      await writeTextFile(join(root, "server.properties"), lines.join("\n"));
-@@ -221,7 +238,7 @@ export class MinecraftServer {
+@@ -221,7 +243,7 @@ export class MinecraftServer {
      const javaName = process.platform === "win32" ? "javaw.exe" : "java";
      const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", javaName) : javaName;
      this.log(`starting ${this.cfg.version} server on ${this.cfg.host}:${this.cfg.gamePort} (rcon :${this.cfg.rconPort})`);
@@ -401,7 +406,7 @@ index 0000000000000000000000000000000000000000..d9aa2f5a9c3bf791caeae45fb0a34b72
 +  return lane ? boxedClearEntities(lane.arena.entityBox) : CLEAR_ENTITIES;
 +}
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488bc9e99ab3 100644
+index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501fa79e29e1 100644
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
 @@ -31,11 +31,11 @@ import {
@@ -417,7 +422,21 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
  import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
  import { preparePlayerForTrial } from "../player/prepare.js";
  import { watchOperatorSpectators } from "../player/operators.js";
-@@ -101,6 +101,13 @@ export interface ScenarioTrialOptions {
+@@ -87,6 +87,13 @@ export interface ScenarioTrialOptions {
+   onGoalProgress?: (goal: GoalResult) => void;
+   /** The arranged clients are waiting at the start line; a managed spectator may connect now. */
+   onPrepared?: () => void | Promise<void>;
++  /**
++   * Every setup command of the arrangement succeeded; called before the settle
++   * delay, the clients' boot and join. Never called when the arrangement
++   * throws; a throw here is an arrangement error (the lane's ticks stop, the
++   * restore runs).
++   */
++  onArranged?: () => void | Promise<void>;
+   /** World setup is complete; hold here before players join the frozen standby. */
+   onWorldPrepared?: () => void | Promise<void>;
+   /** Keep a speculative fixture frozen until its observer has joined. */
+@@ -101,6 +108,13 @@ export interface ScenarioTrialOptions {
    waitForSpectator?: boolean;
    /** Clear server-side player state and non-player entities before a reused-server trial. */
    reuseServer?: boolean;
@@ -431,7 +450,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    startedAt?: number;
    signal?: AbortSignal;
  }
-@@ -151,6 +158,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+@@ -151,6 +165,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
  /** Arrange and measure one trial on an already-running Mine Labs server. */
  export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
    const { scenario, server, log } = opts;
@@ -439,7 +458,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    const startedAt = opts.startedAt ?? Date.now();
    const result = emptyResult(scenario, startedAt);
    result.gamePort = server.gamePort;
-@@ -158,8 +166,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -158,8 +173,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    let clientsPrepared = false;
    // Armed before the world is arranged, so a human who is already connected —
    // or who joins while the fixture is being built — is a spectator before the
@@ -452,7 +471,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
      ? watchOperatorSpectators({
          commands: server.rcon,
          operatorNames: server.operatorNames,
-@@ -175,10 +185,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -175,10 +192,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    // exactly when the next trial most needs it put back — so this cannot be the
    // return value of `arrangeScenario`, which a throw would discard.
    let arenaBackup: ArenaSnapshot | null = null;
@@ -463,11 +482,11 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
 -    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld));
 +    lane = laneContextOf(opts.arena, scenario);
 +    if (opts.reuseServer) arenaBackup = await snapshotArena(server, scenario, log, lane);
-+    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld), lane);
++    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld), lane, opts.onArranged);
      try {
        await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
        await connectScenarioClients({ ...opts, clients });
-@@ -214,7 +226,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -214,7 +233,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
      // The session retains the world for inspection and restores it before reuse.
      if (opts.reuseServer && arenaBackup) {
        const backup = arenaBackup;
@@ -476,7 +495,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
        if (opts.deferReset) opts.deferReset(restore);
        else await restore(log);
      }
-@@ -443,9 +455,10 @@ async function snapshotArena(
+@@ -443,9 +462,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -488,7 +507,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +468,7 @@ async function snapshotArena(
+@@ -455,7 +475,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -497,7 +516,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    }
  }
  
-@@ -465,15 +478,22 @@ async function clearScenario(
+@@ -465,15 +485,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -525,7 +544,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +505,8 @@ async function clearScenario(
+@@ -485,7 +512,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -535,11 +554,12 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -502,20 +523,25 @@ async function arrangeScenario(
+@@ -502,34 +530,85 @@ async function arrangeScenario(
    log: (message: string) => void,
    reuseServer: boolean,
    holdPreparedWorld = false,
 +  lane?: LaneContext,
++  onArranged?: () => void | Promise<void>,
  ): Promise<() => Promise<void>> {
    const rcon = server.rcon;
    if (!rcon) throw new Error("rcon unavailable before arrangement");
@@ -568,8 +588,10 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
      // Chunks must load first; then no redstone, fluid, or scheduled block tick
      // can advance between the first setup command and the start boundary.
      if (holdPreparedWorld) await rcon.executeChecked("tick freeze");
-@@ -524,12 +550,56 @@ async function arrangeScenario(
+     for (const command of setup) {
+       await rcon.executeChecked(command, { acceptedNoOp: acceptedNoOp(command) });
      }
++    await onArranged?.();
    } catch (error) {
      await release();
 +    // The lane's ticks must not keep running while the restore waits its turn.
@@ -625,7 +647,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..477f24fc456a27423c4912ea3076488b
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +656,8 @@ async function pinRegions(
+@@ -586,8 +665,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */

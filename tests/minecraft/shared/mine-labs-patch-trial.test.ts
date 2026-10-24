@@ -73,11 +73,15 @@ function neverStartedServer(worldDir: string, rcon: RecordingRcon) {
   return server;
 }
 
-async function runLaneTrial(rcon: RecordingRcon, options: { arena?: typeof ARENA; scenario: ReturnType<typeof scenario> }) {
+async function runLaneTrial(
+  rcon: RecordingRcon,
+  options: { arena?: typeof ARENA; scenario: ReturnType<typeof scenario>; onArranged?: () => void | Promise<void> },
+) {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-trial-"));
   try {
     return await mineLabs.runScenarioTrial({
       server: neverStartedServer(join(root, "world"), rcon), scenario: options.scenario, runDir: root, log: () => {}, reuseServer: true, arena: options.arena,
+      onArranged: options.onArranged,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -135,4 +139,41 @@ test("a lane's tick command RCON cannot carry fails the trial before the arena i
   assert.equal(result.outcome, "error");
   assert.match(result.error ?? "", /tick command 1 needs a \d+-byte setblock.*shorten it/u);
   assert.equal(rcon.sent.some((command) => command.startsWith("clone ")), false);
+});
+
+test("onArranged is called once the setup commands all succeeded, after the snapshot and before the settle delay", async () => {
+  const rcon = new RecordingRcon();
+  let sentAtCall = -1;
+  let calls = 0;
+  await runLaneTrial(rcon, {
+    arena: ARENA, scenario: scenario(["setblock 1281 -59 1281 minecraft:stone"]),
+    onArranged: () => { calls += 1; sentAtCall = rcon.sent.length; },
+  });
+
+  const before = rcon.sent.slice(0, sentAtCall);
+  assert.equal(calls, 1);
+  assert.ok(before.some((command) => command.startsWith("clone ")), "the snapshot is taken before");
+  assert.equal(before.at(-1), "setblock 1281 -59 1281 minecraft:stone", "every setup command ran before, and it is the last command sent");
+  assert.equal(before.includes("forceload remove -496 1296 -495 1296"), false, "the arena pins are released after the call, the clients' join is what follows");
+});
+
+test("onArranged is not called when the arrangement throws", async () => {
+  const rcon = new RecordingRcon(["bogus"]);
+  let calls = 0;
+  const result = await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["bogus"]), onArranged: () => { calls += 1; } });
+
+  assert.equal(calls, 0);
+  assert.equal(result.outcome, "error");
+});
+
+test("an onArranged that throws ends the trial as an error, the tick blocks stop and the restore runs", async () => {
+  const rcon = new RecordingRcon();
+  const result = await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(), onArranged: async () => { throw new Error("mutex lost"); } });
+
+  assert.equal(result.outcome, "error");
+  assert.match(result.error ?? "", /mutex lost/u);
+  const removals = rcon.sent.flatMap((command, index) => (command === HEAD_REMOVAL ? [index] : []));
+  assert.equal(removals.length, 2, "the failed arrangement stops the ticks at once, the restore removes them again");
+  assert.ok(rcon.sent.some((command, index) => index > removals[1]! && command.startsWith("clone ")), "the arena is cloned back");
+  assert.ok(rcon.sent.includes("forceload remove -496 1296 -495 1296"), "the control chunk pin is released");
 });
