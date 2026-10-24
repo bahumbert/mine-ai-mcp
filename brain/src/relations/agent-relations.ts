@@ -119,6 +119,12 @@ export class AgentRelations {
     if (h.kind === "await") return this.awaitPayment(h.tradeId, h.partner, context);
     let end: HandoffEnd;
     try {
+      // A give queued behind a long order may find its trade ended meanwhile (a deadline broke it): nothing is given.
+      const over = h.kind === "give" ? this.trades.closedAs(h.tradeId) : null;
+      if (h.kind === "give" && over !== null) {
+        this.trades.handoffSkipped(h.tradeId);
+        return { outcome: "failed", detail: `the trade with ${h.partner} is over (${over}): nothing given` };
+      }
       // A give made outside this hand-off (another objective's give_item) counts: only what is left is given.
       const left = h.kind === "give" ? this.trades.leftToGive(h.tradeId) ?? [] : h.items;
       if (h.kind === "give" && left.length === 0) {
