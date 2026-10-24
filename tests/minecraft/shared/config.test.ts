@@ -13,6 +13,7 @@ test("the defaults are the plan's constants", () => {
   assert.equal(config.ownShareHalve, 0.5);
   assert.equal(config.arrangeHoldMs, 800);
   assert.equal(config.arrangeQueueMs, 5_000);
+  assert.equal(config.serversPerKey, 1);
   assert.equal(config.sharedHeapMb, 3_072);
   assert.equal(config.singleHeapMb, 2_048);
   assert.equal(config.socketPath, "/tmp/mine-ai-scenarios.sock");

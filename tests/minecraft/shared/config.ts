@@ -34,6 +34,13 @@ export interface ScenarioServerConfig {
   readonly arrangeHoldMs: number;
   /** A shared server takes no lane that would wait longer than this for its arrangement turn: the next server of the key takes it. */
   readonly arrangeQueueMs: number;
+  /**
+   * Servers a settings key may spread over at once. 1 (the default) keeps today's order: the key's second server starts only when
+   * the first refuses a lane for its arrangement queue. Above 1, a key with at least `serversPerKey x lanesPerServer / 2` trials
+   * queued starts its servers together and each trial takes the server with the shortest arrangement queue. 1 stays the default
+   * (and with the default MAX_PLAYERS 100 the threshold is 98 trials for 2 servers: lower MAX_PLAYERS with it) until the T7c3 measure (`live-testing.md`, shared daemon) shows a faster contract batch with more.
+   */
+  readonly serversPerKey: number;
   readonly waitReportMs: number;
   readonly serverIdleMs: number;
   readonly daemonIdleMs: number;
@@ -71,6 +78,7 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   ownShareHalve: ["OWN_SHARE_HALVE", 0.5, 1],
   arrangeHoldMs: ["ARRANGE_HOLD_MS", 800],
   arrangeQueueMs: ["ARRANGE_QUEUE_MS", 5_000],
+  serversPerKey: ["SERVERS_PER_KEY", 1],
   waitReportMs: ["WAIT_REPORT_MS", 30_000],
   serverIdleMs: ["SERVER_IDLE_MS", 120_000],
   daemonIdleMs: ["DAEMON_IDLE_MS", 600_000],
@@ -107,7 +115,18 @@ export function loadScenarioServerConfig(env: Record<string, string | undefined>
   const numbers = Object.fromEntries(
     Object.entries(NUMBER_CONSTANTS).map(([name, [suffix, fallback, max]]) => [name, numberFromEnv(env, suffix, fallback, max)]),
   ) as Record<NumberKey, number>;
+  if (!Number.isInteger(numbers.serversPerKey)) throw new Error(`${ENV_PREFIX}SERVERS_PER_KEY=${numbers.serversPerKey} is not a whole number from 1`);
   return { ...numbers, socketPath: env[`${ENV_PREFIX}SOCKET_PATH`] || DEFAULT_SOCKET };
+}
+
+/** Lanes a shared server has: its player slots less a spectator and an operator. */
+export function lanesPerServer(config: ScenarioServerConfig): number {
+  return config.maxPlayers - 2;
+}
+
+/** Trials of one key queued at which its servers start together (`serversPerKey` above 1). */
+export function spreadThreshold(config: ScenarioServerConfig): number {
+  return config.serversPerKey * lanesPerServer(config) / 2;
 }
 
 export interface PortBlock { readonly first: number; readonly last: number }

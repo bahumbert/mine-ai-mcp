@@ -244,7 +244,8 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
   while its restore is queued or running. A server whose queue would make the next trial wait over 5 s
   (`ARRANGE_QUEUE_MS`; the median mutex time of its last 20 trials, 800 ms until 3 trials settled) is passed over, so
   the next server of the key (a new one, when memory allows) takes the trial; when no new server can start, the trial
-  takes the server with the shortest queue rather than wait.
+  takes the server with the shortest queue rather than wait. `MINE_AI_SCENARIO_SERVERS_PER_KEY` (default 1) above 1 starts that many
+  servers of a key at once when it has `SERVERS_PER_KEY x (MAX_PLAYERS - 2) / 2` trials queued, each trial on the shortest queue.
 - **The daemon log** (`.tmp/scenario-server/daemon.log`) has, per sample, `sample: ... | cpu= own= load1= mem= ledger=
   target= running= queued= servers= starts= held=<bound:count,...>` (and `target change: halved|foreign load|grew`),
   per settled trial `trial <name> lane <k|own> server <id> queue= serverWait= mutexWait= arrange= join= trial=

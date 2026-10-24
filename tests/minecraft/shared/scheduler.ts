@@ -8,7 +8,7 @@ import {
 import type { Lane } from "../arena/lanes.ts";
 import { renameBodyOnOwnServer } from "../arena/own-body.ts";
 import { shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
-import type { ScenarioServerConfig } from "./config.ts";
+import { spreadThreshold, type ScenarioServerConfig } from "./config.ts";
 import { trialLine, type SampleReport } from "./daemon-lines.ts";
 import { isTimingTrial, reservePlacement, type Placement } from "./placement.ts";
 import type { ManagedServer, MutexQueueMarks, ServerPool } from "./pool.ts";
@@ -122,6 +122,10 @@ export class Scheduler {
   #running = 0;
   /** Queued trials the last pass refused for the target alone: the demand that lets the target grow. */
   #refusedForTarget = 0;
+  /** Queued trials per pool key that could start as the current pass began (a key's demand does not shrink as the pass starts its trials). */
+  #startableOfKey = new Map<string, number>();
+  /** The pass is a sample's or a submission's: a trial settling frees a slot but starts no server of a key's spread, so a start that keeps failing is retried once per sample, not per settle. */
+  #mayStartKeyServers = false;
   /** The bounds that held trials in the last sample's pass, with how many each. */
   #held: Readonly<Record<string, number>> = {};
   #timingRunning = 0;
@@ -177,7 +181,7 @@ export class Scheduler {
       }
     }
     this.#finishIfDone(submission);
-    this.#pump(false);
+    this.#pump(false, true);
     return { id: submission.id, finished: submission.done.promise, cancel: reason => this.#cancel(submission, reason) };
   }
 
@@ -233,11 +237,13 @@ export class Scheduler {
    * Walks the queue once in turn order: a trial held back never blocks the ones behind it, except one that has waited
    * `starveSamples` samples for room for a new server, which keeps the memory it needs from the trials after it.
    */
-  #pump(isSample: boolean): void {
+  #pump(isSample: boolean, mayStartKeyServers = isSample): void {
     if (!this.#base) return;
+    this.#mayStartKeyServers = mayStartKeyServers;
     let starved: QueuedTrial | null = null;
     const held: Record<string, number> = {};
     let refusedForTarget = 0;
+    this.#startableOfKey = this.#countStartableTrialsPerKey();
     for (const queued of this.#turnOrder()) {
       if (starved && this.#running > 0) {
         queued.refusal = `waits behind ${starved.entry.name}, which has waited ${starved.roomSamples} samples for room to start a server`;
@@ -323,7 +329,31 @@ export class Scheduler {
     const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm };
     if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
     const candidates = pool.sharedCandidates(placement.key);
-    return { ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb };
+    return { ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb, spreadToNewServer: this.#mayStartKeyServers && this.#keyWantsMoreServers(placement.key) };
+  }
+
+  /** The key has servers, fewer than SERVERS_PER_KEY, and trials queued to fill them all to half (the first server of a key starts as any new server does). */
+  #keyWantsMoreServers(key: string): boolean {
+    const { pool, config } = this.deps;
+    if (config.serversPerKey === 1) return false;
+    const servers = pool.sharedServerCount(key);
+    return servers > 0 && servers < config.serversPerKey && (this.#startableOfKey.get(key) ?? 0) >= spreadThreshold(config);
+  }
+
+  /** Queued trials per pool key, each submission's `--lanes N` cap taken off: the trials past it cannot start, so they are no demand for a server. */
+  #countStartableTrialsPerKey(): Map<string, number> {
+    const counts = new Map<string, number>();
+    const room = new Map<Submission, number>();
+    for (const queued of this.#queue) {
+      const { submission } = queued;
+      const cap = submission.spec.maxLanes;
+      const left = room.get(submission) ?? (cap === null ? Infinity : Math.max(0, cap - submission.running));
+      if (left <= 0) continue;
+      room.set(submission, left - 1);
+      const key = queued.entry.placement.key;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
   }
 
   /**
@@ -349,7 +379,7 @@ export class Scheduler {
     const { entry, submission } = queued;
     const now = this.deps.now();
     const managed = decision.server === "new"
-      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config), now, ownStartReason(entry.placement))
+      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config), now, ownStartReason(entry.placement), decision.spread ? config.serversPerKey : undefined)
       : pool.get(decision.server);
     if (!managed) return `server ${decision.server} left the pool`;
     let lane: Lane | null = null;

@@ -69,6 +69,8 @@ export interface AdmissionRequest {
   readonly queues?: ReadonlyMap<string, ServerQueue>;
   /** Heap of the server a new start would create. */
   readonly newServerHeapMb: number;
+  /** The key has enough trials queued to fill `serversPerKey` servers and fewer servers than that: a new one starts now, whatever the candidates could take. */
+  readonly spreadToNewServer?: boolean;
   /** This trial measures time (a locked batch, a scenario tagged exclusive): it starts only on a calm machine. */
   readonly timing?: boolean;
   /** Timing trials running now (this sample's admissions included) or waiting for a calm machine: while one is there nothing starts on a busy machine. */
@@ -78,7 +80,7 @@ export interface AdmissionRequest {
 export type AdmissionBound = "memory" | "cpu" | "target" | "server" | "new-server-per-sample";
 
 export type AdmissionDecision =
-  | { readonly admit: true; readonly server: string | "new"; readonly reserveMb: number }
+  | { readonly admit: true; readonly server: string | "new"; readonly reserveMb: number; readonly spread?: true }
   | { readonly admit: false; readonly bound: AdmissionBound; readonly detail: string; readonly waitsForServerRoom: boolean };
 
 export function initialAdmissionState(config: ScenarioServerConfig): AdmissionState {
@@ -142,10 +144,11 @@ function reserveOn(reading: ServerReading, config: ScenarioServerConfig): number
   return config.clientMemMb + (reading.busy ? 0 : growthMb(reading, config));
 }
 
-interface QueueFullServer { readonly id: string; readonly queued: number; readonly reserveMb: number }
+/** A shared server that could take the trial: its mutex queue and what the trial reserves on it. */
+interface ServerOffer { readonly id: string; readonly queued: number; readonly reserveMb: number }
 
-/** No new server can start now: the trial takes the shared server with the fewest trials on its mutex queue (the first on a tie). */
-function shortestQueue(servers: readonly QueueFullServer[]): AdmissionDecision {
+/** The trial takes the shared server with the fewest trials on its mutex queue (the first on a tie). */
+function shortestQueue(servers: readonly ServerOffer[]): AdmissionDecision {
   const shortest = servers.reduce((best, next) => (next.queued < best.queued ? next : best));
   return { admit: true, server: shortest.id, reserveMb: shortest.reserveMb };
 }
@@ -167,11 +170,16 @@ export function decideAdmission(input: {
   const cpuRefusal = cpuRefusalFor(sample, request, running, config);
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
+  const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
+  // A spread start is the key's servers starting together, not the next server of a sample: only the ledger holds it.
+  if (request.spreadToNewServer && available >= needed) return { admit: true, server: "new", reserveMb: needed, spread: true };
   const refusals: string[] = [];
   /** Idle candidates the ledger cannot afford the growth of: a memory refusal, not a server one. */
   const unaffordable: string[] = [];
   /** Servers refused only for their arrangement queue, a placement preference: they take the trial when no new server can start for memory. */
-  const queueFull: QueueFullServer[] = [];
+  const queueFull: ServerOffer[] = [];
+  /** With servers spread, every candidate that fits competes on queue length; with 1 the first that fits takes the trial. */
+  const fitting: ServerOffer[] = [];
   for (const id of request.candidates) {
     const reading = sample.servers.find(server => server.id === id);
     const refusal = serverRefusal(reading, id, state, config);
@@ -185,15 +193,17 @@ export function decideAdmission(input: {
       continue;
     }
     const wait = reading.shared ? queueWaitMs(request.queues?.get(id), config) : 0;
-    if (wait <= config.arrangeQueueMs) return { admit: true, server: id, reserveMb };
-    queueFull.push({ id, queued: request.queues?.get(id)?.queued ?? 0, reserveMb });
+    const offer = { id, queued: request.queues?.get(id)?.queued ?? 0, reserveMb };
+    if (wait > config.arrangeQueueMs) queueFull.push(offer);
+    else if (config.serversPerKey === 1) return { admit: true, server: id, reserveMb };
+    else fitting.push(offer);
   }
+  if (fitting.length > 0) return shortestQueue(fitting);
   if (tally.newServers >= 1) {
     if (queueFull.length > 0) return shortestQueue(queueFull);
     if (unaffordable.length > 0 && refusals.length === 0) return refusal("memory", unaffordable.join("; "), true);
     return refusal("new-server-per-sample", [...refusals, ...unaffordable, "a new server starts at most once per sample"].join("; "));
   }
-  const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
   if (available < needed && queueFull.length > 0) return shortestQueue(queueFull);
   if (available < needed) {
     const detail = `memory ledger ${available} MB does not cover a new server (${needed} MB)`;

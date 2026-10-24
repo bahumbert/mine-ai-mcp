@@ -3,7 +3,7 @@ import type { Scenario } from "mine-labs";
 import { LAST_BODY, type Lane } from "../arena/lanes.ts";
 import type { ServerQueue, ServerReading } from "./admission.ts";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
-import type { ScenarioServerConfig } from "./config.ts";
+import { lanesPerServer, type ScenarioServerConfig } from "./config.ts";
 import { StallWatch } from "./health.ts";
 import { LanePool } from "./lane-pool.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
@@ -107,25 +107,27 @@ export class ServerPool {
   }
 
   /** Why a server for this spec is started now: the plan's reasons for the log, so the starts of a run can be explained. */
-  #startReason(spec: ServerSpec): string {
+  #startReason(spec: ServerSpec, spreadOver?: number): string {
     if (spec.key.startsWith("probe:")) return "probe";
     if (spec.kind === "single") return "own, no idle server of its key";
     const ofKey = [...this.#entries.values()].filter(entry => entry.kind === "shared" && entry.key === spec.key);
     const retired = ofKey.find(entry => entry.retire);
     if (retired) return `replaces retired ${retired.id}`;
     if (ofKey.length === 0) return "new key";
+    if (spreadOver !== undefined) return `spread over ${spreadOver} servers`;
     // A server of the key with a free lane was refused for its mutex queue, tick time or size; without one the lanes are all in use.
     return ofKey.some(entry => entry.lanes!.freeCount > 0 && entry.status !== "sick") ? "key's servers refused it (arrangement queue, tick time or size)" : "key full";
   }
 
-  /** Begin creating a server; it is listed as `starting` at once and its `ready` settles when it is usable. `reason` is logged (the pool names its own when none is given). */
-  startServer(spec: ServerSpec, now: number, reason: string = this.#startReason(spec)): ManagedServer {
+  /** Begin creating a server; it is listed as `starting` at once and its `ready` settles when it is usable. `reason` is logged (the pool names its own when none is given; `spreadOver`, the servers a key spreads over, is the pool's reason for a key's other servers). */
+  startServer(spec: ServerSpec, now: number, reason?: string, spreadOver?: number): ManagedServer {
+    reason ??= this.#startReason(spec, spreadOver);
     const id = `s${this.#nextId++}`;
     this.#started += 1;
     this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) starting: ${reason}`);
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
-      lanes: spec.kind === "shared" ? new LanePool(this.config.maxPlayers - 2) : null,
+      lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null,
       stall: new StallWatch(this.config.stallStopMs, now), server: null, status: "starting", running: 0,
       lastTrialAt: now, msptP95: null, residentMb: 0, idleReusable: false, retire: false,
       mutexQueued: 0, holds: [], nextBody: 0,
@@ -166,6 +168,11 @@ export class ServerPool {
       id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry),
       msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb,
     }));
+  }
+
+  /** Shared servers of the key that are not sick or retired, starting ones and full ones included. */
+  sharedServerCount(key: string): number {
+    return [...this.#entries.values()].filter(entry => entry.kind === "shared" && entry.key === key && entry.status !== "sick" && !entry.retire).length;
   }
 
   /** Shared servers of the key that can take another lane. */
