@@ -20,7 +20,7 @@ const result = (kind: "cancelled" | "died", attacks: number): CombatOutcome => (
 });
 
 test("a health stop recovers and continues the same target with accumulated evidence", async () => {
-  const bot = createFakeBot({ health: 20 }).bot;
+  const { bot, combat: scene } = createFakeBot({ health: 20 });
   const request = new AbortController();
   const transitions: string[] = [];
   const outcome = await runEngagement(request.signal, {
@@ -28,8 +28,7 @@ test("a health stop recovers and continues the same target with accumulated evid
     fight: async () => {
       transitions.push("fight");
       if (transitions.length === 1) {
-        bot.health = 11;
-        bot.emit("health");
+        scene.setHealth(11);
 
         assert.equal(request.signal.aborted, false);
         return {

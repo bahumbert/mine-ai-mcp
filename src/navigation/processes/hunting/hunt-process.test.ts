@@ -57,7 +57,7 @@ function walkingRoute(bot: Bot): HuntRequest["route"] {
 
 for (const presence of ["loaded", "gone", "invalid"] as const) {
   test(`a stopped engagement reports the final ${presence} target observation`, async () => {
-    const { bot } = fakeBot([{ id: 7, at: new Vec3(5, 64, 0) }]);
+    const { bot, entities: server } = fakeBot([{ id: 7, at: new Vec3(5, 64, 0) }]);
     bot.entities[7]!.isValid = true;
     const sightings: HuntTarget[] = [];
     const result = await hunt(
@@ -70,7 +70,8 @@ for (const presence of ["loaded", "gone", "invalid"] as const) {
           await Promise.resolve();
           bot.entity.position.set(10, 64, 0);
           bot.entities[7]!.position.set(12, 65, 0);
-          if (presence === "gone") delete bot.entities[7];
+          if (presence === "gone") server.remove(7);
+          // Not on the shared fake: an entity the bot still lists but that is no longer valid (the server's removal deletes it from `bot.entities`, `entities.js` entityGone). Asked of the master: a scene that leaves a listed, invalid entity, or the row dropped.
           if (presence === "invalid") bot.entities[7]!.isValid = false;
           return { kind: "stopped", reason: "guard could not settle" };
         },

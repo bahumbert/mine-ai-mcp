@@ -17,7 +17,7 @@ const LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 1_000, standDow
  * would. A boat (#7) floats beside the bot; `clock` is a mocked one for a test of the driver's own interval.
  */
 function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock) {
-  const { bot, clock: time } = createFakeBot({ clock, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
+  const { bot, combat, clock: time } = createFakeBot({ clock, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
   const runner = new ActionRunner({ clock: time, cancelGraceMs: 500 });
   const driver = new ReflexDriver(bot, runner, { now: time.now });
   const events: SurvivalTransition[] = [];
@@ -53,7 +53,7 @@ function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock) {
     describe: (outcome) => outcome,
   });
   const pass = (ms: number) => time.advance(ms);
-  return { bot, time, runner, driver, events, counts, definition, pass };
+  return { bot, combat, time, runner, driver, events, counts, definition, pass };
 }
 
 const outcomes = (events: SurvivalTransition[]) =>
@@ -87,11 +87,10 @@ test("a limit is not a cancel: no claim on the next tick, and the decision says 
 });
 
 test("the limit outcome names the limit and the last progress", async () => {
-  const { bot, events, driver, definition, pass } = scene();
+  const { combat, events, driver, definition, pass } = scene();
   driver.register(definition());
   await pass(300);
-  Object.assign(bot, { health: 18 });
-  bot.emit("health");
+  combat.setHealth(18);
   await pass(1_300);
   const limit = outcomes(events).at(0);
   assert.equal(limit?.cancelled, false);
@@ -101,11 +100,10 @@ test("the limit outcome names the limit and the last progress", async () => {
 });
 
 test("a claim that keeps marking runs into its ceiling, not the no-progress limit", async () => {
-  const { bot, events, driver, definition, pass } = scene({ ceilingMs: 2_000, noProgressMs: 1_000, standDownMs: 3_000 });
+  const { combat, events, driver, definition, pass } = scene({ ceilingMs: 2_000, noProgressMs: 1_000, standDownMs: 3_000 });
   driver.register(definition());
   for (let step = 0; step < 50; step++) {
-    Object.assign(bot, { health: bot.health === 20 ? 19 : 20 });
-    bot.emit("health");
+    combat.setHealth(step % 2 === 0 ? 19 : 20);
     await pass(50);
   }
   assert.equal(outcomes(events).at(0)?.outcome.limit, "ceiling");
@@ -136,15 +134,14 @@ test("a cancel is no stand-down", async () => {
 });
 
 test("a death during a claim is no stand-down, and the probes are off afterwards", async () => {
-  const { bot, driver, definition, pass } = scene();
+  const { bot, combat, driver, definition, pass } = scene();
   driver.register(definition());
   await pass(100);
   const during = bot.listenerCount("health");
   assert.ok(during > 0, "the base probe listens during the claim");
-  bot.health = 0;
-  bot.emit("death");
+  combat.setHealth(0);
   await flush();
-  bot.health = 20;
+  combat.setHealth(20);
   assert.deepEqual(driver.answered.snapshot(), []);
   assert.equal(bot.listenerCount("health"), 0, "the probes detach when the claim ends");
 });

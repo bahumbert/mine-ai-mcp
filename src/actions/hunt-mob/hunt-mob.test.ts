@@ -1,5 +1,4 @@
 import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
@@ -14,17 +13,16 @@ import { huntMobOutcomes, parseHuntMobRequest } from "./contract.js";
 import { createCollectMobDropAction, engageTarget, formatHuntMobResult, fruitlessKillLimit, huntMob, HUNT_FRUITLESS_KILLS, type HuntMobDependencies } from "./hunt-mob.js";
 import { died, outcome, dependencies, fakeCombat, huntBot, EntitySpec, mob, fakeNavigation, unseen, droppedItem } from "./hunt-mob-fixtures.test.js";
 
-/** A harness bot that sees `targets` and nothing else of the hunt (engagement tests). */
-function engagementBot(targets: readonly EntitySpec[]): Bot {
-  return createFakeBot({ groundY: null, entities: Object.fromEntries(targets.map((target) => [target.id, target])) }).bot;
+/** A harness whose bot sees `targets` and nothing else of the hunt (engagement tests). */
+function engagementHarness(targets: readonly EntitySpec[]) {
+  return createFakeBot({ groundY: null, entities: Object.fromEntries(targets.map((target) => [target.id, target])) });
 }
 
 test("a hunt delegates health recovery to combat and preserves its terminal evidence", async () => {
-  const bot = engagementBot([mob(7, 1, "blaze", 2, "Hostile mobs")]);
+  const { bot, combat: scene } = engagementHarness([mob(7, 1, "blaze", 2, "Hostile mobs")]);
   const target = bot.entities[7]!;
   const combat = engagingCombat(bot, async (_id, signal) => {
-    bot.health = 11;
-    bot.emit("health");
+    scene.setHealth(11);
     assert.equal(signal.aborted, false, "the hunt does not independently cancel combat recovery");
     return outcome("capability_blocked", 2, { reason: "recovery", observation: "No food remains." });
   });
@@ -37,10 +35,9 @@ test("a hunt delegates health recovery to combat and preserves its terminal evid
 });
 
 test("the hostile fight boundary does not cancel a passive quarry engagement", async () => {
-  const bot = engagementBot([mob(7, 1, "cow", 2)]);
+  const { bot, combat: scene } = engagementHarness([mob(7, 1, "cow", 2)]);
   const combat = engagingCombat(bot, async (_id, signal) => {
-    bot.health = 11;
-    bot.emit("health");
+    scene.setHealth(11);
     assert.equal(signal.aborted, false);
     return outcome("died", 2);
   });

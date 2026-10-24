@@ -6,12 +6,12 @@ import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { climbsBy, fallsUnder, observeBodyProgress, ReflexProgress, risesOver, turnsTrue, watchBodyTicks } from "./reflex-progress.js";
 
 function fixture() {
-  const { bot } = createFakeBot();
+  const { bot, combat } = createFakeBot();
   const { entity } = bot;
   const emitter = bot;
   const progress = new ReflexProgress();
   const tick = () => bot.emit("physicsTick");
-  return { bot, emitter, entity, progress, tick };
+  return { bot, combat, emitter, entity, progress, tick };
 }
 
 test("a 1-block walk marks, a 0.9-block one does not", () => {
@@ -54,23 +54,21 @@ test("a fall out of water keeps marking", () => {
 });
 
 test("a health change marks, up or down, and an unchanged health does not", () => {
-  const { bot, progress } = fixture();
+  const { combat, progress, bot } = fixture();
   const detach = observeBodyProgress(bot, progress.mark);
-  bot.emit("health");
+  combat.setHealth(bot.health);
   assert.equal(progress.marks, 0);
-  Object.assign(bot, { health: 18 });
-  bot.emit("health");
-  Object.assign(bot, { health: 20 });
-  bot.emit("health");
+  combat.setHealth(18);
+  combat.setHealth(20);
   assert.equal(progress.marks, 2);
   assert.equal(progress.lastReason, "health_changed");
   detach();
 });
 
 test("a death marks", () => {
-  const { bot, progress } = fixture();
+  const { bot, combat, progress } = fixture();
   const detach = observeBodyProgress(bot, progress.mark);
-  bot.emit("death");
+  combat.setHealth(0);
   assert.equal(progress.lastReason, "died");
   detach();
 });

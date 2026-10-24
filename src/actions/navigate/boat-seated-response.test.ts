@@ -3,8 +3,9 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { attackedIds } from "../../test-support/combat.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
-import { SEATED_BOAT_ID, attacks, boatsCarried, boatsInView, mountedSea, vehicleMoves, wroteAShift } from "./boat-fixtures.test.js";
+import { SEATED_BOAT_ID, boatsCarried, boatsInView, mountedSea, vehicleMoves, wroteAShift } from "./boat-fixtures.test.js";
 import { respondFromBoat, type SeatedThreat } from "./boat-seated-response.js";
 import { watchVehicle } from "./vehicle-sync.js";
 
@@ -36,7 +37,7 @@ test("a threat in reach is struck from the seat, once per cooldown", async () =>
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 1_000 }), SETTLE_MS);
   // An iron sword's 13 ticks: strikes at 0 and 650 ms, none at 1300.
   assert.equal(result.strikes, 2);
-  assert.deepEqual(attacks(world), [THREAT_ID, THREAT_ID]);
+  assert.deepEqual(attackedIds(world.server), [THREAT_ID, THREAT_ID]);
   assert.deepEqual(equips, ["iron_sword"], "the sword is equipped once");
   assert.equal(result.outcome, "timed_out");
   noShift(world);
@@ -131,7 +132,7 @@ test("after rowing away, the next movement gets off and takes the boat back", as
   const boat = boatsInView(world)[0]!;
   assert.equal(world.bot.vehicle, boat, "still seated somewhere else at sea");
   await world.clock.settle(prepareBotForMovement(world.bot, { cancel: () => undefined } as unknown as NavigationRuntime), SETTLE_MS);
-  assert.deepEqual([...new Set(attacks(world))], [boat.id], "the boat is hit until it breaks");
+  assert.deepEqual([...new Set(attackedIds(world.server))], [boat.id], "the boat is hit until it breaks");
   assert.equal(world.bot.vehicle, null);
   assert.equal(boatsCarried(world), 2, "the boat she carried and the one taken back");
 });

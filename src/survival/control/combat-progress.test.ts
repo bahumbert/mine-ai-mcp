@@ -8,13 +8,20 @@ import { ReflexProgress } from "./reflex-progress.js";
 const SELF = 1;
 const ZOMBIE = 7;
 const BYSTANDER = 9;
+/** A killed creature stays on the client for its death animation (945 ms) and is then removed. */
+const DEATH_REMOVAL_MS = 1_000;
 
 /** Stone on every side of the body at (0, 64, 0): floor, roof and the four walls of both body cells. */
 const SHELTER_SHELL = ["0,63,0", "0,66,0", ...[64, 65].flatMap((y) => [`1,${y},0`, `-1,${y},0`, `0,${y},1`, `0,${y},-1`])];
 
-/** A bot with a server connection, in the open (a shelter can close around it), and a zombie in the response's threats. */
+/** A bot with a server connection, in the open (a shelter can close around it), a zombie in the response's threats and a cow that is not. */
 function fixture() {
-  const { bot, world: blocks } = createFakeBot({ entities: { [ZOMBIE]: { name: "zombie", position: new Vec3(5.5, 64, 0.5) } } });
+  const { bot, world: blocks, combat: scene, clock } = createFakeBot({
+    entities: {
+      [ZOMBIE]: { name: "zombie", position: new Vec3(5.5, 64, 0.5) },
+      [BYSTANDER]: { name: "cow", position: new Vec3(-5.5, 64, 0.5) },
+    },
+  });
   const client = bot._client;
   const zombie = bot.entities[ZOMBIE]!;
   const emitter = bot;
@@ -26,30 +33,30 @@ function fixture() {
   const progress = new ReflexProgress();
   const tick = () => bot.emit("physicsTick");
   const watch = () => observeCombatProgress(bot, [ZOMBIE], progress.mark);
-  return { bot, emitter, client, zombie, world, progress, tick, watch };
+  return { bot, emitter, client, zombie, world, progress, tick, watch, scene, clock };
 }
 
 test("damage to the bot or to a threat of the response is progress; damage to anyone else is not", () => {
-  const { bot, progress, watch } = fixture();
+  const { scene, progress, watch } = fixture();
   const stop = watch();
-  bot.emit("entityHurt", { id: BYSTANDER } as never, undefined as never);
+  scene.hurt(BYSTANDER, null, 2);
   assert.equal(progress.marks, 0);
-  bot.emit("entityHurt", { id: SELF } as never, undefined as never);
-  bot.emit("entityHurt", { id: ZOMBIE } as never, undefined as never);
+  scene.hurtBot(2, null);
+  scene.hurt(ZOMBIE, null, 2);
   assert.equal(progress.marks, 2);
   assert.equal(progress.lastReason, "hurt");
   stop();
 });
 
-test("a threat that dies or leaves is progress", () => {
-  const { bot, progress, watch } = fixture();
+test("a threat that dies or leaves is progress", async () => {
+  const { scene, clock, progress, watch } = fixture();
   const stop = watch();
-  bot.emit("entityDead", { id: BYSTANDER } as never);
-  bot.emit("entityGone", { id: BYSTANDER } as never);
+  scene.kill(BYSTANDER);
+  await clock.advance(DEATH_REMOVAL_MS);
   assert.equal(progress.marks, 0);
-  bot.emit("entityDead", { id: ZOMBIE } as never);
+  scene.kill(ZOMBIE);
   assert.equal(progress.lastReason, "threat_dead");
-  bot.emit("entityGone", { id: ZOMBIE } as never);
+  await clock.advance(DEATH_REMOVAL_MS);
   assert.equal(progress.lastReason, "threat_gone");
   assert.equal(progress.marks, 2);
   stop();

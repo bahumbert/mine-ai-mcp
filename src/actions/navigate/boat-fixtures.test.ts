@@ -74,10 +74,6 @@ export function seaHarness(options: SeaOptions = {}): FakeHarness {
 export const shifts = ({ server }: FakeHarness): boolean[] =>
   server.packets.filter((packet) => packet.name === "entity_action").map((packet) => (packet.data as { actionId: number }).actionId === 0);
 
-/** The ids of the entities the client hit, in order. */
-export const attacks = ({ server }: FakeHarness): number[] =>
-  server.packets.filter((packet) => packet.name === "use_entity" && (packet.data as { mouse: number }).mouse === 1).map((packet) => (packet.data as { target: number }).target);
-
 /** The `vehicle_move` packets the client wrote, in order. */
 export const vehicleMoves = ({ server }: FakeHarness): Record<string, unknown>[] =>
   server.packets.filter((packet) => packet.name === "vehicle_move").map((packet) => packet.data as Record<string, unknown>);

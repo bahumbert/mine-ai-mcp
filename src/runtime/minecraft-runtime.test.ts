@@ -12,7 +12,7 @@ import { readRecentEventsResultSchema } from "../actions/read-recent-events/cont
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot } from "../test-support/fake-bot/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
 /** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
@@ -42,8 +42,12 @@ const combatController = engagingCombat(runtimeBot(), async (targetId) => ({
  * listener for that event throw.
  */
 function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): Bot {
+  return runtimeHarness(controlStates, rejectedListener).bot;
+}
+function runtimeHarness(controlStates: boolean[] = [], rejectedListener?: string): FakeHarness {
   // No column loaded: the frontier observes none.
-  const { bot } = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0), loadedColumns: [] });
+  const harness = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0), loadedColumns: [] });
+  const { bot } = harness;
   bot.setMaxListeners(40); // as the runtime host allows its observers (`runtime-host.ts`)
   const setControlState = bot.setControlState;
   bot.setControlState = (control, state) => {
@@ -61,7 +65,7 @@ function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): B
     bot.on = rejectSelectedListener;
   }
   bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
-  return bot;
+  return harness;
 }
 
 test("completed combat decisions are retained without a physics sample and unsubscribe on close", async (t) => {
@@ -226,7 +230,7 @@ test("an artifact write failure remains evidence and does not turn successful ga
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-runtime-write-test-"));
   const occupied = path.join(directory, "occupied");
   await writeFile(occupied, "not a directory");
-  const bot = runtimeBot();
+  const { bot, combat: scene } = runtimeHarness();
   const runtime = await createMinecraftRuntime(bot, {
     incidents: { directory: occupied },
     createCombatController: () => combatController,
@@ -253,15 +257,7 @@ test("an artifact write failure remains evidence and does not turn successful ga
       ...query,
       execution: { kind: "task" },
       execute: async (request, context) => {
-        bot._client.emit("damage_event", {
-          entityId: bot.entity.id,
-          sourceTypeId: 2,
-          sourceCauseId: 0,
-          sourceDirectId: 0,
-          sourcePosition: null,
-        });
-        bot.health = 18;
-        bot.emit("health");
+        scene.hurtBot(2, null);
         return query.execute(request, context);
       },
     },

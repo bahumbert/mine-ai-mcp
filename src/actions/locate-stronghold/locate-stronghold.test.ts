@@ -22,8 +22,9 @@ const bearing = (x: number, z: number, tx: number, tz: number): Bearing => {
 };
 const makeData = () =>
   SqlBotData.create({ storage: { kind: "temporary" }, identity: { worldId: "test", scope: { kind: "shared" } } });
-/** The eyes of ender the tests throw, made by the harness and out of the bot's sight until a test spawns one. */
-const EYE_IDS = [42, 99];
+/** The eyes of ender the tests throw: the ids of the entities the server spawns, the first the one the bot threw. */
+const THROWN_EYE_ID = 42;
+const OTHER_EYE_ID = 99;
 
 /**
  * The locator's harness bot at (0, 70, 0). Its world has no chunk columns (`findLoadedBlockPositions` scans those):
@@ -37,9 +38,6 @@ function fixture(clock?: FakeClock, loadedColumns: readonly (readonly [number, n
     username: "Locator",
     position: new Vec3(0, 70, 0),
     loadedColumns,
-    entities: Object.fromEntries(
-      EYE_IDS.map((id) => [id, { name: "eye_of_ender", position: new Vec3(0, 71.5, 0), uuid: `eye-${id}` }]),
-    ),
     overrides: {
       activateItem: () => {
         activations++;
@@ -47,9 +45,9 @@ function fixture(clock?: FakeClock, loadedColumns: readonly (readonly [number, n
     },
   });
   const { bot } = harness;
-  const eyes = new Map(EYE_IDS.map((id) => [id, bot.entities[id]!]));
-  for (const id of EYE_IDS) delete bot.entities[id];
-  return { bot, harness, activations: () => activations, eye: (id = 42) => Object.assign(eyes.get(id)!, { position: new Vec3(0, 71.5, 0) }) };
+  /** The server spawns an eye (`entitySpawn`, on the bot): by default at the bot's hand, where it throws one. */
+  const eye = (id = THROWN_EYE_ID, position = new Vec3(0, 71.5, 0)) => harness.entities.spawn({ id, name: "eye_of_ender", position, uuid: `eye-${id}` });
+  return { bot, harness, activations: () => activations, eye };
 }
 
 /** Put `stacks` in the window's slots from `first` on, as the server's `set_slot` does. */
@@ -118,7 +116,6 @@ test("cancelling the wait preserves later airborne measurements and removes flig
   flights.start(store);
   assert.equal(store.read()[0]?.state, "pending");
   const entity = f.eye();
-  f.bot.emit("entitySpawn", entity);
   entity.position = new Vec3(0, 74, -3);
   f.bot.emit("entityMoved", entity);
   const stop = new AbortController();
@@ -128,7 +125,7 @@ test("cancelling the wait preserves later airborne measurements and removes flig
   assert.equal(store.read()[0]?.end_json?.z, -3);
   entity.position = new Vec3(0, 79, -12);
   f.bot.emit("entityMoved", entity);
-  f.bot.emit("entityGone", entity);
+  f.harness.entities.remove(entity.id);
   await flights.wait();
   assert.equal(store.read().length, 1);
   assert.equal(store.read()[0]?.end_json?.z, -12);
@@ -143,13 +140,10 @@ test("unrelated eyes are ignored and runtime disposal persists an incomplete obs
   const flights = new StrongholdEyeFlights(f.bot);
   const store = new StrongholdThrows(data, "Locator", "overworld", "trip");
   flights.start(store);
-  const unrelated = f.eye(99);
-  unrelated.position = new Vec3(50, 70, 0);
-  f.bot.emit("entitySpawn", unrelated);
+  f.eye(OTHER_EYE_ID, new Vec3(50, 70, 0));
   assert.equal(store.read()[0]?.entity_uuid, null);
-  const entity = f.eye();
-  f.bot.emit("entitySpawn", entity);
-  f.bot.emit("entityGone", unrelated);
+  f.eye();
+  f.harness.entities.remove(OTHER_EYE_ID);
   assert.equal(store.read()[0]?.state, "tracking");
   flights[Symbol.dispose]();
   assert.equal(store.read()[0]?.state, "incomplete");
@@ -357,8 +351,7 @@ test("a cancelled body can move before the spent eye's spawn packet arrives", as
   flights.start(store);
   f.bot.entity.position = new Vec3(20, 70, 0);
   const entity = f.eye();
-  f.bot.emit("entitySpawn", entity);
   assert.equal(store.read()[0]?.entity_uuid, entity.uuid);
-  f.bot.emit("entityGone", entity);
+  f.harness.entities.remove(entity.id);
   await flights.wait();
 });

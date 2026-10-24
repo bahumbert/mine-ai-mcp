@@ -53,7 +53,7 @@ function fixture() {
     bot.entities[id] = entity;
     return { entity, state };
   };
-  return { bot, lifetime, item, world, idleEvents, otherPlayer: bot.entities[OTHER_PLAYER_ID]! };
+  return { bot, lifetime, item, world, server: harness.entities, idleEvents, otherPlayer: bot.entities[OTHER_PLAYER_ID]! };
 }
 
 test("records late item metadata, current location, and unexplained disappearance without inventing a pickup", () => {
@@ -66,8 +66,7 @@ test("records late item metadata, current location, and unexplained disappearanc
   f.bot.emit("itemDrop", drop.entity);
   drop.entity.position = new Vec3(22, 44, -19);
   assert.equal(read()[0]!.position.y, 44);
-  f.bot.emit("entityGone", drop.entity);
-  delete f.bot.entities[7];
+  f.server.remove(7);
   const sighting = huntDropSightingSchema.parse(read()[0]);
   assert.equal(sighting.firstSeen, "during_hunt");
   assert.equal(sighting.state, "no_longer_observed");
@@ -91,8 +90,7 @@ test("records a drop moving from air into lava without claiming destruction or p
   f.bot.emit("entityMoved", drop.entity);
   // Removal may arrive without readable item metadata; retain the last movement observation.
   drop.state.stack = null;
-  f.bot.emit("entityGone", drop.entity);
-  delete f.bot.entities[7];
+  f.server.remove(7);
   const sighting = huntDropSightingSchema.parse(read()[0]);
   assert.deepEqual(sighting.blocks, { atPosition: "lava", belowPosition: "basalt" });
   assert.equal(sighting.position.y, 44.56);

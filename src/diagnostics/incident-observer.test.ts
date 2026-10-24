@@ -16,7 +16,7 @@ import { observeIncidents } from "./incident-observer.js";
 test("failure evidence separates lost support, server corrections, and local motion and detaches every listener", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const { bot } = createFakeBot();
+  const { bot, combat: scene } = createFakeBot();
   // The server's flags: on fire (`shared_flags`) and using an item in the off hand (`living_entity_flags`).
   bot.entity.metadata = playerMetadata(bot, { living_entity_flags: 3, shared_flags: 1 });
   bot.entity.velocity = new Vec3(0.02, -0.08, 0);
@@ -92,9 +92,7 @@ test("failure evidence separates lost support, server corrections, and local mot
     sourceDirectId: 7,
     sourcePosition: null,
   });
-  bot.health = 18;
-  bot._client.emit("update_health", { health: 18, food: 20, foodSaturation: 3 });
-  bot.emit("health");
+  scene.setHealth(18);
   // Damage caused by this bot is evidence too, including a collateral hit.
   // It remains silent and does not trigger a separate capture.
   bot._client.emit("damage_event", { entityId: 8, sourceTypeId: 2, sourceCauseId: 6, sourceDirectId: 6 });
@@ -129,7 +127,7 @@ test("failure evidence separates lost support, server corrections, and local mot
   assert.doesNotMatch(intact, /nearby_block_change/);
   assert.match(intact, /"entityId":8,"sourceTypeId":2,"sourceCauseId":6,"sourceDirectId":6/);
   assert.match(intact, /"entityId":9/, "unrelated damage remains available before attribution filtering");
-  assert.match(intact, new RegExp(String.raw`"packet":"update_health","botEntityId":${self},"fields":\{"health":18,"food":20,"foodSaturation":3\}`));
+  assert.match(intact, new RegExp(String.raw`"packet":"update_health","botEntityId":${self},"fields":\{"health":18,"food":20,"foodSaturation":5\}`));
   const impulseRows = intact
     .split("\n")
     .filter(Boolean)
@@ -171,8 +169,7 @@ test("failure evidence separates lost support, server corrections, and local mot
   bot._client.emit("explosion", { x: 10, y: 64, z: 0, playerKnockback: { x: 1, y: 0, z: 0 }, secret: "never-record" });
   // Protodef omits the value of an absent option; it does not return null.
   bot._client.emit("damage_event", { entityId: self, sourceTypeId: 2, sourceCauseId: 0, sourceDirectId: 0 });
-  bot.health = 17;
-  bot.emit("health");
+  scene.setHealth(17);
   await observer.close();
   const last = references.at(-1)!.artifact;
   assert.equal(last.kind, "written");

@@ -142,6 +142,9 @@ test("a gone recipient settles an accepted exchange without inventing completion
   const f = fixture(t);
   const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
   await new Promise((resolve) => setImmediate(resolve));
+  // Kept: Mineflayer emits `entityGone` while the piglin is still listed and valid (`entities.js:313-318`), and `harness.entities.remove`
+  // does the same; barter's wait reads `isValid` at that event and never settles (a code bug, reported to the master). The
+  // test keeps the order its wait can see: the piglin invalid and unlisted, then the event.
   f.target.isValid = false;
   delete f.entities[7];
   f.events.emit("entityGone", f.target);

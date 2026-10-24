@@ -5,7 +5,7 @@ import { forgetVehicle, recoverPhysics, watchVehicle } from "./vehicle-sync.js";
 
 /** A bot by boat 7, seated in it by the server unless `seated` is false; the client records the positions fed to Mineflayer's own handler. */
 async function ridingBot({ seated = true } = {}) {
-  const { bot, clock } = createFakeBot({ position: { x: 20.5, y: 62.96, z: 0.5 }, entities: { 7: { name: "oak_boat", position: { x: 20.5, y: 62.46, z: 0.5 } } } });
+  const { bot, clock, entities } = createFakeBot({ position: { x: 20.5, y: 62.96, z: 0.5 }, entities: { 7: { name: "oak_boat", position: { x: 20.5, y: 62.46, z: 0.5 } } } });
   const boat = bot.entities[7]!;
   if (seated) {
     bot.mount(boat);
@@ -24,7 +24,7 @@ async function ridingBot({ seated = true } = {}) {
   // Mineflayer's own plugins listen for a death and a respawn too: only the watch's own listeners are counted.
   const ownDeathListeners = bot.listenerCount("death") + bot.listenerCount("respawn");
   const stop = watchVehicle(bot);
-  return { bot, self, boat, client, positions, dismounts, stop, ownDeathListeners };
+  return { bot, self, boat, client, positions, dismounts, stop, ownDeathListeners, entities };
 }
 
 // Mineflayer acts only on a passenger list that names the bot: one without her kept the vehicle and physics off for good.
@@ -51,7 +51,7 @@ test("a passenger list that still names her, or another entity's, changes nothin
 
 test("her boat gone (broken or unloaded) is the same as being let off; nothing once the watch is stopped", async () => {
   const first = await ridingBot();
-  first.bot.emit("entityGone", first.boat);
+  first.entities.remove(7);
   assert.equal(first.bot.vehicle, null);
   assert.equal(first.positions.length, 1);
   first.stop();

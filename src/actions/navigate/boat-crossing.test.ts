@@ -5,8 +5,9 @@ import { Vec3 } from "vec3";
 import { boatUnderFeetAtSea, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
+import { attackedIds } from "../../test-support/combat.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
-import { attacks, boatsCarried, farBankSea, mountedSea, seaHarness, settled, shifts, shoreSea, theBoat, vehicleMoves, wroteAShift } from "./boat-fixtures.test.js";
+import { boatsCarried, farBankSea, mountedSea, seaHarness, settled, shifts, shoreSea, theBoat, vehicleMoves, wroteAShift } from "./boat-fixtures.test.js";
 import { getOff } from "./boat-get-off.js";
 import { freeHeldSeat, watchServerSeat } from "./server-seat-watch.js";
 import { watchVehicle } from "./vehicle-sync.js";
@@ -22,7 +23,7 @@ function recordPositions(world: FakeHarness): unknown[] {
 }
 
 /** The boat that every hit of the client went to, once: the one she broke. */
-const hitBoats = (world: FakeHarness) => [...new Set(attacks(world))];
+const hitBoats = (world: FakeHarness) => [...new Set(attackedIds(world.server))];
 
 test("deep open water on the straight way is found with the shore before it and the far shore after", () => {
   const water = deepWaterOnTheWay(shoreSea().bot, new Vec3(0.5, 63, 0.5), { x: 60, z: 0 });
@@ -85,7 +86,7 @@ test("a ride over open sea with no land stops at the distance asked for and stay
   // Still in the boat: no get-off packets, nothing broken, the boat still in the water where it stopped.
   assert.equal(world.bot.vehicle, theBoat(world));
   assert.deepEqual(shifts(world), []);
-  assert.deepEqual(attacks(world), []);
+  assert.deepEqual(attackedIds(world.server), []);
   const moves = vehicleMoves(world);
   const last = moves[moves.length - 1]!;
   // The distance is counted from where she stood (z 0.5), not from where the boat went in (3.5).
@@ -271,7 +272,7 @@ describe("a ride that is interrupted stays seated (ACT-01)", () => {
   const stillSeated = (world: FakeHarness) => {
     assert.equal(world.bot.vehicle, theBoat(world), "still in the boat");
     assert.equal(wroteAShift(world), false, "no shift");
-    assert.deepEqual(attacks(world), [], "the boat is not hit");
+    assert.deepEqual(attackedIds(world.server), [], "the boat is not hit");
     const moves = vehicleMoves(world).map((packet) => JSON.stringify(packet));
     assert.equal(new Set(moves.slice(-4)).size, 1, "the last 4 moves are the same stopped place");
   };
@@ -372,7 +373,7 @@ describe("a ride that is interrupted stays seated (ACT-01)", () => {
     };
     const startedAt = performance.now();
     assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, controller.signal, 0)), false);
-    assert.deepEqual(attacks(world), [7], "one hit, then it stops");
+    assert.deepEqual(attackedIds(world.server), [7], "one hit, then it stops");
     assert.ok(performance.now() - startedAt < 1_000, "no more hits and no swim after the cancel");
   });
 });
@@ -418,7 +419,7 @@ describe("navigate rides on from the seat (B5)", () => {
     assert.equal(result.atSea, true, "the ride went on and stayed at sea");
     assert.equal(boatsCarried(world), placed, "no second boat was launched");
     assert.equal(world.bot.vehicle, theBoat(world), "the same boat");
-    assert.deepEqual(attacks(world), []);
+    assert.deepEqual(attackedIds(world.server), []);
     assert.deepEqual(shifts(world), []);
     assert.ok(vehicleMoves(world).length > 0);
   });
@@ -429,7 +430,7 @@ describe("navigate rides on from the seat (B5)", () => {
     await settled(world, prepareBotForMovement(world.bot, navigation, undefined, { keepBoatSeat: true }));
     assert.equal(world.bot.vehicle, theBoat(world));
     assert.deepEqual(shifts(world), []);
-    assert.deepEqual(attacks(world), []);
+    assert.deepEqual(attackedIds(world.server), []);
   });
 
   test("leaveBoatSeat in shallows takes back the boat just left", async () => {
