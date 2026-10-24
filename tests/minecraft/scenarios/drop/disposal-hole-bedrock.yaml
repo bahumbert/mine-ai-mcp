@@ -9,9 +9,11 @@ world:
   time: noon
   gamerules: { doDaylightCycle: false, doMobSpawning: false, randomTickSpeed: 0 }
 reset:
-  - "fill -8 -63 -8 8 -54 8 air"
+  - "fill -10 -63 -10 10 -54 10 air"
 geometry:
-  - fill: { block: bedrock, from: [-8, -63, -8], to: [8, -61, 8] }
+  # drop_item looks for a stance up to HOLE_SEARCH_RADIUS (8) blocks off and digs the pit beside it, so a pit can be
+  # 9 blocks out: the pad reaches 10 so no dirt is in reach.
+  - fill: { block: bedrock, from: [-10, -63, -10], to: [10, -61, 10] }
 players:
   - name: Disposer
     pos: [0.5, -60, 0.5]
