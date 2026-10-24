@@ -1,10 +1,10 @@
 template: ../../templates/collect/single-action.yaml
 
-name: obsidian-scoop-before-mining
+name: obsidian-under-water-refused
 tags: [acceptance]
-description: Recover the water covering an obsidian target into the supplied empty bucket,
-  seal the adjacent lava, and collect the obsidian. Finish with the water bucket, full
-  health, and no recorded death.
+description: Refuse an obsidian target with water flowing over it, even with an empty bucket
+  carried (the bot never mines under water, run 10). Nothing is broken, the bucket stays empty,
+  full health and no recorded death.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
@@ -14,6 +14,7 @@ reset: ["fill -6 -61 -5 10 -54 5 air"]
 geometry:
   - fill: { block: stone, from: [-5, -61, -4], to: [9, -60, 4] }
   - setblock: { block: obsidian, at: [2, -60, 0] }
+  # The source flows onto the obsidian's top: the target is under water.
   - setblock: { block: water, at: [3, -59, 0] }
   - setblock: { block: lava, at: [2, -60, 1] }
 players:
@@ -26,13 +27,14 @@ params:
     block_name: obsidian
     count: 1
     scaffold: false
+  expect: { status: failed, errorContains: "never mines under water" }
 
 goal:
   kind: all
   timeout: 90
   goals:
-    - { kind: hasItem, who: DrainMiner, item: obsidian, count: 1 }
-    - { kind: hasItem, who: DrainMiner, item: water_bucket, count: 1 }
-    - { kind: survive, who: DrainMiner, seconds: 1 }
+    - { kind: blocksAt, block: obsidian, positions: [[2, -60, 0]] }
+    - { kind: hasItem, who: DrainMiner, item: bucket, count: 1 }
+    # No `survive`: the refusal ends the run within a second; full health below rules out a death.
     - { kind: completion, who: DrainMiner }
     - { kind: health, who: DrainMiner, health: 20 }

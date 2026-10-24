@@ -3,10 +3,11 @@ template: ../../templates/collect/single-action.yaml
 name: obsidian-hazards
 tags: [regression]
 description: >-
-  Collect all three existing obsidian blocks with no bucket: seal the lava beside one,
-  isolate flowing water above another, and approach the third beneath a stone lip.
-  Guards the Run 10 lava/water refusals and the cave regression that repeatedly arrived
-  at an occluded mining stance. All three blocks must be recovered without injury or death.
+  Collect the obsidian that can be mined with no bucket: seal the lava beside one and
+  approach another beneath a stone lip; refuse the third, which has flowing water above it
+  (the bot never mines under water, run 10). Guards the Run 10 lava/water refusals and the
+  cave regression that repeatedly arrived at an occluded mining stance. Two blocks are
+  recovered, the third is left, without injury or death.
 
 minecraft: { version: "1.21.4" }
 world:
@@ -42,17 +43,21 @@ players:
 
 params:
   action: collect_block
-  input: { block_name: obsidian, count: 3, scaffold: false }
+  # max_distance: with the third block refused, an unbounded run explores the flat world for another (700 blocks in
+  # 180 s, 2026-10-24); the three targets are within 22 blocks of the start.
+  input: { block_name: obsidian, count: 3, scaffold: false, max_distance: 30 }
+  expect: { status: partial, errorContains: "never mines under water" }
 
 goal:
   kind: all
   timeout: 180
   goals:
-    # There are exactly three obsidian blocks and no water bucket for casting alternatives.
-    - { kind: hasItem, who: Collector, item: obsidian, count: 3 }
+    # Three obsidian blocks and no water bucket for casting alternatives; the one under water stays.
+    - { kind: hasItem, who: Collector, item: obsidian, count: 2 }
     - kind: blocksAt
       block: air
-      positions: [[2, -60, 0], [12, -60, 0], [24, -60, 0]]
+      positions: [[2, -60, 0], [24, -60, 0]]
+    - { kind: blocksAt, block: obsidian, positions: [[12, -60, 0]] }
     - { kind: health, who: Collector, health: 20 }
     - { kind: survive, who: Collector, seconds: 1 }
     - { kind: completion, who: Collector }
