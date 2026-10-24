@@ -22,10 +22,22 @@ import { arenaFrame, decodeArena, type ArenaFrame } from "./arena/frame.ts";
 
 const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
-await runNodeClient((session) => runScenario(driverFile, withRuntime, session));
+// Started before init: a host booted ahead of its trial has its driver loaded when the trial's values arrive. A load
+// failure is kept and thrown inside the session, where it becomes the failed completion the trial reads.
+const driverLoading = loadDriver(driverFile).then(
+  (driver) => ({ driver }),
+  (cause: unknown) => ({ cause }),
+);
 
-async function runScenario(file: string, withRuntime: boolean, session: NodeClientSession): Promise<void> {
-  const driver = await loadDriver(file);
+await runNodeClient((session) => runScenario(withRuntime, session));
+
+async function runScenario(withRuntime: boolean, session: NodeClientSession): Promise<void> {
+  // A host booted before its trial gets the lane's environment in init, over the one it was spawned with (the later
+  // value wins); started the old way init carries none and the environment is the process's own.
+  Object.assign(process.env, session.env);
+  const loaded = await driverLoading;
+  if ("cause" in loaded) throw loaded.cause;
+  const { driver } = loaded;
   // Read before the bot exists: a malformed lane offset must fail the client, never run it at offset zero inside a lane.
   const arena = arenaFrame(decodeArena(process.env));
   const bot = createScenarioBot(session);

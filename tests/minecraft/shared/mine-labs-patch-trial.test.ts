@@ -75,13 +75,18 @@ function neverStartedServer(worldDir: string, rcon: RecordingRcon) {
 
 async function runLaneTrial(
   rcon: RecordingRcon,
-  options: { arena?: typeof ARENA; scenario: ReturnType<typeof scenario>; onArranged?: () => void | Promise<void> },
+  options: {
+    arena?: typeof ARENA;
+    scenario: ReturnType<typeof scenario>;
+    onArranged?: () => void | Promise<void>;
+    clientProvider?: mineLabs.ClientProvider;
+  },
 ) {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-trial-"));
   try {
     return await mineLabs.runScenarioTrial({
       server: neverStartedServer(join(root, "world"), rcon), scenario: options.scenario, runDir: root, log: () => {}, reuseServer: true, arena: options.arena,
-      onArranged: options.onArranged,
+      onArranged: options.onArranged, clientProvider: options.clientProvider,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -176,4 +181,32 @@ test("an onArranged that throws ends the trial as an error, the tick blocks stop
   assert.equal(removals.length, 2, "the failed arrangement stops the ticks at once, the restore removes them again");
   assert.ok(rcon.sent.some((command, index) => index > removals[1]! && command.startsWith("clone ")), "the arena is cloned back");
   assert.ok(rcon.sent.includes("forceload remove -496 1296 -495 1296"), "the control chunk pin is released");
+});
+/** A scenario with one client; its player is never online, so a trial that gets past the launch would wait for it. */
+function scenarioWithClient() {
+  return mineLabs.scenarioSchema.parse({ ...scenario(), players: [{ name: "Walker" }] });
+}
+
+test("a trial launches its client from the provider it was given, and a client dead at the handover ends it as an error with its stderr", async () => {
+  const ahead = mineLabs.spawnClientAhead({ command: process.execPath, args: ["-e", "console.error(\"driver import failed\"); process.exit(3)"], env: {} });
+  await ahead.closed;
+  const asked: string[] = [];
+  const rcon = new RecordingRcon();
+  const result = await runLaneTrial(rcon, {
+    arena: ARENA, scenario: scenarioWithClient(), clientProvider: (spec, username) => (asked.push(username), ahead),
+  });
+
+  assert.deepEqual(asked, ["Walker"]);
+  assert.equal(result.outcome, "error");
+  assert.match(result.error ?? "", /client .Walker. exited with code 3 before it was handed over: driver import failed/u);
+  assert.ok(rcon.sent.includes("forceload remove -496 1296 -495 1296"), "the lane is restored after the failed handover");
+});
+
+test("a provider that throws ends the trial as an error naming the client", async () => {
+  const result = await runLaneTrial(new RecordingRcon(), {
+    arena: ARENA, scenario: scenarioWithClient(), clientProvider: () => { throw new Error("pool is gone"); },
+  });
+
+  assert.equal(result.outcome, "error");
+  assert.match(result.error ?? "", /client .Walker.: the client provider failed: pool is gone/u);
 });

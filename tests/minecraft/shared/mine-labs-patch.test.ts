@@ -15,6 +15,8 @@ const SCENARIO_SERVER_EXPORTS = [
   "canResetScenario",
   "worldCompatibilityKey",
   "compileScenario",
+  "launchScenarioClient",
+  "spawnClientAhead",
 ] as const;
 
 test("the patched mine-labs exports what the scenario server runs a trial with", () => {

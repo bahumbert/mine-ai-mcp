@@ -1,14 +1,286 @@
+diff --git a/src/client/node.ts b/src/client/node.ts
+index 43f1573..4444d28 100644
+--- a/src/client/node.ts
++++ b/src/client/node.ts
+@@ -29,6 +29,8 @@ export interface NodeClientSession {
+   username: string;
+   version: string;
+   scenario: ScenarioDefinition;
++  /** What `init` carried in `env` (empty for a client spawned with its environment). */
++  env: Record<string, string>;
+   arranged: Promise<void>;
+   start: Promise<void>;
+   signal: AbortSignal;
+@@ -83,6 +85,7 @@ export async function runNodeClient(client: (session: NodeClientSession) => void
+     username: init.username,
+     version: init.version,
+     scenario: init.scenario,
++    env: init.env ?? {},
+     arranged: arranged.promise,
+     start: started.promise,
+     signal: cancellation.signal,
+diff --git a/src/client/process.ts b/src/client/process.ts
+index b35d721..5f331ba 100644
+--- a/src/client/process.ts
++++ b/src/client/process.ts
+@@ -28,6 +28,40 @@ import {
+ import type { ClientCommandSpec, ScenarioDefinition } from "../scenario/schema.js";
+ import { registerManagedChild, settledWithin } from "../process/children.js";
+ 
++/** Lines of a client's output kept before its handover; the oldest are dropped past this. */
++export const CLIENT_AHEAD_MAX_LINES = 200;
++const CLIENT_AHEAD_MAX_LINE_CHARS = 2_000;
++/** How long a handover waits for the stdio of a client that already exited, to read the last of its stderr. */
++const CLOSED_GRACE_MS = 1_000;
++const FAILED_HANDOVER_STDERR_LINES = 10;
++
++export interface ClientOutputLine {
++  readonly stream: "stdout" | "stderr";
++  readonly line: string;
++}
++
++/**
++ * A client process spawned before its trial, waiting for `init`. It keeps the lines the child writes (a bounded
++ * tail) until a trial takes it over, so a client that dies while it waits can still say why.
++ */
++export interface ClientAhead {
++  readonly child: ChildProcessWithoutNullStreams;
++  /** Resolves once the child's stdio has closed (it exited) or it failed to spawn; never rejects. */
++  readonly closed: Promise<void>;
++  /** Set when the process could not be spawned (a missing command). */
++  spawnError(): Error | undefined;
++  /** The bounded tail of what the child wrote so far, oldest first; empty after the handover. */
++  recentOutput(): readonly ClientOutputLine[];
++  /**
++   * The handover: pass the kept lines to `sink` in the order written, then every later line as it arrives.
++   * Returns how many older lines the bound dropped. Meant to be called once.
++   */
++  takeOver(sink: (entry: ClientOutputLine) => void): number;
++}
++
++/** Hands a trial a client booted earlier, or `undefined` to have the trial spawn one on the spot. */
++export type ClientProvider = (client: ClientCommandSpec, username: string) => ClientAhead | undefined;
++
+ export interface ScenarioClientProcess {
+   readonly ready: Promise<void>;
+   readonly prepared: Promise<void>;
+@@ -44,6 +78,12 @@ export interface LaunchScenarioClientOptions {
+   username: string;
+   version: string;
+   artifactsDirectory: string;
++  /**
++   * Asked for the process before one is spawned. A client it hands over was spawned without the trial's values, so
++   * `init` carries them in `env` (`client.env` and `MINE_LABS_ARTIFACTS_DIR`): the client applies them over what the
++   * process was spawned with.
++   */
++  clientProvider?: ClientProvider;
+   readyTimeoutMs?: number;
+   preparedTimeoutMs?: number;
+   log: (message: string) => void;
+@@ -59,8 +99,11 @@ const SIGNAL_GRACE_MS = 5_000;
+ 
+ /** Launch one scenario client behind the language-neutral JSON-lines protocol. */
+ export function launchScenarioClient(options: LaunchScenarioClientOptions): ScenarioClientProcess {
+-  const child = spawnClient(options.client, options.artifactsDirectory);
+-  registerManagedChild(child);
++  const provided = pickClientAhead(options);
++  const failure = provided && handoverFailure(provided);
++  if (provided && failure) return failedHandover(provided, failure, options);
++  const spawned = provided ?? spawnClientAhead(options.client, { MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory });
++  const { child } = spawned;
+   const ready = Promise.withResolvers<void>();
+   const prepared = Promise.withResolvers<void>();
+   const exited = Promise.withResolvers<void>();
+@@ -75,8 +118,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     ready.reject(new Error(`client '${options.username}' did not become ready within ${(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS) / 1000}s`));
+   }, options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
+ 
+-  const output = createInterface({ input: child.stdout });
+-  output.on("line", (line) => {
++  const onStdoutLine = (line: string): void => {
+     let event;
+     try {
+       event = parseClientEvent(line);
+@@ -114,10 +156,11 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+         options.onCompletion(event.completion);
+         return;
+     }
+-  });
+-
+-  const errors = createInterface({ input: child.stderr });
+-  errors.on("line", (line) => options.log(`client '${options.username}' stderr: ${line}`));
++  };
++  const dropped = spawned.takeOver(({ stream, line }) =>
++    stream === "stdout" ? onStdoutLine(line) : options.log(`client '${options.username}' stderr: ${line}`),
++  );
++  if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
+   child.stdin.on("error", (error) => {
+     if (!stopping) options.log(`client '${options.username}' stdin error: ${error.message}`);
+   });
+@@ -148,8 +191,6 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     options.log(`client '${options.username}' process error: ${error.message}`);
+   });
+   child.once("exit", (code, signal) => {
+-    output.close();
+-    errors.close();
+     const detail = `client '${options.username}' exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+     // A prepared client that exits cannot report an unfinished outcome later.
+     // Preserve its first reported completion and keep normal teardown quiet.
+@@ -168,6 +209,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     username: options.username,
+     version: options.version,
+     scenario: options.scenario,
++    ...(provided && { env: { ...options.client.env, MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory } }),
+   });
+ 
+   return {
+@@ -225,13 +267,101 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+   };
+ }
+ 
+-function spawnClient(client: ClientCommandSpec, artifactsDirectory: string): ChildProcessWithoutNullStreams {
+-  return spawn(client.command, client.args, {
++/**
++ * Spawn a client and keep its output until something takes it over: the trial that launches it now, or a trial
++ * that is handed it later through a `ClientProvider`. `env` goes on top of `client.env` in the process environment.
++ */
++export function spawnClientAhead(client: ClientCommandSpec, env: Record<string, string> = {}): ClientAhead {
++  const child = spawn(client.command, client.args, {
+     cwd: client.cwd,
+-    env: { ...process.env, ...client.env, MINE_LABS_ARTIFACTS_DIR: artifactsDirectory },
++    env: { ...process.env, ...client.env, ...env },
+     stdio: ["pipe", "pipe", "pipe"],
+     windowsHide: true,
+   });
++  registerManagedChild(child);
++  const kept: ClientOutputLine[] = [];
++  let dropped = 0;
++  let sink: ((entry: ClientOutputLine) => void) | undefined;
++  let spawnError: Error | undefined;
++  const closed = Promise.withResolvers<void>();
++
++  // The sink gets every line whole (a protocol line can be long); only the kept tail is shortened.
++  const record = (stream: ClientOutputLine["stream"]) => (line: string) => {
++    if (sink) return sink({ stream, line });
++    kept.push({ stream, line: line.length > CLIENT_AHEAD_MAX_LINE_CHARS ? `${line.slice(0, CLIENT_AHEAD_MAX_LINE_CHARS)}...` : line });
++    if (kept.length > CLIENT_AHEAD_MAX_LINES) {
++      kept.shift();
++      dropped += 1;
++    }
++  };
++  const stdout = createInterface({ input: child.stdout });
++  const stderr = createInterface({ input: child.stderr });
++  stdout.on("line", record("stdout"));
++  stderr.on("line", record("stderr"));
++  // Nobody owns the pipe until the handover: a client that dies while it waits must not crash this process.
++  child.stdin.on("error", () => undefined);
++  child.once("error", (error) => {
++    spawnError = error;
++    closed.resolve();
++  });
++  child.once("close", () => {
++    stdout.close();
++    stderr.close();
++    closed.resolve();
++  });
++
++  return {
++    child,
++    closed: closed.promise,
++    spawnError: () => spawnError,
++    recentOutput: () => [...kept],
++    takeOver(next) {
++      const earlier = dropped;
++      for (const entry of kept.splice(0)) next(entry);
++      dropped = 0;
++      sink = next;
++      return earlier;
++    },
++  };
++}
++
++function pickClientAhead(options: LaunchScenarioClientOptions): ClientAhead | undefined {
++  if (!options.clientProvider) return undefined;
++  try {
++    return options.clientProvider(options.client, options.username);
++  } catch (cause) {
++    throw new Error(`client '${options.username}': the client provider failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
++  }
++}
++
++/** Why a client handed over cannot be used (it exited, or never spawned), or undefined when it is alive. */
++function handoverFailure(ahead: ClientAhead): string | undefined {
++  const { child } = ahead;
++  const spawnError = ahead.spawnError();
++  if (spawnError) return `could not start (${spawnError.message})`;
++  if (child.exitCode === null && child.signalCode === null) return undefined;
++  return `exited${child.exitCode === null ? "" : ` with code ${child.exitCode}`}${child.signalCode ? ` (${child.signalCode})` : ""}`;
++}
++
++/**
++ * The process of a client that was already gone at the handover: `ready` fails at once with how it ended and the
++ * last of its stderr, instead of after the ready timeout.
++ */
++function failedHandover(ahead: ClientAhead, reason: string, options: LaunchScenarioClientOptions): ScenarioClientProcess {
++  const ready = Promise.withResolvers<void>();
++  ready.promise.catch(() => undefined);
++  void (async () => {
++    await settledWithin(ahead.closed, CLOSED_GRACE_MS);
++    const stderr: string[] = [];
++    const dropped = ahead.takeOver(({ stream, line }) => {
++      options.log(`client '${options.username}' ${stream}: ${line}`);
++      if (stream === "stderr") stderr.push(line);
++    });
++    if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
++    const tail = stderr.slice(-FAILED_HANDOVER_STDERR_LINES).join("; ");
++    ready.reject(new Error(`client '${options.username}' ${reason} before it was handed over${tail ? `: ${tail}` : ""}`));
++  })();
++  return { ready: ready.promise, prepared: new Promise<void>(() => undefined), arranged() {}, start() {}, async stop() {} };
+ }
+ 
+ function send(child: ChildProcessWithoutNullStreams, command: ClientCommand): void {
+diff --git a/src/client/protocol.ts b/src/client/protocol.ts
+index 20fe378..2d6ae6a 100644
+--- a/src/client/protocol.ts
++++ b/src/client/protocol.ts
+@@ -33,6 +33,8 @@ export type ClientCommand =
+       username: string;
+       version: string;
+       scenario: ScenarioDefinition;
++      /** Environment the client applies over its own: sent to a client that was spawned before its trial. */
++      env?: Record<string, string>;
+     }
+   | { type: "arranged" }
+   | { type: "start" }
+@@ -59,6 +61,7 @@ const clientCommandSchema = z.discriminatedUnion("type", [
+     username: z.string(),
+     version: z.string(),
+     scenario: scenarioDefinitionSchema,
++    env: z.record(z.string(), z.string()).optional(),
+   }),
+   z.object({ type: z.literal("arranged") }),
+   z.object({ type: z.literal("start") }),
 diff --git a/src/index.ts b/src/index.ts
-index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..838ac91e67825a7e496604795c414475bac712e4 100644
+index 7f0cb7e..ec90fa9
 --- a/src/index.ts
 +++ b/src/index.ts
-@@ -22,6 +22,21 @@ export {
+@@ -22,6 +22,31 @@ export {
    type TrialContext,
  } from "./session/run.js";
  export { SessionController, type TrialCancellation } from "./session/controller.js";
 +export { runScenarioTrial, type ScenarioTrialOptions } from "./trial/run.js";
 +export { MinecraftServer, prepareWorldDir, serverJavaArgs } from "./server/server.js";
 +export { writeRunResult } from "./report/artifacts.js";
++export {
++  CLIENT_AHEAD_MAX_LINES,
++  launchScenarioClient,
++  spawnClientAhead,
++  type ClientAhead,
++  type ClientOutputLine,
++  type ClientProvider,
++  type LaunchScenarioClientOptions,
++  type ScenarioClientProcess,
++} from "./client/process.js";
 +export { canResetScenario, worldCompatibilityKey } from "./session/reuse.js";
 +export {
 +  boxedClearEntities,
@@ -24,14 +296,14 @@ index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..838ac91e67825a7e496604795c414475
  export {
    scenarioSchema,
    scenarioDefinitionSchema,
-@@ -40,3 +55,5 @@ export {
+@@ -40,3 +65,5 @@ export {
    type EntitySpec,
    type Geometry,
  } from "./scenario/schema.js";
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
-index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..9c2e6e5542b06055260f12eb0f6fa1806a034a70 100644
+index 54fe980..9c2e6e5
 --- a/src/scenario/compile.ts
 +++ b/src/scenario/compile.ts
 @@ -17,7 +17,7 @@ import { join } from "node:path";
@@ -255,7 +527,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..9c2e6e5542b06055260f12eb0f6fa180
 +  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 +}
 diff --git a/src/server/rcon.ts b/src/server/rcon.ts
-index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c8e0851bf 100644
+index 0baaaf1..73400f9
 --- a/src/server/rcon.ts
 +++ b/src/server/rcon.ts
 @@ -28,7 +28,7 @@ import RconClientModule from "rcon-srcds";
@@ -277,7 +549,7 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
        if (!succeeded && !options.acceptedNoOp?.test(output)) {
          throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
 diff --git a/src/server/server.ts b/src/server/server.ts
-index 51aeb8961776014337dacca592d98d9d0d3889a7..152d0f228c5f3a83ac853d1052b6c02e7541beb5 100644
+index 51aeb89..152d0f2
 --- a/src/server/server.ts
 +++ b/src/server/server.ts
 @@ -94,6 +94,20 @@ export interface ServerConfig {
@@ -339,9 +611,9 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..152d0f228c5f3a83ac853d1052b6c02e
        cwd: root,
        stdio: ["ignore", "pipe", "pipe"],
        windowsHide: true,
-diff --git a/node_modules/mine-labs/src/trial/arena.ts b/src/trial/arena.ts
+diff --git a/src/trial/arena.ts b/src/trial/arena.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d9aa2f5a9c3bf791caeae45fb0a34b72a86b5dbb
+index 0000000..d9aa2f5
 --- /dev/null
 +++ b/src/trial/arena.ts
 @@ -0,0 +1,60 @@
@@ -406,10 +678,10 @@ index 0000000000000000000000000000000000000000..d9aa2f5a9c3bf791caeae45fb0a34b72
 +  return lane ? boxedClearEntities(lane.arena.entityBox) : CLEAR_ENTITIES;
 +}
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501fa79e29e1 100644
+index 2465cf9..b583cff
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
-@@ -31,11 +31,11 @@ import {
+@@ -31,16 +31,16 @@ import {
    unpinCommands,
    UNLOADED_POSITION,
    writeDatapack,
@@ -422,6 +694,12 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
  import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
  import { preparePlayerForTrial } from "../player/prepare.js";
  import { watchOperatorSpectators } from "../player/operators.js";
+ import { delay } from "../util/fs.js";
+-import { launchScenarioClient, type ScenarioClientProcess } from "../client/process.js";
++import { launchScenarioClient, type ClientProvider, type ScenarioClientProcess } from "../client/process.js";
+ import type { ClientCompletion } from "../client/protocol.js";
+ 
+ export interface RunResult {
 @@ -87,6 +87,13 @@ export interface ScenarioTrialOptions {
    onGoalProgress?: (goal: GoalResult) => void;
    /** The arranged clients are waiting at the start line; a managed spectator may connect now. */
@@ -436,7 +714,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    /** World setup is complete; hold here before players join the frozen standby. */
    onWorldPrepared?: () => void | Promise<void>;
    /** Keep a speculative fixture frozen until its observer has joined. */
-@@ -101,6 +108,13 @@ export interface ScenarioTrialOptions {
+@@ -101,6 +108,15 @@ export interface ScenarioTrialOptions {
    waitForSpectator?: boolean;
    /** Clear server-side player state and non-player entities before a reused-server trial. */
    reuseServer?: boolean;
@@ -447,10 +725,12 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
 +   * Needs `reuseServer`; not combinable with `holdPreparedWorld`.
 +   */
 +  arena?: ArenaTrialOptions;
++  /** Hands a trial's client a process booted earlier (see `LaunchScenarioClientOptions.clientProvider`). */
++  clientProvider?: ClientProvider;
    startedAt?: number;
    signal?: AbortSignal;
  }
-@@ -151,6 +165,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+@@ -151,6 +167,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
  /** Arrange and measure one trial on an already-running Mine Labs server. */
  export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
    const { scenario, server, log } = opts;
@@ -458,7 +738,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    const startedAt = opts.startedAt ?? Date.now();
    const result = emptyResult(scenario, startedAt);
    result.gamePort = server.gamePort;
-@@ -158,8 +173,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -158,8 +175,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    let clientsPrepared = false;
    // Armed before the world is arranged, so a human who is already connected —
    // or who joins while the fixture is being built — is a spectator before the
@@ -471,7 +751,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
      ? watchOperatorSpectators({
          commands: server.rcon,
          operatorNames: server.operatorNames,
-@@ -175,10 +192,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -175,10 +194,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    // exactly when the next trial most needs it put back — so this cannot be the
    // return value of `arrangeScenario`, which a throw would discard.
    let arenaBackup: ArenaSnapshot | null = null;
@@ -486,7 +766,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
      try {
        await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
        await connectScenarioClients({ ...opts, clients });
-@@ -214,7 +233,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -214,7 +235,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
      // The session retains the world for inspection and restores it before reuse.
      if (opts.reuseServer && arenaBackup) {
        const backup = arenaBackup;
@@ -495,7 +775,15 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
        if (opts.deferReset) opts.deferReset(restore);
        else await restore(log);
      }
-@@ -443,9 +462,10 @@ async function snapshotArena(
+@@ -296,6 +317,7 @@ async function connectScenarioClients(
+       username: player.name,
+       version: scenario.minecraft.version,
+       artifactsDirectory,
++      clientProvider: opts.clientProvider,
+       log,
+       onChat: (message) => clients.chat.get(player.name)?.push(message),
+       onCompletion: (completion) => recordClientCompletion(player.name, completion, clients, log),
+@@ -443,9 +465,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -507,7 +795,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +475,7 @@ async function snapshotArena(
+@@ -455,7 +478,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -516,7 +804,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    }
  }
  
-@@ -465,15 +485,22 @@ async function clearScenario(
+@@ -465,15 +488,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -544,7 +832,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +512,8 @@ async function clearScenario(
+@@ -485,7 +515,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -554,7 +842,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -502,34 +530,85 @@ async function arrangeScenario(
+@@ -502,34 +533,85 @@ async function arrangeScenario(
    log: (message: string) => void,
    reuseServer: boolean,
    holdPreparedWorld = false,
@@ -647,7 +935,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +665,8 @@ async function pinRegions(
+@@ -586,8 +668,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */
@@ -659,7 +947,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..8a65f25eaf89990e3571eafacd41501f
  
  async function waitForClientPhase(
 diff --git a/src/util/minecraft.ts b/src/util/minecraft.ts
-index 0dfa0ed1ec590720a1bdae1e912463958a8da8ce..e5450d022003bb75af1dcf883399704b2abc62fd 100644
+index 0dfa0ed..e5450d0
 --- a/src/util/minecraft.ts
 +++ b/src/util/minecraft.ts
 @@ -47,3 +47,6 @@ export function withoutDimension(command: string): string {
