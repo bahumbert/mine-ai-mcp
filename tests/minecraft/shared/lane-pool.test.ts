@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { LAST_BODY } from "../arena/lanes.ts";
 import { LanePool } from "./lane-pool.ts";
 
 test("lanes are handed out lowest free index first, starting at 1 (lane 0 is for refused scenarios)", () => {
@@ -47,7 +48,7 @@ test("half the lanes in use quarantined asks for a restart", () => {
   assert.equal(pool.needsRestart, true);
 });
 
-test("1000 random admissions, settlements, aborts and quarantines never give one lane to two trials", () => {
+test("1000 random admissions, settlements, aborts and quarantines never give one lane to two trials, nor one body of a lane twice", () => {
   let seed = 12345;
   const random = (limit: number): number => {
     seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
@@ -55,12 +56,15 @@ test("1000 random admissions, settlements, aborts and quarantines never give one
   };
   const pool = new LanePool(20);
   const held = new Map<number, ReturnType<LanePool["acquire"]>>();
+  const bodiesSeen = new Set<string>();
   for (let step = 0; step < 1000; step++) {
     const action = random(4);
     if (action <= 1 || held.size === 0) {
       const lane = pool.acquire();
       if (!lane) continue;
       assert.equal(held.has(lane.index), false, `lane ${lane.index} handed out twice at step ${step}`);
+      assert.equal(bodiesSeen.has(`${lane.index}/${lane.body}`), false, `lane ${lane.index} gave body ${lane.body} twice at step ${step}`);
+      bodiesSeen.add(`${lane.index}/${lane.body}`);
       held.set(lane.index, lane);
       continue;
     }
@@ -72,6 +76,45 @@ test("1000 random admissions, settlements, aborts and quarantines never give one
     else pool.release(lane!);
     assert.equal(pool.heldCount, held.size);
   }
+});
+
+test("every acquire of a lane hands a new body: the same lane index, the next body", () => {
+  const pool = new LanePool(4);
+  const first = pool.acquire()!;
+  const neighbour = pool.acquire()!;
+  pool.release(first);
+  const second = pool.acquire()!;
+  pool.release(second);
+  const third = pool.acquire()!;
+  assert.deepEqual([first.index, second.index, third.index], [1, 1, 1]);
+  assert.deepEqual([first.body, second.body, third.body], [0, 1, 2]);
+  assert.equal(neighbour.body, 0);
+});
+
+test("a quarantined lane keeps its body counter, and the other lanes' counters go on", () => {
+  const pool = new LanePool(3);
+  const one = pool.acquire()!;
+  const two = pool.acquire()!;
+  pool.quarantine(one);
+  pool.release(two);
+  const next = pool.acquire()!;
+  assert.deepEqual([next.index, next.body], [2, 1]);
+});
+
+test("a lane whose bodies are all used is not handed out again, and the server asks for a restart", () => {
+  const pool = new LanePool(2);
+  let last = pool.acquire()!;
+  for (let used = 1; used <= LAST_BODY; used++) {
+    pool.release(last);
+    assert.equal(pool.needsRestart, false, `restart asked with ${LAST_BODY + 1 - used} bodies left`);
+    last = pool.acquire()!;
+    assert.equal(last.index, 1);
+  }
+  assert.equal(last.body, LAST_BODY);
+  pool.release(last);
+  assert.equal(pool.needsRestart, true);
+  assert.equal(pool.acquire()!.index, 2);
+  assert.equal(pool.freeCount, 0);
 });
 
 test("the pool counts the lanes still free: not held, not quarantined", () => {

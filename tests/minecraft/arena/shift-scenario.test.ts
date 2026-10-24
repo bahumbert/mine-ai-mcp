@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canResetScenario, scenarioSchema, type Scenario, type ScenarioInput } from "mine-labs";
 import { ARENA_ENV, decodeArena } from "./frame.ts";
-import { laneOf } from "./lanes.ts";
+import { LAST_BODY, laneOf } from "./lanes.ts";
 import { shiftScenario } from "./shift-scenario.ts";
 
 const LANE_3 = laneOf(3);
@@ -77,7 +77,7 @@ test("reset, setup and tick commands are shifted, tick ones as tick commands", (
   );
   assert.deepEqual(lane.reset, [`fill -16 -59 ${Z - 16} 20 -40 ${Z + 16} air`]);
   assert.deepEqual(lane.setup, [`setblock 0 -60 ${Z} stone`]);
-  assert.deepEqual(lane.tick, [`execute if entity @a[name=ActorL3,x=1,y=-62,z=${Z - 1},dx=1,dy=3,dz=2] run say hi`]);
+  assert.deepEqual(lane.tick, [`execute if entity @a[name=ActorL3000,x=1,y=-62,z=${Z - 1},dx=1,dy=3,dz=2] run say hi`]);
 });
 
 test("a player is renamed everywhere: players, goals' who, commands", () => {
@@ -88,18 +88,53 @@ test("a player is renamed everywhere: players, goals' who, commands", () => {
       tick: ["effect give Actor minecraft:hunger 2 120 true"],
     }),
   );
-  assert.deepEqual(lane.players.map((player) => player.name), ["ActorL3", "HelperL3"]);
-  assert.equal(lane.goal.kind === "hasItem" ? lane.goal.who : undefined, "HelperL3");
-  assert.deepEqual(lane.tick, ["effect give ActorL3 minecraft:hunger 2 120 true"]);
+  assert.deepEqual(lane.players.map((player) => player.name), ["ActorL3000", "HelperL3000"]);
+  assert.equal(lane.goal.kind === "hasItem" ? lane.goal.who : undefined, "HelperL3000");
+  assert.deepEqual(lane.tick, ["effect give ActorL3000 minecraft:hunger 2 120 true"]);
 });
 
-test("a name that would pass 16 characters is cut to fit, and two names equal after the cut are refused", () => {
-  const long = shifted(scenarioWith({ players: [{ name: "ABCDEFGHIJKLMNO", pos: [0, -60, 0] }], goal: { kind: "completion", timeout: 10 } }));
-  assert.equal(long.players[0]!.name, "ABCDEFGHIJKLMNL3");
-  const clash = refusal(
-    scenarioWith({ players: [{ name: "ABCDEFGHIJKLMNOA", pos: [0, -60, 0] }, { name: "ABCDEFGHIJKLMNOB", pos: [2, -60, 0] }], goal: { kind: "completion", timeout: 10 } }),
+/** Scenario player name, lane, body -> the name the server sees: `<name>L<lane><body in base 36 on 3 characters>`, the name cut to fit 16. */
+const LANE_NAMES: readonly (readonly [string, number, number, string])[] = [
+  ["Actor", 3, 0, "ActorL3000"],
+  ["Actor", 3, 1, "ActorL3001"],
+  ["Actor", 3, 35, "ActorL300z"],
+  ["Actor", 3, 36, "ActorL3010"],
+  ["Actor", 3, LAST_BODY, "ActorL3zzz"],
+  ["ABCDEFGHIJKLMNO", 3, 0, "ABCDEFGHIJKL3000"],
+  ["ABCDEFGHIJKLMNOP", 1, LAST_BODY, "ABCDEFGHIJKL1zzz"],
+  ["ABCDEFGHIJKLMNOP", 98, 5, "ABCDEFGHIJL98005"],
+];
+
+test("the body of a lane ends the player's name, so a new body logs in as a new player, and a name is never over 16 characters", () => {
+  for (const [name, lane, body, expected] of LANE_NAMES) {
+    const scenario = scenarioWith({ players: [{ name, pos: [0, -60, 0] }], goal: { kind: "completion", timeout: 10 } });
+    assert.equal(shifted(scenario, laneOf(lane, body)).players[0]!.name, expected);
+    assert.ok(expected.length <= 16, expected);
+  }
+});
+
+test("the body follows the rename into goals' who and commands", () => {
+  const lane = shifted(
+    scenarioWith({
+      goal: { kind: "hasItem", item: "stone", who: "Actor", timeout: 10 },
+      tick: ["effect give Actor minecraft:hunger 2 120 true"],
+    }),
+    laneOf(3, 12),
   );
-  assert.match(clash, /ABCDEFGHIJKLMNL3/u);
+  assert.equal(lane.goal.kind === "hasItem" ? lane.goal.who : undefined, "ActorL300c");
+  assert.deepEqual(lane.tick, ["effect give ActorL300c minecraft:hunger 2 120 true"]);
+});
+
+test("two names equal after the cut are refused for every body, naming the lane name", () => {
+  const clashing = scenarioWith({
+    players: [{ name: "ABCDEFGHIJKLMNOA", pos: [0, -60, 0] }, { name: "ABCDEFGHIJKLMNOB", pos: [2, -60, 0] }],
+    goal: { kind: "completion", timeout: 10 },
+  });
+  for (const body of [0, 1, LAST_BODY]) {
+    const result = shiftScenario(clashing, laneOf(3, body));
+    assert.ok(!result.ok, `body ${body} shifted the clash`);
+    assert.match(result.reason, new RegExp(`ABCDEFGHIJKL3${body.toString(36).padStart(3, "0")}`, "u"));
+  }
 });
 
 test("the client is told the lane offset, keeps its other env, and the spectator is dropped", () => {

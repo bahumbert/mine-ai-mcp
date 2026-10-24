@@ -1,7 +1,7 @@
 /** Moves a whole Mine Labs scenario into a lane of a shared server, or says why it must run on a server of its own. */
 import { compileScenario, type GoalCondition, type GoalSpec, type Scenario } from "mine-labs";
 import { ARENA_ENV, encodeArena, type ArenaOffset } from "./frame.ts";
-import type { Lane } from "./lanes.ts";
+import { BODY_DIGITS, type Lane } from "./lanes.ts";
 import { shiftCommand, shiftPositionText, type CommandContext } from "./shift-command.ts";
 import { POSITION_IN_DATA } from "./shift-selector.ts";
 import { Refusal, refuseOutsideCell } from "./shift-walk.ts";
@@ -85,9 +85,15 @@ function refuseWhatIsServerWide(scenario: Scenario): void {
   });
 }
 
-/** Scenario player name -> lane name (`<name>L<lane>`, the name cut so the whole fits 16 characters). */
+/**
+ * Scenario player name -> lane name (`<name>L<lane><body>`, the name cut so the whole fits 16 characters). The body is
+ * part of the name because the server keeps a player's data by name: each trial of a lane logs in as a player the
+ * server has never seen, so nothing a predecessor left on its body (air, hotbar slot, fall distance) reaches it. The
+ * suffix length does not depend on the body, so every body of a lane cuts a name at the same place and a clash is
+ * refused for all of them.
+ */
 function renamesOf(scenario: Scenario, lane: Lane): Map<string, string> {
-  const suffix = `L${lane.index}`;
+  const suffix = `L${lane.index}${lane.body.toString(36).padStart(BODY_DIGITS, "0")}`;
   const renames = new Map<string, string>();
   const owners = new Map<string, string>();
   for (const { name } of scenario.players) {

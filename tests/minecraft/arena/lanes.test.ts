@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LANE_SPACING, controlChunkOf, laneOf } from "./lanes.ts";
+import { LANE_SPACING, LAST_BODY, controlChunkOf, laneOf } from "./lanes.ts";
 
 test("lane k sits LANE_SPACING blocks along z, in a cell that holds its arena and scratch copy", () => {
   const lane = laneOf(3);
@@ -17,6 +17,15 @@ test("neighbouring cells touch without overlapping, so a boxed selector never se
 
 test("lane 0 is not a shared lane: it belongs to scenarios that were refused", () => {
   for (const bad of [0, -1, 1.5, Number.NaN]) assert.throws(() => laneOf(bad), RangeError, String(bad));
+});
+
+test("a lane's body defaults to 0, keeps the lane's place and is a whole number below the base-36 limit", () => {
+  assert.equal(laneOf(3).body, 0);
+  const again = laneOf(3, 7);
+  assert.equal(again.body, 7);
+  assert.deepEqual({ ...again, body: 0 }, laneOf(3));
+  assert.equal(laneOf(3, LAST_BODY).body, LAST_BODY);
+  for (const bad of [-1, 1.5, Number.NaN, LAST_BODY + 1]) assert.throws(() => laneOf(3, bad), RangeError, String(bad));
 });
 
 test("the control chunk lies inside its lane's cell and outside every arena (x beyond -100, the widest arena's edge)", () => {
