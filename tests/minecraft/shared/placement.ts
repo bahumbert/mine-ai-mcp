@@ -2,11 +2,12 @@
 import { canResetScenario, worldCompatibilityKey, type Scenario } from "mine-labs";
 import { laneOf, type Lane } from "../arena/lanes.ts";
 import { settingsOf, type GameruleDefaults, type WorldSettings } from "../arena/settings.ts";
-import { shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
+import { EXCLUSIVE_TAG, shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
 
+/** `reservedFor`: the id of the locked batch whose servers this placement uses (set by the scheduler, never by placement itself). */
 export type Placement =
-  | { readonly kind: "lane"; readonly key: string; readonly settings: WorldSettings; readonly scenario: Scenario }
-  | { readonly kind: "own"; readonly key: string; readonly reason: string; readonly reusable: boolean };
+  | { readonly kind: "lane"; readonly key: string; readonly settings: WorldSettings; readonly scenario: Scenario; readonly reservedFor?: number }
+  | { readonly kind: "own"; readonly key: string; readonly reason: string; readonly reusable: boolean; readonly exclusive?: boolean; readonly reservedFor?: number };
 
 /** The arena and Mine Labs functions placement depends on, injectable so a refusal can be tested without a real shift. */
 export interface ArenaPorts {
@@ -36,7 +37,18 @@ export function changesWorldDuringTrial(scenario: Scenario): boolean {
 
 function own(scenario: Scenario, reason: string, ports: ArenaPorts): Placement {
   const reusable = ports.canResetScenario(scenario) && !changesWorldDuringTrial(scenario);
-  return { kind: "own", key: `own:${ports.worldCompatibilityKey(scenario)}`, reason, reusable };
+  return { kind: "own", key: `own:${ports.worldCompatibilityKey(scenario)}`, reason, reusable, ...(scenario.tags.includes(EXCLUSIVE_TAG) ? { exclusive: true } : {}) };
+}
+
+
+/** A trial that times something: the scenario says so (`exclusive`), or its batch is locked. */
+export function isTimingTrial(placement: Placement, batchLocked: boolean): boolean {
+  return batchLocked || (placement.kind === "own" && placement.exclusive === true);
+}
+
+/** The placement a locked batch's trial gets: a pool key of its own, so no other submission's trial can match its servers. */
+export function reservePlacement(placement: Placement, submissionId: number): Placement {
+  return { ...placement, key: `${placement.key}#batch${submissionId}`, reservedFor: submissionId };
 }
 
 /** Decide where `scenario` runs, once, when it is queued. */

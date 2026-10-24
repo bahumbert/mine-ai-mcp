@@ -13,11 +13,11 @@ export interface SubmitArgs {
   readonly stop: boolean;
   readonly socket: string | undefined;
   readonly port: number | undefined;
-  /** Set on the inner run of `--lock`, which already holds /tmp/mine-labs.lock. */
-  readonly holdsLock: boolean;
+  /** `--hold`: a load batch, which waits for the queue ahead of it to empty and then runs alone (the master's `--load` only). */
+  readonly hold: boolean;
 }
 
-const USAGE = "usage: submit.ts <scenario.yaml|dir>... [--repeat N] [--lanes N] [--lock] [--isolated] [--out DIR] [--socket PATH] [--port BASE] | --stop";
+const USAGE = "usage: submit.ts <scenario.yaml|dir>... [--repeat N] [--lanes N] [--lock] [--hold] [--isolated] [--out DIR] [--socket PATH] [--port BASE] | --stop";
 
 function wholeNumber(option: string, value: string | undefined, minimum: number): number {
   const parsed = Number(value);
@@ -27,14 +27,14 @@ function wholeNumber(option: string, value: string | undefined, minimum: number)
 
 export function parseSubmitArgs(argv: readonly string[], cwd: string): SubmitArgs {
   const paths: string[] = [];
-  const flags = { repeat: 1, lanes: null as number | null, out: resolve(cwd, ".mine-labs"), lock: false, isolated: false, stop: false, holdsLock: false };
+  const flags = { repeat: 1, lanes: null as number | null, out: resolve(cwd, ".mine-labs"), lock: false, isolated: false, stop: false, hold: false };
   let socket: string | undefined;
   let port: number | undefined;
   for (let at = 0; at < argv.length; at++) {
     const word = argv[at]!;
     if (!word.startsWith("--")) { paths.push(resolve(cwd, word)); continue; }
     if (word === "--lock") flags.lock = true;
-    else if (word === "--holds-lock") flags.holdsLock = true;
+    else if (word === "--hold") flags.hold = true;
     else if (word === "--isolated") flags.isolated = true;
     else if (word === "--stop") flags.stop = true;
     else if (word === "--repeat") flags.repeat = wholeNumber(word, argv[++at], 1);

@@ -83,7 +83,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     sampling = true;
     try {
       await sampleOnce(samplerDeps);
-      log(`sample: ${scheduler.runningCount} running, ${scheduler.queuedCount} queued, ${pool.readings().length} servers, p95 ms ${pool.readings().map(reading => reading.msptP95 ?? "-").join("/")}`);
+      const cpu = scheduler.cpuBusy;
+      log(`sample: ${scheduler.runningCount} running, ${scheduler.queuedCount} queued, cpu ${cpu === null ? "-" : `${Math.round(cpu * 100)}%`}, ${pool.readings().length} servers, p95 ms ${pool.readings().map(reading => reading.msptP95 ?? "-").join("/")}`);
     } catch (error) {
       log(`sample failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {

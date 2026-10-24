@@ -230,3 +230,41 @@ test("the first sample only starts the growth clock: a target is never raised be
   assert.equal(first.target, config.targetStart);
   assert.equal(advanceAdmissionState(first, sample({ at: 1_000 + config.growAfterMs }), true, config).target, config.targetStart + 1);
 });
+
+const CALM = config.cpuCalm;
+const timing = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, timing: true };
+
+test("a timing trial starts only on a calm machine, even with none of ours running (no skip of the cpu bound)", () => {
+  const idleOwn = { ownTrials: 0 };
+  assert.equal(refusedBound(ask(sample({ ...idleOwn, cpuBusy: CALM + 0.05 }), initialAdmissionState(config), EMPTY_TALLY, timing)), "cpu");
+  assert.equal(ask(sample({ ...idleOwn, cpuBusy: CALM - 0.05 }), initialAdmissionState(config), EMPTY_TALLY, timing).admit, true);
+});
+
+test("a timing trial waits for a cpu reading: the first sample has no window", () => {
+  const decision = ask(sample({ cpuBusy: null, ownTrials: 0 }), initialAdmissionState(config), EMPTY_TALLY, timing);
+  assert.equal(refusedBound(decision), "cpu");
+  assert.match(decision.admit ? "" : decision.detail, /reading/u);
+});
+
+test("while a timing trial runs, other trials start only under CPU_CALM, and the refusal names the timing trial", () => {
+  const withTiming = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, timingRunning: 1 };
+  const decision = ask(sample({ cpuBusy: CALM + 0.05 }), initialAdmissionState(config), EMPTY_TALLY, withTiming);
+  assert.equal(refusedBound(decision), "cpu");
+  assert.match(decision.admit ? "" : decision.detail, /timing/u);
+  assert.equal(ask(sample({ cpuBusy: CALM - 0.05 }), initialAdmissionState(config), EMPTY_TALLY, withTiming).admit, true);
+});
+
+test("CPU_CALM is under CPU_ADMIT and is read from MINE_AI_SCENARIO_CPU_CALM", () => {
+  assert.ok(config.cpuCalm < config.cpuAdmit);
+  assert.equal(loadScenarioServerConfig({ MINE_AI_SCENARIO_CPU_CALM: "0.4" }).cpuCalm, 0.4);
+});
+
+test("a refusal for lack of room for a new server says so, one for any other bound does not", () => {
+  const request = { candidates: [], newServerHeapMb: config.sharedHeapMb };
+  const noRoom = ask(sample({ servers: [], memAvailableMb: 3_000 }), initialAdmissionState(config), EMPTY_TALLY, request);
+  assert.equal(!noRoom.admit && noRoom.waitsForServerRoom, true);
+  const cpu = ask(sample({ cpuBusy: 0.9 }));
+  assert.equal(!cpu.admit && cpu.waitsForServerRoom, false);
+  const perSample = ask(sample({ servers: [], memAvailableMb: 25_000 }), initialAdmissionState(config), { trials: 1, newServers: 1, reservedMb: 4_500 }, request);
+  assert.equal(!perSample.admit && perSample.waitsForServerRoom, false, "losing the one-server-per-sample race is not a lack of room");
+});

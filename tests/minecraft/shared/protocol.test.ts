@@ -38,3 +38,11 @@ test("the line reader joins chunks split anywhere and yields whole lines", () =>
   assert.deepEqual(reader.push('tus"}\n{"type":"stop"}\n{"ty'), ['{"type":"status"}', '{"type":"stop"}']);
   assert.deepEqual(reader.push('pe":"stop"}\n'), ['{"type":"stop"}']);
 });
+
+test("a submit may carry hold (the load batch) and a submit without it is still read, as no hold", () => {
+  const held: ClientMessage = { type: "submit", paths: ["/a.yaml"], out: "/tmp/out", repeat: 1, lanes: null, lock: false, hold: true, env: {} };
+  assert.deepEqual(decodeClientMessage(encodeMessage(held).trimEnd()), held);
+  const plain = decodeClientMessage('{"type":"submit","paths":["/a.yaml"],"out":"/o","repeat":1,"lanes":null,"lock":true,"env":{}}');
+  assert.equal(plain.type === "submit" && plain.hold, undefined);
+  assert.throws(() => decodeClientMessage('{"type":"submit","paths":["/a.yaml"],"out":"/o","repeat":1,"lanes":null,"lock":false,"hold":"yes","env":{}}'), /hold/u);
+});

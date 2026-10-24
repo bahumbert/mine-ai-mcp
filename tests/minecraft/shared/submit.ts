@@ -1,4 +1,4 @@
-// `bun submit.ts <yaml|dir>... [--repeat N] [--lanes N] [--lock] [--isolated] [--out DIR] | --stop`: run scenarios on the shared server.
+// `bun submit.ts <yaml|dir>... [--repeat N] [--lanes N] [--lock] [--hold] [--isolated] [--out DIR] | --stop`: run scenarios on the shared server.
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,6 @@ import { formatMessage, forwardedEnv, parseSubmitArgs, type SubmitArgs } from ".
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../..");
-const MINE_LABS_LOCK = "/tmp/mine-labs.lock";
 const EXIT_INTERRUPTED = 130;
 
 function print(message: DaemonMessage): void {
@@ -23,19 +22,12 @@ function runIsolated(args: SubmitArgs): Promise<number> {
   return new Promise(done => spawn(command[0]!, command.slice(1), { stdio: "inherit", cwd: REPO_ROOT }).once("exit", code => done(code ?? 1)));
 }
 
-/** `--lock`: run this command again under /tmp/mine-labs.lock, so a timing batch never overlaps another worker's. */
-function runUnderLock(argv: readonly string[]): Promise<number> {
-  const child = spawn("flock", [MINE_LABS_LOCK, process.execPath, fileURLToPath(import.meta.url), ...argv, "--holds-lock"], { stdio: "inherit" });
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal));
-  return new Promise(done => child.once("exit", code => done(code ?? 1)));
-}
-
 async function runOnDaemon(args: SubmitArgs): Promise<number> {
   const socketPath = args.socket ?? loadScenarioServerConfig().socketPath;
   await ensureDaemon({ socketPath, port: args.port, daemonFile: resolve(HERE, "daemon.ts"), repoRoot: REPO_ROOT });
   let exitCode = 1;
   const session = await exchange(socketPath, {
-    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock || args.holdsLock, env: forwardedEnv(process.env),
+    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: forwardedEnv(process.env),
   }, message => {
     print(message);
     if (message.type === "done") exitCode = message.failed > 0 || message.cancelled > 0 ? 1 : 0;
@@ -62,7 +54,6 @@ async function main(argv: readonly string[]): Promise<number> {
   const args = parseSubmitArgs(argv, process.cwd());
   if (args.stop) return stopDaemon(args);
   if (args.isolated) return runIsolated(args);
-  if (args.lock && !args.holdsLock) return runUnderLock(argv);
   return runOnDaemon(args);
 }
 

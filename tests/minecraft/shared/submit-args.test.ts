@@ -6,8 +6,19 @@ test("paths and options are told apart and paths become absolute", () => {
   const args = parseSubmitArgs(["tests/a", "b.yaml", "--repeat", "3", "--lanes", "2", "--out", "out", "--lock"], "/work");
   assert.deepEqual(args, {
     paths: ["/work/tests/a", "/work/b.yaml"], repeat: 3, lanes: 2, out: "/work/out", lock: true, isolated: false, stop: false,
-    socket: undefined, port: undefined, holdsLock: false,
+    socket: undefined, port: undefined, hold: false,
   });
+});
+
+test("--hold is the load batch's flag, and --holds-lock (the old inner run of a flock) no longer exists", () => {
+  assert.equal(parseSubmitArgs(["x.yaml", "--hold"], "/work").hold, true);
+  assert.equal(parseSubmitArgs(["x.yaml"], "/work").hold, false);
+  assert.throws(() => parseSubmitArgs(["x.yaml", "--holds-lock"], "/work"), /--holds-lock/u);
+});
+
+test("--lock only asks the daemon for servers of the batch's own: parsing it takes no file lock and re-runs nothing", () => {
+  const args = parseSubmitArgs(["x.yaml", "--lock", "--lanes", "1"], "/work");
+  assert.deepEqual([args.lock, args.hold, args.lanes], [true, false, 1]);
 });
 
 test("the defaults: one repeat, any number of lanes, output in .mine-labs of the submitter", () => {

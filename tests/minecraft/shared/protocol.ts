@@ -12,7 +12,10 @@ const clientMessage = z.discriminatedUnion("type", [
     repeat: z.number().int().min(1),
     /** `--lanes N`: at most N of this submission's trials at once. */
     lanes: z.number().int().min(1).nullable(),
+    /** A timing batch (`--lock`): its trials run on servers reserved for it, on a calm machine. */
     lock: z.boolean(),
+    /** A load batch (`--load`, the master's): runs once the queue ahead of it is empty, and alone. Absent: false. */
+    hold: z.boolean().optional(),
     /** The submitter's MINE_AI_* variables: the clients run under the daemon, not under the submitter. */
     env: z.record(z.string(), z.string()),
   }),

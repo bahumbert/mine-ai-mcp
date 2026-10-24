@@ -22,8 +22,8 @@ export function lanePlacement(key: string): Placement {
   return { kind: "lane", key, settings: settingsOf(scenario, {}).settings, scenario };
 }
 
-export function ownPlacement(key: string, reusable = true): Placement {
-  return { kind: "own", key, reason: "default world", reusable };
+export function ownPlacement(key: string, reusable = true, exclusive = false): Placement {
+  return { kind: "own", key, reason: exclusive ? "tagged exclusive" : "default world", reusable, exclusive };
 }
 
 export class SchedulerRig {
@@ -71,7 +71,7 @@ export class SchedulerRig {
         const scenario = fixtureScenario(60, entry.name);
         return { name: entry.name, scenario, placement: entry.placement.kind === "lane" ? { ...entry.placement, scenario } : entry.placement };
       }),
-      repeat: 1, maxLanes: null, lock: false, outDir: "/tmp/out", emit: event => this.events.push(event), ...overrides,
+      repeat: 1, maxLanes: null, lock: false, hold: false, outDir: "/tmp/out", emit: event => this.events.push(event), ...overrides,
     });
   }
 
@@ -86,6 +86,35 @@ export class SchedulerRig {
       if (waited > 5_000) throw new Error(`timed out waiting for ${what}`);
       await new Promise(resolve => setTimeout(resolve, 5));
     }
+  }
+
+  /** Finishes every trial, one sample apart, until nothing runs and nothing is queued. */
+  async drain(): Promise<void> {
+    while (this.running.length > 0 || this.scheduler.queuedCount > 0) {
+      for (const trial of [...this.running]) trial.finish();
+      this.clock += 5_000;
+      this.sample();
+      await this.settle();
+    }
+  }
+
+  /** The names of the trials running now, in start order. */
+  runningNames(): string[] {
+    return this.running.map(trial => trial.input.scenario.name ?? "");
+  }
+
+  /** The id of the server a running trial is on. */
+  serverOf(name: string): string {
+    const trial = this.running.find(candidate => candidate.input.scenario.name === name);
+    if (!trial) throw new Error(`${name} is not running`);
+    return trial.input.server.id;
+  }
+
+  /** Ends the running trial of that name. */
+  finishNamed(name: string, outcome: RunResult["outcome"] = "pass"): void {
+    const trial = this.running.find(candidate => candidate.input.scenario.name === name);
+    if (!trial) throw new Error(`${name} is not running`);
+    trial.finish(outcome);
   }
 
   lanesInFlight(): number[] {

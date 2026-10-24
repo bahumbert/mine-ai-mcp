@@ -11,9 +11,9 @@ const BUILD_HEIGHT = 384;
 const LANE_BLOCK_LIMIT = LANE_PINNED_CHUNKS * 16 * 16 * BUILD_HEIGHT;
 
 export function serverSpecFor(placement: Placement, scenario: Scenario, config: ScenarioServerConfig): ServerSpec {
-  if (placement.kind === "own") return { kind: "single", key: placement.key, heapMb: config.singleHeapMb, setup: [], scenario };
+  if (placement.kind === "own") return { kind: "single", key: placement.key, heapMb: config.singleHeapMb, setup: [], scenario, reservedFor: placement.reservedFor };
   return {
-    kind: "shared", key: placement.key, heapMb: config.sharedHeapMb, scenario: placement.scenario,
+    kind: "shared", key: placement.key, heapMb: config.sharedHeapMb, scenario: placement.scenario, reservedFor: placement.reservedFor,
     // The block limit is set once per server so no lane's trial changes it under another lane's clone (plan T1).
     setup: [...settingsCommands(placement.settings), `gamerule commandModificationBlockLimit ${LANE_BLOCK_LIMIT}`, "gamerule commandBlockOutput false"],
   };

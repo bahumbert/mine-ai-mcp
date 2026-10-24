@@ -51,13 +51,17 @@ export interface AdmissionRequest {
   readonly candidates: readonly string[];
   /** Heap of the server a new start would create. */
   readonly newServerHeapMb: number;
+  /** This trial measures time (a locked batch, a scenario tagged exclusive): it starts only on a calm machine. */
+  readonly timing?: boolean;
+  /** Timing trials running now (this sample's admissions included) or waiting for a calm machine: while one is there nothing starts on a busy machine. */
+  readonly timingRunning?: number;
 }
 
 export type AdmissionBound = "memory" | "cpu" | "target" | "server" | "new-server-per-sample";
 
 export type AdmissionDecision =
   | { readonly admit: true; readonly server: string | "new"; readonly reserveMb: number }
-  | { readonly admit: false; readonly bound: AdmissionBound; readonly detail: string };
+  | { readonly admit: false; readonly bound: AdmissionBound; readonly detail: string; readonly waitsForServerRoom: boolean };
 
 export function initialAdmissionState(config: ScenarioServerConfig): AdmissionState {
   return { target: config.targetStart, lastAdmissionAt: null, lastBreachAt: null, lastGrowAt: null, servers: {} };
@@ -83,6 +87,24 @@ function serverRefusal(reading: ServerReading | undefined, id: string, state: Ad
   return null;
 }
 
+function refusal(bound: AdmissionBound, detail: string, waitsForServerRoom = false): AdmissionDecision {
+  return { admit: false, bound, detail, waitsForServerRoom };
+}
+
+/**
+ * Why the machine's cpu holds this trial back, or null. A plain trial with none of ours running is never held (foreign load
+ * must not starve us: memory alone decides); a timing trial, and any trial while one runs, needs a calm machine and a reading.
+ */
+function cpuRefusalFor(sample: AdmissionSample, request: AdmissionRequest, running: number, config: ScenarioServerConfig): string | null {
+  const calmNeeded = request.timing === true || (request.timingRunning ?? 0) > 0;
+  const bound = calmNeeded ? config.cpuCalm : config.cpuAdmit;
+  const reason = request.timing === true ? "a timing trial" : "a trial while a timing trial runs or waits for a calm machine";
+  if (sample.cpuBusy === null) return calmNeeded ? `no cpu reading yet, ${reason} waits for one` : null;
+  if (!calmNeeded && running === 0) return null;
+  if (sample.cpuBusy < bound) return null;
+  return `cpu ${Math.round(sample.cpuBusy * 100)}% busy, the bound is ${Math.round(bound * 100)}%${calmNeeded ? ` for ${reason}` : ""}`;
+}
+
 /** Admit the trial on a candidate server, on a new one, or refuse naming the bound that holds it. */
 export function decideAdmission(input: {
   readonly sample: AdmissionSample;
@@ -95,15 +117,11 @@ export function decideAdmission(input: {
   const running = sample.ownTrials + tally.trials;
   const available = ledgerMb(sample, tally, config);
   if (available < config.clientMemMb) {
-    return { admit: false, bound: "memory", detail: `memory ledger ${available} MB does not cover a client (${config.clientMemMb} MB)` };
+    return refusal("memory", `memory ledger ${available} MB does not cover a client (${config.clientMemMb} MB)`);
   }
-  // With none of our trials running, foreign load must not starve us: memory alone decides.
-  if (running > 0 && sample.cpuBusy !== null && sample.cpuBusy >= config.cpuAdmit) {
-    return { admit: false, bound: "cpu", detail: `cpu ${Math.round(sample.cpuBusy * 100)}% busy, the bound is ${Math.round(config.cpuAdmit * 100)}%` };
-  }
-  if (running >= state.target) {
-    return { admit: false, bound: "target", detail: `${running} trials running, the concurrency target is ${state.target}` };
-  }
+  const cpuRefusal = cpuRefusalFor(sample, request, running, config);
+  if (cpuRefusal) return refusal("cpu", cpuRefusal);
+  if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
   const refusals: string[] = [];
   for (const id of request.candidates) {
     const refusal = serverRefusal(sample.servers.find(server => server.id === id), id, state, config);
@@ -111,12 +129,12 @@ export function decideAdmission(input: {
     refusals.push(refusal);
   }
   if (tally.newServers >= 1) {
-    return { admit: false, bound: "new-server-per-sample", detail: [...refusals, "a new server starts at most once per sample"].join("; ") };
+    return refusal("new-server-per-sample", [...refusals, "a new server starts at most once per sample"].join("; "));
   }
   const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
   if (available < needed) {
     const detail = `memory ledger ${available} MB does not cover a new server (${needed} MB)`;
-    return { admit: false, bound: refusals.length ? "server" : "memory", detail: [...refusals, detail].join("; ") };
+    return refusal(refusals.length ? "server" : "memory", [...refusals, detail].join("; "), true);
   }
   return { admit: true, server: "new", reserveMb: needed };
 }

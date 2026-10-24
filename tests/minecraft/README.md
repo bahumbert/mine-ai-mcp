@@ -225,14 +225,25 @@ lift, a `kill` goal, tag `exclusive`...) gets a server of its own at offset 0, s
   sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what servers and young
   clients still have to grow into) covers the client, the concurrency target (starts at 10, halves on a machine breach,
   grows by one after 60 s of held bounds) is not reached. With none of its own trials running the daemon admits one
-  whatever the foreign load. A trial that waits prints the bound that holds it every 30 s. Constants and their env
+  whatever the foreign load. Submissions take turns (a batch never waits behind another's whole queue), and a trial
+  that has waited 3 samples for room for a new server keeps that room from the trials after it. A trial that waits
+  prints the bound that holds it every 30 s. Constants and their env
   overrides (`MINE_AI_SCENARIO_*`): `tests/minecraft/shared/config.ts`.
+- **A timing batch gets servers of its own, nothing global** (`--lock`, owner 2026-10-24). Scenarios that count ticks or
+  world age (`world-age-per-second`, `attack-cooldown-damage`, the contract checks with a "measured bound") run with
+  `--lock --lanes 1`: the daemon makes servers for that batch alone, gives them no trial of another submission, starts
+  its trials only while the machine's CPU is under `CPU_CALM` (60 %), and stops the servers when the batch ends. Other
+  batches keep running on their own servers beside it, but while a timing trial runs, or waits for a calm machine, they
+  start only under `CPU_CALM` too. A scenario tagged `exclusive` is a timing trial by itself (server of its own, same calm rule). The one hold
+  left is `--hold` (the master's `scenario-repeat.sh --load`, a load-only flake fix): it waits for the queue ahead
+  of it to empty and admits nothing else until it ends.
 - **Lanes are free slots** handed out lowest first and held until the trial and its restore have settled; a trial is
   aborted at `goal.timeout` + 120 s on the wall clock, and a server whose restore or abort does not finish in 60 s is
   marked sick (no admission, stopped once it drains). One arrangement or restore at a time per server.
 - **Commands** (all through `submit.ts`; scripts `scenario-run.sh` and `scenario-repeat.sh` call it):
-  `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (takes
-  `/tmp/mine-labs.lock` and asks the daemon to admit nothing else until the batch ends: timing batches), `--out DIR`
+  `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (servers of
+  the batch's own on a calm machine: timing batches; no file lock), `--hold` (master only: runs alone once the queue
+  ahead is empty), `--out DIR`
   (evidence, default `.mine-labs`), `--isolated` (today's `mine-labs run`, one server per worker), `--stop` (daemon
   stops once its trials end; `bun run scenarios:stop`). The clients run from the YAML's own checkout, so a worker tests
   its own code; the submitter's `MINE_AI_*` variables reach the clients through `client.env`.

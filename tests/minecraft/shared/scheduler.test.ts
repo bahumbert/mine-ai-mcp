@@ -119,28 +119,6 @@ test("repeat queues every scenario that many times", async () => {
   assert.equal((await handle.finished).runs, 3);
 });
 
-test("a locked batch waits for running trials to drain, runs alone, and the others start after it ends", async () => {
-  const rig = new SchedulerRig();
-  const other = rig.submit([{ name: "before", placement: lanePlacement("k") }]);
-  rig.sample();
-  await rig.settle();
-  const locked = rig.submit([{ name: "timed-1", placement: lanePlacement("k") }, { name: "timed-2", placement: lanePlacement("k") }], { lock: true });
-  const later = rig.submit([{ name: "after", placement: lanePlacement("k") }]);
-  rig.sample();
-  await rig.settle();
-  assert.deepEqual(runningNames(rig), ["before"], "the locked batch waits for the drain; nothing new is admitted");
-  rig.running[0]!.finish();
-  await rig.settle();
-  assert.deepEqual(runningNames(rig).sort(), ["timed-1", "timed-2"], "the batch runs alone");
-  assert.match(rig.scheduler.waitReport(later.id) ?? "", /lock/u);
-  for (const trial of [...rig.running]) trial.finish();
-  await locked.finished;
-  await rig.settle();
-  assert.deepEqual(runningNames(rig), ["after"]);
-  rig.running[0]!.finish();
-  await Promise.all([other.finished, later.finished]);
-});
-
 test("cancelling a submission aborts its running trials, drops its queue and finishes once the trials end", async () => {
   const rig = new SchedulerRig({ MINE_AI_SCENARIO_TARGET_START: "1" });
   const handle = rig.submit([{ name: "a", placement: lanePlacement("k") }, { name: "b", placement: lanePlacement("k") }]);
@@ -232,4 +210,11 @@ test("queuedKeys lists the keys still waiting so their servers are kept warm", (
   const rig = new SchedulerRig();
   rig.submit([{ name: "a", placement: lanePlacement("k1") }, { name: "b", placement: ownPlacement("own:x") }]);
   assert.deepEqual([...rig.scheduler.queuedKeys()].sort(), ["k1", "own:x"]);
+});
+
+test("the scheduler reports the cpu share of the last sample for the daemon's log", () => {
+  const rig = new SchedulerRig();
+  assert.equal(rig.scheduler.cpuBusy, null);
+  rig.sample({ cpuBusy: 0.42 });
+  assert.equal(rig.scheduler.cpuBusy, 0.42);
 });

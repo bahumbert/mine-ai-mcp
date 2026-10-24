@@ -192,3 +192,17 @@ test("the health targets are the servers that are up, not those starting", async
   pool.startServer(spec({ key: "k2" }), 0);
   assert.deepEqual(pool.healthTargets().map(target => target.id), [up.id]);
 });
+
+test("releasing a batch's reservation retires its servers at once, a server still starting stops once ready, and other servers stay", async () => {
+  const { factory, pool } = setup();
+  const reserved = pool.startServer(spec({ key: "k1#batch7", reservedFor: 7 }), 0);
+  const other = pool.startServer(spec({ key: "k1#batch8", reservedFor: 8 }), 0);
+  const plain = pool.startServer(spec(), 0);
+  await Promise.all([reserved.ready, other.ready, plain.ready]);
+  const late = pool.startServer(spec({ key: "k1#batch7", reservedFor: 7 }), 0);
+  pool.releaseReservation(7);
+  await pool.reap(1, new Set(["k1", "k1#batch7"]));
+  await late.ready;
+  await pool.reap(2, new Set());
+  assert.deepEqual(factory.created.map(server => server.stopped), [true, false, false, true], "batch 7's two servers stopped, batch 8's and the plain one kept");
+});

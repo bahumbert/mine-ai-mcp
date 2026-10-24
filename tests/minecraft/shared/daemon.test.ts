@@ -149,3 +149,17 @@ test("stopping the daemon stops every server it started, the probe included", as
     assert.ok(factory.created.every(server => server.stopped), "no java server left behind");
   });
 });
+
+test("a --lock submit over the socket runs on a server of its own that the daemon stops after the batch, the probe and plain servers staying", async () => {
+  await withDaemon(async ({ socketPath, factory }) => {
+    await submitAndCollect(socketPath, [ONE_FILE]);
+    const messages: DaemonMessage[] = [];
+    const session = await exchange(socketPath, { type: "submit", paths: [ONE_FILE], out: "/tmp/daemon-test-out", repeat: 1, lanes: 1, lock: true, env: {} }, message => messages.push(message));
+    await session.closed;
+    assert.equal(messages.find(message => message.type === "result")?.type, "result");
+    const shared = factory.created.filter(server => server.kind === "shared");
+    assert.equal(shared.length, 3, "the probe, the plain batch's server and a third for the locked batch");
+    for (let waited = 0; !shared[2]!.stopped && waited < 2_000; waited += 20) await new Promise(done => setTimeout(done, 20));
+    assert.deepEqual(shared.map(server => server.stopped), [false, false, true]);
+  });
+});

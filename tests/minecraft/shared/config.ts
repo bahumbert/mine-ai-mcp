@@ -9,6 +9,8 @@ export interface ScenarioServerConfig {
   readonly msptStopMs: number;
   /** Fraction of the machine's threads busy over the last sample window above which nothing new starts. */
   readonly cpuAdmit: number;
+  /** Fraction busy under which a timing trial (a locked batch, a scenario tagged exclusive) starts and, while one runs, any trial starts. */
+  readonly cpuCalm: number;
   /** Resident memory of one scenario client at full size: 210-221 MB peak measured by T1 (client-footprint.sh), 250 MB covers every run seen. */
   readonly clientMemMb: number;
   /** A client counts as young (memory still growing) for this long after its admission. */
@@ -30,6 +32,8 @@ export interface ScenarioServerConfig {
   readonly stallStopMs: number;
   /** Samples under `msptAdmitMs` a backed-off server needs before it takes trials again. */
   readonly recoverySamples: number;
+  /** Samples a trial may wait for room for a new server before it holds back the later trials that would take that room. */
+  readonly starveSamples: number;
   /** `max-players` of a shared server; lanes use two fewer (a spectator and an operator). */
   readonly maxPlayers: number;
   readonly socketPath: string;
@@ -43,6 +47,7 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   msptAdmitMs: ["MSPT_ADMIT_MS", 25],
   msptStopMs: ["MSPT_STOP_MS", 35],
   cpuAdmit: ["CPU_ADMIT", 0.85, 1],
+  cpuCalm: ["CPU_CALM", 0.6, 1],
   clientMemMb: ["CLIENT_MEM_MB", 250],
   clientRampMs: ["CLIENT_RAMP_MS", 30_000],
   serverMemMarginMb: ["SERVER_MEM_MARGIN_MB", 1_024],
@@ -59,6 +64,7 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   restoreBoundMs: ["RESTORE_BOUND_MS", 60_000],
   stallStopMs: ["STALL_STOP_MS", 30_000],
   recoverySamples: ["RECOVERY_SAMPLES", 3],
+  starveSamples: ["STARVE_SAMPLES", 3],
   maxPlayers: ["MAX_PLAYERS", 100],
 };
 

@@ -17,6 +17,8 @@ export interface ServerSpec {
   /** Run once after the server is up (the key's settings, the block limit); empty for a single-scenario server. */
   readonly setup: readonly string[];
   readonly scenario: Scenario;
+  /** The locked batch this server was made for: no other submission's trial uses it, and it stops when that batch ends. */
+  readonly reservedFor?: number;
 }
 
 export type ServerRequest = ServerSpec & { readonly id: string };
@@ -39,6 +41,7 @@ export interface ManagedServer {
 
 interface PoolEntry extends ManagedServer {
   readonly heapMb: number;
+  readonly reservedFor: number | null;
   readonly lanes: LanePool | null;
   readonly stall: StallWatch;
   server: ScenarioServer | null;
@@ -67,7 +70,7 @@ export class ServerPool {
   startServer(spec: ServerSpec, now: number): ManagedServer {
     const id = `s${this.#nextId++}`;
     const entry: PoolEntry = {
-      id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, mutex: new ArrangementMutex(),
+      id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
       lanes: spec.kind === "shared" ? new LanePool(this.config.maxPlayers - 2) : null,
       stall: new StallWatch(this.config.stallStopMs, now), server: null, status: "starting", running: 0,
       lastTrialAt: now, msptP95: null, residentMb: 0, idleReusable: false, retire: false,
@@ -88,6 +91,11 @@ export class ServerPool {
     }
     this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) ready on port ${server.gamePort}`);
     return server;
+  }
+
+  /** A locked batch ended: its servers stop as soon as nothing runs on them (never reused, never kept for SERVER_IDLE). */
+  releaseReservation(submissionId: number): void {
+    for (const entry of this.#entries.values()) if (entry.reservedFor === submissionId) entry.retire = true;
   }
 
   get(id: string): ManagedServer | undefined {

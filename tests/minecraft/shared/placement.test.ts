@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Scenario } from "mine-labs";
 import { laneOf } from "../arena/lanes.ts";
 import { settingsOf } from "../arena/settings.ts";
-import { changesWorldDuringTrial, gameruleNamesOf, parseGameruleAnswer, placeScenario, type ArenaPorts } from "./placement.ts";
+import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, type ArenaPorts } from "./placement.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 
 const accepting: ArenaPorts = {
@@ -77,4 +77,27 @@ test("the gamerules a scenario sets, and Mine Labs' flat-world doMobSpawning, ar
 test("a scenario whose settings cannot be read names no rule", () => {
   const broken: ArenaPorts = { ...accepting, settingsOf: () => { throw new Error("odd"); } };
   assert.deepEqual(gameruleNamesOf(fixtureScenario(10), broken), []);
+});
+
+const refusing: ArenaPorts = { ...accepting, shiftScenario: () => ({ ok: false, reason: "tagged 'exclusive'" }) };
+
+test("a refused scenario tagged exclusive is a timing placement, and one refused for another reason is not", () => {
+  const tagged = placeScenario({ ...fixtureScenario(10, "t"), tags: ["exclusive"] }, {}, refusing);
+  assert.equal(tagged.kind === "own" && tagged.exclusive, true);
+  assert.equal(isTimingTrial(tagged, false), true);
+  const plainRefused = placeScenario(fixtureScenario(10, "n"), {}, refusing);
+  assert.equal(isTimingTrial(plainRefused, false), false);
+  assert.equal(isTimingTrial(plainRefused, true), true, "every trial of a locked batch times something");
+  assert.equal(isTimingTrial(placeScenario(fixtureScenario(10, "l"), {}, accepting), false), false);
+});
+
+test("a locked batch's placement gets a pool key of its own that no other batch's placement has, and the world key inside it is kept", () => {
+  const lane = placeScenario(fixtureScenario(10, "a"), {}, accepting);
+  const one = reservePlacement(lane, 3);
+  const two = reservePlacement(lane, 4);
+  assert.notEqual(one.key, two.key);
+  assert.notEqual(one.key, lane.key);
+  assert.match(one.key, /^key-of-a/u);
+  assert.equal(one.reservedFor, 3);
+  assert.equal(lane.reservedFor, undefined, "the original placement is not changed");
 });

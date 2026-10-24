@@ -59,7 +59,7 @@ async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessa
       + own.map(entry => `\n  own server: ${entry.name} (${entry.placement.kind === "own" ? entry.placement.reason : ""})`).join(""),
   });
   const handle = deps.scheduler.submit({
-    entries, repeat: message.repeat, maxLanes: message.lanes, lock: message.lock, outDir: message.out,
+    entries, repeat: message.repeat, maxLanes: message.lanes, lock: message.lock, hold: message.hold ?? false, outDir: message.out,
     emit: event => deps.send({ ...event }),
   });
   onHandle(handle);
