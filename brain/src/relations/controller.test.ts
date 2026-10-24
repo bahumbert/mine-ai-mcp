@@ -224,6 +224,23 @@ test("a dropped hand-off leaves the trade due and it is taken again later", asyn
   assert.equal(h.handoffs.length, 2);
 });
 
+test("a give stopped after an earlier failure is retaken only once the partner is near, not 30 s later wherever they are (owner, 2026-10-25)", async () => {
+  const h = harness();
+  const s = snapshot();
+  const far = snapshot({ theo: { x: 100, y: 64, z: 0 } });
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await h.c.handoffEnded(theirTrade(h).id, "failed", "cannot reach Theo");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "the retake with the partner near");
+  h.c.handoffDropped(theirTrade(h).id);
+  h.state.now += 31_000;
+  await h.c.tick(far, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "a stop does not lift the partner-near condition of a failed give");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 3);
+  assert.equal(theirTrade(h).state, "agreed", "the stop is no failure: the trade stays due");
+});
+
 test("a trade ended outside a conversation is judged once and the feeling stored", async () => {
   const h = harness();
   const s = snapshot();
