@@ -8,6 +8,10 @@ const paramsSchema = z.strictObject({
   receiver: z.string().min(1),
   item_name: z.string().min(1),
   count: z.number().int().positive(),
+  /** How many the server announces the receiver took: fewer than `count` when its inventory has no room (a partial pickup is not announced: 0). */
+  taken: z.number().int().nonnegative().optional(),
+  /** What the receiver holds of the item when it is done; `count` unless it already held some. */
+  receiver_holds: z.number().int().positive().optional(),
   /** How long the idle receiver watches its inventory for the items. */
   receiver_wait_ticks: z.number().int().positive().default(200),
 });
@@ -29,8 +33,14 @@ async function give(context: ScenarioContext, params: z.output<typeof paramsSche
   const result = dropItemResultSchema.parse(output.result);
   if (result.status !== "succeeded") return { status: "failed", detail: output.summary };
   const recipient = result.drop.recipient;
-  const handed = recipient?.collected === true && recipient.collectedCount === params.count;
-  return { status: handed ? "succeeded" : "failed", detail: handed ? output.summary : `Not handed over; ${output.summary}` };
+  const taken = params.taken ?? params.count;
+  const whole = taken === params.count;
+  const answered = recipient?.settled === true && recipient.collectedCount === taken && recipient.collected === whole;
+  if (!answered) return { status: "failed", detail: `Expected ${taken} of ${params.count} taken and settled; ${output.summary}` };
+  // What the receiver left lying is the giver's to pick back up, as the trade's hand-off does.
+  const left = whole ? null : await context.call("pick_up_items", { item: params.item_name, radius: 8 });
+  if (left && left.result.status !== "succeeded") return { status: "failed", detail: `Could not pick the rest back up; ${left.summary}` };
+  return { status: "succeeded", detail: output.summary };
 }
 
 async function receive(context: ScenarioContext, params: z.output<typeof paramsSchema>): Promise<ClientCompletion> {
@@ -42,8 +52,8 @@ async function receive(context: ScenarioContext, params: z.output<typeof paramsS
     const held = status.status === "succeeded"
       ? status.situation.inventory.stacks.filter((stack) => stack.name === params.item_name).reduce((sum, stack) => sum + stack.count, 0)
       : 0;
-    if (held >= params.count) return { status: "succeeded", detail: `Holds ${held} ${params.item_name}.` };
+    if (held >= (params.receiver_holds ?? params.count)) return { status: "succeeded", detail: `Holds ${held} ${params.item_name}.` };
     await context.waitForTicks(10);
   }
-  return { status: "failed", detail: `Never held ${params.count} ${params.item_name}; last seen: ${lastSeen}` };
+  return { status: "failed", detail: `Never held ${params.receiver_holds ?? params.count} ${params.item_name}; last seen: ${lastSeen}` };
 }

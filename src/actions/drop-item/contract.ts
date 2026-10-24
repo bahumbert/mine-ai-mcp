@@ -106,8 +106,14 @@ export const dropRecipientSchema = z.strictObject({
   position: z.strictObject({ x: z.number(), y: z.number(), z: z.number() }),
   /** The server announced the recipient picking up every tossed item. False: left at their feet, not taken (yet). */
   collected: z.boolean(),
-  /** Items the recipient took, from the tossed stacks' counts; 0 when none was seen taken or the count was unknown. */
+  /** Items the recipient took, from the `pickupItemCount` of the server's pickup packets; 0 when none was seen taken. */
   collectedCount: z.number().int(),
+  /**
+   * The server answered whether the items were taken: all of them were, or the world age moved far enough past the toss
+   * (100 ticks) that what was not taken by then was not taken. False: the wall-clock bound ended the wait first (the
+   * server is frozen or far behind), so nobody knows yet and the tossed items must not be given again.
+   */
+  settled: z.boolean(),
 });
 
 export const holeClosureSchema = z.strictObject({

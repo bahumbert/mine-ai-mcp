@@ -28,7 +28,7 @@ async function give(context: ScenarioContext, params: z.output<typeof paramsSche
   const result = dropItemResultSchema.parse(output.result);
   if (result.status !== "succeeded") return { status: "failed", detail: output.summary };
   const recipient = result.drop.recipient;
-  if (recipient?.collected !== false || recipient.collectedCount !== 0) return { status: "failed", detail: `The receiver was expected to take nothing; ${output.summary}` };
+  if (recipient?.collected !== false || recipient.collectedCount !== 0 || recipient.settled !== true) return { status: "failed", detail: `The receiver was expected to take nothing; ${output.summary}` };
   const back = await context.call("pick_up_items", { item: params.item_name, radius: params.pick_up_radius });
   return back.result.status === "succeeded" ? { status: "succeeded", detail: `Not taken, picked back up; ${back.summary}` } : { status: "failed", detail: `Could not pick the items back up; ${back.summary}` };
 }

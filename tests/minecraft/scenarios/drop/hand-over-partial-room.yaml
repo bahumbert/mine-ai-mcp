@@ -1,0 +1,41 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-partial-room
+tags: [regression]
+description: >-
+  Review 6 (2026-10-24): the recipient's inventory has room for 2 of the 4 tossed logs. The server takes the 2 into the
+  recipient's stack and announces nothing (no pickup packet, no new count on the item entity). The hand-over must not
+  report the stack as taken: it ends settled, not collected, with the 2 logs the server announced (none); the giver
+  then picks the 2 left on the ground back up.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 4 }
+  - name: Receiver
+    pos: [0.5, -60, 1.5]
+    inventory:
+      # 35 full stacks of stone and one stack of 62 logs fill all 36 slots; only 2 logs fit.
+      - { item: stone, count: 2240 }
+      - { item: oak_log, count: 62 }
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: Giver, receiver: Receiver, item_name: oak_log, count: 4, taken: 0, receiver_holds: 64 }
+
+goal:
+  kind: all
+  timeout: 45
+  goals:
+    - { kind: hasItem, who: Giver, item: oak_log, count: 2 }
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 64 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

@@ -1,11 +1,23 @@
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
+import type { Vec3 } from "vec3";
 import type { DiscardedItems } from "../../world/discarded-items.js";
+import { carriedCount } from "../../world/inventory-count.js";
 import { droppedItemName } from "../../world/item-pickup.js";
-import type { DropRecipient } from "./contract.js";
+import type { ActionContext } from "../action.js";
+import { dropItemOutcomes, type DroppedItem, type DropRecipient } from "./contract.js";
 
-/** How long a hand-over waits for the recipient's pickup packet before it reports the items as left at their feet. */
-export const HANDOVER_WAIT_MS = 5_000;
+/**
+ * World ticks after the toss at which what was not taken counts as not taken: the pickup delay (40) plus 60 to walk up
+ * and take it. Counted on the server's world age, which a lagging server moves slowly.
+ */
+export const HANDOVER_SETTLE_TICKS = 100;
+
+/**
+ * The wall-clock bound for a server whose world age does not move far enough (frozen, or far behind). The answer is
+ * then unsettled: nobody knows yet.
+ */
+export const HANDOVER_WALL_MS = 30_000;
 
 export interface HandoverWatch {
   readonly recipientName: string;
@@ -14,74 +26,153 @@ export interface HandoverWatch {
    * asked at pickup time, not fixed beforehand.
    */
   readonly isTossed: (entity: Entity) => boolean;
-  /** Tossed entities known when the wait starts; the wait also ends once all of them are taken. */
+  /** Tossed entities known when the wait starts. */
   readonly tossedIds: ReadonlySet<number>;
   /** Items the toss put on the ground in all: the wait ends early once this many were taken. */
   readonly expectedItems: number;
-  readonly waitMs: number;
+  readonly wallMs: number;
   readonly signal?: AbortSignal;
 }
 
 export interface HandoverOutcome {
-  /** Items the recipient picked up, from the stack counts the server announced; 0 when none was seen taken. */
+  /** Items the recipient picked up, from the `pickupItemCount` of the server's `collect` packets; 0 when none was seen. */
   readonly recipientCount: number;
-  /** True when every tossed entity was taken by the recipient. */
+  /** True when the recipient took every tossed item. */
   readonly recipientTookAll: boolean;
+  /** True when the server answered: all taken, or the world age moved `HANDOVER_SETTLE_TICKS`. False: the wall bound ended it. */
+  readonly settled: boolean;
 }
 
-function stackCount(entity: Entity): number {
+function stackCount(entity: Entity | undefined): number {
   try {
-    return entity.getDroppedItem()?.count ?? 0;
+    return entity?.getDroppedItem()?.count ?? 0;
   } catch {
     return 0;
   }
 }
 
+/** The pickup count a `collect` packet carries; the stack's count when an older server does not say. */
+function pickedUpCount(packet: CollectPacket, entity: Entity | undefined): number {
+  const announced = packet.pickupItemCount;
+  return Number.isInteger(announced) && (announced as number) > 0 ? (announced as number) : stackCount(entity);
+}
+
+interface CollectPacket {
+  readonly collectorEntityId: number;
+  readonly collectedEntityId: number;
+  readonly pickupItemCount?: number;
+}
+
 /**
- * Wait for the server to say who picked the tossed items up.
+ * Wait for the server to say who picked the tossed items up, and how many.
  *
  * A toss lands at the recipient's feet and the giver can take it straight back when the pickup delay ends (live
- * 2026-10-19, B2: a toss at 1.47 blocks reported success, the giver re-picked it 2 s later). The answer is the
- * `playerCollect` packet, so the wait ends on it; the wall-clock bound only covers a recipient who never takes the
- * items (full inventory, walked off, a mode that does not pick up).
+ * 2026-10-19, B2: a toss at 1.47 blocks reported success, the giver re-picked it 2 s later). The answer is the raw
+ * `collect` packet: our mineflayer fork emits `playerCollect` before it lowers the stack by `pickupItemCount`, so that
+ * event cannot tell a partial pickup. Nothing taken once the world age has moved `HANDOVER_SETTLE_TICKS` is an answer
+ * too (settled); a server that lags answers late, so the wall-clock bound only ends the wait as unsettled.
  */
 export function awaitHandover(bot: Bot, watch: HandoverWatch): Promise<HandoverOutcome> {
   return new Promise((resolve, reject) => {
-    const byRecipient = new Map<number, number>();
-    const byAnyone = new Set<number>();
-    let takenItems = 0;
+    const client = bot._client;
+    const ageAtToss = bot.time?.age;
+    let takenByAnyone = 0;
+    let takenByRecipient = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const takenByRecipient = () => [...byRecipient.values()].reduce((sum, count) => sum + count, 0);
-    const outcome = (): HandoverOutcome => ({
-      recipientCount: takenByRecipient(),
-      recipientTookAll:
-        byRecipient.size > 0 && (takenByRecipient() >= watch.expectedItems || [...watch.tossedIds].every((id) => byRecipient.has(id))),
+    const outcome = (settled: boolean): HandoverOutcome => ({
+      recipientCount: takenByRecipient,
+      recipientTookAll: takenByRecipient >= watch.expectedItems,
+      settled,
     });
     const finish = (settle: () => void) => {
       clearTimeout(timer);
-      bot.off("playerCollect", collected);
+      client.off("collect", collected);
+      bot.off("time", ticked);
       watch.signal?.removeEventListener("abort", aborted);
       settle();
     };
     const aborted = () => finish(() => reject(watch.signal?.reason));
-    const collected = (collector: Entity, entity: Entity) => {
-      if (!(watch.tossedIds.has(entity.id) || watch.isTossed(entity)) || byAnyone.has(entity.id)) return;
-      byAnyone.add(entity.id);
-      const count = stackCount(entity);
-      takenItems += count;
-      if ((collector as { username?: string }).username === watch.recipientName) byRecipient.set(entity.id, count);
-      const allKnownTaken = watch.tossedIds.size > 0 && [...watch.tossedIds].every((id) => byAnyone.has(id));
-      if (allKnownTaken || takenItems >= watch.expectedItems) {
-        finish(() => resolve(outcome()));
-      }
+    const collected = (packet: CollectPacket) => {
+      const entity: Entity | undefined = bot.entities[packet.collectedEntityId];
+      if (!(watch.tossedIds.has(packet.collectedEntityId) || (entity && watch.isTossed(entity)))) return;
+      const count = Math.min(pickedUpCount(packet, entity), watch.expectedItems - takenByAnyone);
+      takenByAnyone += count;
+      if (bot.entities[packet.collectorEntityId]?.username === watch.recipientName) takenByRecipient += count;
+      if (takenByAnyone >= watch.expectedItems) finish(() => resolve(outcome(true)));
+    };
+    const ticked = () => {
+      const age = bot.time?.age;
+      if (ageAtToss !== undefined && age !== undefined && age - ageAtToss >= HANDOVER_SETTLE_TICKS) finish(() => resolve(outcome(true)));
     };
 
     if (watch.signal?.aborted) return reject(watch.signal.reason);
-    bot.on("playerCollect", collected);
+    client.on("collect", collected);
+    bot.on("time", ticked);
     watch.signal?.addEventListener("abort", aborted, { once: true });
-    timer = setTimeout(() => finish(() => resolve(outcome())), watch.waitMs);
+    timer = setTimeout(() => finish(() => resolve(outcome(false))), watch.wallMs);
   });
+}
+
+/**
+ * Read the carried counts again after a toss and report only the net drop.
+ *
+ * Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
+ * times over). `dropped` is updated in place.
+ */
+export function recountAfterToss(bot: Bot, dropped: DroppedItem[], hole: Vec3 | null): void {
+  for (const [index, entry] of dropped.entries()) {
+    if (entry.dropped <= 0 || entry.error) continue;
+    const now = carriedCount(bot, entry.item);
+    if (now <= entry.carriedAfter) continue;
+    const net = Math.max(0, entry.carriedBefore - now);
+    dropped[index] = {
+      ...entry,
+      carriedAfter: now,
+      dropped: net,
+      ...(net === 0 && {
+        error: hole ? dropItemOutcomes.notObserved(entry.item, now) : dropItemOutcomes.pickedUp(entry.item),
+      }),
+    };
+  }
+}
+
+export interface HandOverAndRecount {
+  readonly recipient: DropRecipient;
+  readonly dropped: DroppedItem[];
+  readonly tossedIds: ReadonlySet<number>;
+  readonly entityBaseline: ReadonlySet<number>;
+  readonly droppedAt: { x: number; y: number; z: number };
+  readonly discarded: DiscardedItems;
+  readonly dependencies: { readonly handoverWallMs?: number };
+  readonly context: ActionContext;
+  /** Walks the bot off the toss while the watch runs. */
+  readonly walkAway: () => Promise<void>;
+}
+
+/**
+ * Watch the recipient take the toss from the moment it was made, walk off meanwhile, then recount what came back.
+ *
+ * The recipient takes the items while the giver is still walking off (the pickup delay is 2 s), and the server says so
+ * once. Returns the recipient with what the server announced.
+ */
+export async function handOverAndRecount(bot: Bot, args: HandOverAndRecount): Promise<DropRecipient> {
+  const { recipient, dropped, tossedIds, entityBaseline, droppedAt, discarded, dependencies, context } = args;
+  const handoverWatch = awaitHandover(bot, {
+    recipientName: recipient.name,
+    tossedIds,
+    isTossed: (entity) => cameFromToss(entity, entityBaseline, droppedAt),
+    expectedItems: dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0),
+    wallMs: dependencies.handoverWallMs ?? HANDOVER_WALL_MS,
+    signal: context.signal,
+  });
+  handoverWatch.catch(() => undefined);
+  await args.walkAway();
+  const handover = await handoverWatch;
+  // What the recipient left lying was a hand-over that failed, not a deliberate discard: its owner may pick it up again.
+  if (!handover.recipientTookAll) discarded.forget(tossedIds);
+  recountAfterToss(bot, dropped, null);
+  return { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount, settled: handover.settled };
 }
 
 /** Eye height of a standing player above their feet. */
@@ -128,10 +219,14 @@ export function cameFromToss(entity: Entity, baseline: ReadonlySet<number>, from
   return Math.hypot(entity.position.x - from.x, entity.position.z - from.z) <= DISCARD_ATTRIBUTION_RADIUS;
 }
 
-export function handOverLine(recipient: DropRecipient, at: { x: number; y: number; z: number }): string {
+/** `tossed` is the number of items the toss put on the ground in all. */
+export function handOverLine(recipient: DropRecipient, at: { x: number; y: number; z: number }, tossed: number): string {
   const where = `\`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\``;
-  return recipient.collected
-    ? `Handed to **${recipient.name}** from ${recipient.distance} blocks away, at ${where}: they picked up ${recipient.collectedCount} item${recipient.collectedCount === 1 ? "" : "s"}.`
-    : `Left at **${recipient.name}**'s feet, not picked up yet, at ${where}: they were ${recipient.distance} blocks away when the items were tossed.`;
+  if (recipient.collected) {
+    return `Handed to **${recipient.name}** from ${recipient.distance} blocks away, at ${where}: they picked up ${recipient.collectedCount} item${recipient.collectedCount === 1 ? "" : "s"}.`;
+  }
+  return recipient.settled
+    ? `Left at **${recipient.name}**'s feet: they took ${recipient.collectedCount} of ${tossed}, at ${where}, ${recipient.distance} blocks away when the items were tossed.`
+    : `Tossed to **${recipient.name}**; the server has not said yet whether they took them (${recipient.collectedCount} seen taken), at ${where}.`;
 }
 
