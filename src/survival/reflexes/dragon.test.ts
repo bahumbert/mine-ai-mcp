@@ -111,7 +111,7 @@ test("the dragon evade with no progress is released after 30 s and stands down 1
 });
 
 test("the dragon evade is kept alive by damage taken and by a blocked hit", async () => {
-  const { bot, clock } = createFakeBot({ username: "DragonHurt", position: new Vec3(0, 64, 0) });
+  const { bot, clock, combat } = createFakeBot({ username: "DragonHurt", position: new Vec3(0, 64, 0) });
   const runner = new ActionRunner({ clock, cancelGraceMs: 500 });
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const reflex = attachDragonReflex(bot, driver, {
@@ -124,7 +124,7 @@ test("the dragon evade is kept alive by damage taken and by a blocked hit", asyn
     },
   });
   for (let step = 0; step < 90 * 20; step++) {
-    if (step % (25 * 20) === 0 && step > 0) bot.emit("entityHurt", bot.entity, undefined as never);
+    if (step % (25 * 20) === 0 && step > 0) combat.hurtBot(1, null);
     if (step % (25 * 20) === 12 * 20) bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 });
     await clock.advance(50);
   }

@@ -7,7 +7,7 @@ import { CombatPerception } from "./observations.js";
 
 /** A sword-armed fortress skeleton, inside its own reach, in the open. */
 function closingMeleeFixture() {
-  const { bot } = createFakeBot({
+  const { bot, combat } = createFakeBot({
     position: { x: 0, y: 64, z: 0 },
     groundY: null,
     entities: {
@@ -22,11 +22,11 @@ function closingMeleeFixture() {
   });
   const skeleton = bot.entities[31]!;
   skeleton.setEquipment(0, itemOf(bot.registry, "stone_sword"));
-  return { bot, skeleton };
+  return { bot, combat, skeleton };
 }
 
 test("an armed hostile in reach is observed as imminent before it swings, not after", () => {
-  const { bot, skeleton } = closingMeleeFixture();
+  const { bot, combat, skeleton } = closingMeleeFixture();
   using perception = new CombatPerception(bot);
 
   const before = perception.read().find((entry) => entry.id === skeleton.id);
@@ -58,7 +58,7 @@ test("an armed hostile in reach is observed as imminent before it swings, not af
   );
 
   // Attribution still works, and is no longer the only melee signal.
-  bot.emit("entityHurt", bot.entity, skeleton as never);
+  combat.hurtBot(2, skeleton.id);
   assert.equal(
     perception.read().find((entry) => entry.id === skeleton.id)!.hasHitUs, true,
     "melee threat becomes observable only once the damage is already taken",

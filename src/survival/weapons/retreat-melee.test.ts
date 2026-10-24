@@ -37,7 +37,7 @@ function fixture(options: { neutral?: boolean } = {}) {
       clearControlStates: stolen("clearControlStates"),
     },
   });
-  const { bot, clock, world } = harness;
+  const { bot, clock, combat, world } = harness;
   metadata[bot.registry.entitiesByName.magma_cube!.metadataKeys!.indexOf("size")] = 2;
   const target = bot.entities[7]!;
   const attacks: number[] = [];
@@ -53,6 +53,8 @@ function fixture(options: { neutral?: boolean } = {}) {
   };
   return {
     bot,
+    combat,
+    entities: harness.entities,
     target,
     context,
     resolvedIds,
@@ -73,7 +75,7 @@ test("retreat strikes respect sword cooldown, observed death, and observer dispo
   assert.deepEqual(f.attacks, [1, 14]);
   // The hostile observer owns the shared record of dead threats.
   f.resolvedIds.add(f.target.id);
-  f.bot.emit("entityDead", f.target);
+  f.combat.kill(f.target.id);
   await f.advance(20);
   assert.deepEqual(defence.evidence(), { attacks: 2, weaponsUsed: ["diamond_sword"], killedTargetIds: [7] });
   defence[Symbol.dispose]();
@@ -115,7 +117,7 @@ test("retreat preserves nearby neutrals from sword sweep and never selects them 
   neutral.position.x = 10;
   await f.advance();
   assert.deepEqual(f.attacks, [2]);
-  delete f.bot.entities[7];
+  f.entities.remove(7);
   neutral.position.x = 1;
   await f.advance(20);
   assert.deepEqual(f.attacks, [2]);

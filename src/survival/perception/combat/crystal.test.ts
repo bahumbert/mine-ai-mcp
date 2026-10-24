@@ -12,14 +12,14 @@ import type { NavigationRuntime } from "../../../navigation/index.js";
 import { ActionRunner } from "../../../session/action-runner.js";
 import type { FootingRecovery } from "../../responses/footing.js";
 
-/** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
+/** A drop made as a body of its own, for a pickup the test announces by hand (`playerCollect`): a drop spawned on the server near the bot would be picked up by the fake's own answer. */
 function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
   return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
 }
 
 /** The selected crystal #42 above the bot; the scene's blocks and carried items are the test's. */
 function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> = {}) {
-  const { bot, clock, server, world } = createFakeBot({
+  const { bot, clock, combat, entities, server, world } = createFakeBot({
     ...options,
     server: { startAge: 100 },
     entities: { 42: { name: "end_crystal", position: new Vec3(30, 80, 0) } },
@@ -31,12 +31,12 @@ function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> 
   const end = new EndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
   const explode = () => bot._client.emit("explosion", { x: 30, y: 80, z: 0 });
   const run = <T>(action: Promise<T>) => clock.settle(action, 60_000);
-  return { bot, server, world, target, end, explode, script, run };
+  return { bot, combat, entities, server, world, target, end, explode, script, run };
 }
 
-/** A dragon's breath cloud where the bot stands. */
-function breathCloud(bot: Bot): Bot["entity"] {
-  return bodyOf(7, { name: "area_effect_cloud", position: bot.entity.position.clone(), metadata: { 8: 5, 10: { type: "dragon_breath" } } });
+/** The server announces a dragon's breath cloud (entity 7) where the bot stands. */
+function spawnBreathCloud(f: ReturnType<typeof fixture>): void {
+  f.entities.spawn({ id: 7, name: "area_effect_cloud", position: f.bot.entity.position.clone(), metadata: { 8: 5, 10: { type: "dragon_breath" } } });
 }
 
 for (const change of ["identity", "dimension"] as const) {
@@ -44,10 +44,12 @@ for (const change of ["identity", "dimension"] as const) {
     const f = fixture();
     using observation = new CrystalObservation(f.bot, 42);
     observation.released(8);
-    const replacement = bodyOf(42, { name: "end_crystal", position: f.target.position });
-    if (change === "identity") f.bot.entities[42] = replacement;
-    else f.bot.game.dimension = "the_nether";
-    f.bot.emit("entityDead", change === "identity" ? replacement : f.target);
+    if (change === "identity") {
+      // The server drops the crystal and announces another under the same number.
+      f.entities.remove(42);
+      f.entities.spawn({ id: 42, name: "end_crystal", position: f.target.position.clone() });
+    } else f.bot.game.dimension = "the_nether";
+    f.combat.kill(42);
     f.explode();
     assert.equal(observation.destroyed, false);
     const result = await f.run(f.end.crystal(42, new AbortController().signal, observation));
@@ -64,8 +66,7 @@ test("crystal removal does not end observation before a delayed explosion receip
   f.server.stop();
   f.script.onTick = (tick) => {
     if (tick === 1) {
-      f.target.isValid = false;
-      delete f.bot.entities[42];
+      f.entities.remove(42);
     }
     // Far beyond the old ten client-tick window, but the server has not advanced.
     if (tick === 35) f.explode();
@@ -81,11 +82,9 @@ for (const removed of [false, true])
     const f = fixture();
     using observation = new CrystalObservation(f.bot, 42);
     observation.released(8);
-    f.script.onTick = () => {
-      if (removed) {
-        f.target.isValid = false;
-        delete f.bot.entities[42];
-      }
+    // The server removes the crystal once; the ticks after it find it gone.
+    f.script.onTick = (tick) => {
+      if (removed && tick === 1) f.entities.remove(42);
     };
     const result = await f.run(f.end.crystal(42, new AbortController().signal, observation));
     // The server's 40 ticks of age arrive as two time packets a second apart: 40 client ticks (contract checks
@@ -99,8 +98,7 @@ for (const reappears of [false, true]) test(`lost shot revisits the native site 
   using observation = new CrystalObservation(f.bot, 42, "bow");
   observation.released(8);
   observation.shot!.settled = true;
-  f.target.isValid = false;
-  delete f.bot.entities[42];
+  f.entities.remove(42);
   let visited = false;
   const navigation = { navigate: async () => {
     visited = true;
@@ -108,7 +106,7 @@ for (const reappears of [false, true]) test(`lost shot revisits the native site 
     return { status: "completed", elapsedMs: 1 } as const;
   } } as unknown as NavigationRuntime;
   f.script.onTick = () => {
-    if (visited && reappears && f.bot.entities[42] === undefined) f.bot.entities[42] = bodyOf(42, { name: "end_crystal", position: f.target.position });
+    if (visited && reappears && f.bot.entities[42] === undefined) f.entities.spawn({ id: 42, name: "end_crystal", position: f.target.position.clone() });
   };
   const result = await f.run(new EndCombat(f.bot, navigation, { needed: false } as FootingRecovery).crystal(42, new AbortController().signal, observation));
   assert.equal(visited, true);
@@ -133,8 +131,7 @@ test("a successful dragon takeover resumes the same crystal request and retains 
         signal.addEventListener("abort", () => resolve(), { once: true }),
       );
       const claim = runner.claim("dragon_reflex", "Dragon breath", async () => {
-        f.target.isValid = false;
-        delete f.bot.entities[42];
+        f.entities.remove(42);
         f.explode();
         return { value: null, continuation: { kind: "resume" as const } };
       });
@@ -303,8 +300,7 @@ test("melee blast damage requires the selected crystal's damage packet and exact
     sourceCauseId: 8,
     sourceDirectId: 8,
   });
-  f.bot.health = 17;
-  f.bot.emit("health");
+  f.combat.setHealth(17);
   assert.equal(observation.explosionHealthLost, null, "mixed dragon damage remains unattributed");
   f.bot._client.emit("damage_event", {
     entityId: f.bot.entity.id,
@@ -312,8 +308,7 @@ test("melee blast damage requires the selected crystal's damage packet and exact
     sourceCauseId: 0,
     sourceDirectId: 43,
   });
-  f.bot.health = 15;
-  f.bot.emit("health");
+  f.combat.setHealth(15);
   assert.equal(observation.explosionHealthLost, 2);
 });
 
@@ -342,10 +337,9 @@ async function shootThroughBreath(f: ReturnType<typeof fixture>, onTick: (ticks:
   };
   f.script.onTick = (ticks) => {
     onTick(ticks);
-    if (ticks === 5) f.bot.entities[7] = breathCloud(f.bot);
+    if (ticks === 5) spawnBreathCloud(f);
     if (releaseTick >= 0 && ticks === releaseTick + 1) {
-      f.target.isValid = false;
-      delete f.bot.entities[42];
+      f.entities.remove(42);
     }
     if (releaseTick >= 0 && ticks === releaseTick + 3) f.explode();
   };
@@ -354,7 +348,7 @@ async function shootThroughBreath(f: ReturnType<typeof fixture>, onTick: (ticks:
       seen.escapes++;
       assert.equal(seen.drawing, false, "escape must not release a partial arrow");
       assert.equal(seen.releases, 0);
-      delete f.bot.entities[7];
+      f.entities.remove(7);
       return { status: "completed", elapsedMs: 1 };
     },
   } as unknown as NavigationRuntime;
@@ -380,8 +374,7 @@ test("a crystal destroyed during the resumed draw cancels the draw without firin
   const f = fixture({ carried: { bow: 1, arrow: 3 } });
   const { escapes, releases, result } = await shootThroughBreath(f, (ticks) => {
     if (ticks !== 15) return;
-    f.target.isValid = false;
-    delete f.bot.entities[42];
+    f.entities.remove(42);
     f.explode();
   });
   assert.equal(escapes, 1);

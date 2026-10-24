@@ -8,7 +8,7 @@ import { awaitLavaSettled, LAVA_SETTLE_MAXIMUM_MS, type LavaSettle } from "./lav
 function settleScene(options: { dimension?: string; lavaBeside?: boolean; attacker?: boolean } = {}) {
   // A mocked clock: the two tests that wait on the wall clock install it, the others never touch the timers.
   const clock = createFakeClock({ mode: "mocked" });
-  const { bot, server } = createFakeBot({
+  const { bot, combat, server } = createFakeBot({
     clock,
     dimension: options.dimension,
     server: { startAge: 1000 },
@@ -24,6 +24,7 @@ function settleScene(options: { dimension?: string; lavaBeside?: boolean; attack
   Object.assign(bot.entity, { metadata });
   const scene = {
     bot,
+    combat,
     clock,
     server,
     metadata,
@@ -171,8 +172,7 @@ test("a mob hit while burning is endangered", async () => {
   scene.bot.health = 19;
   await scene.advance(20);
   assert.equal(scene.result, undefined, "the burn tick alone does not end it");
-  scene.bot.health = 15;
-  scene.bot.emit("entityHurt", scene.bot.entity, scene.bot.entities[9]!);
+  scene.combat.hurtBot(4, 9);
   await scene.advance(20);
   assert.equal(scene.result, "endangered", "a hit with a source entity is not the burn");
 });

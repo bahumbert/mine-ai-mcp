@@ -64,7 +64,7 @@ test("takeoff and cooldown observed during suspension cannot start a second perc
 
 for (const change of ["identity", "dimension"] as const) {
   test(`a ${change} change cannot credit another dragon's death or perch`, async () => {
-    const { bot } = createFakeBot({ dimension: "the_end" });
+    const { bot, combat } = createFakeBot({ dimension: "the_end" });
     const keys = bot.registry.entitiesByName.ender_dragon!.metadataKeys!;
     dragonAt(bot, new Vec3(0, 65, 0), 5, 200);
     using observation = new PerchObservation(bot, 42);
@@ -73,7 +73,7 @@ for (const change of ["identity", "dimension"] as const) {
     else bot.game.dimension = "the_nether";
     const metadata: unknown[] = bot.entities[42]!.metadata;
     metadata[keys.indexOf("phase")] = 4;
-    bot.emit("entityDead", bot.entities[42]!);
+    combat.kill(42);
     bot.emit("physicsTick");
     assert.equal(observation.died, false);
     assert.equal(observation.ended, false);

@@ -61,11 +61,11 @@ function refuseEquip(message: string): Pick<NonNullable<FakeBotOptions["override
 /** The clock a hide may take before the test calls it stuck. */
 const HIDE_LIMIT_MS = 150_000;
 
-function hide(bot: FakeBot): ReturnType<typeof hideInPlace> {
+function hide(bot: FakeBot, resolvedIds: Set<number> = new Set()): ReturnType<typeof hideInPlace> {
   return hideInPlace(bot, {
     threatContext: {
       ...combatTestContext(bot),
-      resolvedIds: new Set(),
+      resolvedIds,
       attackerIds: new Set(),
       unreachableIds: new Set(),
     },
@@ -243,24 +243,37 @@ function closeMob(name: string): FakeEntitySpec {
   return { name, kind: "Hostile mobs", metadata: [], position: new Vec3(0.5, 64, 0.9) };
 }
 
+/**
+ * The wither skeleton `id` has `health` left, so the bot's one hit kills it; the hostile observer, absent in these tests, files
+ * the dead among the resolved threats (without it the hide goes on swinging at the corpse for its 19 ticks). Returns that record.
+ */
+function killableIntruder(bot: FakeBot, id: number, health: number): Set<number> {
+  Reflect.set(bot.entities[id]!.metadata, bot.registry.entitiesByName.wither_skeleton!.metadataKeys!.indexOf("health"), health);
+  const resolvedIds = new Set<number>();
+  bot.on("entityDead", (dead) => void resolvedIds.add(dead.id));
+  return resolvedIds;
+}
+
 test("hide repels an authorized intruder before building and uses the observed landing cell", async () => {
   let attacks = 0;
-  const { bot, clock, server } = scene({
+  const { bot, clock, combat, server } = scene({
     health: 20,
     carried: { cobblestone: 32 },
     entities: { 2: closeMob("wither_skeleton") },
     overrides: refuseEquip("placement boundary"),
+    simulatePhysics: true,
   });
-  // The fake models no knockback (runtime-pitfalls "Fights"): as the strike is written, the test moves the mob away and the bot into the next cell, as the server's velocity would.
+  const resolvedIds = killableIntruder(bot, 2, 1); // the bot's bare hand kills it
+  // The bot's own hit moves her nowhere (`attack-mob-knockback`); the intruder's hit back pushes her away from it, and her own physics carry her on.
   onAttack(server, () => {
     attacks++;
-    bot.entities[2]!.position.x = 10;
-    bot.entity.position.x = 3.5;
+    combat.hurtBot(2, 2);
   });
-  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  const result = await clock.settle(hide(bot, resolvedIds), HIDE_LIMIT_MS);
   assert.equal(attacks, 1);
   assert.equal(result.swings, 1);
-  assert.match(result.error ?? "", /4,64,0/);
+  // Before (the test teleported her to x 3.5): the first placement at 4,64,0. After (the measured push, 0.4 away and 0.36 up, then her own fall): at 1,64,-2, east of the cell she landed in.
+  assert.match(result.error ?? "", /placement was refused at 1,64,-2/);
 });
 
 test("a neutral piglin sharing the construction space is not permission to attack", async () => {
@@ -279,7 +292,7 @@ test("a neutral piglin sharing the construction space is not permission to attac
 test("shelter contact uses a ready shield and a non-sweeping tool beside a neutral Enderman", async () => {
   let ticks = 0;
   let raisedAt: number | undefined;
-  const { bot, clock, server, entities } = scene({
+  const { bot, clock, server } = scene({
     health: 20,
     carried: { iron_sword: 1, iron_pickaxe: 1, shield: 1, cobblestone: 32 },
     entities: {
@@ -289,17 +302,16 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   });
   const intruder = bot.entities[2]!;
   const bystander = bot.entities[3]!;
+  const resolvedIds = killableIntruder(bot, intruder.id, 3); // the pickaxe's one hit is 4 at a full swing (`weapon-damage-tools`)
   // The first use request the server receives is the shield's.
   server.onPacket("use_item", () => {
     raisedAt ??= ticks;
   });
-  // Not on the shared fake: the damage of an iron pickaxe (no check measured it; the fake throws for it). The intruder is gone as the strike is written. Asked of the master: a contract check for the pickaxe.
   onAttack(server, (target) => {
     assert.equal(target, intruder.id);
     assert.equal(bot.heldItem?.name, "iron_pickaxe");
     assert.equal(bot.usingHeldItem, true);
     assert.ok(raisedAt !== undefined && ticks - raisedAt >= 5);
-    entities.remove(intruder.id);
   });
   bot.on("physicsTick", () => {
     ticks++;
@@ -311,8 +323,9 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
     if (item.name === "cobblestone") throw new Error("construction boundary");
     return equip(item, destination);
   };
-  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  const result = await clock.settle(hide(bot, resolvedIds), HIDE_LIMIT_MS);
   assert.equal(result.swings, 1);
+  assert.deepEqual([...resolvedIds], [intruder.id], "the pickaxe's hit killed the intruder");
   assert.equal(bystander.isValid, true);
   assert.equal(bot.usingHeldItem, false, "the construction owner releases its shield on settlement");
 });
@@ -341,25 +354,23 @@ test("a stopped physics stream does not prevent hide cancellation", async () => 
 
 test("an intruder arriving during centering interrupts steering before construction", async () => {
   let arrived = false;
-  const { bot, clock, server, entities } = scene({
+  const { bot, clock, combat, server } = scene({
     health: 20,
     position: new Vec3(0.5, 64, 0.146),
     carried: { cobblestone: 32 },
     // Starts well outside the shell; the first tick brings it in.
     entities: { 2: { ...closeMob("wither_skeleton"), position: new Vec3(20, 64, 20) } },
     overrides: refuseEquip("placement boundary"),
+    simulatePhysics: true,
   });
-  // The strike drives the intruder off and the bot back to the middle of its cell, as the server's velocity would.
-  onAttack(server, () => {
-    entities.remove(2);
-    bot.entity.position.z = 0.5;
-  });
+  const resolvedIds = killableIntruder(bot, 2, 1); // the bot's bare hand kills it; its hit back pushes her away from it (her own hit moves her nowhere)
+  onAttack(server, () => combat.hurtBot(1, 2));
   bot.on("physicsTick", () => {
     if (arrived) return;
     arrived = true;
     bot.entities[2]!.position = new Vec3(0.5, 64, 0.9);
   });
-  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  const result = await clock.settle(hide(bot, resolvedIds), HIDE_LIMIT_MS);
   assert.equal(result.swings, 1);
   assert.match(result.error ?? "", /placement boundary/);
 });
@@ -516,15 +527,15 @@ test("an intruder that cannot be struck does not starve the event loop", async (
 });
 
 test("an intruder that leaves while the bot turns to it does not stop the shelter being built", async () => {
-  const { bot, clock, server } = scene({
+  const { bot, clock, entities, server } = scene({
     health: 20,
     carried: { cobblestone: 32 },
     entities: { 2: closeMob("wither_skeleton") },
     overrides: {
       ...refuseEquip("placement boundary"),
-      // Scripted: the intruder is gone by the time the look ends.
+      // Scripted: the server drops the intruder from her view by the time the look ends.
       lookAt: async () => {
-        delete bot.entities[2];
+        if (bot.entities[2] !== undefined) entities.remove(2);
       },
     },
   });

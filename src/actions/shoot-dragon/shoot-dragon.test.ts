@@ -21,24 +21,26 @@ const SHOT_MS = 30_000;
 /**
  * A bot in the End with a bow and 3 arrows and a flying dragon in range. Its physics ticks come from the harness
  * clock: a test settles the shot on it. Drawing is `activateItem`, release is `deactivateItem` while drawing, and a
- * hotbar switch cancels the draw without releasing (Mineflayer's own `activateItem` is not on the fake).
+ * hotbar switch cancels the draw without releasing: the fixture counts them around the fake's own answers (a bow
+ * released after 3 ticks of draw shoots and spends an arrow, `bow-draw-and-release`).
  */
 function fixture() {
   let drawing = false, releases = 0;
   const dragon = () => ({ name: "ender_dragon", position: new Vec3(30, 84, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
     metadata: { 9: 190, 16: 1 } });
   const harness = createFakeBot({ dimension: "the_end", entities: { [DRAGON_ID]: dragon(), [REUSED_ID]: dragon() },
-    carried: { bow: 1, arrow: 3 }, overrides: {
-      activateItem() { drawing = true; }, deactivateItem() { if (drawing) releases++; drawing = false; },
-    } });
+    carried: { bow: 1, arrow: 3 } });
   const { bot, clock } = harness;
+  const draw = bot.activateItem.bind(bot), release = bot.deactivateItem.bind(bot);
+  bot.activateItem = (offHand) => { drawing = true; draw(offHand); };
+  bot.deactivateItem = () => { if (drawing) releases++; drawing = false; release(); };
   const switchSlot = bot.setQuickBarSlot;
   bot.setQuickBarSlot = (slot) => { drawing = false; switchSlot(slot); };
   const reused = bot.entities[REUSED_ID]!;
   delete bot.entities[REUSED_ID];
   const arrows = carriedCountField(harness, "arrow");
   const end = new TestEndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
-  return { bot, clock, dragon: bot.entities[DRAGON_ID]!, reused, arrows, end, releases: () => releases };
+  return { bot, clock, combat: harness.combat, dragon: bot.entities[DRAGON_ID]!, reused, arrows, end, releases: () => releases };
 }
 
 test("shoot_dragon refuses absent arrows and arrow-immune perches without releasing", async () => {
@@ -114,7 +116,7 @@ test("native death remains terminal when its health metadata packet is still sta
   const f = fixture();
   using observation = new DragonShotObservation(f.bot, 42);
   observation.released(10);
-  f.bot.emit("entityDead", f.dragon);
+  f.combat.kill(DRAGON_ID);
   f.bot.emit("physicsTick");
   assert.equal(observation.died, true);
   assert.equal(observation.healthAfter, 0);

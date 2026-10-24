@@ -163,7 +163,7 @@ test("head approach can walk below breath while a jump into the same cloud is re
 });
 
 test("a fireball dodge clears the growing cloud horizontally rather than dropping into a nearby shaft", async () => {
-  const { bot, clock } = endScene({ position: new Vec3(0.5, 64, 0.5), entities: {
+  const { bot, clock, entities } = endScene({ position: new Vec3(0.5, 64, 0.5), entities: {
     7: { name: "dragon_fireball", position: new Vec3(0.5, 65, 30), velocity: new Vec3(0, 0, -1) } } });
   using _timers = clock.install();
   const navigation = { navigate: async ({ goal }: Parameters<NavigationRuntime["navigate"]>[0]) => {
@@ -174,7 +174,7 @@ test("a fireball dodge clears the growing cloud horizontally rather than droppin
       assert.equal(resolved.isSatisfied({ feet: { x: 0, y: 54, z: 0 } } as never, {} as never), false);
       assert.equal(resolved.isSatisfied({ feet: { x: 10, y: 64, z: 0 } } as never, {} as never), true);
     }
-    bot.entities[7]!.isValid = false;
+    entities.remove(7);
     return { status: "completed", elapsedMs: 1 };
   } } as unknown as NavigationRuntime;
   const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
@@ -386,7 +386,7 @@ test("a landing escape releases a safe bot when the dragon settles instead of fi
 });
 
 test("damage-interrupted breath excavation gives the next escape a route without digging", async () => {
-  const { bot, clock } = endScene({ entities: { 7: breathCloud(new Vec3(0.5, 64, 0.5), 5) } });
+  const { bot, clock, entities } = endScene({ entities: { 7: breathCloud(new Vec3(0.5, 64, 0.5), 5) } });
   using _timers = clock.install();
   const footing = {
     needed: false,
@@ -415,7 +415,7 @@ test("damage-interrupted breath excavation gives the next escape a route without
       }
       assert.equal(options.movements.allowDigging, false, "do not restart the same vulnerable excavation");
       assert.equal(footing.needed, false, "the next route still waits for physical recovery");
-      bot.entities[7]!.isValid = false;
+      entities.remove(7);
       return { status: "completed", elapsedMs: 500 } as const;
     },
   } as unknown as NavigationRuntime;

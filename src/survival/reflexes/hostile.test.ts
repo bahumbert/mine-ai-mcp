@@ -78,6 +78,19 @@ for (const escapes of [true, false]) {
   });
 }
 
+/** What a skeleton's arrow costs the bot (`projectile-hit-bot`: 3 on easy) and the most clock its flight takes in these scenes (48 blocks at 1.6 a tick: 30 server ticks). */
+const ARROW_DAMAGE = 3;
+const ARROW_FLIGHT_MS = 2_000;
+/** A health that leaves the bot between the engage bar (12) and the critical one (8) after one arrow, and after two. */
+const HEALTH_BEFORE_ARROWS = 14.5;
+
+/** The clock runs a slice at a time until the shot has landed on the bot (her health fell), at most `limitMs`: the test then reads the state the hit left. */
+async function landed(fixture: { readonly bot: FakeBot; readonly clock: { advance(ms: number): Promise<void> } }, limitMs: number): Promise<void> {
+  const before = fixture.bot.health;
+  for (let passed = 0; fixture.bot.health >= before && passed < limitMs; passed += 50) await fixture.clock.advance(50);
+  assert.ok(fixture.bot.health < before, `the shot did not land within ${limitMs} ms of clock`);
+}
+
 /** A hostile the bot sees at the start, `x` blocks along the row the bot stands on (its size is the game's). */
 function hostile(name: string, x: number): FakeEntitySpec {
   return { name, kind: "Hostile mobs", position: new Vec3(x, 64, 0) };
@@ -102,7 +115,7 @@ function seeThroughShelter(bot: FakeBot): void {
 test("an automatic target disappearing resumes the original request without claiming a kill", async () => {
   const fixture = reflexFixture(
     async (targetId) => {
-      fixture.bot.entities[targetId]!.isValid = false;
+      fixture.entities.remove(targetId);
       return { ...died(targetId), kind: "target_lost", attacks: 0 };
     },
     undefined,
@@ -161,7 +174,7 @@ function recordedEncounters(data: SqlBotData): string[] {
 }
 
 function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
-  const { bot, clock, world, inventory, entities, server } = createFakeBot({
+  const { bot, clock, combat, world, inventory, entities, server } = createFakeBot({
     username: "ReflexBot",
     position: new Vec3(0, 64, 0),
     // Open air with nothing carried: a hide here can dig nothing and place
@@ -207,6 +220,8 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   return {
     bot,
     clock,
+    /** What other actors do: hurt the bot, shoot her, kill a mob. */
+    combat,
     world,
     inventory,
     /** The packets the client wrote, in order. */
@@ -414,7 +429,7 @@ test("the automatic enderman response holds its stance across a teleport", async
   const enderman = fixture.bot.entities[7]!;
   Reflect.set(enderman.metadata, fixture.bot.registry.entitiesByName.enderman!.metadataKeys!.indexOf("creepy"), true);
   try {
-    fixture.bot.emit("entityHurt", fixture.bot.entity, enderman);
+    fixture.combat.hurtBot(1, 7);
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 1));
     assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
@@ -622,8 +637,7 @@ test("the reflex awaits combat recovery and records its capability limit", async
   );
   fixture.tick();
   assert.ok(await until(() => engaging));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   assert.equal(fixture.runner.status().busy, true, "health alone does not settle the encounter");
   recoveryBlocked();
   assert.ok(await until(() => !fixture.runner.status().busy));
@@ -675,7 +689,7 @@ test("ending the original melee contact cannot drop the owner while another fuse
   fixture.bot.entities[7]!.position.y = 58;
   fixture.tick();
   assert.equal(await until(() => !fixture.runner.status().busy, 5), false);
-  delete fixture.bot.entities[8];
+  fixture.entities.remove(8);
   fixture.tick();
   assert.equal(await until(() => !fixture.runner.status().busy, 5), false, "missing is not discharged");
   fixture.perception.creeperClearance.resolve(8);
@@ -707,8 +721,7 @@ test("damage below the hide threshold does not stop an already admitted escape",
   fixture.bot.health = 9;
   fixture.tick();
   assert.ok(await until(() => escaping));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   fixture.tick();
   assert.equal(fixture.runner.status().busy, true);
   assert.deepEqual(fixture.recorded(), []);
@@ -768,14 +781,13 @@ test("one evade retains its first threat and records a new contact encountered a
 
 test("a hostile that has hurt the bot is in contact from beyond the contact range", async () => {
   const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("skeleton", 12) } });
-  const skeleton = fixture.bot.entities[7]!;
 
   fixture.tick();
   assert.equal(fixture.runner.status().busy, false);
-  fixture.bot.emit("entityHurt", fixture.bot.entity, skeleton);
-  fixture.tick();
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  // The clock's slice that lands the arrow also runs the reflex's tick and the fight the stub ends at once: the body is idle again when the slice returns, so the takeover shows only in the record.
+  await landed(fixture, ARROW_FLIGHT_MS);
 
-  assert.equal(fixture.runner.status().owner, "takeover");
   assert.ok(await until(() => fixture.recorded().length === 1));
   assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
   await fixture.observer[Symbol.asyncDispose]();
@@ -876,8 +888,7 @@ test("an admitted low-health escape still yields to session cancellation", async
   fixture.bot.health = 9;
   fixture.tick();
   assert.ok(await until(() => escaping));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   fixture.runner.cancelActive("Minecraft runtime closed");
   assert.ok(await until(() => !fixture.runner.status().busy));
   assert.deepEqual(fixture.recorded(), ["evade -> cancelled"]);
@@ -915,7 +926,7 @@ test("a cancelled escape preserves its attack and kill evidence when navigation 
     async (targetId) => died(targetId),
     async () => {
       fixture.tick();
-      fixture.bot.emit("entityDead", fixture.bot.entities[7]!);
+      fixture.combat.kill(7);
       fixture.runner.cancelActive("footing recovery");
       throw new Error("navigation released during cancellation");
     },
@@ -1001,12 +1012,11 @@ test("safe separation answers old distant attack contact, while later damage re-
       fixture.bot.entity.position.x = -20;
       return { status: "completed", elapsedMs: 0 };
     },
-    // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping.
-    { entities: { 7: hostile("blaze", 28) }, slots: { 45: { name: "shield" } } },
+    // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping. A skeleton shoots arrows: a blaze's ball would set her on fire, and a burning bot under the engage bar hides instead of retreating.
+    { entities: { 7: hostile("skeleton", 28) }, slots: { 45: { name: "shield" } }, health: HEALTH_BEFORE_ARROWS },
   );
-  fixture.bot.health = 11;
-  const shooter = fixture.bot.entities[7]!;
-  fixture.bot.emit("entityHurt", fixture.bot.entity, shooter);
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
   fixture.tick();
   assert.ok(await until(() => fixture.recorded().length === 1));
   assert.deepEqual(fixture.recorded(), ["evade -> safe_separation"]);
@@ -1015,8 +1025,9 @@ test("safe separation answers old distant attack contact, while later damage re-
     await until(() => !fixture.runner.status().busy);
   }
   assert.equal(routes, 1, "already answered contact must not repeatedly claim the same satisfied escape");
-  fixture.bot.emit("entityHurt", fixture.bot.entity, shooter);
-  fixture.tick();
+  // The bot is 48 blocks from the skeleton now: the second arrow lands 30 ticks after it is shot, past the first one's hurt window (20 ticks).
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
   assert.ok(await until(() => fixture.recorded().length === 2));
   assert.equal(routes, 2);
   await fixture.observer[Symbol.asyncDispose]();
@@ -1024,21 +1035,28 @@ test("safe separation answers old distant attack contact, while later damage re-
 });
 
 test("safe separation cannot erase a new attack observed during the response", async () => {
+  let routes = 0;
   const fixture = reflexFixture(
     async (id) => died(id),
     async () => {
       fixture.bot.entity.position.x = -20;
-      fixture.bot.emit("entityHurt", fixture.bot.entity, fixture.bot.entities[7]);
+      // The first route ends when a second arrow has landed: the new attack is seen during it. A later route (the second arrow's own contact) is not waited on.
+      if (++routes === 1) {
+        fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+        await new Promise<void>((resolve) => fixture.bot.once("entityHurt", () => resolve()));
+      }
       return { status: "completed", elapsedMs: 0 };
     },
     // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping.
-    { entities: { 7: hostile("blaze", 28) }, slots: { 45: { name: "shield" } } },
+    { entities: { 7: hostile("skeleton", 28) }, slots: { 45: { name: "shield" } }, health: HEALTH_BEFORE_ARROWS },
   );
-  fixture.bot.health = 11;
-  fixture.bot.emit("entityHurt", fixture.bot.entity, fixture.bot.entities[7]);
-  fixture.tick();
-  assert.ok(await until(() => fixture.recorded().length === 1));
-  assert.equal(fixture.observer.threats.attackerIds.has(7), true);
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
+  await fixture.clock.advance(ARROW_FLIGHT_MS);
+  // Before: one response recorded and the attacker still filed. With time passing the clock goes on into the answer to the new attack: a second response is recorded (the erased attack would leave one), and it ends the contact.
+  assert.ok(await until(() => fixture.recorded().length === 2));
+  assert.deepEqual(fixture.recorded(), ["evade -> safe_separation", "evade -> safe_separation"]);
+  assert.equal(routes, 2);
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
 });
@@ -1090,8 +1108,8 @@ test("a cube killed during retreat does not fail separation against its last pos
   const fixture = reflexFixture(
     async (targetId) => died(targetId),
     async () => {
-      fixture.bot.emit("entityDead", fixture.bot.entities[7]!);
-      delete fixture.bot.entities[7];
+      fixture.combat.kill(7);
+      fixture.entities.remove(7);
       return { status: "completed", elapsedMs: 1 };
     }, { entities: { 7: hostile("magma_cube", 3) } },
   );
@@ -1309,8 +1327,8 @@ test("after the stand-down of its fight the decision picks evade, and target A i
 });
 
 /** Runs a standoff for 100 s, giving `mark` at second 20, 40, 60, 80; true when the fight is never released. */
-async function keptAlive(mark: (scene: ReturnType<typeof standoffScene>) => void) {
-  const scene = standoffScene(7);
+async function keptAlive(mark: (scene: ReturnType<typeof standoffScene>) => void, ...zombies: number[]) {
+  const scene = standoffScene(...(zombies.length === 0 ? [7] : zombies));
   try {
     for (let second = 1; second <= 100; second++) {
       if (second % 20 === 0) mark(scene);
@@ -1328,7 +1346,7 @@ test("blocked hits keep a shielded fight alive past 30 s", async () => {
 });
 
 test("an answered swing resets the clock", async () => {
-  assert.equal(await keptAlive((scene) => scene.bot.emit("entityHurt", scene.bot.entities[7]!, undefined as never)), true);
+  assert.equal(await keptAlive((scene) => scene.combat.hurt(7, null, 1)), true);
 });
 
 test("a target that moves resets the clock", async () => {
@@ -1338,7 +1356,9 @@ test("a target that moves resets the clock", async () => {
 });
 
 test("a threat that dies resets the clock", async () => {
-  assert.equal(await keptAlive((scene) => scene.bot.emit("entityDead", scene.bot.entities[7]!)), true);
+  // One threat dies at each of the four marks (a dead threat dies once; the fifth mark, at second 100, has none left): the target 7 is the nearest and the last to go.
+  const dying = [8, 9, 10, 7];
+  assert.equal(await keptAlive((scene) => { const id = dying.shift(); if (id !== undefined) scene.combat.kill(id); }, 7, 8, 9, 10), true);
 });
 
 test("a standoff with no mark at all is released inside 100 s", async () => {

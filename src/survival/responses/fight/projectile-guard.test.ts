@@ -69,7 +69,7 @@ test("guard aim is applied before the same tick's movement send and respects mov
 });
 
 for (const abort of [false, true]) test(`terminal volley preserves guard after target death${abort ? " and remains cancellable" : " until the arrow clears"}`, async () => {
-  const { bot, clock } = createFakeBot({ slots: { 45: { name: "shield" } }, position: new Vec3(0, 64, 0),
+  const { bot, clock, entities } = createFakeBot({ slots: { 45: { name: "shield" } }, position: new Vec3(0, 64, 0),
     entities: { 9: { name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1), metadata: [] } } });
   bot.world.raycast = () => null;
   const arrow = bot.entities[9]!;
@@ -87,7 +87,7 @@ for (const abort of [false, true]) test(`terminal volley preserves guard after t
     assert.equal(weapons.itemUse.shieldRaised, true);
     if (++ticks === 3) {
       if (abort) controller.abort(new Error("survival takeover"));
-      else arrow.isValid = false;
+      else entities.remove(arrow.id);
     }
   };
   bot.on("physicsTick", onTick);
