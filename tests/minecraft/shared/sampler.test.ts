@@ -31,7 +31,7 @@ test("a sample reads each server's tick time and resident size into the pool", a
   fake.replies.set("tick query", TICK_QUERY);
   await sampleOnce(depsOf(rig.pool, rig));
   assert.deepEqual(rig.pool.readings().find(reading => reading.id === managed.id), {
-    id: managed.id, key: "k", status: "ready", shared: true, msptP95: 9.5, heapMb: 3_072, residentMb: 1_234,
+    id: managed.id, key: "k", status: "ready", shared: true, busy: false, msptP95: 9.5, heapMb: 3_072, residentMb: 1_234,
   });
 });
 

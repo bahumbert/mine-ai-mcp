@@ -269,3 +269,17 @@ test("a server of its own is not reused after a scenario that could not get a fr
   await second.finished;
   assert.deepEqual(rig.pool.reusableSingles("own:w"), [], "the server that refused is retired, not left idle for the next scenario");
 });
+
+test("a warm idle server is out of the sample's ledger; the trial admitted onto it puts its growth in at once, with its client", async () => {
+  const rig = new SchedulerRig();
+  await warmServer(rig);
+  rig.pool.setHealth("s1", { msptP95: 5, residentMb: 1_000 });
+  rig.clock += rig.config.clientRampMs;
+  rig.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 20_000, threads: 24 }, rig.clock);
+  assert.equal(rig.scheduler.sampleReport()!.ledgerMb, 20_000, "idle: nothing to grow into");
+  rig.submit(lanes(1));
+  rig.clock += 5_000;
+  rig.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 20_000, threads: 24 }, rig.clock);
+  await rig.settle();
+  assert.equal(rig.scheduler.sampleReport()!.ledgerMb, 20_000 - (3_072 + 512 - 1_000) - 250, "the server is busy with the trial: its growth and the young client");
+});

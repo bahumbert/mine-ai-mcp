@@ -85,6 +85,11 @@ interface PoolEntry extends ManagedServer {
   nextBody: number;
 }
 
+/** Can still grow into its heap: starting, a trial running on it, or its mutex queue holding an arrangement or a restore. */
+function isBusy(entry: PoolEntry): boolean {
+  return entry.status === "starting" || entry.running > 0 || entry.mutexQueued > 0;
+}
+
 export class ServerPool {
   readonly #entries = new Map<string, PoolEntry>();
   #nextId = 1;
@@ -158,7 +163,7 @@ export class ServerPool {
 
   readings(): ServerReading[] {
     return [...this.#entries.values()].map(entry => ({
-      id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared",
+      id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry),
       msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb,
     }));
   }

@@ -226,8 +226,9 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
 
 - **Admission is detected, never a fixed count.** Every 5 s the daemon reads each server's tick time P95 (`tick query`),
   the CPU busy share (`/proc/stat`) and `MemAvailable`, and starts a trial (and a new server for it, at most one per
-  sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what servers and young
-  clients still have to grow into) covers the client, the concurrency target (starts at 28, see below) is not reached.
+  sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what busy servers and young
+  clients still have to grow into; idle warm servers are not counted, a trial admitted onto one needs its growth
+  free too) covers the client, the concurrency target (starts at 28, see below) is not reached.
   With none of its own trials running the daemon admits one whatever the foreign load. Submissions take turns (a batch
   never waits behind another's whole queue), and a trial that has waited 3 samples for room for a new server keeps
   that room from the trials after it. A trial that waits prints the bound that holds it every 30 s. Constants and their

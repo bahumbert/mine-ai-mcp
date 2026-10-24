@@ -153,7 +153,7 @@ test("health readings reach the admission sample", async () => {
   const managed = pool.startServer(spec(), 0);
   await managed.ready;
   pool.setHealth(managed.id, { msptP95: 7.5, residentMb: 1_200 });
-  assert.deepEqual(pool.readings()[0], { id: managed.id, key: "k1", status: "ready", shared: true, msptP95: 7.5, heapMb: 3_072, residentMb: 1_200 });
+  assert.deepEqual(pool.readings()[0], { id: managed.id, key: "k1", status: "ready", shared: true, busy: false, msptP95: 7.5, heapMb: 3_072, residentMb: 1_200 });
 });
 
 test("stopAll stops servers that are ready and those still starting", async () => {
@@ -389,4 +389,32 @@ test("a trial that was cancelled or failed (not restored) adds nothing to the ho
   for (let trial = 0; trial < 5; trial++) pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(0, 0, { restored: false }), 10);
   pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(60_000, 0, { restored: false }), 10);
   assert.equal(queueOf(pool, managed.id).holdMs, 400);
+});
+
+const busyOf = (pool: ServerPool, id: string) => pool.readings().find(reading => reading.id === id)?.busy;
+
+test("a server is busy while it starts and while a trial is on it (admitted or running), idle once the trial ended or left its queue", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec(), 0);
+  assert.equal(busyOf(pool, managed.id), true, "starting");
+  await managed.ready;
+  assert.equal(busyOf(pool, managed.id), false, "warm and unused");
+  const lane = pool.leaseLane(managed.id)!;
+  const marks = pool.joinMutexQueue(managed.id)!;
+  assert.equal(busyOf(pool, managed.id), true, "admitted, waiting for its arrangement");
+  marks.leave();
+  pool.finishTrial(managed.id, lane, end({ restored: false }), 10);
+  assert.equal(busyOf(pool, managed.id), false, "cancelled before its arrangement");
+});
+
+test("an idle reusable single server is idle, and busy again while its next scenario runs", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);
+  await managed.ready;
+  pool.noteSingleTrialStarted(managed.id);
+  assert.equal(busyOf(pool, managed.id), true);
+  pool.finishTrial(managed.id, null, end(), 10, { reusable: true });
+  assert.equal(busyOf(pool, managed.id), false);
+  pool.noteSingleTrialStarted(managed.id);
+  assert.equal(busyOf(pool, managed.id), true);
 });

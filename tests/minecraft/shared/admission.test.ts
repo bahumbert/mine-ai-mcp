@@ -5,6 +5,7 @@ import {
   decideAdmission,
   EMPTY_TALLY,
   initialAdmissionState,
+  ledgerMb,
   noteWallBoundHit,
   type AdmissionDecision,
   type AdmissionSample,
@@ -18,7 +19,7 @@ import { loadScenarioServerConfig } from "./config.ts";
 const config = loadScenarioServerConfig({});
 
 function server(overrides: Partial<ServerReading> = {}): ServerReading {
-  return { id: "s1", key: "k", status: "ready", shared: true, msptP95: 5, heapMb: 3_072, residentMb: 1_500, ...overrides };
+  return { id: "s1", key: "k", status: "ready", shared: true, busy: true, msptP95: 5, heapMb: 3_072, residentMb: 1_500, ...overrides };
 }
 
 function sample(overrides: Partial<AdmissionSample> = {}): AdmissionSample {
@@ -53,6 +54,50 @@ test("the ledger subtracts what servers still have to grow into and the clients 
   const line = 2_084 + 3 * config.clientMemMb;
   assert.equal(ask({ ...base, memAvailableMb: line }).admit, true);
   assert.equal(refusedBound(ask({ ...base, memAvailableMb: line - 1 })), "memory");
+});
+
+// A 2048 MB heap with 512 MB of overhead and 900 MB resident has 1660 MB still to come when it works.
+const WARM = { heapMb: 2_048, residentMb: 900 } as const;
+const GROWTH_MB = 1_660;
+const warm = (overrides: Partial<ServerReading> = {}) => server({ ...WARM, ...overrides });
+
+test("the ledger reserves growth only for busy servers: starting, working or holding the mutex reserve it, an idle warm one, a gone one and a server gone from the sample reserve nothing", () => {
+  const ledgerWith = (...servers: ServerReading[]) => ledgerMb(sample({ memAvailableMb: 10_000, servers }), EMPTY_TALLY, config);
+  assert.equal(WARM.heapMb + config.serverOverheadMb - WARM.residentMb, GROWTH_MB);
+  assert.equal(ledgerWith(warm({ busy: false })), 10_000, "idle");
+  assert.equal(ledgerWith(warm({ busy: true })), 10_000 - GROWTH_MB, "a trial running, or a restore clone holding it");
+  assert.equal(ledgerWith(warm({ status: "starting", msptP95: null, residentMb: 0, busy: true })), 10_000 - WARM.heapMb - config.serverOverheadMb, "starting");
+  assert.equal(ledgerWith(warm({ id: "a", busy: true }), warm({ id: "b", busy: false }), warm({ id: "c", busy: true })), 10_000 - 2 * GROWTH_MB, "only the busy ones are summed");
+  assert.deepEqual([warm({ busy: true }), warm({ busy: false })].map(each => ledgerWith(each)), [8_340, 10_000], "goes idle between two samples");
+  assert.equal(ledgerWith(), 10_000, "a server that died is no longer in the sample");
+});
+
+test("a trial reserves its client and, on an idle server, the growth it wakes (a single server the same way); on a busy server only the client", () => {
+  const reserve = (candidate: ServerReading) => ask(sample({ memAvailableMb: 10_000, ownTrials: 0, servers: [candidate] }));
+  assert.deepEqual(reserve(warm({ busy: false })), { admit: true, server: "s1", reserveMb: config.clientMemMb + GROWTH_MB });
+  assert.deepEqual(reserve(warm({ busy: true })), { admit: true, server: "s1", reserveMb: config.clientMemMb });
+  assert.deepEqual(reserve(warm({ shared: false, busy: false })), { admit: true, server: "s1", reserveMb: config.clientMemMb + GROWTH_MB });
+});
+
+test("an idle warm server is refused for memory when the ledger covers its client but not the growth the trial wakes", () => {
+  const line = config.clientMemMb + GROWTH_MB;
+  const idle = (memAvailableMb: number, tally: AdmissionTally = EMPTY_TALLY) =>
+    ask(sample({ memAvailableMb, ownTrials: 1, servers: [warm({ busy: false })] }), initialAdmissionState(config), tally);
+  assert.equal(idle(line).admit, true);
+  const short = idle(line - 1);
+  assert.equal(refusedBound(short), "memory");
+  assert.match(short.admit ? "" : short.detail, /s1.*1660/u);
+  assert.equal(refusedBound(idle(line - 1, { trials: 1, newServers: 1, reservedMb: 0 })), "memory", "still a memory refusal once the sample's one new server has started");
+});
+
+test("a busy candidate takes the trial when the idle one cannot be afforded", () => {
+  const both = sample({
+    memAvailableMb: 3_000, ownTrials: 1,
+    servers: [warm({ id: "idle", busy: false }), warm({ id: "busy", busy: true })],
+  });
+  // the busy one reserves 1660 in the ledger (1340 left, one client fits); the idle one would need 250 + 1660 more
+  assert.deepEqual(ask(both, initialAdmissionState(config), EMPTY_TALLY, { candidates: ["idle", "busy"], newServerHeapMb: config.sharedHeapMb }),
+    { admit: true, server: "busy", reserveMb: config.clientMemMb });
 });
 
 test("cpu alone breached with trials running: nothing new starts", () => {

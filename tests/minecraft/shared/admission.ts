@@ -7,6 +7,8 @@ export interface ServerReading {
   readonly status: "starting" | "ready" | "sick";
   /** Lane servers carry the tick-time and resident-size bounds; a single-scenario server only its health. */
   readonly shared: boolean;
+  /** Can still grow into its heap: starting, a trial running on it, or its arrangement mutex queue holding an arrangement or a restore. An idle warm server stays where it is. */
+  readonly busy: boolean;
   /** Null: no `tick query` answer yet. */
   readonly msptP95: number | null;
   readonly heapMb: number;
@@ -83,10 +85,19 @@ export function initialAdmissionState(config: ScenarioServerConfig): AdmissionSt
   return { target: config.targetStart, firstSampleAt: null, lastBreachAt: null, lastGrowAt: null, servers: {}, event: null };
 }
 
-/** MemAvailable minus what servers and young clients are still going to take, minus what this sample admitted. */
+/** What a server will take from MemAvailable before it is full: its heap and overhead less what it already holds. */
+function growthMb(server: ServerReading, config: ScenarioServerConfig): number {
+  return Math.max(0, server.heapMb + config.serverOverheadMb - server.residentMb);
+}
+
+/**
+ * MemAvailable minus what busy servers and young clients are still going to take, minus what this sample admitted. An idle warm
+ * server is not counted (it will not grow, and its resident size is already out of MemAvailable). The trial admitted onto it
+ * must find that growth plus its client free (`reserveMb`); the scheduler then leases the lane, which makes the server busy in the
+ * next reading, so the ledger holds the growth from there and the tally keeps only the client.
+ */
 export function ledgerMb(sample: AdmissionSample, tally: AdmissionTally, config: ScenarioServerConfig): number {
-  const serversStillGrowing = sample.servers.reduce(
-    (sum, server) => sum + Math.max(0, server.heapMb + config.serverOverheadMb - server.residentMb), 0);
+  const serversStillGrowing = sample.servers.reduce((sum, server) => sum + (server.busy ? growthMb(server, config) : 0), 0);
   return sample.memAvailableMb - serversStillGrowing - sample.youngClients * config.clientMemMb - tally.reservedMb;
 }
 
@@ -126,10 +137,17 @@ function cpuRefusalFor(sample: AdmissionSample, request: AdmissionRequest, runni
   return `cpu ${Math.round(sample.cpuBusy * 100)}% busy, the bound is ${Math.round(bound * 100)}%${calmNeeded ? ` for ${reason}` : ""}`;
 }
 
+/** The memory one more trial reserves on this server: its client, and the growth the trial wakes when the server is idle. */
+function reserveOn(reading: ServerReading, config: ScenarioServerConfig): number {
+  return config.clientMemMb + (reading.busy ? 0 : growthMb(reading, config));
+}
+
+interface QueueFullServer { readonly id: string; readonly queued: number; readonly reserveMb: number }
+
 /** No new server can start now: the trial takes the shared server with the fewest trials on its mutex queue (the first on a tie). */
-function shortestQueue(servers: readonly { readonly id: string; readonly queued: number }[], config: ScenarioServerConfig): AdmissionDecision {
+function shortestQueue(servers: readonly QueueFullServer[]): AdmissionDecision {
   const shortest = servers.reduce((best, next) => (next.queued < best.queued ? next : best));
-  return { admit: true, server: shortest.id, reserveMb: config.clientMemMb };
+  return { admit: true, server: shortest.id, reserveMb: shortest.reserveMb };
 }
 
 /** Admit the trial on a candidate server, on a new one, or refuse naming the bound that holds it. */
@@ -150,25 +168,36 @@ export function decideAdmission(input: {
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
   const refusals: string[] = [];
+  /** Idle candidates the ledger cannot afford the growth of: a memory refusal, not a server one. */
+  const unaffordable: string[] = [];
   /** Servers refused only for their arrangement queue, a placement preference: they take the trial when no new server can start for memory. */
-  const queueFull: { readonly id: string; readonly queued: number }[] = [];
+  const queueFull: QueueFullServer[] = [];
   for (const id of request.candidates) {
     const reading = sample.servers.find(server => server.id === id);
     const refusal = serverRefusal(reading, id, state, config);
-    if (refusal) { refusals.push(refusal); continue; }
-    const wait = reading?.shared ? queueWaitMs(request.queues?.get(id), config) : 0;
-    if (wait <= config.arrangeQueueMs) return { admit: true, server: id, reserveMb: config.clientMemMb };
-    queueFull.push({ id, queued: request.queues?.get(id)?.queued ?? 0 });
+    if (refusal || !reading) {
+      if (refusal) refusals.push(refusal);
+      continue;
+    }
+    const reserveMb = reserveOn(reading, config);
+    if (available < reserveMb) {
+      unaffordable.push(`${id} is idle: its client and the ${reserveMb - config.clientMemMb} MB it grows by need ${reserveMb} MB, the ledger has ${available} MB`);
+      continue;
+    }
+    const wait = reading.shared ? queueWaitMs(request.queues?.get(id), config) : 0;
+    if (wait <= config.arrangeQueueMs) return { admit: true, server: id, reserveMb };
+    queueFull.push({ id, queued: request.queues?.get(id)?.queued ?? 0, reserveMb });
   }
   if (tally.newServers >= 1) {
-    if (queueFull.length > 0) return shortestQueue(queueFull, config);
-    return refusal("new-server-per-sample", [...refusals, "a new server starts at most once per sample"].join("; "));
+    if (queueFull.length > 0) return shortestQueue(queueFull);
+    if (unaffordable.length > 0 && refusals.length === 0) return refusal("memory", unaffordable.join("; "), true);
+    return refusal("new-server-per-sample", [...refusals, ...unaffordable, "a new server starts at most once per sample"].join("; "));
   }
   const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
-  if (available < needed && queueFull.length > 0) return shortestQueue(queueFull, config);
+  if (available < needed && queueFull.length > 0) return shortestQueue(queueFull);
   if (available < needed) {
     const detail = `memory ledger ${available} MB does not cover a new server (${needed} MB)`;
-    return refusal(refusals.length ? "server" : "memory", [...refusals, detail].join("; "), true);
+    return refusal(refusals.length ? "server" : "memory", [...refusals, ...unaffordable, detail].join("; "), true);
   }
   return { admit: true, server: "new", reserveMb: needed };
 }
