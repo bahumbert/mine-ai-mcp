@@ -13,9 +13,9 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { ANSWER_WALL_MS } from "../server-answer.ts";
-import { type ContractSubject, settleWithin } from "../subject.ts";
-import { CALL_WALL_MS, NIGHT, STILL_MOB_NBT, TICK_MS, ZOMBIE_HEALTH, healthOf, holdInHand, listenToFight, mobAt } from "./combat-scene.ts";
+import type { ContractSubject } from "../subject.ts";
+import { NIGHT, STILL_MOB_NBT, ZOMBIE_HEALTH, healthOf, holdInHand, listenToFight, mobAt } from "./combat-scene.ts";
+import { type Mark, READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
 
 const AXE_DAMAGE = 9;
 /** The axe's swing period in ticks: 20 over its attack speed of 0.9. */
@@ -24,8 +24,6 @@ const SWING_TICKS = 20 / 0.9;
 const HURT_WINDOW_TICKS = 10;
 /** Ticks a swing rests to be full: the period and a margin for the readings. */
 const REST_TICKS = 24;
-/** A reading of `time query gametime` sent right before an act is off the act's own tick by at most 1 (the server runs the two in one batch of packets), so the difference of two readings is off by at most this much each way (reasoned, not measured: the readings of hits 50 ms apart were 1 to 3 apart on lanes, 5 once with the client 76 ms late). */
-const READING_TICKS = 2;
 /** Gaps between the first hit and the second: inside the hurt window, past it with half a swing, almost a full swing, a full swing (on a server on time). */
 const GAPS_MS: readonly number[] = [50, 600, 1_000, 1_600];
 /** What the second hit costs, by the server ticks between the hits. */
@@ -50,31 +48,9 @@ function damageBounds(ticks: number, inHurtWindow: boolean): readonly [number, n
   return [low - DAMAGE_MARGIN, high + DAMAGE_MARGIN];
 }
 
-/** A moment of the run: when the client acted (wall) and the server's tick then, asked right before so the server runs both in one tick or in neighbouring ones; null if the server answered nothing. */
-interface Mark {
-  readonly tick: Promise<number | null>;
-  readonly atMs: number;
-}
-
-function markNow(subject: ContractSubject): Mark {
-  return { tick: subject.serverGameTime().catch(() => null), atMs: subject.now() };
-}
-
-async function tickOf(subject: ContractSubject, mark: Mark): Promise<number> {
-  const tick = (await settleWithin(subject, mark.tick, CALL_WALL_MS))?.value ?? null;
-  assert.ok(tick !== null, "the server answered no game time (is the bot op? or the server stalled)");
-  return tick;
-}
-
-/** Let the swing rest `REST_TICKS` server ticks after the act marked, whatever the wall time they take; fails at the wall bound (a server that barely ticks). */
-async function restSince(subject: ContractSubject, since: Mark): Promise<void> {
-  const sinceTick = await tickOf(subject, since);
-  const startedAt = subject.now();
-  for (let ticksLeft = REST_TICKS; ticksLeft > 0; ) {
-    assert.ok(subject.now() - startedAt < ANSWER_WALL_MS, `the swing rested ${REST_TICKS - ticksLeft} of ${REST_TICKS} server ticks in ${ANSWER_WALL_MS} ms: the server is stalled`);
-    await subject.wait(ticksLeft * TICK_MS);
-    ticksLeft = REST_TICKS - ((await tickOf(subject, markNow(subject))) - sinceTick);
-  }
+/** Let the swing rest `REST_TICKS` server ticks after the act marked. */
+function restSince(subject: ContractSubject, since: Mark): Promise<void> {
+  return restTicksSince(subject, since, REST_TICKS, "the swing");
 }
 
 /** What the two sides saw of the acts: the server's tick at each, when the client did each and heard the mob hurt. */

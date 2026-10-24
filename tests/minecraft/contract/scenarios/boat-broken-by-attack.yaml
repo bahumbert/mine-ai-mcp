@@ -2,8 +2,8 @@ template: ../../templates/flat-single-action.yaml
 name: contract-boat-broken-by-attack
 tags:
   - contract
-description: "A boat hit by hand breaks once it holds more than 40 damage (10 a hit, 1 lost a tick: 8 hits 250 ms apart,
-  17 at 400) and drops its item, which the bot picks up after 10 ticks; a rider is freed and told nothing. Contract
+description: "A boat hit by hand breaks once it holds more than 40 damage (10 a hit when the swing is full, 1 lost a server tick,
+  judged by the ticks the server ran between the hits) and drops its item, which the bot picks up after 10 ticks; a rider is freed and told nothing. Contract
   check tests/minecraft/contract/checks/boat-broken-by-attack.ts, also run on the fake bot (bot-contract.test.ts); setup
   from setupCommands(fixture) (setup-commands.test.ts)."
 client:
@@ -24,11 +24,6 @@ entities:
       - 0.5
       - -60
       - 2.5
-  - type: oak_boat
-    pos:
-      - 0.5
-      - -60
-      - -3.5
   - type: oak_boat
     pos:
       - -2.5
