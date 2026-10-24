@@ -24,6 +24,20 @@ const HOLE_CLEARANCE = 3;
 
 export class DropItemActionError extends Error {}
 
+/**
+ * Where a cell counts as being: its centre. The route's goals measure a node by it, and so does the arrival check: the
+ * body stops a little short of the node's centre, so a result measured from the body disagreed with the goal that sent
+ * it there ("Still 2.93 blocks" after a route that met the 3-block goal).
+ */
+function cellCentre(cell: { x: number; z: number }): { x: number; z: number } {
+  return { x: cell.x + 0.5, z: cell.z + 0.5 };
+}
+
+/** The centre of the cell the body's feet are in. */
+function feetCellCentre(bot: Bot): { x: number; z: number } {
+  return cellCentre(bot.entity.position.floored());
+}
+
 /** Walk to the named player and face them, so a toss lands at their feet rather than ours. */
 export async function approachPlayer(
   bot: Bot,
@@ -112,7 +126,10 @@ export async function walkAwayFromToss(
     ahead,
   ];
   for (const [index, side] of sides.entries()) {
-    const reach = (node: { feet: { x: number; z: number } }) => (node.feet.x + 0.5 - from.x) * side.x + (node.feet.z + 0.5 - from.z) * side.z;
+    const reach = (node: { feet: { x: number; z: number } }) => {
+      const centre = cellCentre(node.feet);
+      return (centre.x - from.x) * side.x + (centre.z - from.z) * side.z;
+    };
     const goal = customGoal(
       `clear-of-toss:${index}:${from.x.toFixed(1)},${from.z.toFixed(1)}`,
       (node) => reach(node) >= GROUND_CLEARANCE,
@@ -123,7 +140,8 @@ export async function walkAwayFromToss(
     } catch {
       context.signal?.throwIfAborted();
     }
-    if (Math.hypot(bot.entity.position.x - from.x, bot.entity.position.z - from.z) >= GROUND_CLEARANCE) return;
+    const centre = feetCellCentre(bot);
+    if (Math.hypot(centre.x - from.x, centre.z - from.z) >= GROUND_CLEARANCE) return;
   }
 }
 
@@ -139,10 +157,8 @@ async function stepAwayFromHole(
     Math.hypot(position.x - column.x, position.z - column.z);
   const goal = customGoal(
     `clear-of-hole:${hole.x},${hole.y},${hole.z}`,
-    (node) => distanceFrom({ x: node.feet.x + 0.5, z: node.feet.z + 0.5 }) >= HOLE_CLEARANCE,
-    (node) =>
-      Math.max(0, HOLE_CLEARANCE - distanceFrom({ x: node.feet.x + 0.5, z: node.feet.z + 0.5 })) *
-      HORIZONTAL_TICKS_PER_BLOCK,
+    (node) => distanceFrom(cellCentre(node.feet)) >= HOLE_CLEARANCE,
+    (node) => Math.max(0, HOLE_CLEARANCE - distanceFrom(cellCentre(node.feet))) * HORIZONTAL_TICKS_PER_BLOCK,
   );
   try {
     const route = await dependencies.navigate({
@@ -150,7 +166,7 @@ async function stepAwayFromHole(
       goal,
       signal: context.signal,
     });
-    const distance = Number(distanceFrom(bot.entity.position).toFixed(2));
+    const distance = Number(distanceFrom(feetCellCentre(bot)).toFixed(2));
     return distance >= HOLE_CLEARANCE
       ? { distance }
       : { distance, error: `[DROP_HOLE_BESIDE] Still ${distance} blocks from the hole: ${describeNavigation(route)}` };
@@ -158,7 +174,7 @@ async function stepAwayFromHole(
     context.signal?.throwIfAborted();
     const reason = cause instanceof Error ? cause.message : String(cause);
     return {
-      distance: Number(distanceFrom(bot.entity.position).toFixed(2)),
+      distance: Number(distanceFrom(feetCellCentre(bot)).toFixed(2)),
       error: `[DROP_HOLE_BESIDE] Could not step back from the hole: ${reason}`,
     };
   }

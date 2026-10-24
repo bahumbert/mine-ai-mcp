@@ -46,11 +46,13 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
   const sleep = options.sleep ?? ((ms: number) => sleepFor(ms, options.signal));
   const startedAt = now();
-  const ageAtStart = bot.time?.age;
+  // A bot that has heard no time packet yet has a null age (`time.js`): the first age it hears is the one to move from.
+  let ageAtStart = bot.time?.age ?? undefined;
   for (;;) {
     options.signal?.throwIfAborted();
     if (options.until?.() === true) return "until";
-    const age = bot.time?.age;
+    const age = bot.time?.age ?? undefined;
+    ageAtStart ??= age;
     if (ageAtStart !== undefined && age !== undefined && age - ageAtStart >= ticks) return "moved";
     if (now() - startedAt >= options.wallMs) return "timeout";
     await sleep(Math.min(pollMs, Math.max(1, options.wallMs - (now() - startedAt))));

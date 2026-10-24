@@ -97,3 +97,52 @@ dropTest("a sealed burial is remembered, an open one is not", async ({ clock, ru
   await run(dropItem(open.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }], in_a_hole: true }), {}, open.dependencies, createDiscardedItems()));
   assert.equal(sealedPitGuarding(open.bot, 1, 62, 0), null);
 });
+
+dropTest("a body that stops 0.07 short of the node centre the goal accepted has stepped back from the hole", async ({ clock, run }) => {
+  // The goal measures from the node's cell centre; the body stops a little short of that centre (live: "Still 2.93 blocks").
+  const world = pitWorld(clock, [{ name: "cobblestone", count: 70 }]);
+  const dependencies = {
+    ...world.dependencies,
+    navigate: async () => {
+      world.bot.entity.position.set(4.43, 64, 0.5);
+      return { status: "completed", elapsedMs: 0 } as never;
+    },
+  };
+
+  const result = await run(dropItem(world.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }], in_a_hole: true }), {}, dependencies, createDiscardedItems()));
+
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  assert.equal(result.drop.holeClosure?.error, undefined);
+  assert.equal(result.drop.holeClosure?.distance, 3, "the cell centre of the feet is 3 blocks from the hole's column");
+});
+
+dropTest("a step back that fails reports the distance of the cell the body stands in", async ({ clock, run }) => {
+  const world = pitWorld(clock, [{ name: "cobblestone", count: 70 }]);
+  const dependencies = {
+    ...world.dependencies,
+    navigate: async () => {
+      world.bot.entity.position.set(4.43, 64, 0.5);
+      throw new Error("route lost");
+    },
+  };
+
+  const result = await run(dropItem(world.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }], in_a_hole: true }), {}, dependencies, createDiscardedItems()));
+
+  assert.match(result.drop.holeClosure?.error ?? "", /\[DROP_HOLE_BESIDE\] Could not step back from the hole: route lost/);
+  assert.equal(result.drop.holeClosure?.distance, 3);
+});
+
+dropTest("a body on a cell whose centre is short of the clearance has not stepped back from the hole", async ({ clock, run }) => {
+  const world = pitWorld(clock, [{ name: "cobblestone", count: 70 }]);
+  const dependencies = {
+    ...world.dependencies,
+    navigate: async () => {
+      world.bot.entity.position.set(3.9, 64, 0.5);
+      return { status: "completed", elapsedMs: 0 } as never;
+    },
+  };
+
+  const result = await run(dropItem(world.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }], in_a_hole: true }), {}, dependencies, createDiscardedItems()));
+
+  assert.match(result.drop.holeClosure?.error ?? "", /\[DROP_HOLE_BESIDE\] Still 2 blocks/);
+});

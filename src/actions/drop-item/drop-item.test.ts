@@ -313,6 +313,30 @@ dropTest("a ground drop walks off before the pickup check, so the items stay dro
   assert.equal(result.drop.dropped[0]?.dropped, 4);
 });
 
+dropTest("a ground drop whose body stops short of the node centre the goal accepted needs no second side", async ({ clock, run }) => {
+  const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4 }] }, clock);
+  let tries = 0;
+  const result = await run(
+    dropItem(
+      bot,
+      parseDropItemRequest({ items: [{ item_name: "oak_log" }] }),
+      {},
+      deps({
+        pickupWaitMs: PICKED_UP_BY_MS,
+        navigate: (async () => {
+          tries += 1;
+          // Four blocks from the toss in the cell's centre (z 4.5), the body 0.07 short of it.
+          bot.entity.position.set(bot.entity.position.x, bot.entity.position.y, 4.43);
+          return { status: "completed", elapsedMs: 10 };
+        }) as never,
+      }),
+      createDiscardedItems(),
+    ),
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(tries, 1, "the first side was enough");
+});
+
 dropTest("a ground drop that cannot walk away still reports the items picked up again", async ({ clock, run }) => {
   const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4 }] }, clock);
   let tries = 0;

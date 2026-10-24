@@ -123,6 +123,18 @@ test("the awaited change wins over the world age in the server answer wait", asy
   assert.equal(await waitForServerAnswer(bot, 100, { wallMs: 5_000, until: () => true, ...timing }), "until");
 });
 
+test("a bot that has heard no time packet yet counts from the first age it hears", async () => {
+  // `time.js` starts with a null age: the first packet is the baseline, not a move from zero.
+  const { bot, clock, timing } = worldBot(1_000, { server: { startAge: 1_000, timePacketYet: false } });
+  let moved = false;
+  void waitForWorldAge(bot, 40, { wallMs: 10_000, ...timing }).then(() => void (moved = true));
+
+  await clock.advance(2_000); // the first packet, then one 20 ticks on
+  assert.equal(moved, false, "a null age at the start is no age to move from");
+  await clock.advance(1_000);
+  assert.equal(moved, true);
+});
+
 test("a bot without a world age waits on the wall clock only", async () => {
   // The server never sent a time packet: the bot has no `time` to read.
   const { bot, clock, timing } = worldBot(1_000, { overrides: { time: undefined } });

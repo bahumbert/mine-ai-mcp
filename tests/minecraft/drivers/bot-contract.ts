@@ -14,8 +14,6 @@ const paramsSchema = z.strictObject({ check: z.string().min(1) });
 
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const check = contractCheckNamed(paramsSchema.parse(context.scenario.params).check);
-  // The selected hotbar slot outlives a trial in the player's data (2026-10-21: an equip check left slot 1); the fake starts at 0.
-  context.bot.setQuickBarSlot(0);
   try {
     await check.run(serverContractSubject(context.bot, context.arena));
   } catch (cause) {
