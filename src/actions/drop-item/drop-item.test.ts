@@ -81,7 +81,7 @@ function dropBot(options: DropBotOptions) {
     if (options.spawnsEntityId === undefined || !entities[options.spawnsEntityId]) return;
     for (const collect of collects) {
       setTimeout(() => {
-        if (collect.by === "giver") items.push(stack);
+        if (collect.by === "giver") items.push({ ...stack, count: collect.count ?? stack.count });
         const collectorEntityId = { giver: 1, other: OTHER_PLAYER_ID, recipient: Object.values(bot.players)[0]?.entity?.id ?? 0 }[collect.by];
         client.emit("collect", { collectedEntityId: options.spawnsEntityId, collectorEntityId, pickupItemCount: collect.count ?? stack.count });
       }, collect.afterMs);
@@ -530,6 +530,7 @@ test("hand-over: the recipient collects -> succeeded, collected true", async () 
   assert.equal(result.drop.recipient?.collected, true);
   assert.equal(result.drop.recipient?.settled, true);
   assert.equal(result.drop.recipient?.collectedCount, 3);
+  assert.equal(result.drop.recipient?.tossedCount, 3);
   assert.match(formatDropItemResult(result), /Handed to \*\*Dev\*\*/);
 });
 
@@ -562,7 +563,7 @@ test("hand-over: the world age never moves -> the wall bound ends the wait unset
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, false);
   assert.ok(Date.now() - startedAt < 1_000, "the wait is bounded on the wall clock");
-  assert.match(formatDropItemResult(result), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(0 seen taken\)/);
+  assert.match(formatDropItemResult(result), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(0 of 3 seen taken\)/);
 });
 
 test("hand-over: no world age at the toss -> only the wall bound ends the wait, unsettled", async () => {
@@ -627,12 +628,26 @@ test("hand-over: another player takes part of it -> the recipient took nothing, 
   assert.equal(result.drop.recipient?.settled, true);
 });
 
+test("hand-over: the giver picking back what was not taken leaves 'took X of N' at the toss, not the net drop (review 2026-10-24, 3)", async () => {
+  const { bot, advanceAge } = handOver({
+    carried: [{ name: "oak_log", count: 4, type: 1 }],
+    spawnedCount: 4,
+    collects: [{ by: "recipient", afterMs: 30, count: 2 }, { by: "giver", afterMs: 60, count: 2 }],
+  });
+  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+  setTimeout(() => advanceAge(100), 120);
+  const result = await run;
+  assert.equal(result.drop.dropped[0]?.dropped, 2, "the net drop counts what came back");
+  assert.equal(result.drop.recipient?.tossedCount, 4);
+  assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
+});
+
 test("hand-over lines: settled partial, unsettled and collected", () => {
   const at = { x: 0, y: 64, z: 0 };
-  const recipient = { name: "Dev", distance: 1.5, position: at, collected: false, collectedCount: 2, settled: true };
-  assert.match(handOverLine(recipient, at, 4), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
-  assert.match(handOverLine({ ...recipient, settled: false }, at, 4), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(2 seen taken\)/);
-  assert.match(handOverLine({ ...recipient, collected: true, collectedCount: 4 }, at, 4), /Handed to \*\*Dev\*\* from 1.5 blocks away/);
+  const recipient = { name: "Dev", distance: 1.5, position: at, collected: false, collectedCount: 2, tossedCount: 4, settled: true };
+  assert.match(handOverLine(recipient, at), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
+  assert.match(handOverLine({ ...recipient, settled: false }, at), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(2 of 4 seen taken\)/);
+  assert.match(handOverLine({ ...recipient, collected: true, collectedCount: 4 }, at), /Handed to \*\*Dev\*\* from 1.5 blocks away/);
 });
 
 test("hand-over: the giver aims the toss at the recipient", async () => {

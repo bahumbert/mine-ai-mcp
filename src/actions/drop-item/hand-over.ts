@@ -158,11 +158,13 @@ export interface HandOverAndRecount {
  */
 export async function handOverAndRecount(bot: Bot, args: HandOverAndRecount): Promise<DropRecipient> {
   const { recipient, dropped, tossedIds, entityBaseline, droppedAt, discarded, dependencies, context } = args;
+  // Counted before the recount below, which takes off what the giver picks back up.
+  const tossedCount = dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0);
   const handoverWatch = awaitHandover(bot, {
     recipientName: recipient.name,
     tossedIds,
     isTossed: (entity) => cameFromToss(entity, entityBaseline, droppedAt),
-    expectedItems: dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0),
+    expectedItems: tossedCount,
     wallMs: dependencies.handoverWallMs ?? HANDOVER_WALL_MS,
     signal: context.signal,
   });
@@ -172,7 +174,7 @@ export async function handOverAndRecount(bot: Bot, args: HandOverAndRecount): Pr
   // What the recipient left lying was a hand-over that failed, not a deliberate discard: its owner may pick it up again.
   if (!handover.recipientTookAll) discarded.forget(tossedIds);
   recountAfterToss(bot, dropped, null);
-  return { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount, settled: handover.settled };
+  return { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount, tossedCount, settled: handover.settled };
 }
 
 /** Eye height of a standing player above their feet. */
@@ -219,14 +221,15 @@ export function cameFromToss(entity: Entity, baseline: ReadonlySet<number>, from
   return Math.hypot(entity.position.x - from.x, entity.position.z - from.z) <= DISCARD_ATTRIBUTION_RADIUS;
 }
 
-/** `tossed` is the number of items the toss put on the ground in all. */
-export function handOverLine(recipient: DropRecipient, at: { x: number; y: number; z: number }, tossed: number): string {
+/** "took X of N" counts against what the toss put on the ground, not the net drop left after a pick-back. */
+export function handOverLine(recipient: DropRecipient, at: { x: number; y: number; z: number }): string {
+  const tossed = recipient.tossedCount;
   const where = `\`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\``;
   if (recipient.collected) {
     return `Handed to **${recipient.name}** from ${recipient.distance} blocks away, at ${where}: they picked up ${recipient.collectedCount} item${recipient.collectedCount === 1 ? "" : "s"}.`;
   }
   return recipient.settled
     ? `Left at **${recipient.name}**'s feet: they took ${recipient.collectedCount} of ${tossed}, at ${where}, ${recipient.distance} blocks away when the items were tossed.`
-    : `Tossed to **${recipient.name}**; the server has not said yet whether they took them (${recipient.collectedCount} seen taken), at ${where}.`;
+    : `Tossed to **${recipient.name}**; the server has not said yet whether they took them (${recipient.collectedCount} of ${tossed} seen taken), at ${where}.`;
 }
 

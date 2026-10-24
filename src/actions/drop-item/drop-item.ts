@@ -231,6 +231,7 @@ async function approachPlayer(
     position: { x: target.position.x, y: target.position.y, z: target.position.z },
     collected: false,
     collectedCount: 0,
+    tossedCount: 0,
     settled: false,
   };
 }
@@ -529,7 +530,7 @@ export function formatDropItemResult(result: DropItemResult): string {
   lines.push(
     "",
     drop.recipient
-      ? handOverLine(drop.recipient, at, drop.dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0))
+      ? handOverLine(drop.recipient, at)
       :`Dropped at \`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\`.`,
     `Free slots ${drop.freeSlotsBefore} → ${drop.freeSlotsAfter}.`,
   );

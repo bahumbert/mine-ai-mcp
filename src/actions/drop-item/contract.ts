@@ -108,6 +108,8 @@ export const dropRecipientSchema = z.strictObject({
   collected: z.boolean(),
   /** Items the recipient took, from the `pickupItemCount` of the server's pickup packets; 0 when none was seen taken. */
   collectedCount: z.number().int(),
+  /** Items the toss put on the ground, before the giver picked any back up (the drop entries then count the net). */
+  tossedCount: z.number().int(),
   /**
    * The server answered whether the items were taken: all of them were, or the world age moved far enough past the toss
    * (100 ticks) that what was not taken by then was not taken. False: the wall-clock bound ended the wait first (the
