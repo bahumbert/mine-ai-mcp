@@ -106,3 +106,13 @@ export interface DamageEvent {
 
 /** The client's packet emitter, typed for the packets the checks read raw. */
 export type PacketListening = { on(event: string, listener: (packet: never) => void): void; off(event: string, listener: (packet: never) => void): void };
+
+/** What an `update_health` packet tells the checks read. */
+export interface HealthPacket {
+  readonly health: number;
+}
+
+/** Whether the bot's entity flags (`entity_metadata` key 0, bit 0) say she is on fire. */
+export function burning(bot: Bot): boolean {
+  return (Number(bot.entity.metadata[0] ?? 0) & 1) === 1;
+}

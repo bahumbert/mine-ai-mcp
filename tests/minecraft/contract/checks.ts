@@ -7,6 +7,10 @@ import type { ContractSubject } from "./subject.ts";
 import { attackCooldownDamage } from "./checks/attack-cooldown-damage.ts";
 import { attackHurtsAndKills } from "./checks/attack-hurts-and-kills.ts";
 import { attackOutOfReach } from "./checks/attack-out-of-reach.ts";
+import { attackMobKnockback } from "./checks/attack-mob-knockback.ts";
+import { weaponDamageTools } from "./checks/weapon-damage-tools.ts";
+import { projectileHitBot } from "./checks/projectile-hit-bot.ts";
+import { deflectFireball } from "./checks/deflect-fireball.ts";
 import { bowDrawAndRelease } from "./checks/bow-draw-and-release.ts";
 import { consumeFood } from "./checks/consume-food.ts";
 import { damageEventToBot } from "./checks/damage-event-to-bot.ts";
@@ -134,6 +138,10 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   explosionKnockback,
   shieldRaised,
   unequipHand,
+  deflectFireball,
+  projectileHitBot,
+  weaponDamageTools,
+  attackMobKnockback,
   bucketPourAndFill,
   placeBlockWithOptions,
 ];

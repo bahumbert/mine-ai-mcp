@@ -12,6 +12,7 @@ import { Vec3 } from "vec3";
 import { EQUIPMENT_SLOTS, type FakeInventory, type TossedStack } from "./fake-inventory.js";
 import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
+import { DEFAULT_MOB_HEALTH, NOT_HURTABLE_TYPES } from "./fake-bot-combat-rules.js";
 import type { FakeWorld } from "./fake-world.js";
 
 /** Mineflayer's one sequence of prediction acknowledgements per connection (`interaction_sequence.js`). */
@@ -95,6 +96,8 @@ export function createFakeEntities(registry: Bot["registry"], EntityClass: new (
         width: known?.width ?? 0,
         position: position.clone(),
       });
+      const healthKey = known?.metadataKeys?.indexOf("health") ?? -1;
+      if (healthKey >= 0 && !NOT_HURTABLE_TYPES.has(entity.type)) Reflect.set(entity.metadata, healthKey, DEFAULT_MOB_HEALTH);
       return entity;
     },
   };

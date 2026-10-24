@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import type { FakeCell, FakeHarness, Weather } from "../../../src/test-support/fake-bot/index.ts";
+import type { FakeCell, FakeHarness, ShotProjectile, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 
 /** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
@@ -37,7 +37,22 @@ export interface ContractSubject {
   kill(entityId: number): Promise<void>;
   /** A creeper ignited with no fuse explodes at `position`, breaking no block; resolves once the client heard the explosion. */
   explode(position: Vec3): Promise<void>;
+  /** The server summons the mob `name` at `position` (a world position) with the raw SNBT `nbt` (the fake reads none: its mobs have no AI); resolves with it once the client has it. */
+  summonMob(name: string, position: Vec3, nbt?: string): Promise<Entity>;
+  /** The server removes a mob it summoned (`/kill`); resolves once the client no longer has it. */
+  removeMob(mob: Entity): Promise<void>;
+  /** A fireball (a ghast's) is summoned at `position` flying with `motion` (blocks a tick) and a small acceleration, with no block broken by its blast (the `mobGriefing` game rule is off until `clearFireballs`: a server-wide rule); resolves with it once the client has it. */
+  launchFireball(position: Vec3, motion: Vec3): Promise<Entity>;
+  /** The server removes every fireball and gives `mobGriefing` back; resolves once the client has no fireball left (the rule goes back with the next command: a server answers in order). */
+  clearFireballs(): Promise<void>;
+  /** The shooter `shooterId` (a mob on the client) hits the bot with a `projectile` ("arrow" or "small_fireball") that flew in from its side; resolves once the client heard the hurt. */
+  shootBot(projectile: ProjectileName, shooterId: number): Promise<void>;
 }
+
+/** The projectiles a mob shoots at the bot that the checks name. */
+export type ProjectileName = ShotProjectile;
+/** What each costs the bot once it lands on easy, as `projectile-hit-bot` measured it on the server (the fake's scene control takes the final amount). */
+const SHOT_COST: Readonly<Record<ProjectileName, number>> = { arrow: 3, small_fireball: 3.5 };
 
 /** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
 const SERVER_EDIT_WALL_MS = 3_000;
@@ -63,6 +78,23 @@ function heardWithin<Args extends unknown[]>(bot: Bot, event: string, wanted: (.
       reject(new Error(`${what}: not heard after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
     }, SERVER_EDIT_WALL_MS);
     bot.on(event as never, listener as never);
+  });
+}
+
+/** Resolve with the entity `name` the client first hears spawn near `position`, or throw after the wall bound (the command did nothing: is the bot op?). */
+function spawnedNear(bot: Bot, name: string, position: Vec3, what: string): Promise<Entity> {
+  return new Promise<Entity>((resolve, reject) => {
+    const onSpawn = (entity: Entity) => {
+      if (entity.name !== name || entity.position.distanceTo(position) > SUMMON_MATCH_DISTANCE) return;
+      clearTimeout(timer);
+      bot.off("entitySpawn", onSpawn);
+      resolve(entity);
+    };
+    const timer = setTimeout(() => {
+      bot.off("entitySpawn", onSpawn);
+      reject(new Error(`${what}: no ${name} entity near ${position} after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
+    }, SERVER_EDIT_WALL_MS);
+    bot.on("entitySpawn", onSpawn);
   });
 }
 
@@ -133,6 +165,30 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => combat.explode(position));
       await clock.advance(50);
     },
+    async summonMob(name, position) {
+      let summoned: Entity | undefined;
+      server.answer(() => void (summoned = entities.spawn({ name, position })));
+      await clock.advance(50);
+      return summoned!;
+    },
+    async removeMob(mob) {
+      server.answer(() => entities.remove(mob.id));
+      await clock.advance(50);
+    },
+    async shootBot(projectile, shooterId) {
+      server.answer(() => combat.shootBot(projectile, shooterId, SHOT_COST[projectile]));
+      await clock.advance(50);
+    },
+    async launchFireball(position, motion) {
+      let launched: Entity | undefined;
+      server.answer(() => void (launched = combat.launchFireball(position, motion)));
+      await clock.advance(50);
+      return launched!;
+    },
+    async clearFireballs() {
+      server.answer(() => Object.values(bot.entities).filter(({ name }) => name === "fireball").forEach(({ id }) => entities.remove(id)));
+      await clock.advance(50);
+    },
   };
 }
 
@@ -190,19 +246,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/weather ${weather}`);
     },
     async summonItem(stack, position, pickupDelayTicks) {
-      const spawned = new Promise<Entity>((resolve, reject) => {
-        const onSpawn = (entity: Entity) => {
-          if (entity.name !== "item" || entity.position.distanceTo(position) > SUMMON_MATCH_DISTANCE) return;
-          clearTimeout(timer);
-          bot.off("entitySpawn", onSpawn);
-          resolve(entity);
-        };
-        const timer = setTimeout(() => {
-          bot.off("entitySpawn", onSpawn);
-          reject(new Error(`/summon item: no item entity near ${position} after ${SERVER_EDIT_WALL_MS} ms`));
-        }, SERVER_EDIT_WALL_MS);
-        bot.on("entitySpawn", onSpawn);
-      });
+      const spawned = spawnedNear(bot, "item", position, "/summon item");
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
     },
@@ -235,5 +279,70 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       await heard;
       bot.chat("/gamerule mobGriefing true");
     },
+    ...serverMobActions(bot, at),
   };
+}
+
+/** The subject's means on mobs, projectiles and fireballs on a real server (op commands), `at` writing a position for a command. */
+function serverMobActions(bot: Bot, at: (cell: Vec3) => string): Pick<ContractSubject, "summonMob" | "removeMob" | "launchFireball" | "clearFireballs" | "shootBot"> {
+  return {
+    async summonMob(name, position, nbt) {
+      const spawned = spawnedNear(bot, name, position, `/summon ${name}`);
+      bot.chat(`/summon ${name} ${at(position)}${nbt === undefined ? "" : ` ${nbt}`}`);
+      return spawned;
+    },
+    async removeMob(mob) {
+      const gone = heardWithin(bot, "entityGone", (entity: Entity) => entity === mob, "/kill");
+      bot.chat(`/kill ${selectorOf(mob)}`);
+      await gone;
+    },
+    async launchFireball(position, motion) {
+      const spawned = spawnedNear(bot, "fireball", position, "/summon fireball");
+      bot.chat("/gamerule mobGriefing false");
+      bot.chat(`/summon fireball ${at(position)} {Motion:[${motion.x}d,${motion.y}d,${motion.z}d],acceleration_power:${FIREBALL_LAUNCH_ACCELERATION}d}`);
+      return spawned;
+    },
+    async clearFireballs() {
+      bot.chat("/kill @e[type=fireball]");
+      const startedAt = performance.now();
+      while (Object.values(bot.entities).some(({ name }) => name === "fireball")) {
+        if (performance.now() - startedAt > SERVER_EDIT_WALL_MS) throw new Error(`/kill @e[type=fireball]: a fireball is still on the client after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`);
+        await delay(SETTLE_STEP_MS);
+      }
+      bot.chat("/gamerule mobGriefing true");
+    },
+    async shootBot(projectile, shooterId) {
+      const shooter = bot.entities[shooterId]!;
+      const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, `/summon ${projectile}`);
+      bot.chat(`/summon ${projectile} ${at(projectileStart(bot, shooter))} ${projectileNbt(projectile, bot, shooter)}`);
+      await heard;
+    },
+  };
+}
+
+/** How far from the bot the server drops a projectile on the line to its shooter: it hits a tick or two later, after the client has heard it spawn. */
+const PROJECTILE_START_DISTANCE = 3;
+/** The speed a skeleton's arrow leaves the bow with (power 1.6 for a full draw), in blocks a tick. */
+const ARROW_SPEED = 1.6;
+const FIREBALL_SPEED = 1;
+const FIREBALL_ACCELERATION = 0.1;
+/** A launched fireball picks up speed slowly, so a check has several ticks to hit it (the 0.1 of a blaze's shot reaches 0.65 blocks a tick within 8). */
+const FIREBALL_LAUNCH_ACCELERATION = 0.02;
+
+/** The point at the bot's chest height on the line from her to `shooter`, `PROJECTILE_START_DISTANCE` out. */
+function projectileStart(bot: Bot, shooter: Entity): Vec3 {
+  const toShooter = shooter.position.minus(bot.entity.position).plus(new Vec3(0, -shooter.position.y + bot.entity.position.y, 0)).normalize();
+  return bot.entity.position.plus(toShooter.scaled(PROJECTILE_START_DISTANCE)).offset(0, bot.entity.height * 0.7, 0);
+}
+
+/** The `/summon` data of a projectile owned by `shooter`, flying at the bot's chest. */
+function projectileNbt(projectile: ProjectileName, bot: Bot, shooter: Entity): string {
+  const start = projectileStart(bot, shooter);
+  const toBot = bot.entity.position.offset(0, bot.entity.height * 0.7, 0).minus(start).normalize();
+  const speed = projectile === "arrow" ? ARROW_SPEED : FIREBALL_SPEED;
+  const motion = toBot.scaled(speed);
+  const uuid = (shooter.uuid ?? "").replaceAll("-", "");
+  const owner = [0, 8, 16, 24].map((from) => Number(BigInt.asIntN(32, BigInt(`0x${uuid.slice(from, from + 8)}`)))).join(",");
+  const acceleration = projectile === "small_fireball" ? `,acceleration_power:${FIREBALL_ACCELERATION}d` : "";
+  return `{Owner:[I;${owner}],Motion:[${motion.x}d,${motion.y}d,${motion.z}d]${acceleration}}`;
 }

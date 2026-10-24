@@ -3319,6 +3319,8 @@ for (const name of ["small_fireball", "arrow"]) {
     const projectile = Object.assign(combatFixture([]).target, {
       id: 8,
       name,
+      // The zombie it was made as carries a zombie's health in its metadata, which an arrow reads as another field.
+      metadata: [],
       width: 0.3125,
       position: new Vec3(0, 65, 8),
       velocity: new Vec3(0, 0, -1.5),

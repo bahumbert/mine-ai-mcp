@@ -19,6 +19,8 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["scenarios/pathfinder/obsidian-lava-approach.yaml", /world\.type/u],
   // Contract checks whose subject changes a server-wide setting while they run (the mobGriefing rule, the weather).
   ["contract/scenarios/explosion-knockback.yaml", /exclusive/u],
+  ["contract/scenarios/deflect-fireball.yaml", /exclusive/u],
+  ["contract/scenarios/projectile-hit-bot.yaml", /exclusive/u],
   ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
   // The arena and its scratch copy pin more than the 256 chunks Minecraft force-loads.
   ["scenarios/collect/obsidian-by-exploring.yaml", /chunks/u],
