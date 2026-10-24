@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import { type FakeColumn, type ListedColumn, createLoadedChunks } from "../../../../src/test-support/fake-bot/fake-world-columns.ts";
 import type { ContractCheck } from "../checks.ts";
+import { serverQuiet } from "../server-answer.ts";
 import { type LocalPoint, holdsWithin } from "../subject.ts";
 
 const STAIRS_CELL = [2, -60, 0] as const;
@@ -15,8 +16,6 @@ const GOLD_CELL = [-3, -60, -4] as const;
 const FEET = [0.5, -60, 0.5] as const;
 /** The server sends its chunks over the first seconds after the login. */
 const CHUNKS_ARRIVE_WITHIN_MS = 20_000;
-/** Time for a chunk still on its way to show up in the list before it is compared. */
-const LATE_CHUNK_GRACE_MS = 1_000;
 
 /** The synchronous world of `WorldSync`, whose columns Prismarine's typings leave out. */
 interface SyncWorld {
@@ -42,7 +41,8 @@ export const columnsHoldCells: ContractCheck = {
     const expected = createLoadedChunks({ feet, namedChunks: [] }).list();
     const arrived = await holdsWithin(subject, () => world.getColumns().length >= expected.length, CHUNKS_ARRIVE_WITHIN_MS);
     assert.ok(arrived, `${world.getColumns().length} of ${expected.length} chunks listed`);
-    await subject.wait(LATE_CHUNK_GRACE_MS);
+    // A chunk still on its way (one the list should not hold) shows up within the server's ticks: the list is compared after them.
+    await serverQuiet(subject, "after the expected chunks were listed");
     const listed = world.getColumns();
     assert.deepEqual(
       listed.map(({ chunkX, chunkZ }) => `${chunkX},${chunkZ}`).sort(),

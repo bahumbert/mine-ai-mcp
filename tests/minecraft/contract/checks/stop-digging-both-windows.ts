@@ -4,15 +4,12 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { settleWithin } from "../subject.ts";
+import { serverQuiet } from "../server-answer.ts";
+import { holdsWithin, settleWithin } from "../subject.ts";
 
 const BEFORE_PACKET_TARGET = [1, -60, 0] as const;
 const AFTER_PACKET_TARGET = [-1, -60, 0] as const;
-/** Well after the look's tick and the start packet, well before dirt's 750 ms by hand. */
-const MID_DIG_MS = 300;
 const DIG_WALL_MS = 3_000;
-/** Long enough for a server that broke the block anyway to send the air. */
-const SERVER_KEEPS_MS = 1_500;
 
 export const stopDiggingBothWindows: ContractCheck = {
   name: "stop-digging-both-windows",
@@ -36,12 +33,13 @@ export const stopDiggingBothWindows: ContractCheck = {
     // A forced look: the start packet goes out at once, whatever the turn would take.
     const second = bot.dig(bot.blockAt(afterPacketTarget)!, true);
     second.catch(() => undefined); // read below; an early failure must not go unhandled meanwhile
-    await subject.wait(MID_DIG_MS);
-    assert.ok(bot.targetDigBlock, "the dig packet is out (targetDigBlock set)");
+    // Mineflayer sets `targetDigBlock` in the call that writes the start packet: the stop below is the first moment after it, not a wall time into the dig.
+    assert.ok(await holdsWithin(subject, () => bot.targetDigBlock !== null, DIG_WALL_MS), "the dig packet is out (targetDigBlock set)");
     bot.stopDigging();
     const aborted = await settleWithin(subject, second, DIG_WALL_MS);
     assert.equal(aborted?.error?.message, "Digging aborted");
-    await subject.wait(SERVER_KEEPS_MS);
+    // A server that broke the block anyway sends the air within its ticks.
+    await serverQuiet(subject, "after the aborted dig");
     assert.equal(bot.blockAt(afterPacketTarget)?.name, "dirt", "the aborted dig left the block");
   },
 };

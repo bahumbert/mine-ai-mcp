@@ -2,6 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-item-pickup-after-delay
 tags:
   - contract
+  - exclusive
 description: "The server picks an item entity up once its pickup delay is over, in reach of the bot and with room:
   collect, the slot and the removal in one tick; a pickup that fits only in part sends the slot alone and the client
   never hears the new count; a full inventory picks nothing up. Contract check

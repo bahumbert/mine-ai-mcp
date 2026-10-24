@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { afterServerTicks, serverQuiet } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { WATER_POOL_CELLS, boatSummonedAt, getOffAndStand, mountBoat } from "./boat-seat.ts";
 
@@ -14,20 +15,29 @@ import { WATER_POOL_CELLS, boatSummonedAt, getOffAndStand, mountBoat } from "./b
 const BOAT_AT = [3.5, -60.111, 0.5] as const;
 /** A step of the ride (`BOAT_STEP` in `boat-crossing.ts` is of this order), and the gap between steps. */
 const STEP = 0.2;
+/** The ride's own pacing (what `BoatRide` does between moves), not a wait for the server: each move is accepted or put back on its own packet. */
 const STEP_GAP_MS = 50;
 /** The boat follows within the server's tick and the entity broadcast: well under a second on a server on time. */
 const FOLLOW_WALL_MS = 2_000;
-const QUIET_MS = 1_000;
 const TOLERANCE = 0.01;
 /** Steps from the pool's middle (x 3.5) that stay clear of the bank: the last is x 4.3. */
 const FREE_STEPS = 4;
-const REST_WAIT_MS = 2_500;
+/** Server ticks the boat takes to float down to its rest level at most ("a second or two": 20 to 40 ticks). */
+const REST_TICKS = 40;
 const NOT_SEATED_SHIFT = 0.3;
 
-/** Whether the boat stays at `x` for `QUIET_MS`. */
+/** Whether the boat stays at `x` while the server has its ticks (never at a point only: a boat that left and came back is not staying). */
 async function staysAt(subject: ContractSubject, x: number): Promise<boolean> {
   const boat = boatSummonedAt(subject, BOAT_AT)!;
-  return !(await holdsWithin(subject, () => Math.abs(boat.position.x - x) > TOLERANCE, QUIET_MS));
+  let strayed = false;
+  const onMoved = (entity: unknown) => void (entity === boat && Math.abs(boat.position.x - x) > TOLERANCE && (strayed = true));
+  subject.bot.on("entityMoved", onMoved);
+  try {
+    await serverQuiet(subject, `the boat's stay at x ${x}`);
+  } finally {
+    subject.bot.off("entityMoved", onMoved);
+  }
+  return !strayed && Math.abs(boat.position.x - x) <= TOLERANCE;
 }
 
 export const boatFollowsVehicleMove: ContractCheck = {
@@ -39,7 +49,7 @@ export const boatFollowsVehicleMove: ContractCheck = {
     const { bot } = subject;
     const boat = boatSummonedAt(subject, BOAT_AT);
     assert.ok(boat !== undefined, "no oak_boat entity in view");
-    await subject.wait(REST_WAIT_MS);
+    await afterServerTicks(subject, REST_TICKS, "the boat's float down to its rest level");
     const { y, z } = boat.position;
     let { x } = boat.position;
     const startX = x;

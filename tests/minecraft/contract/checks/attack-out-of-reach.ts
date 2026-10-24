@@ -5,12 +5,13 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS, serverQuiet } from "../server-answer.ts";
+import { holdsWithin } from "../subject.ts";
 import { NIGHT, STILL_MOB_NBT, listenToFight, mobAt } from "./combat-scene.ts";
 
 /** The bot's feet x; a zombie's box edge is its centre less 0.3. */
 const BOT_X = -5.5;
 const HALF_WIDTH = 0.3;
-const HIT_WAIT_MS = 700;
 /** The distance from the eye to the box (the eye is level with the zombie's box), and whether the server answers. */
 const DISTANCES: readonly { readonly box: number; readonly hurts: boolean }[] = [
   { box: 3.5, hurts: true },
@@ -39,7 +40,9 @@ export const attackOutOfReach: ContractCheck = {
       const fight = listenToFight(subject, mob);
       try {
         bot.attack(mob);
-        await subject.wait(HIT_WAIT_MS);
+        // A hit in reach is answered (the mob's hurt); one out of reach is ignored, which only server ticks can show.
+        if (hurts) await holdsWithin(subject, () => fight.heard.hurts.length > 0, ANSWER_WALL_MS);
+        else await serverQuiet(subject, `after the hit on a zombie ${box} blocks from the eye`);
         assert.equal(fight.heard.hurts.length, hurts ? 1 : 0, `a zombie ${box} blocks from the eye ${hurts ? "was not hit" : "was hit"}`);
       } finally {
         fight.stop();

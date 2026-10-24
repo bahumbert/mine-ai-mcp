@@ -7,13 +7,14 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { afterServerTicks } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 import { type DamageEvent, NIGHT, STILL_MOB_NBT, damageTypeId, mobAt } from "./combat-scene.ts";
 
 const DAMAGE = 2;
 const SETTLE_MS = 500;
 /** A second damage of the same size inside the first ten ticks is ignored (the hurt window the mobs have too): the 3 s wait of the first run saw no event. */
-const HURT_WINDOW_MS = 700;
+const HURT_WINDOW_TICKS = 10;
 /** Natural regeneration heals a point every 10 ticks at full food (not modelled by the fake): a read a tick late may show it. */
 const REGENERATED = 1;
 /** Notchian velocity is 1/8000 of a block per tick. */
@@ -68,7 +69,8 @@ export const damageEventToBot: ContractCheck = {
       events.length = 0;
       hurts.length = 0;
       healthEvents = 0;
-      await subject.wait(HURT_WINDOW_MS);
+      // The first damage's answers all came (health, hurt, velocity: the same tick); the window is server ticks, not a wall time.
+      await afterServerTicks(subject, HURT_WINDOW_TICKS, "the hurt window");
       await subject.hurtBot(DAMAGE, null);
       assert.deepEqual(events.map(fieldsOf), [{ entityId: bot.entity.id, sourceTypeId: damageTypeId(bot.registry, "generic"), sourceCauseId: 0, sourceDirectId: 0 }]);
       assert.deepEqual(hurts, [{ entity: bot.entity, source: undefined }]);

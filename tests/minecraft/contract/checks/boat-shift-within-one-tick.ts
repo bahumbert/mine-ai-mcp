@@ -7,12 +7,17 @@
 import assert from "node:assert/strict";
 import { writeShiftKey } from "../../../../src/navigation/mineflayer/sneak.ts";
 import type { ContractCheck } from "../checks.ts";
+import { afterServerTicks } from "../server-answer.ts";
 import { BOAT_FIXTURE, getOffAndStand, listenWhileSeated, mountBoat } from "./boat-seat.ts";
 
 /** Presses and releases written in one go, with no wait between them. */
 const QUICK_PRESSES = 5;
-/** A press held this long reaches two ticks of the server (60 ms measured: let off every time). */
-const HELD_MS = 100;
+/**
+ * A press held across at least this many server ticks is read at one of them (60 ms, a tick and a bit, measured: let off every
+ * time). The wait is for observed ticks, so the hold is 1-2 s in fact: the claim is "a hold that spans server ticks lets her off",
+ * which is what the runtime's get-off relies on (it holds the key until the server answered, `boat-get-off.ts`).
+ */
+const HELD_TICKS = 2;
 
 export const boatShiftWithinOneTick: ContractCheck = {
   name: "boat-shift-within-one-tick",
@@ -32,10 +37,11 @@ export const boatShiftWithinOneTick: ContractCheck = {
     assert.equal(bot.vehicle?.id, boat.id);
     const listeningAfterHold = listenWhileSeated(subject, boat);
     writeShiftKey(bot, true);
-    await subject.wait(HELD_MS);
+    // Held for server ticks, not for a wall time: a stalled server reads press and release in one tick (the 100 ms this was).
+    await afterServerTicks(subject, HELD_TICKS, "the shift held");
     writeShiftKey(bot, false);
     const afterHold = await listeningAfterHold;
-    assert.equal(await subject.seatedOnServer(boat), false, `the server kept her seated after a shift held ${HELD_MS} ms`);
+    assert.equal(await subject.seatedOnServer(boat), false, `the server kept her seated after a shift held across at least ${HELD_TICKS} server ticks`);
     assert.ok(afterHold.positions >= 1 && afterHold.listsWithoutHer >= 1, `the get-off was not answered: ${JSON.stringify(afterHold)}`);
     // Next action from here: the runtime's get-off still ends with her free and physics running.
     await getOffAndStand(subject, boat);

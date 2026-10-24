@@ -69,6 +69,8 @@ export const itemPickupAfterDelay: ContractCheck = {
   name: "item-pickup-after-delay",
   // Bare bot: our runtime must not walk to items lying near it while the check measures the server (review of T3b-C).
   withoutRuntime: true,
+  exclusive:
+    "the pickup delay is the server's 20 ticks asserted in wall milliseconds from the moment the client heard the spawn: another lane's clone freezes the server thread 0.16-0.9 s, and the stall before the spawn is flushed or the catch-up ticks after it put the pickup 810 ms after the spawn on a lane (red on lanes, 2026-10-24); the world age comes one packet per 20 ticks, too coarse for a 20-tick delay (a server tick count read in chat, `time query gametime`, would make it lane-safe)",
   fixture: { cells: {}, carried: { cobblestone: 64 - ROOM, ...Object.fromEntries(FILLER.map((name) => [name, 1])) }, position: [0.5, -60, 0.5] },
   async run(subject) {
     const { bot } = subject;

@@ -6,12 +6,11 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, slotsOf } from "../window-packets.ts";
 
-const SERVER_ANSWER_MS = 1_000;
 const OPEN_WALL_MS = 5_000;
-const FAR_WAIT_MS = 3_000;
 /** In reach of a bot at x -4.5, and 7.5 blocks away from it. */
 const NEAR = [0, -60, 0] as const;
 const FAR = [3, -60, 0] as const;
@@ -33,7 +32,7 @@ export const chestOpenTakeClose: ContractCheck = {
     position: [-4.5, -60, 0.5],
   },
   async run(subject) {
-    const { bot, wait } = subject;
+    const { bot } = subject;
     const recording = recordWindowPackets(bot);
     const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), OPEN_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest in reach opened: ${opened?.error?.message ?? "never"}`);
@@ -43,18 +42,19 @@ export const chestOpenTakeClose: ContractCheck = {
     assert.deepEqual(slotsOf(window, CHEST_SLOTS), { 0: "cobblestone x64", 1: "cobblestone x6", 2: "torch x3", 3: null });
     assert.deepEqual(recording.packets.splice(0), [{ name: "open_window", windowId: 1 }, { name: "window_items", windowId: 1 }], "open_window, then the window's items");
 
+    // The server sends nothing back for a click it agrees with: every wait below that expects no packet is for server ticks.
     await window.withdraw(bot.registry.itemsByName.cobblestone!.id, null, 4);
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the withdraw");
     assert.deepEqual(slotsOf(window, CHEST_SLOTS), { 0: "cobblestone x2", 1: "cobblestone x64", 2: "torch x3", 3: null }, "Mineflayer's transfer: the 64 picked up, 4 put down one by one, the rest merged into the 6 and the 2 left in slot 0");
     assert.equal(slotsOf(window, [WINDOW_FIRST_MAIN_SLOT])[WINDOW_FIRST_MAIN_SLOT], "cobblestone x4", "in the first free slot of the window's player part");
     assert.equal(slotsOf(bot.inventory, [36])[36], "bread x4", "bot.inventory itself is untouched until the close");
     await window.deposit(bot.registry.itemsByName.bread!.id, null, 3);
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the deposit");
     assert.deepEqual(slotsOf(window, CHEST_SLOTS), { 0: "cobblestone x2", 1: "cobblestone x64", 2: "torch x3", 3: "bread x3" });
     assert.deepEqual(recording.packets.splice(0), [], "the server's result is the client's: nothing is sent back");
 
     window.close();
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the close");
     assert.equal(bot.currentWindow, null);
     assert.deepEqual(slotsOf(bot.inventory, [9, 10, 36]), { 9: "cobblestone x4", 10: "bread x1", 36: null }, "the window's player part is now the inventory");
     assert.deepEqual(recording.packets.splice(0), [], "the close brings no packet");
@@ -65,18 +65,23 @@ export const chestOpenTakeClose: ContractCheck = {
     assert.deepEqual(slotsOf(again.value, CHEST_SLOTS), { 0: "cobblestone x2", 1: "cobblestone x64", 2: "torch x3", 3: "bread x3" }, "the server kept the chest's stacks");
     // A shift click on a chest slot sends the stack to the last free slot of the window's player part, a bit of a stack it can join first.
     await bot.clickWindow(2, 0, 1);
-    await wait(SERVER_ANSWER_MS);
+    // Prismarine may predict this move right: then no answer comes to wait for, and the server's view is read once its ticks passed.
+    await serverQuiet(subject, "after the shift click");
     assert.deepEqual(slotsOf(again.value, [2, WINDOW_LAST_SLOT]), { 2: null, [WINDOW_LAST_SLOT]: "torch x3" }, "the chest's torches went to the end of the player's part");
+    // The packets of one connection are read in order: the close is the server's before the click written after it.
     again.value.close();
-    await wait(SERVER_ANSWER_MS);
     recording.packets.splice(0);
     bot._client.write("window_click", { windowId: 2, stateId: 0, slot: 0, mouseButton: 0, mode: 0, changedSlots: [], cursorItem: { itemCount: 0 } });
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the click on the closed window");
     assert.deepEqual(recording.packets.splice(0), [], "a click on the closed window is ignored");
 
-    const far = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(FAR))!), FAR_WAIT_MS);
+    // The far chest answers nothing: the call must still be pending once the server had its ticks.
+    let farSettled = false;
+    const farOpening = bot.openContainer(bot.blockAt(subject.world(FAR))!);
+    farOpening.then(() => void (farSettled = true), () => void (farSettled = true));
+    await serverQuiet(subject, "after the open of the chest out of reach");
     recording.stop();
-    assert.equal(far, null, "a chest out of reach never opens: the call stays pending");
+    assert.equal(farSettled, false, "a chest out of reach never opens: the call stays pending");
     assert.deepEqual(recording.packets, [], "and nothing comes back");
   },
 };

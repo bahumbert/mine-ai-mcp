@@ -8,10 +8,10 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { answerSettled, serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, variantStackOf, type WindowPacket } from "../window-packets.ts";
 
-const SERVER_ANSWER_MS = 1_000;
 const OPEN_WALL_MS = 5_000;
 /** The chest's cell in the fixture's frame; `subject.world` moves it to the lane. */
 const CHEST = [0, -60, 0] as const;
@@ -80,7 +80,7 @@ export const clickWindowVariantSplit: ContractCheck = {
     position: [-4.5, -60, 0.5],
   },
   async run(subject) {
-    const { bot, wait } = subject;
+    const { bot } = subject;
     const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
     const window = opened.value;
@@ -89,7 +89,9 @@ export const clickWindowVariantSplit: ContractCheck = {
     for (const { label, click, predicted, answered, packets } of STEPS) {
       await bot.clickWindow(...click);
       assert.deepEqual(seen(), predicted, `${label}: as predicted`);
-      await wait(SERVER_ANSWER_MS);
+      // A step the server answers waits for its packets; one it agrees with sends none, so the wait is for server ticks.
+      if (packets.length > 0) await answerSettled(subject, () => recording.packets.length >= packets.length, `${label}: the packets of the answer`);
+      else await serverQuiet(subject, label);
       assert.deepEqual(seen(), answered, `${label}: once the server answered`);
       assert.deepEqual(recording.packets.splice(0), packets, `${label}: the packets of the answer`);
     }

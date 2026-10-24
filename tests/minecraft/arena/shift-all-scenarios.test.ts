@@ -21,6 +21,7 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/explosion-knockback.yaml", /exclusive/u],
   ["contract/scenarios/deflect-fireball.yaml", /exclusive/u],
   ["contract/scenarios/projectile-hit-bot.yaml", /exclusive/u],
+  ["contract/scenarios/item-pickup-after-delay.yaml", /exclusive/u],
   ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
   // A contract check that measures server ticks from the wall clock: another lane's clone would stall the server thread under it.
   ["contract/scenarios/bow-draw-and-release.yaml", /exclusive/u],

@@ -10,10 +10,10 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { answerSettled, serverQuiet } from "../server-answer.ts";
 import { holdsWithin, settleWithin } from "../subject.ts";
 import { followServerCursor, recordWindowAnswers, variantStackOf, type WindowAnswer } from "../window-packets.ts";
 
-const SERVER_ANSWER_MS = 1_000;
 const OPEN_WALL_MS = 5_000;
 const DROP_WALL_MS = 3_000;
 /** The drop starts at the eye and falls in front of the bot: well inside this. */
@@ -50,7 +50,7 @@ export const variantTransferClicks: ContractCheck = {
     position: [-4.5, -60, 0.5],
   },
   async run(subject) {
-    const { bot, wait } = subject;
+    const { bot } = subject;
     const open = async () => {
       const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
       assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
@@ -66,7 +66,9 @@ export const variantTransferClicks: ContractCheck = {
     const click = async (slot: number, mouseButton: number, answered: readonly WindowAnswer[]) => {
       await bot.clickWindow(slot, mouseButton, 0);
       const predicted = seen();
-      await wait(SERVER_ANSWER_MS);
+      // A click the server answers waits for its answers; one it agrees with sends none, so the wait is for server ticks.
+      if (answered.length > 0) await answerSettled(subject, () => recording.answers.length >= answered.length, `the answer to the click on slot ${slot}`);
+      else await serverQuiet(subject, `after the click on slot ${slot}`);
       assert.deepEqual(recording.answers.splice(0), answered, `the answer to the click on slot ${slot} (button ${mouseButton})`);
       return predicted;
     };
@@ -87,7 +89,7 @@ export const variantTransferClicks: ContractCheck = {
 
     stopFollowing();
     window.close();
-    await wait(SERVER_ANSWER_MS);
+    await answerSettled(subject, () => recording.answers.length >= 1, "the slot the close gave the stack in hand");
     assert.equal(bot.currentWindow, null);
     assert.deepEqual(recording.answers.splice(0), [slotAnswer(PLAYER_WINDOW_ID, FREE_INVENTORY_SLOT, RENAMED(5))], "the close gave the stack in hand to the inventory's free slot");
     assert.equal(variantStackOf(bot.inventory.slots[FREE_INVENTORY_SLOT]), RENAMED(5));
@@ -97,7 +99,8 @@ export const variantTransferClicks: ContractCheck = {
     const again = await open();
     const stopAgain = followServerCursor(bot, again);
     await bot.clickWindow(SECOND_SLOT, 0, 0);
-    await wait(SERVER_ANSWER_MS);
+    // Whatever the server answers to this pick-up is not what the drop below is about: let it arrive, then clear it.
+    await serverQuiet(subject, "after the pick-up of the second stack");
     recording.answers.splice(0);
     stopAgain();
     again.close();

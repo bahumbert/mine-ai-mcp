@@ -7,8 +7,8 @@ import type { ContractFixture } from "./checks.ts";
 /** Entity ids the fixture's entities get on the fake (the bot is 1). */
 const FIRST_FIXTURE_ENTITY_ID = 100;
 
-/** The fixture's world on the fake: the cells, stacks and feet as given, moved into the lane, the floor at the fake's default ground; `server` sets how the fake server behaves (it starts with the fixture's day time and weather). */
-export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, server: Omit<FakeServerOptions, "lagMs"> = {}) {
+/** The fixture's world on the fake: the cells, stacks and feet as given, moved into the lane, the floor at the fake's default ground; `server` sets how the fake server behaves (it starts with the fixture's day time and weather); every server answer takes `lagMs` of clock. */
+export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, server: Omit<FakeServerOptions, "lagMs"> = {}, lagMs = 0) {
   const point = (local: readonly [number, number, number]) => new Vec3(...frame.world(local));
   const entities: Record<number, FakeEntitySpec> = {};
   (fixture.entities ?? []).forEach(({ name, position, passengers }, index) => {
@@ -24,6 +24,7 @@ export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, serv
     carried: fixture.carried,
     containers: inLane(fixture.containers),
     entities,
+    lagMs,
     server: { timeOfDay: fixture.timeOfDay, weather: fixture.weather, ...server },
   });
 }

@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import type { ContractSubject, LocalPoint } from "../subject.ts";
 import type { ContractCheck } from "../checks.ts";
+import { afterClientTicks, afterServerTicks, serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 
 /** The dry target beside the feet, the wet one above it at eye level, and the head cell the water goes into. */
@@ -16,8 +17,10 @@ const HEAD_CELL = [0, -59, 0] as const;
  * the server run of 2026-10-21), so only the dig is timed; its end is read within a tick or two.
  */
 const DIG_SLACK_MS = 150;
-/** A server that disagreed with the dig time sends the block back within a round trip. */
-const SERVER_KEEPS_MS = 1_000;
+/** Server ticks the water takes to flow from the head cell down to the feet and the pocket (vanilla: 5 ticks a step, two steps; unmeasured here). */
+const WATER_FLOW_TICKS = 10;
+/** The client's physics ticks the body needs to settle in the water (or float against the roof) before the dig reads its inputs: a second of the client's 20 a second. */
+const BODY_SETTLE_CLIENT_TICKS = 20;
 /** A dig under water by hand is slow (dirt 3.75 s; airborne too, 18.75 s): the bound covers both. */
 const DIG_WALL_MS = 25_000;
 /** Mineflayer's (and the game's) factor for the eye in water without Aqua Affinity. */
@@ -41,7 +44,8 @@ async function digAndCheck(subject: ContractSubject, local: LocalPoint, label: s
   assert.ok(settled !== null && settled.error === undefined, `${label} dig: ${settled?.error?.message ?? "never ended"}`);
   const tookMs = settled.atMs - startedAt;
   assert.ok(tookMs >= expectedMs && tookMs <= expectedMs + DIG_SLACK_MS, `${label} dig took ${Math.round(tookMs)} ms: digTime ${expectedMs} + 0..${DIG_SLACK_MS}`);
-  await subject.wait(SERVER_KEEPS_MS);
+  // The dig itself is the measured wait (above). A server that disagreed with the dig time sends the block back within its ticks.
+  await serverQuiet(subject, `${label}: after the dig`);
   assert.notEqual(bot.blockAt(target)?.name, "dirt", `${label}: the server put the dirt back (it disagreed with the dig time)`);
   return expectedMs;
 }
@@ -62,8 +66,9 @@ export const digTimeAndUpdate: ContractCheck = {
   async run(subject) {
     const dryMs = await digAndCheck(subject, DRY_TARGET, "dry");
     await subject.setBlock(subject.world(HEAD_CELL), "water");
-    // Let the water reach the feet and the body settle (or float against the roof) before the dig reads its inputs.
-    await subject.wait(1_000);
+    // The water flows from the head cell to the feet and into the glass pocket over server ticks (5 a step), then the body settles in it (or floats against the roof) by the client's physics: both are over before the dig reads its inputs.
+    await afterServerTicks(subject, WATER_FLOW_TICKS, "the water flowing to the feet");
+    await afterClientTicks(subject, BODY_SETTLE_CLIENT_TICKS, "the body in the water");
     const wetMs = await digAndCheck(subject, WET_TARGET, "eye in water");
     assert.ok(wetMs >= EYE_IN_WATER_FACTOR * dryMs, `eye-in-water dig time ${wetMs} ms, under ${EYE_IN_WATER_FACTOR}x the dry ${dryMs} ms`);
   },

@@ -10,11 +10,18 @@
  * hears its velocity, then a position packet of zero, then the regular ones; it flies away and no packet names an owner. The check runs
  * with no block broken (`mobGriefing` off in the subject while a ball flies): the fake models no crater, and a ball that is not
  * removed flies on into other lanes, so the subject removes them after.
+ *
+ * The update gaps and the first update's delay are asserted in wall milliseconds: the packets carry no world age (the age comes one
+ * packet per 20 ticks, too coarse for a 10-tick gap), so ticks cannot stand in for them. That is sound only on a server no other lane
+ * stalls (a lane's `clone` freezes the server thread 0.16-0.9 s and the catch-up ticks then run back to back), so the check stays
+ * `exclusive` (its own server, run under the calm rule) and keeps its wall intervals for that reason too.
+ * Every other wait here is for a packet that arrives, the client's own physics ticks, or server ticks before an absence.
  */
 import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { afterClientTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 import { type DamageEvent, type HealthPacket, TICK_MS, damageTypeId } from "./combat-scene.ts";
 import { type LoggedPacket, type PacketLog, logPackets } from "./packet-log.ts";
@@ -43,6 +50,10 @@ const COST_TOLERANCE = 0.1;
 /** Natural regeneration heals 1 every 10 ticks and its `update_health` can share the hit's tick: the packet before the hit then lacks it, and the hit looks 1 cheaper. */
 const REGENERATED_IN_THE_TICK = 1;
 const DAMAGE_TO_EXPLOSION_MS = TICK_MS * 2;
+/** A forced look is sent by the client's next physics tick; two make sure it went out, and the server reads packets in order, so the hit that follows has the look. */
+const LOOK_SENT_CLIENT_TICKS = 2;
+/** The client's physics ticks the bot's knockback from the blast takes to end (the 500 ms this was). */
+const KNOCKBACK_CLIENT_TICKS = 10;
 
 /** The ball's speed `ticks` ticks after a start at `speed`: `v = (v + power) * 0.95`, steady at `power * 0.95 / 0.05`. */
 function speedAfter(ticks: number, speed: number, power: number): number {
@@ -81,7 +92,7 @@ export const deflectFireball: ContractCheck = {
   name: "deflect-fireball",
   fixture: { cells: {}, carried: {}, position: [0.5, -60, 0.5], difficulty: "easy" },
   withoutRuntime: true,
-  exclusive: "the ball's blast must break no block, so the subject turns the mobGriefing game rule off (a server-wide rule) while a fireball flies; a ball that is missed flies on into other lanes",
+  exclusive: "the ball's blast must break no block, so the subject turns the mobGriefing game rule off (a server-wide rule) while a fireball flies; a ball that is missed flies on into other lanes; and the check asserts the ball's update gaps in wall ms, which another lane's clone stall would break",
   async run(subject) {
     try {
       await hitOutOfReach(subject);
@@ -96,7 +107,7 @@ async function hitOutOfReach(subject: Parameters<ContractCheck["run"]>[0]): Prom
   const { bot } = subject;
   const feet = bot.entity.position.clone();
   await bot.lookAt(feet.offset(5, 1.62, 0), true);
-  await subject.wait(300);
+  await afterClientTicks(subject, LOOK_SENT_CLIENT_TICKS, "the look sent");
   const healthBefore = bot.health;
   const log = logPackets(subject, NAMES);
   try {
@@ -104,7 +115,8 @@ async function hitOutOfReach(subject: Parameters<ContractCheck["run"]>[0]): Prom
     const spawnedAtMs = log.sinceStartMs();
     bot.attack(ball);
     assert.ok(await goneWithin(subject, ball, ARRIVAL_WALL_MS), "the ball that was out of reach never reached the bot");
-    await subject.wait(TICK_MS * 4);
+    // The hit's packets came in the ball's last tick, before its removal; the wait is for the log to hold them, not for 4 ticks of wall time.
+    await answerArrives(subject, () => hitAnswered(log, bot.entity.id), "the packets of the ball's hit on the bot");
     const zero = log.packets.find(({ name, packet }) => name === "rel_entity_move" && packet.entityId === ball.id);
     assert.ok(zero !== undefined && zero.packet.dX === 0 && zero.packet.dY === 0 && zero.packet.dZ === 0, "a move of zero comes first");
     const updates = updatesOf(log, ball, spawnedAtMs + SPAWN_PACKETS_MS);
@@ -131,14 +143,20 @@ async function hitOutOfReach(subject: Parameters<ContractCheck["run"]>[0]): Prom
   } finally {
     log.stop();
   }
-  await subject.wait(TICK_MS * 10);
+  await afterClientTicks(subject, KNOCKBACK_CLIENT_TICKS, "the knockback of the blast");
+}
+
+/** Whether the log holds the bot's `damage_event`, an `explosion` and the `update_health` that came with the hit or after it. */
+function hitAnswered(log: PacketLog, botId: number): boolean {
+  const hit = log.packets.find(({ name, packet }) => name === "damage_event" && packet.entityId === botId);
+  return hit !== undefined && log.packets.some(({ name }) => name === "explosion") && log.packets.some(({ name, atMs }) => name === "update_health" && atMs >= hit.atMs);
 }
 
 async function hitInReach(subject: Parameters<ContractCheck["run"]>[0]): Promise<void> {
   const { bot } = subject;
   const feet = bot.entity.position.clone();
   await bot.lookAt(feet.offset(5, 1.62, 0), true);
-  await subject.wait(300);
+  await afterClientTicks(subject, LOOK_SENT_CLIENT_TICKS, "the look sent");
   const healthBefore = bot.health;
   const log = logPackets(subject, NAMES);
   try {
@@ -146,9 +164,16 @@ async function hitInReach(subject: Parameters<ContractCheck["run"]>[0]): Promise
     const startX = ball.position.x;
     const hitAtMs = log.sinceStartMs();
     bot.attack(ball);
-    await subject.wait(FLIGHT_AFTER_HIT_MS);
-    const own = log.packets.filter(({ packet }) => packet.entityId === ball.id);
-    const deflected = own.find(({ name, atMs, packet }) => name === "entity_velocity" && atMs >= hitAtMs && (packet.velocity as { x: number }).x > 0);
+    const ownPackets = () => log.packets.filter(({ packet }) => packet.entityId === ball.id);
+    const deflectedOf = () => ownPackets().find(({ name, atMs, packet }) => name === "entity_velocity" && atMs >= hitAtMs && (packet.velocity as { x: number }).x > 0);
+    // The ball is flown away once it was set flying and updated twice; the absences below (no owner, no hurt) are read after server ticks on top.
+    await holdsWithin(subject, () => {
+      const first = deflectedOf();
+      return first !== undefined && updatesOf(log, ball, first.atMs).length >= 2 && ball.position.x - startX >= FLOWN_AWAY_BLOCKS;
+    }, FLIGHT_AFTER_HIT_MS);
+    await serverQuiet(subject, "after the ball flew away");
+    const own = ownPackets();
+    const deflected = deflectedOf();
     assert.ok(deflected !== undefined && deflected.atMs - hitAtMs <= TICK_MS * 3, `the ball's new velocity came ${deflected === undefined ? "never" : `${deflected.atMs - hitAtMs} ms after the hit`}`);
     const velocity = deflected.packet.velocity as { x: number; y: number; z: number };
     assert.ok(Math.abs(velocity.x / VELOCITY_UNIT - 1) <= DEFLECT_VELOCITY_TOLERANCE && Math.abs(velocity.y) / VELOCITY_UNIT <= DEFLECT_VELOCITY_TOLERANCE && Math.abs(velocity.z) / VELOCITY_UNIT <= DEFLECT_VELOCITY_TOLERANCE, `the deflected velocity ${JSON.stringify(velocity)} is not 1 along her look`);

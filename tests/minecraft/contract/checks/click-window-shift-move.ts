@@ -5,9 +5,9 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { answerSettled, serverQuiet } from "../server-answer.ts";
 import { recordWindowPackets, slotsOf } from "../window-packets.ts";
 
-const SERVER_ANSWER_MS = 1_000;
 /** 64 dirt in slot 36, 6 in slot 37. */
 const CARRIED = { dirt: 70 };
 const WATCHED = [9, 10, 36, 37, 38];
@@ -19,13 +19,14 @@ export const clickWindowShiftMove: ContractCheck = {
   // Bare bot: our runtime manages the inventory and would act on the windows.
   withoutRuntime: true,
   fixture: { cells: {}, carried: CARRIED, position: [0.5, -60, 0.5] },
-  async run({ bot, wait }) {
+  async run(subject) {
+    const { bot } = subject;
     const slots = () => slotsOf(bot.inventory, WATCHED);
     assert.deepEqual(slots(), { 9: null, 10: null, 36: "dirt x64", 37: "dirt x6", 38: null });
     const recording = recordWindowPackets(bot);
     await bot.clickWindow(FIRST_HOTBAR_SLOT, 0, 1);
     assert.deepEqual(slots(), { 9: "dirt x6", 10: null, 36: null, 37: "dirt x64", 38: null }, "Prismarine predicts the 64 merged into the 6 and the 6 moved to the first main slot");
-    await wait(SERVER_ANSWER_MS);
+    await answerSettled(subject, () => recording.packets.length >= 2, "the server's corrections of the shift click");
     assert.deepEqual(slots(), { 9: "dirt x64", 10: null, 36: null, 37: "dirt x6", 38: null }, "the server moved the 64 to the first free main slot");
     assert.deepEqual(
       recording.packets.splice(0),
@@ -33,7 +34,7 @@ export const clickWindowShiftMove: ContractCheck = {
       "and corrected the two slots the claim had wrong",
     );
     await bot.clickWindow(FIRST_MAIN_SLOT, 0, 1);
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the shift click back");
     recording.stop();
     assert.deepEqual(slots(), { 9: null, 10: null, 36: "dirt x6", 37: "dirt x64", 38: null }, "the 64 back on the hotbar: merged into the 6 (up to 64, 6 left over), the rest in the first free hotbar slot");
     assert.deepEqual(recording.packets, [], "the client had predicted that move right");

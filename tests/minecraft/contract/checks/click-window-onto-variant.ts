@@ -7,10 +7,10 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { answerSettled, serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, variantStackOf } from "../window-packets.ts";
 
-const SERVER_ANSWER_MS = 1_000;
 const OPEN_WALL_MS = 5_000;
 /** The chest's cell in the fixture's frame; `subject.world` moves it to the lane. */
 const CHEST = [0, -60, 0] as const;
@@ -30,7 +30,7 @@ export const clickWindowOntoVariant: ContractCheck = {
     position: [-4.5, -60, 0.5],
   },
   async run(subject) {
-    const { bot, wait } = subject;
+    const { bot } = subject;
     const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
     const window = opened.value;
@@ -39,13 +39,13 @@ export const clickWindowOntoVariant: ContractCheck = {
     const RENAMED = 'cobblestone x5 "first"';
 
     await bot.clickWindow(RENAMED_SLOT, 0, 0);
-    await wait(SERVER_ANSWER_MS);
+    await serverQuiet(subject, "after the click that takes the renamed stack");
     assert.deepEqual(seen(), { renamedSlot: null, plainSlot: "cobblestone x4", cursor: RENAMED }, "the renamed stack is on the cursor, on both sides");
     assert.deepEqual(recording.packets.splice(0), [], "the server agreed: nothing is sent back");
 
     await bot.clickWindow(PLAIN_SLOT, 0, 0);
     assert.deepEqual(seen(), { renamedSlot: null, plainSlot: "cobblestone x9", cursor: null }, "Prismarine predicts a merge: nbt is null on both");
-    await wait(SERVER_ANSWER_MS);
+    await answerSettled(subject, () => recording.packets.length >= 2, "the slot and cursor corrections of the click onto the plain stack");
     assert.deepEqual(seen(), { renamedSlot: null, plainSlot: RENAMED, cursor: null }, "the server swapped: the renamed stack lies in the slot; the client's cursor stays empty");
     assert.deepEqual(
       recording.packets.splice(0),
@@ -55,7 +55,7 @@ export const clickWindowOntoVariant: ContractCheck = {
 
     await bot.clickWindow(RENAMED_SLOT, 0, 0);
     assert.deepEqual(seen(), { renamedSlot: null, plainSlot: RENAMED, cursor: null }, "the client sees a click on an empty slot with an empty hand: nothing");
-    await wait(SERVER_ANSWER_MS);
+    await answerSettled(subject, () => recording.packets.length >= 1, "the slot correction of the click on the emptied slot");
     recording.stop();
     assert.deepEqual(seen(), { renamedSlot: "cobblestone x4", plainSlot: RENAMED, cursor: null }, "the server put the plain stack it still held in the emptied slot");
     assert.deepEqual(recording.packets, [{ name: "set_slot", windowId: WINDOW_ID, slot: RENAMED_SLOT }], "and told the slot only: its cursor is empty now, as the client believes");
