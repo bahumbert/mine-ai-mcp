@@ -270,11 +270,14 @@ export class TradeController implements BoardPeer {
     return trade === undefined ? null : this.leftToGiveOf(trade);
   }
 
-  /** How a trade ended (its state, or "gone" when the book has no such trade); null while it is open. */
+  /**
+   * How a trade closed before my side was given (its state, or "gone" when the book has no such trade); null while it
+   * is open, or once my side was given (done, or a give made outside the hand-off).
+   */
   closedAs(tradeId: string): string | null {
     const trade = this.find(tradeId);
     if (trade === undefined) return "gone";
-    return isOpen(trade) ? null : trade.state;
+    return isOpen(trade) || trade.state === "done" || trade.gaveAt !== null ? null : trade.state;
   }
 
   /** A hand-off found nothing left to give: the agent ended it, so it is no longer pending (no retake clock). */

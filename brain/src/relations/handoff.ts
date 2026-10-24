@@ -1,9 +1,9 @@
 // The hand-off routines of a trade, as code (no work-tier call): give my side with `give_item`, or collect theirs from the ground.
 import type { Clock } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
+import type { Position } from "../runtime-client.ts";
 import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import { carriedOf, sideText } from "./items.ts";
-import type { Position } from "../runtime-client.ts";
 import type { ItemCount } from "./types.ts";
 
 /** How far around itself a collect looks for the partner's items. */
@@ -13,8 +13,6 @@ export const COLLECT_RADIUS = 6;
  * level toss's ~4.3 block slide. Centred on the giver itself, 6 missed them (Mine Labs hand-over-walks-off: it walks off).
  */
 export const PICK_BACK_RADIUS = 8;
-/** A pick-up that found no matching item on the ground: the toss is gone (taken), not lying there. */
-const NOTHING_ON_GROUND = "[NO_MATCHING_ITEMS]";
 /** How often a wait for the partner's payment looks at whether it came. */
 const AWAIT_POLL_MS = 1_000;
 const MINUTE_MS = 60_000;
@@ -64,7 +62,7 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
     }
     // The server sends no packet for every pickup (a partial one into a nearly full inventory): the count seen is no proof of what is left, the pick-back is.
     const pickBack = await pickBackCount(context, partner, item, count, droppedAt);
-    if (context.signal.aborted) return { status: "stopped" };
+    if (context.signal.aborted || "interrupted" in pickBack) return { status: "stopped" };
     // A pick-back that did not look properly says nothing about what the partner took: no credit, the give stays due.
     if ("unknown" in pickBack) return { status: "failed", detail: `could not pick back the ${item} ${partner} may not have taken (${pickBack.unknown})` };
     const { back } = pickBack;
@@ -77,18 +75,33 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
   return { status: "done", detail: `gave ${sideText(items)} to ${partner}${unconfirmed.length > 0 ? ` (${sideText(unconfirmed)} not confirmed taken: ${doubt})` : ""}` };
 }
 
+type PickBack = { readonly back: number } | { readonly unknown: string } | { readonly interrupted: true };
+
 /**
  * How many of the item the pick-up around the toss spot got back after a toss that was not all seen taken (carried
- * after minus carried before); unknown when it could not look (no toss spot, a failure other than an empty ground).
+ * after minus carried before). Nothing seen, or every item seen gone before it got there, means taken. Unknown when it
+ * could not look (no toss spot, an item it could not reach or had no room for, no evidence); interrupted when the
+ * pick-up was refused or cancelled (the body taken by another owner): no give failure.
  */
-async function pickBackCount(context: SkillContext, partner: string, item: string, left: number, at: Position | null): Promise<{ readonly back: number } | { readonly unknown: string }> {
+async function pickBackCount(context: SkillContext, partner: string, item: string, left: number, at: Position | null): Promise<PickBack> {
   if (at === null) return { unknown: "the toss result named no spot" };
   const before = carriedOf((await context.runtime.status()).inventory, item);
   const outcome = await context.body.act("pick_up_items", { item, x: at.x, y: at.y, z: at.z, radius: PICK_BACK_RADIUS }, `Pick up the ${item} ${partner} did not take.`, { signal: context.signal });
   if (context.signal.aborted) return { back: 0 };
+  if (outcome.preempted || outcome.status === "refused" || outcome.status === "cancelled") return { interrupted: true };
   const back = Math.min(left, Math.max(0, carriedOf((await context.runtime.status()).inventory, item) - before));
-  if (back > 0 || outcome.status === "succeeded" || outcome.error?.startsWith(NOTHING_ON_GROUND) === true) return { back };
-  return { unknown: outcome.error ?? `pick_up_items ${outcome.status}` };
+  if (back > 0 || outcome.status === "succeeded") return { back };
+  const fates = sightingOutcomes(outcome.result);
+  const why = outcome.error ?? `pick_up_items ${outcome.status}`;
+  if (fates === null) return { unknown: why };
+  const stuck = fates.find((fate) => fate !== "collected" && fate !== "gone_unconfirmed");
+  return stuck === undefined ? { back } : { unknown: `${stuck}: ${why}` };
+}
+
+/** What became of each item the pick-up saw (`pickup.sightings[].outcome`); null when the result names no sightings. */
+function sightingOutcomes(result: Readonly<Record<string, unknown>> | undefined): string[] | null {
+  const sightings = (result?.pickup as { sightings?: unknown } | undefined)?.sightings;
+  return Array.isArray(sightings) ? sightings.map((s) => String((s as { outcome?: unknown }).outcome)) : null;
 }
 
 const notTaken = (partner: string, left: ItemCount): SkillResult =>

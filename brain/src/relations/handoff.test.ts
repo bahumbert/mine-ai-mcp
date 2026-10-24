@@ -217,33 +217,56 @@ test("a toss lying at the feet is not 'taken' even when someone else took it: on
   assert.equal(ended.outcome, "not_taken");
 });
 
-test("a pick-back that finds nothing means the items are gone from the ground: credited as given, not confirmed, never given twice", async () => {
-  const runtime = new FakeRuntime();
-  near(runtime);
-  runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
-  runtime.failures.pick_up_items = "[NO_MATCHING_ITEMS] No matching loaded dropped items were observed in the area.";
-  const taken: ItemCount[] = [];
-  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
-  assert.equal(ended.outcome, "done");
-  assert.match(ended.detail, /4 oak_log not confirmed taken/u);
-  assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
-  assert.equal(dropCalls(runtime), 1);
-});
+/** A pick-back that gained nothing, with the runtime's evidence of what it saw (`pickup.sightings`). */
+const pickBackFails = (runtime: FakeRuntime, error: string, sightings: readonly string[] | null): void => {
+  runtime.failures.pick_up_items = error;
+  if (sightings !== null) runtime.failureResults.pick_up_items = { pickup: { observed: sightings.length, sightings: sightings.map((outcome, id) => ({ id, item: "oak_log", observedCount: 4, outcome })) } };
+};
+const giveFourLogs = async (runtime: FakeRuntime, taken: ItemCount[]) =>
+  handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
 
-for (const error of ["[NO_CONFIRMED_PICKUP] No inventory gain confirmed a pickup.", "[RECOVERY_SITE_UNREACHABLE] no path"]) {
-  test(`a pick-back that fails with ${error.split(" ")[0]} says nothing about the partner: nothing credited, the give fails and stays due`, async () => {
+for (const [why, error, sightings] of [
+  ["sees nothing", "[NO_MATCHING_ITEMS] No matching loaded dropped items were observed in the area.", []],
+  ["sees the toss vanish before it gets there (someone took it)", "[NO_CONFIRMED_PICKUP] No inventory gain confirmed a pickup.", ["gone_unconfirmed"]],
+] as const) {
+  test(`a pick-back that ${why} reads the items as gone: credited as given, not confirmed, never given twice`, async () => {
     const runtime = new FakeRuntime();
     near(runtime);
     runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
-    runtime.failures.pick_up_items = error;
+    pickBackFails(runtime, error, sightings);
     const taken: ItemCount[] = [];
-    const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
+    const ended = await giveFourLogs(runtime, taken);
+    assert.equal(ended.outcome, "done");
+    assert.match(ended.detail, /4 oak_log not confirmed taken/u);
+    assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
+    assert.equal(dropCalls(runtime), 1);
+  });
+}
+
+for (const [why, sightings] of [["could not reach the toss", ["unreachable"]], ["had no room", ["inventory_full"]], ["names no evidence", null]] as const) {
+  test(`a pick-back that ${why} says nothing about the partner: nothing credited, the give fails and stays due`, async () => {
+    const runtime = new FakeRuntime();
+    near(runtime);
+    runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
+    pickBackFails(runtime, "[NO_CONFIRMED_PICKUP] No inventory gain confirmed a pickup.", sightings);
+    const taken: ItemCount[] = [];
+    const ended = await giveFourLogs(runtime, taken);
     assert.equal(ended.outcome, "failed");
     assert.match(ended.detail, /could not pick back the oak_log Theo may not have taken/u);
     assert.deepEqual(taken, []);
     assert.equal(dropCalls(runtime), 1);
   });
 }
+
+test("a pick-back the runtime refuses (the body taken by another owner) is an interruption: dropped, nothing credited, no give failure", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.dropOutcomes.push({ ...tossed("oak_log", 4, 0), effect: () => { runtime.refuseNext = { state: "refused", code: "NOT_CONNECTED", error: "offline", activeActionId: null, unretrievedActionId: null }; } });
+  const taken: ItemCount[] = [];
+  const ended = await giveFourLogs(runtime, taken);
+  assert.equal(ended.outcome, "dropped");
+  assert.deepEqual(taken, []);
+});
 
 test("the pick-back searches around where the toss was made, not around the giver who walked off after it", async () => {
   const runtime = new FakeRuntime();

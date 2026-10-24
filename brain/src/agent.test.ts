@@ -1870,6 +1870,28 @@ test("a queued give for a trade broken meanwhile ends failed, naming the trade o
   assert.deepEqual(finished, [["failed", "the trade with Theo is over (broken): nothing given"]]);
 });
 
+test("a queued give for a trade that ended done meanwhile (given outside the hand-off) ends done 'already handed over', never 'nothing given'", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations; takeHandoff(h: Handoff): void };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  const id = inside.relations.book.trades()[0]!.id;
+  // They paid, then another objective's give_item paid my side: the trade is done before the queued give runs.
+  await inside.relations.book.update("Theo", (r) => ({ ...r, trades: r.trades.map((trade) => ({ ...trade, state: "done" as const, gaveAt: 1 })) }));
+  inside.takeHandoff({ kind: "give", tradeId: id, partner: "Theo", items: [{ item: "bread", count: 5 }] });
+  await until(() => action.requests.length === 2, 4_000);
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"), "no give_item call");
+  const finished = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("hand over") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(finished, [["done", "already handed over"]]);
+});
+
 test("an agreed trade where they pay first sets the own objective aside for a wait; the payment ends it, the give follows and the objective resumes", async (t) => {
   const runtime = tradingRuntime();
   runtime.durations.collect_block = 100_000;
