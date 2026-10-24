@@ -22,8 +22,18 @@ export interface ScenarioServerConfig {
   readonly singleHeapMb: number;
   /** A shared server takes no more lanes once its resident size passes this share of heap + overhead. */
   readonly rssFull: number;
+  /** Trials at once a batch may start with: 28 covers the contract batch (52 checks, about 780 s of lane time) in 30 s with a tail (plan T7c item 10, an estimate). */
   readonly targetStart: number;
+  /** The target grows only after this long without a breach of any bound. */
   readonly growAfterMs: number;
+  /** ...and then by one per this long while a trial waits at the target. */
+  readonly growEveryMs: number;
+  /** A cpu breach halves the target only when our process tree used at least this share of the busy cpu; below it the load is foreign. */
+  readonly ownShareHalve: number;
+  /** Mutex time per trial (its arrangement plus its restore) assumed for a server until it has settled 3 trials (T7b: about 0.8 s). */
+  readonly arrangeHoldMs: number;
+  /** A shared server takes no lane that would wait longer than this for its arrangement turn: the next server of the key takes it. */
+  readonly arrangeQueueMs: number;
   readonly waitReportMs: number;
   readonly serverIdleMs: number;
   readonly daemonIdleMs: number;
@@ -55,8 +65,12 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   sharedHeapMb: ["SHARED_HEAP_MB", 3_072],
   singleHeapMb: ["SINGLE_HEAP_MB", 2_048],
   rssFull: ["RSS_FULL", 0.85, 1],
-  targetStart: ["TARGET_START", 10],
+  targetStart: ["TARGET_START", 28],
   growAfterMs: ["GROW_AFTER_MS", 60_000],
+  growEveryMs: ["GROW_EVERY_MS", 15_000],
+  ownShareHalve: ["OWN_SHARE_HALVE", 0.5, 1],
+  arrangeHoldMs: ["ARRANGE_HOLD_MS", 800],
+  arrangeQueueMs: ["ARRANGE_QUEUE_MS", 5_000],
   waitReportMs: ["WAIT_REPORT_MS", 30_000],
   serverIdleMs: ["SERVER_IDLE_MS", 120_000],
   daemonIdleMs: ["DAEMON_IDLE_MS", 600_000],

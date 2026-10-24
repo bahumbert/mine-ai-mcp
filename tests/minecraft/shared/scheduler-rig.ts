@@ -33,13 +33,17 @@ export class SchedulerRig {
   readonly scheduler: Scheduler;
   readonly running: RunningTrial[] = [];
   readonly events: SubmissionEvent[] = [];
+  /** Every line the pool and the scheduler logged. */
+  readonly logs: string[] = [];
+  /** While set, a trial's arrangement does not finish: the trial counts in its server's mutex queue until the gate opens. */
+  arrangeGate: Promise<void> | null = null;
   clock = 100_000;
 
   constructor(env: Record<string, string> = {}) {
     this.config = loadScenarioServerConfig({ ...TEST_CONFIG_ENV, ...env });
-    this.pool = new ServerPool(this.factory, this.config, () => {});
+    this.pool = new ServerPool(this.factory, this.config, message => this.logs.push(message));
     this.scheduler = new Scheduler({
-      pool: this.pool, config: this.config, now: () => this.clock, log: () => {},
+      pool: this.pool, config: this.config, now: () => this.clock, log: message => this.logs.push(message),
       runTrial: input => this.#runTrial(input),
       runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
     });
@@ -47,7 +51,11 @@ export class SchedulerRig {
 
   #runTrial(input: TrialRunInput): Promise<RunResult> {
     return new Promise(resolve => {
-      void input.onPrepared().then(() => {
+      void (async () => {
+        await this.arrangeGate;
+        await input.onArranged();
+        await input.onPrepared();
+      })().then(() => {
         input.deferReset(async () => {});
         this.running.push({
           input,
@@ -61,7 +69,7 @@ export class SchedulerRig {
   }
 
   /** One admission sample, by default of an idle, roomy machine. */
-  sample(overrides: { cpuBusy?: number | null; memAvailableMb?: number } = {}): void {
+  sample(overrides: { cpuBusy?: number | null; ownCpu?: number | null; memAvailableMb?: number } = {}): void {
     this.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 28_000, threads: 24, ...overrides }, this.clock);
   }
 

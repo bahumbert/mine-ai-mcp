@@ -219,16 +219,39 @@ key** (world type, seed, time, difficulty, tick rate and the effective value of 
 scenario on a **lane** of such a server: the scenario is shifted to `z = 512 × lane` (`tests/minecraft/arena/`), so
 many arenas share one world. A scenario the shift refuses (a natural `default` world, a settings verb it cannot
 lift, a `kill` goal, tag `exclusive`...) gets a server of its own at offset 0, started at the same time as the others.
+A scenario whose client is not `tests/minecraft/client-host.ts` (every legacy `scenarios/` YAML: its driver does not
+read the arena frame, so its coordinates would stay at offset zero) also gets a server of its own; the daemon log
+names the reason (`placement.ts`, T7e4). The next scenario on a reusable server of its own logs in under another player
+name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or hotbar slot is saved from its predecessor.
 
 - **Admission is detected, never a fixed count.** Every 5 s the daemon reads each server's tick time P95 (`tick query`),
   the CPU busy share (`/proc/stat`) and `MemAvailable`, and starts a trial (and a new server for it, at most one per
   sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what servers and young
-  clients still have to grow into) covers the client, the concurrency target (starts at 10, halves on a machine breach,
-  grows by one after 60 s of held bounds) is not reached. With none of its own trials running the daemon admits one
-  whatever the foreign load. Submissions take turns (a batch never waits behind another's whole queue), and a trial
-  that has waited 3 samples for room for a new server keeps that room from the trials after it. A trial that waits
-  prints the bound that holds it every 30 s. Constants and their env
-  overrides (`MINE_AI_SCENARIO_*`): `tests/minecraft/shared/config.ts`.
+  clients still have to grow into) covers the client, the concurrency target (starts at 28, see below) is not reached.
+  With none of its own trials running the daemon admits one whatever the foreign load. Submissions take turns (a batch
+  never waits behind another's whole queue), and a trial that has waited 3 samples for room for a new server keeps
+  that room from the trials after it. A trial that waits prints the bound that holds it every 30 s. Constants and their
+  env overrides (`MINE_AI_SCENARIO_*`): `tests/minecraft/shared/config.ts`.
+- **The target follows demand and our own load.** It grows by one when, in the last pass, a queued trial was refused
+  by the target alone, no bound was breached for 60 s (`GROW_AFTER`), the last growth is 15 s old (`GROW_EVERY`) and the
+  cpu projected with one more trial of ours stays under 85 %; it has no ceiling of its own. A cpu breach with our trials
+  running halves it only when the daemon's own process tree (itself, the java servers, the clients) used at least half of
+  the busy cpu (`OWN_SHARE_HALVE`, read from `/proc/<pid>/stat`); under that the load is other workers' and only the
+  cpu bound holds admission (log `target change: foreign load`). A full memory ledger leaves the target alone (it refuses admissions itself, and stops growth).
+- **A shared server takes no lane that would wait too long for the arrangement turn.** One arrangement or restore at a
+  time per server: a lane trial counts on its server's queue from admission until its arrangement is done, and again
+  while its restore is queued or running. A server whose queue would make the next trial wait over 5 s
+  (`ARRANGE_QUEUE_MS`; the median mutex time of its last 20 trials, 800 ms until 3 trials settled) is passed over, so
+  the next server of the key (a new one, when memory allows) takes the trial; when no new server can start, the trial
+  takes the server with the shortest queue rather than wait.
+- **The daemon log** (`.tmp/scenario-server/daemon.log`) has, per sample, `sample: ... | cpu= own= load1= mem= ledger=
+  target= running= queued= servers= starts= held=<bound:count,...>` (and `target change: halved|foreign load|grew`),
+  per settled trial `trial <name> lane <k|own> server <id> queue= serverWait= mutexWait= arrange= join= trial=
+  restoreWait= restore= hold=` (ms: submission to admission, server not yet ready, the six phases of the run log, admission
+  to the lane's return), and per server `server <id> (...) starting: <reason>` / `stopping: <reason>`.
+- **Killing the submitter ends its trials, not the daemon.** `submit` going away (Ctrl-C, `kill`, even `kill -9` of a
+  script that wraps it) closes its socket: the daemon cancels that submission's queued and running trials and goes on
+  serving the others; its servers stay warm for the next submit.
 - **A timing batch gets servers of its own, nothing global** (`--lock`, owner 2026-10-24). Scenarios that count ticks or
   world age (`world-age-per-second`, `attack-cooldown-damage`, the contract checks with a "measured bound") run with
   `--lock --lanes 1`: the daemon makes servers for that batch alone, gives them no trial of another submission, starts

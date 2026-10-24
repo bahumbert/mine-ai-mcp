@@ -47,7 +47,7 @@ export function shiftScenario(scenario: Scenario, lane: Lane): Shifted {
 
 function shiftInLane(scenario: Scenario, lane: Lane): Scenario {
   refuseWhatIsServerWide(scenario);
-  const renames = renamesOf(scenario, lane);
+  const renames = playerRenames(scenario, lane.index, lane.body);
   const walk: LaneWalk = {
     offset: lane.offset,
     rcon: { where: "rcon", cell: lane.cell, renames },
@@ -86,20 +86,21 @@ function refuseWhatIsServerWide(scenario: Scenario): void {
 }
 
 /**
- * Scenario player name -> lane name (`<name>L<lane><body>`, the name cut so the whole fits 16 characters). The body is
+ * Scenario player name -> lane name (`<name>L<lane><body>`, the name cut so the whole fits 16 characters; `laneIndex` 0
+ * is a server of its own, whose later scenarios take a fresh body the same way). The body is
  * part of the name because the server keeps a player's data by name: each trial of a lane logs in as a player the
  * server has never seen, so nothing a predecessor left on its body (air, hotbar slot, fall distance) reaches it. The
  * suffix length does not depend on the body, so every body of a lane cuts a name at the same place and a clash is
  * refused for all of them.
  */
-function renamesOf(scenario: Scenario, lane: Lane): Map<string, string> {
-  const suffix = `L${lane.index}${lane.body.toString(36).padStart(BODY_DIGITS, "0")}`;
+export function playerRenames(scenario: Scenario, laneIndex: number, body: number): Map<string, string> {
+  const suffix = `L${laneIndex}${body.toString(36).padStart(BODY_DIGITS, "0")}`;
   const renames = new Map<string, string>();
   const owners = new Map<string, string>();
   for (const { name } of scenario.players) {
     const renamed = name.slice(0, MAX_NAME_LENGTH - suffix.length) + suffix;
     const clash = owners.get(renamed);
-    if (clash !== undefined) throw new Refusal(`players '${clash}' and '${name}' are both '${renamed}' in lane ${lane.index}`);
+    if (clash !== undefined) throw new Refusal(`players '${clash}' and '${name}' are both '${renamed}' in lane ${laneIndex}`);
     owners.set(renamed, name);
     renames.set(name, renamed);
   }

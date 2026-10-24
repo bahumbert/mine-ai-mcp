@@ -25,22 +25,23 @@ const probeAnswers = (factory: FakeFactory): void => {
 };
 
 async function withDaemon(
-  run: (context: { daemon: Daemon; socketPath: string; factory: FakeFactory; dir: string }) => Promise<void>,
+  run: (context: { daemon: Daemon; socketPath: string; factory: FakeFactory; dir: string; logs: string[] }) => Promise<void>,
   overrides: { env?: Record<string, string>; runTrial?: TrialRunner } = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "daemon-"));
   const socketPath = join(dir, "d.sock");
   const factory = new FakeFactory();
+  const logs: string[] = [];
   probeAnswers(factory);
   const config = loadScenarioServerConfig({ MINE_AI_SCENARIO_SAMPLE_EVERY_MS: "20", MINE_AI_SCENARIO_SOCKET_PATH: socketPath, ...overrides.env });
   const daemon = await startDaemon({
-    socketPath, config, stateDir: join(dir, "state"), portBlock: { first: 25_400, last: 25_559 }, log: () => {},
+    socketPath, config, stateDir: join(dir, "state"), portBlock: { first: 25_400, last: 25_559 }, log: line => logs.push(line),
     factory, runTrial: overrides.runTrial ?? passing,
     machine: { read: async () => ({ cpuBusy: 0.1, memAvailableMb: 20_000, threads: 24 }) }, residentMbOf: async () => 900,
     runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
   });
   try {
-    await run({ daemon, socketPath, factory, dir });
+    await run({ daemon, socketPath, factory, dir, logs });
   } finally {
     await daemon.stop();
     await rm(dir, { recursive: true, force: true });
@@ -161,5 +162,16 @@ test("a --lock submit over the socket runs on a server of its own that the daemo
     assert.equal(shared.length, 3, "the probe, the plain batch's server and a third for the locked batch");
     for (let waited = 0; !shared[2]!.stopped && waited < 2_000; waited += 20) await new Promise(done => setTimeout(done, 20));
     assert.deepEqual(shared.map(server => server.stopped), [false, false, true]);
+  });
+});
+
+test("the daemon logs one sample line with the machine, the ledger, the target and the counts, and one trial line per settled trial", async () => {
+  await withDaemon(async ({ socketPath, logs }) => {
+    await submitAndCollect(socketPath, [ONE_FILE]);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const sample = logs.find(line => /sample: .* \| cpu=10% own=- load1=- mem=\d+ ledger=-?\d+ target=28 running=\d+ queued=\d+ servers=\d+ starts=\d+ held=/u.test(line));
+    assert.ok(sample, `no sample line in ${logs.join(" / ")}`);
+    assert.ok(logs.some(line => /^trial air-supply-under-water lane 1 server s\d+ queue=\d+ serverWait=\d+ mutexWait=\d+ arrange=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+ hold=\d+$/u.test(line)), "a trial line");
+    assert.ok(logs.some(line => /^server s\d+ \(shared, key .*\) starting: new key$/u.test(line)), "a start with its reason");
   });
 });

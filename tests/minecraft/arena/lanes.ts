@@ -15,7 +15,7 @@ export interface LaneCell {
   readonly maxZ: number;
 }
 
-/** A body number is written in base 36 on this many characters in the player's name (`renamesOf`). */
+/** A body number is written in base 36 on this many characters in the player's name (`playerRenames`). */
 export const BODY_DIGITS = 3;
 
 /** `zzz`: the last body a lane can hand out before its names would repeat. */

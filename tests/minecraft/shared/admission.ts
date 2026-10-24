@@ -17,6 +17,8 @@ export interface AdmissionSample {
   readonly at: number;
   /** Null on the first reading, which has no window yet. */
   readonly cpuBusy: number | null;
+  /** The share of the machine our process tree used over the same window; null or absent when it could not be read. */
+  readonly ownCpu?: number | null;
   readonly memAvailableMb: number;
   readonly threads: number;
   readonly servers: readonly ServerReading[];
@@ -35,20 +37,34 @@ export interface AdmissionTally {
 
 export const EMPTY_TALLY: AdmissionTally = { trials: 0, newServers: 0, reservedMb: 0 };
 
+/** What a shared server has queued on its arrangement mutex: trials admitted whose arrangement has not run, restores not done. */
+export interface ServerQueue {
+  readonly queued: number;
+  /** The mutex time one trial of this server takes (its arrangement plus its restore). */
+  readonly holdMs: number;
+}
+
 interface ServerBackoff { readonly overStopStreak: number; readonly backedOff: boolean; readonly goodSamples: number }
+
+/** What the last state advance did to the target, for the daemon log. */
+export type AdmissionEvent = "halved" | "foreign load" | "memory full" | "grew";
 
 export interface AdmissionState {
   readonly target: number;
-  readonly lastAdmissionAt: number | null;
+  /** The first sample: the 60 s without a breach that growth needs start here. */
+  readonly firstSampleAt: number | null;
   /** The last time a machine bound or a server bound was not held. */
   readonly lastBreachAt: number | null;
   readonly lastGrowAt: number | null;
   readonly servers: Readonly<Record<string, ServerBackoff>>;
+  readonly event: AdmissionEvent | null;
 }
 
 export interface AdmissionRequest {
   /** Ids of the servers that could take this trial (same key with a lane, or an idle reusable server). */
   readonly candidates: readonly string[];
+  /** The mutex queue of each shared candidate; a server not listed has none. */
+  readonly queues?: ReadonlyMap<string, ServerQueue>;
   /** Heap of the server a new start would create. */
   readonly newServerHeapMb: number;
   /** This trial measures time (a locked batch, a scenario tagged exclusive): it starts only on a calm machine. */
@@ -64,7 +80,7 @@ export type AdmissionDecision =
   | { readonly admit: false; readonly bound: AdmissionBound; readonly detail: string; readonly waitsForServerRoom: boolean };
 
 export function initialAdmissionState(config: ScenarioServerConfig): AdmissionState {
-  return { target: config.targetStart, lastAdmissionAt: null, lastBreachAt: null, lastGrowAt: null, servers: {} };
+  return { target: config.targetStart, firstSampleAt: null, lastBreachAt: null, lastGrowAt: null, servers: {}, event: null };
 }
 
 /** MemAvailable minus what servers and young clients are still going to take, minus what this sample admitted. */
@@ -87,6 +103,11 @@ function serverRefusal(reading: ServerReading | undefined, id: string, state: Ad
   return null;
 }
 
+/** What the next trial of a shared server would wait for its arrangement turn: every queued trial's mutex time, and its own. */
+function queueWaitMs(queue: ServerQueue | undefined, config: ScenarioServerConfig): number {
+  return ((queue?.queued ?? 0) + 1) * (queue?.holdMs ?? config.arrangeHoldMs);
+}
+
 function refusal(bound: AdmissionBound, detail: string, waitsForServerRoom = false): AdmissionDecision {
   return { admit: false, bound, detail, waitsForServerRoom };
 }
@@ -103,6 +124,12 @@ function cpuRefusalFor(sample: AdmissionSample, request: AdmissionRequest, runni
   if (!calmNeeded && running === 0) return null;
   if (sample.cpuBusy < bound) return null;
   return `cpu ${Math.round(sample.cpuBusy * 100)}% busy, the bound is ${Math.round(bound * 100)}%${calmNeeded ? ` for ${reason}` : ""}`;
+}
+
+/** No new server can start now: the trial takes the shared server with the fewest trials on its mutex queue (the first on a tie). */
+function shortestQueue(servers: readonly { readonly id: string; readonly queued: number }[], config: ScenarioServerConfig): AdmissionDecision {
+  const shortest = servers.reduce((best, next) => (next.queued < best.queued ? next : best));
+  return { admit: true, server: shortest.id, reserveMb: config.clientMemMb };
 }
 
 /** Admit the trial on a candidate server, on a new one, or refuse naming the bound that holds it. */
@@ -123,15 +150,22 @@ export function decideAdmission(input: {
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
   const refusals: string[] = [];
+  /** Servers refused only for their arrangement queue, a placement preference: they take the trial when no new server can start for memory. */
+  const queueFull: { readonly id: string; readonly queued: number }[] = [];
   for (const id of request.candidates) {
-    const refusal = serverRefusal(sample.servers.find(server => server.id === id), id, state, config);
-    if (!refusal) return { admit: true, server: id, reserveMb: config.clientMemMb };
-    refusals.push(refusal);
+    const reading = sample.servers.find(server => server.id === id);
+    const refusal = serverRefusal(reading, id, state, config);
+    if (refusal) { refusals.push(refusal); continue; }
+    const wait = reading?.shared ? queueWaitMs(request.queues?.get(id), config) : 0;
+    if (wait <= config.arrangeQueueMs) return { admit: true, server: id, reserveMb: config.clientMemMb };
+    queueFull.push({ id, queued: request.queues?.get(id)?.queued ?? 0 });
   }
   if (tally.newServers >= 1) {
+    if (queueFull.length > 0) return shortestQueue(queueFull, config);
     return refusal("new-server-per-sample", [...refusals, "a new server starts at most once per sample"].join("; "));
   }
   const needed = config.clientMemMb + request.newServerHeapMb + config.serverMemMarginMb;
+  if (available < needed && queueFull.length > 0) return shortestQueue(queueFull, config);
   if (available < needed) {
     const detail = `memory ledger ${available} MB does not cover a new server (${needed} MB)`;
     return refusal(refusals.length ? "server" : "memory", [...refusals, detail].join("; "), true);
@@ -150,37 +184,55 @@ function nextBackoff(previous: ServerBackoff | undefined, msptP95: number | null
     : { overStopStreak, backedOff: true, goodSamples };
 }
 
-/** Called once per sample: server back-off, target halving on a machine breach, +1 growth after GROW_AFTER of held bounds. */
+/** Our process tree used under OWN_SHARE_HALVE of the busy cpu: the breach is other workers' load, and halving our target would not cure it. */
+function cpuIsForeign(sample: AdmissionSample, config: ScenarioServerConfig): boolean {
+  const own = sample.ownCpu;
+  return own !== null && own !== undefined && sample.cpuBusy !== null && sample.cpuBusy > 0 && own < config.ownShareHalve * sample.cpuBusy;
+}
+
+/** The cpu the machine would show with one more trial of ours: each running trial is taken to cost an equal share of what we use now. */
+function projectedCpu(sample: AdmissionSample): number {
+  const perTrial = (sample.ownCpu ?? sample.cpuBusy ?? 0) / Math.max(1, sample.ownTrials);
+  return (sample.cpuBusy ?? 0) + perTrial;
+}
+
+/**
+ * Called once per sample: server back-off, target halving on a cpu breach of our own making, and +1 growth while trials
+ * wait at the target (`demandAtTarget`): no breach for GROW_AFTER, the last growth GROW_EVERY ago, the projected cpu under the bound.
+ */
 export function advanceAdmissionState(
   state: AdmissionState,
   sample: AdmissionSample,
-  demand: boolean,
+  demandAtTarget: boolean,
   config: ScenarioServerConfig,
 ): AdmissionState {
   const servers = Object.fromEntries(
     sample.servers.map(server => [server.id, nextBackoff(state.servers[server.id], server.msptP95, config)]));
   const cpuBreached = sample.cpuBusy !== null && sample.cpuBusy >= config.cpuAdmit;
   const memoryFull = ledgerMb(sample, EMPTY_TALLY, config) < config.clientMemMb;
-  const machineBreached = cpuBreached || memoryFull;
   const serverLagging = sample.servers.some(server => server.shared && server.msptP95 !== null && server.msptP95 >= config.msptAdmitMs);
-  const breached = machineBreached || serverLagging;
+  const serverBackedOff = Object.values(servers).some(backoff => backoff.backedOff);
+  const breached = cpuBreached || memoryFull || serverLagging || serverBackedOff;
   const lastBreachAt = breached ? sample.at : state.lastBreachAt;
-  if (sample.ownTrials > 0 && (cpuBreached || memoryFull)) {
-    // CPU over the bound is overload: halve. A full memory ledger is capacity: hold at what runs, so the batch keeps that many going.
-    const target = cpuBreached ? Math.floor(state.target / 2) : Math.min(state.target, sample.ownTrials);
-    return { ...state, servers, lastBreachAt, target: Math.max(1, target) };
+  const firstSampleAt = state.firstSampleAt ?? sample.at;
+  const next: AdmissionState = { ...state, servers, lastBreachAt, firstSampleAt, event: null };
+  if (sample.ownTrials > 0 && cpuBreached && !cpuIsForeign(sample, config)) {
+    // CPU over the bound with our trials as the cause is overload: halve.
+    return { ...next, target: Math.max(1, Math.floor(state.target / 2)), event: "halved" };
   }
-  const lastEventAt = Math.max(state.lastAdmissionAt ?? -Infinity, lastBreachAt ?? -Infinity, state.lastGrowAt ?? -Infinity);
-  // The first sample starts the growth clock: a target is not raised before it has been held for GROW_AFTER.
-  if (lastEventAt === -Infinity) return { ...state, servers, lastBreachAt, lastGrowAt: sample.at };
-  if (demand && !breached && sample.at - lastEventAt >= config.growAfterMs) {
-    return { ...state, servers, lastBreachAt, target: state.target + 1, lastGrowAt: sample.at };
+  if (sample.ownTrials > 0 && memoryFull) {
+    // A full ledger is capacity, not overload, and the ledger refuses every admission by itself while it is full: the target
+    // stays where it is. (T4 capped it at the trials running; the tail of a batch then left it at 2 for the next batch,
+    // which took 266 s warm to climb back, T7c measurement.)
+    return { ...next, event: "memory full" };
   }
-  return { ...state, servers, lastBreachAt };
-}
-
-export function noteAdmission(state: AdmissionState, at: number): AdmissionState {
-  return { ...state, lastAdmissionAt: at };
+  if (sample.ownTrials > 0 && cpuBreached) return { ...next, event: "foreign load" };
+  const quietSince = Math.max(lastBreachAt ?? -Infinity, firstSampleAt);
+  const mayGrow = demandAtTarget && !breached && sample.cpuBusy !== null
+    && sample.at - quietSince >= config.growAfterMs
+    && sample.at - (state.lastGrowAt ?? -Infinity) >= config.growEveryMs
+    && projectedCpu(sample) < config.cpuAdmit;
+  return mayGrow ? { ...next, target: state.target + 1, lastGrowAt: sample.at, event: "grew" } : next;
 }
 
 /** A trial on this server hit its wall-clock bound: no new trial until it recovers. */

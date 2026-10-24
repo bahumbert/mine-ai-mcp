@@ -3,6 +3,7 @@ import type { ArenaTrialOptions, RunResult, Scenario } from "mine-labs";
 import { controlChunkOf, type Lane } from "../arena/lanes.ts";
 import type { ArrangementMutex } from "./arrangement-mutex.ts";
 import type { ScenarioServerConfig } from "./config.ts";
+import type { MutexQueueMarks } from "./pool.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
 const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
@@ -40,6 +41,8 @@ export interface TrialJob {
   /** The submitter's cancel. */
   readonly signal: AbortSignal;
   readonly reuseServer: boolean;
+  /** Where this trial stands in its server's arrangement queue (the pool's count for admission); absent on a server of its own. */
+  readonly queue?: MutexQueueMarks;
 }
 
 export interface TrialEnd {
@@ -181,6 +184,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
     return { result: cancelled, lane: "free", serverSick: false, hitWallBound: false, restored: false };
   }
   marks.acquired();
+  const queue = job.lane ? job.queue : undefined;
   const startedAt = Date.now();
   const wall = new AbortController();
   const timeoutMs = (job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS) * 1000 + deps.config.trialSlackMs;
@@ -193,8 +197,8 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
       server: job.server, scenario: job.scenario, runDir: job.runDir, log: job.log, signal, reuseServer: job.reuseServer,
       arena: job.lane ? arenaOf(job.lane) : undefined,
       deferReset: handed => { restore = handed; },
-      onArranged: async () => { marks.arranged(); release(); },
-      onPrepared: async () => { marks.prepared(); release(); },
+      onArranged: async () => { marks.arranged(); queue?.arranged(); release(); },
+      onPrepared: async () => { marks.prepared(); queue?.arranged(); release(); },
     });
     const settled = await Promise.race([trial.then(result => ({ result }), (error: unknown) => ({ error })), late.promise]);
     marks.settled();
@@ -209,7 +213,8 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
     }
     // A trial that failed before `onArranged` still holds its arrangement turn; its own restore must not wait behind it.
     release();
-    return { ...(await restoreArena(deps, job, restore, settled.result, marks)), hitWallBound };
+    queue?.arranged();
+    return { ...(await restoreArena(deps, job, restore, settled.result, marks, queue)), hitWallBound };
   } finally {
     clearTimeout(wallTimer);
     late.cancel();
@@ -225,13 +230,15 @@ async function restoreArena(
   restore: ((log: (message: string) => void) => Promise<void>) | undefined,
   result: RunResult,
   marks: TrialMarks,
+  queue: MutexQueueMarks | undefined,
 ): Promise<RestoreEnd> {
   if (!restore) return { result, lane: "free", serverSick: false, restored: false };
   const restoring = (async () => {
     marks.restoreQueued();
+    queue?.restoreQueued();
     const turn = await takeRestoreTurn(job);
     marks.restoreStarted();
-    try { await restore(job.log); } finally { marks.restoreEnded(); turn(); }
+    try { await restore(job.log); } finally { marks.restoreEnded(); queue?.restoreDone(); turn(); }
   })();
   let failure: unknown;
   const outcome = await within(restoring.catch((error: unknown) => { failure = error; }), deps.config.restoreBoundMs);

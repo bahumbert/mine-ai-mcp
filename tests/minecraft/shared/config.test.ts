@@ -8,7 +8,11 @@ test("the defaults are the plan's constants", () => {
   assert.equal(config.msptAdmitMs, 25);
   assert.equal(config.msptStopMs, 35);
   assert.equal(config.cpuAdmit, 0.85);
-  assert.equal(config.targetStart, 10);
+  assert.equal(config.targetStart, 28);
+  assert.equal(config.growEveryMs, 15_000);
+  assert.equal(config.ownShareHalve, 0.5);
+  assert.equal(config.arrangeHoldMs, 800);
+  assert.equal(config.arrangeQueueMs, 5_000);
   assert.equal(config.sharedHeapMb, 3_072);
   assert.equal(config.singleHeapMb, 2_048);
   assert.equal(config.socketPath, "/tmp/mine-ai-scenarios.sock");
@@ -19,6 +23,14 @@ test("an env variable MINE_AI_SCENARIO_* overrides one constant and leaves the o
   assert.equal(config.msptAdmitMs, 12);
   assert.equal(config.socketPath, "/tmp/x.sock");
   assert.equal(config.msptStopMs, 35);
+});
+
+test("MINE_AI_SCENARIO_TARGET_START still overrides the default target", () => {
+  assert.equal(loadScenarioServerConfig({ MINE_AI_SCENARIO_TARGET_START: "3" }).targetStart, 3);
+});
+
+test("the share of the busy cpu that makes a breach ours is a fraction: above 1 is refused", () => {
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_OWN_SHARE_HALVE: "2" }), /MINE_AI_SCENARIO_OWN_SHARE_HALVE/u);
 });
 
 test("a number that is not a number names the variable instead of becoming NaN", () => {

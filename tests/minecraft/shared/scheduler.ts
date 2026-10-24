@@ -2,14 +2,16 @@
 import { join } from "node:path";
 import type { RunResult, Scenario } from "mine-labs";
 import {
-  advanceAdmissionState, decideAdmission, EMPTY_TALLY, initialAdmissionState, noteAdmission, noteWallBoundHit,
+  advanceAdmissionState, decideAdmission, EMPTY_TALLY, initialAdmissionState, ledgerMb, noteWallBoundHit,
   type AdmissionDecision, type AdmissionRequest, type AdmissionSample, type AdmissionState, type AdmissionTally,
 } from "./admission.ts";
 import type { Lane } from "../arena/lanes.ts";
+import { renameBodyOnOwnServer } from "../arena/own-body.ts";
 import { shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
 import type { ScenarioServerConfig } from "./config.ts";
+import { trialLine, type SampleReport } from "./daemon-lines.ts";
 import { isTimingTrial, reservePlacement, type Placement } from "./placement.ts";
-import type { ManagedServer, ServerPool } from "./pool.ts";
+import type { ManagedServer, MutexQueueMarks, ServerPool } from "./pool.ts";
 import { fileRunIo, type RunIo } from "./run-io.ts";
 import { serverSpecFor } from "./server-spec.ts";
 import { executeTrial, type TrialEnd, type TrialRunner } from "./trial.ts";
@@ -45,7 +47,23 @@ export interface SubmissionHandle {
   cancel(reason: string): void;
 }
 
-export interface MachineReading { readonly cpuBusy: number | null; readonly memAvailableMb: number; readonly threads: number }
+export interface MachineReading {
+  readonly cpuBusy: number | null;
+  /** The share of the machine our process tree used over the same window; absent or null when it could not be read. */
+  readonly ownCpu?: number | null;
+  readonly load1?: number | null;
+  readonly memAvailableMb: number;
+  readonly threads: number;
+}
+
+/** Where a trial stands from admission on: what the daemon's trial line and the server's mutex queue need. */
+interface Admitted {
+  readonly at: number;
+  /** The trial's place in its server's arrangement queue; null on a server of its own. */
+  readonly queue: MutexQueueMarks | null;
+  /** Which player body a server of its own gives this scenario (0 for the first). */
+  readonly body: number;
+}
 
 export interface SchedulerDeps {
   readonly pool: ServerPool;
@@ -59,6 +77,9 @@ export interface SchedulerDeps {
 
 interface QueuedTrial {
   readonly sequence: number;
+  readonly queuedAt: number;
+  /** The bound that held this trial at its last turn, for the sample's count of held trials; null when it was not held. */
+  heldBy: string | null;
   readonly submission: Submission;
   readonly entry: SubmissionEntry;
   refusal: string | null;
@@ -81,6 +102,12 @@ interface Submission {
 /** The line a submitter waits for before it starts the load a hold batch runs under (`scenario-repeat.sh --load`). */
 export const HOLD_STARTED_TEXT = "hold: this batch runs alone now";
 
+/** The reason a server of its own starts, for the daemon log (a lane server's reason is the pool's own). */
+function ownStartReason(placement: Placement): string | undefined {
+  if (placement.kind !== "own") return undefined;
+  return placement.reusable ? "own, no idle server of its key" : "own, not reusable";
+}
+
 function slug(name: string): string {
   return name.replace(/[^A-Za-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 60);
 }
@@ -90,9 +117,13 @@ export class Scheduler {
   readonly #submissions = new Map<number, Submission>();
   readonly #young: number[] = [];
   #admission: AdmissionState;
-  #base: Omit<AdmissionSample, "servers"> | null = null;
+  #base: (Omit<AdmissionSample, "servers"> & { readonly load1?: number | null }) | null = null;
   #tally: AdmissionTally = EMPTY_TALLY;
   #running = 0;
+  /** Queued trials the last pass refused for the target alone: the demand that lets the target grow. */
+  #refusedForTarget = 0;
+  /** The bounds that held trials in the last sample's pass, with how many each. */
+  #held: Readonly<Record<string, number>> = {};
   #timingRunning = 0;
   /** Queued timing trials refused for the cpu bound at their last turn. */
   #timingWaitingForCalm = 0;
@@ -119,6 +150,18 @@ export class Scheduler {
     return this.#queue.length;
   }
 
+  /** What the last sample read and did, for the daemon's sample line; null before the first sample. */
+  sampleReport(): SampleReport | null {
+    const sample = this.#liveSample();
+    if (!sample) return null;
+    const { cpuBusy, ownCpu = null, load1 = null, memAvailableMb } = this.#base!;
+    return {
+      cpuBusy, ownCpu, load1, memAvailableMb, ledgerMb: ledgerMb(sample, this.#tally, this.deps.config), target: this.#admission.target,
+      running: this.#running, queued: this.#queue.length, servers: sample.servers.length, starts: this.deps.pool.startedCount,
+      held: this.#held, event: this.#admission.event,
+    };
+  }
+
   submit(spec: SubmissionSpec): SubmissionHandle {
     const submission: Submission = {
       id: this.#nextSubmission++, spec, abort: new AbortController(), summary: { runs: 0, passed: 0, failed: 0, cancelled: 0 },
@@ -129,7 +172,7 @@ export class Scheduler {
     const entries = spec.lock ? spec.entries.map(entry => ({ ...entry, placement: reservePlacement(entry.placement, submission.id) })) : spec.entries;
     for (let cycle = 0; cycle < spec.repeat; cycle++) {
       for (const entry of entries) {
-        this.#queue.push({ sequence: ++this.#sequence, submission, entry, refusal: null, roomSamples: 0, waitingForCalm: false });
+        this.#queue.push({ sequence: ++this.#sequence, queuedAt: this.deps.now(), heldBy: null, submission, entry, refusal: null, roomSamples: 0, waitingForCalm: false });
         submission.queued += 1;
       }
     }
@@ -155,7 +198,7 @@ export class Scheduler {
     this.#young.splice(0, this.#young.length, ...young);
     this.#base = { at: now, ...machine, ownTrials: this.#running, youngClients: young.length };
     this.#tally = EMPTY_TALLY;
-    this.#admission = advanceAdmissionState(this.#admission, this.#liveSample()!, this.#queue.length > 0, this.deps.config);
+    this.#admission = advanceAdmissionState(this.#admission, this.#liveSample()!, this.#refusedForTarget > 0, this.deps.config);
     this.#pump(true);
   }
 
@@ -193,14 +236,23 @@ export class Scheduler {
   #pump(isSample: boolean): void {
     if (!this.#base) return;
     let starved: QueuedTrial | null = null;
+    const held: Record<string, number> = {};
+    let refusedForTarget = 0;
     for (const queued of this.#turnOrder()) {
       if (starved && this.#running > 0) {
         queued.refusal = `waits behind ${starved.entry.name}, which has waited ${starved.roomSamples} samples for room to start a server`;
-        continue;
+        queued.heldBy = "starved";
+      } else {
+        queued.heldBy = null;
+        queued.refusal = this.#tryStart(queued, isSample);
+        if (queued.refusal !== null && queued.roomSamples >= this.deps.config.starveSamples) starved ??= queued;
       }
-      queued.refusal = this.#tryStart(queued, isSample);
-      if (queued.refusal !== null && queued.roomSamples >= this.deps.config.starveSamples) starved ??= queued;
+      if (queued.refusal === null) continue;
+      held[queued.heldBy ?? "other"] = (held[queued.heldBy ?? "other"] ?? 0) + 1;
+      if (queued.heldBy === "target") refusedForTarget += 1;
     }
+    this.#refusedForTarget = refusedForTarget;
+    if (isSample) this.#held = held;
   }
 
   /** The queue interleaved by submission, each taking a turn, the first turn going to the submission after the last one served. */
@@ -228,9 +280,9 @@ export class Scheduler {
   #tryStart(queued: QueuedTrial, isSample: boolean): string | null {
     const { submission, entry } = queued;
     const gate = this.#holdGate(submission);
-    if (gate) return this.#refusedNotForRoom(queued, gate);
+    if (gate) return this.#refusedNotForRoom(queued, gate, "hold");
     const cap = submission.spec.maxLanes;
-    if (cap !== null && submission.running >= cap) return this.#refusedNotForRoom(queued, `--lanes ${cap} reached for this submission`);
+    if (cap !== null && submission.running >= cap) return this.#refusedNotForRoom(queued, `--lanes ${cap} reached for this submission`, "lanes");
     const decision = decideAdmission({
       sample: this.#liveSample()!, state: this.#admission, tally: this.#tally, config: this.deps.config,
       request: this.#requestFor(entry.placement, this.#isTiming(submission, entry)),
@@ -242,6 +294,7 @@ export class Scheduler {
       return this.#start(queued, decision);
     }
     queued.roomSamples = decision.waitsForServerRoom ? queued.roomSamples + (isSample ? 1 : 0) : 0;
+    queued.heldBy = decision.bound;
     return `${decision.bound}: ${decision.detail}`;
   }
 
@@ -252,8 +305,9 @@ export class Scheduler {
   }
 
   /** A refusal that is neither a wait for room for a new server nor for a calm machine: both waits start again from zero. */
-  #refusedNotForRoom(queued: QueuedTrial, reason: string): string {
+  #refusedNotForRoom(queued: QueuedTrial, reason: string, heldBy: string): string {
     queued.roomSamples = 0;
+    queued.heldBy = heldBy;
     this.#setWaitingForCalm(queued, false);
     return reason;
   }
@@ -267,9 +321,9 @@ export class Scheduler {
     const { pool, config } = this.deps;
     // A timing trial waiting for a calm machine counts as one running: the others start only under CPU_CALM until it has started.
     const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm };
-    return placement.kind === "lane"
-      ? { ...base, candidates: pool.sharedCandidates(placement.key), newServerHeapMb: config.sharedHeapMb }
-      : { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
+    if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
+    const candidates = pool.sharedCandidates(placement.key);
+    return { ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb };
   }
 
   /**
@@ -295,61 +349,77 @@ export class Scheduler {
     const { entry, submission } = queued;
     const now = this.deps.now();
     const managed = decision.server === "new"
-      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config), now)
+      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config), now, ownStartReason(entry.placement))
       : pool.get(decision.server);
     if (!managed) return `server ${decision.server} left the pool`;
     let lane: Lane | null = null;
+    let queue: MutexQueueMarks | null = null;
+    let body = 0;
     if (entry.placement.kind === "lane") {
       lane = pool.leaseLane(managed.id);
       if (!lane) return `server ${managed.id} has no free lane`;
+      queue = pool.joinMutexQueue(managed.id);
     } else {
-      pool.noteSingleTrialStarted(managed.id);
+      body = pool.noteSingleTrialStarted(managed.id);
     }
     this.#tally = {
       trials: this.#tally.trials + 1, newServers: this.#tally.newServers + (decision.server === "new" ? 1 : 0),
       reservedMb: this.#tally.reservedMb + config.clientMemMb,
     };
     this.#young.push(now);
-    this.#admission = noteAdmission(this.#admission, now);
     this.#running += 1;
     if (this.#isTiming(submission, entry)) this.#timingRunning += 1;
     this.#lastServed = submission.id;
     submission.running += 1;
     submission.queued -= 1;
     this.#queue.splice(this.#queue.indexOf(queued), 1);
-    void this.#run(queued, managed, lane);
+    void this.#run(queued, managed, lane, { at: now, queue, body });
     return null;
   }
 
-  async #run(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null): Promise<void> {
+  async #run(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted): Promise<void> {
     const { entry, submission } = queued;
     const runDir = join(submission.spec.outDir, "runs", `${new Date().toISOString().replaceAll(/[:.]/gu, "-")}-t${String(queued.sequence).padStart(5, "0")}-${slug(entry.name)}`);
     const io = this.deps.runIo ?? fileRunIo;
     let end: TrialEnd;
+    const wait = { serverMs: 0 };
     try {
-      end = await this.#execute(queued, managed, lane, runDir, io);
+      end = await this.#execute(queued, managed, lane, admitted, runDir, io, wait);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       end = {
         result: { scenario: entry.name, outcome: "error", elapsedMs: 0, goal: { state: "pending", detail }, goalText: "", error: detail },
-        lane: "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0,
+        lane: error instanceof FreshBodyRefused ? "quarantined" : "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0,
       };
     }
-    this.#settle(queued, managed, lane, end, runDir);
+    this.#settle(queued, managed, lane, admitted, wait.serverMs, end, runDir);
   }
 
-  async #execute(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, runDir: string, io: RunIo): Promise<TrialEnd> {
+  /** The scenario this trial runs: shifted into its lane, or on a server of its own under the body that server is up to. */
+  #scenarioFor(entry: SubmissionEntry, lane: Lane | null, body: number): Scenario {
+    if (lane) {
+      const shifted = (this.deps.shift ?? shiftScenario)(entry.placement.kind === "lane" ? entry.placement.scenario : entry.scenario, lane);
+      if (!shifted.ok) throw new Error(`the scenario could not be shifted to lane ${lane.index}: ${shifted.reason}`);
+      return shifted.scenario;
+    }
+    const renamed = renameBodyOnOwnServer(entry.scenario, body);
+    if (!renamed.ok) throw new FreshBodyRefused(`the scenario could not be given a fresh body (${body}) on its reused server: ${renamed.reason}`);
+    return renamed.scenario;
+  }
+
+  async #execute(
+    queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted, runDir: string, io: RunIo, wait: { serverMs: number },
+  ): Promise<TrialEnd> {
     const { entry, submission } = queued;
+    const waitedFrom = this.deps.now();
     const server = await managed.ready.catch((error: unknown) => {
       throw new Error(`server failed to start: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    const shifted = lane ? (this.deps.shift ?? shiftScenario)(entry.placement.kind === "lane" ? entry.placement.scenario : entry.scenario, lane)
-      : { ok: true as const, scenario: entry.scenario };
-    if (!shifted.ok) throw new Error(`the scenario could not be shifted to lane ${lane?.index}: ${shifted.reason}`);
+    }).finally(() => { wait.serverMs = this.deps.now() - waitedFrom; });
+    const scenario = this.#scenarioFor(entry, lane, admitted.body);
     const run = await io.open(runDir);
     try {
       const end = await executeTrial({ runTrial: this.deps.runTrial, config: this.deps.config }, {
-        name: entry.name, scenario: shifted.scenario, lane, server, mutex: managed.mutex, runDir, log: run.log,
+        name: entry.name, scenario, lane, server, mutex: managed.mutex, runDir, log: run.log, queue: admitted.queue ?? undefined,
         signal: submission.abort.signal, reuseServer: lane !== null || (entry.placement.kind === "own" && entry.placement.reusable),
       });
       await io.writeResult(runDir, end.result);
@@ -359,9 +429,14 @@ export class Scheduler {
     }
   }
 
-  #settle(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, end: TrialEnd, runDir: string): void {
+  #settle(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted, serverWaitMs: number, end: TrialEnd, runDir: string): void {
     const { submission, entry } = queued;
     const now = this.deps.now();
+    admitted.queue?.leave();
+    this.deps.log(trialLine({
+      name: entry.name, lane: lane?.index ?? null, serverId: managed.id, queueMs: admitted.at - queued.queuedAt, serverWaitMs,
+      phases: end.phases, holdMs: now - admitted.at,
+    }));
     this.deps.pool.finishTrial(managed.id, lane, end, now, { reusable: entry.placement.kind === "own" && entry.placement.reusable });
     if (end.hitWallBound) this.#admission = noteWallBoundHit(this.#admission, managed.id);
     this.#running -= 1;
@@ -380,3 +455,6 @@ export class Scheduler {
     this.#pump(false);
   }
 }
+
+/** The next scenario on a reused server of its own cannot have a fresh body: its end keeps that server from being reused, or every later scenario of the key would fail the same way. */
+class FreshBodyRefused extends Error {}

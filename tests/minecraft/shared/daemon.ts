@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Scenario } from "mine-labs";
 import { loadScenarioServerConfig, portBlockOf, type PortBlock, type ScenarioServerConfig } from "./config.ts";
+import { sampleLine } from "./daemon-lines.ts";
 import { serveSocket } from "./daemon-socket.ts";
 import { GameruleDefaultsCache } from "./gamerule-defaults.ts";
 import { LabsServerFactory } from "./labs-server.ts";
@@ -83,8 +84,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     sampling = true;
     try {
       await sampleOnce(samplerDeps);
-      const cpu = scheduler.cpuBusy;
-      log(`sample: ${scheduler.runningCount} running, ${scheduler.queuedCount} queued, cpu ${cpu === null ? "-" : `${Math.round(cpu * 100)}%`}, ${pool.readings().length} servers, p95 ms ${pool.readings().map(reading => reading.msptP95 ?? "-").join("/")}`);
+      const report = scheduler.sampleReport();
+      if (report) log(sampleLine(report, pool.readings().map(reading => reading.msptP95)));
     } catch (error) {
       log(`sample failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {

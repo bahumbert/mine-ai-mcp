@@ -89,3 +89,11 @@ test("a slow tick query is neither abandoned nor repeated: it is still outstandi
   await first;
   assert.equal(rig.pool.readings().find(reading => reading.id === managed.id)?.msptP95, 9.5);
 });
+
+test("the machine reading's own cpu and load average reach the scheduler's sample report", async () => {
+  const rig = new SchedulerRig();
+  await sampleOnce(depsOf(rig.pool, rig, { machine: { read: async () => ({ cpuBusy: 0.5, ownCpu: 0.4, load1: 6.5, memAvailableMb: 20_000, threads: 24 }) } }));
+  const report = rig.scheduler.sampleReport();
+  assert.equal(report?.ownCpu, 0.4);
+  assert.equal(report?.load1, 6.5);
+});

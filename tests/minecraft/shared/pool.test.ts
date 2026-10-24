@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { LAST_BODY } from "../arena/lanes.ts";
 import { loadScenarioServerConfig } from "./config.ts";
 import { FakeFactory } from "./fake-servers.ts";
 import { ServerPool, type ServerSpec } from "./pool.ts";
@@ -205,4 +206,187 @@ test("releasing a batch's reservation retires its servers at once, a server stil
   await late.ready;
   await pool.reap(2, new Set());
   assert.deepEqual(factory.created.map(server => server.stopped), [true, false, false, true], "batch 7's two servers stopped, batch 8's and the plain one kept");
+});
+
+function withPhases(arrangeMs: number, restoreMs: number, overrides: Partial<TrialEnd> = {}): TrialEnd {
+  return end({ phases: { mutexWaitMs: 50, arrangeMs, joinMs: 9_000, trialMs: 5_000, restoreWaitMs: 40, restoreMs }, ...overrides });
+}
+
+async function readyShared(pool: ServerPool, overrides: Partial<ServerSpec> = {}) {
+  const managed = pool.startServer(spec(overrides), 0);
+  await managed.ready;
+  return managed;
+}
+
+const queueOf = (pool: ServerPool, id: string) => pool.queues([id]).get(id)!;
+
+test("a trial counts in its server's mutex queue from admission until its arrangement is done, and a restore from queued until done", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  const lane = pool.leaseLane(managed.id)!;
+  const marks = pool.joinMutexQueue(managed.id)!;
+  assert.equal(queueOf(pool, managed.id).queued, 1, "admitted, not arranged");
+  marks.arranged();
+  assert.equal(queueOf(pool, managed.id).queued, 0);
+  marks.restoreQueued();
+  assert.equal(queueOf(pool, managed.id).queued, 1);
+  marks.restoreDone();
+  assert.equal(queueOf(pool, managed.id).queued, 0);
+  pool.finishTrial(managed.id, lane, end(), 10);
+});
+
+test("each mark counts once however often it is called", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  pool.leaseLane(managed.id);
+  const marks = pool.joinMutexQueue(managed.id)!;
+  const other = pool.joinMutexQueue(managed.id)!;
+  assert.equal(queueOf(pool, managed.id).queued, 2);
+  marks.arranged();
+  marks.arranged();
+  marks.restoreDone();
+  assert.equal(queueOf(pool, managed.id).queued, 1, "a second arranged() or a restoreDone() with no restore queued takes nothing off another trial");
+  other.leave();
+  other.leave();
+  assert.equal(queueOf(pool, managed.id).queued, 0);
+});
+
+test("a trial aborted between admission and its arrangement leaves the queue when it settles", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  const lane = pool.leaseLane(managed.id)!;
+  const marks = pool.joinMutexQueue(managed.id)!;
+  assert.equal(queueOf(pool, managed.id).queued, 1);
+  marks.leave();
+  pool.finishTrial(managed.id, lane, end({ lane: "free" }), 10);
+  assert.equal(queueOf(pool, managed.id).queued, 0);
+});
+
+test("a restore that never ends leaves the queue with the trial (the restore bound gave up on it)", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  pool.leaseLane(managed.id);
+  const marks = pool.joinMutexQueue(managed.id)!;
+  marks.arranged();
+  marks.restoreQueued();
+  assert.equal(queueOf(pool, managed.id).queued, 1);
+  marks.leave();
+  assert.equal(queueOf(pool, managed.id).queued, 0);
+  marks.restoreDone();
+  assert.equal(queueOf(pool, managed.id).queued, 0, "the restore finishing later takes nothing off");
+});
+
+test("the hold of a server is ARRANGE_HOLD_MS until 3 of its trials settled, then the median of arrange + restore over the last 20", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  assert.equal(queueOf(pool, managed.id).holdMs, config.arrangeHoldMs);
+  const settle = (arrange: number, restore: number) => {
+    const lane = pool.leaseLane(managed.id)!;
+    pool.finishTrial(managed.id, lane, withPhases(arrange, restore), 10);
+  };
+  settle(300, 100);
+  settle(900, 100);
+  assert.equal(queueOf(pool, managed.id).holdMs, config.arrangeHoldMs, "two settled: still the default");
+  settle(500, 100);
+  assert.equal(queueOf(pool, managed.id).holdMs, 600, "median of 400, 1000, 600");
+  for (let trial = 0; trial < 20; trial++) settle(100, 50);
+  assert.equal(queueOf(pool, managed.id).holdMs, 150, "only the last 20 count");
+});
+
+test("the mutex wait and the join are not part of the hold, and an end with no phases adds nothing", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  for (let trial = 0; trial < 3; trial++) pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(200, 100), 10);
+  pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, end(), 10);
+  assert.equal(queueOf(pool, managed.id).holdMs, 300);
+});
+
+test("a server of its own has no mutex queue: joining is refused and it has no entry", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);
+  await managed.ready;
+  assert.equal(pool.joinMutexQueue(managed.id), null);
+  assert.equal(pool.queues([managed.id]).size, 0);
+});
+
+test("the body counter of a reusable server of its own: 0 for the first scenario, then one more each time", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);
+  await managed.ready;
+  assert.equal(pool.noteSingleTrialStarted(managed.id), 0);
+  pool.finishTrial(managed.id, null, end(), 10, { reusable: true });
+  assert.equal(pool.noteSingleTrialStarted(managed.id), 1);
+  pool.finishTrial(managed.id, null, end(), 20, { reusable: true });
+  assert.equal(pool.noteSingleTrialStarted(managed.id), 2);
+});
+
+test("a server of its own whose bodies are used up retires once its trial ends (a name must not come back)", async () => {
+  const { factory, pool } = setup();
+  const managed = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);
+  await managed.ready;
+  for (let body = 0; body < LAST_BODY; body++) {
+    pool.noteSingleTrialStarted(managed.id);
+    pool.finishTrial(managed.id, null, end(), 10, { reusable: true });
+  }
+  assert.deepEqual(pool.reusableSingles("own:a"), [managed.id], "the last body is still to come");
+  pool.noteSingleTrialStarted(managed.id);
+  pool.finishTrial(managed.id, null, end(), 10, { reusable: true });
+  assert.deepEqual(pool.reusableSingles("own:a"), []);
+  await pool.reap(11, new Set());
+  assert.equal(factory.created[0]?.stopped, true);
+});
+
+test("a server start logs its reason: a new key, a full key, the retired server it replaces, a probe, an own server", async () => {
+  const lines: string[] = [];
+  const pool = new ServerPool(new FakeFactory(), config, message => lines.push(message));
+  const first = pool.startServer(spec(), 0);
+  await first.ready;
+  const second = pool.startServer(spec(), 0);
+  await second.ready;
+  pool.markSick(first.id);
+  pool.startServer(spec(), 0);
+  pool.startServer(spec({ key: "probe:1.21.4" }), 0);
+  pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0, "own, not reusable");
+  const starts = lines.filter(line => line.includes(" starting: "));
+  assert.deepEqual(starts.map(line => /starting: (.*)$/u.exec(line)?.[1]), [
+    "new key", "key's servers refused it (arrangement queue, tick time or size)", `replaces retired ${first.id}`, "probe", "own, not reusable",
+  ]);
+  assert.match(starts[0]!, /server s1 \(shared, key k1\) starting/u);
+});
+
+test("a server stop logs its reason: idle, retired, sick, own after trial", async () => {
+  const lines: string[] = [];
+  const pool = new ServerPool(new FakeFactory(), config, message => lines.push(message));
+  const idle = await readyShared(pool, { key: "idle" });
+  const retired = await readyShared(pool, { key: "retired" });
+  const sick = await readyShared(pool, { key: "sick" });
+  const single = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);
+  await single.ready;
+  pool.finishTrial(sick.id, pool.leaseLane(sick.id)!, end({ serverSick: true, lane: "held" }), 0);
+  pool.noteSingleTrialStarted(single.id);
+  pool.finishTrial(single.id, null, end(), 0, { reusable: false });
+  const batch = pool.startServer(spec({ key: "k#batch5", reservedFor: 5 }), 0);
+  await batch.ready;
+  pool.releaseReservation(5);
+  await pool.reap(config.serverIdleMs + 1, new Set(["retired"]));
+  const reasons = Object.fromEntries(lines.flatMap(line => { const match = /server (s\d+) stopping: (.*)$/u.exec(line); return match ? [[match[1], match[2]]] : []; }));
+  assert.deepEqual(reasons, { [idle.id]: "idle", [sick.id]: "sick", [single.id]: "own after trial", [batch.id]: "retired" });
+  assert.notEqual(pool.get(retired.id), undefined, "its key is still queued: it stays");
+});
+
+test("the number of servers started is counted for the sample line", async () => {
+  const { pool } = setup();
+  assert.equal(pool.startedCount, 0);
+  await readyShared(pool);
+  await readyShared(pool, { key: "k2" });
+  assert.equal(pool.startedCount, 2);
+});
+
+test("a trial that was cancelled or failed (not restored) adds nothing to the hold", async () => {
+  const { pool } = setup();
+  const managed = await readyShared(pool);
+  for (let trial = 0; trial < 3; trial++) pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(300, 100), 10);
+  for (let trial = 0; trial < 5; trial++) pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(0, 0, { restored: false }), 10);
+  pool.finishTrial(managed.id, pool.leaseLane(managed.id)!, withPhases(60_000, 0, { restored: false }), 10);
+  assert.equal(queueOf(pool, managed.id).holdMs, 400);
 });

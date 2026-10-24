@@ -1,7 +1,7 @@
 // The servers the daemon owns: one or more per settings key, lanes leased from each, single-scenario servers, idle and sick stops.
 import type { Scenario } from "mine-labs";
-import type { Lane } from "../arena/lanes.ts";
-import type { ServerReading } from "./admission.ts";
+import { LAST_BODY, type Lane } from "../arena/lanes.ts";
+import type { ServerQueue, ServerReading } from "./admission.ts";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
 import type { ScenarioServerConfig } from "./config.ts";
 import { StallWatch } from "./health.ts";
@@ -30,6 +30,29 @@ export interface ServerFactory {
 
 type ServerStatus = ServerReading["status"];
 
+/** Trials of a server whose mutex time its hold is the median of. */
+const HOLD_WINDOW = 20;
+/** Settled trials a server needs before its own median replaces ARRANGE_HOLD_MS. */
+const HOLD_MIN_TRIALS = 3;
+
+/**
+ * One lane trial's place in its server's arrangement queue: the arrangement it waits for, then the restore it waits for.
+ * Each mark counts once; `leave` takes off whatever is left (an abort before the arrangement, a restore the bound gave up on).
+ */
+export interface MutexQueueMarks {
+  /** The arrangement has run (or failed, or was cancelled): the trial no longer waits for the mutex for it. */
+  arranged(): void;
+  restoreQueued(): void;
+  restoreDone(): void;
+  leave(): void;
+}
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((first, second) => first - second);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
 export interface ManagedServer {
   readonly id: string;
   readonly key: string;
@@ -54,11 +77,18 @@ interface PoolEntry extends ManagedServer {
   idleReusable: boolean;
   /** Stop as soon as nothing runs on it (sick, restart, or a scenario that dirtied its world). */
   retire: boolean;
+  /** Trials admitted to this shared server whose arrangement has not run, plus restores queued or running: all want its mutex. */
+  mutexQueued: number;
+  /** The mutex time (arrange + restore) of the last HOLD_WINDOW settled trials. */
+  holds: number[];
+  /** The body a single server's next scenario gets (its first scenario is body 0). */
+  nextBody: number;
 }
 
 export class ServerPool {
   readonly #entries = new Map<string, PoolEntry>();
   #nextId = 1;
+  #started = 0;
 
   constructor(
     private readonly factory: ServerFactory,
@@ -66,14 +96,34 @@ export class ServerPool {
     private readonly log: (message: string) => void,
   ) {}
 
-  /** Begin creating a server; it is listed as `starting` at once and its `ready` settles when it is usable. */
-  startServer(spec: ServerSpec, now: number): ManagedServer {
+  /** Servers started since the daemon began: the sample line shows it. */
+  get startedCount(): number {
+    return this.#started;
+  }
+
+  /** Why a server for this spec is started now: the plan's reasons for the log, so the starts of a run can be explained. */
+  #startReason(spec: ServerSpec): string {
+    if (spec.key.startsWith("probe:")) return "probe";
+    if (spec.kind === "single") return "own, no idle server of its key";
+    const ofKey = [...this.#entries.values()].filter(entry => entry.kind === "shared" && entry.key === spec.key);
+    const retired = ofKey.find(entry => entry.retire);
+    if (retired) return `replaces retired ${retired.id}`;
+    if (ofKey.length === 0) return "new key";
+    // A server of the key with a free lane was refused for its mutex queue, tick time or size; without one the lanes are all in use.
+    return ofKey.some(entry => entry.lanes!.freeCount > 0 && entry.status !== "sick") ? "key's servers refused it (arrangement queue, tick time or size)" : "key full";
+  }
+
+  /** Begin creating a server; it is listed as `starting` at once and its `ready` settles when it is usable. `reason` is logged (the pool names its own when none is given). */
+  startServer(spec: ServerSpec, now: number, reason: string = this.#startReason(spec)): ManagedServer {
     const id = `s${this.#nextId++}`;
+    this.#started += 1;
+    this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) starting: ${reason}`);
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
       lanes: spec.kind === "shared" ? new LanePool(this.config.maxPlayers - 2) : null,
       stall: new StallWatch(this.config.stallStopMs, now), server: null, status: "starting", running: 0,
       lastTrialAt: now, msptP95: null, residentMb: 0, idleReusable: false, retire: false,
+      mutexQueued: 0, holds: [], nextBody: 0,
       ready: this.#create(id, spec),
     };
     this.#entries.set(id, entry);
@@ -127,6 +177,37 @@ export class ServerPool {
       .map(entry => entry.id);
   }
 
+  /** The mutex queue and hold of each of these shared servers (a server of its own, or one that left, has no entry). */
+  queues(ids: readonly string[]): Map<string, ServerQueue> {
+    const queues = new Map<string, ServerQueue>();
+    for (const id of ids) {
+      const entry = this.#entries.get(id);
+      if (entry?.kind !== "shared") continue;
+      const holdMs = entry.holds.length >= HOLD_MIN_TRIALS ? median(entry.holds) : this.config.arrangeHoldMs;
+      queues.set(id, { queued: entry.mutexQueued, holdMs });
+    }
+    return queues;
+  }
+
+  /** A lane trial has been admitted to this shared server: it now waits for the mutex. Null for a server of its own, which has none. */
+  joinMutexQueue(id: string): MutexQueueMarks | null {
+    const entry = this.#entries.get(id);
+    if (entry?.kind !== "shared") return null;
+    const waiting = { arrangement: true, restore: false };
+    entry.mutexQueued += 1;
+    const take = (key: keyof typeof waiting, now: boolean): void => {
+      if (waiting[key] === now) return;
+      waiting[key] = now;
+      entry.mutexQueued += now ? 1 : -1;
+    };
+    return {
+      arranged: () => take("arrangement", false),
+      restoreQueued: () => take("restore", true),
+      restoreDone: () => take("restore", false),
+      leave: () => { take("arrangement", false); take("restore", false); },
+    };
+  }
+
   leaseLane(id: string): Lane | null {
     const entry = this.#entries.get(id);
     const lane = entry?.lanes?.acquire() ?? null;
@@ -134,11 +215,13 @@ export class ServerPool {
     return lane;
   }
 
-  noteSingleTrialStarted(id: string): void {
+  /** A scenario starts on a server of its own; returns its body (0 for the first scenario of the server's life, then 1, 2...). */
+  noteSingleTrialStarted(id: string): number {
     const entry = this.#entries.get(id);
-    if (!entry) return;
+    if (!entry) return 0;
     entry.idleReusable = false;
     entry.running += 1;
+    return entry.nextBody++;
   }
 
   /** The ready servers, for the sampler to ask them `tick query`. */
@@ -165,7 +248,7 @@ export class ServerPool {
       this.log(`server ${entry.id} answered nothing for ${this.config.stallStopMs} ms: stopping it`);
       this.#entries.delete(entry.id);
     }
-    await Promise.allSettled(stalled.map(entry => this.#stop(entry)));
+    await Promise.allSettled(stalled.map(entry => this.#stop(entry, "stalled")));
     return stalled.map(entry => entry.id);
   }
 
@@ -175,6 +258,8 @@ export class ServerPool {
     if (!entry) return;
     entry.running -= 1;
     entry.lastTrialAt = now;
+    // Only a trial that was arranged and restored measures the mutex: a cancelled or failed one has 0 or its whole time as arrange.
+    if (entry.kind === "shared" && end.phases && end.restored) entry.holds = [...entry.holds, end.phases.arrangeMs + end.phases.restoreMs].slice(-HOLD_WINDOW);
     if (lane && entry.lanes) {
       if (end.lane === "free") entry.lanes.release(lane);
       else if (end.lane === "quarantined") entry.lanes.quarantine(lane);
@@ -184,7 +269,8 @@ export class ServerPool {
       entry.retire = true;
     }
     if (entry.kind === "single") {
-      const reusable = Boolean(options.reusable) && end.lane === "free" && !end.serverSick;
+      // A body past the last one would give a name back to a player the server has seen: the server is retired instead.
+      const reusable = Boolean(options.reusable) && end.lane === "free" && !end.serverSick && entry.nextBody <= LAST_BODY;
       entry.idleReusable = reusable;
       entry.retire = !reusable;
     } else if (entry.lanes?.needsRestart) {
@@ -207,17 +293,24 @@ export class ServerPool {
       return now - entry.lastTrialAt >= this.config.serverIdleMs && !wantedKeys.has(entry.key);
     });
     for (const entry of stopping) this.#entries.delete(entry.id);
-    await Promise.allSettled(stopping.map(entry => this.#stop(entry)));
+    await Promise.allSettled(stopping.map(entry => this.#stop(entry, this.#stopReason(entry))));
+  }
+
+  /** Why a drained server stops: the plan's reasons for the log. */
+  #stopReason(entry: PoolEntry): string {
+    if (entry.status === "sick") return "sick";
+    if (entry.kind === "single" && entry.retire) return "own after trial";
+    return entry.retire ? "retired" : "idle";
   }
 
   async stopAll(): Promise<void> {
     const all = [...this.#entries.values()];
     this.#entries.clear();
-    await Promise.allSettled(all.map(entry => this.#stop(entry)));
+    await Promise.allSettled(all.map(entry => this.#stop(entry, "daemon stopping")));
   }
 
-  async #stop(entry: PoolEntry): Promise<void> {
-    this.log(`server ${entry.id} stopping`);
+  async #stop(entry: PoolEntry, reason: string): Promise<void> {
+    this.log(`server ${entry.id} stopping: ${reason}`);
     const server = entry.server ?? await entry.ready.catch(() => null);
     await server?.stop();
   }

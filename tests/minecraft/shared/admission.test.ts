@@ -5,12 +5,12 @@ import {
   decideAdmission,
   EMPTY_TALLY,
   initialAdmissionState,
-  noteAdmission,
   noteWallBoundHit,
   type AdmissionDecision,
   type AdmissionSample,
   type AdmissionState,
   type AdmissionTally,
+  type AdmissionRequest,
   type ServerReading,
 } from "./admission.ts";
 import { loadScenarioServerConfig } from "./config.ts";
@@ -29,7 +29,7 @@ function ask(
   s: AdmissionSample,
   state: AdmissionState = initialAdmissionState(config),
   tally: AdmissionTally = EMPTY_TALLY,
-  request = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb },
+  request: AdmissionRequest = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb },
 ): AdmissionDecision {
   return decideAdmission({ sample: s, state, tally, request, config });
 }
@@ -64,8 +64,9 @@ test("a lagging cpu reading of none (first sample) does not refuse", () => {
 });
 
 test("target alone breached: running trials reach the concurrency target", () => {
-  assert.equal(refusedBound(ask(sample({ ownTrials: 10 }))), "target");
-  assert.equal(refusedBound(ask(sample({ ownTrials: 9 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 0 })), "target");
+  const target = config.targetStart;
+  assert.equal(refusedBound(ask(sample({ ownTrials: target }))), "target");
+  assert.equal(refusedBound(ask(sample({ ownTrials: target - 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 0 })), "target");
 });
 
 test("candidate server over MSPT_ADMIT: refused naming the server tick time, a new server is the way out when memory allows", () => {
@@ -180,15 +181,22 @@ test("a machine breach with trials running halves the target down to the floor o
     state = advanceAdmissionState(state, sample({ at: at * 5_000, cpuBusy: 0.95 }), true, config);
     seen.push(state.target);
   }
-  assert.deepEqual(seen, [5, 2, 1, 1, 1, 1]);
+  assert.deepEqual(seen, [14, 7, 3, 1, 1, 1]);
 });
 
-test("a full memory ledger caps the target at the trials running (capacity, not overload): it does not collapse to 1 sample after sample", () => {
+test("a full memory ledger leaves the target alone (capacity, not overload): the ledger refuses admissions itself, and a draining batch must not leave the next one a target of 2", () => {
   let state = initialAdmissionState(config);
   for (let at = 0; at < 4; at++) {
     state = advanceAdmissionState(state, sample({ at: at * 5_000, memAvailableMb: 700, ownTrials: 7, servers: [server({ residentMb: 3_000 })] }), true, config);
+    assert.equal(state.event, "memory full");
   }
-  assert.equal(state.target, 7);
+  assert.equal(state.target, config.targetStart);
+  assert.equal(refusedBound(ask(sample({ memAvailableMb: 700, ownTrials: 7, servers: [server({ residentMb: 3_000 })] }), state)), "memory", "admission is still refused by the ledger");
+});
+
+test("a full memory ledger stops the growth: the target neither grows nor shrinks while it lasts", () => {
+  const full = growthRun(initialAdmissionState(config), 120, { memAvailableMb: 700, servers: [server({ residentMb: 3_000 })] });
+  assert.ok(full.every(target => target === config.targetStart));
 });
 
 test("a breach with none of our trials running leaves the target alone (foreign load says nothing about ours)", () => {
@@ -196,16 +204,76 @@ test("a breach with none of our trials running leaves the target alone (foreign 
   assert.equal(state.target, config.targetStart);
 });
 
-test("the target grows by one only when demand waits and the last admission and breach are GROW_AFTER old", () => {
-  let state: AdmissionState = { ...initialAdmissionState(config), target: 3 };
-  state = noteAdmission(state, 100_000);
-  const at = (ms: number) => sample({ at: 100_000 + ms, ownTrials: 3 });
-  assert.equal(advanceAdmissionState(state, at(59_000), true, config).target, 3);
-  assert.equal(advanceAdmissionState(state, at(60_000), false, config).target, 3, "nothing waits: no need to grow");
-  state = advanceAdmissionState(state, at(60_000), true, config);
-  assert.equal(state.target, 4);
-  assert.equal(advanceAdmissionState(state, at(65_000), true, config).target, 4, "one step per GROW_AFTER");
-  assert.equal(advanceAdmissionState(state, at(120_000), true, config).target, 5);
+/** One sample per 5 s from `first`, the way a batch that keeps admitting sees them: bounds held, trials waiting at the target. */
+function growthRun(from: AdmissionState, seconds: number, over: Partial<AdmissionSample> = {}): number[] {
+  const targets: number[] = [];
+  let state = from;
+  for (let at = 0; at <= seconds * 1_000; at += 5_000) {
+    state = advanceAdmissionState(state, sample({ at, ownTrials: state.target, ...over }), true, config);
+    targets.push(state.target);
+  }
+  return targets;
+}
+
+test("a batch that admits every sample still grows: +1 at GROW_AFTER, then +1 per GROW_EVERY while trials wait at the target", () => {
+  const start = config.targetStart;
+  const targets = growthRun(initialAdmissionState(config), 120);
+  const at = (second: number) => targets[second / 5]!;
+  assert.equal(at(55), start, "not before 60 s without a breach");
+  assert.equal(at(60), start + 1);
+  assert.equal(at(70), start + 1, "one step per GROW_EVERY");
+  assert.equal(at(75), start + 2);
+  assert.equal(at(90), start + 3);
+  assert.equal(at(120), start + 5);
+});
+
+test("nothing waits at the target: no growth, however long the bounds hold", () => {
+  let state = initialAdmissionState(config);
+  for (let at = 0; at <= 300_000; at += 5_000) state = advanceAdmissionState(state, sample({ at, ownTrials: 3 }), false, config);
+  assert.equal(state.target, config.targetStart);
+});
+
+test("growth has no ceiling of its own: the bounds are the limit", () => {
+  const targets = growthRun(initialAdmissionState(config), 600);
+  assert.equal(targets.at(-1), config.targetStart + 1 + Math.floor((600 - 60) / 15));
+});
+
+test("a growth step that the projected cpu would carry over CPU_ADMIT is not taken", () => {
+  // 28 trials use 0.84 of the machine (own 0.84): one more adds 0.03, 0.84 + 0.03 is over 0.85 only when busy is 0.83+
+  const busy = growthRun(initialAdmissionState(config), 120, { cpuBusy: 0.84, ownCpu: 0.84 });
+  assert.ok(busy.every(target => target === config.targetStart), "0.84 + 0.84/28 = 0.87");
+  const room = growthRun(initialAdmissionState(config), 75, { cpuBusy: 0.6, ownCpu: 0.5 });
+  assert.equal(room.at(-1), config.targetStart + 2);
+});
+
+test("the projection counts all the cpu as ours when our share cannot be read", () => {
+  const unreadable = growthRun(initialAdmissionState(config), 120, { cpuBusy: 0.84, ownCpu: null });
+  assert.equal(unreadable.at(-1), config.targetStart);
+});
+
+test("no cpu reading, no growth (the first sample has no window)", () => {
+  const blind = growthRun(initialAdmissionState(config), 120, { cpuBusy: null });
+  assert.equal(blind.at(-1), config.targetStart);
+});
+
+test("a breach in the middle of the wait starts the 60 s again", () => {
+  let state = initialAdmissionState(config);
+  const run = (at: number, over: Partial<AdmissionSample> = {}) => { state = advanceAdmissionState(state, sample({ at, ownTrials: state.target, ...over }), true, config); return state.target; };
+  run(0);
+  run(40_000, { servers: [server({ msptP95: 30 })] });
+  assert.equal(run(65_000), config.targetStart, "60 s from the start, but only 25 s from the lagging server");
+  assert.equal(run(100_000), config.targetStart + 1, "60 s after the breach");
+});
+
+test("a server that backs off after lagging is a breach: no growth while it lags", () => {
+  const lagging = growthRun(initialAdmissionState(config), 120, { servers: [server({ msptP95: 40 })] });
+  assert.equal(lagging.at(-1), config.targetStart);
+});
+
+test("a server over its arrangement queue is no breach: its refusal reaches no state, so the target grows and halves as before", () => {
+  const full = sample({ servers: [server()], ownTrials: 3 });
+  const request: AdmissionRequest = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, queues: new Map([["s1", { queued: 40, holdMs: 800 }]]) };
+  assert.equal(ask(full, initialAdmissionState(config), EMPTY_TALLY, request).admit, true, "a new server takes it");
 });
 
 test("a cpu breach resets the growth clock: halve, then wait GROW_AFTER from the breach", () => {
@@ -267,4 +335,129 @@ test("a refusal for lack of room for a new server says so, one for any other bou
   assert.equal(!cpu.admit && cpu.waitsForServerRoom, false);
   const perSample = ask(sample({ servers: [], memAvailableMb: 25_000 }), initialAdmissionState(config), { trials: 1, newServers: 1, reservedMb: 4_500 }, request);
   assert.equal(!perSample.admit && perSample.waitsForServerRoom, false, "losing the one-server-per-sample race is not a lack of room");
+});
+
+test("foreign cpu 90% with our own 20% keeps the target: the cpu bound alone holds admission, and the state says foreign load", () => {
+  const breach = sample({ cpuBusy: 0.9, ownCpu: 0.2, ownTrials: 5 });
+  const state = advanceAdmissionState(initialAdmissionState(config), breach, true, config);
+  assert.equal(state.target, config.targetStart);
+  assert.equal(state.event, "foreign load");
+  assert.equal(state.lastBreachAt, breach.at, "still a breach: no growth and the 60 s start again");
+  assert.equal(refusedBound(ask(breach)), "cpu");
+});
+
+test("our own 60% of a 90% busy machine halves the target", () => {
+  const state = advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 0.9, ownCpu: 0.6, ownTrials: 20 }), true, config);
+  assert.equal(state.target, config.targetStart / 2);
+  assert.equal(state.event, "halved");
+});
+
+test("our share exactly at OWN_SHARE_HALVE of the busy cpu halves; just under keeps", () => {
+  const at = (ownCpu: number) => advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 0.9, ownCpu, ownTrials: 20 }), true, config).target;
+  assert.equal(at(0.9 * config.ownShareHalve), config.targetStart / 2);
+  assert.equal(at(0.9 * config.ownShareHalve - 0.01), config.targetStart);
+});
+
+test("our share unreadable (null or absent): today's halving", () => {
+  assert.equal(advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 0.9, ownCpu: null, ownTrials: 20 }), true, config).target, config.targetStart / 2);
+  assert.equal(advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 0.9, ownTrials: 20 }), true, config).target, config.targetStart / 2);
+});
+
+test("foreign load with a full memory ledger keeps the target too", () => {
+  const state = advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 0.9, ownCpu: 0.1, ownTrials: 7, memAvailableMb: 700, servers: [server({ residentMb: 3_000 })] }), true, config);
+  assert.equal(state.target, config.targetStart);
+});
+
+test("foreign load while none of our trials runs says nothing: no event, target kept", () => {
+  const state = advanceAdmissionState(initialAdmissionState(config), sample({ cpuBusy: 1, ownCpu: 0, ownTrials: 0 }), true, config);
+  assert.equal(state.target, config.targetStart);
+  assert.equal(state.event, null);
+});
+
+test("a timing trial still starts only under CPU_CALM while the target is kept for foreign load", () => {
+  const busy = sample({ cpuBusy: CALM + 0.05, ownCpu: 0.01, ownTrials: 0 });
+  assert.equal(refusedBound(ask(busy, initialAdmissionState(config), EMPTY_TALLY, timing)), "cpu");
+});
+
+/** A server whose queue holds \`queued\` trials at \`holdMs\` each. */
+function queued(entries: Record<string, [queued: number, holdMs?: number]>): AdmissionRequest["queues"] {
+  return new Map(Object.entries(entries).map(([id, [count, holdMs]]) => [id, { queued: count, holdMs: holdMs ?? config.arrangeHoldMs }]));
+}
+
+function asking(candidates: string[], queues: AdmissionRequest["queues"]): AdmissionRequest {
+  return { candidates, newServerHeapMb: config.sharedHeapMb, queues };
+}
+
+const admittedOn = (decision: AdmissionDecision): string | null => (decision.admit ? decision.server : null);
+const twoServers = (over: Partial<AdmissionSample> = {}) => sample({ servers: [server(), server({ id: "s2" })], memAvailableMb: 30_000, ...over });
+
+test("6 trials queued at 800 ms take a 7th (the queue would be 5.6 s, over 5 s): refused, the next candidate gets it", () => {
+  const request = asking(["s1", "s2"], queued({ s1: [6], s2: [0] }));
+  assert.deepEqual(ask(twoServers(), initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s2", reserveMb: config.clientMemMb });
+  assert.deepEqual(ask(twoServers(), initialAdmissionState(config), EMPTY_TALLY, asking(["s1", "s2"], queued({ s1: [5], s2: [0] }))),
+    { admit: true, server: "s1", reserveMb: config.clientMemMb }, "5 queued: the 6th waits 4.8 s, under 5 s");
+});
+
+test("no candidate with room left: a new server, when memory allows", () => {
+  const decision = ask(sample({ servers: [server()], memAvailableMb: 30_000 }), initialAdmissionState(config), EMPTY_TALLY, asking(["s1"], queued({ s1: [6] })));
+  assert.deepEqual(decision, { admit: true, server: "new", reserveMb: config.clientMemMb + config.sharedHeapMb + config.serverMemMarginMb });
+});
+
+test("a measured hold of 300 ms takes 16 in the queue, 2 s takes 2", () => {
+  const at = (count: number, holdMs: number) => admittedOn(ask(sample({ memAvailableMb: 30_000 }), initialAdmissionState(config), EMPTY_TALLY, asking(["s1"], queued({ s1: [count, holdMs] }))));
+  assert.equal(at(15, 300), "s1", "16th: 16 x 300 = 4.8 s");
+  assert.equal(at(16, 300), "new", "17th: 5.1 s");
+  assert.equal(at(1, 2_000), "s1", "2nd: 4 s");
+  assert.equal(at(2, 2_000), "new", "3rd: 6 s");
+});
+
+test("a new server refused for memory: the trial goes to the candidate with the shortest queue instead of waiting", () => {
+  const poor = twoServers({ memAvailableMb: 5_000 });
+  const request = asking(["s1", "s2"], queued({ s1: [9], s2: [7] }));
+  assert.deepEqual(ask(poor, initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s2", reserveMb: config.clientMemMb });
+  const tied = asking(["s1", "s2"], queued({ s1: [7], s2: [7] }));
+  assert.equal(admittedOn(ask(poor, initialAdmissionState(config), EMPTY_TALLY, tied)), "s1", "a tie keeps the first candidate");
+});
+
+test("a server of the key that is also lagging or backed off is not a queue-fallback candidate", () => {
+  const lagging = twoServers({ servers: [server({ msptP95: 30 }), server({ id: "s2" })], memAvailableMb: 5_000 });
+  const request = asking(["s1", "s2"], queued({ s1: [0], s2: [9] }));
+  assert.deepEqual(ask(lagging, initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s2", reserveMb: config.clientMemMb },
+    "s1 has the shorter queue but its tick time refuses it");
+});
+
+test("a second new server in one sample is not started: the trial takes the shortest queue, the queue bound is a preference, not a reason to run fewer trials", () => {
+  const request = asking(["s1", "s2"], queued({ s1: [8], s2: [6] }));
+  const decision = ask(twoServers(), initialAdmissionState(config), { trials: 1, newServers: 1, reservedMb: 4_000 }, request);
+  assert.deepEqual(decision, { admit: true, server: "s2", reserveMb: config.clientMemMb });
+});
+
+test("with no queue-full candidate the one-server-per-sample refusal stands, and it names the queue refusals it saw", () => {
+  const decision = ask(sample({ memAvailableMb: 30_000, servers: [server({ status: "sick" })] }), initialAdmissionState(config), { trials: 1, newServers: 1, reservedMb: 4_000 }, asking(["s1"], queued({ s1: [6] })));
+  assert.equal(refusedBound(decision), "new-server-per-sample");
+});
+
+test("a server without a queue entry counts as empty, and a queue-full server still takes the trial when nothing else can", () => {
+  const request = asking(["s1"], queued({ s1: [6] }));
+  const decision = ask(sample({ memAvailableMb: 3_000, servers: [server({ shared: true })] }), initialAdmissionState(config), EMPTY_TALLY, { ...request, queues: undefined });
+  assert.equal(decision.admit, true, "no queue information: no queue bound");
+  const noServerFits = ask(sample({ memAvailableMb: 3_000 }), initialAdmissionState(config), EMPTY_TALLY, { ...request, candidates: ["s1", "s3"] });
+  assert.equal(noServerFits.admit, true, "s1 queue-full, s3 not in the sample: the queue-full server still takes it");
+});
+
+test("a server of its own (not shared) has no lanes: its queue entry is never read", () => {
+  const own = sample({ servers: [server({ shared: false })] });
+  assert.equal(ask(own, initialAdmissionState(config), EMPTY_TALLY, asking(["s1"], queued({ s1: [50] }))).admit, true);
+});
+
+test("a server backed off after a wall-bound hit (its tick time fine) stops the growth until it recovers", () => {
+  let state = noteWallBoundHit(advanceAdmissionState(initialAdmissionState(config), sample({ at: 0 }), true, config), "s1");
+  const targets: number[] = [];
+  for (let at = 5_000; at <= 120_000; at += 5_000) {
+    state = advanceAdmissionState(state, sample({ at, ownTrials: state.target, servers: [server({ msptP95: 5 })] }), true, config);
+    targets.push(state.target);
+  }
+  assert.equal(state.servers.s1?.backedOff, false, "three good samples end the back-off");
+  assert.equal(targets[3], config.targetStart, "backed off at 20 s");
+  assert.equal(targets.at(-1)! > config.targetStart, true, "growth resumes once it recovered and 60 s passed");
 });
