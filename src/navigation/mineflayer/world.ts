@@ -71,6 +71,9 @@ const INTERACTIVE = new Set([
   "respawn_anchor",
   "bell",
 ]);
+/** Blocks lava over them does not pour into (T7e5a, facts `fire-lava-escape.md` "Lava over sugar cane and a structure void"): measured, not read from the registry. */
+/** The fake server's copy of this list is in `test-support/fake-bot/fake-bot-lava-flow.ts`. */
+const LAVA_CANNOT_ENTER = new Set(["sugar_cane", "structure_void"]);
 const DAMAGING = new Set([
   "magma_block",
   "fire",
@@ -126,6 +129,7 @@ function traits(block: MineflayerBlock): BlockTraits {
     damaging: DAMAGING.has(block.name) || liquid === "lava",
     entangling: block.name === "cobweb",
     current: "drag" in properties,
+    lavaCannotEnter: LAVA_CANNOT_ENTER.has(block.name),
     interactive:
       INTERACTIVE.has(block.name) ||
       openable ||

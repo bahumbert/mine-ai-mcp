@@ -75,6 +75,12 @@ export interface BlockTraits {
   readonly entangling?: boolean;
   /** Water that drags the body up or down whatever it presses: a bubble column (its state has a `drag` property). */
   readonly current?: boolean;
+  /**
+   * Lava over this block does not pour into it, so it rests on it as on a floor, though the block has no collision: sugar cane and
+   * a structure void (contract check `lava-over-passable`, facts `fire-lava-escape.md` "Lava over sugar cane and a structure void").
+   * False for a block lava enters or one another trait holds lava up with; absent in test doubles.
+   */
+  readonly lavaCannotEnter?: boolean;
   /** Right-clicking this block opens or operates it instead of placing against it. */
   readonly interactive: boolean;
   /** How far a parkour jump can start from this block's top. */

@@ -29,17 +29,19 @@ const SPREAD_NEIGHBOURS: readonly (readonly [number, number, number])[] = [[-1, 
 /**
  * Whether the cell under (x, y, z) holds lava up: a block with collision, water (lava meeting it sets stone, which is a
  * floor next), or a block with none that lava cannot enter (a ladder, a door, a sign, a bubble column, and every block that
- * takes water in: a rail, glow lichen, a coral fan; a vine or a button counts too, which keeps the sideways spread).
- * Lava or air under it, or a block lava replaces, lets lava pour on: false. Sugar cane and portals hold lava up too and
- * show no trait: they read as open.
+ * takes water in: a rail, glow lichen, a coral fan; a vine or a button counts too, which keeps the sideways spread), or sugar
+ * cane or a structure void, which lava does not pour into (contract check `lava-over-passable`, facts `fire-lava-escape.md`
+ * "Lava over sugar cane and a structure void", trait `lavaCannotEnter`). A nether portal needs no answer: lava never stands over
+ * a portal block that stays (the same facts line).
+ * Lava or air under it, or a block lava replaces, lets lava pour on: false.
  * A cell not loaded is not known: undefined, which `lavaSpreadsFrom` reads as a floor.
  */
 function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
   const below = world.blockAt(x, y - 1, z);
   if (below.kind !== "loaded") return undefined;
   if (below.collisionShapes.length > 0 || below.traits.liquid === "water") return true;
-  const { climbable, openable, interactive, current, waterloggable } = below.traits;
-  return climbable || openable || interactive || waterloggable || current === true;
+  const { climbable, openable, interactive, current, waterloggable, lavaCannotEnter } = below.traits;
+  return climbable || openable || interactive || waterloggable || current === true || lavaCannotEnter === true;
 }
 
 /**

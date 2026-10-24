@@ -88,7 +88,6 @@ function readCases(subject: ContractSubject): string[] {
 
 export const lavaOverPassable: ContractCheck = {
   name: "lava-over-passable",
-  waitsForFake: "the fake's lava flow answer for these blocks comes from this check's measure (plan 2026-10-23-shared-scenario-server T7e5b)",
   fixture: { cells: arenaCells(), carried: {}, position: [0.5, FLOOR_Y, 0.5] },
   async run(subject) {
     // Every block stands before the lava goes in, with what keeps it (the cane's dirt and water, all six portal blocks) after 21 ticks of the server.

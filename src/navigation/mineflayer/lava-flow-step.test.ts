@@ -233,3 +233,42 @@ test("the scene of obsidian-lava-approach: the goal cell with level 2 over falli
   const { bot } = createFakeBot();
   assert.equal(createMovements(bot).decideStep(51, -20, 71, world).kind, "allowed");
 });
+
+/**
+ * Contract check `lava-over-passable` (T7e5a, facts `fire-lava-escape.md`): lava over sugar cane or a structure void does not
+ * pour into it, so it rests on it as on a floor and spreads to the cell beside it. A block marked `lavaCannotEnter` is that floor.
+ */
+const LAVA_PROOF_BLOCKS = ["sugar_cane", "structure_void"] as const;
+
+function loadLavaProof(world: MemoryWorld, name: (typeof LAVA_PROOF_BLOCKS)[number]): void {
+  world.load(BELOW_BESIDE, { stateId: registry.blocksByName[name]!.defaultState!, collisionShapes: [], traits: { empty: true, lavaCannotEnter: true } });
+}
+
+test("flowing or falling lava over sugar cane or a structure void rests on it and spreads to the cell beside it: the step is prohibited", () => {
+  for (const name of LAVA_PROOF_BLOCKS)
+    for (const level of [2, FALLING]) {
+      const world = flatWorld();
+      lavaAt(world, BESIDE, level);
+      loadLavaProof(world, name);
+      assert.equal(decide(world).kind, "prohibited", `${name}, level ${level}`);
+    }
+});
+
+test("sugar cane or a structure void beside the lava, not under it, change nothing: lava over air still pours down and the step stays open", () => {
+  for (const name of LAVA_PROOF_BLOCKS) {
+    const world = flatWorld();
+    lavaAt(world, BESIDE, 2);
+    world.load(BELOW_BESIDE, { stateId: 0 });
+    world.load({ x: 2, y: 62, z: 0 }, { stateId: registry.blocksByName[name]!.defaultState!, collisionShapes: [], traits: { empty: true, lavaCannotEnter: true } });
+    assert.equal(decide(world).kind, "allowed", name);
+  }
+});
+
+test("sugar cane under the lava broken again: the lava pours down at the next read and the step is open", () => {
+  const world = flatWorld();
+  lavaAt(world, BESIDE, 2);
+  loadLavaProof(world, "sugar_cane");
+  assert.equal(decide(world).kind, "prohibited", "the cane stands");
+  world.load(BELOW_BESIDE, { stateId: 0 });
+  assert.equal(decide(world).kind, "allowed", "the cane is gone");
+});

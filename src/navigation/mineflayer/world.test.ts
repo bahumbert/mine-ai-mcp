@@ -43,6 +43,12 @@ test("both growing and terminal Nether vine blocks are climbable", () => {
   }
 });
 
+/** Facts `fire-lava-escape.md` "Lava over sugar cane and a structure void" (T7e5a): lava does not enter these two blocks, the rest it enters or is held by another trait. */
+test("sugar cane and a structure void are blocks lava cannot enter; a nether portal, air, water and stone are not marked", () => {
+  for (const name of ["sugar_cane", "structure_void"]) assert.equal(observeMineflayerBlock(realBlock(name)).traits.lavaCannotEnter, true, name);
+  for (const name of ["nether_portal", "air", "stone", "grass_block", "lava", "oak_door"]) assert.notEqual(observeMineflayerBlock(realBlock(name)).traits.lavaCannotEnter, true, name);
+});
+
 test("a cell is read from Prismarine once, and equal cells share one observation", () => {
   const { bot, cellReads } = columnBot({ "4,63,2": "stone", "1,63,1": "stone", "2,63,1": "stone" });
   const world = new MineflayerWorldView(bot);

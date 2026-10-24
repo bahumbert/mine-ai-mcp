@@ -53,11 +53,60 @@ test("a level 2 with air under it pours a falling column and fills nothing besid
   assert.deepEqual([0, 2].map((x) => nameAt(overLava, x, LAVA_Y)), ["air", "air"]);
 });
 
-test("a source over air is not answered: not measured", async () => {
-  const harness = rowBot({ [key(1, FLOOR_Y, 0)]: "air" });
+test("a source over air pours a falling column after 30 ticks and that column goes on down one cell every 30 ticks; the cells beside the source stay air (not measured)", async () => {
+  const harness = rowBot({ [key(1, FLOOR_Y, 0)]: "air", [key(1, FLOOR_Y - 1, 0)]: "air" });
   harness.world.setCell(new Vec3(1, LAVA_Y, 0), lava(0));
+  await harness.clock.advance((FLOW_TICKS - 1) * TICK_MS);
+  assert.equal(nameAt(harness, 1, FLOOR_Y), "air", "not before 30 ticks");
+  await harness.clock.advance(TICK_MS);
+  assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 1, FLOOR_Y - 1)], ["lava 8", "air"]);
+  await harness.clock.advance(FLOW_TICKS * TICK_MS);
+  assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 1, FLOOR_Y - 1)], ["lava 8", "lava 8"]);
+  assert.deepEqual([0, 2].map((x) => nameAt(harness, x, LAVA_Y)), ["air", "air"]);
+});
+
+/** Contract check `lava-over-passable` (T7e5a, 2026-10-24): lava over these blocks stays where it is and the block stays. */
+const LAVA_PROOF = ["sugar_cane", "structure_void"] as const;
+
+test("a source or a level 2 over sugar cane or a structure void: the block stays and the lava stays (the cells beside it are not answered)", async () => {
+  for (const name of LAVA_PROOF) {
+    for (const level of [0, 2]) {
+      const harness = rowBot({ [key(1, FLOOR_Y, 0)]: name });
+      harness.world.setCell(new Vec3(1, LAVA_Y, 0), lava(level));
+      await harness.clock.advance(FLOW_TICKS * 3 * TICK_MS);
+      assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 1, LAVA_Y)], [name, `lava ${level}`], `${name} level ${level}`);
+    }
+  }
+});
+
+test("the sugar cane under a lava source broken before its turn: the lava reads the cell at its turn and pours into the air", async () => {
+  const broken = rowBot({ [key(1, FLOOR_Y, 0)]: "sugar_cane", [key(1, FLOOR_Y - 1, 0)]: "air" });
+  broken.world.setCell(new Vec3(1, LAVA_Y, 0), lava(0));
+  await broken.clock.advance(10 * TICK_MS);
+  broken.world.setCell(new Vec3(1, FLOOR_Y, 0), "air");
+  await broken.clock.advance(FLOW_TICKS * TICK_MS);
+  assert.equal(nameAt(broken, 1, FLOOR_Y), "lava 8");
+});
+
+test("lava in the cell above a nether portal breaks the whole portal at once and then pours down through it, a cell every 30 ticks", async () => {
+  const portal: Record<string, FakeCell> = {};
+  for (const y of [FLOOR_Y, FLOOR_Y - 1, FLOOR_Y - 2]) portal[key(1, y, 0)] = { name: "nether_portal", properties: { axis: "x" } };
+  portal[key(2, FLOOR_Y, 0)] = { name: "nether_portal", properties: { axis: "x" } };
+  portal[key(1, LAVA_Y, 0)] = "obsidian";
+  const harness = rowBot(portal);
+  harness.world.setCell(new Vec3(1, LAVA_Y, 0), lava(0));
+  assert.deepEqual([[1, FLOOR_Y], [1, FLOOR_Y - 1], [1, FLOOR_Y - 2], [2, FLOOR_Y]].map(([x, y]) => nameAt(harness, x!, y!)), ["air", "air", "air", "air"], "the portal blocks went with the frame");
+  await harness.clock.advance(FLOW_TICKS * TICK_MS);
+  assert.deepEqual([FLOOR_Y, FLOOR_Y - 1].map((y) => nameAt(harness, 1, y)), ["lava 8", "air"]);
+  await harness.clock.advance(FLOW_TICKS * TICK_MS);
+  assert.deepEqual([FLOOR_Y, FLOOR_Y - 1].map((y) => nameAt(harness, 1, y)), ["lava 8", "lava 8"]);
+});
+
+test("lava beside a portal block, not over it, does not break it or fill it: only air is flowed into", async () => {
+  const harness = rowBot({ [key(2, LAVA_Y, 0)]: { name: "nether_portal", properties: { axis: "x" } } });
+  harness.world.setCell(new Vec3(0, LAVA_Y, 0), lava(0));
   await harness.clock.advance(FLOW_TICKS * 3 * TICK_MS);
-  assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 0, LAVA_Y), nameAt(harness, 2, LAVA_Y)], ["air", "air", "air"]);
+  assert.deepEqual([1, 2].map((x) => nameAt(harness, x, LAVA_Y)), ["lava 2", "nether_portal"]);
 });
 
 test("a stopped server flows no lava, and lava removed and set again counts its 30 ticks from the second time", async () => {
