@@ -60,6 +60,15 @@ export interface ContractSubject {
    * with `holdsWithin`.
    */
   serverTicks(ticks: number, wallMs: number): Promise<boolean>;
+  /**
+   * The ticks the server has run (`time query gametime`, stored and told back by `tellraw`: Mine Labs mutes command feedback): exact, where `bot.time.age` is up to 19 ticks
+   * stale. The command is sent before the call returns, so a call made just before `bot.attack` has the server run both in
+   * one tick or in neighbouring ones (it reads its packets in order): the readings of two such calls bound the server ticks
+   * between the two acts, which a wall gap cannot (a stalled server catches up in a burst). The promise settles with the
+   * answer, in the order asked; it does not move the clock, so on the fake the caller's own waits, or `settleWithin`, run
+   * the answer. A real server that does not answer rejects at the wall bound (the command did nothing: is the bot op? or the server stalled).
+   */
+  serverGameTime(): Promise<number>;
   /** The server sends a time packet now, as it does at each `/time set`: the command with the day time the client holds, harmless server-wide (the same value). Resolves once the command is sent; the packet comes with the next ticks. */
   resendTime(): Promise<void>;
 }
@@ -69,6 +78,10 @@ export type ProjectileName = ShotProjectile;
 /** What each costs the bot once it lands on easy, as `projectile-hit-bot` measured it on the server (the fake's scene control takes the final amount). */
 const SHOT_COST: Readonly<Record<ProjectileName, number>> = { arrow: 3, small_fireball: 3.5 };
 
+/** The line a `tellraw` of the stored game time prints: this text, then the count. */
+const GAME_TIME_LINE = "contract-gametime ";
+/** The `storage` namespace that holds each bot's last `time query gametime` (one key per bot, so lanes never read each other's). */
+const GAME_TIME_STORAGE = "mine_ai:contract";
 /** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
 const SERVER_EDIT_WALL_MS = 3_000;
 /** An item entity spawned this close to where `/summon` put it is the summoned one (the server may nudge it a tick later). */
@@ -111,6 +124,44 @@ function spawnedNear(bot: Bot, name: string, position: Vec3, what: string): Prom
     }, SERVER_EDIT_WALL_MS);
     bot.on("entitySpawn", onSpawn);
   });
+}
+
+/**
+ * The `/time query gametime` questions one bot asked and the server has not answered, oldest first. Mine Labs sets `sendCommandFeedback
+ * false`, so the query's own reply is never sent (measured 2026-10-24, attack-cooldown-damage: 10 of 10 questions unanswered): the count
+ * is stored under the bot's key (`execute store`) and printed by `tellraw`, which is not command feedback. The server runs commands in
+ * the order sent, so each printed line belongs to the oldest question. A question nothing
+ * answers rejects at the wall bound; a late answer after that goes to the next question, but the check that got the rejection has failed.
+ */
+function createGameTimeQueries(bot: Bot) {
+  const waiting: { resolve(ticks: number): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }[] = [];
+  const key = `gametime_${bot.username}`;
+  const onMessage = (text: string) => {
+    const ticks = text.startsWith(GAME_TIME_LINE) ? Number(text.slice(GAME_TIME_LINE.length)) : NaN;
+    const oldest = Number.isNaN(ticks) ? undefined : waiting.shift();
+    if (oldest === undefined) return;
+    clearTimeout(oldest.timer);
+    oldest.resolve(ticks);
+    if (waiting.length === 0) bot.off("messagestr", onMessage as never);
+  };
+  return {
+    ask: () =>
+      new Promise<number>((resolve, reject) => {
+        const query = {
+          resolve,
+          reject,
+          timer: setTimeout(() => {
+            waiting.splice(waiting.indexOf(query), 1);
+            if (waiting.length === 0) bot.off("messagestr", onMessage as never);
+            reject(new Error(`/time query gametime: no answer after ${SERVER_EDIT_WALL_MS} ms (is the bot op? or the server stalled)`));
+          }, SERVER_EDIT_WALL_MS),
+        };
+        if (waiting.length === 0) bot.on("messagestr", onMessage as never);
+        waiting.push(query);
+        bot.chat(`/execute store result storage ${GAME_TIME_STORAGE} ${key} int 1 run time query gametime`);
+        bot.chat(`/tellraw @s {"text":"${GAME_TIME_LINE}","extra":[{"nbt":"${key}","storage":"${GAME_TIME_STORAGE}"}]}`);
+      }),
+  };
 }
 
 /** Steps of `settleWithin`: fine enough for a 2-tick bound, coarse enough for the real event loop. */
@@ -174,6 +225,8 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     wait,
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
+    // Sent now and not awaited here: the check goes on, and its own waits move the clock that runs the answer.
+    serverGameTime: () => new Promise<number>((resolve) => server.answer(() => resolve(server.gameTime))),
     async resendTime() {
       server.answer(() => server.resendTime());
       await clock.advance(50);
@@ -263,6 +316,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
   const world = (local: LocalPoint) => new Vec3(...arena.world(local));
   const probe = world(SEAT_PROBE_LOCAL);
   const sentinel = world(SEAT_SENTINEL_LOCAL);
+  const gameTimeQueries = createGameTimeQueries(bot);
   const wait = (ms: number) => delay(ms);
   const now = () => performance.now();
   return {
@@ -271,6 +325,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
     wait,
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
+    serverGameTime: gameTimeQueries.ask,
     // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
     async resendTime() {
       // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.

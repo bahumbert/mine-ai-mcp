@@ -157,3 +157,41 @@ test("resendTime leaves the day time as it is", async () => {
   server.resendTime();
   assert.equal(server.timeOfDay, 6_020);
 });
+
+test("the game time moves a tick every 50 ms of clock while the age the client hears moves 20 at the whole second", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(600);
+  assert.equal(server.age, 24_000);
+  assert.equal(server.gameTime, 24_012);
+  await clock.advance(400);
+  assert.equal(server.age, 24_020);
+  assert.equal(server.gameTime, 24_020);
+});
+
+test("the game time runs 20 ticks a second at any phase of the time packets, never behind the age the client heard", async () => {
+  const { clock, server } = serverAt({ phaseMs: 500 });
+  await clock.advance(550);
+  const first = server.gameTime;
+  assert.ok(first >= server.age, `game time ${first}, age ${server.age}`);
+  await clock.advance(400);
+  assert.equal(server.gameTime - first, 8);
+});
+
+test("a server 30 % behind its schedule runs 14 ticks of game time in a second", async () => {
+  const { clock, server } = serverAt({ ticksPerSecond: 14 });
+  await clock.advance(500);
+  assert.equal(server.gameTime, 24_007);
+  await clock.advance(500);
+  assert.equal(server.gameTime, 24_014);
+});
+
+test("a stopped server's game time stands still and goes on from there after resume", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(400);
+  server.stop();
+  await clock.advance(3_050);
+  assert.equal(server.gameTime, 24_008);
+  server.resume();
+  await clock.advance(100);
+  assert.equal(server.gameTime, 24_010);
+});

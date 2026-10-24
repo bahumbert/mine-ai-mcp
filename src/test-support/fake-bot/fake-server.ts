@@ -40,6 +40,12 @@ export interface ReceivedPacket {
 
 export interface FakeServer {
   readonly age: number;
+  /**
+   * The ticks the game has run (`time query gametime`): `ticksPerSecond` a second (20 on time) of the clock the server ran, none while it is
+   * stopped. The client's `age` is this value as of a packet, so never ahead of it (a packet that falls while the server is stopped is skipped,
+   * so after a stop the age lags). Only the weather and the fake's combat count their own ticks, 20 a second whatever `ticksPerSecond` says.
+   */
+  readonly gameTime: number;
   readonly timeOfDay: number;
   /** The day time unwrapped (`bot.time.time`): `timeOfDay` is it modulo a day. */
   readonly dayTime: number;
@@ -226,6 +232,9 @@ function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAt
   /** The age of the last regular packet; `age` (what the client holds) is it, or an extra packet's age ahead of it until the next regular one. */
   let cadenceAge = options.startAge ?? 24_000;
   let age = cadenceAge;
+  const startAge = cadenceAge;
+  /** Milliseconds the server has run (not stopped), counted from the packet that would fall a second before the first: the first packet's age is then 20 ticks on, and the game time runs at the same rate at any phase. */
+  let runningMs = phaseMs > 0 ? TIME_PACKET_EVERY_MS - phaseMs : 0;
   let dayTime = options.timeOfDay ?? 6_000;
   let timePacketSent = options.timePacketYet !== false;
   const timeListeners = new Set<() => void>();
@@ -234,18 +243,23 @@ function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAt
     for (const listener of [...timeListeners]) listener();
   };
   return {
-    /** The regular packets that fall in the slice `(fromMs, toMs]` of clock. */
-    sendRegularPackets(fromMs: number, toMs: number) {
-      for (let packet = timePacketsBetween(fromMs - startedAtMs, toMs - startedAtMs, phaseMs); packet > 0; packet -= 1) {
+    /** The server ran the slice `(fromMs, toMs]` of clock: the regular packets that fall in it go out, and the game time moves. */
+    run(fromMs: number, toMs: number) {
+      const packets = timePacketsBetween(fromMs - startedAtMs, toMs - startedAtMs, phaseMs);
+      for (let packet = packets; packet > 0; packet -= 1) {
         cadenceAge += ticksPerPacket;
         age = cadenceAge;
         dayTime += ticksPerPacket;
         sendTimePacket();
       }
+      runningMs += toMs - fromMs;
     },
     api: {
       get age() {
         return age;
+      },
+      get gameTime() {
+        return Math.max(age, startAge + Math.floor((runningMs * ticksPerPacket) / TIME_PACKET_EVERY_MS));
       },
       get timeOfDay() {
         return dayTime % TICKS_PER_DAY;
@@ -268,7 +282,7 @@ function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAt
         timeListeners.add(listener);
         return () => void timeListeners.delete(listener);
       },
-    } satisfies Pick<FakeServer, "age" | "timeOfDay" | "dayTime" | "timePacketSent" | "setDayTime" | "resendTime" | "onTimePacket">,
+    } satisfies Pick<FakeServer, "age" | "gameTime" | "timeOfDay" | "dayTime" | "timePacketSent" | "setDayTime" | "resendTime" | "onTimePacket">,
   };
 }
 
@@ -287,7 +301,7 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
 
   clock.onSlice("server", (sliceMs) => {
     const nowMs = clock.now();
-    if (running) time.sendRegularPackets(lastSliceMs, nowMs);
+    if (running) time.run(lastSliceMs, nowMs);
     lastSliceMs = nowMs;
     // The weather advances a level step each server tick of 50 ms (the air of `fake-bot-breath.ts` counts the same way).
     if (running) {
