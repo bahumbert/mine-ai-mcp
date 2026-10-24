@@ -3,12 +3,18 @@ import type { Clock } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
 import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import { carriedOf, sideText } from "./items.ts";
+import type { Position } from "../runtime-client.ts";
 import type { ItemCount } from "./types.ts";
 
 /** How far around itself a collect looks for the partner's items. */
 export const COLLECT_RADIUS = 6;
-/** How far around itself a giver looks for the items the partner left: the toss slides a few blocks and the giver walked off it (Mine Labs hand-over-walks-off: 6 missed it). */
-export const PICK_BACK_RADIUS = 16;
+/**
+ * How far around the spot it tossed from a giver looks for the items the partner left: the partner within reach plus a
+ * level toss's ~4.3 block slide. Centred on the giver itself, 6 missed them (Mine Labs hand-over-walks-off: it walks off).
+ */
+export const PICK_BACK_RADIUS = 8;
+/** A pick-up that found no matching item on the ground: the toss is gone (taken), not lying there. */
+const NOTHING_ON_GROUND = "[NO_MATCHING_ITEMS]";
 /** How often a wait for the partner's payment looks at whether it came. */
 const AWAIT_POLL_MS = 1_000;
 const MINUTE_MS = 60_000;
@@ -50,15 +56,18 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
   const unconfirmed: ItemCount[] = [];
   let sure = true;
   for (const { item, count } of items) {
-    const { result, taken, settled } = await giveTo(context, partner, item, count);
+    const { result, taken, settled, droppedAt } = await giveTo(context, partner, item, count);
     if (result.status !== "done") return result;
     if (Math.min(count, taken ?? count) >= count) {
       credit?.({ item, count });
       continue;
     }
     // The server sends no packet for every pickup (a partial one into a nearly full inventory): the count seen is no proof of what is left, the pick-back is.
-    const back = await pickBackCount(context, partner, item, count);
+    const pickBack = await pickBackCount(context, partner, item, count, droppedAt);
     if (context.signal.aborted) return { status: "stopped" };
+    // A pick-back that did not look properly says nothing about what the partner took: no credit, the give stays due.
+    if ("unknown" in pickBack) return { status: "failed", detail: `could not pick back the ${item} ${partner} may not have taken (${pickBack.unknown})` };
+    const { back } = pickBack;
     if (count - back > 0) credit?.({ item, count: count - back });
     if (back > 0) return notTaken(partner, { item, count: back });
     unconfirmed.push({ item, count });
@@ -68,12 +77,18 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
   return { status: "done", detail: `gave ${sideText(items)} to ${partner}${unconfirmed.length > 0 ? ` (${sideText(unconfirmed)} not confirmed taken: ${doubt})` : ""}` };
 }
 
-/** How many of the item the pick-up around me got back after a toss that was not all seen taken (carried after minus carried before). */
-async function pickBackCount(context: SkillContext, partner: string, item: string, left: number): Promise<number> {
+/**
+ * How many of the item the pick-up around the toss spot got back after a toss that was not all seen taken (carried
+ * after minus carried before); unknown when it could not look (no toss spot, a failure other than an empty ground).
+ */
+async function pickBackCount(context: SkillContext, partner: string, item: string, left: number, at: Position | null): Promise<{ readonly back: number } | { readonly unknown: string }> {
+  if (at === null) return { unknown: "the toss result named no spot" };
   const before = carriedOf((await context.runtime.status()).inventory, item);
-  await context.body.act("pick_up_items", { item, radius: PICK_BACK_RADIUS }, `Pick up the ${item} ${partner} did not take.`, { signal: context.signal });
-  if (context.signal.aborted) return 0;
-  return Math.min(left, Math.max(0, carriedOf((await context.runtime.status()).inventory, item) - before));
+  const outcome = await context.body.act("pick_up_items", { item, x: at.x, y: at.y, z: at.z, radius: PICK_BACK_RADIUS }, `Pick up the ${item} ${partner} did not take.`, { signal: context.signal });
+  if (context.signal.aborted) return { back: 0 };
+  const back = Math.min(left, Math.max(0, carriedOf((await context.runtime.status()).inventory, item) - before));
+  if (back > 0 || outcome.status === "succeeded" || outcome.error?.startsWith(NOTHING_ON_GROUND) === true) return { back };
+  return { unknown: outcome.error ?? `pick_up_items ${outcome.status}` };
 }
 
 const notTaken = (partner: string, left: ItemCount): SkillResult =>

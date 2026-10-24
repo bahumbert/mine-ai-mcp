@@ -10,7 +10,8 @@ const paramsSchema = z.strictObject({
   count: z.number().int().positive(),
   /** Where the receiver walks off to at once, `x` `z` on the flat floor. */
   walk_to: z.strictObject({ x: z.number(), y: z.number(), z: z.number() }),
-  pick_up_radius: z.number().int().positive().default(16),
+  /** The brain's pick-back: this radius around the spot the giver tossed from (`PICK_BACK_RADIUS`, relations/handoff.ts). */
+  pick_up_radius: z.number().int().positive().default(8),
 });
 
 /**
@@ -29,7 +30,7 @@ async function give(context: ScenarioContext, params: z.output<typeof paramsSche
   if (result.status !== "succeeded") return { status: "failed", detail: output.summary };
   const recipient = result.drop.recipient;
   if (recipient?.collected !== false || recipient.collectedCount !== 0 || recipient.settled !== true) return { status: "failed", detail: `The receiver was expected to take nothing; ${output.summary}` };
-  const back = await context.call("pick_up_items", { item: params.item_name, radius: params.pick_up_radius });
+  const back = await context.call("pick_up_items", { item: params.item_name, ...result.drop.droppedAt, radius: params.pick_up_radius });
   return back.result.status === "succeeded" ? { status: "succeeded", detail: `Not taken, picked back up; ${back.summary}` } : { status: "failed", detail: `Could not pick the items back up; ${back.summary}` };
 }
 

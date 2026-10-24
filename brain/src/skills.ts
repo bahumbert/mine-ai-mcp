@@ -369,14 +369,20 @@ async function give(context: SkillContext, player: string, item: string, count: 
  * recipient), and whether the answer is settled: false when the server had not said yet (late or stopped), so the count
  * may be short of what happened. An old runtime names no `settled`: read as settled.
  */
-export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null; readonly settled: boolean }> {
+export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null; readonly settled: boolean; readonly droppedAt: Position | null }> {
   const approach = await come(context, player);
-  if (approach.status !== "done") return { result: approach, taken: null, settled: true };
+  if (approach.status !== "done") return { result: approach, taken: null, settled: true, droppedAt: null };
   const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
-  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true };
-  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null, settled: true };
+  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true, droppedAt: null };
+  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null, settled: true, droppedAt: null };
   const detail = handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}`;
-  return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result) };
+  return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result), droppedAt: tossSpot(outcome.result) };
+}
+
+/** Where the giver stood when it tossed (the action's `drop.droppedAt`); null when the result names no such spot. */
+function tossSpot(result: Readonly<Record<string, unknown>> | undefined): Position | null {
+  const at = (result?.drop as { droppedAt?: { x?: unknown; y?: unknown; z?: unknown } } | undefined)?.droppedAt;
+  return typeof at?.x === "number" && typeof at.y === "number" && typeof at.z === "number" ? { x: at.x, y: at.y, z: at.z } : null;
 }
 
 /** Whether the runtime's answer to a hand-over is final (`drop.recipient.settled`); true when it names no such field. */

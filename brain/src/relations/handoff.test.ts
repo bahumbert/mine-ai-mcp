@@ -165,6 +165,8 @@ const onGround = (runtime: FakeRuntime, item: string, count: number): void => {
   runtime.simulateInventory = true;
   runtime.groundItems = [{ item, count }];
 };
+/** The fake's toss spot when a drop outcome names none. */
+const TOSS_SPOT = { x: 0, y: 64, z: 0 };
 const picksUp = (runtime: FakeRuntime): unknown[] => runtime.submitted.filter((call) => call.tool === "pick_up_items").map((call) => call.input);
 
 test("a toss the partner did not take is picked back up and the hand-off ends not_taken, naming what was not taken (s1d, bug A)", async () => {
@@ -177,7 +179,7 @@ test("a toss the partner did not take is picked back up and the hand-off ends no
   const ended = handoffOutcome(result);
   assert.equal(ended.outcome, "not_taken");
   assert.equal(ended.detail, "Theo did not take 4 oak_log");
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", radius: 16 }]);
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }]);
   assert.deepEqual(taken, [], "nothing taken, nothing credited");
 });
 
@@ -203,7 +205,7 @@ test("a hand-off with a second entry still gives it after a first that was taken
   const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "bread", count: 5 }, { item: "oak_log", count: 2 }] }, (credit) => taken.push(credit)));
   assert.equal(ended.outcome, "not_taken");
   assert.deepEqual(taken, [{ item: "bread", count: 5 }]);
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", radius: 16 }], "only the untaken item is picked up");
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }], "only the untaken item is picked up");
 });
 
 test("a toss lying at the feet is not 'taken' even when someone else took it: only the recipient's count counts", async () => {
@@ -219,13 +221,49 @@ test("a pick-back that finds nothing means the items are gone from the ground: c
   const runtime = new FakeRuntime();
   near(runtime);
   runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
-  runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
+  runtime.failures.pick_up_items = "[NO_MATCHING_ITEMS] No matching loaded dropped items were observed in the area.";
   const taken: ItemCount[] = [];
   const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
   assert.equal(ended.outcome, "done");
   assert.match(ended.detail, /4 oak_log not confirmed taken/u);
   assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
   assert.equal(dropCalls(runtime), 1);
+});
+
+for (const error of ["[NO_CONFIRMED_PICKUP] No inventory gain confirmed a pickup.", "[RECOVERY_SITE_UNREACHABLE] no path"]) {
+  test(`a pick-back that fails with ${error.split(" ")[0]} says nothing about the partner: nothing credited, the give fails and stays due`, async () => {
+    const runtime = new FakeRuntime();
+    near(runtime);
+    runtime.dropOutcomes.push(tossed("oak_log", 4, 0));
+    runtime.failures.pick_up_items = error;
+    const taken: ItemCount[] = [];
+    const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
+    assert.equal(ended.outcome, "failed");
+    assert.match(ended.detail, /could not pick back the oak_log Theo may not have taken/u);
+    assert.deepEqual(taken, []);
+    assert.equal(dropCalls(runtime), 1);
+  });
+}
+
+test("the pick-back searches around where the toss was made, not around the giver who walked off after it", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  onGround(runtime, "oak_log", 4);
+  runtime.dropOutcomes.push({ ...tossed("oak_log", 4, 0), droppedAt: { x: 12.5, y: 70, z: -3.5 } });
+  await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] });
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", x: 12.5, y: 70, z: -3.5, radius: 8 }]);
+});
+
+test("a toss result naming no spot credits nothing: a search around the giver could miss the items and read them as taken", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  onGround(runtime, "oak_log", 4);
+  runtime.dropOutcomes.push({ ...tossed("oak_log", 4, 0), droppedAt: null });
+  const taken: ItemCount[] = [];
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] }, (credit) => taken.push(credit)));
+  assert.equal(ended.outcome, "failed");
+  assert.deepEqual(taken, []);
+  assert.deepEqual(picksUp(runtime), []);
 });
 
 test("a settled toss with no packet (collectedCount 0) whose pick-back returns 2 of 4 credits 2 and ends not_taken for the 2 (the server sends no packet for a partial pickup)", async () => {
@@ -306,7 +344,7 @@ test("an unsettled toss with nothing back is credited in full and never given a 
   assert.match(handoffOutcome(result).detail, /4 oak_log not confirmed taken/u);
   assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
   assert.equal(dropCalls(runtime), 1);
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", radius: 16 }], "what is on the ground is picked back first");
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }], "what is on the ground is picked back first");
 });
 
 test("an unsettled toss that all came back ends not_taken and credits nothing", async () => {
