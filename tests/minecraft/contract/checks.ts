@@ -39,6 +39,7 @@ import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
+import { lavaOverPassable } from "./checks/lava-over-passable.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
@@ -95,6 +96,11 @@ export interface ContractCheck {
    * `exclusive` so the scenario gets a server of its own and never a lane of a shared one, where every other lane would see the change. The value is the reason.
    */
   readonly exclusive?: string;
+  /**
+   * Set while the shared fake cannot yet answer what the check measures (it grows only from measurements): `bot-contract.test.ts`
+   * skips the check on the fake with this reason, and the real server runs it. Removed once the fake answers.
+   */
+  readonly waitsForFake?: string;
 }
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
@@ -146,6 +152,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   bucketPourAndFill,
   placeBlockWithOptions,
   lavaOverHole,
+  lavaOverPassable,
 ];
 
 /** The check of that name; throws listing the known names. */

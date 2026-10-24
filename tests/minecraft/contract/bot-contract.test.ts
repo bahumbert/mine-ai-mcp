@@ -19,7 +19,7 @@ const FRAMES: readonly { readonly label: string; readonly frame: ArenaFrame }[] 
 
 for (const check of CONTRACT_CHECKS) {
   for (const { label, frame } of FRAMES) {
-    test(`contract ${check.name} holds on the fake bot at ${label}`, async () => {
+    test(`contract ${check.name} holds on the fake bot at ${label}`, { skip: check.waitsForFake }, async () => {
       const harness = fakeHarnessFor(check.fixture, frame);
       using _installed = harness.clock.install();
       await check.run(fakeContractSubject(harness, frame));
