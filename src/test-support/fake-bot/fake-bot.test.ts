@@ -201,7 +201,8 @@ test("a placement looks at the face, then sets the cell on the server's answer a
   assert.equal(world.blockAt(new Vec3(1, 64, 0))!.name, "air", "the look takes its turn, the answer one more slice");
   await clock.advance(50);
   assert.deepEqual(placing, { done: true, error: null });
-  assert.deepEqual(updates, ["cobblestone"]);
+  // One update per block_change packet: the clicked floor block's, then the cell's change and its resend (contract check `placement-block-update`).
+  assert.deepEqual(updates, ["stone", "cobblestone", "cobblestone"]);
   assert.equal(bot.heldItem!.count, 2);
 });
 

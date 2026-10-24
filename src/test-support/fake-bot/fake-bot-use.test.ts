@@ -4,6 +4,7 @@
  * blocks, the stack loses its one boat, a boat rests 0.37 below the surface by 1.5 s).
  */
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot.js";
@@ -65,9 +66,36 @@ test("a boat used at water is put at the surface point the look meets, one stack
   assert.deepEqual(spawned, ["oak_boat"]);
   assert.equal(bot.entities[boat!.id], boat);
   assert.equal(boat!.kind, "Vehicles");
-  assert.ok(Math.abs(boat!.yaw - (3 * Math.PI) / 2) < NEAR, `she looked east (measured: 3 pi / 2 as an entity yaw), not ${boat!.yaw}`);
   assert.equal(bot.inventory.slots[HOTBAR_START], null, "a boat stacks to 1: the used stack is gone");
   assert.equal(boatsCarried(harness), 2);
+});
+
+/** An entity yaw travels as one byte, 256 steps a turn; a look east is Notchian yaw -90 degrees, exactly -64 steps. */
+const DEGREES_PER_STEP = 360 / 256;
+
+/** Look at the water `steps` byte steps past east (the pitch kept), use slot 0: the boat that was put. */
+async function boatLookingEastPlus(steps: number) {
+  const harness = boatBot();
+  const { bot } = harness;
+  const known = new Set(Object.keys(bot.entities));
+  bot.setQuickBarSlot(0);
+  // As the contract check turns: the aim rotated about the bot, so `lookAt` (yaw -pi/2 +- a little, Notchian 270 degrees) sends it.
+  const turn = ((steps * DEGREES_PER_STEP) * Math.PI) / 180;
+  const distance = WATER_AIM.x - bot.entity.position.x;
+  await bot.lookAt(new Vec3(bot.entity.position.x + distance * Math.cos(turn), WATER_AIM.y, bot.entity.position.z + distance * Math.sin(turn)), true);
+  bot.activateItem();
+  await harness.clock.advance(200);
+  return Object.values(bot.entities).find((entity) => entity.name === "oak_boat" && !known.has(String(entity.id)))!;
+}
+
+/** The yaw a signed byte decodes to in Mineflayer (`fromNotchianYawByte`): radians, 0 to 2 pi. */
+const { fromNotchianYawByte } = createRequire(import.meta.url)("mineflayer/lib/conversions") as { fromNotchianYawByte(byte: number): number };
+
+test("a boat's yaw is the look's floored to a signed byte of 256 steps a turn (contract check boat-placed-by-use): 0.3 of a step under east is -65, over it -64", async () => {
+  for (const [steps, byte] of [[0.3, -64], [-0.3, -65], [0.9, -64], [-0.9, -65]] as const) {
+    const boat = await boatLookingEastPlus(steps);
+    assert.equal(boat.yaw, fromNotchianYawByte(byte), `${steps} steps from east: byte ${byte}`);
+  }
 });
 
 test("a water plant counts as water: the boat is put at the surface above it", async () => {

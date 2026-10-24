@@ -8,9 +8,11 @@
  * face the bottom half; a taken destination is only acknowledged (Mineflayer's own wait then runs out).
  * A bed is put whole: its foot at the destination and its head one block on, the way she looks (`facing`), and the server
  * resends the destination once (the chunk's own change carries both halves, as a `multi_block_change` the fake does not send).
+ * Mineflayer emits a `blockUpdate` for every `block_change` packet, so the cell of a block put alone hears two, both to the
+ * placed block, within one tick (contract check `placement-block-update`, Mine Labs 2026-10-24, 10 of 10 runs), and the
+ * clicked block hears one, unchanged (`blocks.js` `updateBlockState`; the game was measured to send the packet).
  * Vanilla's rules, not measured: a creative bot keeps its stack, a stair's facing and shape, a slab onto a slab, a bed's head
- * needing an empty cell (nothing is put otherwise), the chunk's own repeat of the change reaching the world as a second
- * `blockUpdate`, the server's yaw being the client's at the moment it answers.
+ * needing an empty cell (nothing is put otherwise), the server's yaw being the client's at the moment it answers.
  */
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
@@ -210,8 +212,14 @@ function placedCells(bot: FakeBot, name: string, destination: Vec3, face: Vec3, 
   return [{ cell: destination, block: name }];
 }
 
-/** The server sends a block as the client's `block_change` packet. */
-function sendBlockChange(bot: FakeBot, world: FakeWorld, cell: Vec3): void {
+/**
+ * The server sends a block as the client's `block_change` packet; Mineflayer sets the state it carries and the world
+ * emits a `blockUpdate` for it, changed or not. The update of the first packet that changes the cell is `setCell`'s own,
+ * so only a packet that repeats the state the world already has (`repeats`) emits its update here.
+ */
+function sendBlockChange(bot: FakeBot, world: FakeWorld, cell: Vec3, repeats: boolean): void {
+  // Mineflayer's own `block_change` listener (the world and its update) runs before `place_block.js`'s.
+  if (repeats) world.resend(cell);
   bot._client.emit("block_change", { location: { x: cell.x, y: cell.y, z: cell.z }, type: world.getBlockStateId(cell) });
 }
 
@@ -230,11 +238,14 @@ function answerPlacement(bot: FakeBot, parts: PlacementParts, click: BlockPlaceC
     return there !== null && there.shapes.length === 0;
   });
   if (held === null || !free) return acknowledge();
-  sendBlockChange(bot, world, click.location);
+  sendBlockChange(bot, world, click.location, true);
   for (const { cell, block: placedBlock } of placed) world.setCell(cell, placedBlock);
-  sendBlockChange(bot, world, destination);
-  // A block put alone is announced twice (the chunk's change and the click's resend); a bed's halves go in one `multi_block_change`.
-  if (placed.length === 1) sendBlockChange(bot, world, destination);
+  // A block put alone is announced twice (the chunk's change and the click's resend), the cell hearing two `blockUpdate`s
+  // within the tick (contract check `placement-block-update`, 10 of 10); a bed's halves go in one `multi_block_change`
+  // (`setCell`'s updates stand for it), then the destination's `block_change` repeats the foot: the foot hears two, the head one.
+  const bed = placed.length > 1;
+  sendBlockChange(bot, world, destination, bed);
+  if (!bed) sendBlockChange(bot, world, destination, true);
   if (bot.game.gameMode !== "creative") inventory.updateSlot(held.slot, held.count > 1 ? itemOf(bot.registry, held.name, held.count - 1) : (null as never));
   acknowledge();
 }

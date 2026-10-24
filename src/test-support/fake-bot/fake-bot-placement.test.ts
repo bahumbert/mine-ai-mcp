@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot.js";
+import { blockUpdateEventOf } from "./fake-world.js";
 
 const WEST = new Vec3(-1, 0, 0);
 const UP = new Vec3(0, 1, 0);
@@ -134,6 +135,15 @@ test("the server sends the clicked block, the placed block twice, the slot, then
   assert.equal(harness.bot.heldItem!.count, 3);
 });
 
+test("every block_change the placer hears is a blockUpdate, as blocks.js emits one per packet (contract check placement-block-update: two to the cell, both to the placed block)", async () => {
+  const harness = placer({ carried: { cobblestone: 2 } });
+  harness.bot.setQuickBarSlot(0);
+  const heard: string[] = [];
+  harness.bot.on("blockUpdate", (before, after) => void heard.push(`${before?.position} ${before?.name} -> ${after?.name}`));
+  await place(harness, { swingArm: "right" });
+  assert.deepEqual(heard, ["(2, -60, 0) stone -> stone", "(1, -60, 0) air -> cobblestone", "(1, -60, 0) cobblestone -> cobblestone"]);
+});
+
 test("a creative bot keeps its stack", async () => {
   const harness = placer({ gameMode: "creative" });
   await place(harness, { half: "top", swingArm: "right" });
@@ -210,6 +220,16 @@ test("a bed put on the floor is whole: its foot where the click lands, its head 
     assert.deepEqual(heard, ["block_change ref", "block_change dest", "set_slot 36", "ack"], facing);
     assert.equal(bedsCarried(harness), 1, "one bed taken (a bed stacks to 1: its slot is empty)");
   }
+});
+
+test("a bed's foot hears two blockUpdates and its head one: the halves come in one multi_block_change, then the destination's block_change repeats the foot", async () => {
+  const harness = bedder();
+  await harness.bot.look(YAW_OF.east, 0, true);
+  const heard: Record<"foot" | "head", string[]> = { foot: [], head: [] };
+  harness.bot.on(blockUpdateEventOf(BED_FOOT), (_before, after) => void heard.foot.push(`${after?.name}`));
+  harness.bot.on(blockUpdateEventOf(BED_FOOT.plus(HEAD_OF.east)), (_before, after) => void heard.head.push(`${after?.name}`));
+  await place(harness, { forceLook: "ignore", swingArm: "right" }, UP, BED_FLOOR);
+  assert.deepEqual(heard, { foot: ["red_bed", "red_bed"], head: ["red_bed"] });
 });
 
 test("a bed whose head cell is taken is only acknowledged and nothing is taken (vanilla's rule, not measured)", async () => {

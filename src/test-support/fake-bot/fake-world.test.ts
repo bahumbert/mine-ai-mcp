@@ -75,6 +75,21 @@ test("setCell emits blockUpdate with the old and the new block on every bot the 
   assert.equal(world.getBlockStateId(at(0, 64, 0)), registry.blocksByName.air!.defaultState);
 });
 
+test("resend emits blockUpdate again for the cell's present block, old and new alike, and changes nothing (a second block_change of one state: prismarine-world emits for it); for a chunk the server has not sent, nothing", () => {
+  const world = createFakeWorld(VERSION, { cells: { "0,64,0": "stone", "40,64,0": "void" } });
+  const bot = new EventEmitter();
+  world.forwardTo(bot);
+  const seen: string[] = [];
+  bot.on("blockUpdate", (before, after) => seen.push(`${before?.name}->${after?.name}`));
+  bot.on(`blockUpdate:${at(0, 64, 0)}`, (before, after) => seen.push(`at ${before?.name}->${after?.name}`));
+  world.resend(at(0, 64, 0));
+  assert.deepEqual(seen, ["stone->stone", "at stone->stone"]);
+  assert.equal(world.blockAt(at(0, 64, 0))!.name, "stone");
+  seen.length = 0;
+  world.resend(at(40, 64, 0));
+  assert.deepEqual(seen, [], "no block to announce");
+});
+
 test("a void cell answers null to blockAt and air's id to getBlockStateId, as Prismarine's world does unloaded", () => {
   // prismarine-world worldsync.js getBlockStateId: `if (!chunk) return 0`.
   const world = createFakeWorld(VERSION, { cells: { "0,64,0": "void" } });

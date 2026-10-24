@@ -1,8 +1,8 @@
 /**
  * The fake bot's item use: `activateItem` as Mineflayer writes it (`inventory.js:127`, a `use_item` packet), and the
  * server's answer to a boat used, as the 1.21.4 server gave it (contract check `boat-placed-by-use`, Mine Labs
- * 2026-10-23): the boat appears where the look meets water or ground within the block reach, facing the look, and the
- * stack loses its one boat; on water it sinks to its rest level. Nothing is put (stack kept) for a look at the sky or at
+ * 2026-10-23): the boat appears where the look meets water or ground within the block reach, facing the look (its yaw a
+ * byte of 256 steps a turn, the look's floored: `yawOfSpawnPacket`), and the stack loses its one boat; on water it sinks to its rest level. Nothing is put (stack kept) for a look at the sky or at
  * something out of reach, where the boat would stand in a block, or on a spot another boat holds.
  * Vanilla's rules, not measured: a creative bot keeps its stack, the off hand's use, a vehicle of any kind blocks a spot,
  * a water plant or a waterlogged block counts as water, the rest of the bobbing between spawn and rest.
@@ -26,10 +26,10 @@ import type { FakeWorld } from "./fake-world.js";
 
 const require = createRequire(import.meta.url);
 const { nextInteractionSequence } = require("mineflayer/lib/interaction_sequence") as { nextInteractionSequence(bot: Bot): number | undefined };
-const { toNotchianYaw, toNotchianPitch, fromNotchianYaw } = require("mineflayer/lib/conversions") as {
+const { toNotchianYaw, toNotchianPitch, fromNotchianYawByte } = require("mineflayer/lib/conversions") as {
   toNotchianYaw(yaw: number): number;
   toNotchianPitch(pitch: number): number;
-  fromNotchianYaw(yaw: number): number;
+  fromNotchianYawByte(byte: number): number;
 };
 
 const MAIN_HAND = 0;
@@ -37,6 +37,21 @@ const OFF_HAND = 1;
 /** A boat on water sinks to rest this far below the surface, about 1.5 s after it is put (-60.111 to -60.477 measured). */
 const REST_BELOW_SURFACE = 0.366;
 const REST_AFTER_MS = 1_500;
+/** An entity's yaw travels as one byte, 256 steps a turn. */
+const YAW_STEPS_PER_TURN = 256;
+const DEGREES_PER_TURN = 360;
+
+/**
+ * The yaw a boat has once the client has decoded the spawn packet: the look's Notchian degrees (a float on the wire) packed
+ * into a byte by the server's floor (a look 0.3 of a step either side of east, -64 steps, gave -64 and -65: contract check
+ * `boat-placed-by-use`, Mine Labs 2026-10-24; rounding would give -64 twice), then decoded as Mineflayer does. The float32
+ * steps of the arithmetic are vanilla's `Mth.packDegrees`, read from its source and not measured.
+ */
+function yawOfSpawnPacket(degrees: number): number {
+  const steps = Math.fround(Math.fround(Math.fround(degrees) * YAW_STEPS_PER_TURN) / DEGREES_PER_TURN);
+  // The byte is signed (`(byte)` in Java, an i8 on the wire): 191 steps arrive as -65.
+  return fromNotchianYawByte(((Math.floor(steps) + YAW_STEPS_PER_TURN / 2) & (YAW_STEPS_PER_TURN - 1)) - YAW_STEPS_PER_TURN / 2);
+}
 
 /** The stack the used hand holds. */
 function heldIn(inventory: FakeInventory, hand: number): Item | null {
@@ -72,7 +87,7 @@ function restOnWater(bot: FakeBot, parts: UseParts, boat: Entity, surface: numbe
 function answerBoatUse(bot: FakeBot, parts: UseParts, held: Item, eye: Vec3, rotation: { x: number; y: number }): void {
   if (bot.registry.entitiesByName[held.name] === undefined) return;
   const meeting = lookMeeting(bot, eye, lookDirection(rotation));
-  const boat = meeting === null ? null : boatAt(bot, parts.entities, held.name, meeting.point, fromNotchianYaw(rotation.x));
+  const boat = meeting === null ? null : boatAt(bot, parts.entities, held.name, meeting.point, yawOfSpawnPacket(rotation.x));
   if (meeting === null || boat === null) return;
   bot.entities[boat.id] = boat;
   parts.server.setServerPosition(boat.id, boat.position);

@@ -65,6 +65,12 @@ export interface FakeWorld {
   getColumns(): ListedColumn[];
   /** Change a cell and emit `blockUpdate` and `blockUpdate:(x, y, z)` with the old and the new block. */
   setCell(cell: Vec3, block: FakeCell): void;
+  /**
+   * Emit the same two events for the cell's present block, old and new alike, and change nothing: a second `block_change` of
+   * the state the cell already has (`blocks.js` `updateBlockState` sets it again, and prismarine-world `_emitBlockUpdate`
+   * emits for it whether or not it changed). Nothing for a cell in a chunk the server has not sent.
+   */
+  resend(cell: Vec3): void;
   /** `bot.world.raycast`: the first block with a collision shape on the ray (fluids have none), with face and point. */
   raycast(origin: Vec3, direction: Vec3, maxDistance: number): FakeRaycastHit | null;
   /** Emit every block update on `sink` too, as Mineflayer forwards the world's events to the bot. */
@@ -85,6 +91,14 @@ const { RaycastIterator } = require("prismarine-world/src/iterators.js") as {
 /** Mineflayer's per-cell block event (`blockUpdate:(x, y, z)`), which its typings name by that one literal. */
 export function blockUpdateEventOf(cell: Vec3): "blockUpdate:(x, y, z)" {
   return `blockUpdate:${cell.floored()}` as "blockUpdate:(x, y, z)";
+}
+
+/** The world's two block events for `cell`, on every bot it feeds. */
+function announce(sinks: ReadonlySet<BlockUpdateSink>, cell: Vec3, before: MineflayerBlock | null, after: MineflayerBlock | null): void {
+  for (const sink of sinks) {
+    sink.emit("blockUpdate", before, after);
+    sink.emit(blockUpdateEventOf(cell), before, after);
+  }
 }
 
 /** The state id a cell stands for, or `VOID`; throws naming a block or property the version does not have. */
@@ -160,11 +174,10 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
       const sent = state !== VOID && loaded.add(chunkIndexOf(cell.x), chunkIndexOf(cell.z));
       columns.setBlockStateId(Math.floor(cell.x), Math.floor(cell.y), Math.floor(cell.z), state === VOID ? 0 : state);
       if (sent) for (const sink of sinks) sink.emit("chunkColumnLoad", new Vec3(chunkIndexOf(cell.x) * 16, 0, chunkIndexOf(cell.z) * 16));
-      const after = read(cell);
-      for (const sink of sinks) {
-        sink.emit("blockUpdate", before, after);
-        sink.emit(blockUpdateEventOf(cell), before, after);
-      }
+      announce(sinks, cell, before, read(cell));
+    },
+    resend(cell) {
+      if (stateAt(cell) !== VOID) announce(sinks, cell, read(cell), read(cell));
     },
     raycast(origin, direction, maxDistance) {
       // prismarine-world `raycast` (`worldsync.js:40-60`): each cell on the walk is met only where its shapes are.
