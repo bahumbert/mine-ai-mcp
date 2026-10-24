@@ -527,6 +527,13 @@ test("F10 reachOf: seen at 32 blocks is in reach, at 33 out; no position is out 
   assert.deepEqual(reachOf("Theo", reachSnapshot([]), 32), { inReach: false, away: null });
 });
 
+test("F10 reachOf gives whole blocks, rounded up (live s3c: '41.739999999999995 blocks away'): 31.6 is 32 and in reach, 32.4 is 33 and out", () => {
+  const at = (x: number) => reachSnapshot(theoAt(32).map((player) => ({ ...player, position: { ...player.position!, x: player.position!.x - 32 + x } })));
+  assert.deepEqual(reachOf("Theo", at(41.74), 32), { inReach: false, away: 42 });
+  assert.deepEqual(reachOf("Theo", at(31.6), 32), { inReach: true, away: 32 });
+  assert.deepEqual(reachOf("Theo", at(32.4), 32), { inReach: false, away: 33 });
+});
+
 test("F10 partnersInReach keeps the seen partners at most the reach away, in order; it does not filter the bot itself", () => {
   const players = [...theoAt(10), { username: "Bruno", position: { x: 200, y: 64, z: 0 } }, { username: "Ayla", position: { x: 0, y: 64, z: 0 } }];
   assert.deepEqual(partnersInReach(["Bruno", "Theo", "Mia"], reachSnapshot(players), 32), ["Theo"]);

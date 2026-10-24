@@ -195,11 +195,12 @@ export function withTrading(drawn: readonly Activity[], available: readonly Acti
   return drawn[0] === undefined ? ["trading"] : [drawn[0], "trading"];
 }
 
-/** Whether the partner is seen and at most `reach` blocks away (Manhattan), and how far (null = not seen, so out of reach). */
+/** Whether the partner is seen and at most `reach` blocks away (Manhattan), and how far in whole blocks, rounded up (null = not seen, so out of reach). */
 export function reachOf(name: string, snapshot: BotSnapshot, reach: number): { readonly inReach: boolean; readonly away: number | null } {
   const position = positionOf(snapshot, name);
   if (position === null) return { inReach: false, away: null };
-  const away = manhattan(snapshot.position, position);
+  // Positions are fractional: the model reads "42 blocks away", and a whole reach compares the same rounded up.
+  const away = Math.ceil(manhattan(snapshot.position, position));
   return { inReach: away <= reach, away };
 }
 
