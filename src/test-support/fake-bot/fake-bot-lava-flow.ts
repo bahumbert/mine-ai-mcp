@@ -11,7 +11,6 @@
 import type { Vec3 } from "vec3";
 import { cellKey } from "../../utils/index.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 import type { BlockUpdateSink, FakeWorld } from "./fake-world.js";
 
@@ -25,7 +24,6 @@ const AIR_BLOCKS: ReadonlySet<string> = new Set(["air", "cave_air", "void_air"])
 const SIDES: readonly (readonly [number, number])[] = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
 export interface LavaFlowParts {
-  readonly clock: FakeClock;
   readonly server: FakeServer;
   readonly world: FakeWorld;
 }
@@ -55,7 +53,7 @@ function flowOn(world: FakeWorld, cell: Vec3): void {
 }
 
 /** Let lava that appears in the world flow on, tick by tick of the running server. */
-export function attachFakeLavaFlow({ clock, server, world }: LavaFlowParts): void {
+export function attachFakeLavaFlow({ server, world }: LavaFlowParts): void {
   let tick = 0;
   /** The tick each lava cell flows at, by cell; a cell whose lava is gone loses its turn. */
   const due = new Map<string, { readonly cell: Vec3; readonly tick: number }>();
@@ -71,7 +69,7 @@ export function attachFakeLavaFlow({ clock, server, world }: LavaFlowParts): voi
     },
   };
   world.forwardTo(sink);
-  onServerTick(clock, server, () => {
+  onServerTick(server, () => {
     tick += 1;
     for (const [key, entry] of [...due]) {
       if (entry.tick > tick) continue;

@@ -2,11 +2,10 @@
  * The fake bot's air: the server counts it down while the eye is under water and refills it out of the water, and
  * the client learns it only from the player's `air_supply` entity metadata, which Mineflayer turns into
  * `oxygenLevel` and a `breath` event (`entities.js:515-518`). Rates as measured on a 1.21.4 server by the contract
- * check `air-supply-under-water`. Not modelled: the server's ticks a second (`ticksPerSecond` moves the world age, the air always
- * ticks 20 a second), the air below 0 (drowning damage and its reset), Respiration, creative immunity.
+ * check `air-supply-under-water`. The air counts the server's ticks (`FakeServer.onTick`), so it follows `ticksPerSecond` and a stop's
+ * catch-up. Not modelled: the air below 0 (drowning damage and its reset), Respiration, creative immunity.
  */
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
@@ -39,7 +38,6 @@ export interface FakeBreath {
 }
 
 export interface FakeBreathParts {
-  readonly clock: FakeClock;
   readonly server: FakeServer;
 }
 
@@ -77,7 +75,7 @@ function fileAirSupply(bot: FakeBot, ticks: number): void {
   bot.emit("entityUpdate", bot.entity);
 }
 
-/** Give `bot` its air: a server tick each 50 ms of `parts.clock` and `oxygenLevel` as the client reads it. */
+/** Give `bot` its air: a server tick per `FakeServer.onTick` and `oxygenLevel` as the client reads it. */
 export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBreath {
   let air = FULL_AIR;
   let level = bot.oxygenLevel;
@@ -89,7 +87,7 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
   };
   const send = (ticks: number) => parts.server.answer(() => hear(ticks));
   let held = false;
-  onServerTick(parts.clock, parts.server, () => {
+  onServerTick(parts.server, () => {
     if (held) return;
     const next = eyeInWater(bot) ? Math.max(0, air - AIR_LOST_PER_TICK) : Math.min(FULL_AIR, air + AIR_GAINED_PER_TICK);
     if (next === air) return;

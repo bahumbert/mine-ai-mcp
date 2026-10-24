@@ -398,8 +398,8 @@ test("the backstop of a roofed dive still asks an immediate rescue with the eyes
 
 // NAVP-13 (run 15: the server 2.5-4.6 s behind): the breathing stop counted 100 client ticks for full air. The fake
 // server on 14 ticks a second (30 % behind) moves the world age so the bound is about 7-8 s (time packets come each
-// second); its air packets come 3 s late (the fake's air ticks 20 a second whatever the server's rate): the
-// full air is heard at about 6 s, past the 100 client ticks (5 s) and inside the age bound.
+// second); its air packets come 3 s late and its air ticks 14 a second like everything the server counts: the
+// full air (60 refill ticks, 4.3 s, then 3 s late) is heard at about 7.3 s, past the 100 client ticks (5 s) and inside the age bound.
 test("a server behind the client still completes the breathing stop: full air reported late is waited for", async () => {
   const { world, bot, breath, clock } = fixture({ mocked: true, lagMs: 3_000, server: { ticksPerSecond: 14 } });
   using _timers = clock.install();

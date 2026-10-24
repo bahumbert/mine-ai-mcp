@@ -12,7 +12,6 @@ import type { ServerEntities } from "./fake-bot-entities.js";
 import { BOAT_NAME, inEntityReach } from "./fake-bot-entity-reach.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 
 const HIT_DAMAGE = 10;
@@ -20,7 +19,7 @@ const BREAKS_ABOVE = 40;
 /** A broken boat's item cannot be picked up for this many ticks (477 to 489 ms measured). */
 const DROP_PICKUP_DELAY_TICKS = 10;
 
-type DamageParts = { clock: FakeClock; server: FakeServer; entities: ServerEntities };
+type DamageParts = { server: FakeServer; entities: ServerEntities };
 
 /** The boat breaks: it leaves the client, drops its item where it stood and frees all its riders, who hear nothing. */
 function breakBoat(bot: FakeBot, parts: DamageParts, boat: Entity): void {
@@ -33,7 +32,7 @@ function breakBoat(bot: FakeBot, parts: DamageParts, boat: Entity): void {
 /** Give `bot` `attack` and the server's answer to a hit on a boat. */
 export function attachFakeBoatDamage(bot: FakeBot, parts: DamageParts): void {
   const damage = new Map<number, number>();
-  onServerTick(parts.clock, parts.server, () => {
+  onServerTick(parts.server, () => {
     for (const [id, held] of damage) {
       if (held <= 1) damage.delete(id);
       else damage.set(id, held - 1);

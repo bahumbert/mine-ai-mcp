@@ -27,12 +27,10 @@ import {
 import { eyeHeightOf } from "./fake-bot-physics.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 
 /** What the fireballs need of the fights: the client's packets, the bot's hurts, and the entities of the server. */
 export interface FireballParts {
-  readonly clock: FakeClock;
   readonly server: FakeServer;
   readonly entities: ServerEntities;
   readonly hear: (name: string, data: unknown) => void;
@@ -133,7 +131,7 @@ export function attachFakeFireballs(bot: FakeBot, parts: FireballParts): FakeFir
       tellPosition(ball);
     }
   };
-  onServerTick(parts.clock, parts.server, () => [...balls.values()].forEach(step));
+  onServerTick(parts.server, () => [...balls.values()].forEach(step));
 
   return {
     launch(position, motion) {

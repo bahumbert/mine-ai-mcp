@@ -174,6 +174,34 @@ test("a stopped server picks nothing up until it resumes", async () => {
   assert.equal(cobblestone(harness), 13);
 });
 
+test("a pickup delay of 20 ticks is 20 server ticks: 1.43 s on a server at 14 ticks a second", async () => {
+  const harness = pickupHarness({ server: { ticksPerSecond: 14 } });
+  const drop = harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 3 }, pickupDelayTicks: 20 });
+  await harness.clock.advance(1_400);
+  assert.equal(harness.bot.entities[drop.id], drop, "19 ticks run");
+  await harness.clock.advance(100);
+  assert.equal(harness.bot.entities[drop.id], undefined);
+});
+
+test("a stall that is dropped runs no ticks of the delay, one that is caught up runs them at the resume", async () => {
+  const dropped = pickupHarness();
+  const first = dropped.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 3 }, pickupDelayTicks: 20 });
+  dropped.server.stop();
+  await dropped.clock.advance(2_500);
+  dropped.server.resume();
+  await dropped.clock.advance(900);
+  assert.equal(dropped.bot.entities[first.id], first, "18 ticks since the resume");
+  await dropped.clock.advance(150);
+  assert.equal(dropped.bot.entities[first.id], undefined);
+  const caughtUp = pickupHarness();
+  const second = caughtUp.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 3 }, pickupDelayTicks: 20 });
+  caughtUp.server.stop();
+  await caughtUp.clock.advance(1_500);
+  caughtUp.server.resume();
+  await caughtUp.clock.advance(100);
+  assert.equal(caughtUp.bot.entities[second.id], undefined, "30 ticks owed run at the resume: the delay is over");
+});
+
 test("with lagMs the pickup reaches the client lagMs after the server took the item", async () => {
   const harness = pickupHarness({ lagMs: 300 });
   const drop = harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 3 }, pickupDelayTicks: 0 });

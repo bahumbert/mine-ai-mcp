@@ -1,15 +1,7 @@
-/** The fake server's ticks: 50 ms of a running server, for what the game reads once a tick (a shift key, a boat's damage). */
-import type { FakeClock } from "./fake-clock.js";
+/** The fake server's ticks for what the game reads once a tick (a shift key, a boat's damage): the counter of `FakeServer.onTick`. */
 import type { FakeServer } from "./fake-server.js";
 
-export const SERVER_TICK_MS = 50;
-
-/** Call `tick` once per 50 ms of clock while the server runs (a stopped server counts none); the returned function stops it. */
-export function onServerTick(clock: FakeClock, server: FakeServer, tick: () => void): () => void {
-  let carryMs = 0;
-  return clock.onSlice("server", (sliceMs) => {
-    if (!server.isRunning) return;
-    carryMs += sliceMs;
-    for (; carryMs >= SERVER_TICK_MS; carryMs -= SERVER_TICK_MS) tick();
-  });
+/** Call `tick` once per server tick (none while the server is stopped, the owed ticks of a caught-up stop at the resume); the returned function stops it. */
+export function onServerTick(server: FakeServer, tick: () => void): () => void {
+  return server.onTick(tick);
 }

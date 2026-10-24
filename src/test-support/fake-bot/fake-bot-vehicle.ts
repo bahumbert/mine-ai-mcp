@@ -13,7 +13,6 @@ import { Vec3 } from "vec3";
 import { boxMeetsBlocks } from "./fake-bot-boxes.js";
 import { inEntityReach, vehicleOnServer } from "./fake-bot-entity-reach.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 
 const require = createRequire(import.meta.url);
@@ -111,8 +110,8 @@ export function seatStartingPassengers(bot: FakeBot, server: FakeServer, vehicle
 }
 
 /** Give `bot` `mount`, `dismount` and the server's answer to the shift and to the rider's `vehicle_move`. */
-export function attachFakeVehicle(bot: FakeBot, parts: { clock: FakeClock; server: FakeServer }): void {
-  const { clock, server } = parts;
+export function attachFakeVehicle(bot: FakeBot, parts: { server: FakeServer }): void {
+  const { server } = parts;
   const yaws = new Map<number, number>();
   server.onPacket("vehicle_move", (data) => server.answer(() => answerVehicleMove(bot, server, data as VehicleMove, yaws)));
   bot.vehicle = null; // the entity's own `vehicle` starts null (prismarine-entity)
@@ -127,7 +126,7 @@ export function attachFakeVehicle(bot: FakeBot, parts: { clock: FakeClock; serve
     const { actionId } = data as { actionId: number };
     if (actionId === PRESS_SHIFT || actionId === RELEASE_SHIFT) server.answer(() => void (shiftDown = actionId === PRESS_SHIFT));
   });
-  onServerTick(clock, server, () => shiftDown && getOffOnServer(bot, server));
+  onServerTick(server, () => shiftDown && getOffOnServer(bot, server));
   // `dismount()` sends the jump input (`entities.js:902-916`), which a boat ignores (`navigation-and-boats.md`).
   bot.dismount = () => {
     if (bot.vehicle) bot._client.write("player_input", { inputs: { jump: true } });

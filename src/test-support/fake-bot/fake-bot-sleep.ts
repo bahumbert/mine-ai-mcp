@@ -15,8 +15,8 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeEntities } from "./fake-bot-items.js";
+import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeServer } from "./fake-server.js";
 import type { FakeWorld } from "./fake-world.js";
 
@@ -51,7 +51,6 @@ const POSE_STANDING = 0;
 const POSE_SLEEPING = 2;
 /** `Player.SLEEP_DURATION`: ticks asleep before the night can be skipped. */
 const SLEEP_TICKS_TO_SKIP = 100;
-const TICK_MS = 50;
 const TICKS_PER_DAY = 24_000;
 /** The box a monster stops a rest in: the bed's cell grown 8 by 5 by 8 (`Player.startSleepInBed`). */
 const MONSTER_BOX = { x: 8, y: 5, z: 8 };
@@ -73,7 +72,6 @@ interface Sleeper {
 }
 
 export interface FakeSleepParts {
-  readonly clock: FakeClock;
   readonly server: FakeServer;
   readonly world: FakeWorld;
 }
@@ -168,7 +166,7 @@ function setOccupied(world: FakeWorld, cell: Vec3, occupied: boolean): void {
 
 /** Give `bot` beds, weather and `activateBlock`, and the server its answers to them. */
 export function attachFakeSleep(bot: FakeBot, parts: FakeSleepParts): void {
-  const { clock, server, world } = parts;
+  const { server, world } = parts;
   installRain(bot, {});
   installBed(bot, {});
   bot.canDigBlock ??= (block) => canDigBlock(bot, block as MineflayerBlock | null);
@@ -231,19 +229,12 @@ export function attachFakeSleep(bot: FakeBot, parts: FakeSleepParts): void {
     for (const other of others) if (other.entity) hearPlayerMetadata(bot, other.entity, POSE_STANDING, null);
     if (server.raining) server.setWeather("clear");
   };
-  let accumulatedMs = 0;
-  clock.onSlice("server", (sliceMs) => {
-    if (!server.isRunning) return;
-    for (accumulatedMs += sliceMs; accumulatedMs >= TICK_MS; accumulatedMs -= TICK_MS) {
-      if (sleeper === null) continue;
-      // `Player.tick`: a sleep ends once the sky is bright (an operator's `time set`; not measured).
-      if (!server.skyAllowsSleep) {
-        wakeUp();
-        continue;
-      }
-      sleeper.ticks += 1;
-      skipNightIfEveryoneSleeps();
-    }
+  onServerTick(server, () => {
+    if (sleeper === null) return;
+    // `Player.tick`: a sleep ends once the sky is bright (an operator's `time set`; not measured).
+    if (!server.skyAllowsSleep) return wakeUp();
+    sleeper.ticks += 1;
+    skipNightIfEveryoneSleeps();
   });
 }
 

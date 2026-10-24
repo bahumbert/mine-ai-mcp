@@ -11,7 +11,15 @@ export type { Weather, WeatherPacket };
 /** One time packet a second (`facts/runtime-pitfalls.md` "The server's answer, not a guess of its delay"). */
 const TIME_PACKET_EVERY_MS = 1_000;
 const TICKS_PER_DAY = 24_000;
-const TICK_MS = 50;
+/** The ticks a second of a server on time; a server at this rate catches up after a stall, one below it cannot. */
+const ON_TIME_TICKS_PER_SECOND = 20;
+/**
+ * The stall rule of vanilla `MinecraftServer.runServer` (read in its source, not measured here): a server that stalled
+ * runs the ticks it owes back to back; when it owes more than 2000 ms and its last "Can't keep up!" warning is 15 s or
+ * more old, it warns and drops them; a second long stall inside those 15 s is caught up in full.
+ */
+const STALL_DROPPED_OVER_MS = 2_000;
+const STALL_WARNING_EVERY_MS = 15_000;
 
 export interface FakeServerOptions {
   readonly startAge?: number;
@@ -21,8 +29,9 @@ export interface FakeServerOptions {
   /** Where in each second the time packet falls (0-999 ms after the server starts). */
   readonly phaseMs?: number;
   /**
-   * Ticks one time packet adds: 20 on time; fewer for a server behind its schedule, which still sends one packet a
-   * second of wall time (Cleo ~30 % behind, `facts/navigation-and-boats.md`; `tick rate 2`).
+   * Ticks a second of running clock, and so the ticks one time packet adds: 20 on time; fewer for a server behind its
+   * schedule, which still sends one packet a second (Cleo ~30 % behind, `facts/navigation-and-boats.md`; `tick rate 2`).
+   * A server below 20 never catches up after a stop. A whole number.
    */
   readonly ticksPerSecond?: number;
   /** The weather the world starts in, its levels already full; clear when omitted. */
@@ -41,11 +50,14 @@ export interface ReceivedPacket {
 export interface FakeServer {
   readonly age: number;
   /**
-   * The ticks the game has run (`time query gametime`): `ticksPerSecond` a second (20 on time) of the clock the server ran, none while it is
-   * stopped. The client's `age` is this value as of a packet, so never ahead of it (a packet that falls while the server is stopped is skipped,
-   * so after a stop the age lags). Only the weather and the fake's combat count their own ticks, 20 a second whatever `ticksPerSecond` says.
+   * The ticks the game has run (`time query gametime`), the one counter every subsystem of the fake counts (`onTick`): `ticksPerSecond` a
+   * second of the clock the server ran, none while it is stopped. A stop at 20 ticks a second is caught up at `resume()` (the owed ticks run
+   * at once) unless it passed 2000 ms and no stall was dropped in the last 15 s; below 20 nothing is caught up. The client's `age` is this
+   * value as of a packet, so never ahead of it.
    */
   readonly gameTime: number;
+  /** Call `listener` once per server tick, in order, with `gameTime` already at that tick; a listener added during a tick hears the next one. */
+  onTick(listener: () => void): () => void;
   readonly timeOfDay: number;
   /** The day time unwrapped (`bot.time.time`): `timeOfDay` is it modulo a day. */
   readonly dayTime: number;
@@ -54,10 +66,11 @@ export interface FakeServer {
   readonly timePacketSent: boolean;
   /** Every packet the client wrote (`bot._client.write`), in order. */
   readonly packets: readonly ReceivedPacket[];
-  /** Freeze the server: no time packet and no answer until `resume`, while the clock goes on. */
+  /** Freeze the server: no tick, time packet or answer until `resume`, while the clock goes on. */
   stop(): void;
+  /** Run again. A stop the game catches up is caught up here (`gameTime` has moved when this returns), the answers queued during it after its first tick. */
   resume(): void;
-  /** Run `answer` after `lagMs` of clock, on a later slice than the call (never inside it). */
+  /** Run `answer` after `lagMs` of clock, on a later tick than the call (never inside it): at the start of the next tick, or at the end of the slice when none falls in it. */
   answer(answer: () => void): void;
   onTimePacket(listener: () => void): () => void;
   /** `/weather`: the levels ramp toward it a hundredth a tick and the client hears each step. */
@@ -77,8 +90,8 @@ export interface FakeServer {
   setDayTime(ticks: number): void;
   /**
    * The extra time packet the game sends at each `/time set` (any player's), the day time as it is: its age is the world's
-   * now, the last regular packet's plus the ticks since, so it falls off the regular packets' cadence (same age mod
-   * the packet's ticks) unless it lands in the tick of one, then it repeats that packet's age.
+   * now (`gameTime`), so it falls off the regular packets' cadence (same age mod the packet's ticks) unless it lands in
+   * the tick of one, then it repeats that packet's age.
    */
   resendTime(): void;
   /** The server's record of who sits in `vehicleId` (an entity id), which the client never hears about: the first rider. */
@@ -107,18 +120,55 @@ interface PendingAnswer {
   readonly run: () => void;
 }
 
-/** How many time packets fall in the slice `(fromMs, toMs]` of server time. */
-function timePacketsBetween(fromMs: number, toMs: number, phaseMs: number): number {
-  // Packets fall at every t > 0 with t ≡ phaseMs (mod 1000): at 1000, 2000... for phase 0, at 999, 1999... for 999.
-  const packetsUpTo = (ms: number) => (ms <= 0 ? 0 : Math.floor((ms - phaseMs) / TIME_PACKET_EVERY_MS) + (phaseMs > 0 ? 1 : 0));
-  return Math.max(0, packetsUpTo(toMs) - packetsUpTo(fromMs));
-}
-
-/** The ticks the world has run since the last regular packet at `elapsedMs` of server time: the packets fall at `phaseMs` (a second for phase 0) and every second after, `ticksPerPacket` ticks each. */
-function ticksIntoPacketCycle(elapsedMs: number, phaseMs: number, ticksPerPacket: number): number {
-  const firstPacketMs = phaseMs > 0 ? phaseMs : TIME_PACKET_EVERY_MS;
-  const sinceMs = elapsedMs < firstPacketMs ? elapsedMs : (elapsedMs - firstPacketMs) % TIME_PACKET_EVERY_MS;
-  return Math.floor((sinceMs * ticksPerPacket) / TIME_PACKET_EVERY_MS);
+/**
+ * The server's ticks, the one counter of the fake: `serverMs` is the time the server has run (a stop it does not catch up
+ * adds none), a tick falls at each `1000 / ticksPerSecond` ms of it, and `gameTime` is `startAge` plus the ticks run.
+ * The server has already run `1000 - phaseMs` ms when the clock starts (when `phaseMs` is not 0), so the first time
+ * packet falls `phaseMs` ms in and the ticks run at the same rate at any phase.
+ */
+function createServerTicks(options: FakeServerOptions) {
+  const phaseMs = options.phaseMs ?? 0;
+  if (phaseMs < 0 || phaseMs >= TIME_PACKET_EVERY_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
+  const ticksPerSecond = options.ticksPerSecond ?? ON_TIME_TICKS_PER_SECOND;
+  if (!Number.isInteger(ticksPerSecond) || ticksPerSecond < 1) throw new RangeError(`ticksPerSecond ${ticksPerSecond}: a whole number from 1 (a time packet comes every that many ticks)`);
+  const startAge = options.startAge ?? 24_000;
+  let serverMs = phaseMs > 0 ? TIME_PACKET_EVERY_MS - phaseMs : 0;
+  let ticksRun = Math.floor((serverMs * ticksPerSecond) / TIME_PACKET_EVERY_MS);
+  const listeners = new Set<() => void>();
+  return {
+    ticksPerSecond,
+    /** The ticks run so far, the ones of the first `phaseMs` ms included. */
+    get ticksRun() {
+      return ticksRun;
+    },
+    /**
+     * The server runs `ms` of its own time: each tick that falls in it, in order (the listeners of a tick are those at its
+     * start), while `keepGoing` holds; ticks left undone when it stops are run by the next call. `afterFirstTick` runs once,
+     * right after the first tick of this call (when none falls in it, never). Returns the ticks run.
+     */
+    run(ms: number, keepGoing: () => boolean, afterFirstTick?: () => void): number {
+      serverMs += ms;
+      const ticksDue = Math.floor((serverMs * ticksPerSecond) / TIME_PACKET_EVERY_MS + 1e-9);
+      const ticksBefore = ticksRun;
+      for (let first = true; ticksRun < ticksDue && keepGoing(); first = false) {
+        ticksRun += 1;
+        for (const listener of [...listeners]) if (listeners.has(listener)) listener();
+        if (first) afterFirstTick?.();
+      }
+      // A stop inside a tick leaves the slice's other ticks undone: the server has run only to its last tick, so a later slice does not owe them.
+      if (ticksRun < ticksDue) serverMs = (ticksRun * TIME_PACKET_EVERY_MS) / ticksPerSecond;
+      return ticksRun - ticksBefore;
+    },
+    api: {
+      get gameTime() {
+        return startAge + ticksRun;
+      },
+      onTick(listener: () => void) {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      },
+    } satisfies Pick<FakeServer, "gameTime" | "onTick">,
+  };
 }
 
 /** Run, in order, every answer due by `nowMs`, and keep the rest. */
@@ -224,17 +274,13 @@ function weatherApi(
   };
 }
 
-/** The world age and day time the client is told, and the time packets that tell it: the regular ones and the extras (`setDayTime`, `resendTime`). */
-function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAtMs: number) {
-  const phaseMs = options.phaseMs ?? 0;
-  if (phaseMs < 0 || phaseMs >= TIME_PACKET_EVERY_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
-  const ticksPerPacket = options.ticksPerSecond ?? 20;
-  /** The age of the last regular packet; `age` (what the client holds) is it, or an extra packet's age ahead of it until the next regular one. */
-  let cadenceAge = options.startAge ?? 24_000;
-  let age = cadenceAge;
-  const startAge = cadenceAge;
-  /** Milliseconds the server has run (not stopped), counted from the packet that would fall a second before the first: the first packet's age is then 20 ticks on, and the game time runs at the same rate at any phase. */
-  let runningMs = phaseMs > 0 ? TIME_PACKET_EVERY_MS - phaseMs : 0;
+/**
+ * The world age and day time the client is told, and the time packets that tell it: a regular one every `ticksPerSecond`
+ * ticks (a second of the server's running time, so a stop that was dropped or not caught up delays the next one), and the
+ * extras (`setDayTime`, `resendTime`). The age of a regular packet is the game time of its tick.
+ */
+function createWorldTime(options: FakeServerOptions, ticks: ReturnType<typeof createServerTicks>) {
+  let age = options.startAge ?? 24_000;
   let dayTime = options.timeOfDay ?? 6_000;
   let timePacketSent = options.timePacketYet !== false;
   const timeListeners = new Set<() => void>();
@@ -242,24 +288,18 @@ function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAt
     timePacketSent = true;
     for (const listener of [...timeListeners]) listener();
   };
+  // Vanilla sends the time every 20 ticks (`MinecraftServer.tickChildren`, read in the source, not measured here); a server behind its schedule
+  // is modelled as one packet a second of its own ticks (plan review 2026-10-24; `ticksPerSecond` above).
+  ticks.api.onTick(() => {
+    if (ticks.ticksRun % ticks.ticksPerSecond !== 0) return;
+    age = ticks.api.gameTime;
+    dayTime += ticks.ticksPerSecond;
+    sendTimePacket();
+  });
   return {
-    /** The server ran the slice `(fromMs, toMs]` of clock: the regular packets that fall in it go out, and the game time moves. */
-    run(fromMs: number, toMs: number) {
-      const packets = timePacketsBetween(fromMs - startedAtMs, toMs - startedAtMs, phaseMs);
-      for (let packet = packets; packet > 0; packet -= 1) {
-        cadenceAge += ticksPerPacket;
-        age = cadenceAge;
-        dayTime += ticksPerPacket;
-        sendTimePacket();
-      }
-      runningMs += toMs - fromMs;
-    },
     api: {
       get age() {
         return age;
-      },
-      get gameTime() {
-        return Math.max(age, startAge + Math.floor((runningMs * ticksPerPacket) / TIME_PACKET_EVERY_MS));
       },
       get timeOfDay() {
         return dayTime % TICKS_PER_DAY;
@@ -270,45 +310,82 @@ function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAt
       get timePacketSent() {
         return timePacketSent;
       },
-      setDayTime(ticks: number) {
-        dayTime = ticks;
+      setDayTime(next: number) {
+        dayTime = next;
         sendTimePacket();
       },
       resendTime() {
-        age = cadenceAge + ticksIntoPacketCycle(clock.now() - startedAtMs, phaseMs, ticksPerPacket);
+        age = ticks.api.gameTime;
         sendTimePacket();
       },
       onTimePacket(listener: () => void) {
         timeListeners.add(listener);
         return () => void timeListeners.delete(listener);
       },
-    } satisfies Pick<FakeServer, "age" | "gameTime" | "timeOfDay" | "dayTime" | "timePacketSent" | "setDayTime" | "resendTime" | "onTimePacket">,
+    } satisfies Pick<FakeServer, "age" | "timeOfDay" | "dayTime" | "timePacketSent" | "setDayTime" | "resendTime" | "onTimePacket">,
   };
+}
+
+/** What the game does with a stall of `owedMs` that ends at `nowMs`: run its ticks at once, drop them, or (a server below 20 ticks a second) leave them. */
+function stallOutcome(owedMs: number, nowMs: number, lastDropMs: number | null, ticksPerSecond: number): "catch up" | "drop" | "leave" {
+  if (ticksPerSecond < ON_TIME_TICKS_PER_SECOND || owedMs <= 0) return "leave";
+  const warnedRecently = lastDropMs !== null && nowMs - lastDropMs < STALL_WARNING_EVERY_MS;
+  return owedMs > STALL_DROPPED_OVER_MS && !warnedRecently ? "drop" : "catch up";
 }
 
 export function createFakeServer(clock: FakeClock, options: FakeServerOptions = {}): FakeServer {
   const lagMs = options.lagMs ?? 0;
-  const startedAtMs = clock.now();
-  const time = createWorldTime(clock, options, startedAtMs);
+  const ticks = createServerTicks(options);
+  const time = createWorldTime(options, ticks);
   const weather = createServerWeather(options.weather);
-  let tickAccumulatedMs = 0;
   let running = true;
-  let lastSliceMs = startedAtMs;
+  let lastSliceMs = clock.now();
+  /** Where the clock stood when the server stopped, and when a stall was last dropped. */
+  let stoppedAtMs = lastSliceMs;
+  let lastDropMs: number | null = null;
   let pending: PendingAnswer[] = [];
 
   const answer = (run: () => void) => void pending.push({ dueMs: clock.now() + lagMs, run });
   const weatherChannel = createWeatherChannel(answer);
+  // The weather advances a level step each server tick.
+  ticks.api.onTick(() => weather.tick().forEach(weatherChannel.send));
+  const answerDue = () => void (pending = runDueAnswers(pending, clock.now()));
+  /** Whether the ticks running are a stall's owed ones, whose answers wait for the first of them to end. */
+  let catchingUp = false;
+  // The answers due are handled at the start of a tick's work, after the time packet and the weather and before every other listener's.
+  ticks.api.onTick(() => catchingUp || answerDue());
 
-  clock.onSlice("server", (sliceMs) => {
-    const nowMs = clock.now();
-    if (running) time.run(lastSliceMs, nowMs);
-    lastSliceMs = nowMs;
-    // The weather advances a level step each server tick of 50 ms (the air of `fake-bot-breath.ts` counts the same way).
-    if (running) {
-      for (tickAccumulatedMs += sliceMs; tickAccumulatedMs >= TICK_MS; tickAccumulatedMs -= TICK_MS) weather.tick().forEach(weatherChannel.send);
-    }
-    if (running) pending = runDueAnswers(pending, nowMs);
+  clock.onSlice("server", () => {
+    const sliceMs = clock.now() - lastSliceMs;
+    lastSliceMs = clock.now();
+    if (!running) return;
+    // A slice shorter than a tick (a clock stepped by 1 ms) still answers what is due.
+    if (ticks.run(sliceMs, () => running) === 0 && running) answerDue();
   });
+
+  /** Run the ticks a stall owes at once; the packets that came in during it are handled in the first tick after it. */
+  const catchUp = (owedMs: number) => {
+    catchingUp = true;
+    try {
+      ticks.run(owedMs, () => running, () => ((catchingUp = false), answerDue()));
+    } finally {
+      catchingUp = false;
+    }
+  };
+  const stop = () => {
+    if (!running) return;
+    running = false;
+    stoppedAtMs = lastSliceMs;
+  };
+  const resume = () => {
+    if (running) return;
+    running = true;
+    const nowMs = clock.now();
+    lastSliceMs = nowMs;
+    const outcome = stallOutcome(nowMs - stoppedAtMs, nowMs, lastDropMs, ticks.ticksPerSecond);
+    if (outcome === "drop") lastDropMs = nowMs;
+    if (outcome === "catch up") catchUp(nowMs - stoppedAtMs);
+  };
 
   const server = {
     get isRunning() {
@@ -317,14 +394,15 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
     onWeatherPacket: weatherChannel.onWeatherPacket,
     ...createClientPackets(clock),
     ...createPositions(),
-    stop: () => void (running = false),
-    resume: () => void (running = true),
+    stop,
+    resume,
     answer,
     ...createRiders(),
   };
   // Getters are copied as getters (a spread would read them once).
   return Object.defineProperties(server, {
     ...Object.getOwnPropertyDescriptors(time.api),
+    ...Object.getOwnPropertyDescriptors(ticks.api),
     ...Object.getOwnPropertyDescriptors(weatherApi(weather, () => time.api.dayTime)),
   }) as FakeServer;
 }

@@ -24,7 +24,6 @@ import { attachFakeHeldUse } from "./fake-bot-held-use.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeInventory } from "./fake-inventory.js";
 import type { FakeServer } from "./fake-server.js";
 
@@ -53,7 +52,7 @@ export interface FakeCombat {
   explode(position: Vec3): void;
 }
 
-type CombatParts = { clock: FakeClock; server: FakeServer; inventory: FakeInventory; entities: ServerEntities };
+type CombatParts = { server: FakeServer; inventory: FakeInventory; entities: ServerEntities };
 
 /** A bot that has stood about has a full swing (the ticker counts from the login). */
 const STANDING_SWING_TICKS = 1_000;
@@ -82,7 +81,7 @@ function damageTypeId(bot: FakeBot, name: string): number {
 function createSender(bot: FakeBot, parts: CombatParts) {
   let ticks = 0;
   const later: { dueTick: number; run: () => void }[] = [];
-  onServerTick(parts.clock, parts.server, () => {
+  onServerTick(parts.server, () => {
     ticks += 1;
     for (const due of later.filter(({ dueTick }) => dueTick <= ticks)) {
       later.splice(later.indexOf(due), 1);
@@ -149,7 +148,7 @@ function trackSprint(server: FakeServer): { readonly active: () => boolean; read
 function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: MobKnockback) {
   const creatures = new Map<number, Creature>();
   const botWindow: Creature = { health: bot.health, invulnerableTicks: 0, lastHurt: 0, dying: false };
-  onServerTick(parts.clock, parts.server, () => {
+  onServerTick(parts.server, () => {
     for (const creature of [botWindow, ...creatures.values()]) creature.invulnerableTicks = Math.max(0, creature.invulnerableTicks - 1);
   });
   const healthKeyOf = (entity: Entity) => bot.registry.entitiesByName[entity.name!]?.metadataKeys?.indexOf("health") ?? -1;
@@ -227,7 +226,7 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   const sender = createSender(bot, parts);
   let ticksSinceSwing = STANDING_SWING_TICKS;
   let heldType = parts.inventory.heldItem?.type;
-  onServerTick(parts.clock, parts.server, () => void (ticksSinceSwing += 1));
+  onServerTick(parts.server, () => void (ticksSinceSwing += 1));
   // `Player.tick`: a different item type in the main hand starts the swing over.
   parts.inventory.onHeldItemChanged((held) => {
     if (held?.type !== heldType) ticksSinceSwing = 0;
@@ -236,7 +235,7 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender });
   const knock = attachMobKnockback(bot, sender);
   const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock);
-  const fireballs = attachFakeFireballs(bot, { clock: parts.clock, server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
+  const fireballs = attachFakeFireballs(bot, { server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
   const sprint = trackSprint(parts.server);
   const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, deaths: sender.deaths, hurtTheBot, pushBot });
 

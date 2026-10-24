@@ -10,8 +10,8 @@ import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import type { FakeBot, FakeEntitySpec } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeEntities } from "./fake-bot-items.js";
+import { onServerTick } from "./fake-bot-server-ticks.js";
 import { EQUIPMENT_SLOTS, type FakeInventory, itemOf } from "./fake-inventory.js";
 import type { FakeServer } from "./fake-server.js";
 
@@ -19,7 +19,6 @@ type Registry = ReturnType<typeof minecraftData>;
 type ItemClass = typeof Item & { toNotch(item: Item | null): unknown };
 const require = createRequire(import.meta.url);
 
-const MS_PER_TICK = 50;
 /** The delay of a block's drop (`ItemEntity.setDefaultPickUpDelay`): unmeasured, only the delay a spec gives is. */
 const DEFAULT_PICKUP_DELAY_TICKS = 10;
 /** An item in reach touches the bot's box grown by this much sideways and up and down (measured: 1.3 blocks in, 1.55 out). */
@@ -55,13 +54,13 @@ interface LyingItem {
   readonly entity: Entity;
   readonly name: string;
   count: number;
-  readonly pickableAtMs: number;
+  /** The server tick (`FakeServer.gameTime`) the item can be picked up from. */
+  readonly pickableAtTick: number;
   /** A pickup decided and still on its way to the client (a lagging server). */
   inFlight: boolean;
 }
 
 interface EntityParts {
-  readonly clock: FakeClock;
   readonly server: FakeServer;
   readonly inventory: FakeInventory;
   readonly entities: FakeEntities;
@@ -115,7 +114,7 @@ function addToInventory(inventory: FakeInventory, registry: Registry, name: stri
 
 /** Give the server its spawn, removal and the pickup of item entities; returns the controls of the harness. */
 export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEntities {
-  const { clock, server, inventory, entities } = parts;
+  const { server, inventory, entities } = parts;
   const lying = new Map<number, LyingItem>();
   const Items = require("prismarine-item")(bot.registry) as ItemClass;
   const itemSlot = bot.registry.supportFeature("metadataIxOfItem") as number;
@@ -138,7 +137,7 @@ export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEnti
     const entity = Object.assign(entities.make(name, new Vec3(position.x, position.y, position.z), newId), extra);
     if (item !== undefined) {
       entity.metadata[itemSlot] = Items.toNotch(itemOf(bot.registry, item.name, item.count));
-      lying.set(entity.id, { entity, name: item.name, count: item.count, pickableAtMs: clock.now() + (pickupDelayTicks ?? DEFAULT_PICKUP_DELAY_TICKS) * MS_PER_TICK, inFlight: false });
+      lying.set(entity.id, { entity, name: item.name, count: item.count, pickableAtTick: server.gameTime + (pickupDelayTicks ?? DEFAULT_PICKUP_DELAY_TICKS), inFlight: false });
     }
     bot.entities[entity.id] = entity;
     bot.emit("entitySpawn", entity);
@@ -181,10 +180,10 @@ export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEnti
     entity.metadata[itemSlot] = Items.toNotch(dropped.count > 0 ? dropped : null);
   };
 
-  clock.onSlice("server", () => {
-    if (!server.isRunning || !canPickUp(bot)) return;
+  onServerTick(server, () => {
+    if (!canPickUp(bot)) return;
     for (const lyingItem of [...lying.values()]) {
-      const waiting = lyingItem.inFlight || clock.now() < lyingItem.pickableAtMs;
+      const waiting = lyingItem.inFlight || server.gameTime < lyingItem.pickableAtTick;
       if (waiting || !inReach(bot, lyingItem.entity) || roomFor(inventory, bot.registry, lyingItem.name) === 0) continue;
       lyingItem.inFlight = true;
       server.answer(() => pickUp(lyingItem));

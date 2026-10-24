@@ -18,19 +18,11 @@ test("a failure of attack-cooldown-damage names the server ticks of the acts, wh
   );
 });
 
-test("attack-cooldown-damage judges the second hit by the server ticks between the hits: a server that loses 3 ticks of every second still passes", async () => {
-  const harness = fakeHarnessFor(attackCooldownDamage.fixture, frame);
+test("attack-cooldown-damage judges the second hit by the server ticks between the hits: a server behind its schedule (17 ticks a second) still passes", async () => {
+  // A stop under 2 s is caught up by the game, so a gap that holds fewer ticks than the wall time says is a server that runs slow: a 1000 ms gap holds 17 ticks and the swing is that much less back.
+  const harness = fakeHarnessFor(attackCooldownDamage.fixture, frame, { ticksPerSecond: 17 });
   using _installed = harness.clock.install();
-  // Every second the server stands still for 150 ms: a 1000 ms gap holds 17 ticks and the swing is that much less back.
-  const stall = setInterval(() => {
-    harness.server.stop();
-    setTimeout(() => harness.server.resume(), 150);
-  }, 1_000);
-  try {
-    await attackCooldownDamage.run(fakeContractSubject(harness, frame));
-  } finally {
-    clearInterval(stall);
-  }
+  await attackCooldownDamage.run(fakeContractSubject(harness, frame));
 });
 
 test("attack-cooldown-damage trusts the server's tick readings over the wall gap: readings 24 ticks apart for hits 50 ms apart fail it with the damage the rule wants", async () => {

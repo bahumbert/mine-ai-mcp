@@ -67,7 +67,7 @@ test("the air does not go below 0: the drowning damage is the server's and not m
   assert.equal(bot.oxygenLevel, 0);
 });
 
-test("a stopped server sends no air; a resumed one goes on from where it was", async () => {
+test("a stopped server sends no air; one stopped under 2 s runs the air ticks it owes at the resume (the game catches the stall up)", async () => {
   const { bot, clock, server } = createFakeBot({ position: POOL_FEET, cells: POOL });
   await clock.advance(500 + DELIVERY_MS);
   assert.equal(bot.entity.metadata[airIndex(bot)], 290);
@@ -76,8 +76,30 @@ test("a stopped server sends no air; a resumed one goes on from where it was", a
   assert.equal(bot.entity.metadata[airIndex(bot)], 290);
   server.resume();
   await clock.advance(500 + DELIVERY_MS);
-  // The tick in flight when it stopped arrives first: 11 ticks before the stop, 10 delivered after it.
+  // The tick in flight when it stopped arrives first: 11 ticks before the stop, the 20 owed ones run at the resume, 10 more after it.
+  assert.equal(bot.entity.metadata[airIndex(bot)], 300 - 11 - 20 - 10);
+});
+
+test("a stall over 2 s is dropped by the game: the air goes on from where it was, the owed ticks never run", async () => {
+  const { bot, clock, server } = createFakeBot({ position: POOL_FEET, cells: POOL });
+  await clock.advance(500 + DELIVERY_MS);
+  server.stop();
+  await clock.advance(2_500);
+  assert.equal(bot.entity.metadata[airIndex(bot)], 290);
+  server.resume();
+  await clock.advance(500 + DELIVERY_MS);
   assert.equal(bot.entity.metadata[airIndex(bot)], 300 - 11 - 10);
+});
+
+test("a server at 14 ticks a second drops 14 air a second and catches nothing up after a stop", async () => {
+  const { bot, clock, server } = createFakeBot({ position: POOL_FEET, cells: POOL, server: { ticksPerSecond: 14 } });
+  await clock.advance(1_000 + DELIVERY_MS);
+  assert.equal(bot.entity.metadata[airIndex(bot)], 300 - 14);
+  server.stop();
+  await clock.advance(1_000);
+  server.resume();
+  await clock.advance(1_000 + DELIVERY_MS);
+  assert.equal(bot.entity.metadata[airIndex(bot)], 300 - 28);
 });
 
 test("a server lagMs behind delivers each air packet lagMs late", async () => {

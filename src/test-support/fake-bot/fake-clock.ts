@@ -45,8 +45,15 @@ export interface FakeClock extends StallClock {
 /** The node mock timer APIs a mocked clock takes over. `setImmediate` stays real: `flush` needs it. */
 const MOCKED_APIS = ["setTimeout", "setInterval", "Date"] as const;
 
-/** One installed clock at a time: node's mock timers are global, so two would fight over them. */
-let installed: { restore(): void } | null = null;
+/** One installed clock at a time: node's mock timers are global, so two would fight over them. `by` is where it was installed (a `file:line`). */
+let installed: { restore(): void; readonly by: string } | null = null;
+
+/** The first `file:line` of the stack outside this file: the test that called `install()`. */
+function installerOfThisCall(): string {
+  const frames = (new Error().stack ?? "").split("\n").slice(1);
+  const outside = frames.find((frame) => !frame.includes("fake-clock.ts"));
+  return outside?.match(/(?:\(|\bat )(.+?:\d+):\d+\)?\s*$/)?.[1] ?? "an unknown caller";
+}
 
 /** Lets every promise reaction already queued run, timers included. */
 export async function flush(): Promise<void> {
@@ -133,10 +140,12 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
     pendingTimers: () => timers.size,
     install() {
       if (options.mode !== "mocked") throw new Error("a manual fake clock does not install: create it with mode mocked");
-      if (installed !== null) throw new Error("a fake clock is already installed: dispose it before installing another");
+      const by = installerOfThisCall();
+      if (installed !== null) throw new Error(`a fake clock is already installed by ${installed.by}: dispose it (\`using installed = clock.install()\`) before installing another`);
       const restoreGlobals = installGlobals(now);
       ownsGlobals = true;
       const handle = {
+        by,
         restore() {
           if (installed !== handle) return;
           restoreGlobals();

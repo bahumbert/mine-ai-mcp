@@ -195,3 +195,233 @@ test("a stopped server's game time stands still and goes on from there after res
   await clock.advance(100);
   assert.equal(server.gameTime, 24_010);
 });
+
+/** Every tick the server runs, with the game time it ran at. */
+function recordTicks(server: ReturnType<typeof createFakeServer>): number[] {
+  const seen: number[] = [];
+  server.onTick(() => seen.push(server.gameTime));
+  return seen;
+}
+
+function assertAgeNotAhead(server: ReturnType<typeof createFakeServer>) {
+  assert.ok(server.age <= server.gameTime, `age ${server.age} is ahead of game time ${server.gameTime}`);
+}
+
+test("onTick is the one tick stream: 20 ticks a second on time, 14 behind the schedule, none while stopped", async () => {
+  const { clock, server } = serverAt();
+  const onTime = recordTicks(server);
+  await clock.advance(1_000);
+  assert.equal(onTime.length, 20);
+  assert.deepEqual(onTime.slice(0, 2), [24_001, 24_002], "each listener reads the game time of its own tick");
+  const behind = serverAt({ ticksPerSecond: 14 });
+  const slow = recordTicks(behind.server);
+  await behind.clock.advance(1_000);
+  assert.equal(slow.length, 14);
+  assert.equal(behind.server.gameTime, 24_014);
+  server.stop();
+  await clock.advance(500);
+  assert.equal(onTime.length, 20);
+});
+
+test("a listener added during a tick hears the next tick, one that removed itself hears no more", async () => {
+  const { clock, server } = serverAt();
+  const heard: string[] = [];
+  const removeLate = server.onTick(() => heard.push("late"));
+  removeLate();
+  let added = false;
+  server.onTick(() => {
+    if (added) return;
+    added = true;
+    server.onTick(() => heard.push("added"));
+    heard.push("adder");
+  });
+  await clock.advance(100);
+  assert.deepEqual(heard, ["adder", "added"]);
+  assertAgeNotAhead(server);
+});
+
+test("a stop of 800 ms at 20 ticks a second is caught up at once on resume: 16 ticks and the packet that fell in it", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(400);
+  const packetAges: number[] = [];
+  server.onTimePacket(() => packetAges.push(server.age));
+  const ticks = recordTicks(server);
+  server.stop();
+  await clock.advance(800);
+  assert.equal(server.gameTime, 24_008);
+  assert.equal(ticks.length, 0);
+  server.resume();
+  assert.equal(ticks.length, 16, "the owed ticks run inside resume");
+  assert.equal(server.gameTime, 24_024);
+  assert.deepEqual(packetAges, [24_020], "the packet of the first second goes out at the resume");
+  assertAgeNotAhead(server);
+  await clock.advance(50);
+  assert.equal(server.gameTime, 24_025, "the clock goes on from there, one tick a slice");
+});
+
+test("a stop of exactly 2000 ms is still caught up", async () => {
+  const { clock, server } = serverAt();
+  server.stop();
+  await clock.advance(2_000);
+  server.resume();
+  assert.equal(server.gameTime, 24_040);
+  assertAgeNotAhead(server);
+});
+
+test("a stop of 2500 ms drops the owed ticks and its time packets, and the server goes on from where it stopped", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(400);
+  const packetAges: number[] = [];
+  server.onTimePacket(() => packetAges.push(server.age));
+  server.stop();
+  await clock.advance(2_500);
+  server.resume();
+  assert.equal(server.gameTime, 24_008);
+  assert.deepEqual(packetAges, []);
+  assertAgeNotAhead(server);
+  await clock.advance(600);
+  assert.equal(server.gameTime, 24_020, "the first packet after the drop falls a second of running time after the start");
+  assert.deepEqual(packetAges, [24_020]);
+  assertAgeNotAhead(server);
+});
+
+test("a second stop of 2500 ms inside 15 s of a drop is caught up in full, one 15 s after it is dropped again", async () => {
+  const { clock, server } = serverAt();
+  server.stop();
+  await clock.advance(2_500);
+  server.resume();
+  assert.equal(server.gameTime, 24_000, "the first long stall is dropped");
+  await clock.advance(2_500);
+  const before = server.gameTime;
+  server.stop();
+  await clock.advance(2_500);
+  server.resume();
+  assert.equal(server.gameTime - before, 50, "5 s after the drop: caught up");
+  assertAgeNotAhead(server);
+  await clock.advance(12_000);
+  const later = server.gameTime;
+  server.stop();
+  await clock.advance(2_500);
+  server.resume();
+  assert.equal(server.gameTime, later, "15 s after the drop the owed ticks are dropped again");
+  assertAgeNotAhead(server);
+});
+
+test("a stop at 14 ticks a second catches nothing up: the server already runs as fast as it can", async () => {
+  const { clock, server } = serverAt({ ticksPerSecond: 14 });
+  await clock.advance(500);
+  const ticks = recordTicks(server);
+  server.stop();
+  await clock.advance(800);
+  server.resume();
+  assert.equal(ticks.length, 0);
+  assert.equal(server.gameTime, 24_007);
+  await clock.advance(500);
+  assert.equal(server.gameTime, 24_014);
+  assertAgeNotAhead(server);
+});
+
+test("answers queued during a stop run after the first caught-up tick, before the second", async () => {
+  const { clock, server } = serverAt();
+  server.stop();
+  const order: string[] = [];
+  server.onTick(() => order.push(`tick ${server.gameTime - 24_000}`));
+  server.answer(() => order.push("answer"));
+  await clock.advance(400);
+  server.resume();
+  assert.deepEqual(order.slice(0, 3), ["tick 1", "answer", "tick 2"]);
+  assert.equal(order.length, 9, "8 caught-up ticks and the answer");
+  assertAgeNotAhead(server);
+});
+
+test("a stop that catches up answers only what is due on a server with lag", async () => {
+  const { clock, server } = serverAt({ lagMs: 1_000 });
+  let answered = false;
+  server.stop();
+  server.answer(() => (answered = true));
+  await clock.advance(400);
+  server.resume();
+  assert.equal(answered, false, "queued 400 ms ago, due in 600 ms more");
+  await clock.advance(600);
+  assert.equal(answered, true);
+  assertAgeNotAhead(server);
+});
+
+test("the caught-up packet and age hold at phaseMs 0 and 999", async () => {
+  for (const phaseMs of [0, 999]) {
+    const { clock, server } = serverAt({ phaseMs });
+    await clock.advance(200);
+    const ages: number[] = [];
+    server.onTimePacket(() => ages.push(server.age));
+    server.stop();
+    await clock.advance(1_500);
+    server.resume();
+    assert.equal(ages.length, 1, `phase ${phaseMs}: the packet inside the stop goes out at the resume`);
+    assert.equal(ages[0], server.age);
+    assertAgeNotAhead(server);
+    await clock.advance(1_000);
+    assert.equal(ages.length, 2, `phase ${phaseMs}: one more a second on`);
+    assertAgeNotAhead(server);
+  }
+});
+
+test("resendTime during a catch-up carries the game time of the tick it is sent in, and after it the world's age", async () => {
+  const { clock, server } = serverAt();
+  server.stop();
+  await clock.advance(300);
+  const ages: number[] = [];
+  let tick = 0;
+  server.onTick(() => {
+    tick += 1;
+    if (tick === 3) server.resendTime();
+  });
+  server.onTimePacket(() => ages.push(server.age));
+  server.resume();
+  assert.deepEqual(ages, [24_003]);
+  assertAgeNotAhead(server);
+  server.resendTime();
+  assert.equal(server.age, 24_006, "6 ticks were caught up");
+});
+
+test("resendTime while stopped carries the game time it stopped at", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(1_300);
+  server.stop();
+  await clock.advance(700);
+  server.resendTime();
+  assert.equal(server.age, 24_026);
+});
+
+test("a stop inside a tick of a long slice leaves that slice's other ticks undone, not owed to a later slice", async () => {
+  const { clock, server } = serverAt();
+  let tick = 0;
+  server.onTick(() => {
+    tick += 1;
+    if (tick === 2) server.stop();
+  });
+  await clock.advance(200, 200);
+  assert.equal(tick, 2, "the stop ends the slice's ticks");
+  await clock.advance(2_500);
+  server.resume();
+  const before = tick;
+  await clock.advance(50);
+  assert.equal(tick - before, 1, "one tick for one slice, not the two the stopped slice left");
+});
+
+test("a ticksPerSecond that is not a whole number above 0 is refused: the time packets come every that many ticks", () => {
+  for (const ticksPerSecond of [0, 14.5, -1]) assert.throws(() => serverAt({ ticksPerSecond }), /ticksPerSecond/);
+});
+
+test("a stop and resume inside a tick owe nothing and the slice's other ticks run", async () => {
+  const { clock, server } = serverAt();
+  let tick = 0;
+  server.onTick(() => {
+    tick += 1;
+    if (tick !== 3) return;
+    server.stop();
+    server.resume();
+  });
+  await clock.advance(200);
+  assert.equal(server.gameTime, 24_004);
+  assert.equal(tick, 4);
+});

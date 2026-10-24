@@ -241,6 +241,38 @@ test("a bed out of reach is Mineflayer's refusal (its reach test comes before th
   assert.equal(writtenBlockPlaces(h), 0);
 });
 
+/** The server ticks from the moment the bot is asleep to the wake the client hears, and the clock's reading at the wake. */
+async function ticksAsleep(h: FakeHarness, whileAsleep: () => Promise<void> = async () => void (await h.clock.advance(15_000))): Promise<{ ticks: number; wokeAtMs: number }> {
+  let asleepAt = 0;
+  h.bot.on("sleep", () => void (asleepAt = h.server.gameTime));
+  const woke: { ticks: number; wokeAtMs: number }[] = [];
+  h.bot.on("wake", () => void woke.push({ ticks: h.server.gameTime - asleepAt, wokeAtMs: h.clock.now() }));
+  await sleepIn(h);
+  await whileAsleep();
+  assert.equal(woke.length, 1, "she woke once");
+  return woke[0]!;
+}
+
+test("the night is skipped 100 server ticks into the sleep, at 20 ticks a second and on a server at 14", async () => {
+  for (const ticksPerSecond of [20, 14]) {
+    const { ticks } = await ticksAsleep(bedroom({ server: { ticksPerSecond } }));
+    assert.ok(ticks >= 98 && ticks <= 102, `${ticks} ticks at ${ticksPerSecond} a second`);
+  }
+});
+
+test("the ticks a caught-up stop owes count toward the 100 of the sleep, run at the resume and not waited for", async () => {
+  const h = bedroom();
+  const { ticks, wokeAtMs } = await ticksAsleep(h, async () => {
+    await h.clock.advance(1_000);
+    h.server.stop();
+    await h.clock.advance(1_500);
+    h.server.resume();
+    await h.clock.advance(15_000);
+  });
+  assert.ok(ticks >= 98 && ticks <= 102, `${ticks} ticks, 30 of them caught up at the resume`);
+  assert.ok(wokeAtMs <= USE_MS + 1_000 + 1_500 + 2_100, `woke at ${wokeAtMs} ms: 20 ticks before the stop, 30 at the resume, 50 more (2.5 s)`);
+});
+
 test("a server stopped while she sleeps skips nothing until it runs again", async () => {
   const h = bedroom();
   await sleepIn(h);

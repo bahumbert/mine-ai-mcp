@@ -49,9 +49,11 @@ test("a get-off holds shift while the world age stands still, and lets go only o
   const harness = seaHarness({ lagMs: 3_000 });
   using _installed = harness.clock.install();
   const positions = await seat(harness, 3_050);
-  // Stopped for 800 ms: no time packet and no answer until it runs again.
+  // Stopped for 800 ms: no tick, time packet or answer until it runs again; the game then catches the 16 owed ticks up at once.
   harness.server.stop();
   harness.clock.after(800, () => harness.server.resume());
+  const ageAtShift: number[] = [];
+  harness.server.onPacket("entity_action", () => ageAtShift.push(harness.bot.time.age));
   const startedAt = performance.now();
   // Two time packets after the resume, before the late answer (due 3 s after the press).
   const result = await getOffOver(harness, 2_500);
@@ -60,6 +62,8 @@ test("a get-off holds shift while the world age stands still, and lets go only o
   assert.equal(result.answered, true, "the server clock moved past the send: it handled the shift");
   assert.equal(result.ended, "world_age");
   assert.deepEqual(shifts(harness), [true, false]);
+  assert.equal(ageAtShift.length, 2);
+  assert.ok(ageAtShift[1]! - ageAtShift[0]! >= 40, `shift released after the age she heard moved ${String(ageAtShift[1]! - ageAtShift[0]!)} ticks, the caught-up ones included`);
   assert.equal(positions.length, 1);
   assert.equal(harness.bot.vehicle, null);
 });
@@ -129,7 +133,8 @@ test("a world age that jumps 40 in the first 250 ms after the press is not the s
   // Run 16: the server ran ~30 % behind and Cleo's get-off "answered" in ~1.1 s: a client whose event loop was blocked
   // reads its queued time packets after the press, so the age it sees jump says nothing about the server reading the shift.
   // Here the time packet 50 ms after the press brings 40 ticks at once (two queued packets read together), and the
-  // server's answer to the shift takes 500 ms.
+  // server's answer to the shift takes 500 ms. `ticksPerSecond: 40` stands for that burst of two packets in the client's
+  // queue: a server on time sends 20 ticks a packet, so this fake really runs 40 a second to make one packet carry 40.
   const harness = seaHarness({ lagMs: 500, server: { phaseMs: 550, ticksPerSecond: 40 } });
   using _installed = harness.clock.install();
   await seat(harness, 500);

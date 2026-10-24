@@ -97,10 +97,29 @@ test("an aborted sleep rejects with the signal's reason and leaves no timer", as
   assert.equal(clock.pendingTimers(), 0);
 });
 
-test("only one mocked clock can be installed at a time", () => {
+test("a second install while a clock is installed throws, naming the file that installed the first", () => {
   const first = createFakeClock({ mode: "mocked" });
   using _installed = first.install();
+  assert.throws(() => createFakeClock({ mode: "mocked" }).install(), /already installed by .*fake-clock\.test\.ts:\d+/);
+});
+
+test("after the installed clock is disposed another installs", () => {
+  {
+    using _first = createFakeClock({ mode: "mocked" }).install();
+  }
+  const second = createFakeClock({ mode: "mocked", startMs: 7 });
+  using _installed = second.install();
+  assert.equal(Date.now(), 7);
+});
+
+test("a failed second install leaves the first clock's timers and globals as they were", async () => {
+  const first = createFakeClock({ mode: "mocked" });
+  using _installed = first.install();
+  let fired = 0;
+  setTimeout(() => (fired += 1), 100);
   assert.throws(() => createFakeClock({ mode: "mocked" }).install(), /already installed/);
+  await first.advance(100);
+  assert.equal(fired, 1);
 });
 
 test("a clock left installed at the end of a test is restored and named", () => {
