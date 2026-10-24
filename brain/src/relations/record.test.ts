@@ -124,3 +124,24 @@ test("D2: an old relation note whose trades have no receivedAt parses, with rece
   const parsed = parseRelationNote(JSON.stringify(relation));
   assert.equal(parsed?.trades[0]?.receivedAt, null);
 });
+
+const withOne = (t: ReturnType<typeof deal>) => withTrade(fresh(), t);
+
+test("describeTrade agreed says nothing was handed over on either side", () => {
+  const text = describeRelation(withOne(deal("them", { give: [{ item: "cobblestone", count: 60 }], get: [{ item: "cooked_beef", count: 16 }] })), "GlutenFoul", t0);
+  assert.match(text, /agreed 0 min ago: you give 60 cobblestone, GlutenFoul gives 16 cooked_beef, GlutenFoul first; nothing handed over yet: you have not given your 60 cobblestone and have not received their 16 cooked_beef/u);
+});
+
+test("describeTrade they_gave says my side is not given yet", () => {
+  const trade = creditTrade(deal("them", { give: [{ item: "cobblestone", count: 60 }], get: [{ item: "cooked_beef", count: 16 }] }), [{ item: "cooked_beef", count: 16 }], t0).trade;
+  const text = describeRelation(withOne(trade), "GlutenFoul", t0);
+  assert.match(text, /GlutenFoul gave 16 cooked_beef; you have not given your 60 cobblestone yet \(it is handed over for you\)/u);
+});
+
+test("describeTrade agreed with a partial payment says what arrived and what is owed", () => {
+  const trade = creditTrade(deal("them", { give: [{ item: "cobblestone", count: 60 }], get: [{ item: "cooked_beef", count: 16 }] }), [{ item: "cooked_beef", count: 6 }], t0).trade;
+  assert.equal(trade.state, "agreed");
+  const text = describeRelation(withOne(trade), "GlutenFoul", t0);
+  assert.match(text, /you have not given your 60 cobblestone yet; GlutenFoul handed over 6 cooked_beef and still owes 10 cooked_beef/u);
+  assert.doesNotMatch(text, /nothing handed over yet/u);
+});

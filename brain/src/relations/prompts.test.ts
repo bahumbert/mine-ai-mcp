@@ -102,3 +102,7 @@ test("F10 tooFarLine tells a partner out of reach cannot be gone to, with the di
   assert.equal(tooFarLine("Theo", 200), "Theo is too far away to trade with (200 blocks away): do not offer to go to them; they can come to you.");
   assert.equal(tooFarLine("Theo", null), "Theo is too far away to trade with (out of sight): do not offer to go to them; they can come to you.");
 });
+
+test("tradeInstructions forbids claiming a hand-over", () => {
+  assert.match(tradeInstructions(), /never say you gave, dropped or handed over items unless your "Open:" line says you gave them/u);
+});

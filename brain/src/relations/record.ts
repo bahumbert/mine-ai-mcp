@@ -89,12 +89,19 @@ function owedText(t: Trade): string {
     .filter((w) => w.left > 0).map((w) => `${w.left} ${w.item}`).join(", ");
 }
 
+/** What changed hands in an agreed trade: nothing, or the part payment that arrived before my give. */
+function agreedHandOver(t: Trade, partner: string): string {
+  const give = sideText(t.give) || "nothing";
+  if (t.received.length === 0) return `nothing handed over yet: you have not given your ${give} and have not received their ${sideText(t.get) || "nothing"}`;
+  return `you have not given your ${give} yet; ${partner} handed over ${sideText(t.received)} and still owes ${owedText(t)}`;
+}
+
 function describeTrade(t: Trade, partner: string, now: number): string {
   const ago = minutesAgo(t.gaveAt ?? t.agreedAt ?? t.createdAt, now);
   if (t.state === "proposed") return `you proposed giving ${sideText(t.give) || "nothing"} for ${sideText(t.get) || "nothing"} ${ago} min ago, no answer yet`;
-  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first`;
+  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first; ${agreedHandOver(t, partner)}`;
   if (t.state === "i_gave") return `you gave ${sideText(t.give)} ${ago} min ago, ${partner} owes ${owedText(t)}`;
-  if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}, you owe ${sideText(t.give)}`;
+  if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}; you have not given your ${sideText(t.give)} yet (it is handed over for you)`;
   return `${partner} did not pay in time (${t.note}), still owes ${owedText(t)}`;
 }
 
