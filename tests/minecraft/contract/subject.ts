@@ -47,6 +47,21 @@ export interface ContractSubject {
   clearFireballs(): Promise<void>;
   /** The shooter `shooterId` (a mob on the client) hits the bot with a `projectile` ("arrow" or "small_fireball") that flew in from its side; resolves once the client heard the hurt. */
   shootBot(projectile: ProjectileName, shooterId: number): Promise<void>;
+  /**
+   * Resolves true once the world age the client holds moved by `ticks` or more since this call, false at `wallMs` (the
+   * wall bound; a server behind by seconds ends here, never on ticks alone). The age comes one packet per 20 ticks
+   * (`mineflayer/lib/plugins/time.js`), so the age at the call may be up to 19 ticks stale: `ticks` observed prove at
+   * least `ticks - 19` server ticks after the call, and 40 prove at least 21 (the runtime's accepted rule, facts
+   * `runtime-pitfalls.md` "The server's answer"). That holds for a client that reads its packets as they come: on a
+   * lane client whose event loop is late, time packets the server sent before the call may be read after it and
+   * count (open question for the master: an exact start from a `time query gametime` round trip, with T7d1b's method).
+   * Before the first packet the first age heard is the start. Use it for an
+   * absence ("no arrow", "no packet") and for a gap that stands for server ticks; a value the server will send is read
+   * with `holdsWithin`.
+   */
+  serverTicks(ticks: number, wallMs: number): Promise<boolean>;
+  /** The server sends a time packet now, as it does at each `/time set`: the command with the day time the client holds, harmless server-wide (the same value). Resolves once the command is sent; the packet comes with the next ticks. */
+  resendTime(): Promise<void>;
 }
 
 /** The projectiles a mob shoots at the bot that the checks name. */
@@ -121,23 +136,48 @@ export async function settleWithin<T>(subject: ContractSubject, promise: Promise
 }
 
 /** Let time pass until `condition` holds or `maxMs` is over; whether it held. */
-export async function holdsWithin(subject: ContractSubject, condition: () => boolean, maxMs: number): Promise<boolean> {
-  const startedAt = subject.now();
+export function holdsWithin(subject: ContractSubject, condition: () => boolean, maxMs: number): Promise<boolean> {
+  return holdsOnClock(subject, condition, maxMs);
+}
+
+/** `holdsWithin` on any clock: a subject under construction has the two clock members before it has the rest. */
+async function holdsOnClock(clock: Pick<ContractSubject, "now" | "wait">, condition: () => boolean, maxMs: number): Promise<boolean> {
+  const startedAt = clock.now();
   while (!condition()) {
-    if (subject.now() - startedAt >= maxMs) return false;
-    await subject.wait(SETTLE_STEP_MS);
+    if (clock.now() - startedAt >= maxMs) return false;
+    await clock.wait(SETTLE_STEP_MS);
   }
   return true;
+}
+
+/** `ContractSubject.serverTicks` for a subject made of `bot`, `now` and `wait`: both kinds of subject share it. */
+function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait">, ticks: number, wallMs: number): Promise<boolean> {
+  // `bot.time.age` is null until the first time packet; the first age heard is then the start.
+  let startAge: number | null = subject.bot.time.age;
+  const moved = () => {
+    const age: number | null = subject.bot.time.age;
+    if (age === null) return 0;
+    startAge ??= age;
+    return age - startAge;
+  };
+  return holdsOnClock(subject, () => moved() >= ticks, wallMs);
 }
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
   const { bot, clock, combat, entities, server, world } = harness;
+  const wait = (ms: number) => clock.advance(ms);
+  const now = () => clock.now();
   return {
     bot,
     world: (local) => new Vec3(...arena.world(local)),
-    wait: (ms) => clock.advance(ms),
-    now: () => clock.now(),
+    wait,
+    now,
+    serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
+    async resendTime() {
+      server.answer(() => server.resendTime());
+      await clock.advance(50);
+    },
     async setBlock(cell, block) {
       server.answer(() => world.setCell(cell, block));
       await clock.advance(50);
@@ -223,11 +263,19 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
   const world = (local: LocalPoint) => new Vec3(...arena.world(local));
   const probe = world(SEAT_PROBE_LOCAL);
   const sentinel = world(SEAT_SENTINEL_LOCAL);
+  const wait = (ms: number) => delay(ms);
+  const now = () => performance.now();
   return {
     bot,
     world,
-    wait: (ms) => delay(ms),
-    now: () => performance.now(),
+    wait,
+    now,
+    serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
+    // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
+    async resendTime() {
+      // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.
+      bot.chat(`/time set ${bot.time.time}`);
+    },
     async setBlock(cell, block) {
       const name = typeof block === "string" ? block : typeof block === "number" ? "" : block.name;
       await commandUntil(bot, `setblock ${at(cell)} ${blockArgument(block)}`, cell, name);

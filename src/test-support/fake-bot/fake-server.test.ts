@@ -121,3 +121,39 @@ test("the server keeps where it has an entity, apart from what the client believ
   server.setServerPosition(1, new Vec3(0.5, 62.5, 0.5));
   assert.deepEqual(server.serverPositionOf(1), new Vec3(0.5, 62.5, 0.5));
 });
+
+test("resendTime sends a time packet carrying the age of now: the last packet's plus the ticks since, off the cadence", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(1_000);
+  const ages: number[] = [];
+  server.onTimePacket(() => ages.push(server.age));
+  await clock.advance(500);
+  server.resendTime();
+  assert.deepEqual(ages, [24_030], "500 ms are 10 ticks into the second");
+  await clock.advance(500);
+  assert.deepEqual(ages, [24_030, 24_040], "the regular packet goes on from its own cadence, not from the extra's age");
+});
+
+test("resendTime in the tick of a regular packet carries that packet's age (a duplicate age)", async () => {
+  const { clock, server } = serverAt();
+  await clock.advance(2_000);
+  const ages: number[] = [];
+  server.onTimePacket(() => ages.push(server.age));
+  server.resendTime();
+  assert.deepEqual(ages, [24_040]);
+});
+
+test("resendTime on a server behind its schedule counts ticks at its own rate and never reaches the next packet's age", async () => {
+  const { clock, server } = serverAt({ ticksPerSecond: 10 });
+  await clock.advance(1_000);
+  await clock.advance(999);
+  server.resendTime();
+  assert.equal(server.age, 24_019, "10 ticks a packet: 999 ms after the first packet (age 24010) are 9 ticks in");
+});
+
+test("resendTime leaves the day time as it is", async () => {
+  const { clock, server } = serverAt({ timeOfDay: 6_000 });
+  await clock.advance(1_500);
+  server.resendTime();
+  assert.equal(server.timeOfDay, 6_020);
+});

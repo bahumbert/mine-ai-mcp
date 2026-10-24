@@ -69,6 +69,12 @@ export interface FakeServer {
   onWeatherPacket(listener: (packet: WeatherPacket) => void): () => void;
   /** Set the day time and tell the client at once (`ServerLevel.setDayTime`: the skip of a night). */
   setDayTime(ticks: number): void;
+  /**
+   * The extra time packet the game sends at each `/time set` (any player's), the day time as it is: its age is the world's
+   * now, the last regular packet's plus the ticks since, so it falls off the regular packets' cadence (same age mod
+   * the packet's ticks) unless it lands in the tick of one, then it repeats that packet's age.
+   */
+  resendTime(): void;
   /** The server's record of who sits in `vehicleId` (an entity id), which the client never hears about: the first rider. */
   riderOf(vehicleId: number): number | null;
   /** Every rider of `vehicleId`, in the order they sat (a boat has two seats). */
@@ -100,6 +106,13 @@ function timePacketsBetween(fromMs: number, toMs: number, phaseMs: number): numb
   // Packets fall at every t > 0 with t ≡ phaseMs (mod 1000): at 1000, 2000... for phase 0, at 999, 1999... for 999.
   const packetsUpTo = (ms: number) => (ms <= 0 ? 0 : Math.floor((ms - phaseMs) / TIME_PACKET_EVERY_MS) + (phaseMs > 0 ? 1 : 0));
   return Math.max(0, packetsUpTo(toMs) - packetsUpTo(fromMs));
+}
+
+/** The ticks the world has run since the last regular packet at `elapsedMs` of server time: the packets fall at `phaseMs` (a second for phase 0) and every second after, `ticksPerPacket` ticks each. */
+function ticksIntoPacketCycle(elapsedMs: number, phaseMs: number, ticksPerPacket: number): number {
+  const firstPacketMs = phaseMs > 0 ? phaseMs : TIME_PACKET_EVERY_MS;
+  const sinceMs = elapsedMs < firstPacketMs ? elapsedMs : (elapsedMs - firstPacketMs) % TIME_PACKET_EVERY_MS;
+  return Math.floor((sinceMs * ticksPerPacket) / TIME_PACKET_EVERY_MS);
 }
 
 /** Run, in order, every answer due by `nowMs`, and keep the rest. */
@@ -205,38 +218,77 @@ function weatherApi(
   };
 }
 
-export function createFakeServer(clock: FakeClock, options: FakeServerOptions = {}): FakeServer {
-  const lagMs = options.lagMs ?? 0;
+/** The world age and day time the client is told, and the time packets that tell it: the regular ones and the extras (`setDayTime`, `resendTime`). */
+function createWorldTime(clock: FakeClock, options: FakeServerOptions, startedAtMs: number) {
   const phaseMs = options.phaseMs ?? 0;
   if (phaseMs < 0 || phaseMs >= TIME_PACKET_EVERY_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
   const ticksPerPacket = options.ticksPerSecond ?? 20;
-  const startedAtMs = clock.now();
-  let age = options.startAge ?? 24_000;
+  /** The age of the last regular packet; `age` (what the client holds) is it, or an extra packet's age ahead of it until the next regular one. */
+  let cadenceAge = options.startAge ?? 24_000;
+  let age = cadenceAge;
   let dayTime = options.timeOfDay ?? 6_000;
-  const weather = createServerWeather(options.weather);
   let timePacketSent = options.timePacketYet !== false;
-  let tickAccumulatedMs = 0;
-  let running = true;
-  let lastSliceMs = startedAtMs;
-  let pending: PendingAnswer[] = [];
   const timeListeners = new Set<() => void>();
-
   const sendTimePacket = () => {
     timePacketSent = true;
     for (const listener of [...timeListeners]) listener();
   };
+  return {
+    /** The regular packets that fall in the slice `(fromMs, toMs]` of clock. */
+    sendRegularPackets(fromMs: number, toMs: number) {
+      for (let packet = timePacketsBetween(fromMs - startedAtMs, toMs - startedAtMs, phaseMs); packet > 0; packet -= 1) {
+        cadenceAge += ticksPerPacket;
+        age = cadenceAge;
+        dayTime += ticksPerPacket;
+        sendTimePacket();
+      }
+    },
+    api: {
+      get age() {
+        return age;
+      },
+      get timeOfDay() {
+        return dayTime % TICKS_PER_DAY;
+      },
+      get dayTime() {
+        return dayTime;
+      },
+      get timePacketSent() {
+        return timePacketSent;
+      },
+      setDayTime(ticks: number) {
+        dayTime = ticks;
+        sendTimePacket();
+      },
+      resendTime() {
+        age = cadenceAge + ticksIntoPacketCycle(clock.now() - startedAtMs, phaseMs, ticksPerPacket);
+        sendTimePacket();
+      },
+      onTimePacket(listener: () => void) {
+        timeListeners.add(listener);
+        return () => void timeListeners.delete(listener);
+      },
+    } satisfies Pick<FakeServer, "age" | "timeOfDay" | "dayTime" | "timePacketSent" | "setDayTime" | "resendTime" | "onTimePacket">,
+  };
+}
+
+export function createFakeServer(clock: FakeClock, options: FakeServerOptions = {}): FakeServer {
+  const lagMs = options.lagMs ?? 0;
+  const startedAtMs = clock.now();
+  const time = createWorldTime(clock, options, startedAtMs);
+  const weather = createServerWeather(options.weather);
+  let tickAccumulatedMs = 0;
+  let running = true;
+  let lastSliceMs = startedAtMs;
+  let pending: PendingAnswer[] = [];
+
   const answer = (run: () => void) => void pending.push({ dueMs: clock.now() + lagMs, run });
   const weatherChannel = createWeatherChannel(answer);
 
   clock.onSlice("server", (sliceMs) => {
     const nowMs = clock.now();
-    const packetCount = running ? timePacketsBetween(lastSliceMs - startedAtMs, nowMs - startedAtMs, phaseMs) : 0;
+    if (running) time.sendRegularPackets(lastSliceMs, nowMs);
     lastSliceMs = nowMs;
-    for (let packet = 0; packet < packetCount; packet += 1) {
-      age += ticksPerPacket;
-      dayTime += ticksPerPacket;
-      sendTimePacket();
-    }
     // The weather advances a level step each server tick of 50 ms (the air of `fake-bot-breath.ts` counts the same way).
     if (running) {
       for (tickAccumulatedMs += sliceMs; tickAccumulatedMs >= TICK_MS; tickAccumulatedMs -= TICK_MS) weather.tick().forEach(weatherChannel.send);
@@ -244,38 +296,21 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
     if (running) pending = runDueAnswers(pending, nowMs);
   });
 
-  const server: Omit<FakeServer, keyof ReturnType<typeof weatherApi>> = {
-    get age() {
-      return age;
-    },
-    get timeOfDay() {
-      return dayTime % TICKS_PER_DAY;
-    },
-    get dayTime() {
-      return dayTime;
-    },
+  const server = {
     get isRunning() {
       return running;
     },
-    get timePacketSent() {
-      return timePacketSent;
-    },
     onWeatherPacket: weatherChannel.onWeatherPacket,
-    setDayTime(ticks) {
-      dayTime = ticks;
-      sendTimePacket();
-    },
     ...createClientPackets(clock),
     ...createPositions(),
     stop: () => void (running = false),
     resume: () => void (running = true),
     answer,
-    onTimePacket(listener) {
-      timeListeners.add(listener);
-      return () => void timeListeners.delete(listener);
-    },
     ...createRiders(),
   };
   // Getters are copied as getters (a spread would read them once).
-  return Object.defineProperties(server, Object.getOwnPropertyDescriptors(weatherApi(weather, () => dayTime))) as FakeServer;
+  return Object.defineProperties(server, {
+    ...Object.getOwnPropertyDescriptors(time.api),
+    ...Object.getOwnPropertyDescriptors(weatherApi(weather, () => time.api.dayTime)),
+  }) as FakeServer;
 }

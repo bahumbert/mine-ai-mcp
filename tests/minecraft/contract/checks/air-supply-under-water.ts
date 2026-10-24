@@ -31,10 +31,16 @@ const TICK_MS = 50;
  */
 const LAG_SLACK_TICKS = 6;
 
-/** One air packet as the client filed it. */
+/** One air packet as the client filed it, with the world age the client held when it came. */
 interface Reading {
   readonly air: number;
   readonly atMs: number;
+  readonly age: number;
+}
+
+/** The readings as a failure message shows them: air, wall time into the check, world age (a time packet comes every 20 ticks, so the age is up to 19 ticks stale). */
+function describeReadings(readings: readonly Reading[], startedAtMs: number): string {
+  return readings.map(({ air, atMs, age }) => `${air}@${Math.round(atMs - startedAtMs)}ms/age ${age}`).join(", ");
 }
 
 /** The change from each reading to the next. */
@@ -69,7 +75,9 @@ export const airSupplyUnderWater: ContractCheck = {
       return typeof value === "number" ? value : undefined;
     };
     const readings: Reading[] = [];
-    const onBreath = () => void readings.push({ air: airHeard()!, atMs: subject.now() });
+    const startedAtMs = subject.now();
+    let wateredAt = "no water placed yet";
+    const onBreath = () => void readings.push({ air: airHeard()!, atMs: subject.now(), age: bot.time.age });
     bot.on("breath", onBreath);
     try {
       await wait(FULL_AIR_QUIET_MS);
@@ -77,14 +85,17 @@ export const airSupplyUnderWater: ContractCheck = {
       assert.equal(readings.length, 0, "no air packet for a full meter with the eye in air");
 
       await subject.setBlock(subject.world(HEAD_CELL), "water");
+      wateredAt = `water seen at ${Math.round(subject.now() - startedAtMs)}ms/age ${bot.time.age}`;
       assert.ok(await holdsWithin(subject, () => readings.length > 0, FIRST_PACKET_WALL_MS), "no air packet within the wall bound with the eye under water");
-      const diveFrom = readings.length - 1;
-      assert.equal(readings[diveFrom]!.air, FULL_AIR - AIR_LOST_PER_TICK, "the first tick under water takes 1 from the full meter");
+      // The dive is every reading from the first: the check looks every 25 ms, and a client busy for longer files several packets before it looks (6c-warm: 297, 2 ticks in; a 6b lane: 298).
+      assert.equal(readings[0]!.air, FULL_AIR - AIR_LOST_PER_TICK, "the first tick under water takes 1 from the full meter");
       await wait(DIVE_MS);
-      const dive = readings.slice(diveFrom);
+      const dive = readings;
       assert.ok(stepsOf(dive).every((step) => step === -AIR_LOST_PER_TICK), `dive steps ${stepsOf(dive).join(", ")}: each -${AIR_LOST_PER_TICK}, one packet a server tick`);
       const lost = dive[0]!.air - dive.at(-1)!.air;
-      assert.ok(Math.abs(lost - DIVE_MS / TICK_MS) <= LAG_SLACK_TICKS, `${lost} air lost in ${DIVE_MS} ms: ${DIVE_MS / TICK_MS} within ${LAG_SLACK_TICKS}`);
+      // Over the span between the first and the last packet: the look after the wait may come late, the packets do not.
+      const diveMs = dive.at(-1)!.atMs - dive[0]!.atMs;
+      assert.ok(Math.abs(lost - diveMs / TICK_MS) <= LAG_SLACK_TICKS, `${lost} air lost in ${Math.round(diveMs)} ms: ${Math.round(diveMs / TICK_MS)} within ${LAG_SLACK_TICKS}`);
 
       await subject.setBlock(subject.world(HEAD_CELL), "air");
       assert.ok(await holdsWithin(subject, () => airHeard() === FULL_AIR, DIVE_MS), `the air is ${String(airHeard())}, not refilled`);
@@ -98,6 +109,9 @@ export const airSupplyUnderWater: ContractCheck = {
       const refilled = readings.length;
       await wait(FULL_AIR_QUIET_MS);
       assert.equal(readings.length, refilled, "a full meter sends no more air");
+    } catch (error) {
+      // Every air reading with its wall time and the world age: a reading that skips ticks is told from a client that missed one (plan T7d1 step 4).
+      throw new Error(`${(error as Error).message}; ${wateredAt}; air readings (air@ms/age): ${describeReadings(readings, startedAtMs)}`, { cause: error });
     } finally {
       bot.off("breath", onBreath);
     }

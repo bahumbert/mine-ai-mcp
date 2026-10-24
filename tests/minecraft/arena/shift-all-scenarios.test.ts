@@ -22,6 +22,8 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/deflect-fireball.yaml", /exclusive/u],
   ["contract/scenarios/projectile-hit-bot.yaml", /exclusive/u],
   ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
+  // A contract check that measures server ticks from the wall clock: another lane's clone would stall the server thread under it.
+  ["contract/scenarios/bow-draw-and-release.yaml", /exclusive/u],
   // The arena and its scratch copy pin more than the 256 chunks Minecraft force-loads.
   ["scenarios/collect/obsidian-by-exploring.yaml", /chunks/u],
   ["scenarios/pathfinder/at-sea-land-behind-kelp.yaml", /chunks/u],

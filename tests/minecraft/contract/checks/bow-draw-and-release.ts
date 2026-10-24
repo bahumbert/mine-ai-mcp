@@ -15,8 +15,12 @@ const ARROWS = 16;
 const SHORT_DRAW_MS = 100;
 const SHOT_DRAW_MS = 200;
 const FULL_DRAW_MS = 1_000;
-/** The flags and the slots reach the client a tick or two after the packet that changed them. */
-const SETTLE_MS = 400;
+/** The flags and the slots reach the client a tick or two after the packet that changed them; a server behind by seconds is bounded on the wall clock (the reads return as soon as they hold). */
+const SETTLE_MS = 2_000;
+/** Observed ticks that prove at least 21 server ticks, before an absence ("no arrow shot"). */
+const ABSENCE_TICKS = 40;
+/** The wall bound of those ticks (40 take 2 s on a server on time). */
+const ABSENCE_WALL_MS = 5_000;
 const USING_HAND = 1;
 /** An arrow is shot from the eye less 0.1 (y -58.48 for an eye at -58.38 measured). */
 const SPAWN_FROM_EYE = { min: 0.05, max: 0.15 } as const;
@@ -26,6 +30,7 @@ export const bowDrawAndRelease: ContractCheck = {
   name: "bow-draw-and-release",
   fixture: { cells: {}, carried: { bow: 1, arrow: ARROWS }, position: [0.5, -60, 0.5] },
   withoutRuntime: true,
+  exclusive: "the 100 ms and 200 ms draws measure the server's tick count from the wall clock, and another lane's clone stalls the server thread 0.16 to 0.9 s",
   async run(subject) {
     const { bot } = subject;
     const arrowType = bot.registry.itemsByName.arrow!.id;
@@ -42,7 +47,7 @@ export const bowDrawAndRelease: ContractCheck = {
       bot.activateItem();
       await subject.wait(SHORT_DRAW_MS);
       bot.deactivateItem();
-      await subject.wait(SETTLE_MS);
+      assert.ok(await subject.serverTicks(ABSENCE_TICKS, ABSENCE_WALL_MS), `after a draw of ${SHORT_DRAW_MS} ms: the server ran fewer than ${ABSENCE_TICKS} ticks in ${ABSENCE_WALL_MS} ms`);
       assert.equal(arrows.length, 0, `a draw of ${SHORT_DRAW_MS} ms shot an arrow`);
       assert.equal(bot.inventory.count(arrowType, null), ARROWS, "a draw too short spent an arrow");
       assert.equal(useFlagsOf(bot) & USING_HAND, 0, "the release did not clear the hand-in-use bit");
@@ -51,8 +56,7 @@ export const bowDrawAndRelease: ContractCheck = {
       await subject.wait(SHOT_DRAW_MS);
       bot.deactivateItem();
       assert.ok(await holdsWithin(subject, () => arrows.length === 1, SETTLE_MS), `a draw of ${SHOT_DRAW_MS} ms shot no arrow`);
-      await subject.wait(SETTLE_MS);
-      assert.equal(bot.inventory.count(arrowType, null), ARROWS - 1, "the shot did not spend an arrow");
+      assert.ok(await holdsWithin(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 1, SETTLE_MS), `the shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
 
       bot.activateItem();
       await subject.wait(FULL_DRAW_MS);
@@ -60,9 +64,8 @@ export const bowDrawAndRelease: ContractCheck = {
       assert.equal(bot.usingHeldItem, true);
       bot.deactivateItem();
       assert.ok(await holdsWithin(subject, () => arrows.length === 2, SETTLE_MS), `a draw of ${FULL_DRAW_MS} ms shot no arrow`);
-      await subject.wait(SETTLE_MS);
-      assert.equal(bot.inventory.count(arrowType, null), ARROWS - 2);
-      assert.equal(useFlagsOf(bot) & USING_HAND, 0, "the shot did not clear the hand-in-use bit");
+      assert.ok(await holdsWithin(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 2, SETTLE_MS), `the second shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
+      assert.ok(await holdsWithin(subject, () => (useFlagsOf(bot) & USING_HAND) === 0, SETTLE_MS), "the shot did not clear the hand-in-use bit");
       assert.equal(bot.usingHeldItem, false);
       const eye = bot.entity.position.offset(0, EYE_HEIGHT, 0);
       for (const { at } of arrows) {
