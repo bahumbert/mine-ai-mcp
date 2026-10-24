@@ -8,14 +8,18 @@
  * from, 0.4 sideways and 0.3608 up (a hit on the ground) after one tick of the server's own physics on her (x 0.4 * 0.546 = 0.2184,
  * y (0.3608 - 0.08) * 0.98 = 0.2752). A fireball also sets her on fire (the flags' bit 0, before the `damage_event`): she takes 1 of
  * `on_fire` damage (no source) at 1, 2, 3 and 4 s after the hit and the flag clears at 5 s. An arrow sets no fire.
+ *
+ * The gaps are judged by the server's ticks, each read with `time query gametime` when the client heard the event, and the burns from the read sent right before the shot (`server-tick-marks.ts`):
+ * a server behind its schedule or one that stalled and caught up holds a different number of ticks in a second of wall time.
  */
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { answerSettled } from "../server-answer.ts";
-import type { ContractSubject, ProjectileName } from "../subject.ts";
+import { ANSWER_WALL_MS, answerSettled, serverQuiet } from "../server-answer.ts";
+import { type ContractSubject, type ProjectileName, holdsWithin } from "../subject.ts";
 import { type DamageEvent, type HealthPacket, NIGHT, STILL_MOB_NBT, TICK_MS, burning, damageTypeId, mobAt } from "./combat-scene.ts";
 import { type LoggedPacket, type PacketLog, logPackets } from "./packet-log.ts";
+import { type Mark, READING_TICKS, markNow, tickOf } from "./server-tick-marks.ts";
 
 /** One tick of the server's physics on a player knocked up from the ground: horizontal friction 0.91 * 0.6, then gravity and drag. */
 const PUSH_SIDEWAYS = 0.4 * 0.546;
@@ -25,18 +29,31 @@ const PUSH_TOLERANCE = 0.01;
 const LOSS_TOLERANCE = 0.05;
 /** Natural regeneration heals 1 every 10 ticks and its `update_health` can share the hit's tick: the packet before the hit then lacks it, and the hit looks 1 cheaper (the fake has no regeneration). */
 const REGENERATED_IN_THE_TICK = 1;
-/** The hit follows the spawn by 1 to 3 ticks from 3 blocks (a tick of jitter either way; a server behind on a shared host stretches it: 317 ms seen under 12 lanes). */
-const FLIGHT_MS = { min: TICK_MS - 40, max: 10 * TICK_MS } as const;
-const BURN_AT_MS = [1_000, 2_000, 3_000, 4_000];
-const BURN_JITTER_MS = 150;
-const FIRE_OUT_MS = 5_000;
-const FIRE_OUT_JITTER_MS = 300;
+/** The hit follows the spawn by 1 to 3 ticks from 3 blocks; 10 is a server's jitter and the client's lag, as the wait of the old 500 ms (a server behind on a shared host stretched it to 317 ms under 12 lanes). */
+const FLIGHT_MAX_TICKS = 10;
+/** The projectile leaves in the hit's tick and the push comes a tick later (the old wall bounds, 2 and 3 ticks of 50 ms, read in server ticks). */
+const GONE_APART_TICKS = 2;
+const PUSH_APART_TICKS = 3;
+/** The hit is at least a tick after the shot (the projectile has to fly), the fire's first hurt 20 ticks after the hit and one every 20 after: 4 hurts, the flag out at the 100th tick. */
+const FLIGHT_MIN_TICKS = 1;
+const BURN_EVERY_TICKS = 20;
+const BURNS = 4;
+/** The wall bound of the fire: 100 ticks and the flight, with a server at 10 ticks a second. */
+const FIRE_OUT_WALL_MS = 15_000;
+/** A burn is heard late by the client's lag, and the read of it with it; late is not the game: the readings may differ by the ticks the answer wait's wall bound holds. */
+const HEARD_LATE_TICKS = ANSWER_WALL_MS / TICK_MS;
 
 /** The two shooters: a skeleton on the east (+x) and a blaze on the west, and what each one's projectile does. */
 const CASES: readonly { readonly projectile: ProjectileName; readonly shooter: string; readonly x: number; readonly loss: number; readonly damageType: string; readonly fire: boolean }[] = [
   { projectile: "arrow", shooter: "skeleton", x: 4.5, loss: 3, damageType: "arrow", fire: false },
   { projectile: "small_fireball", shooter: "blaze", x: -4.5, loss: 3.5, damageType: "fireball", fire: true },
 ];
+
+/** An entity the client heard appear or leave, and the server's tick then. */
+interface HeardEntity {
+  readonly entity: Entity;
+  readonly heardAt: Mark;
+}
 
 export const projectileHitBot: ContractCheck = {
   name: "projectile-hit-bot",
@@ -55,16 +72,17 @@ export const projectileHitBot: ContractCheck = {
     const shooters = await Promise.all(CASES.map(({ shooter, x }) => mobAt(subject, shooter, x, 0.5)));
     for (const [index, { projectile, loss, damageType, fire, x }] of CASES.entries()) {
       const shooter = shooters[index]!;
-      const log = logPackets(subject, ["damage_event", "update_health", "entity_velocity"]);
-      const spawned: { entity: Entity; atMs: number }[] = [];
-      const gone: { entity: Entity; atMs: number }[] = [];
-      const onSpawn = (entity: Entity) => void (entity.name === projectile && spawned.push({ entity, atMs: log.sinceStartMs() }));
-      const onGone = (entity: Entity) => void (entity.name === projectile && gone.push({ entity, atMs: log.sinceStartMs() }));
+      const log = logPackets(subject, ["damage_event", "update_health", "entity_velocity"], ["damage_event", "entity_velocity"]);
+      const spawned: HeardEntity[] = [];
+      const gone: HeardEntity[] = [];
+      const onSpawn = (entity: Entity) => void (entity.name === projectile && spawned.push({ entity, heardAt: markNow(subject) }));
+      const onGone = (entity: Entity) => void (entity.name === projectile && gone.push({ entity, heardAt: markNow(subject) }));
       bot.on("entitySpawn", onSpawn);
       bot.on("entityGone", onGone);
       try {
         assert.equal(burning(bot), false, "the bot burns before the shot");
         const healthBefore = bot.health;
+        const shot = markNow(subject);
         await subject.shootBot(projectile, shooter.id);
         await awaitHitAnswer(subject, log, gone, projectile);
         assert.equal(spawned.length, 1, `${projectile}: one projectile heard spawning`);
@@ -80,10 +98,8 @@ export const projectileHitBot: ContractCheck = {
           { type: damageTypeId(bot.registry, damageType), cause: shooter.id + 1, direct: flying.entity.id + 1 },
           `${projectile}: the damage_event names the damage type, the shooter as cause and the projectile as direct source`,
         );
-        const flight = hitAtMs - flying.atMs;
-        assert.ok(flight >= FLIGHT_MS.min && flight <= FLIGHT_MS.max, `${projectile}: the hit came ${flight} ms after the spawn, not ${FLIGHT_MS.min} to ${FLIGHT_MS.max}`);
         assert.equal(gone.length, 1, `${projectile}: the projectile is gone after the hit`);
-        assert.ok(Math.abs(gone[0]!.atMs - hitAtMs) <= TICK_MS * 2, `${projectile}: it left ${gone[0]!.atMs - hitAtMs} ms after the hit`);
+        // The log's own clock only orders the packets here: the gaps between them are the server's ticks (`assertHitTicks`).
         const told = log.packets.find(({ name, atMs }) => name === "update_health" && atMs >= hitAtMs);
         assert.ok(told !== undefined, `${projectile}: no update_health after the hit`);
         const previous = log.packets.filter(({ name, atMs }) => name === "update_health" && atMs < hitAtMs).at(-1);
@@ -97,9 +113,9 @@ export const projectileHitBot: ContractCheck = {
           Math.abs(velocity.x / VELOCITY_UNIT - awayFromShooter * PUSH_SIDEWAYS) <= PUSH_TOLERANCE && Math.abs(velocity.y / VELOCITY_UNIT - PUSH_UP) <= PUSH_TOLERANCE && Math.abs(velocity.z) / VELOCITY_UNIT <= PUSH_TOLERANCE,
           `${projectile}: the push is ${JSON.stringify(velocity)}, not x ${awayFromShooter * PUSH_SIDEWAYS * VELOCITY_UNIT} y ${PUSH_UP * VELOCITY_UNIT}`,
         );
-        assert.ok(push.atMs - hitAtMs <= TICK_MS * 3, `${projectile}: the push came ${push.atMs - hitAtMs} ms after the hit`);
+        await assertHitTicks(subject, projectile, { spawn: flying.heardAt, hit: damage[0]!.heardAt!, gone: gone[0]!.heardAt, push: push.heardAt! });
         assert.equal(burning(bot), fire, `${projectile}: ${fire ? "no fire" : "fire"} on the bot after the hit`);
-        if (fire) await assertBurns(subject, log, hitAtMs);
+        if (fire) await assertBurns(subject, log, shot, projectile);
       } finally {
         bot.off("entitySpawn", onSpawn);
         bot.off("entityGone", onGone);
@@ -108,6 +124,27 @@ export const projectileHitBot: ContractCheck = {
     }
   },
 };
+
+/** The server's tick as the client heard each event of one hit: the spawn, the `damage_event`, the removal and the push. */
+interface HitHearings {
+  readonly spawn: Mark;
+  readonly hit: Mark;
+  readonly gone: Mark;
+  readonly push: Mark;
+}
+
+/**
+ * The hit follows the spawn within `FLIGHT_MAX_TICKS`, the projectile is gone in the hit's tick and the push comes within `PUSH_APART_TICKS`:
+ * ticks the server ran between the readings of each hearing (heard in order, so never negative), where a wall gap would count a stalled
+ * server's catch-up as no time and a slow server's few ticks as many.
+ */
+async function assertHitTicks(subject: ContractSubject, projectile: ProjectileName, hearings: HitHearings): Promise<void> {
+  const [spawn, hit, gone, push] = await Promise.all([hearings.spawn, hearings.hit, hearings.gone, hearings.push].map((mark) => tickOf(subject, mark)));
+  const readings = `server ticks read at the spawn ${spawn}, the hit ${hit}, the removal ${gone}, the push ${push}`;
+  assert.ok(hit - spawn >= 0 && hit - spawn <= FLIGHT_MAX_TICKS, `${projectile}: the hit came ${hit - spawn} server ticks after the spawn, not 0 to ${FLIGHT_MAX_TICKS} (${readings})`);
+  assert.ok(Math.abs(gone - hit) <= GONE_APART_TICKS, `${projectile}: it left ${gone - hit} server ticks after the hit, not within ${GONE_APART_TICKS} (${readings})`);
+  assert.ok(push - hit >= 0 && push - hit <= PUSH_APART_TICKS, `${projectile}: the push came ${push - hit} server ticks after the hit, not 0 to ${PUSH_APART_TICKS} (${readings})`);
+}
 
 /**
  * The shot's answer, awaited and then seen to be the only one: the projectile gone, the `update_health` and the push after the hit
@@ -125,19 +162,27 @@ async function awaitHitAnswer(subject: ContractSubject, log: PacketLog, gone: re
 }
 
 /**
- * The four `on_fire` hurts at whole seconds after the hit (a source of none; each costs 1, measured 18.5 to 17.5 four times, but a regeneration can share its tick, so the amount is not asserted), and the flag out at 5 s.
- * The seconds are server ticks read on the wall clock: the check runs on a server of its own (`exclusive`), where no other lane's command stalls it.
+ * The four `on_fire` hurts (a source of none; each costs 1, measured 18.5 to 17.5 four times, but a regeneration can share its tick, so the amount is not asserted) and the flag out:
+ * awaited as the answer, then the server runs on so a fifth would have been heard. Each hurt is 20 ticks after the one before and the first 20 after the hit, which is at least
+ * a tick after the shot: no burn is heard sooner than that many server ticks after the read sent right before the shot (never early: the late side is the client's lag).
  */
-async function assertBurns(subject: ContractSubject, log: PacketLog, hitAtMs: number): Promise<void> {
+async function assertBurns(subject: ContractSubject, log: PacketLog, shot: Mark, projectile: ProjectileName): Promise<void> {
   const { bot } = subject;
-  await subject.wait(hitAtMs + FIRE_OUT_MS + FIRE_OUT_JITTER_MS - log.sinceStartMs());
   const onFire = damageTypeId(bot.registry, "on_fire");
-  const burns = log.packets.filter(({ name, packet }) => name === "damage_event" && packet.entityId === bot.entity.id && (packet as unknown as DamageEvent).sourceTypeId === onFire);
-  assert.equal(burns.length, BURN_AT_MS.length, `${burns.length} on_fire hurts after a fireball, at ${burns.map(({ atMs }) => atMs - hitAtMs).join(", ")} ms: ${BURN_AT_MS.length} at ${BURN_AT_MS.join(", ")} expected`);
-  burns.forEach(({ atMs, packet }, index) => {
-    assert.ok(Math.abs(atMs - hitAtMs - BURN_AT_MS[index]!) <= BURN_JITTER_MS, `burn ${index + 1} came ${atMs - hitAtMs} ms after the hit, not ${BURN_AT_MS[index]}`);
+  const burnsHeard = () => log.packets.filter(({ name, packet }) => name === "damage_event" && packet.entityId === bot.entity.id && (packet as unknown as DamageEvent).sourceTypeId === onFire);
+  assert.ok(await holdsWithin(subject, () => burnsHeard().length >= BURNS && !burning(bot), FIRE_OUT_WALL_MS), `${projectile}: ${burnsHeard().length} on_fire hurts and ${burning(bot) ? "the fire still on" : "the fire out"} after ${FIRE_OUT_WALL_MS} ms`);
+  await serverQuiet(subject, `${projectile}: after the fire`);
+  const burns = burnsHeard();
+  assert.equal(burns.length, BURNS, `${projectile}: ${burns.length} on_fire hurts after a fireball, ${BURNS} expected`);
+  const shotTick = await tickOf(subject, shot);
+  for (const [index, { heardAt, packet }] of burns.entries()) {
+    const heardTick = await tickOf(subject, heardAt!);
+    const earliest = BURN_EVERY_TICKS * (index + 1) + FLIGHT_MIN_TICKS - READING_TICKS;
+    const latest = BURN_EVERY_TICKS * (index + 1) + FLIGHT_MAX_TICKS + READING_TICKS + HEARD_LATE_TICKS;
+    const afterShot = heardTick - shotTick;
+    assert.ok(afterShot >= earliest && afterShot <= latest, `${projectile}: burn ${index + 1} heard at server tick ${heardTick}, ${afterShot} ticks after the shot at tick ${shotTick}: the burn is ${BURN_EVERY_TICKS * (index + 1)} ticks after the hit, so not less than ${earliest} (readings +-${READING_TICKS}) and not more than ${latest}`);
     const event = packet as unknown as DamageEvent;
     assert.equal(event.sourceCauseId + event.sourceDirectId, 0, "a burn names no source");
-  });
-  assert.equal(burning(bot), false, "the fire is still on the bot 5 s after the hit");
+  }
+  assert.equal(burning(bot), false, "the fire is still on the bot after the hurts");
 }

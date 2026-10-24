@@ -20,6 +20,7 @@ import type { Entity } from "prismarine-entity";
 import type { ContractFixture } from "../checks.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { ANSWER_WALL_MS, afterClientTicks, serverQuiet } from "../server-answer.ts";
+import { type Mark, READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
 import { NIGHT, STILL_MOB_NBT, TICK_MS, holdInHand, mobAt } from "./combat-scene.ts";
 import { type LoggedPacket, logPackets } from "./packet-log.ts";
 
@@ -46,14 +47,20 @@ const MOVING_MOB_PUSH_MARGIN = MOVING_MOB_WALK_HALF + PUSH * 0.1 + PUSH_TOLERANC
  * 199 ms on, 1 run of 60, 2026-10-24), and the packets carry no tick count to read it in ticks instead; the order is.
  */
 const FIRST_VELOCITY_MIN_MS = 0;
-/** The server holds the swing for its recovery (the sword's 12.5 ticks), which only more ticks than the wall gives can cut short: a stalled server catches up with more, never fewer. */
-const SWING_REST_MS = 1_500;
+/** The server holds the swing for its recovery (the sword's 12.5 ticks; the hand's is shorter): the bot rests 13 server ticks after the equip, whatever the wall time they take. */
+const SWING_REST_TICKS = 13;
 /** One client tick of the bot's own physics (50 ms) sends the look before the hit does, so the server pushes along the new look; the server reads the two in the order sent. */
 const LOOK_CLIENT_TICKS = 2;
-/** The mob with no AI rests 12 s after the hit; a server behind on a shared host rests later: the watch waits for the zero velocity this long, and the rest may come up to 1.6 times later. */
+/** The mob with no AI rests 12 s of server ticks after the hit; a server behind on a shared host takes longer on the wall clock: the watch waits for the zero velocity this long. */
 const REST_WAIT_MS = 25_000;
-const REST_AT_MS = { min: 10_500, max: 20_000 } as const;
 const DECAY_PER_TICK = 0.98;
+/** A component under this is dropped to zero each tick, and the tracker looks every 3 ticks (the fake's own list of what was measured: `fake-bot-mob-knockback.ts`). */
+const REST_BELOW = 0.003;
+const TELL_EVERY_TICKS = 3;
+/** The index of the first velocity after the pair of the push. */
+const FIRST_AFTER_PAIR = 2;
+/** The zero is read when the client hears it: late by its lag, within what the wait's wall bound holds on a server on time. */
+const REST_LATE_TICKS = REST_WAIT_MS / TICK_MS;
 /** A velocity above this (a twentieth of a block a tick) is large enough for its ratio to say the ticks between two of them. */
 const DECAY_CHECKED_ABOVE = 0.05;
 const DECAY_TOLERANCE = 0.02;
@@ -120,10 +127,15 @@ async function hitAndWatch(subject: ContractSubject, mob: Entity, watch: Trial["
   const mobBefore = mob.position.clone();
   const log = logPackets(subject, ["entity_velocity", ...MOVE_PACKETS, "damage_event", "entity_status", "entity_metadata"]);
   const forMob = ({ name, packet }: LoggedPacket, wanted: string) => name === wanted && packet.entityId === mob.id;
+  /** The server's tick right before the hit and when the client heard the mob rest (a decay watch only: the push's watch reads no tick). */
+  let restTicks: { hit: Mark; rest: Mark } | undefined;
   try {
+    const hitMark = markNow(subject);
     bot.attack(mob);
-    if (watch === "decay") await holdsWithin(subject, () => log.packets.some((heard) => forMob(heard, "entity_velocity") && Math.hypot(...Object.values(heard.packet.velocity as Record<string, number>)) === 0), REST_WAIT_MS);
-    else {
+    if (watch === "decay") {
+      await holdsWithin(subject, () => log.packets.some((heard) => forMob(heard, "entity_velocity") && Math.hypot(...Object.values(heard.packet.velocity as Record<string, number>)) === 0), REST_WAIT_MS);
+      restTicks = { hit: hitMark, rest: markNow(subject) };
+    } else {
       const answered = await holdsWithin(subject, () => log.packets.some((heard) => forMob(heard, "damage_event")) && log.packets.filter((heard) => forMob(heard, "entity_velocity")).length >= 2, ANSWER_WALL_MS);
       const nearby = Object.values(bot.entities).filter((entity) => entity !== bot.entity && entity.position.distanceTo(bot.entity.position) < 12).map((entity) => `${entity.name} ${entity.id} at ${entity.position}`);
       assert.ok(answered, `the hit on ${mob.name} ${mob.id} (entities within 12 blocks: ${nearby.join("; ")};${bot.entity.position.distanceTo(mob.position).toFixed(2)} blocks off, sprint key ${bot.controlState.sprint}, bot at ${bot.entity.position}, mob at ${mob.position}) was not answered in ${ANSWER_WALL_MS} ms; heard: ${log.packets.map((heard) => `${heard.atMs.toFixed(0)} ${heard.name} ${heard.packet.entityId}`).join(", ") || "nothing"}`);
@@ -133,7 +145,7 @@ async function hitAndWatch(subject: ContractSubject, mob: Entity, watch: Trial["
     log.stop();
   }
   const damage = log.packets.find((heard) => forMob(heard, "damage_event"));
-  return { log, damage, velocities: log.packets.filter((heard) => forMob(heard, "entity_velocity")), botMoved: bot.entity.position.distanceTo(botBefore), mobMoved: mob.position.distanceTo(mobBefore) };
+  return { log, damage, restTicks, velocities: log.packets.filter((heard) => forMob(heard, "entity_velocity")), botMoved: bot.entity.position.distanceTo(botBefore), mobMoved: mob.position.distanceTo(mobBefore) };
 }
 
 /** The first push of a hit: two equal velocities a tick after the `damage_event`, the push as expected. */
@@ -157,22 +169,34 @@ export function assertFirstPush(label: string, damage: LoggedPacket | undefined,
   if (upDown === "none") assert.equal(push.y, 0, `${label}: a mob with no AI is pushed up`);
 }
 
-/** Every velocity after the pair is the one before it decayed by 0.98 for the ticks between them (a tick of jitter: only large ones count), the last is zero. */
-function assertDecay(label: string, velocities: LoggedPacket[], hitAtMs: number): void {
+/** Server ticks a push whose largest component is `push` takes to fall under the rest threshold: the tick its component is dropped (`0.4 * 0.98 ^ 242` is still 0.003004). */
+function ticksToRest(push: { x: number; y: number; z: number }): number {
+  return Math.ceil(Math.log(REST_BELOW / Math.max(Math.abs(push.x), Math.abs(push.y), Math.abs(push.z))) / Math.log(DECAY_PER_TICK));
+}
+
+/**
+ * Every velocity after the pair is the one before it decayed by 0.98 for the ticks between them, and the ticks are the ratio's own (a wall gap
+ * between two packets is not the ticks a server ran: a stall or a slower server changes it); the tracker tells every 3rd tick of the server's count, so the ticks are a multiple of 3 (the first velocity after the pair 1 to 3: its look has a phase; only large
+ * velocities count: a small one rounds to the unit). The last is zero, and the mob rested after the ticks its push takes to fall under the rest threshold,
+ * as the server's tick read right before the hit and the one read at the zero say (never early by more than the readings' error and the tracker's look).
+ */
+export function assertDecay(label: string, velocities: LoggedPacket[], restedAfterTicks: number): void {
   const norms = velocities.map((packet) => {
     const { x, y, z } = velocityOf(packet);
     return Math.hypot(x, y, z);
   });
-  for (let index = 2; index < velocities.length; index += 1) {
+  for (let index = FIRST_AFTER_PAIR; index < velocities.length; index += 1) {
     if (norms[index - 1]! < DECAY_CHECKED_ABOVE || norms[index]! === 0) continue;
-    const ticks = (velocities[index]!.atMs - velocities[index - 1]!.atMs) / TICK_MS;
     const ratio = norms[index]! / norms[index - 1]!;
-    assert.ok(Math.abs(ratio - DECAY_PER_TICK ** Math.round(ticks)) <= DECAY_TOLERANCE, `${label}: velocity ${index + 1} is ${ratio.toFixed(3)} of the one before ${ticks.toFixed(1)} ticks earlier, not ${DECAY_PER_TICK ** Math.round(ticks)}`);
+    const ticks = Math.round(Math.log(ratio) / Math.log(DECAY_PER_TICK));
+    // The pair is sent in the hit's tick; the first velocity after it waits for the tracker's next look, 1 to 3 ticks on (the fake has no phase: 4 of 5 real decays had 2, lanes 2026-10-24).
+    const everyThird = index === FIRST_AFTER_PAIR ? ticks >= 1 && ticks <= TELL_EVERY_TICKS : ticks > 0 && ticks % TELL_EVERY_TICKS === 0;
+    assert.ok(everyThird && Math.abs(ratio - DECAY_PER_TICK ** ticks) <= DECAY_TOLERANCE, `${label}: velocity ${index + 1} is ${ratio.toFixed(3)} of the one before, ${ticks} ticks of decay: the mob is told every ${TELL_EVERY_TICKS} ticks (the first after the pair 1 to ${TELL_EVERY_TICKS}), not ${DECAY_PER_TICK ** ticks}`);
   }
-  const last = velocities.at(-1)!;
   assert.equal(norms.at(-1), 0, `${label}: the last velocity is not zero`);
-  const restedAfter = last.atMs - hitAtMs;
-  assert.ok(restedAfter >= REST_AT_MS.min && restedAfter <= REST_AT_MS.max, `${label}: the mob rested ${restedAfter} ms after the hit`);
+  const earliest = ticksToRest(velocityOf(velocities[0]!)) - READING_TICKS - TELL_EVERY_TICKS;
+  const latest = ticksToRest(velocityOf(velocities[0]!)) + READING_TICKS + TELL_EVERY_TICKS + REST_LATE_TICKS;
+  assert.ok(restedAfterTicks >= earliest && restedAfterTicks <= latest, `${label}: the mob rested ${restedAfterTicks} server ticks after the hit (the readings +-${READING_TICKS}), not ${earliest} to ${latest}`);
 }
 
 /** The bot holds what the trial names, rested, looking at the mob (a sprint key down for a sprinting trial); nothing of it is left to undo but the key. */
@@ -180,7 +204,7 @@ async function standReadyToHit(subject: ContractSubject, trial: Trial, mob: Enti
   const { bot } = subject;
   if (trial.held === "hand") await bot.unequip("hand");
   else await holdInHand(subject, "iron_sword");
-  await subject.wait(SWING_REST_MS);
+  await restTicksSince(subject, markNow(subject), SWING_REST_TICKS, "the swing");
   await bot.lookAt(mob.position.offset(0, 1.2, 0), true);
   await afterClientTicks(subject, LOOK_CLIENT_TICKS, "the look");
   if (trial.sprint) bot.setControlState("sprint", true);
@@ -194,7 +218,7 @@ export async function runKnockbackTrials(subject: ContractSubject, trials: reado
     try {
       await standReadyToHit(subject, trial, mob);
       const expected = expectedPush(subject, mob, trial.sprint === true);
-      const { damage, velocities, botMoved, mobMoved, log } = await hitAndWatch(subject, mob, trial.watch);
+      const { damage, velocities, botMoved, mobMoved, log, restTicks } = await hitAndWatch(subject, mob, trial.watch);
       assertFirstPush(trial.label, damage, velocities, expected, trial.ai ? "any" : "none");
       if (!trial.ai) {
         const moves = log.packets.filter(({ name, packet }) => MOVE_PACKETS.includes(name) && packet.entityId === mob.id);
@@ -202,7 +226,7 @@ export async function runKnockbackTrials(subject: ContractSubject, trials: reado
         assert.ok(mobMoved <= MOB_STAYS_TOLERANCE, `${trial.label}: the mob moved ${mobMoved} blocks`);
       }
       if (!trial.sprint && !trial.ai) assert.ok(botMoved <= BOT_MOVE_TOLERANCE, `${trial.label}: the bot moved ${botMoved} blocks by hitting`);
-      if (trial.watch === "decay") assertDecay(trial.label, velocities, damage!.atMs);
+      if (restTicks !== undefined) assertDecay(trial.label, velocities, (await tickOf(subject, restTicks.rest)) - (await tickOf(subject, restTicks.hit)));
       if (trial.sprint) await assertSprintSpent(subject, trial);
     } finally {
       if (trial.sprint) bot.setControlState("sprint", false);

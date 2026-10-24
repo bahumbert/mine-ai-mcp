@@ -15,6 +15,9 @@ const HEAD_CELL = [0, -59, 0] as const;
 /**
  * The look is forced (no turn: a non-forced one turns at 3 rad/s first, `physics.js:169`, ~1 s for half a turn on
  * the server run of 2026-10-21), so only the dig is timed; its end is read within a tick or two.
+ * The timed span is a client duration, so it stays on the wall clock (plan T7d6b, 2026-10-24): Mineflayer ends the dig with its own `setTimeout(finishDigging, digTime)`
+ * and turns the cell to air itself (`digging.js:137,161`), so no server answer sets it; a server behind its schedule or a stall changes nothing in it.
+ * What the server says of the dig (it puts the dirt back if it disagrees) is read after, over server ticks (`serverQuiet`).
  */
 const DIG_SLACK_MS = 150;
 /** Server ticks the water takes to flow from the head cell down to the feet and the pocket (vanilla: 5 ticks a step, two steps; unmeasured here). */

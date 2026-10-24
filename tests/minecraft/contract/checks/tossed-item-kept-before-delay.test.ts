@@ -1,24 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { FakeServerOptions } from "../../../../src/test-support/fake-bot/index.ts";
-import { ZERO_ARENA, arenaFrame } from "../../arena/frame.ts";
-import { fakeHarnessFor } from "../fake-harness.ts";
-import { type ContractSubject, fakeContractSubject } from "../subject.ts";
 import { tossedItemKeptBeforeDelay } from "./tossed-item-kept-before-delay.ts";
+import { runOnFake } from "./run-on-fake.ts";
 
-type Harness = ReturnType<typeof fakeHarnessFor>;
-
-/** Run the check on the fake; `change` rewrites the subject before it runs, `stalls` stop the server for `ms` from `atMs` of clock. */
-function runCheck(server: FakeServerOptions, change: (subject: ContractSubject, harness: Harness) => ContractSubject = (subject) => subject, stalls: readonly { atMs: number; ms: number }[] = []): Promise<void> {
-  const frame = arenaFrame(ZERO_ARENA);
-  const harness = fakeHarnessFor(tossedItemKeptBeforeDelay.fixture, frame, server);
-  const installed = harness.clock.install();
-  for (const { atMs, ms } of stalls) {
-    harness.clock.after(atMs, () => harness.server.stop());
-    harness.clock.after(atMs + ms, () => harness.server.resume());
-  }
-  return tossedItemKeptBeforeDelay.run(change(fakeContractSubject(harness, frame), harness)).finally(() => installed[Symbol.dispose]());
-}
+/** Run the check on the fake (`run-on-fake.ts`): `change` rewrites the subject before it runs, `stalls` stop the server. */
+const runCheck = (server: FakeServerOptions, change?: Parameters<typeof runOnFake>[2], stalls?: Parameters<typeof runOnFake>[3]) => runOnFake(tossedItemKeptBeforeDelay, server, change, stalls);
 
 test("tossed-item-kept-before-delay judges the 40 ticks by the server's tick: a server at 14 ticks a second (2.9 s of wall) passes", async () => {
   await runCheck({ ticksPerSecond: 14 });

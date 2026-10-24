@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { LoggedPacket } from "./packet-log.ts";
-import { assertFirstPush } from "./knockback-scene.ts";
+import { assertDecay, assertFirstPush } from "./knockback-scene.ts";
 
 const UNIT = 8_000;
 const damageEvent = (atMs: number): LoggedPacket => ({ atMs, name: "damage_event", packet: {} });
@@ -35,4 +35,38 @@ test("a mob with no AI is judged by its first two velocities alone, to the unit,
   assert.throws(() => assertFirstPush("still", damageEvent(100), push(0.424), AWAY_Z, "none"), /the push is/u);
   assert.throws(() => assertFirstPush("still", damageEvent(100), push(0.4, 0.36), AWAY_Z, "none"), /pushed up/u);
   assert.throws(() => assertFirstPush("still", damageEvent(100), [velocity(101, 0, 0, 0.4), velocity(101.1, 0, 0, 0.3)], AWAY_Z, "none"), /differs/u);
+});
+
+const DECAY_PER_TICK = 0.98;
+/** The told velocities of a push along z that decays by 0.98 a tick, one every `gapTicks` ticks, all heard at the same wall time (the wall is not what is judged). */
+function decayHeard(gapsInTicks: readonly number[]): LoggedPacket[] {
+  const heard = [velocity(0, 0, 0, 0.4), velocity(0, 0, 0, 0.4)];
+  let ticks = 0;
+  for (const gap of gapsInTicks) {
+    ticks += gap;
+    heard.push(velocity(0, 0, 0, Math.round(0.4 * DECAY_PER_TICK ** ticks * UNIT) / UNIT));
+  }
+  return [...heard, velocity(0, 0, 0, 0)];
+}
+
+test("a decay told every 3 ticks, or on the 6th when a change was too small, is judged by the 0.98 a tick, whatever the wall time between the packets", () => {
+  assert.doesNotThrow(() => assertDecay("by hand", decayHeard([3, 3, 3, 3, 3, 6, 3]), 243));
+});
+
+test("a decay that fell 2 ticks between two told velocities, or 4, is refused naming the ticks its ratio says", () => {
+  assert.throws(() => assertDecay("by hand", decayHeard([3, 3, 2, 3]), 243), /velocity 5 is 0\.96\d of the one before, 2 ticks of decay: the mob is told every 3 ticks/u);
+  assert.throws(() => assertDecay("by hand", decayHeard([3, 4, 3]), 243), /velocity 4 is 0\.92\d of the one before, 4 ticks of decay/u);
+});
+
+test("a mob that rested before its push could have decayed, or long after, is refused with the ticks read", () => {
+  // 0.4 under 0.003 takes 243 ticks (0.4 * 0.98 ^ 242 = 0.003004): told on the next 3rd tick, read with an error of 2.
+  assert.doesNotThrow(() => assertDecay("by hand", decayHeard([3]), 238));
+  assert.throws(() => assertDecay("by hand", decayHeard([3]), 100), /by hand: the mob rested 100 server ticks after the hit \(the readings \+-2\), not 238 to 748/u);
+  assert.throws(() => assertDecay("by hand", decayHeard([3]), 749), /rested 749 server ticks/u);
+});
+
+test("the first velocity after the pair comes 1, 2 or 3 ticks on: the pair is sent in the hit's tick, the tracker's looks fall on every 3rd tick of the server's count", () => {
+  // Seen on a real server (lanes, 2026-10-24): 4 of 5 decays had 2 ticks (0.960 of the pair) between the pair and the next velocity, the rest every 3.
+  for (const firstGap of [1, 2, 3]) assert.doesNotThrow(() => assertDecay("by hand", decayHeard([firstGap, 3, 3, 3]), 243), `first gap ${firstGap}`);
+  assert.throws(() => assertDecay("by hand", decayHeard([4, 3, 3]), 243), /velocity 3 is 0\.92\d of the one before, 4 ticks of decay/u);
 });
