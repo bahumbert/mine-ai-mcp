@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, answerArrives, serverQuiet } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 import { markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
 
@@ -18,10 +18,6 @@ const GLASS_CELLS = [
 ];
 /** The dive that is measured, in server ticks (3 s on a server on time). */
 const DIVE_TICKS = 60;
-/** The wall bound of the refill: 15 ticks of 4 air for a dive of 60, with a server at 10 ticks a second and the client's lag. */
-const REFILL_WALL_MS = 5_000;
-/** The first packet, a server tick after the eye went under (a server behind its schedule, a round trip more). */
-const FIRST_PACKET_WALL_MS = 2_000;
 /** The full meter (`LivingEntity.getMaxAirSupply`), and what one server tick takes from it under water and gives back out of it. */
 const FULL_AIR = 300;
 const AIR_LOST_PER_TICK = 1;
@@ -88,7 +84,7 @@ export const airSupplyUnderWater: ContractCheck = {
       const waterPlaced = markNow(subject);
       await subject.setBlock(subject.world(HEAD_CELL), "water");
       wateredAt = `water seen at ${Math.round(subject.now() - startedAtMs)}ms/age ${bot.time.age}`;
-      assert.ok(await holdsWithin(subject, () => readings.length > 0, FIRST_PACKET_WALL_MS), "no air packet within the wall bound with the eye under water");
+      await answerArrives(subject, () => readings.length > 0, "no air packet with the eye under water");
       // The dive is every reading from the first: the check looks every 25 ms, and a client busy for longer files several packets before it looks (6c-warm: 297, 2 ticks in; a 6b lane: 298).
       assert.equal(readings[0]!.air, FULL_AIR - AIR_LOST_PER_TICK, "the first tick under water takes 1 from the full meter");
       await restTicksSince(subject, waterPlaced, DIVE_TICKS, "the dive");
@@ -101,7 +97,7 @@ export const airSupplyUnderWater: ContractCheck = {
 
       const airPlaced = markNow(subject);
       await subject.setBlock(subject.world(HEAD_CELL), "air");
-      assert.ok(await holdsWithin(subject, () => airHeard() === FULL_AIR, REFILL_WALL_MS), `the air is ${String(airHeard())}, not refilled`);
+      assert.ok(await holdsWithin(subject, () => airHeard() === FULL_AIR, ANSWER_WALL_MS), `the air is ${String(airHeard())}, not refilled`);
       const refillHeard = markNow(subject);
       const refill = refillOf(readings);
       const steps = stepsOf(refill);

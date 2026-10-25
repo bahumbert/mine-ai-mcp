@@ -11,24 +11,22 @@ import assert from "node:assert/strict";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS, afterServerTicks, answerArrives } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
-import { CALL_WALL_MS, type DamageEvent, NIGHT, type PacketListening, STILL_MOB_NBT, ZOMBIE_HEALTH, damageTypeId, finishWithin, healthOf, listenToFight, mobAt } from "./combat-scene.ts";
+import { type Mark, READING_TICKS, markNow, tickOf } from "./server-tick-marks.ts";
+import { type DamageEvent, NIGHT, type PacketListening, STILL_MOB_NBT, ZOMBIE_HEALTH, damageTypeId, finishWithin, healthOf, listenToFight, mobAt } from "./combat-scene.ts";
 
 const SWORD_DAMAGE = 6;
 const HAND_DAMAGE = 1;
 const HITS_TO_KILL = 4;
-/** The server's answer to a hit (the `damage_event`, then the health in metadata a tick later) reaches the client within this wall time. */
-const ANSWER_WALL_MS = 2_000;
-/** Observed ticks that prove at least 21 server ticks: the mob's hurt window is 10 and the sword's cooldown 12.5. */
-const HIT_GAP_TICKS = 40;
-/** The wall bound of those ticks (40 take 2 s on a server on time). */
-const HIT_GAP_WALL_MS = 5_000;
-/** The death animation keeps the mob on the client this long after `entityDead` (945 ms measured). */
-const DEATH_ANIMATION_MS = { min: 600, max: 1_500 } as const;
+/** Server ticks to let pass between hits: the mob's hurt window is 10 and the sword's cooldown 12.5. */
+const HIT_GAP_TICKS = 21;
+/** The death animation keeps the mob on the client this many server ticks after `entityDead`: 20 in vanilla (`LivingEntity.tickDeath`, unmeasured here; 945 ms measured on a server on time), less and more by the two readings' error (`READING_TICKS` each) and a tick or two. */
+const DEATH_ANIMATION_TICKS = { min: 20 - 2 * READING_TICKS - 2, max: 20 + 2 * READING_TICKS + 2 } as const;
 /** The health the client holds is a float32 of the server's: a hundredth is the bound. */
 const HEALTH_TOLERANCE = 0.01;
-/** The server has the new selected slot this many observed ticks after the packet. */
-const SLOT_CHANGE_TICKS = 40;
+/** The server has the new selected slot this many server ticks after the packet. */
+const SLOT_CHANGE_TICKS = 21;
 
 /** The mob's health when the client holds one (the metadata comes with the spawn), else undefined. */
 function healthIfKnown(bot: Bot, mob: Entity): number | undefined {
@@ -39,9 +37,9 @@ function healthIfKnown(bot: Bot, mob: Entity): number | undefined {
   }
 }
 
-/** Let the server run `HIT_GAP_TICKS` (observed) from now, or fail: a hit sent sooner could land inside the mob's hurt window. */
-async function letHurtWindowPass(subject: ContractSubject, after: string): Promise<void> {
-  assert.ok(await subject.serverTicks(HIT_GAP_TICKS, HIT_GAP_WALL_MS), `${after}: the server ran fewer than ${HIT_GAP_TICKS} ticks in ${HIT_GAP_WALL_MS} ms`);
+/** Let the server run `HIT_GAP_TICKS` from now, or fail: a hit sent sooner could land inside the mob's hurt window. */
+function letHurtWindowPass(subject: ContractSubject, after: string): Promise<void> {
+  return afterServerTicks(subject, HIT_GAP_TICKS, after);
 }
 
 /** Hit `mob`, wait for the health the server files after it (below `before`), and let the hurt window pass; the health read. */
@@ -77,8 +75,14 @@ export const attackHurtsAndKills: ContractCheck = {
     const healths: number[] = [];
     const events: DamageEvent[] = [];
     const onDamage = (event: DamageEvent) => void (event.entityId === struck.id && events.push(event));
+    const deathHeard: Mark[] = [];
+    const goneHeard: Mark[] = [];
+    const onDead = (entity: Entity) => void (entity === struck && deathHeard.push(markNow(subject)));
+    const onGone = (entity: Entity) => void (entity === struck && goneHeard.push(markNow(subject)));
     const client = bot._client as unknown as PacketListening;
     client.on("damage_event", onDamage);
+    bot.on("entityDead", onDead);
+    bot.on("entityGone", onGone);
     try {
       // The swing starts over when the body joins or takes the sword in hand (`Player.tick`) and recharges in server ticks (12.5 for the sword): a first hit sent at once on a server behind its schedule is weak (a lane batch: 1.2 of 6).
       await letHurtWindowPass(subject, "before the first hit");
@@ -96,9 +100,9 @@ export const attackHurtsAndKills: ContractCheck = {
       });
       assert.equal(sword.heard.deaths.length, 1, "the fourth hit did not kill it exactly once");
       assert.ok(Math.abs(sword.heard.deaths[0]! - sword.heard.hurts[HITS_TO_KILL - 1]!.atMs) < 100, "the death came apart from the killing hit");
-      await holdsWithin(subject, () => sword.heard.gone.length > 0, DEATH_ANIMATION_MS.max * 2);
-      const stayedMs = sword.heard.gone[0]! - sword.heard.deaths[0]!;
-      assert.ok(stayedMs >= DEATH_ANIMATION_MS.min && stayedMs <= DEATH_ANIMATION_MS.max, `the dead mob stayed ${stayedMs} ms, not ${DEATH_ANIMATION_MS.min} to ${DEATH_ANIMATION_MS.max}`);
+      await answerArrives(subject, () => goneHeard.length > 0, "the dead mob was never removed");
+      const stayedTicks = (await tickOf(subject, goneHeard[0]!)) - (await tickOf(subject, deathHeard[0]!));
+      assert.ok(stayedTicks >= DEATH_ANIMATION_TICKS.min && stayedTicks <= DEATH_ANIMATION_TICKS.max, `the dead mob stayed ${stayedTicks} server ticks, not ${DEATH_ANIMATION_TICKS.min} to ${DEATH_ANIMATION_TICKS.max}`);
       assert.equal(struck.isValid, false, "a removed mob stays valid");
       assert.equal(bot.entities[struck.id], undefined, "a removed mob is still on the bot");
       bot.attack(struck);
@@ -106,12 +110,14 @@ export const attackHurtsAndKills: ContractCheck = {
       assert.equal(sword.heard.hurts.length, HITS_TO_KILL, "a hit on a removed mob hurt it");
     } finally {
       client.off("damage_event", onDamage);
+      bot.off("entityDead", onDead);
+      bot.off("entityGone", onGone);
       sword.stop();
     }
-    await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
+    await finishWithin(subject, bot.unequip("hand"), "unequip");
     assert.equal(bot.heldItem, null, "the hand is empty after the unequip");
     // A hit written in the same breath as the slot change was the old slot's (the sword's 6 where the hand does 1; seen twice): the server applies the change a tick or more later. Not modelled by the fake.
-    assert.ok(await subject.serverTicks(SLOT_CHANGE_TICKS, HIT_GAP_WALL_MS), `after the unequip: the server ran fewer than ${SLOT_CHANGE_TICKS} ticks in ${HIT_GAP_WALL_MS} ms`);
+    await afterServerTicks(subject, SLOT_CHANGE_TICKS, "after the unequip");
     const hand = listenToFight(subject, handled);
     try {
       let health = ZOMBIE_HEALTH;

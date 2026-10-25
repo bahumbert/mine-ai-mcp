@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import type { Block } from "prismarine-block";
 import type { ContractFixture } from "../checks.ts";
-import { type ContractBot, type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
+import { ANSWER_WALL_MS, answerArrives } from "../server-answer.ts";
+import { type ContractBot, type ContractSubject, settleWithin } from "../subject.ts";
 
 /** A red bed one block east of the feet, its head further east (`bed.js:parseBedMetadata`: facing east puts the head at +x). */
 export const BED_FOOT = [1, -60, 0] as const;
@@ -16,12 +17,8 @@ export const BED_FIXTURE: ContractFixture = {
   position: [0.5, -60, 0.5],
 };
 
-/** The sleep Mineflayer waits for (`bed.js:waitUntilSleep`) is 3 s; one more second for a server behind. */
+/** The sleep Mineflayer waits for (`bed.js:waitUntilSleep`) is its own 3 s timer on the wall clock, a client duration the server's ticks do not move; one more second so its error is the one seen. */
 export const SLEEP_WALL_MS = 4_000;
-/** One server answer to a bed use (a round trip, a server a little behind). */
-export const BED_ANSWER_WALL_MS = 3_000;
-/** How long a refusal is watched for a sleep that does not come. */
-export const REFUSAL_WATCH_MS = 2_000;
 
 /** The bed's foot block as the client has it. */
 export function bedFoot(subject: ContractSubject): Block {
@@ -64,11 +61,11 @@ export async function trySleep(subject: ContractSubject): Promise<{ readonly sle
 
 /** Wait until the client's world shows the bed's occupied state as `occupied`. */
 export async function untilBedOccupied(subject: ContractSubject, occupied: boolean): Promise<void> {
-  assert.ok(await holdsWithin(subject, () => bedOccupied(subject) === occupied, BED_ANSWER_WALL_MS), `the bed never showed occupied=${occupied}`);
+  await answerArrives(subject, () => bedOccupied(subject) === occupied, `the bed never showed occupied=${occupied}`);
 }
 
 /** Use the bed without Mineflayer's sleep checks (`activateBlock`: the look, the packet, the swing), so the server's own answer is the one heard. */
 export async function useBed(subject: ContractSubject): Promise<void> {
-  const settled = await settleWithin(subject, subject.bot.activateBlock(bedFoot(subject)), BED_ANSWER_WALL_MS);
+  const settled = await settleWithin(subject, subject.bot.activateBlock(bedFoot(subject)), ANSWER_WALL_MS);
   assert.ok(settled !== null && settled.error === undefined, `activateBlock: ${settled?.error?.message ?? "never settled"}`);
 }

@@ -4,12 +4,11 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { serverQuiet } from "../server-answer.ts";
-import { holdsWithin, settleWithin } from "../subject.ts";
+import { ANSWER_WALL_MS, answerArrives, serverQuiet } from "../server-answer.ts";
+import { settleWithin } from "../subject.ts";
 
 const BEFORE_PACKET_TARGET = [1, -60, 0] as const;
 const AFTER_PACKET_TARGET = [-1, -60, 0] as const;
-const DIG_WALL_MS = 3_000;
 
 export const stopDiggingBothWindows: ContractCheck = {
   name: "stop-digging-both-windows",
@@ -26,7 +25,7 @@ export const stopDiggingBothWindows: ContractCheck = {
     await bot.look(Math.PI / 2, 0, true);
     const first = bot.dig(bot.blockAt(beforePacketTarget)!);
     bot.stopDigging();
-    const ended = await settleWithin(subject, first, DIG_WALL_MS);
+    const ended = await settleWithin(subject, first, ANSWER_WALL_MS);
     assert.ok(ended !== null && ended.error === undefined, `a stop during the look ended the dig: ${ended?.error?.message ?? "it never ended"}`);
     assert.equal(bot.blockAt(beforePacketTarget)?.name, "air");
 
@@ -34,9 +33,9 @@ export const stopDiggingBothWindows: ContractCheck = {
     const second = bot.dig(bot.blockAt(afterPacketTarget)!, true);
     second.catch(() => undefined); // read below; an early failure must not go unhandled meanwhile
     // Mineflayer sets `targetDigBlock` in the call that writes the start packet: the stop below is the first moment after it, not a wall time into the dig.
-    assert.ok(await holdsWithin(subject, () => bot.targetDigBlock !== null, DIG_WALL_MS), "the dig packet is out (targetDigBlock set)");
+    await answerArrives(subject, () => bot.targetDigBlock !== null, "the dig packet is not out (targetDigBlock not set)");
     bot.stopDigging();
-    const aborted = await settleWithin(subject, second, DIG_WALL_MS);
+    const aborted = await settleWithin(subject, second, ANSWER_WALL_MS);
     assert.equal(aborted?.error?.message, "Digging aborted");
     // A server that broke the block anyway sends the air within its ticks.
     await serverQuiet(subject, "after the aborted dig");

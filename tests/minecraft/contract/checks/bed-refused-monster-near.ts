@@ -4,12 +4,11 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { holdsWithin } from "../subject.ts";
-import { BED_FIXTURE, REFUSAL_WATCH_MS, countWrites, trySleep, useBed } from "./bed-scene.ts";
+import { answerArrives } from "../server-answer.ts";
+import { BED_FIXTURE, countWrites, trySleep, useBed } from "./bed-scene.ts";
 
 /** What the server says to a player in a bed with a monster near (`Player.BedSleepingProblem.NOT_SAFE`). */
 const NOT_SAFE = "block.minecraft.bed.not_safe";
-const ZOMBIE_WALL_MS = 5_000;
 
 export const bedRefusedMonsterNear: ContractCheck = {
   name: "bed-refused-monster-near",
@@ -17,7 +16,7 @@ export const bedRefusedMonsterNear: ContractCheck = {
   fixture: { ...BED_FIXTURE, timeOfDay: 14_000, daylightCycle: true, entities: [{ name: "zombie", position: [4.5, -60, 3.5] }] },
   async run(subject) {
     const { bot } = subject;
-    assert.ok(await holdsWithin(subject, () => Object.values(bot.entities).some((entity) => entity.name === "zombie"), ZOMBIE_WALL_MS), "no zombie in view");
+    await answerArrives(subject, () => Object.values(bot.entities).some((entity) => entity.name === "zombie"), "no zombie in view");
     const blockPlaces = countWrites(bot, "block_place");
     const messages: string[] = [];
     const onActionBar = (message: { translate?: string; toString(): string }) => void messages.push(message.translate ?? message.toString());
@@ -30,7 +29,7 @@ export const bedRefusedMonsterNear: ContractCheck = {
 
       // The server's own answer to the use that Mineflayer would not send.
       await useBed(subject);
-      assert.ok(await holdsWithin(subject, () => messages.length > 0, REFUSAL_WATCH_MS), "the server said nothing to the use");
+      await answerArrives(subject, () => messages.length > 0, "the server said nothing to the use");
       assert.equal(blockPlaces.count(), 1);
       assert.deepEqual(messages, [NOT_SAFE], "the action bar says it is not safe");
       assert.equal(bot.isSleeping, false);

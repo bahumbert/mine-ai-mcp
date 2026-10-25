@@ -6,11 +6,10 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, slotsOf } from "../window-packets.ts";
 
-const OPEN_WALL_MS = 5_000;
 /** In reach of a bot at x -4.5, and 7.5 blocks away from it. */
 const NEAR = [0, -60, 0] as const;
 const FAR = [3, -60, 0] as const;
@@ -34,7 +33,7 @@ export const chestOpenTakeClose: ContractCheck = {
   async run(subject) {
     const { bot } = subject;
     const recording = recordWindowPackets(bot);
-    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), OPEN_WALL_MS);
+    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), ANSWER_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest in reach opened: ${opened?.error?.message ?? "never"}`);
     const window = opened.value;
     assert.deepEqual([window.type, window.id, window.slots.length], ["minecraft:generic_9x3", 1, 63]);
@@ -59,7 +58,7 @@ export const chestOpenTakeClose: ContractCheck = {
     assert.deepEqual(slotsOf(bot.inventory, [9, 10, 36]), { 9: "cobblestone x4", 10: "bread x1", 36: null }, "the window's player part is now the inventory");
     assert.deepEqual(recording.packets.splice(0), [], "the close brings no packet");
 
-    const again = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), OPEN_WALL_MS);
+    const again = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(NEAR))!), ANSWER_WALL_MS);
     assert.ok(again?.value !== undefined, `the chest opened again: ${again?.error?.message ?? "never"}`);
     assert.equal(again.value.id, 2, "the second window has the next id");
     assert.deepEqual(slotsOf(again.value, CHEST_SLOTS), { 0: "cobblestone x2", 1: "cobblestone x64", 2: "torch x3", 3: "bread x3" }, "the server kept the chest's stacks");

@@ -5,8 +5,9 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { answerArrives } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
-import { BED_ANSWER_WALL_MS, BED_FIXTURE, countWrites, trySleep, useBed } from "./bed-scene.ts";
+import { BED_FIXTURE, countWrites, trySleep, useBed } from "./bed-scene.ts";
 
 /** What the server says to a bed used by day (`Player.BedSleepingProblem.NOT_POSSIBLE_NOW`). */
 const NO_SLEEP = "block.minecraft.bed.no_sleep";
@@ -15,9 +16,9 @@ const NOON = 6_000;
 const LEVEL_STEP = 0.01;
 const FULL_RAMP_TICKS = 100;
 const FLOAT_SLACK = 1e-5;
+/** The ramp is 100 server ticks, judged on the wall clock because this check is `exclusive` (no other lane's stall moves it): a bound for a ramp, not for one answer. */
 const FULL_RAMP_MS = 5_000;
 const RAMP_SLACK_MS = 3_000;
-const FIRST_UPDATE_WALL_MS = 3_000;
 
 export const rainAndThunderState: ContractCheck = {
   name: "rain-and-thunder-state",
@@ -38,12 +39,12 @@ export const rainAndThunderState: ContractCheck = {
 
       // By day in the clear: the use is answered with the action bar, and nobody sleeps.
       await useBed(subject);
-      assert.ok(await holdsWithin(subject, () => messages.length > 0, BED_ANSWER_WALL_MS), "the server said nothing to the use by day");
+      await answerArrives(subject, () => messages.length > 0, "the server said nothing to the use by day");
       assert.deepEqual(messages, [NO_SLEEP]);
       assert.equal(bot.isSleeping, false);
 
       await subject.setWeather("rain");
-      assert.ok(await holdsWithin(subject, () => bot.isRaining, FIRST_UPDATE_WALL_MS), "no rain");
+      await answerArrives(subject, () => bot.isRaining, "no rain");
       assert.ok(await holdsWithin(subject, () => bot.rainState === 1, FULL_RAMP_MS + RAMP_SLACK_MS), `rain level ${bot.rainState}, not full`);
       const rainRamp = levels.filter((level) => level.thunder === 0);
       const rainSteps = rainRamp.slice(1).map((level, index) => level.rain - rainRamp[index]!.rain);
@@ -65,7 +66,7 @@ export const rainAndThunderState: ContractCheck = {
       const storm = await trySleep(subject);
       assert.deepEqual({ slept: storm.slept, error: storm.error }, { slept: true, error: undefined }, "a full thunderstorm lets her sleep at noon");
       await bot.wake();
-      assert.ok(await holdsWithin(subject, () => !bot.isSleeping, BED_ANSWER_WALL_MS), "wake() did not free her");
+      await answerArrives(subject, () => !bot.isSleeping, "wake() did not free her");
 
       await subject.setWeather("clear");
       assert.ok(await holdsWithin(subject, () => !bot.isRaining, FULL_RAMP_MS + RAMP_SLACK_MS), "the rain never stopped");

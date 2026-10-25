@@ -16,8 +16,9 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
-import { CALL_WALL_MS, NIGHT, STILL_MOB_NBT, TICK_MS, healthOf, holdInHand, mobAt } from "./combat-scene.ts";
+import { NIGHT, STILL_MOB_NBT, TICK_MS, healthOf, holdInHand, mobAt } from "./combat-scene.ts";
 
 /** The attack attribute (the hand's 1 included) and the swings a second of a tool, with the tiers' vanilla numbers. */
 export interface Tool {
@@ -73,8 +74,6 @@ const RING: readonly (readonly [number, number])[] = Array.from({ length: 11 }, 
 
 /** The equip starts the swing over: the first hit waits for its period (20 / speed ticks) and this many ticks more, counted on the server. */
 const REST_MARGIN_TICKS = 3;
-/** A server behind its schedule takes longer on the wall clock for those ticks; past this the swing is called not back. */
-const REST_WALL_MS = 5_000;
 /** The bot's own gaps between hits, on the wall clock: what the server counts between them is read, not assumed. */
 const SECOND_GAP_MS = 500;
 const THIRD_GAP_MS = 100;
@@ -106,15 +105,15 @@ function impliedTicks(tool: Tool, cost: number): number | null {
 
 /** The server's tick now, with the clock moving until the answer is in (a reading that is not tied to a hit). */
 async function tickNow(subject: ContractSubject): Promise<number> {
-  const settled = await settleWithin(subject, subject.serverGameTime(), CALL_WALL_MS);
-  assert.ok(settled?.value !== undefined, `the server's tick was not read within ${CALL_WALL_MS} ms: ${settled?.error?.message ?? "no answer"}`);
+  const settled = await settleWithin(subject, subject.serverGameTime(), ANSWER_WALL_MS);
+  assert.ok(settled?.value !== undefined, `the server's tick was not read within ${ANSWER_WALL_MS} ms: ${settled?.error?.message ?? "no answer"}`);
   return settled.value;
 }
 
 /**
  * Wait until the swing is back (`REST_MARGIN_TICKS` past its period) since the reading `since`, taken right after the equip, which
  * starts the swing over; counted on the server's ticks, so a server behind its schedule rests for longer on the wall clock, up to
- * `REST_WALL_MS`.
+ * `ANSWER_WALL_MS`.
  */
 async function restUntilSwingBack(subject: ContractSubject, tool: Tool, since: number): Promise<void> {
   const needed = Math.ceil(20 / tool.speed) + REST_MARGIN_TICKS;
@@ -122,7 +121,7 @@ async function restUntilSwingBack(subject: ContractSubject, tool: Tool, since: n
   for (;;) {
     const ran = (await tickNow(subject)) - since;
     if (ran >= needed) return;
-    assert.ok(subject.now() - startedAt < REST_WALL_MS, `${tool.name}: the swing was not back ${REST_WALL_MS} ms after the equip: ${ran} ticks of ${needed} on the server`);
+    assert.ok(subject.now() - startedAt < ANSWER_WALL_MS, `${tool.name}: the swing was not back ${ANSWER_WALL_MS} ms after the equip: ${ran} ticks of ${needed} on the server`);
     await subject.wait((needed - ran) * TICK_MS);
   }
 }
@@ -150,7 +149,7 @@ async function hitThreeMobs(subject: ContractSubject, tool: Tool, mobs: readonly
   // An unanswered question rejects when awaited below, not as an unhandled rejection on the way.
   readings.forEach((reading) => void reading.catch(() => undefined));
   // Every hit of a tool costs something, so each mob's health tells that its answer came; a hit that never lands is read as a cost of 0.
-  await holdsWithin(subject, () => hit.every((mob, index) => healthOf(bot, mob) < before[index]!), CALL_WALL_MS);
+  await holdsWithin(subject, () => hit.every((mob, index) => healthOf(bot, mob) < before[index]!), ANSWER_WALL_MS);
   const [full, slower, faster] = hit.map((mob, index) => before[index]! - healthOf(bot, mob)) as [number, number, number];
   const [first, second, third] = (await Promise.all(readings)) as [number, number, number];
   return { full, slower, faster, ticksBetween: [second - first, third - second] as const };

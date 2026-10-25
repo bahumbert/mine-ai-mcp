@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { afterServerTicks, serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, afterServerTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { WATER_POOL_CELLS, boatSummonedAt, getOffAndStand, mountBoat } from "./boat-seat.ts";
 
@@ -17,8 +17,6 @@ const BOAT_AT = [3.5, -60.111, 0.5] as const;
 const STEP = 0.2;
 /** The ride's own pacing (what `BoatRide` does between moves), not a wait for the server: each move is accepted or put back on its own packet. */
 const STEP_GAP_MS = 50;
-/** The boat follows within the server's tick and the entity broadcast: well under a second on a server on time. */
-const FOLLOW_WALL_MS = 2_000;
 const TOLERANCE = 0.01;
 /** Steps from the pool's middle (x 3.5) that stay clear of the bank: the last is x 4.3. */
 const FREE_STEPS = 4;
@@ -66,12 +64,12 @@ export const boatFollowsVehicleMove: ContractCheck = {
         bot._client.write("vehicle_move", { x, y, z, yaw: -90, pitch: 0, onGround: false });
         await subject.wait(STEP_GAP_MS);
       }
-      assert.ok(await holdsWithin(subject, () => Math.abs(boat.position.x - x) < TOLERANCE, FOLLOW_WALL_MS), `the boat is at x ${boat.position.x}, not at the x ${x} the moves took it to`);
+      assert.ok(await holdsWithin(subject, () => Math.abs(boat.position.x - x) < TOLERANCE, ANSWER_WALL_MS), `the boat is at x ${boat.position.x}, not at the x ${x} the moves took it to`);
       assert.equal(corrections.length, 0, "a move inside the pool was put back");
       const lastFree = x;
       x += STEP;
       bot._client.write("vehicle_move", { x, y, z, yaw: -90, pitch: 0, onGround: false });
-      assert.ok(await holdsWithin(subject, () => corrections.length > 0, FOLLOW_WALL_MS), "a move into the bank block was not put back");
+      await answerArrives(subject, () => corrections.length > 0, "a move into the bank block was not put back");
       assert.ok(Math.abs(corrections[0]!.x - lastFree) < TOLERANCE, `put back to x ${corrections[0]!.x}, not to the last accepted ${lastFree}`);
       assert.ok(await staysAt(subject, lastFree), `the boat did not stay at x ${lastFree}`);
     } finally {

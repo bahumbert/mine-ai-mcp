@@ -7,9 +7,9 @@
 import assert from "node:assert/strict";
 import { ITEM_VARIANTS, type ItemVariantName } from "../../../../src/test-support/fake-bot/item-variants.ts";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 
-const OPEN_WALL_MS = 5_000;
 /** The chest's cell in the fixture's frame; `subject.world` moves it to the lane. */
 const CHEST = [0, -60, 0] as const;
 /** The stacks in the chest, slot 0 first: a variant name or a plain item name, and its count. */
@@ -51,7 +51,7 @@ export const itemVariantComponents: ContractCheck = {
   },
   async run(subject) {
     const { bot } = subject;
-    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
+    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), ANSWER_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
     const { slots } = opened.value;
     const measured = STACKS.map((_, slot) => {

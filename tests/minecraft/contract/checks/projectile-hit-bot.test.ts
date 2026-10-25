@@ -26,3 +26,24 @@ test("projectile-hit-bot fails, naming the ticks read, when the first burn came 
     /small_fireball: burn 1 heard at server tick \d+, \d+ ticks after the shot at tick \d+: the burn is 20 ticks after the hit, so not less than 19 \(readings \+-2\)/,
   );
 });
+
+/** The reads after a fireball's shot: its spawn, the hit, the removal and the push, then one per burn. */
+const FIRST_BURN_READ = 4;
+/** Ticks each burn's read is late by more than the one before. */
+const EXTRA_PER_BURN = 7;
+
+test("projectile-hit-bot fails, naming the reads, when a burn came 27 ticks after the one before it, which the fire's 20 ticks never are", async () => {
+  // The reads of burns 2 to 4 are late by 7 more each (the fake burns every 20 ticks): consecutive burns read 27 ticks apart, outside 20 +- 6, while every burn is still inside its window from the shot.
+  let shots = 0;
+  let firstReadAfterShot = -1;
+  await assert.rejects(
+    runOnFake(projectileHitBot, {}, (subject) => ({
+      ...withShiftedReads(subject, (index) => {
+        if (shots >= 2 && firstReadAfterShot < 0) firstReadAfterShot = index;
+        return shots >= 2 && index >= firstReadAfterShot + FIRST_BURN_READ ? EXTRA_PER_BURN * (index - firstReadAfterShot - FIRST_BURN_READ) : 0;
+      }),
+      shootBot: (projectile, shooterId) => (shots += 1, subject.shootBot(projectile, shooterId)),
+    })),
+    /small_fireball: burn 2 heard at server tick \d+, 27 ticks after burn 1 at tick \d+: the fire burns every 20 ticks, so not less than 14 and not more than 26/,
+  );
+});

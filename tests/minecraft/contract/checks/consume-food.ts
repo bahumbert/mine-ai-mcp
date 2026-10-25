@@ -11,10 +11,9 @@ import type { Bot } from "mineflayer";
 import type { ContractCheck } from "../checks.ts";
 import { answerArrives, serverQuiet } from "../server-answer.ts";
 import { countWrites } from "./bed-scene.ts";
-import { CALL_WALL_MS, finishWithin, holdInHand, useFlagsOf } from "./combat-scene.ts";
+import { finishWithin, holdInHand, useFlagsOf } from "./combat-scene.ts";
 
 const EATING_MS = { min: 1_400, max: 2_100 } as const;
-
 
 const USING_HAND = 1;
 const APPLE_EFFECTS = ["regeneration", "absorption"];
@@ -31,7 +30,7 @@ export const consumeFood: ContractCheck = {
     assert.equal(bot.food, 20, "the bot starts hungry");
     await holdInHand(subject, "golden_apple");
     const startedAt = subject.now();
-    const tookMs = (await finishWithin(subject, bot.consume(), CALL_WALL_MS, "consume")) - startedAt;
+    const tookMs = (await finishWithin(subject, bot.consume(), "consume")) - startedAt;
     assert.ok(tookMs >= EATING_MS.min && tookMs <= EATING_MS.max, `eating took ${tookMs} ms, not ${EATING_MS.min} to ${EATING_MS.max}`);
     // The stack, the bit and the effects come after the resolution; the assertions below say which one never did.
     await answerArrives(subject, () => countOf(bot, "golden_apple") === 1 && (useFlagsOf(bot) & USING_HAND) === 0 && APPLE_EFFECTS.every((effect) => effectNames(bot).includes(effect)), "the eaten apple, the bite over and the effects");
@@ -61,10 +60,10 @@ export const consumeFood: ContractCheck = {
     await answerArrives(subject, () => (useFlagsOf(bot) & USING_HAND) === USING_HAND, "no bite under way");
     bot.deactivateItem();
     await answerArrives(subject, () => (useFlagsOf(bot) & USING_HAND) === 0, "the release did not stop the bite");
-    await finishWithin(subject, interrupted, CALL_WALL_MS, "the released bite");
+    await finishWithin(subject, interrupted, "the released bite");
     assert.notEqual(await interrupted, "ate", "a bite released halfway was eaten");
     assert.equal(countOf(bot, "golden_apple"), 1, "a released bite spent the apple");
-    await finishWithin(subject, bot.consume(), CALL_WALL_MS, "the next consume");
+    await finishWithin(subject, bot.consume(), "the next consume");
     await answerArrives(subject, () => countOf(bot, "golden_apple") === 0, "the next consume did not eat it");
   },
 };

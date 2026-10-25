@@ -7,12 +7,11 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { afterServerTicks } from "../server-answer.ts";
+import { ANSWER_WALL_MS, afterServerTicks, answerArrives } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 import { type DamageEvent, NIGHT, STILL_MOB_NBT, damageTypeId, mobAt } from "./combat-scene.ts";
 
 const DAMAGE = 2;
-const SETTLE_MS = 500;
 /** A second damage of the same size inside the first ten ticks is ignored (the hurt window the mobs have too): the 3 s wait of the first run saw no event. */
 const HURT_WINDOW_TICKS = 10;
 /** Natural regeneration heals a point every 10 ticks at full food (not modelled by the fake): a read a tick late may show it. */
@@ -55,7 +54,7 @@ export const damageEventToBot: ContractCheck = {
     bot.on("health", onHealth);
     try {
       await subject.hurtBot(DAMAGE, zombie.id);
-      assert.ok(await holdsWithin(subject, () => bot.health <= 20 - DAMAGE + REGENERATED, SETTLE_MS), `health is ${bot.health} after ${DAMAGE} damage`);
+      assert.ok(await holdsWithin(subject, () => bot.health <= 20 - DAMAGE + REGENERATED, ANSWER_WALL_MS), `health is ${bot.health} after ${DAMAGE} damage`);
       assert.ok(bot.health >= 20 - DAMAGE, `health is ${bot.health}, below ${20 - DAMAGE}`);
       assert.equal(events.length, 1);
       assert.deepEqual(fieldsOf(events[0]!), { entityId: bot.entity.id, sourceTypeId: damageTypeId(bot.registry, "mob_attack"), sourceCauseId: zombie.id + 1, sourceDirectId: zombie.id + 1 });
@@ -72,9 +71,10 @@ export const damageEventToBot: ContractCheck = {
       // The first damage's answers all came (health, hurt, velocity: the same tick); the window is server ticks, not a wall time.
       await afterServerTicks(subject, HURT_WINDOW_TICKS, "the hurt window");
       await subject.hurtBot(DAMAGE, null);
+      await answerArrives(subject, () => events.length >= 1 && hurts.length >= 1, "the second damage sent no damage_event or entityHurt");
       assert.deepEqual(events.map(fieldsOf), [{ entityId: bot.entity.id, sourceTypeId: damageTypeId(bot.registry, "generic"), sourceCauseId: 0, sourceDirectId: 0 }]);
       assert.deepEqual(hurts, [{ entity: bot.entity, source: undefined }]);
-      assert.ok(await holdsWithin(subject, () => healthEvents >= 1, SETTLE_MS), "the second damage sent no health update");
+      await answerArrives(subject, () => healthEvents >= 1, "the second damage sent no health update");
     } finally {
       client.off("damage_event", onDamage);
       client.off("entity_velocity", onVelocity);

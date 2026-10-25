@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { afterClientTicks, answerArrives, serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, afterClientTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 import { type DamageEvent, type HealthPacket, TICK_MS, damageTypeId } from "./combat-scene.ts";
 import { type LoggedPacket, type PacketLog, logPackets } from "./packet-log.ts";
@@ -37,9 +37,6 @@ const UPDATE_GAP_MS = { min: 8 * TICK_MS - 60, max: 10 * TICK_MS + 100 } as cons
 const FIRST_UPDATE_MS = { min: TICK_MS, max: 5 * TICK_MS } as const;
 const SPEED_TOLERANCE = 0.012;
 const DEFLECT_VELOCITY_TOLERANCE = 0.01;
-/** The out-of-reach ball reaches the bot within this long; a missed ball is destroyed at her. */
-const ARRIVAL_WALL_MS = 3_000;
-const FLIGHT_AFTER_HIT_MS = 3_500;
 const FLOWN_AWAY_BLOCKS = 15;
 /** The spawn tells the ball's velocity in the packets that come with it, a few ms after the client has the entity. */
 const SPAWN_PACKETS_MS = 20;
@@ -83,11 +80,6 @@ function movedBlocks({ name, packet }: LoggedPacket): number {
   return name === "entity_move_look" ? (packet.dX as number) / POSITION_UNIT : (packet.x as number);
 }
 
-/** Wait until the client has no `ball` any more (the server destroyed it) or `maxMs` went. */
-function goneWithin(subject: Parameters<typeof holdsWithin>[0], ball: Entity, maxMs: number): Promise<boolean> {
-  return holdsWithin(subject, () => subject.bot.entities[ball.id] === undefined, maxMs);
-}
-
 export const deflectFireball: ContractCheck = {
   name: "deflect-fireball",
   fixture: { cells: {}, carried: {}, position: [0.5, -60, 0.5], difficulty: "easy" },
@@ -114,7 +106,8 @@ async function hitOutOfReach(subject: Parameters<ContractCheck["run"]>[0]): Prom
     const ball = await subject.launchFireball(feet.offset(OUT_OF_REACH_BLOCKS, 0.9, 0), new Vec3(-LAUNCH_SPEED, 0, 0));
     const spawnedAtMs = log.sinceStartMs();
     bot.attack(ball);
-    assert.ok(await goneWithin(subject, ball, ARRIVAL_WALL_MS), "the ball that was out of reach never reached the bot");
+    // A missed ball is destroyed at her: the server removes it on arrival.
+    await answerArrives(subject, () => subject.bot.entities[ball.id] === undefined, "the ball that was out of reach never reached the bot");
     // The hit's packets came in the ball's last tick, before its removal; the wait is for the log to hold them, not for 4 ticks of wall time.
     await answerArrives(subject, () => hitAnswered(log, bot.entity.id), "the packets of the ball's hit on the bot");
     const zero = log.packets.find(({ name, packet }) => name === "rel_entity_move" && packet.entityId === ball.id);
@@ -170,7 +163,7 @@ async function hitInReach(subject: Parameters<ContractCheck["run"]>[0]): Promise
     await holdsWithin(subject, () => {
       const first = deflectedOf();
       return first !== undefined && updatesOf(log, ball, first.atMs).length >= 2 && ball.position.x - startX >= FLOWN_AWAY_BLOCKS;
-    }, FLIGHT_AFTER_HIT_MS);
+    }, ANSWER_WALL_MS);
     await serverQuiet(subject, "after the ball flew away");
     const own = ownPackets();
     const deflected = deflectedOf();

@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { Vec3 } from "vec3";
 import type { ContractCheck } from "../checks.ts";
-import { ANSWER_WALL_MS } from "../server-answer.ts";
+import { ANSWER_WALL_MS, answerArrives } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { getOffAndStand, mountBoat } from "./boat-seat.ts";
 import { type Mark, READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
@@ -214,7 +214,7 @@ export const boatBrokenByAttack: ContractCheck = {
   async run(subject) {
     const { bot } = subject;
     const boatsInView = () => Object.values(bot.entities).filter((entity) => entity.name === "oak_boat").length;
-    assert.ok(await holdsWithin(subject, () => boatsInView() === 2, 5_000), "the fixture's two boats");
+    await answerArrives(subject, () => boatsInView() === 2, "the fixture's two boats");
     const quick = boatAt(subject, 0.5, 2.5);
     const ridden = boatAt(subject, RIDDEN_AT[0], RIDDEN_AT[2]);
     await breakByHits(subject, quick);

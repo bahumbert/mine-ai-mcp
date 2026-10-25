@@ -10,12 +10,10 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { answerSettled, serverQuiet } from "../server-answer.ts";
-import { holdsWithin, settleWithin } from "../subject.ts";
+import { ANSWER_WALL_MS, answerArrives, answerSettled, serverQuiet } from "../server-answer.ts";
+import { settleWithin } from "../subject.ts";
 import { followServerCursor, recordWindowAnswers, variantStackOf, type WindowAnswer } from "../window-packets.ts";
 
-const OPEN_WALL_MS = 5_000;
-const DROP_WALL_MS = 3_000;
 /** The drop starts at the eye and falls in front of the bot: well inside this. */
 const DROP_REACH = 4;
 /** The chest's cell in the fixture's frame; `subject.world` moves it to the lane. */
@@ -52,7 +50,7 @@ export const variantTransferClicks: ContractCheck = {
   async run(subject) {
     const { bot } = subject;
     const open = async () => {
-      const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
+      const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), ANSWER_WALL_MS);
       assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
       return opened.value;
     };
@@ -106,7 +104,7 @@ export const variantTransferClicks: ContractCheck = {
     again.close();
     const live = () => drops.filter((entity) => bot.entities[entity.id] === entity && entity.position.distanceTo(bot.entity.position) <= DROP_REACH);
     const droppedStack = () => live().map((entity) => variantStackOf(entity.getDroppedItem()));
-    assert.ok(await holdsWithin(subject, () => droppedStack().length > 0, DROP_WALL_MS), `an item entity near the bot within ${DROP_WALL_MS} ms`);
+    await answerArrives(subject, () => droppedStack().length > 0, "no item entity near the bot");
     assert.deepEqual(droppedStack(), ['cobblestone x3 "second"'], "the stack in hand fell to the ground as one item entity, renamed as it was");
     assert.equal(bot.inventory.items().length, FILLER.length + 1, "the full inventory took nothing");
     assert.deepEqual(recording.answers.splice(0), [], "no slot was corrected");

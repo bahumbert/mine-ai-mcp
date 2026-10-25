@@ -38,10 +38,12 @@ const PUSH_APART_TICKS = 3;
 const FLIGHT_MIN_TICKS = 1;
 const BURN_EVERY_TICKS = 20;
 const BURNS = 4;
-/** The wall bound of the fire: 100 ticks and the flight, with a server at 10 ticks a second. */
+/** The wall bound of the fire: 100 ticks and the flight, with a server at 10 ticks a second. Over the 10 s of `ANSWER_WALL_MS` on purpose: the fire is no single answer. */
 const FIRE_OUT_WALL_MS = 15_000;
 /** A burn is heard late by the client's lag, and the read of it with it; late is not the game: the readings may differ by the ticks the answer wait's wall bound holds. */
 const HEARD_LATE_TICKS = ANSWER_WALL_MS / TICK_MS;
+/** Two burns are 20 ticks apart whatever the client's lag, both reads being late by the same lag: the difference of their reads is off by the two readings' error and the tick or two of a lag that changed between them. */
+const BURN_SPACING_SLACK_TICKS = 2 * READING_TICKS + 2;
 
 /** The two shooters: a skeleton on the east (+x) and a blaze on the west, and what each one's projectile does. */
 const CASES: readonly { readonly projectile: ProjectileName; readonly shooter: string; readonly x: number; readonly loss: number; readonly damageType: string; readonly fire: boolean }[] = [
@@ -164,7 +166,8 @@ async function awaitHitAnswer(subject: ContractSubject, log: PacketLog, gone: re
 /**
  * The four `on_fire` hurts (a source of none; each costs 1, measured 18.5 to 17.5 four times, but a regeneration can share its tick, so the amount is not asserted) and the flag out:
  * awaited as the answer, then the server runs on so a fifth would have been heard. Each hurt is 20 ticks after the one before and the first 20 after the hit, which is at least
- * a tick after the shot: no burn is heard sooner than that many server ticks after the read sent right before the shot (never early: the late side is the client's lag).
+ * a tick after the shot: no burn is heard sooner than that many server ticks after the read sent right before the shot (never early: the late side is the client's lag),
+ * and two burns are read 20 ticks apart give or take `BURN_SPACING_SLACK_TICKS`, which the lag does not widen: a fire that burns every 25 ticks is red.
  */
 async function assertBurns(subject: ContractSubject, log: PacketLog, shot: Mark, projectile: ProjectileName): Promise<void> {
   const { bot } = subject;
@@ -175,12 +178,18 @@ async function assertBurns(subject: ContractSubject, log: PacketLog, shot: Mark,
   const burns = burnsHeard();
   assert.equal(burns.length, BURNS, `${projectile}: ${burns.length} on_fire hurts after a fireball, ${BURNS} expected`);
   const shotTick = await tickOf(subject, shot);
+  let previousBurn: number | undefined;
   for (const [index, { heardAt, packet }] of burns.entries()) {
     const heardTick = await tickOf(subject, heardAt!);
     const earliest = BURN_EVERY_TICKS * (index + 1) + FLIGHT_MIN_TICKS - READING_TICKS;
     const latest = BURN_EVERY_TICKS * (index + 1) + FLIGHT_MAX_TICKS + READING_TICKS + HEARD_LATE_TICKS;
     const afterShot = heardTick - shotTick;
     assert.ok(afterShot >= earliest && afterShot <= latest, `${projectile}: burn ${index + 1} heard at server tick ${heardTick}, ${afterShot} ticks after the shot at tick ${shotTick}: the burn is ${BURN_EVERY_TICKS * (index + 1)} ticks after the hit, so not less than ${earliest} (readings +-${READING_TICKS}) and not more than ${latest}`);
+    if (previousBurn !== undefined) {
+      const apart = heardTick - previousBurn;
+      assert.ok(Math.abs(apart - BURN_EVERY_TICKS) <= BURN_SPACING_SLACK_TICKS, `${projectile}: burn ${index + 1} heard at server tick ${heardTick}, ${apart} ticks after burn ${index} at tick ${previousBurn}: the fire burns every ${BURN_EVERY_TICKS} ticks, so not less than ${BURN_EVERY_TICKS - BURN_SPACING_SLACK_TICKS} and not more than ${BURN_EVERY_TICKS + BURN_SPACING_SLACK_TICKS} (readings +-${READING_TICKS})`);
+    }
+    previousBurn = heardTick;
     const event = packet as unknown as DamageEvent;
     assert.equal(event.sourceCauseId + event.sourceDirectId, 0, "a burn names no source");
   }

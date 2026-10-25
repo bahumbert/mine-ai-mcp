@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { ANSWER_WALL_MS } from "../server-answer.ts";
 import { type ContractSubject, settleWithin } from "../subject.ts";
-import { CALL_WALL_MS, TICK_MS } from "./combat-scene.ts";
+import { TICK_MS } from "./combat-scene.ts";
 
 /**
  * A reading of `time query gametime` sent right before an act (or right at an event the client heard) is off the act's own tick by at
@@ -22,7 +22,7 @@ export function markNow(subject: ContractSubject): Mark {
 }
 
 export async function tickOf(subject: ContractSubject, mark: Mark): Promise<number> {
-  const tick = (await settleWithin(subject, mark.tick, CALL_WALL_MS))?.value ?? null;
+  const tick = (await settleWithin(subject, mark.tick, ANSWER_WALL_MS))?.value ?? null;
   assert.ok(tick !== null, "the server answered no game time (is the bot op? or the server stalled)");
   return tick;
 }

@@ -6,11 +6,10 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
 
 const TOSSED = 3;
-/** The drop's entity and its item metadata come within a second or two of a server on time. */
-const DROP_WALL_MS = 3_000;
 /** The drop starts at the eye and falls in front of the bot: well inside this. */
 const DROP_REACH = 4;
 
@@ -34,7 +33,7 @@ export const tossCountAndEntity: ContractCheck = {
         spawned
           .filter((entity) => bot.entities[entity.id] === entity && entity.position.distanceTo(bot.entity.position) <= DROP_REACH)
           .reduce((total, entity) => total + (entity.getDroppedItem()?.name === "cobblestone" ? entity.getDroppedItem()!.count : 0), 0);
-      assert.ok(await holdsWithin(subject, () => droppedCount() === TOSSED, DROP_WALL_MS), `${droppedCount()} cobblestone in live item entities within ${DROP_WALL_MS} ms, not ${TOSSED} (${spawned.length} item spawns)`);
+      assert.ok(await holdsWithin(subject, () => droppedCount() === TOSSED, ANSWER_WALL_MS), `${droppedCount()} cobblestone in live item entities within ${ANSWER_WALL_MS} ms, not ${TOSSED} (${spawned.length} item spawns)`);
     } finally {
       bot.off("entitySpawn", onSpawn);
     }

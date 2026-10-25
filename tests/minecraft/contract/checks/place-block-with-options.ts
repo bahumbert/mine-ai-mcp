@@ -11,11 +11,10 @@ import type { Block } from "prismarine-block";
 import type { ContractCheck } from "../checks.ts";
 import { type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
 import { stackOf } from "../window-packets.ts";
-import { afterClientTicks, afterServerTicks, answerArrives, serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, afterClientTicks, afterServerTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 
 /** Mineflayer's own wait for the block update is 5 s; a server on time answers in a tick or two. */
 const PLACEMENT_WALL_MS = 6_000;
-const SLOT_WALL_MS = 2_000;
 /** The rest of an answer comes in the same server tick as its acknowledgement, the last packet of it: one more tick proven shows no packet followed (`serverQuiet` would add 20 ticks to each of seven placements). */
 const AFTER_ACK_TICKS = 1;
 /** The look the placements read goes out with the client's next physics tick (its own clock; the server reads the packets in the order sent). */
@@ -135,7 +134,7 @@ export const placeBlockWithOptions: ContractCheck = {
     const bed = await placeAgainst(subject, BED_FLOOR, UP, { forceLook: "ignore", swingArm: "right" });
     // One resend of the placed cell only: the chunk's own change carries both halves, as one `multi_block_change`.
     assert.deepEqual(bed.packets, ["block_change ref", "block_change dest", "set_slot 39", "ack"], "the packets of a bed");
-    assert.ok(await holdsWithin(subject, () => bot.blockAt(laneCell(subject, BED_HEAD))?.name === "red_bed", SLOT_WALL_MS), "the bed's head half never came");
+    await answerArrives(subject, () => bot.blockAt(laneCell(subject, BED_HEAD))?.name === "red_bed", "the bed's head half never came");
     const halves = [BED_FOOT, BED_HEAD].map((cell) => bot.blockAt(laneCell(subject, cell))!.getProperties());
     assert.deepEqual(halves.map(({ part, facing, occupied }) => [part, facing, String(occupied)]), [["foot", "east", "false"], ["head", "east", "false"]], `the bed: ${JSON.stringify(halves)}`);
     bot.setQuickBarSlot(1);
@@ -145,6 +144,6 @@ export const placeBlockWithOptions: ContractCheck = {
     const offHand = await placeAt(subject, REFERENCES.offHand, { offhand: true, swingArm: "left" });
     assert.equal(offHand.changes[0], "cobblestone", `a placement with the off hand: the cell heard ${offHand.changes.join(", ")}`);
     assert.equal(slotOf(36), "oak_slab x1", "the main hand's stack was left alone");
-    assert.ok(await holdsWithin(subject, () => slotOf(OFF_HAND_SLOT) === null, SLOT_WALL_MS), `the off hand still holds ${slotOf(OFF_HAND_SLOT)}: the server did not take the placed block`);
+    assert.ok(await holdsWithin(subject, () => slotOf(OFF_HAND_SLOT) === null, ANSWER_WALL_MS), `the off hand still holds ${slotOf(OFF_HAND_SLOT)}: the server did not take the placed block`);
   },
 };

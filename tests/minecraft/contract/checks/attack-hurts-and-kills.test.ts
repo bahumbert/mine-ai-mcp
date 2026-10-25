@@ -4,7 +4,7 @@ import { ZERO_ARENA, arenaFrame } from "../../arena/frame.ts";
 import { fakeHarnessFor } from "../fake-harness.ts";
 import { fakeContractSubject } from "../subject.ts";
 import { attackHurtsAndKills } from "./attack-hurts-and-kills.ts";
-import { CALL_WALL_MS, finishWithin } from "./combat-scene.ts";
+import { finishWithin } from "./combat-scene.ts";
 
 /** A server thread stalled this long after each hit (another lane's clone: 0.16 to 0.9 s, plan 2026-10-23-shared-scenario-server E4). */
 const STALL_MS = 400;
@@ -30,8 +30,8 @@ test("attack-hurts-and-kills lets the sword's swing recharge in server ticks bef
   const { bot } = harness;
   const sword = bot.heldItem!;
   // A body that just joined, or just took the sword: the swing starts over (`Player.tick`), a hit in the first 12 ticks is weak (a lane batch: 1.2 of 6 for hit 1).
-  await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
-  await finishWithin(subject, bot.equip(sword, "hand"), CALL_WALL_MS, "equip");
+  await finishWithin(subject, bot.unequip("hand"), "unequip");
+  await finishWithin(subject, bot.equip(sword, "hand"), "equip");
   await attackHurtsAndKills.run(subject);
 });
 

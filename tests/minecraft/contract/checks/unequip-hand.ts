@@ -8,7 +8,7 @@ import type { ContractCheck } from "../checks.ts";
 import { serverQuiet } from "../server-answer.ts";
 import type { ContractBot } from "../subject.ts";
 import { countWrites } from "./bed-scene.ts";
-import { CALL_WALL_MS, finishWithin } from "./combat-scene.ts";
+import { finishWithin } from "./combat-scene.ts";
 
 const FIRST_MAIN_SLOT = 9;
 const FIRST_HOTBAR_SLOT = 36;
@@ -27,7 +27,7 @@ export const unequipHand: ContractCheck = {
     const selects = countWrites(bot, "held_item_slot");
     try {
       assert.equal(heldName(bot), "stone");
-      await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
+      await finishWithin(subject, bot.unequip("hand"), "unequip");
       // The server answers the click with the slot packets (or corrects it): read after they came and the server ran on.
       await serverQuiet(subject, "the first unequip click");
       assert.equal(heldName(bot), undefined, "a full hotbar: the hand is not empty");
@@ -35,14 +35,14 @@ export const unequipHand: ContractCheck = {
       assert.equal(bot.inventory.slots[FIRST_MAIN_SLOT]?.name, "stone", "a full hotbar: the stack is not in the first free main slot");
       assert.equal(selects.count(), 0, "a full hotbar: a slot was selected");
 
-      await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
+      await finishWithin(subject, bot.unequip("hand"), "unequip");
       assert.equal(bot.quickBarSlot, 0, "an empty hand moved the selection");
       assert.equal(selects.count(), 0, "an empty hand selected a slot");
 
-      await finishWithin(subject, bot.equip(bot.inventory.slots[FIRST_HOTBAR_SLOT + 1]!, "hand"), CALL_WALL_MS, "equip");
+      await finishWithin(subject, bot.equip(bot.inventory.slots[FIRST_HOTBAR_SLOT + 1]!, "hand"), "equip");
       assert.equal(heldName(bot), "dirt");
       assert.equal(bot.quickBarSlot, 1);
-      await finishWithin(subject, bot.unequip("hand"), CALL_WALL_MS, "unequip");
+      await finishWithin(subject, bot.unequip("hand"), "unequip");
       await serverQuiet(subject, "the second unequip click");
       assert.equal(heldName(bot), undefined, "a free slot: the hand is not empty");
       assert.equal(bot.quickBarSlot, 0, "a free slot: the first free hotbar slot was not selected");

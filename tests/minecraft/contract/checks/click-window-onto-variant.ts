@@ -7,11 +7,10 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { answerSettled, serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, answerSettled, serverQuiet } from "../server-answer.ts";
 import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, variantStackOf } from "../window-packets.ts";
 
-const OPEN_WALL_MS = 5_000;
 /** The chest's cell in the fixture's frame; `subject.world` moves it to the lane. */
 const CHEST = [0, -60, 0] as const;
 const RENAMED_SLOT = 0;
@@ -31,7 +30,7 @@ export const clickWindowOntoVariant: ContractCheck = {
   },
   async run(subject) {
     const { bot } = subject;
-    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), OPEN_WALL_MS);
+    const opened = await settleWithin(subject, bot.openContainer(bot.blockAt(subject.world(CHEST))!), ANSWER_WALL_MS);
     assert.ok(opened?.value !== undefined, `the chest opened: ${opened?.error?.message ?? "never"}`);
     const window = opened.value;
     const recording = recordWindowPackets(bot);

@@ -2,14 +2,13 @@
 import assert from "node:assert/strict";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
-import { type ContractSubject, holdsWithin, settleWithin } from "../subject.ts";
+import { ANSWER_WALL_MS, answerArrives } from "../server-answer.ts";
+import { type ContractSubject, settleWithin } from "../subject.ts";
 
 /** A mob the server leaves where it stands (no AI, no despawn) with no armor, so a hit costs it the weapon's damage and nothing less. */
 export const STILL_MOB_NBT = '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}';
 /** Night: an undead mob does not burn in the sun and send `damage_event`s of its own. */
 export const NIGHT = 18_000;
-/** A mob the fixture summoned shows up on the client within this wall time. */
-export const MOB_WALL_MS = 5_000;
 /** Server ticks are 50 ms. */
 export const TICK_MS = 50;
 /** The zombie's health when it is summoned. */
@@ -27,7 +26,7 @@ export function healthOf(bot: Bot, mob: Entity): number {
 export async function mobAt(subject: ContractSubject, name: string, x: number, z: number): Promise<Entity> {
   const place = subject.world([x, 0, z]);
   const find = () => Object.values(subject.bot.entities).find((entity) => entity.name === name && Math.abs(entity.position.x - place.x) < 0.1 && Math.abs(entity.position.z - place.z) < 0.1);
-  assert.ok(await holdsWithin(subject, () => find() !== undefined, MOB_WALL_MS), `no ${name} at ${place.x} ${place.z}`);
+  await answerArrives(subject, () => find() !== undefined, `no ${name} at ${place.x} ${place.z}`);
   return find()!;
 }
 
@@ -65,21 +64,18 @@ export function listenToFight(subject: ContractSubject, mob: Entity): { readonly
 }
 
 /** Let time pass until `promise` settles (a fake clock moves only when told); the subject's reading when it did, or its error thrown. */
-export async function finishWithin(subject: ContractSubject, promise: Promise<unknown>, maxMs: number, what: string): Promise<number> {
-  const settled = await settleWithin(subject, promise, maxMs);
-  if (settled === null) throw new Error(`${what}: not finished after ${maxMs} ms`);
+export async function finishWithin(subject: ContractSubject, promise: Promise<unknown>, what: string): Promise<number> {
+  const settled = await settleWithin(subject, promise, ANSWER_WALL_MS);
+  if (settled === null) throw new Error(`${what}: not finished after ${ANSWER_WALL_MS} ms`);
   if (settled.error !== undefined) throw settled.error;
   return settled.atMs;
 }
-
-/** Wall bound of a call that waits for one server answer. */
-export const CALL_WALL_MS = 5_000;
 
 /** Equip the named item (carried by the fixture) in the hand. */
 export async function holdInHand(subject: ContractSubject, name: string): Promise<void> {
   const item = subject.bot.inventory.items().find((stack) => stack.name === name);
   assert.ok(item !== undefined, `${name} is not carried`);
-  await finishWithin(subject, subject.bot.equip(item, "hand"), CALL_WALL_MS, `equip ${name}`);
+  await finishWithin(subject, subject.bot.equip(item, "hand"), `equip ${name}`);
 }
 
 /** The bit of the bot's `living_entity_flags` the server sets while the hand uses an item (bit 0 a hand in use, bit 1 the off hand's). */
