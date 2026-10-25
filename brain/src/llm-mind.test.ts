@@ -957,3 +957,14 @@ test("a heard line shows how far its speaker is when the server said so", async 
   await mind.chat(input, signal);
   assert.doesNotMatch(chat.requests[1]?.at(-1)?.content ?? "", /blocks away/u);
 });
+
+test("a heard line from farther than her talk carries says so, a fact for her to weigh", async () => {
+  const local = scriptedMind();
+  local.chat.reply({ say: "Hi", route: "talk", request: "" }, { say: "Hi", route: "talk", request: "" });
+  const mind = new LlmMind({ chat: local.chat, action: local.action, planner: local.planner }, undefined, { range: 64 });
+  const input = chatInput("Ayla, can you hear me?");
+  await mind.chat({ ...input, message: { ...input.message, distance: 150 } }, signal);
+  assert.match(local.chat.requests[0]?.at(-1)?.content ?? "", /from 150 blocks away \(beyond your talk range\): /u);
+  await mind.chat({ ...input, message: { ...input.message, distance: 30 } }, signal);
+  assert.doesNotMatch(local.chat.requests[1]?.at(-1)?.content ?? "", /beyond/u);
+});
