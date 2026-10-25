@@ -27,7 +27,7 @@ test("every contract check has its scenario YAML, named after it", () => {
   assert.deepEqual(CONTRACT_CHECKS.filter(({ name }) => !files.has(`${name}.yaml`)).map(({ name }) => name), []);
 });
 
-test("every contract YAML arranges its check's fixture: setup lines, the op player's place and stacks, the entities", () => {
+test("every contract YAML arranges its check's fixture: setup lines, the op player's place and stacks, the entities", { timeout: 60_000 }, () => {
   for (const file of readdirSync(SCENARIOS)) {
     const scenario = readContractYaml(file);
     assert.equal(file, `${scenario.params.check}.yaml`, `${file} runs check ${scenario.params.check}`);
@@ -56,9 +56,9 @@ test("setupCommands writes block states in command form and refuses a cell outsi
   assert.throws(() => setupCommands({ cells: { "9,-60,0": "dirt" }, carried: {}, position: [0.5, -60, 0.5] }), /outside the contract arena/);
 });
 
-test("setupCommands sets the day time, the day cycle and the weather after the cells, and none of them for a fixture that names none", () => {
+test("setupCommands sets the day time, the day cycle, the weather and the tick rate after the cells, and none of them for a fixture that names none", () => {
   const bare = setupCommands({ cells: { "0,-60,2": "dirt" }, carried: {}, position: [0.5, -60, 0.5] }).setup;
-  assert.equal(bare.some((line) => /^(time|weather|gamerule)/u.test(line)), false);
+  assert.equal(bare.some((line) => /^(time|weather|gamerule|tick)/u.test(line)), false);
   const { setup } = setupCommands({
     cells: { "0,-60,2": "dirt" },
     carried: {},
@@ -66,8 +66,9 @@ test("setupCommands sets the day time, the day cycle and the weather after the c
     timeOfDay: 14_000,
     daylightCycle: true,
     weather: "thunder",
+    tickRate: 8,
   });
-  assert.deepEqual(setup.slice(bare.length), ["gamerule doDaylightCycle true", "time set 14000", "weather thunder"]);
+  assert.deepEqual(setup.slice(bare.length), ["gamerule doDaylightCycle true", "time set 14000", "weather thunder", "tick rate 8"]);
 });
 
 test("setupCommands fills a container's slots from 0 after its setblock, splitting at the stack size, and a fixture without containers writes none", () => {

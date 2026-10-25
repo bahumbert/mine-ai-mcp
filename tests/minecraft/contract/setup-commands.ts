@@ -54,6 +54,7 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
     ...(fixture.difficulty !== undefined ? [`difficulty ${fixture.difficulty}`] : holdsHostileMob(fixture) ? ["difficulty easy"] : []),
     ...(fixture.timeOfDay === undefined ? [] : [`time set ${fixture.timeOfDay}`]),
     ...(fixture.weather === undefined ? [] : [`weather ${fixture.weather}`]),
+    ...(fixture.tickRate === undefined ? [] : [`tick rate ${fixture.tickRate}`]),
   ];
   assertInArena("feet", fixture.position);
   return {

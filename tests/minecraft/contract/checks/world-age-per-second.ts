@@ -15,7 +15,7 @@ const RESEND_AFTER_MS = 1_000;
 const TICKS_PER_PACKET = 20;
 
 /** A time packet the client heard: the age it held and when (the subject's clock). */
-interface HeardPacket {
+export interface HeardPacket {
   readonly age: number;
   readonly atMs: number;
 }
@@ -34,7 +34,7 @@ function extraPackets(heard: readonly HeardPacket[], cadence: number): HeardPack
   return heard.filter(({ age }, index) => age % TICKS_PER_PACKET !== cadence || (index > 0 && heard[index - 1]!.age === age));
 }
 
-const describe = (heard: readonly HeardPacket[], startedAtMs: number) => heard.map(({ age, atMs }) => `${age}@${Math.round(atMs - startedAtMs)}ms`).join(", ");
+export const describePackets = (heard: readonly HeardPacket[], startedAtMs: number) => heard.map(({ age, atMs }) => `${age}@${Math.round(atMs - startedAtMs)}ms`).join(", ");
 
 export const worldAgePerSecond: ContractCheck = {
   name: "world-age-per-second",
@@ -55,7 +55,7 @@ export const worldAgePerSecond: ContractCheck = {
     } finally {
       bot.off("time", onTime);
     }
-    const seen = `packets heard (age@ms into the watch): ${describe(heard, startedAtMs)}; time set sent after ${heardBeforeResend}`;
+    const seen = `packets heard (age@ms into the watch): ${describePackets(heard, startedAtMs)}; time set sent after ${heardBeforeResend}`;
     assert.ok(heard.length > 0, `no time packet in ${WATCH_MS} ms; ${seen}`);
     const cadence = cadenceOf(heard, ageBefore);
     const extras = extraPackets(heard, cadence);

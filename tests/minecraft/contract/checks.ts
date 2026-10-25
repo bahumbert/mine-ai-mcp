@@ -57,6 +57,7 @@ import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
 import { waitForTicksAndAge } from "./checks/wait-for-ticks-and-age.ts";
+import { worldAgeAtSlowTick } from "./checks/world-age-at-slow-tick.ts";
 import { worldAgePerSecond } from "./checks/world-age-per-second.ts";
 
 type Cell = readonly [number, number, number];
@@ -82,6 +83,8 @@ export interface ContractFixture {
   readonly daylightCycle?: boolean;
   /** The weather set before the check; the template's world is clear. */
   readonly weather?: Weather;
+  /** The server's ticks a second set before the check (`tick rate`); the fake server runs at it too, as a server behind its schedule (`FakeServerOptions.ticksPerSecond`: no catch-up after a stop, which a game at a set rate may do, unmeasured). 20 when omitted. */
+  readonly tickRate?: number;
   /**
    * `nbt` is the raw SNBT the server summons the entity with (Mine Labs `entities[].nbt`); the fake does not read it.
    * `passengers` are entities (by name) that ride it from the start, on both sides: the server gets them as `Passengers` nbt.
@@ -110,6 +113,7 @@ export interface ContractCheck {
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   worldAgePerSecond,
+  worldAgeAtSlowTick,
   waitForTicksAndAge,
   thinBlockShapes,
   stateIdAgrees,
