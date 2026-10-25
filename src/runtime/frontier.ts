@@ -158,8 +158,8 @@ export function seenInWorld(
 class ChunkRecorder {
   observedChunks: number;
   private storageError: string | null = null;
-  /** Why the spawn ring was not read at attach: kept until close, since no later chunk records it. */
-  private attachError: string | null = null;
+  /** Why the spawn ring was not read, or the kept flags not rechecked, at attach: kept until close. */
+  private readonly attachErrors: string[] = [];
   private readonly pending = new Map<string, PendingChunk>();
   private readonly listeners = new Set<(chunk: FrontierChunk) => void>();
   private closed = false;
@@ -189,8 +189,9 @@ class ChunkRecorder {
     }
   }
 
-  recordAttachError(cause: unknown): void {
-    this.attachError = `Spawn-ring chunks are not recorded: ${message(cause)}`;
+  /** What failed at attach, and why: kept until close, since nothing retries it. */
+  recordAttachError(what: string, cause: unknown): void {
+    this.attachErrors.push(`${what}: ${message(cause)}`);
   }
 
   onRecorded(listener: (chunk: FrontierChunk) => void): () => void {
@@ -206,7 +207,7 @@ class ChunkRecorder {
     return {
       observedChunks: this.observedChunks,
       pendingChunks: this.pending.size,
-      error: this.storageError ?? this.attachError ?? this.scanErrors.values().next().value ?? null,
+      error: this.storageError ?? (this.attachErrors.join("; ") || null) ?? this.scanErrors.values().next().value ?? null,
     };
   }
 
@@ -304,6 +305,14 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
   };
   bot.on("chunkColumnLoad", loaded);
 
+  // A database kept from before p1 T1 still holds spawn-ring rows flagged frontier by the string-coordinate bug, and
+  // no insert rechecks them (74fdee18): they are rechecked here, once, before the ring is read.
+  try {
+    recheckFlaggedFrontier(data, bot.game.dimension);
+  } catch (cause) {
+    recorder.recordAttachError("Frontier flags were not rechecked (a chunk flagged by an old bug clears when it is scanned again, and a restart tries the recheck again)", cause);
+  }
+
   // The bot is already spawned when the session is built, so its spawn ring may
   // have arrived before this listener existed.
   try {
@@ -313,7 +322,7 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
   } catch (cause) {
     // A column list Prismarine changed under us (a coordinate that is no integer) must not stop the session from
     // starting: no spawn-ring chunk is recorded, health says why, and the chunk-load events go on.
-    recorder.recordAttachError(cause);
+    recorder.recordAttachError("Spawn-ring chunks are not recorded", cause);
   }
 
   const close = (): void => {
@@ -349,8 +358,9 @@ function scanAndRecord(bot: Bot, data: SqlBotData, chunk: PendingChunk): boolean
       for (const material of materials) insertMaterial.run(key, material);
       const insertBiome = database.prepare("INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count) VALUES (?, ?, ?)");
       for (const [biome, sampleCount] of biomes) insertBiome.run(key, biome, sampleCount);
+      updateFrontierFlags(database, chunk);
     }, { name: "rescanChunk" });
-    // Not a new chunk: no count, no frontier change, no listener.
+    // Not a new chunk: no count, no listener. Its flags are rechecked anyway: a flag a past bug left stuck clears at the next scan.
     return false;
   }
 
@@ -394,6 +404,31 @@ function scanAndRecord(bot: Bot, data: SqlBotData, chunk: PendingChunk): boolean
 
 /** Recheck only the new chunk and the four chunks whose frontier state it can change. */
 function updateFrontierFlags(database: DatabaseSync, chunk: FrontierChunk): void {
+  // Seek the five primary keys. A correlated WHERE EXISTS scans every
+  // historical chunk, making each newly streamed column cost more forever.
+  recheckFrontierFlags(database, [
+    chunkKey(chunk),
+    chunkKey({ ...chunk, chunkZ: chunk.chunkZ - 1 }),
+    chunkKey({ ...chunk, chunkX: chunk.chunkX + 1 }),
+    chunkKey({ ...chunk, chunkZ: chunk.chunkZ + 1 }),
+    chunkKey({ ...chunk, chunkX: chunk.chunkX - 1 }),
+  ]);
+}
+
+/**
+ * Recheck the rows of `dimension` that are flagged frontier. A row is flagged by an insert that sees a missing
+ * neighbour and cleared only by a later insert beside it, so a flag that a past bug left on a chunk with all four
+ * neighbours recorded (the spawn ring of a database written before p1 T1) would stay for good.
+ */
+function recheckFlaggedFrontier(data: SqlBotData, dimension: string): void {
+  data.transaction((database) => {
+    const flagged = database.prepare("SELECT chunk_key FROM frontier_chunks WHERE dimension = ? AND is_frontier = 1").all(dimension);
+    if (flagged.length > 0) recheckFrontierFlags(database, flagged.map((row) => String(row.chunk_key)));
+  }, { name: "recheckFrontier" });
+}
+
+/** The one rule: a chunk is frontier when any of its four neighbours is not recorded. Rechecks the chunks named by `keys`. */
+function recheckFrontierFlags(database: DatabaseSync, keys: readonly string[]): void {
   database
     .prepare(
       `
@@ -411,18 +446,10 @@ function updateFrontierFlags(database: DatabaseSync, chunk: FrontierChunk): void
             AND neighbour.chunk_z = candidate.chunk_z + direction.delta_z
         )
       )
-      WHERE chunk_key IN (?, ?, ?, ?, ?)
+      WHERE chunk_key IN (SELECT value FROM json_each(?))
     `,
     )
-    // Seek the five primary keys. A correlated WHERE EXISTS scans every
-    // historical chunk, making each newly streamed column cost more forever.
-    .run(
-      chunkKey(chunk),
-      chunkKey({ ...chunk, chunkZ: chunk.chunkZ - 1 }),
-      chunkKey({ ...chunk, chunkX: chunk.chunkX + 1 }),
-      chunkKey({ ...chunk, chunkZ: chunk.chunkZ + 1 }),
-      chunkKey({ ...chunk, chunkX: chunk.chunkX - 1 }),
-    );
+    .run(JSON.stringify(keys));
 }
 
 function chunkKey(chunk: FrontierChunk): string {

@@ -514,3 +514,106 @@ test("a column list that holds a non-integer coordinate is a storage error, the 
   // A recorded chunk does not wipe the report: the spawn ring is still not recorded, and health says so.
   assert.match(String(frontier.status().error), /Spawn-ring chunks are not recorded.*chunkX/);
 });
+
+/** Rows as a database kept from before p1 T1 holds them: `flagged` chunks carry `is_frontier = 1` whatever their neighbours. */
+function seedChunks(data: SqlBotData, dimension: string, chunks: Array<readonly [number, number]>, flagged: (chunk: readonly [number, number]) => boolean): void {
+  data.transaction((database) => {
+    const insert = database.prepare(
+      `INSERT INTO frontier_chunks (chunk_key, dimension, chunk_x, chunk_z, first_observed_at, scanned_at, surface_water_fraction, is_frontier)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+    );
+    const now = new Date().toISOString();
+    for (const chunk of chunks) insert.run(`${dimension}|${chunk[0]}|${chunk[1]}`, dimension, chunk[0], chunk[1], now, now, flagged(chunk) ? 1 : 0);
+  }, { name: "seedChunks" });
+}
+
+/** The centre and its four neighbours, which is all the old ring bug left flagged. */
+const PLUS = (centre: readonly [number, number]): Array<[number, number]> =>
+  [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]].map(([dx, dz]) => [centre[0] + dx!, centre[1] + dz!]);
+
+function attachToSeeded(t: { after(fn: () => void): void }, seed: (data: SqlBotData) => void): { data: SqlBotData; frontier: ReturnType<typeof attachSessionFrontier>; attachMs: number } {
+  const { bot } = createFakeBot({ loadedColumns: [] });
+  const data = temporaryBotData();
+  seed(data);
+  const started = performance.now();
+  const frontier = attachSessionFrontier(bot, data);
+  const attachMs = performance.now() - started;
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  return { data, frontier, attachMs };
+}
+
+test("attaching rechecks the rows a database kept flagged frontier: a chunk with all four neighbours recorded is cleared, a true frontier and another dimension stay", async (t) => {
+  // p1 T1 (74fdee18) fixed the string coordinates that kept the spawn ring flagged; databases written before it keep the flags.
+  const { data, frontier } = attachToSeeded(t, (seeded) => {
+    seedChunks(seeded, "overworld", PLUS([5, 5]), () => true);
+    seedChunks(seeded, "the_nether", PLUS([5, 5]), () => true);
+  });
+  await frontier.idle();
+
+  const flagged = (dimension: string) => data.read("SELECT chunk_x, chunk_z FROM frontier_chunks WHERE dimension = ? AND is_frontier = 1 ORDER BY chunk_x, chunk_z", dimension);
+  assert.deepEqual(flagged("overworld"), [{ chunk_x: 4, chunk_z: 5 }, { chunk_x: 5, chunk_z: 4 }, { chunk_x: 5, chunk_z: 6 }, { chunk_x: 6, chunk_z: 5 }], "the centre has its four neighbours; the four outer chunks do not");
+  assert.equal(flagged("the_nether").length, 5, "another dimension is not rechecked");
+});
+
+test("the attach recheck of 10 000 recorded chunks, 2 000 flagged, takes under 200 ms", async (t) => {
+  // A 100 x 100 block of chunks; the 2 000 flagged are inner chunks (each has its four neighbours), so all clear.
+  const grid: Array<[number, number]> = [];
+  for (let x = 0; x < 100; x += 1) for (let z = 0; z < 100; z += 1) grid.push([x, z]);
+  const inner = grid.filter(([x, z]) => x >= 1 && x <= 98 && z >= 1 && z <= 98).slice(0, 2_000);
+  const flagged = new Set(inner.map(([x, z]) => `${x},${z}`));
+  assert.equal(flagged.size, 2_000);
+  const { data, frontier, attachMs } = attachToSeeded(t, (seeded) => seedChunks(seeded, "overworld", grid, ([x, z]) => flagged.has(`${x},${z}`)));
+  await frontier.idle();
+
+  assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE is_frontier = 1")[0]?.count, 0);
+  assert.ok(attachMs < 200, `attach took ${attachMs.toFixed(1)} ms`);
+});
+
+test("a rescan clears the stuck flag of its own chunk and of the neighbours it completes", async (t) => {
+  const { events, bot, data } = fixture();
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+  // Chunk (0, -1) has all four neighbours once (0, 0) is counted; both are stuck flagged, as the old ring bug left them.
+  const ring: Array<[number, number]> = [...PLUS([0, 0]), [0, -2], [-1, -1], [1, -1]];
+  seedChunks(data, "overworld", ring, () => true);
+  data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
+
+  events.emit("chunkColumnLoad", new Vec3(0, 0, 0));
+  await frontier.idle();
+
+  const flags = frontierFlags(data);
+  assert.equal(flags.get("0,0"), 0, "the rescanned chunk's own flag");
+  assert.equal(flags.get("0,-1"), 0, "its north neighbour has all four recorded");
+  for (const outer of ["1,0", "0,1", "-1,0"]) assert.equal(flags.get(outer), 1, `${outer} is a true frontier`);
+});
+
+test("a failed attach recheck and a failed spawn-ring read are both reported in health, and a chunk loaded later is still recorded", async (t) => {
+  const { events, bot, data } = fixture();
+  seedChunks(data, "overworld", PLUS([5, 5]), () => true);
+  // Stopgap on the data object: a real database fails a recheck only when its disk does, so the one transaction is made to throw.
+  const transaction = data.transaction.bind(data);
+  Object.assign(data, { transaction: ((work, options) => {
+    if (options?.name === "recheckFrontier") throw new Error("disk is full");
+    return transaction(work, options);
+  }) satisfies typeof data.transaction });
+  Object.assign(bot.world, { getColumns: () => [{ chunkX: "1.5", chunkZ: "0", column: {} }] });
+  const frontier = attachSessionFrontier(bot, data);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+  await frontier.idle();
+
+  assert.match(String(frontier.status().error), /Frontier flags were not rechecked.*disk is full.*Spawn-ring chunks are not recorded/);
+
+  events.emit("chunkColumnLoad", new Vec3(48, 0, -32));
+  await frontier.idle();
+  assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE chunk_key = 'overworld|3|-2'")[0]?.count, 1);
+});
