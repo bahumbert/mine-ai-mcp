@@ -92,6 +92,29 @@ test("a passenger owes no physics tick, an idle runner is never failed", async (
   assert.equal(runner.status().busy, false);
 });
 
+// Run 20 (Vex): a 36 s ride, then a get-off; the silence of the ride was counted and the navigate failed before its first tick.
+test("an action that was a passenger for longer than the stall limit is not stalled by the ride when it ticks after the get-off", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  let riding = true;
+  const runner = new ActionRunner({ physicsStallMs: 40, physicsExpected: () => !riding });
+  let ticking: ReturnType<typeof setInterval> | null = null;
+  try {
+    const action = stubAction(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      riding = false;
+      ticking = setInterval(() => runner.observePhysicsTick(), 20);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return { status: "succeeded" };
+    });
+    const running = runner.run(action, { block_name: "stone" });
+    await clock.advance(300, 10);
+    assert.equal((await running).result.status, "succeeded");
+  } finally {
+    if (ticking !== null) clearInterval(ticking);
+  }
+});
+
 test("a cancelled action that cannot stop for want of ticks settles as cancelled, and the next action runs", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();

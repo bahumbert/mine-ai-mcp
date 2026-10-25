@@ -103,3 +103,24 @@ test("ordinary single-action scenarios still pass without an expectation", async
   }));
   assert.deepEqual(completion, { status: "succeeded", detail: "observed" });
 });
+
+// A ride that can end in several honest ways (reached, or "the water ahead is not loaded" and back) is judged by the world goals.
+test("a settled expectation takes a succeeded or failed result, but not a runtime failure or a cancel", async () => {
+  const cases = [
+    { result: { status: "succeeded" }, passes: true },
+    { result: { status: "failed", error: "[NO_ROUTE] rode back" }, passes: true },
+    { result: { status: "partial", error: "went part way" }, passes: true },
+    { result: { kind: "runtime_failure", status: "failed", error: "[RUNTIME_PHYSICS_STALLED]" }, passes: false },
+    { result: { status: "cancelled", error: "stopped" }, passes: false },
+  ] as const;
+  for (const { result, passes } of cases) {
+    const completion = await run(scenarioTestContext({
+      scenario: scenarioDefinitionSchema.parse({
+        params: { action: "navigate", input: {}, expect: { status: "settled" } },
+        goal: { kind: "completion" },
+      }),
+      call: async (action) => ({ action, durationMs: 1, result, summary: "navigate ended" }),
+    }));
+    assert.equal(completion.status, passes ? "succeeded" : "failed", JSON.stringify(result));
+  }
+});

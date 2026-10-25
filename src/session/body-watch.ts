@@ -5,7 +5,7 @@ import type { BodyAbort, ReflexLimitKind } from "./abort.js";
 /** The first limit an owner of the body ran into; the owner's controller was aborted with `abort`. */
 export interface BodyLimitHit {
   readonly limit: ReflexLimitKind;
-  /** How long the limit measured: since the last tick (`physics_stalled`), the claim's age (`ceiling`), the window (`no_progress`). */
+  /** How long the limit measured: the silence since the last tick or the first check owing one (`physics_stalled`), the claim's age (`ceiling`), the window (`no_progress`). */
   readonly elapsedMs: number;
   readonly abort: BodyAbort;
 }
@@ -30,7 +30,10 @@ export interface BodyWatchOptions {
   readonly cancelGraceMs: number;
   /** The clock reading of the last physics tick, read at every check. */
   readonly lastPhysicsTickAt: () => number;
-  /** False while the bot is a passenger: Mineflayer turns physics off for the ride, so no tick is owed. */
+  /**
+   * False while the bot is a passenger: Mineflayer turns physics off for the ride, so no tick is owed. The stall limit
+   * counts the silence from the first check that sees this true again after a check that saw it false.
+   */
   readonly physicsExpected: () => boolean;
   /** Ends the watch without a verdict when it aborts: the connection ended, the pending work can never settle. */
   readonly abandon?: AbortSignal;
@@ -54,11 +57,29 @@ export type BodyWatchEnd<Value> =
 /** How often the limits are checked: a quarter of the shortest one, 10 to 250 ms. */
 const checkEveryMs = (shortestMs: number) => Math.max(10, Math.min(250, Math.floor(shortestMs / 4)));
 
+/** Calls `onStalled` once when `marks()` stays unchanged for `noProgress.ms`; returns the stop. */
+function watchNoProgress(noProgress: NonNullable<BodyWatchOptions["noProgress"]>, clock: StallClock, onStalled: () => void): () => void {
+  // The position is not read: `watchForStall` only reports how far the body walked in its description.
+  const stalled = watchForStall({
+    work: noProgress.marks,
+    position: () => ({ x: 0, y: 0, z: 0 }),
+    stallMs: noProgress.ms,
+    sampleMs: checkEveryMs(noProgress.ms),
+    clock,
+    describe: () => "no progress",
+  });
+  stalled.signal.addEventListener("abort", onStalled, { once: true });
+  return stalled.close;
+}
+
 /**
  * Holds the owner of the body to its limits and settles with `run`, or earlier when the owner does not stop.
  *
- * Three limits, one clock: no physics tick for `stallMs` (live run 14: twelve bots left mounted at sea never ticked
- * again, their navigate never returned and ignored its cancel), a ceiling on how long the body is held, and no
+ * Three limits, one clock: no physics tick for `stallMs` while one is owed, counted from the later of the last tick and
+ * the first check that owes one after a span that owed none, so a ride is not silence (a seated span shorter than one
+ * check goes unseen and counts as silence; live run 14: twelve
+ * bots left mounted at sea never ticked again, their navigate never returned and ignored its cancel; run 20: a 36 s ride
+ * tripped it the moment the get-off made a tick owed), a ceiling on how long the body is held, and no
  * progress mark for the no-progress window (SRV-01: a reflex that waits on ticks or events that never come held the
  * body for good). The first to trip aborts the owner's controller and calls `onLimit` (the runtime records an incident
  * and restarts physics); the owner then has `cancelGraceMs` to settle on the returning ticks before the body is
@@ -78,6 +99,8 @@ export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOpt
     let hit: BodyLimitHit | null = null;
     let hitAt = 0;
     let cancelledAt: number | null = null;
+    let owedSince = startedAt;
+    let owedAtLastCheck = true;
     let finished = false;
     const stops: Array<() => void> = [];
     const finish = (end: BodyWatchEnd<Value>) => {
@@ -101,14 +124,19 @@ export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOpt
       }
       if (stallMs !== undefined) {
         if (options.signal.aborted && cancelledAt === null) cancelledAt = now;
+        const owed = options.physicsExpected();
+        // A passenger owes no tick (Mineflayer emits no physicsTick while seated: facts navigation-and-boats.md "Reflexes sense seated through onBodyTick"): the silence counts from the first check that owes one again (run 20, Vex).
+        if (owed && !owedAtLastCheck) owedSince = now;
+        owedAtLastCheck = owed;
         const lastTick = Math.max(options.lastPhysicsTickAt(), startedAt);
         if (cancelledAt !== null && now - Math.max(lastTick, cancelledAt) >= options.cancelGraceMs) {
           const reason = options.signal.reason instanceof Error ? options.signal.reason.message : "cancelled";
           finish({ kind: "released", hit: null, cancelled: options.cancelledWithoutTicks(options.owner, reason) });
           return;
         }
-        if (now - lastTick >= stallMs && options.physicsExpected()) {
-          trip("physics_stalled", now - lastTick);
+        const silentMs = now - Math.max(lastTick, owedSince);
+        if (owed && silentMs >= stallMs) {
+          trip("physics_stalled", silentMs);
           return;
         }
       }
@@ -116,19 +144,7 @@ export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOpt
     };
     const shortest = Math.min(...[stallMs, ceilingMs].filter((ms): ms is number => ms !== undefined));
     if (Number.isFinite(shortest)) stops.push(clock.every(check, checkEveryMs(shortest)));
-    if (noProgress !== undefined) {
-      // The position is not read: `watchForStall` only reports how far the body walked in its description.
-      const stalled = watchForStall({
-        work: noProgress.marks,
-        position: () => ({ x: 0, y: 0, z: 0 }),
-        stallMs: noProgress.ms,
-        sampleMs: checkEveryMs(noProgress.ms),
-        clock,
-        describe: () => "no progress",
-      });
-      stalled.signal.addEventListener("abort", () => trip("no_progress", noProgress.ms), { once: true });
-      stops.push(stalled.close);
-    }
+    if (noProgress !== undefined) stops.push(watchNoProgress(noProgress, clock, () => trip("no_progress", noProgress.ms)));
     const onAbandon = () => finish({ kind: "released", hit, cancelled: null });
     if (options.abandon?.aborted) onAbandon();
     options.abandon?.addEventListener("abort", onAbandon, { once: true });

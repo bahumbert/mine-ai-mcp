@@ -7,7 +7,8 @@ const requestSchema = z.strictObject({
   action: z.string().trim().min(1),
   input: z.record(z.string(), z.unknown()),
   expect: z.strictObject({
-    status: z.enum(["succeeded", "partial", "failed"]),
+    // "settled": any result the action itself returned (succeeded, partial or failed); the world goals judge the outcome.
+    status: z.enum(["succeeded", "partial", "failed", "settled"]),
     errorContains: z.string().min(1).optional(),
     interruptionContains: z.string().min(1).optional(),
   }).default({ status: "succeeded" }),
@@ -27,7 +28,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   }
   const error = result.status === "succeeded" ? "" : result.error;
   const interruption = expect.interruptionContains;
-  const matches = result.status === expect.status &&
+  const matches = (expect.status === "settled" || result.status === expect.status) &&
     (expect.errorContains === undefined || error.includes(expect.errorContains)) &&
     (interruption === undefined ||
       output.interruptions?.some((reason) => reason.includes(interruption)) === true);

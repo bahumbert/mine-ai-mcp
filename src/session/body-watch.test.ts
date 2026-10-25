@@ -74,6 +74,41 @@ test("in a vehicle no tick is owed: no stall, and the ceiling still ends the cla
   assert.deepEqual(watch.hits.map((hit) => hit.limit), ["ceiling"]);
 });
 
+// Run 20 (Vex): a ride over 30 s ended in a get-off and the watch counted the whole ride as silence. The watches below
+// check at every step the hand clock takes, so `advance(ms, 250)` checks at 250, 500, ...; a check owes a tick when
+// `physicsExpected()` is true at it.
+test("no tick for the stall limit after a ride is counted from the first check that owes one, not from before the ride", async () => {
+  const time = handClock();
+  const watch = watched(time.clock, { stallMs: 1_000, physicsExpected: () => time.clock.now() > 3_100 });
+  await time.advance(4_000, 250);
+  assert.equal(watch.hits.length, 0, "the first check that owes a tick is at 3250");
+  await time.advance(250, 250);
+  assert.deepEqual(watch.hits.map((hit) => [hit.limit, hit.elapsedMs]), [["physics_stalled", 1_000]], "a real stall after the ride is still caught");
+});
+
+for (const getOffAt of [3_100, 6_100]) {
+  test(`a server that ticks every 150 ms after a ride that ended at ${getOffAt} ms is not stalled (a get-off answered late too)`, async () => {
+    const time = handClock();
+    const watch = watched(time.clock, { stallMs: 1_000, physicsExpected: () => time.clock.now() > getOffAt });
+    for (let step = 0; step < 200; step += 1) {
+      await time.advance(50, 50);
+      if (time.clock.now() > getOffAt && time.clock.now() % 150 === 0) watch.tickedAt(time.clock.now());
+    }
+    assert.ok(time.clock.now() >= 10_000);
+    assert.equal(watch.hits.length, 0);
+  });
+}
+
+test("a second ride restarts the count: the silence is measured from the first check that owes a tick again", async () => {
+  const time = handClock();
+  const seatedNow = () => time.clock.now() <= 3_100 || (time.clock.now() > 3_600 && time.clock.now() <= 6_100);
+  const watch = watched(time.clock, { stallMs: 1_000, physicsExpected: () => !seatedNow() });
+  await time.advance(7_000, 250);
+  assert.equal(watch.hits.length, 0, "owed 3250-3500 only, then seated again until 6100");
+  await time.advance(250, 250);
+  assert.deepEqual(watch.hits.map((hit) => [hit.limit, hit.elapsedMs]), [["physics_stalled", 1_000]], "6250 + 1000");
+});
+
 test("past the ceiling the owner is aborted with reflex_limit ceiling, onLimit is called once, and the elapsed time is the claim's age", async () => {
   const time = handClock();
   const watch = watched(time.clock, { ceilingMs: 2_000 });
