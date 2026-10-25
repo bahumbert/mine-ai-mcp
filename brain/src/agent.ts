@@ -238,6 +238,8 @@ export class Agent {
   private readonly relations: AgentRelations | null;
   /** The items the running step is out to get: what it gains is its own work, never a partner's payment. */
   private stepYields: ReadonlySet<string> = new Set();
+  /** The yields of every step started since a relations tick last ran (B1): a step that ends between two looks still explains its gains. */
+  private yieldsSinceTick: ReadonlySet<string> = new Set();
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
@@ -344,7 +346,9 @@ export class Agent {
           unreadable = true;
         }
         this.lookAtConversations();
-        this.relations?.look(this.stepYields, new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal);
+        const answer = this.relations?.look(new Set([...this.stepYields, ...this.yieldsSinceTick]), new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal);
+        // A tick saw the gains of the steps that ended (and an idle controller counts none): their yields are not needed again.
+        if (answer === "ticked" || answer === "idle") this.yieldsSinceTick = new Set();
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -656,8 +660,10 @@ export class Agent {
     this.stepYields = itemsYieldedBy(step);
   }
 
+  /** The step's yields wait for a tick that sees the inventory after the step (a look during the step clears the set, so they are added here, not at the start). */
   private endStep(work: Work): void {
     work.step = null;
+    this.yieldsSinceTick = new Set([...this.yieldsSinceTick, ...this.stepYields]);
     this.stepYields = new Set();
   }
 

@@ -19,6 +19,8 @@ import type { ItemCount, RelationEvent, TradeEvent } from "./types.ts";
 /** With only a player's window open (no trade), the tick runs this often at most: it only watches for a payment tossed before the deal. */
 const WATCH_LOOK_MS = 2_000;
 
+export type LookAnswer = "ticked" | "busy_wait" | "idle";
+
 export interface AgentRelationsDeps {
   readonly persona: Persona;
   readonly mind: Mind;
@@ -105,10 +107,14 @@ export class AgentRelations {
     return this.book.summaries(partners.filter((partner) => this.book.get(partner) !== null));
   }
 
-  /** The agent's poll: while a trade is open, its tick runs in the background (never held up by, nor holding up, a step). */
-  look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): void {
+  /**
+   * The agent's poll: while a trade is open, its tick runs in the background (never held up by, nor holding up, a step).
+   * "ticked": a tick started with the yields; "idle": nothing is open, so no gain is counted; "busy_wait": a tick runs or the watch throttle skipped it, so the yields must wait for the next look.
+   */
+  look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): LookAnswer {
     const now = (this.deps.clock ?? realClock).now();
-    if (this.looking || signal.aborted || !this.trades.busy() || (this.trades.onlyWatching() && now - this.lastLookAt < WATCH_LOOK_MS)) return;
+    if (signal.aborted || !this.trades.busy()) return "idle";
+    if (this.looking || (this.trades.onlyWatching() && now - this.lastLookAt < WATCH_LOOK_MS)) return "busy_wait";
     this.looking = true;
     this.lastLookAt = now;
     void (async () => {
@@ -118,6 +124,7 @@ export class AgentRelations {
     })()
       .catch((error: unknown) => this.deps.log(`trade check failed: ${String(error)}`))
       .finally(() => { this.looking = false; });
+    return "ticked";
   }
 
   /** Runs one hand-off and tells the controller how it ended. */

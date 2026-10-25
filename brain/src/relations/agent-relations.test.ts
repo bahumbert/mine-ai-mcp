@@ -19,6 +19,21 @@ function relationsWithClock() {
   return { relations, time, look, calls: () => statusCalls };
 }
 
+test("look() answers idle with nothing busy, busy_wait inside the throttle or while a tick runs, ticked otherwise", async () => {
+  const { relations, time, look } = relationsWithClock();
+  const signal = new AbortController().signal;
+  assert.equal(relations.look(new Set(), new Set(), signal), "idle");
+  relations.trades.heardLine("Theo", Date.now(), 2);
+  assert.equal(relations.look(new Set(), new Set(), signal), "ticked");
+  assert.equal(relations.look(new Set(), new Set(), signal), "busy_wait", "a tick is running");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(relations.look(new Set(), new Set(), signal), "busy_wait", "inside the watch throttle");
+  time.at += 2_000;
+  assert.equal(relations.look(new Set(), new Set(), signal), "ticked");
+  await look();
+  assert.equal(relations.look(new Set(), new Set(), AbortSignal.abort()), "idle", "aborted");
+});
+
 test("with only a window open look() polls status at most every 2 s", async () => {
   const { relations, time, look, calls } = relationsWithClock();
   relations.trades.heardLine("Theo", Date.now(), 2);
