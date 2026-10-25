@@ -11,7 +11,7 @@ import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./hando
 import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
-import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, proposeTrade, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, partnerPosition, proposeTrade, settleTrade } from "./trade.ts";
 import { type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
@@ -533,7 +533,7 @@ export class TradeController implements BoardPeer {
     const dropped = this.droppedAt.get(t.id);
     if (dropped !== undefined && now - dropped < RETAKE_AFTER_MS) return false;
     if ((this.giveFailures.get(t.id) ?? 0) === 0) return true;
-    const there = this.partners.get(t.partner) ?? null;
+    const there = partnerPosition(this.partners, t.partner);
     return at !== null && there !== null && manhattan(at, there) <= this.deps.persona.settings.conversation.openingDistance;
   }
 
@@ -557,7 +557,7 @@ export class TradeController implements BoardPeer {
         this.watches.delete(id);
         continue;
       }
-      const there = this.partners.get(trade.partner) ?? null;
+      const there = partnerPosition(this.partners, trade.partner);
       const near = there !== null && this.position !== null && manhattan(this.position, there) <= COLLECT_RADIUS;
       if (now - since < COLLECT_WATCH_MS || !near || this.pending.has(id)) continue;
       this.watches.delete(id);

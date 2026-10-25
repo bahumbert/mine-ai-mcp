@@ -1028,3 +1028,25 @@ test("a give handed over keeps the note the trade already holds", async () => {
   await h.c.handoffEnded(agreed.id, "done", "d");
   assert.equal(theirTrade(h).note, "x");
 });
+
+const withFinn = (position: Position): BotSnapshot => ({ ...snapshot(), players: [{ username: "Finn", position }] });
+
+test("a partner named in another case than the world lists them: the retry give still comes due when they are near", async () => {
+  const h = harness();
+  const s = withFinn({ x: 2, y: 64, z: 0 });
+  await h.c.onDecision(decision({ first: "me" }), "finn", s);
+  await h.c.handoffEnded(h.book.get("finn")!.trades.at(-1)!.id, "failed", "cannot reach finn");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "the retake with the partner near");
+});
+
+test("a partner named in another case than the world lists them: the collect fallback still starts when they are near", async () => {
+  const h = harness();
+  const s = withFinn({ x: 2, y: 64, z: 0 });
+  await h.c.onDecision(decision({ first: "them" }), "finn", s);
+  await h.c.tick(s, new Set(), signal);
+  h.c.heardLine("finn", h.state.now, 2);
+  h.state.now += 5_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(kinds(h), ["collect"]);
+});

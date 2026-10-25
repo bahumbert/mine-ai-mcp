@@ -155,7 +155,8 @@ export function inventoryGains(before: BotSnapshot["inventory"], after: BotSnaps
   return out;
 }
 
-function positionOf(positions: ReadonlyMap<string, Position | null>, name: string): Position | null {
+/** Where the named player stood in a tick's player list, whatever the case of the name; null when absent. */
+export function partnerPosition(positions: ReadonlyMap<string, Position | null>, name: string): Position | null {
   const key = name.toLowerCase();
   for (const [who, position] of positions) if (who.toLowerCase() === key) return position;
   return null;
@@ -163,7 +164,7 @@ function positionOf(positions: ReadonlyMap<string, Position | null>, name: strin
 
 /** The partner's distance when within hand-off distance now or at the previous tick; null when out or unknown. */
 function nearDistance(o: { partners: ReadonlyMap<string, Position | null>; previous: ReadonlyMap<string, Position | null>; self: Position; handoffDistance: number }, name: string): number | null {
-  const distances = [positionOf(o.partners, name), positionOf(o.previous, name)]
+  const distances = [partnerPosition(o.partners, name), partnerPosition(o.previous, name)]
     .filter((p): p is Position => p !== null)
     .map((p) => manhattan(o.self, p));
   if (distances.length === 0) return null;
