@@ -7,6 +7,9 @@ import { completeResponse } from "../control/combat/settlement.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import { carriedShields, messageOf, shieldInOffHand, type HostileScene } from "./hostile-scene.js";
 
+/** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
+const HOSTILE_TAKE_BACK_HITS = 15;
+
 export type ShieldPrepared = { readonly kind: "shield_prepared"; readonly equipped: boolean; readonly error: string | null };
 
 /** Put an available shield in the off-hand; a failure is the outcome, not an exception. */
@@ -125,7 +128,7 @@ export async function respondToHostile(
     let settlement: HostileSettlement;
     try {
       signal.throwIfAborted();
-      await prepareBotForMovement(bot, navigation, signal);
+      await prepareBotForMovement(bot, navigation, signal, { takeBackHits: HOSTILE_TAKE_BACK_HITS });
       signal.throwIfAborted();
       const physical = await executeHostileResponse(bot, navigation, controller, directive, context, healthBefore, signal);
       settlement = completeResponse(physical, signal);

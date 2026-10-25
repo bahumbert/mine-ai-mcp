@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import { boatUnderFeet, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
+import { boatUnderFeet, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong } from "./boat-crossing.js";
+import { takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
@@ -67,8 +68,7 @@ test("a boat she stands on out at sea is found, carried boats or not; not one sh
 test("a boat taken back is broken by hand and its item picked up", async () => {
   const world = shoreSea({ feet: new Vec3(20.5, 63.05, 0.5), boat: new Vec3(20.5, 62.49, 0.5), mocked: true, physics: true });
   using _timers = world.clock.install();
-  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, undefined, 0)), true);
-  assert.equal(world.bot.entities[7], undefined);
+const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 })); assert.equal(report.carried, true); assert.equal(report.goneAfterHit, report.hits, "the report names the hit after which the boat left her view"); assert.equal(world.bot.entities[7], undefined);
   assert.equal(boatsCarried(world), 1);
 });
 
@@ -244,6 +244,32 @@ describe("a seat the server still holds", () => {
     watch.stop();
   });
 
+  // STOPGAP: the answer is a position packet sent by hand, waiting for a contract check of what a server that stalled 20 s sends a held rider (the fake frees a rider "and told nothing" when the boat breaks, `fake-bot-boat-damage.ts`).
+  test("a take-back that hits for 10 s leaves the answer its own 15 s: a server that answers 20 s in still frees the seat", async () => {
+    const world = seaHarness();
+    using _timers = world.clock.install();
+    const { watch } = await heldAfterAStay(world);
+    world.server.stop();
+    const startedAt = performance.now();
+    setTimeout(() => world.server.sendPosition(world.bot.entity.position), 20_000);
+    await settled(world, freeHeldSeat(world.bot));
+    assert.equal(watch.heldAt(), null, "the answer came and the seat is forgotten");
+    assert.ok(attackedIds(world.server).length >= 30, "the hits went on for the whole 10 s");
+    assert.ok(performance.now() - startedAt >= 20_000, "past the 15 s the whole freeing used to be given");
+    watch.stop();
+  });
+
+  test("the hostile reflex's preparation caps the hits that free a held seat too", async () => {
+    const world = seaHarness();
+    using _timers = world.clock.install();
+    const { watch } = await heldAfterAStay(world);
+    const before = attackedIds(world.server).length;
+    world.server.stop();
+    await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 })), /SERVER_HELD_POSITION/u);
+    assert.equal(attackedIds(world.server).length - before, 15, "15 hits, not the 10 s of hits");
+    watch.stop();
+  });
+
   test("a seat the server never frees fails the preparation with where it holds her, and records nothing shared", async () => {
     const world = seaHarness();
     using _timers = world.clock.install();
@@ -372,7 +398,7 @@ describe("a ride that is interrupted stays seated (ACT-01)", () => {
       controller.abort(new Error("cancelled"));
     };
     const startedAt = performance.now();
-    assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, controller.signal, 0)), false);
+    assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, controller.signal, { settleMs: 0 })), false);
     assert.deepEqual(attackedIds(world.server), [7], "one hit, then it stops");
     assert.ok(performance.now() - startedAt < 1_000, "no more hits and no swim after the cancel");
   });
@@ -392,7 +418,7 @@ test("a cancel during the swim after the boat item ends it within 200 ms", async
       controller.abort(new Error("cancelled"));
     }
   };
-  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, controller.signal, 0)), false);
+  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, controller.signal, { settleMs: 0 })), false);
   assert.ok(cancelledAt > 0, "the item was swum after");
   assert.ok(performance.now() - cancelledAt < 200, `the swim ended ${String(Math.round(performance.now() - cancelledAt))} ms after the cancel`);
 });
@@ -461,6 +487,6 @@ test("a boat taken back is swum after when its item floated off, though another 
   // item that drifted off the bank was never swum after and the ridden boat was lost.
   const world = shoreSea({ feet: new Vec3(20.5, 63.05, 0.5), boat: new Vec3(24.5, 62.49, 0.5), carried: { oak_boat: 1 }, mocked: true, physics: true });
   using _timers = world.clock.install();
-  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, undefined, 0)), true);
+  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 })), true);
   assert.equal(boatsCarried(world), 2, "the item was swum after and picked up");
 });

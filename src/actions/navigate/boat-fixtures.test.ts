@@ -151,3 +151,38 @@ export function farBankSea(lowFrom: number): FakeHarness {
   }
   return createFakeBot({ groundY: 49, cells, position: new Vec3(39.5, SURFACE_Y + 1, 0.5) });
 }
+
+/**
+ * The server stalls when the first hit on an entity reaches it (no tick, no answer) and runs again `afterMs` later, never when
+ * omitted: the clock must be installed (`using`) so the resume is a mocked timer.
+ */
+export function stallServerAtFirstHit(world: FakeHarness, afterMs?: number): void {
+  let stalled = false;
+  world.server.onPacket("use_entity", (data) => {
+    if (stalled || (data as { mouse: number }).mouse !== 1) return;
+    stalled = true;
+    world.server.stop();
+    if (afterMs !== undefined) setTimeout(() => world.server.resume(), afterMs);
+  });
+}
+
+/**
+ * From the first hit on, the server has the boat that was hit out of reach (the fake's reach rule, contract check
+ * `attack-out-of-reach`): the hits arrive and do nothing, the boat stays in her view. They land again `landAgainAfterMs`
+ * after the first (a mocked timer: install the clock first), or when the returned function is called; never otherwise.
+ */
+export function makeHitsMiss(world: FakeHarness, landAgainAfterMs?: number): () => void {
+  let hit: number | null = null;
+  const landAgain = () => {
+    const boat = hit === null ? undefined : world.bot.entities[hit];
+    if (boat !== undefined) world.server.setServerPosition(boat.id, boat.position);
+  };
+  world.server.onPacket("use_entity", (data) => {
+    const { mouse, target } = data as { mouse: number; target: number };
+    if (hit !== null || mouse !== 1) return;
+    hit = target;
+    world.server.setServerPosition(target, new Vec3(200.5, 62.5, 200.5));
+    if (landAgainAfterMs !== undefined) setTimeout(landAgain, landAgainAfterMs);
+  });
+  return landAgain;
+}

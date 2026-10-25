@@ -29,7 +29,7 @@ const finished = (action: string, result: Record<string, unknown>) => ({ action,
 
 function contextFor(harness: ReturnType<typeof botByBoat>, call: Call, onCancel: () => void = () => {}) {
   return scenarioTestContext({
-    scenario: scenarioDefinitionSchema.parse({ params: { target: [60, -60, 0] }, goal: { kind: "completion" } }),
+    scenario: scenarioDefinitionSchema.parse({ params: { target: [60, -60, 0], stateWaitMs: 100 }, goal: { kind: "completion" } }),
     arena: FRAME,
     bot: harness.bot,
     call: async (action, input) => {
@@ -78,7 +78,36 @@ test("a navigate that was not cut (it succeeded, or no boat lies under her) is r
   noBoat.entities.remove(BOAT_ID);
   const second = await run(contextFor(noBoat, async (action) => finished(action, { status: "failed", error: "no" })));
   assert.equal(second.status, "failed");
-  assert.match(second.detail ?? "", /state not reached \(seated false, boats carried 0, boat within 2 blocks false \(nearest of 0 boats none off/u);
+  assert.match(second.detail ?? "", /state not reached after \d+ ms \(seated false, boats carried 0, boat within 2 blocks false \(nearest of 0 boats none off/u);
+});
+
+test("a boat the server has not yet brought under her is waited for, then the second navigate goes on", async () => {
+  const harness = botByBoat();
+  harness.boat.position = new Vec3(103.5, -60.5, 512.5);
+  const arrives = setTimeout(() => (harness.boat.position = new Vec3(100.5, -60.5, 512.5)), 40);
+  let navigates = 0;
+  const outcome = await run(contextFor(harness, async (action) => {
+    navigates += 1;
+    if (navigates === 2) harness.bot.inventory.updateSlot(36, itemOf(harness.bot.registry, "oak_boat"));
+    return finished(action, { status: navigates === 1 ? "cancelled" : "succeeded" });
+  }));
+  clearTimeout(arrives);
+  assert.equal(outcome.status, "succeeded", outcome.detail ?? "");
+  assert.match(outcome.detail ?? "", /after [1-9]\d* ms of waiting/u);
+});
+
+test("a boat that never comes under her fails after the wait with the distance it read", async () => {
+  const harness = botByBoat();
+  harness.boat.position = new Vec3(103.5, -60.5, 512.5);
+  const context = scenarioTestContext({
+    scenario: scenarioDefinitionSchema.parse({ params: { target: [60, -60, 0], stateWaitMs: 200 }, goal: { kind: "completion" } }),
+    arena: FRAME,
+    bot: harness.bot,
+    call: async (action) => finished(action, { status: "cancelled" }),
+  });
+  const outcome = await run(context);
+  assert.equal(outcome.status, "failed");
+  assert.match(outcome.detail ?? "", /state not reached after \d+ ms \(seated false, boats carried 0, boat within 2 blocks false \(nearest of 1 boats 3\.[0-9] off/u);
 });
 
 test("a second navigate that fails, or leaves no boat carried, fails the scenario with what it read", async () => {

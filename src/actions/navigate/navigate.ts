@@ -26,6 +26,8 @@ import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
+import { retryBoatTakeBack } from "./boat-left-retry.js";
+import { describeBoatLeft } from "./boat-take-back.js";
 import { startFromSeat } from "./seated-leg.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
 import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
@@ -607,9 +609,11 @@ async function crossByBoatFromHere(
     }
     return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
   }
+  const boatLeft = await retryBoatTakeBack(bot, crossed, context.signal);
   const onward = await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
   const boatBlocks = crossed.blocks + (onward.navigation.boatBlocks ?? 0);
-  return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks } };
+  const left = onward.navigation.boatLeft ?? boatLeft;
+  return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks, ...(left !== undefined && { boatLeft: left }) } };
 }
 
 /** The line that tells the model which rule of its own was set aside once to get it out of a pocket, and what that dug. */
@@ -630,6 +634,7 @@ export function formatNavigateResult(result: NavigateResult): string {
     `- Start: \`${navigation.start.x.toFixed(2)}, ${navigation.start.y.toFixed(2)}, ${navigation.start.z.toFixed(2)}\``,
     `- End: \`${navigation.end.x.toFixed(2)}, ${navigation.end.y.toFixed(2)}, ${navigation.end.z.toFixed(2)}\``,
     ...(navigation.afloat ? ["- Arrived, afloat in its boat at " + Math.round(navigation.end.x) + " " + Math.round(navigation.end.z)] : []),
+    ...(navigation.boatLeft ? [describeBoatLeft(navigation.boatLeft)] : []),
     ...(navigation.escapeRelaxed?.length ? [describeEscape(navigation.escapeRelaxed)] : []),
     ...(navigation.landLeg ? [`- Swam to land first: \`${navigation.landLeg.x}, ${navigation.landLeg.y}, ${navigation.landLeg.z}\``] : []),
     `- Pathfinder elapsed: ${navigation.elapsedMs} ms`,

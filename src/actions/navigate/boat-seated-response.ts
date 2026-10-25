@@ -7,7 +7,8 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { equipCombatLoadout, MELEE_RANGE, readCombatItems, selectMeleeLoadout } from "../../survival/weapons/equipment.js";
-import { BoatRide, isBoatEntity } from "./boat-crossing.js";
+import { BoatRide } from "./boat-crossing.js";
+import { isBoatEntity } from "./boat-entities.js";
 import { currentVehicle } from "./vehicle-sync.js";
 import { timeoutSignal } from "../../utils/wall-timers.js";
 

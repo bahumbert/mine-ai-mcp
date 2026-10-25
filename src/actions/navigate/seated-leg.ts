@@ -3,7 +3,8 @@
  * straight way is over deep water, instead of getting off and putting the boat in again; over land it gets off first.
  */
 import type { Bot } from "mineflayer";
-import { isBoatEntity, deepWaterOnTheWay, type DeepWaterLine } from "./boat-crossing.js";
+import { deepWaterOnTheWay, type DeepWaterLine } from "./boat-crossing.js";
+import { isBoatEntity } from "./boat-entities.js";
 import { leaveBoatSeat } from "../../session/prepare-body.js";
 import { currentVehicle } from "./vehicle-sync.js";
 

@@ -12,7 +12,8 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { writeShiftKey } from "../../navigation/mineflayer/sneak.js";
 import { waitForWorldAge } from "../../world/world-age.js";
-import { BOAT_REACH, nearestBoat, takeBoatBack } from "./boat-crossing.js";
+import { BOAT_REACH, nearestBoat } from "./boat-entities.js";
+import { takeBoatBack } from "./boat-take-back.js";
 import { NO_TELEPORT } from "./vehicle-sync.js";
 
 /** Chunk borders the client crossed with no chunk centre update from the server before she is taken to be held. */
@@ -21,7 +22,7 @@ const HELD_CHUNKS = 2;
 const AT_THE_BOAT = 2;
 /** ...and her client this far from it disagrees with the server (vanilla: "moved too quickly"). */
 const CLIENT_APART = 16;
-/** Longest the freeing takes on the wall clock, the boat's break included. */
+/** Longest the wait for the server's answer takes on the wall clock, counted from the take-back's end: the take-back has its own bound (run 20: a stalled server answers late). */
 const FREE_WALL_MS = 15_000;
 
 export interface ServerSeatWatch {
@@ -108,16 +109,15 @@ export function watchServerSeat(bot: Bot): ServerSeatWatch {
 
 /**
  * Frees a seat the server still holds: shift held as a get-off does, the boat near where she is held broken (which
- * ejects its rider), then up to 15 s of the wall clock for the server's answer, a real position or a chunk centre.
- * Does nothing when no seat is held; throws `[SERVER_HELD_POSITION]` when the server does not answer, and then
- * remembers the seat, so the next movement tries again.
+ * ejects its rider on the server; the hits go on up to the take-back's time bound), then up to 15 s of the wall clock,
+ * counted from the end of the take-back, for the server's answer, a real position or a chunk centre. Does nothing when
+ * no seat is held; throws `[SERVER_HELD_POSITION]` when the server does not answer, and then remembers the seat, so the
+ * next movement tries again.
  */
-export async function freeHeldSeat(bot: Bot, options: { readonly signal?: AbortSignal; readonly wallMs?: number } = {}): Promise<void> {
+export async function freeHeldSeat(bot: Bot, options: { readonly signal?: AbortSignal; readonly wallMs?: number; readonly maxHits?: number } = {}): Promise<void> {
   const watch = serverSeatWatchOf(bot);
   const held = watch?.heldAt() ?? null;
   if (watch === undefined || held === null) return;
-  const startedAt = performance.now();
-  const wallMs = options.wallMs ?? FREE_WALL_MS;
   let answered = false;
   const onAnswer = (packet?: ServerPosition) => {
     if (packet?.teleportId !== NO_TELEPORT) answered = true;
@@ -127,8 +127,8 @@ export async function freeHeldSeat(bot: Bot, options: { readonly signal?: AbortS
   try {
     writeShiftKey(bot, true);
     const boat = nearestBoat(bot, held, BOAT_REACH);
-    if (boat !== null) await takeBoatBack(bot, boat, options.signal);
-    await waitForWorldAge(bot, Number.POSITIVE_INFINITY, { wallMs: Math.max(0, wallMs - (performance.now() - startedAt)), until: () => answered, ...(options.signal && { signal: options.signal }) });
+    if (boat !== null) await takeBoatBack(bot, boat, options.signal, options.maxHits === undefined ? {} : { maxHits: options.maxHits });
+    await waitForWorldAge(bot, Number.POSITIVE_INFINITY, { wallMs: options.wallMs ?? FREE_WALL_MS, until: () => answered, ...(options.signal && { signal: options.signal }) });
   } finally {
     bot._client.off("position", onAnswer);
     bot._client.off("update_view_position", onAnswer);
