@@ -275,6 +275,22 @@ test("S4: a refused give with the partner away says it waits for the partner wit
   assert.ok(other.c.block(["Theo"], []).includes("the hand-over was interrupted"), other.c.block(["Theo"], []));
 });
 
+test("S9: while the retry give runs the line says it is handed over, not that it waits for the partner", async () => {
+  const h = harness();
+  const near = snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] });
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  await h.c.tick(snapshot(), new Set(), signal);
+  await h.c.tick(near, new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "failed", "cannot reach Theo");
+  await h.c.tick(near, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "the retry give is taken with the partner near");
+  await h.c.tick({ ...near, players: [{ username: "Theo", position: { x: 20, y: 64, z: 0 } }] }, new Set(), signal);
+  assert.ok(h.c.block(["Theo"], []).includes("(it is handed over for you)"), h.c.block(["Theo"], []));
+  assert.ok(!h.c.block(["Theo"], []).includes("tried again when"));
+  h.c.handoffDropped(theirTrade(h).id);
+  assert.ok(h.c.block(["Theo"], []).includes("tried again when Theo is within"), "the give no longer runs: it waits for the partner again");
+});
+
 test("a trade ended outside a conversation is judged once and the feeling stored", async () => {
   const h = harness();
   const s = snapshot();

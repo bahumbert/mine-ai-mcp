@@ -530,8 +530,9 @@ export class TradeController implements BoardPeer {
     const trade = this.find(tradeId);
     if (trade === undefined || !isOpen(trade)) return undefined;
     const given = [...(this.givenOutside.get(tradeId) ?? [])].filter(([, count]) => count > 0).map(([item, count]) => ({ item, count }));
-    const retake = this.deps.now() - (this.droppedAt.get(tradeId) ?? -Infinity) < RETAKE_AFTER_MS;
-    const away = (this.giveFailures.get(tradeId) ?? 0) > 0 && !this.partnerNear(trade, this.position);
+    const idle = this.pending.get(tradeId) !== "give"; // a give that runs is handed over: nothing waits
+    const retake = idle && this.deps.now() - (this.droppedAt.get(tradeId) ?? -Infinity) < RETAKE_AFTER_MS;
+    const away = idle && (this.giveFailures.get(tradeId) ?? 0) > 0 && !this.partnerNear(trade, this.position);
     return { given, waits: away ? "partner_away" : retake ? "retake" : null, nearWithin: this.deps.persona.settings.conversation.openingDistance };
   }
 
