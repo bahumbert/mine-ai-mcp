@@ -24,7 +24,7 @@ client:
   command: bun
   cwd: ../..
   args: [client-host.ts, drivers/hand-over-walks-off.ts]
-params: { giver: Giver, receiver: Receiver, item_name: oak_log, count: 3, walk_to: { x: 0, y: -60, z: 12 } }
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3, walk_to: { x: 0, y: -60, z: 12 } }
 
 goal:
   kind: all

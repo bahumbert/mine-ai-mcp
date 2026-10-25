@@ -1,12 +1,15 @@
-import { createRequire } from "node:module";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
-import { offsetBlocks, placeShapes, type OffsetRegistry } from "../../../src/world/block-offset.ts";
+import type { ArenaFrame } from "../arena/frame.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { BODY_HALF_WIDTH, serverBoxes } from "./offset-stalk-boxes.ts";
 
-const paramsSchema = z.strictObject({
+/** `stalks[].at` is arena-local in the YAML and a world cell here: the bamboo offset depends on the world cell, so the lane's cell is the one checked. */
+const paramsIn = (arena: ArenaFrame) => z.strictObject({
   debugExecuteJavaScript: z.literal(true),
-  stalks: z.array(z.strictObject({ at: z.tuple([z.number().int(), z.number().int(), z.number().int()]) })).min(1),
+  stalks: z.array(z.strictObject({
+    at: z.tuple([z.number().int(), z.number().int(), z.number().int()]).transform((cell) => arena.world(cell)),
+  })).min(1),
 });
 
 const probeReportSchema = z.strictObject({
@@ -16,10 +19,10 @@ const probeReportSchema = z.strictObject({
   endZ: z.number(),
   corrections: z.number().int(),
   stateId: z.number().int(),
+  /** The stalk cell the program worked out from where the body stood, to be the one the driver asked for. */
+  stalk: z.tuple([z.number().int(), z.number().int(), z.number().int()]),
 });
 
-/** Body half-width of a player, as the server collides it. */
-const BODY_HALF_WIDTH = 0.3;
 const STOP_TOLERANCE = 0.01;
 const WALK_TICKS = 20;
 
@@ -37,22 +40,20 @@ const SIDES: readonly Side[] = [
   { name: "south", axis: "z", direction: -1 },
 ];
 
-interface GameData extends OffsetRegistry {
-  readonly blocksByStateId: Record<number, { readonly name: string; readonly minStateId: number }>;
-}
-const require = createRequire(import.meta.url);
-const gameData = (require("minecraft-data") as (version: string) => GameData)("1.21.4");
-
 /**
  * The code run inside the host's bot: centre in the approach cell, count `forcedMove` events while walking straight at
  * the stalk, report where the body stopped, and walk back to the approach cell's centre. Positions are read from the bot, never assumed.
+ * The program holds no coordinate: it finds the approach cell where the body stands (the driver navigated there) and the stalk
+ * one cell on from it, so the same program runs in every lane; it reports the stalk cell for the driver to check.
  */
-function probeProgram(stalk: readonly [number, number, number], side: Side): string {
-  const [x, y, z] = stalk;
-  const approach = side.axis === "x" ? [x - side.direction, z] : [x, z - side.direction];
-  const farEdge = side.axis === "x" ? x + (side.direction > 0 ? 1 + BODY_HALF_WIDTH : -BODY_HALF_WIDTH) : z + (side.direction > 0 ? 1 + BODY_HALF_WIDTH : -BODY_HALF_WIDTH);
+function probeProgram(side: Side): string {
+  const along = side.axis === "x" ? "sx" : "sz";
+  const farEdge = `${along} + ${side.direction > 0 ? 1 + BODY_HALF_WIDTH : -BODY_HALF_WIDTH}`;
   return `
-    const cx = ${approach[0]! + 0.5}, cz = ${approach[1]! + 0.5};
+    const standing = bot.entity.position;
+    const ax = Math.floor(standing.x), ay = Math.floor(standing.y + 0.01), az = Math.floor(standing.z);
+    const sx = ax + ${side.axis === "x" ? side.direction : 0}, sz = az + ${side.axis === "z" ? side.direction : 0};
+    const cx = ax + 0.5, cz = az + 0.5;
     const eye = 1.62;
     const centre = async () => {
       for (let tick = 0; tick < 40; tick += 1) {
@@ -76,7 +77,7 @@ function probeProgram(stalk: readonly [number, number, number], side: Side): str
     await bot.lookAt(target, true);
     bot.setControlState("forward", true);
     for (let tick = 0; tick < ${WALK_TICKS}; tick += 1) {
-      if ((bot.entity.position.${side.axis} - ${farEdge}) * ${side.direction} > 0) break;
+      if ((bot.entity.position.${side.axis} - (${farEdge})) * ${side.direction} > 0) break;
       await bot.waitForTicks(1);
     }
     bot.clearControlStates();
@@ -88,21 +89,10 @@ function probeProgram(stalk: readonly [number, number, number], side: Side): str
     await centre();
     return JSON.stringify({
       startX: start.x, startZ: start.z, endX: end.x, endZ: end.z, corrections,
-      stateId: bot.world.getBlockStateId(new Vec3(${x}, ${y}, ${z})),
+      stalk: [sx, ay, sz],
+      stateId: bot.world.getBlockStateId(new Vec3(sx, ay, sz)),
     });
   `;
-}
-
-/** The stalk's boxes as the server has them, from the game data and the formula, in world coordinates. */
-function serverBoxes(stalk: readonly [number, number, number], stateId: number): readonly (readonly number[])[] {
-  const block = gameData.blocksByStateId[stateId];
-  const max = block === undefined ? undefined : offsetBlocks(gameData).get(block.name);
-  if (block === undefined || max === undefined) throw new Error(`state ${stateId} at ${stalk.join(",")} is not an offset block`);
-  const collision = gameData.blockCollisionShapes!;
-  const ids = collision.blocks[block.name]!;
-  const shapeId = Array.isArray(ids) ? ids[stateId - block.minStateId]! : ids;
-  const placed = placeShapes(collision.shapes[shapeId]!, max, stalk[0], stalk[2]);
-  return placed.map((box) => [stalk[0] + box[0]!, box[1]!, stalk[2] + box[2]!, stalk[0] + box[3]!, box[4]!, stalk[2] + box[5]!]);
 }
 
 /** Where a body centred at `start` stops walking along `side` into the boxes, or null when it walks past them. */
@@ -117,7 +107,7 @@ function expectedStop(boxes: readonly (readonly number[])[], side: Side, startCr
 
 /** Walk straight at every stalk from its four sides; the server's stalk is the oracle (no correction, flush stop). */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { stalks } = paramsSchema.parse(context.scenario.params);
+  const { stalks } = paramsIn(context.arena).parse(context.scenario.params);
   const lines: string[] = [];
   let failed = false;
   for (const { at } of stalks) {
@@ -126,11 +116,12 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       const approach = side.axis === "x" ? { x: at[0] - side.direction, z: at[2] } : { x: at[0], z: at[2] - side.direction };
       const arrival = await context.call("navigate", { ...approach, y: at[1], range: 0, dig: false, scaffold: false });
       if (arrival.result.status !== "succeeded") return { status: "failed", detail: `${label}: navigate ${arrival.summary}; ${lines.join("; ")}` };
-      const probe = await context.call("debug_execute_javascript", { code: probeProgram(at, side) });
+      const probe = await context.call("debug_execute_javascript", { code: probeProgram(side) });
       const execution = (probe.result as { readonly execution?: { readonly value: string } }).execution;
       const json = execution?.value.slice(execution.value.indexOf("{"), execution.value.lastIndexOf("}") + 1);
       if (json === undefined || json === "") return { status: "failed", detail: `${label}: probe gave ${probe.summary}; ${lines.join("; ")}` };
       const report = probeReportSchema.parse(JSON.parse(json));
+      if (report.stalk.join() !== at.join()) return { status: "failed", detail: `${label}: the body stood beside ${report.stalk.join(",")}, not the stalk; ${lines.join("; ")}` };
       const boxes = serverBoxes(at, report.stateId);
       const expected = expectedStop(boxes, side, side.axis === "x" ? report.startZ : report.startX);
       const got = side.axis === "x" ? report.endX : report.endZ;

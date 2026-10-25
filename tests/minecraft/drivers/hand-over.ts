@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { dropItemResultSchema, viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
+import { handOverRolesOf, handOverRolesSchema, type HandOverRoles } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
 
 const paramsSchema = z.strictObject({
-  giver: z.string().min(1),
-  receiver: z.string().min(1),
+  /** Places in the scenario's `players` list. */
+  ...handOverRolesSchema,
   item_name: z.string().min(1),
   count: z.number().int().positive(),
   /** How many the server announces the receiver took: fewer than `count` when its inventory has no room (a partial pickup is not announced: 0). */
@@ -23,13 +24,13 @@ const paramsSchema = z.strictObject({
  */
 export const run: ScenarioRun = async (context) => {
   const params = paramsSchema.parse(context.scenario.params);
-  if (context.username === undefined) throw new Error("The client host gave this driver no username.");
-  return context.username === params.giver ? give(context, params) : receive(context, params);
+  const roles = handOverRolesOf(context, params);
+  return roles.isGiver ? give(context, params, roles) : receive(context, params);
 };
 
-async function give(context: ScenarioContext, params: z.output<typeof paramsSchema>): Promise<ClientCompletion> {
+async function give(context: ScenarioContext, params: z.output<typeof paramsSchema>, roles: HandOverRoles): Promise<ClientCompletion> {
   // The first inventory item is in the hand; the toss is the point of the scenario, not the hand check.
-  const output = await context.call("drop_item", { items: [{ item_name: params.item_name, count: params.count }], to_player: params.receiver, allow_equipped: true });
+  const output = await context.call("drop_item", { items: [{ item_name: params.item_name, count: params.count }], to_player: roles.receiver, allow_equipped: true });
   const result = dropItemResultSchema.parse(output.result);
   if (result.status !== "succeeded") return { status: "failed", detail: output.summary };
   const recipient = result.drop.recipient;

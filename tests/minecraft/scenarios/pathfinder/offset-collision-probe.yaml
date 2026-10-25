@@ -19,20 +19,20 @@ world:
     randomTickSpeed: 0
 
 reset:
-  - "fill 185 -60 286 197 -55 298 air"
+  - "fill 185 -60 -14 197 -55 -2 air"
 
-# Two high, three apart: no approach cell holds a stalk. Offsets (x, z): 191,292 +0.217 +0.150 (Ayla's cell);
-# 188,292 +0.150 -0.050; 194,292 +0.050 -0.183; 191,289 -0.117 +0.183; 191,295 +0.250 -0.117 (the maximum).
+# Two high, three apart: no approach cell holds a stalk. The first is Ayla's cell of the live case (x 191, z 292 there); the
+# arena puts it at z -8, and each lane gives every stalk its own offset, so the server is the oracle for all of them.
 geometry:
-  - fill: { block: bamboo, from: [191, -60, 292], to: [191, -59, 292] }
-  - fill: { block: bamboo, from: [188, -60, 292], to: [188, -59, 292] }
-  - fill: { block: bamboo, from: [194, -60, 292], to: [194, -59, 292] }
-  - fill: { block: bamboo, from: [191, -60, 289], to: [191, -59, 289] }
-  - fill: { block: bamboo, from: [191, -60, 295], to: [191, -59, 295] }
+  - fill: { block: bamboo, from: [191, -60, -8], to: [191, -59, -8] }
+  - fill: { block: bamboo, from: [188, -60, -8], to: [188, -59, -8] }
+  - fill: { block: bamboo, from: [194, -60, -8], to: [194, -59, -8] }
+  - fill: { block: bamboo, from: [191, -60, -11], to: [191, -59, -11] }
+  - fill: { block: bamboo, from: [191, -60, -5], to: [191, -59, -5] }
 
 players:
   - name: Actor
-    pos: [189.5, -60, 292.5]
+    pos: [189.5, -60, -7.5]
 
 client:
   command: bun
@@ -42,11 +42,11 @@ client:
 params:
   debugExecuteJavaScript: true
   stalks:
-    - { at: [191, -60, 292] }
-    - { at: [188, -60, 292] }
-    - { at: [194, -60, 292] }
-    - { at: [191, -60, 289] }
-    - { at: [191, -60, 295] }
+    - { at: [191, -60, -8] }
+    - { at: [188, -60, -8] }
+    - { at: [194, -60, -8] }
+    - { at: [191, -60, -11] }
+    - { at: [191, -60, -5] }
 
 goal:
   kind: all

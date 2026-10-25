@@ -7,6 +7,8 @@ import type { ScenarioContext } from "./scenario.ts";
 
 export interface ScenarioTestContextParts {
   readonly scenario: ScenarioDefinition;
+  /** The player this client plays, for a driver that gives each declared player its own part. */
+  readonly username?: string;
   readonly call: ScenarioContext["call"];
   /** The lane the driver runs in; the zero frame (a plain `mine-labs run`) when omitted. */
   readonly arena?: ArenaFrame;
@@ -20,6 +22,7 @@ export function scenarioTestContext(parts: ScenarioTestContextParts): ScenarioCo
   const bot = parts.bot ?? createFakeBot().bot;
   return {
     scenario: parts.scenario,
+    ...(parts.username !== undefined && { username: parts.username }),
     arena: parts.arena ?? arenaFrame(ZERO_ARENA),
     bot,
     waitForTicks: async () => {},

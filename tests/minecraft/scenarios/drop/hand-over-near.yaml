@@ -24,7 +24,7 @@ client:
   command: bun
   cwd: ../..
   args: [client-host.ts, drivers/hand-over.ts]
-params: { giver: Giver, receiver: Receiver, item_name: oak_log, count: 3 }
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3 }
 
 goal:
   kind: all
