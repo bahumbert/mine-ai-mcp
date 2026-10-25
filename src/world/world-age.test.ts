@@ -144,7 +144,7 @@ test("a bot without a world age waits on the wall clock only", async () => {
 
 // `stallMs`: the wait times out when the age stands still that long, not when 40 ticks take long.
 test("a server at 8 ticks a second moves 40 ticks in about 5 s: no timeout under a 5 s stall bound", async () => {
-  // Both cadences hold: a time packet every second (8 ticks) or one per 20 ticks (every 2.5 s) moves the age inside the stall bound.
+  // The game sends a time packet per 20 ticks at any rate (contract check world-age-at-slow-tick): every 2.5 s here, inside the stall bound.
   const { bot, clock, timing } = worldBot(1_000, { server: { startAge: 1_000, ticksPerSecond: 8 } });
   const pending = waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing });
   const wait = watch(pending);

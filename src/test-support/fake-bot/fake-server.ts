@@ -8,8 +8,9 @@ import { type ServerWeather, type Weather, type WeatherPacket, createServerWeath
 
 export type { Weather, WeatherPacket };
 
-/** One time packet a second (`facts/runtime-pitfalls.md` "The server's answer, not a guess of its delay"). */
-const TIME_PACKET_EVERY_MS = 1_000;
+/** One time packet per 20 server ticks at any speed, a second of them on time (`facts/runtime-pitfalls.md` "The server's answer, not a guess of its delay"; "Time packets": measured at 20 ticks a second by T7d1 and at 8 by R16). */
+const TICKS_PER_TIME_PACKET = 20;
+const ONE_SECOND_MS = 1_000;
 const TICKS_PER_DAY = 24_000;
 /** The ticks a second of a server on time; a server at this rate catches up after a stall, one below it cannot. */
 const ON_TIME_TICKS_PER_SECOND = 20;
@@ -26,12 +27,12 @@ export interface FakeServerOptions {
   readonly timeOfDay?: number;
   /** How long every answer takes, in ms of clock. */
   readonly lagMs?: number;
-  /** Where in each second the time packet falls (0-999 ms after the server starts). */
+  /** Where in each second the time packet falls (0-999 ms after the server starts); a server on time only: another `ticksPerSecond` with a phase is refused. */
   readonly phaseMs?: number;
   /**
-   * Ticks a second of running clock, and so the ticks one time packet adds: 20 on time; fewer for a server behind its
-   * schedule, which still sends one packet a second (Cleo ~30 % behind, `facts/navigation-and-boats.md`; `tick rate 2`).
-   * A server below 20 never catches up after a stop. A whole number.
+   * Ticks a second of running clock: 20 on time; fewer for a server behind its schedule (Cleo ~30 % behind,
+   * `facts/navigation-and-boats.md`) or set to a lower `tick rate`. The time packets keep to 20 ticks each, so a server below
+   * 20 sends them further apart (one per 2.5 s at 8). A server below 20 never catches up after a stop. A whole number.
    */
   readonly ticksPerSecond?: number;
   /** The weather the world starts in, its levels already full; clear when omitted. */
@@ -128,12 +129,13 @@ interface PendingAnswer {
  */
 function createServerTicks(options: FakeServerOptions) {
   const phaseMs = options.phaseMs ?? 0;
-  if (phaseMs < 0 || phaseMs >= TIME_PACKET_EVERY_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
+  if (phaseMs < 0 || phaseMs >= ONE_SECOND_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
   const ticksPerSecond = options.ticksPerSecond ?? ON_TIME_TICKS_PER_SECOND;
-  if (!Number.isInteger(ticksPerSecond) || ticksPerSecond < 1) throw new RangeError(`ticksPerSecond ${ticksPerSecond}: a whole number from 1 (a time packet comes every that many ticks)`);
+  if (!Number.isInteger(ticksPerSecond) || ticksPerSecond < 1) throw new RangeError(`ticksPerSecond ${ticksPerSecond}: a whole number from 1`);
+  if (phaseMs > 0 && ticksPerSecond !== ON_TIME_TICKS_PER_SECOND) throw new RangeError(`phaseMs ${phaseMs} with ticksPerSecond ${ticksPerSecond}: a phase is the packet's place in the second of a server on time (20)`);
   const startAge = options.startAge ?? 24_000;
-  let serverMs = phaseMs > 0 ? TIME_PACKET_EVERY_MS - phaseMs : 0;
-  let ticksRun = Math.floor((serverMs * ticksPerSecond) / TIME_PACKET_EVERY_MS);
+  let serverMs = phaseMs > 0 ? ONE_SECOND_MS - phaseMs : 0;
+  let ticksRun = Math.floor((serverMs * ticksPerSecond) / ONE_SECOND_MS);
   const listeners = new Set<() => void>();
   return {
     ticksPerSecond,
@@ -148,7 +150,7 @@ function createServerTicks(options: FakeServerOptions) {
      */
     run(ms: number, keepGoing: () => boolean, afterFirstTick?: () => void): number {
       serverMs += ms;
-      const ticksDue = Math.floor((serverMs * ticksPerSecond) / TIME_PACKET_EVERY_MS + 1e-9);
+      const ticksDue = Math.floor((serverMs * ticksPerSecond) / ONE_SECOND_MS + 1e-9);
       const ticksBefore = ticksRun;
       for (let first = true; ticksRun < ticksDue && keepGoing(); first = false) {
         ticksRun += 1;
@@ -156,7 +158,7 @@ function createServerTicks(options: FakeServerOptions) {
         if (first) afterFirstTick?.();
       }
       // A stop inside a tick leaves the slice's other ticks undone: the server has run only to its last tick, so a later slice does not owe them.
-      if (ticksRun < ticksDue) serverMs = (ticksRun * TIME_PACKET_EVERY_MS) / ticksPerSecond;
+      if (ticksRun < ticksDue) serverMs = (ticksRun * ONE_SECOND_MS) / ticksPerSecond;
       return ticksRun - ticksBefore;
     },
     api: {
@@ -275,8 +277,8 @@ function weatherApi(
 }
 
 /**
- * The world age and day time the client is told, and the time packets that tell it: a regular one every `ticksPerSecond`
- * ticks (a second of the server's running time, so a stop that was dropped or not caught up delays the next one), and the
+ * The world age and day time the client is told, and the time packets that tell it: a regular one every 20 ticks at any
+ * speed (a second of the server's running time on time, so a stop that was dropped or not caught up delays the next one), and the
  * extras (`setDayTime`, `resendTime`). The age of a regular packet is the game time of its tick.
  */
 function createWorldTime(options: FakeServerOptions, ticks: ReturnType<typeof createServerTicks>) {
@@ -288,12 +290,12 @@ function createWorldTime(options: FakeServerOptions, ticks: ReturnType<typeof cr
     timePacketSent = true;
     for (const listener of [...timeListeners]) listener();
   };
-  // Vanilla sends the time every 20 ticks (`MinecraftServer.tickChildren`, read in the source, not measured here); a server behind its schedule
-  // is modelled as one packet a second of its own ticks (plan review 2026-10-24; `ticksPerSecond` above).
+  // Vanilla sends the time every 20 ticks (`MinecraftServer.tickChildren`) whatever the rate: measured at 8 ticks a second by the
+  // contract check `world-age-at-slow-tick` (ages step 20, 2.5 s apart); a server lagging behind 20 is the same by the source, unmeasured.
   ticks.api.onTick(() => {
-    if (ticks.ticksRun % ticks.ticksPerSecond !== 0) return;
+    if (ticks.ticksRun % TICKS_PER_TIME_PACKET !== 0) return;
     age = ticks.api.gameTime;
-    dayTime += ticks.ticksPerSecond;
+    dayTime += TICKS_PER_TIME_PACKET;
     sendTimePacket();
   });
   return {

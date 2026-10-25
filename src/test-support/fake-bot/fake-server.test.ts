@@ -29,13 +29,28 @@ test("with phaseMs 999 the first time packet comes at 999 ms (a request sent 1 m
   assert.equal(server.age, 24_040);
 });
 
-test("a server 30 % behind its schedule needs 3 time packets for 40 ticks", async () => {
+test("a server 30 % behind its schedule sends a time packet every 20 ticks like the game: 2 packets for 40 ticks, the ages 20 apart", async () => {
   const { clock, server } = serverAt({ ticksPerSecond: 14 });
-  let packets = 0;
-  server.onTimePacket(() => (packets += 1));
+  const ages: number[] = [];
+  server.onTimePacket(() => ages.push(server.age));
   while (server.age < 24_040) await clock.advance(1_000);
-  assert.equal(packets, 3);
-  assert.equal(server.age, 24_042);
+  assert.deepEqual(ages, [24_020, 24_040]);
+  assertAgeNotAhead(server);
+});
+
+test("a server at 8 ticks a second sends its packets 2.5 s apart (the game at tick rate 8, contract check world-age-at-slow-tick), the day time moving 20 each", async () => {
+  const { clock, server } = serverAt({ ticksPerSecond: 8, timeOfDay: 6_000 });
+  await clock.advance(2_499);
+  assert.equal(server.age, 24_000);
+  await clock.advance(1);
+  assert.equal(server.age, 24_020);
+  assert.equal(server.timeOfDay, 6_020);
+  await clock.advance(2_499);
+  assert.equal(server.age, 24_020);
+  await clock.advance(1);
+  assert.equal(server.age, 24_040);
+  assert.equal(server.timeOfDay, 6_040);
+  assertAgeNotAhead(server);
 });
 
 test("the time of day moves with the age and wraps at a day", async () => {
@@ -145,10 +160,10 @@ test("resendTime in the tick of a regular packet carries that packet's age (a du
 
 test("resendTime on a server behind its schedule counts ticks at its own rate and never reaches the next packet's age", async () => {
   const { clock, server } = serverAt({ ticksPerSecond: 10 });
-  await clock.advance(1_000);
+  await clock.advance(2_000);
   await clock.advance(999);
   server.resendTime();
-  assert.equal(server.age, 24_019, "10 ticks a packet: 999 ms after the first packet (age 24010) are 9 ticks in");
+  assert.equal(server.age, 24_029, "10 ticks a second: 999 ms after the first packet (age 24020, 20 ticks) are 9 ticks in");
 });
 
 test("resendTime leaves the day time as it is", async () => {
@@ -408,8 +423,9 @@ test("a stop inside a tick of a long slice leaves that slice's other ticks undon
   assert.equal(tick - before, 1, "one tick for one slice, not the two the stopped slice left");
 });
 
-test("a ticksPerSecond that is not a whole number above 0 is refused: the time packets come every that many ticks", () => {
+test("a ticksPerSecond that is not a whole number above 0 is refused, and so is a phase on a server that is not on time", () => {
   for (const ticksPerSecond of [0, 14.5, -1]) assert.throws(() => serverAt({ ticksPerSecond }), /ticksPerSecond/);
+  assert.throws(() => serverAt({ ticksPerSecond: 14, phaseMs: 500 }), /a phase is the packet's place in the second of a server on time/);
 });
 
 test("a stop and resume inside a tick owe nothing and the slice's other ticks run", async () => {

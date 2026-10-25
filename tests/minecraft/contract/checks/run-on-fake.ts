@@ -41,3 +41,13 @@ export function withShiftedReads(subject: ContractSubject, shift: (readIndex: nu
     },
   };
 }
+
+/** A subject whose client reads the age `extra` ticks further ahead with each time packet it has heard: a server whose regular packets step `extra` ticks more than 20. */
+export function withSteppingAges(subject: ContractSubject, extra: number): ContractSubject {
+  let drift = 0;
+  subject.bot.on("time", () => void (drift += extra));
+  const bot = new Proxy(subject.bot, {
+    get: (target, property) => (property === "time" ? { ...target.time, age: target.time.age + drift } : Reflect.get(target, property, target)),
+  });
+  return { ...subject, bot };
+}

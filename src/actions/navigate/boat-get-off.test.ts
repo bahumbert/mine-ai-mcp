@@ -128,17 +128,23 @@ test("a press and release read in one server tick do not let her off: the releas
   assert.equal(serverSeated(harness), false);
 });
 
-test("a world age that jumps 40 in the first 250 ms after the press is not the server's answer", async () => {
+test("a world age that jumps 40 ticks in the first 250 ms after the press is not the server's answer", async () => {
   // Run 16: the server ran ~30 % behind and Cleo's get-off "answered" in ~1.1 s: a client whose event loop was blocked
   // reads its queued time packets after the press, so the age it sees jump says nothing about the server reading the shift.
-  // Here the time packet 50 ms after the press brings 40 ticks at once (two queued packets read together), and the
-  // server's answer to the shift takes 500 ms. `ticksPerSecond: 40` stands for that burst of two packets in the client's
-  // queue: a server on time sends 20 ticks a packet, so this fake really runs 40 a second to make one packet carry 40.
-  const harness = seaHarness({ lagMs: 500, server: { phaseMs: 550, ticksPerSecond: 40 } });
+  // The fake's client reads each packet as it comes, so the burst is a server that stalled for 1.9 s and catches its 39 owed ticks up
+  // (two time packets at once, the age jumping 40; no drop under 2 s) 50 ms after the press, while its answer to the shift takes 500 ms.
+  const harness = seaHarness({ lagMs: 500 });
   using _installed = harness.clock.install();
   await seat(harness, 500);
+  harness.server.stop();
+  await harness.clock.advance(1_900);
+  harness.clock.after(50, () => harness.server.resume());
+  const ageBefore = harness.bot.time.age!;
+  let ageAfterDrain = 0;
+  harness.clock.after(250, () => void (ageAfterDrain = harness.bot.time.age!));
   await getOffOver(harness, 3_000);
   const [down, up] = shiftPackets(harness);
-  assert.ok(up!.atMs - down!.atMs >= 300, `shift was released ${String(up!.atMs - down!.atMs)} ms after the press: the burst counted as 40 server ticks`);
+  assert.ok(up!.atMs - down!.atMs >= 300, `shift was released ${String(up!.atMs - down!.atMs)} ms after the press: the burst counted as server ticks`);
+  assert.equal(ageAfterDrain - ageBefore, 40, "the burst was in the age she saw by the end of the 250 ms");
   assert.equal(serverSeated(harness), false);
 });

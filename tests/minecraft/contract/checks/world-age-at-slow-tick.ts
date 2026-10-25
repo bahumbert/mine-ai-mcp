@@ -22,7 +22,6 @@ const TICKS_SLACK = EXPECTED_TICKS / 4;
 export const worldAgeAtSlowTick: ContractCheck = {
   name: "world-age-at-slow-tick",
   fixture: { cells: {}, carried: {}, position: [0.5, -60, 0.5], tickRate: TICK_RATE },
-  waitsForFake: "the fake sends a time packet every `ticksPerSecond` ticks (8 here), the game one per 20 (R15 moves the fake; this measures the game first)",
   exclusive: "it asserts that every time packet steps 20, which another lane's arrangement `/time set` would break, and it times server ticks against the wall clock, which another lane's clone stalls",
   async run(subject) {
     const { bot } = subject;

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runOnFake, withShiftedReads } from "./run-on-fake.ts";
+import { runOnFake, withShiftedReads, withSteppingAges } from "./run-on-fake.ts";
 import { worldAgeAtSlowTick } from "./world-age-at-slow-tick.ts";
 
-test("world-age-at-slow-tick fails, with the packets heard and the ticks run, on a server whose time packets step by its rate", async () => {
-  await assert.rejects(runOnFake(worldAgeAtSlowTick), /ages step by 20 at tick rate 8; server ticks run in the watch: 80; packets heard \(age@ms into the watch\): \d+@\d+ms/);
+test("world-age-at-slow-tick fails, with the packets heard and the ticks run, on a server whose time packets step by more than 20", async () => {
+  await assert.rejects(
+    runOnFake(worldAgeAtSlowTick, {}, (subject) => withSteppingAges(subject, 20)),
+    /ages step by 20 at tick rate 8; server ticks run in the watch: 80; packets heard \(age@ms into the watch\): \d+@\d+ms/,
+  );
 });
 
 test("world-age-at-slow-tick fails when the server ran at another rate than the one set", async () => {

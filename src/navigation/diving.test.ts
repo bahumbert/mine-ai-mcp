@@ -396,11 +396,13 @@ test("the backstop of a roofed dive still asks an immediate rescue with the eyes
 });
 
 // NAVP-13 (run 15: the server 2.5-4.6 s behind): the breathing stop counted 100 client ticks for full air. The fake
-// server on 14 ticks a second (30 % behind) moves the world age so the bound is about 7-8 s (time packets come each
-// second); its air packets come 3 s late and its air ticks 14 a second like everything the server counts: the
-// full air (60 refill ticks, 4.3 s, then 3 s late) is heard at about 7.3 s, past the 100 client ticks (5 s) and inside the age bound.
+// server on 14 ticks a second (30 % behind) moves the world age 20 ticks a packet, one packet per 1.43 s (the game
+// sends one per 20 ticks at any rate, contract check world-age-at-slow-tick), so the bound of 100 ticks is 7.1 s; its air
+// packets come 2.5 s late and its air ticks 14 a second like everything the server counts: the full air (60 refill ticks,
+// 4.3 s, then 2.5 s late) is heard at about 6.8 s, past the 100 client ticks (5 s) and inside the age bound. The bound's
+// margin is the 40 answer ticks, 2.9 s of this server, less the age's staleness (facts live-testing.md "The fake").
 test("a server behind the client still completes the breathing stop: full air reported late is waited for", async () => {
-  const { world, bot, breath, clock } = fixture({ mocked: true, lagMs: 3_000, server: { ticksPerSecond: 14 } });
+  const { world, bot, breath, clock } = fixture({ mocked: true, lagMs: 2_500, server: { ticksPerSecond: 14 } });
   using _timers = clock.install();
   const diving = new Diving(bot, world);
   const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
@@ -412,7 +414,7 @@ test("a server behind the client still completes the breathing stop: full air re
       bot.emit("physicsTick");
       return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
     }
-    // At the surface the server refills 4 a tick, and says so 3 s late.
+    // At the surface the server refills 4 a tick, and says so 2.5 s late.
     if (calls === 2) bot.entity.position.y = 63.5;
     return { status: "completed", elapsedMs: 0 };
   });
