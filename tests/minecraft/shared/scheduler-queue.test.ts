@@ -92,7 +92,7 @@ test("a server whose trials settled takes its hold from them: a measured 2 s hol
   for (let trial = 0; trial < 3; trial++) {
     const lane = rig.pool.leaseLane(server.id)!;
     rig.pool.finishTrial(server.id, lane, { result: { scenario: "x", outcome: "pass", elapsedMs: 1, goal: { state: "passed", detail: "" }, goalText: "" },
-      lane: "free", serverSick: false, hitWallBound: false, restored: true, mutexWaitMs: 0,
+      lane: "free", serverSick: false, hitWallBound: false, restored: true, mutexWaitMs: 0, arranged: true,
       phases: { mutexWaitMs: 0, arrangeMs: 1_500, joinMs: 0, trialMs: 0, restoreWaitMs: 0, restoreMs: 500 } }, rig.clock);
   }
   assert.equal(rig.pool.queues([server.id]).get(server.id)?.holdMs, 2_000);

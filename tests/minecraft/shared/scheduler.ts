@@ -18,6 +18,7 @@ import { fileRunIo, type RunIo } from "./run-io.ts";
 import type {
   MachineReading, SchedulerDeps, SubmissionEntry, SubmissionHandle, SubmissionSpec, SubmissionSummary,
 } from "./scheduler-types.ts";
+import { awaitDeathOrCancel, blameDeadServer, deathConfirmBoundMs } from "./server-death.ts";
 import { serverSpecFor } from "./server-spec.ts";
 import { executeTrial, type TrialEnd } from "./trial.ts";
 
@@ -475,17 +476,28 @@ export class Scheduler {
     const io = this.deps.runIo ?? fileRunIo;
     let end: TrialEnd;
     const wait = { serverMs: 0 };
+    let ran = false;
     try {
       end = await this.#execute(queued, managed, lane, admitted, runDir, io, wait);
+      ran = true;
     } catch (error) {
       if (error instanceof ServerStartFailed && this.#sendBack(queued, admitted, "its server failed to start")) return;
       const detail = error instanceof Error ? error.message : String(error);
       end = {
         result: { scenario: entry.name, outcome: "error", elapsedMs: 0, goal: { state: "pending", detail }, goalText: "", error: detail },
-        lane: error instanceof FreshBodyRefused ? "quarantined" : "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0,
+        lane: error instanceof FreshBodyRefused ? "quarantined" : "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0, arranged: false,
       };
     }
-    if (managed.died.aborted && admitted.queue?.arrangementPending() && this.#sendBack(queued, admitted, "its server died before its arrangement")) return;
+    // Mine Labs returns a failed arrangement as an error result, so a lane trial's queue marks say "arranged" too: only the end knows whether it ran.
+    const unrun = !end.arranged;
+    // A trial on a dead java fails its RCON commands at once, 5-10 s before the sampler confirms the death: it is not settled red before then.
+    // An end the scheduler made itself (a failed start, a body refused) has nothing of a dead java in it.
+    if (ran && unrun && !managed.died.aborted && end.result.outcome !== "pass" && !submission.abort.signal.aborted) {
+      const boundMs = deathConfirmBoundMs(this.deps.config);
+      this.deps.log(`${entry.name}: failed before its arrangement, waiting up to ${boundMs} ms for the death of server ${managed.id} to be confirmed`);
+      await awaitDeathOrCancel(AbortSignal.any([managed.died, submission.abort.signal]), boundMs);
+    }
+    if (unrun && managed.died.aborted && this.#sendBack(queued, admitted, "its server died before its arrangement")) return;
     this.#settle(queued, managed, lane, admitted, wait.serverMs, blameDeadServer(managed, queued.submission, end), runDir);
   }
 
@@ -494,7 +506,7 @@ export class Scheduler {
     const { submission, entry } = queued;
     if (queued.sentBack || submission.abort.signal.aborted) return false;
     queued.sentBack = true;
-    this.#unadmit(queued, admitted);
+    this.#unadmit(queued, admitted, true);
     // The client of the admission never started a trial: it is not growing into the ledger.
     const young = this.#young.findIndex(client => client.at === admitted.at && client.mb === admitted.clientMb);
     if (young >= 0) this.#young.splice(young, 1);
@@ -511,11 +523,11 @@ export class Scheduler {
   }
 
   /** The trial leaves what admission gave it: its place in the mutex queue, its booked client, its count among the running. */
-  #unadmit(queued: QueuedTrial, admitted: Admitted): void {
+  #unadmit(queued: QueuedTrial, admitted: Admitted, sentBack = false): void {
     const { submission, entry } = queued;
     admitted.queue?.leave();
     // A client it was kept and never took (its server did not start, or died) goes back to the submission's spares.
-    this.deps.clientsAhead?.trialEnded(queued.sequence);
+    this.deps.clientsAhead?.trialEnded(queued.sequence, { sentBack });
     this.#running -= 1;
     if (this.#isTiming(submission, entry)) this.#timingRunning -= 1;
     this.#tally = { ...this.#tally, trials: this.#tally.trials - 1 };
@@ -585,12 +597,3 @@ class FreshBodyRefused extends Error {}
 
 /** The server did not start: the trial never touched it, so it can be placed on another one. */
 class ServerStartFailed extends Error {}
-
-/** A trial that did not pass on a server whose java died ended because of the death, whatever it saw of it (an abort, a dead RCON, a lost client). */
-function blameDeadServer(managed: ManagedServer, submission: { readonly abort: AbortController }, end: TrialEnd): TrialEnd {
-  const { result } = end;
-  if (!managed.died.aborted || submission.abort.signal.aborted || result.outcome === "pass") return end;
-  const seen = result.error && result.outcome !== "cancelled" ? ` (the trial saw: ${result.error})` : "";
-  const error = `server ${managed.id} died: ${String(managed.died.reason)}${seen}; this trial is not a result of the scenario, run it again`;
-  return { ...end, result: { ...result, outcome: "error", error, goal: { state: "pending", detail: error } } };
-}

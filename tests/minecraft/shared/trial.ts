@@ -59,6 +59,11 @@ export interface TrialEnd {
   /** A restore ran and finished. */
   readonly restored: boolean;
   readonly mutexWaitMs: number;
+  /**
+   * The runner reached `onArranged` or `onPrepared` (Mine Labs fires `onArranged` after every setup command, a trial on a server of its own included): false for a
+   * trial that failed or was cancelled before, which changed nothing outside its server. The scheduler asks it when that server died.
+   */
+  readonly arranged: boolean;
   /** Where the trial's time went; absent on an end the scheduler made without running the trial. */
   readonly phases?: TrialPhases;
 }
@@ -103,6 +108,7 @@ class TrialMarks {
   /** Marks only while the trial has not been prepared, and only once. */
   arranged(): void { if (this.#preparedAt === undefined) this.#arrangedAt ??= performance.now(); }
   prepared(): void { this.#preparedAt ??= performance.now(); }
+  wasArranged(): boolean { return this.#arrangedAt !== undefined || this.#preparedAt !== undefined; }
   /** The first client was asked for: its `init` is written right after. */
   initSent(): void { this.#initAt ??= performance.now(); }
   settled(): void { this.#settledAt ??= performance.now(); }
@@ -190,10 +196,10 @@ export async function executeTrial(deps: TrialDeps, job: TrialJob): Promise<Tria
   marks.settled();
   const phases = marks.phases();
   job.log(phasesLine(phases));
-  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases };
+  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases, arranged: marks.wasArranged() };
 }
 
-async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): Promise<Omit<TrialEnd, "mutexWaitMs" | "phases">> {
+async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): Promise<Omit<TrialEnd, "mutexWaitMs" | "phases" | "arranged">> {
   const queuedAt = Date.now();
   let release: () => void;
   try {

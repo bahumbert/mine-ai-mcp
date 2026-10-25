@@ -15,7 +15,7 @@ function spec(overrides: Partial<ServerSpec> = {}): ServerSpec {
 
 function end(overrides: Partial<TrialEnd> = {}): TrialEnd {
   return { result: { scenario: "x", outcome: "pass", elapsedMs: 1, goal: { state: "passed", detail: "" }, goalText: "" }, lane: "free",
-    serverSick: false, hitWallBound: false, restored: true, mutexWaitMs: 0, ...overrides };
+    serverSick: false, hitWallBound: false, restored: true, mutexWaitMs: 0, arranged: true, ...overrides };
 }
 
 function setup() {

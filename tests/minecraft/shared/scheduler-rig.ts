@@ -77,7 +77,11 @@ export class SchedulerRig {
             resolve({ scenario: input.scenario.name ?? "demo", outcome, elapsedMs: 1, goal: { state: "passed", detail: "ok" }, goalText: "" });
           },
         });
-      }, reject);
+      }, (error: unknown) => {
+        // Mine Labs never throws out of a trial: a failed arrangement is an error result (node_modules/mine-labs/src/trial/run.ts, the catch of runScenarioTrial).
+        const message = error instanceof Error ? error.message : String(error);
+        resolve({ scenario: input.scenario.name ?? "demo", outcome: "error", elapsedMs: 1, goal: { state: "pending", detail: message }, goalText: "", error: message });
+      });
     });
   }
 

@@ -36,7 +36,7 @@ interface Spare {
   readonly spawnedAt: number;
   readonly spawnedPerf: number;
   /** Spawned for a trial already admitted: that trial's reserve is the whole client, so the spare reserves nothing of its own. */
-  readonly covered: boolean;
+  covered: boolean;
   /** The trial this client is kept for; null while it is any trial's of its submission. */
   claimedBy: number | null;
   bootedAfterMs: number | null;
@@ -147,9 +147,18 @@ export class ClientsAhead {
     };
   }
 
-  /** A trial ended: the clients it claimed and did not take go back to its submission's spares, still waiting for `init`. */
-  trialEnded(trial: number): void {
-    for (const spares of this.#spares.values()) for (const spare of spares) if (spare.claimedBy === trial) spare.claimedBy = null;
+  /**
+   * A trial ended: the clients it claimed and did not take go back to its submission's spares, still waiting for `init`.
+   * `sentBack`: the trial never ran and its admission is undone (its young entry and reserve with it), so a spare booted for it is no longer covered by that reserve.
+   */
+  trialEnded(trial: number, options: { readonly sentBack?: boolean } = {}): void {
+    for (const spares of this.#spares.values()) {
+      for (const spare of spares) {
+        if (spare.claimedBy !== trial) continue;
+        spare.claimedBy = null;
+        if (options.sentBack) spare.covered = false;
+      }
+    }
   }
 
   /** The submission ended or was cancelled: kills every client it has not handed over. Returns how many. */

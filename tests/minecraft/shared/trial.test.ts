@@ -505,3 +505,27 @@ test("a provider that throws ends the trial with its message, the lane freed", a
   assert.equal(end.lane, "quarantined");
   (await mutex.acquire())();
 });
+
+// `arranged` is what the scheduler asks of a trial on a server of its own when that server died: did anything of it run (R20).
+
+test("a trial says it was arranged once its runner arranged or prepared, and not when the runner failed or the trial was cancelled before either", async () => {
+  const arranges: TrialRunner = async input => { await input.onArranged(); return result("pass"); };
+  const prepares: TrialRunner = async input => { await input.onPrepared(); return result("pass"); };
+  const fails: TrialRunner = async () => { throw new Error("rcon closed"); };
+  const returnsError: TrialRunner = async () => result("error");
+  const own = { lane: null };
+  assert.equal((await executeTrial({ runTrial: arranges, config }, job(own))).arranged, true, "onArranged");
+  assert.equal((await executeTrial({ runTrial: prepares, config }, job(own))).arranged, true, "onPrepared alone");
+  assert.equal((await executeTrial({ runTrial: arranges, config }, job())).arranged, true, "a lane trial");
+  assert.equal((await executeTrial({ runTrial: fails, config }, job(own))).arranged, false, "the runner threw before arranging");
+  assert.equal((await executeTrial({ runTrial: returnsError, config }, job(own))).arranged, false, "the runner returned an error before arranging");
+  const mutex = new ArrangementMutex();
+  const held = await mutex.acquire();
+  const gone = new AbortController();
+  const waiting = executeTrial({ runTrial: arranges, config }, job({ mutex, signal: gone.signal }));
+  gone.abort("server died");
+  const end = await waiting;
+  assert.equal(end.result.outcome, "cancelled");
+  assert.equal(end.arranged, false, "cancelled while waiting for the arrangement turn");
+  held();
+});
