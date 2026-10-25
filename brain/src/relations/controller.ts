@@ -11,7 +11,7 @@ import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./hando
 import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
-import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, partnerPosition, proposeTrade, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
 import { type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
@@ -24,9 +24,6 @@ const RETAKE_AFTER_MS = 30_000;
 const RECENT_NEAR_MS = 30_000;
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
 const GIVE_ATTEMPTS = 2;
-/** A propose or accept that repeats a trade that ended `done` this recently is a late chat reply, not a new deal. */
-const REPEAT_AFTER_DONE_MS = 2 * MINUTE_MS;
-
 export interface TradeControllerDeps {
   readonly self: string;
   readonly persona: Persona;
@@ -53,13 +50,6 @@ interface PendingJudgment { readonly partner: string; readonly trade: Trade; rea
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const EVENT_OF_STATE: Record<TradeState, EventName> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
-
-const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
-const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
-
-const dealKey = (items: readonly ItemCount[]): string => JSON.stringify([...items].map((i) => [i.item, i.count]).sort());
-/** The same items and counts on both sides, in any order; who gives first does not matter. */
-export const sameDealTerms = (a: Pick<TradeDecision, "give" | "get">, b: Pick<TradeDecision, "give" | "get">): boolean => dealKey(a.give) === dealKey(b.give) && dealKey(a.get) === dealKey(b.get);
 
 export class TradeController implements BoardPeer {
   private previous: Seen | null = null;
@@ -155,16 +145,21 @@ export class TradeController implements BoardPeer {
       const offer = d.action === "accept" ? theirOffer : undefined;
       const terms = this.termsOf(d, offer);
       const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
-      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? this.repeatOfDone(speaker, terms, now) : undefined;
+      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? repeatOfDone(this.deps.book.trades(), speaker, terms, now) : undefined;
       if (repeated !== undefined) {
         this.deps.log(`trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
         return null;
       }
       if (d.action === "propose") {
-        const blocked = mine !== undefined ? `a proposal to ${speaker} ignored, ${mine.id} is still open` : local && theirOffer !== undefined ? `my proposal to ${speaker} dropped, their older proposal to me stands` : null;
-        if (blocked === null) return this.proposeAndPost(deal, now);
-        this.deps.log(`trade: ${blocked}`);
-        return null;
+        if (mine !== undefined) {
+          this.deps.log(`trade: a proposal to ${speaker} ignored, ${mine.id} is still open`);
+          return null;
+        }
+        if (local && theirOffer !== undefined) {
+          this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
+          return null;
+        }
+        return this.proposeAndPost(deal, now);
       }
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) {
@@ -188,11 +183,6 @@ export class TradeController implements BoardPeer {
       if (mine !== undefined) await this.record(cancelTrade(mine, now, d.action === "decline" ? "I declined" : "I cancelled"), "cancelled");
       return null;
     });
-  }
-
-  /** The trade with the speaker that ended `done` within the repeat window on the same terms, if any: a chat reply written while it was open lands after it. */
-  private repeatOfDone(speaker: string, terms: TradeDecision, now: number): Trade | undefined {
-    return this.deps.book.trades().find((t) => t.state === "done" && same(t.partner, speaker) && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && sameDealTerms(t, terms));
   }
 
   /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */

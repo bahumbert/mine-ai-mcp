@@ -1,5 +1,6 @@
 // The trade state machine and payment attribution: pure, every clock is a wall-clock `now` passed in.
 import { manhattan } from "../conversation/state.ts";
+import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { sideText } from "./items.ts";
 import { type ItemCount, MINUTE_MS, type Trade, type TradeSettings, type TradeState } from "./types.ts";
@@ -19,6 +20,21 @@ function newTrade(a: DealArgs, state: "proposed" | "agreed"): Trade {
     createdAt: a.now, agreedAt: state === "agreed" ? a.now : null, receivedAt: null, gaveAt: null, received: [], endedAt: null,
     brokenBy: null, late: false, note: "",
   };
+}
+
+/** A propose or accept that repeats a trade that ended `done` this recently is a late chat reply, not a new deal. */
+const REPEAT_AFTER_DONE_MS = 2 * MINUTE_MS;
+
+export const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
+export const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
+
+const dealKey = (items: readonly ItemCount[]): string => JSON.stringify([...items].map((i) => [i.item, i.count]).sort());
+/** The same items and counts on both sides, in any order; who gives first does not matter. */
+export const sameDealTerms = (a: Pick<TradeDecision, "give" | "get">, b: Pick<TradeDecision, "give" | "get">): boolean => dealKey(a.give) === dealKey(b.give) && dealKey(a.get) === dealKey(b.get);
+
+/** The trade with the speaker that ended `done` within the repeat window on the same terms, if any: a chat reply written while it was open lands after it. */
+export function repeatOfDone(trades: readonly Trade[], speaker: string, terms: TradeDecision, now: number): Trade | undefined {
+  return trades.find((t) => t.state === "done" && t.partner.toLowerCase() === speaker.toLowerCase() && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && sameDealTerms(t, terms));
 }
 
 export function proposeTrade(a: DealArgs): Trade {

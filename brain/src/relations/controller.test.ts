@@ -5,10 +5,10 @@ import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { RelationBook } from "./book.ts";
-import { sameDealTerms, TradeController } from "./controller.ts";
+import { TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
 import { newRelation, withTrade } from "./record.ts";
-import { proposeTrade } from "./trade.ts";
+import { proposeTrade, sameDealTerms } from "./trade.ts";
 import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from "./types.ts";
 
 const MIN = 60_000;

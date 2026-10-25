@@ -1,11 +1,11 @@
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import { owedItems } from "./trade.ts";
-import type { ItemCount, Trade } from "./types.ts";
+import { type ItemCount, MINUTE_MS, type Trade } from "./types.ts";
 
 /** How long a give or a gain waits for a trade with the player (memory only: a brain restart loses it). */
-export const EARLIER_GIVE_MS = 10 * 60_000;
-export const EARLIER_GAIN_MS = 10 * 60_000;
+export const EARLIER_GIVE_MS = 10 * MINUTE_MS;
+export const EARLIER_GAIN_MS = 10 * MINUTE_MS;
 
 interface Entry {
   readonly player: string;
