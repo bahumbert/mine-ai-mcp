@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
+// check-reads: src/**/*.ts
 test("movement inputs belong to navigation, survival, and the bounded raw action", () => {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const invalid: { file: string; call: string }[] = [];

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ROLES, type BlockRole, type Palette, type Variants } from "./blueprint.ts";
 import { ROOFS } from "./house.ts";
 
+// check-reads: brain/building-styles/*.json
 const blockId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft block id such as oak_planks").refine((id) => id !== "air", "air is not a material");
 const blockRoles = ROLES.filter((role): role is BlockRole => role !== "air");
 

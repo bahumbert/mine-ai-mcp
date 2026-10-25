@@ -13,9 +13,11 @@ import { isLiquid, isReplaceableForPlacement } from "./block-classification.js";
 import { STANDING_EYE_HEIGHT } from "./block-visibility.js";
 import type { WorldBlock } from "./placement.js";
 
-export type LiquidName = "water" | "lava";
+/** The game's two fluids: the one list the bucket action's input, its items and its source checks all read. */
+export const LIQUIDS = ["water", "lava"] as const;
+export type LiquidName = (typeof LIQUIDS)[number];
 
-/** How far around a pour the obsidian and cobblestone are counted. */
+/** How far around a pour the blocks it makes are counted. */
 const FORMATION_RADIUS = 10;
 /** How long a pour is given to finish spreading before its formations are counted. */
 const SPREAD_TIMEOUT_TICKS = 100;
@@ -161,7 +163,7 @@ export function pourAim(bot: Bot, accepts: (landing: Vec3) => number | null): Po
           const distance = lookAt.distanceTo(eye);
           if (distance > USE_RAY_REACH || distance < RAY_STEP) continue;
           if (best !== null && score === best.score && distance >= best.distance) continue;
-          if (!isReplaceableForPlacement(bot.blockAt(landing))) continue;
+          if (!isReplaceableForPlacement(bot.blockAt(landing), bot.version)) continue;
           const direction = lookAt.minus(eye).scaled(1 / distance);
           const hit = bot.world.raycast(eye, direction, USE_RAY_REACH);
           if (hit === null) continue;
@@ -177,35 +179,76 @@ export function pourAim(bot: Bot, accepts: (landing: Vec3) => number | null): Po
   return best?.aim ?? null;
 }
 
-export interface LiquidFormations {
-  readonly obsidian: number;
-  readonly cobblestone: number;
+/** The blocks a pour made out of liquid, by name: obsidian from lava sources, cobblestone from flowing lava, stone... */
+export type Formed = Readonly<Record<string, number>>;
+
+/**
+ * The cells around a pour that were not solid when it began, and which of them have held liquid. Liquid is what makes a
+ * block here, so a cell counts as formed only when it held liquid (before the pour or at some tick after) and holds a
+ * solid block now: a block placed into air or a gravel block that fell is not the pour's.
+ */
+export interface FormationWatch {
+  readonly cells: readonly Vec3[];
+  /** Indexes into `cells` of the ones seen holding liquid so far. */
+  readonly wet: Set<number>;
 }
 
-export function countFormations(bot: Bot, around: Vec3): LiquidFormations {
-  const count = (name: string) =>
-    bot.findBlocks({
-      point: around,
-      matching: bot.registry.blocksByName[name]!.id,
-      maxDistance: FORMATION_RADIUS,
-      count: 512,
-    }).length;
-  return { obsidian: count("obsidian"), cobblestone: count("cobblestone") };
+/** The cells within the formation radius of `around` (a sphere, walked as one flat index over its bounding cube). */
+function cellsAround(around: Vec3): Vec3[] {
+  const side = 2 * FORMATION_RADIUS + 1;
+  const cells: Vec3[] = [];
+  for (let index = 0; index < side ** 3; index += 1) {
+    const dx = (index % side) - FORMATION_RADIUS;
+    const dy = (Math.floor(index / side) % side) - FORMATION_RADIUS;
+    const dz = Math.floor(index / side ** 2) - FORMATION_RADIUS;
+    if (dx * dx + dy * dy + dz * dz <= FORMATION_RADIUS * FORMATION_RADIUS) cells.push(around.offset(dx, dy, dz));
+  }
+  return cells;
+}
+
+/** Start watching the cells within the formation radius of `around`, before the liquid lands. */
+export function watchFormations(bot: Bot, around: Vec3): FormationWatch {
+  const cells: Vec3[] = [];
+  const wet = new Set<number>();
+  for (const cell of cellsAround(around)) {
+    const block = bot.blockAt(cell);
+    if (block === null || block.boundingBox === "block") continue;
+    if (isLiquid(block)) wet.add(cells.length);
+    cells.push(cell);
+  }
+  return { cells, wet };
+}
+
+/** The solid blocks the watched cells that held liquid hold now, counted by name. Unloaded cells say nothing. */
+export function observeFormations(bot: Bot, watch: FormationWatch): Formed {
+  const formed: Record<string, number> = {};
+  watch.cells.forEach((cell, index) => {
+    const block = bot.blockAt(cell);
+    if (block === null) return;
+    if (isLiquid(block)) watch.wet.add(index);
+    else if (block.boundingBox === "block" && watch.wet.has(index)) formed[block.name] = (formed[block.name] ?? 0) + 1;
+  });
+  return formed;
+}
+
+function sameFormed(left: Formed, right: Formed): boolean {
+  const names = Object.keys(left);
+  return names.length === Object.keys(right).length && names.every((name) => left[name] === right[name]);
 }
 
 /** Wait for a pour to stop changing the world, then count what it made. */
 export async function settledFormations(
   bot: Bot,
-  around: Vec3,
+  watch: FormationWatch,
   signal: AbortSignal | undefined,
-): Promise<LiquidFormations> {
-  let last = countFormations(bot, around);
+): Promise<Formed> {
+  let last = observeFormations(bot, watch);
   let stableTicks = 0;
   for (let tick = 0; tick < SPREAD_TIMEOUT_TICKS && stableTicks < SPREAD_SETTLED_TICKS; tick += 1) {
     await bot.waitForTicks(1);
     signal?.throwIfAborted();
-    const next = countFormations(bot, around);
-    stableTicks = next.obsidian === last.obsidian && next.cobblestone === last.cobblestone ? stableTicks + 1 : 0;
+    const next = observeFormations(bot, watch);
+    stableTicks = sameFormed(next, last) ? stableTicks + 1 : 0;
     last = next;
   }
   return last;

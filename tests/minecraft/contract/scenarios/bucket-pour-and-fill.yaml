@@ -1,0 +1,41 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-bucket-pour-and-fill
+tags:
+  - contract
+description: A bucket used acts on what the look meets within the block reach of 4.5 blocks. A water bucket pours a
+  source into the cell above the face it meets (in front of a side face) and becomes an empty bucket; an empty bucket
+  facing a water source takes it and becomes a water bucket (in the first free hotbar slot when the stack holds more
+  than one); the sky and ground out of reach change nothing. Contract check
+  tests/minecraft/contract/checks/bucket-pour-and-fill.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: bucket-pour-and-fill
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -3 -60 0 stone
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: water_bucket
+        count: 1
+      - item: bucket
+        count: 2
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

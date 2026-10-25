@@ -1,0 +1,63 @@
+template: ../../templates/flat-single-action.yaml
+
+name: smelt-in-deep-water
+tags: [regression]
+description: >-
+  Live run 15 (2026-10-18): bots that smelted standing in water two blocks deep sank with their eyes under water, the
+  breath reflex cancelled the smelt at air 12, the model asked again and the loop repeated (one bot smelted sand five
+  times in three minutes). The bot stands on the floor of a sunken pool two blocks deep (eyes under water) beside a
+  furnace on the pool floor and smelts six sand: while the action works with nothing steering the body, the runtime must
+  float it up and keep it breathing, so the smelt finishes uninterrupted at full health. Then a navigate to the dry bank
+  starts from where the body floats.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -62 -8 14 -50 8 air"
+
+geometry:
+  # The ground the flat world has: grass at y -61 over dirt; the bank is where the actor ends up.
+  - fill: { block: grass_block, from: [-8, -61, -8], to: [14, -61, 8] }
+  - fill: { block: dirt, from: [-8, -62, -8], to: [14, -62, 8] }
+  # A one-block kerb keeps the water in the pool.
+  - fill: { block: stone, from: [-5, -60, -5], to: [5, -60, 5] }
+  # The pool: two blocks of water over its floor at y -62.
+  - fill: { block: water, from: [-4, -61, -4], to: [4, -60, 4] }
+  # The furnace on the pool floor: the smelt names it, so the bot has no reason to leave the water.
+  - fill: { block: furnace, from: [2, -61, 0], to: [2, -61, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -61, 0.5]
+    inventory:
+      - { item: sand, count: 6 }
+      - { item: coal, count: 2 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/smelt-then-navigate.ts
+
+params:
+  smelt: { x: 2, y: -61, z: 0, item_name: sand, count: 6, fuel_item_name: coal }
+  produced: 6
+  navigate: { x: 9, y: -60, z: 0, range: 1 }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - { kind: hasItem, who: Actor, item: glass, count: 6 }
+    - { kind: health, who: Actor, health: 20 }
+    - { kind: reach, who: Actor, pos: [9.5, -60, 0.5], radius: 2 }
+    - { kind: completion, who: Actor }

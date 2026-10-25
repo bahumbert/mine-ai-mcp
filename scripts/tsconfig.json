@@ -1,0 +1,12 @@
+{
+  // Repository scripts run under Bun (`Bun.spawnSync`, `bun:test`), so they get Bun's types besides Node's.
+  "extends": "../tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun"],
+    "rootDir": "..",
+    "baseUrl": ".."
+  },
+  "include": ["**/*.ts"]
+}

@@ -1,0 +1,95 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-lava-over-passable
+tags:
+  - contract
+description: What lava does over blocks it cannot pour into. A lava source in the cell above sugar cane (on dirt, water
+  beside it), a nether portal block (inside its obsidian frame), a structure void and air (the control), each walled in
+  stone so the lava can only move down; the cells are read after two lava steps (79 observed ticks). Contract check
+  tests/minecraft/contract/checks/lava-over-passable.ts, waits for the fake's lava answer (T7e5b) before it runs on the
+  fake bot; setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: lava-over-passable
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -5 -60 -4 stone
+  - setblock -3 -60 -4 stone
+  - setblock -4 -60 -5 stone
+  - setblock -4 -60 -3 stone
+  - setblock -5 -59 -4 stone
+  - setblock -3 -59 -4 stone
+  - setblock -4 -59 -5 stone
+  - setblock -4 -59 -3 stone
+  - setblock -5 -60 4 stone
+  - setblock -3 -60 4 stone
+  - setblock -4 -60 3 stone
+  - setblock -4 -60 5 stone
+  - setblock -5 -59 4 stone
+  - setblock -3 -59 4 stone
+  - setblock -4 -59 3 stone
+  - setblock -4 -59 5 stone
+  - setblock 3 -59 -4 stone
+  - setblock 5 -59 -4 stone
+  - setblock 4 -59 -5 stone
+  - setblock 4 -59 -3 stone
+  - setblock 3 -58 -4 stone
+  - setblock 5 -58 -4 stone
+  - setblock 4 -58 -5 stone
+  - setblock 4 -58 -3 stone
+  - setblock 6 -60 -4 stone
+  - setblock 5 -60 -5 stone
+  - setblock 5 -60 -3 stone
+  - setblock 1 -57 4 stone
+  - setblock 2 -57 3 stone
+  - setblock 2 -57 5 stone
+  - setblock 2 -60 3 stone
+  - setblock 2 -60 5 stone
+  - setblock 2 -59 3 stone
+  - setblock 2 -59 5 stone
+  - setblock 2 -58 3 stone
+  - setblock 2 -58 5 stone
+  - setblock 3 -60 3 stone
+  - setblock 3 -60 5 stone
+  - setblock 3 -59 3 stone
+  - setblock 3 -59 5 stone
+  - setblock 3 -58 3 stone
+  - setblock 3 -58 5 stone
+  - setblock 2 -61 4 obsidian
+  - setblock 3 -61 4 obsidian
+  - setblock 2 -57 4 obsidian
+  - setblock 3 -57 4 obsidian
+  - setblock 1 -60 4 obsidian
+  - setblock 4 -60 4 obsidian
+  - setblock 1 -59 4 obsidian
+  - setblock 4 -59 4 obsidian
+  - setblock 1 -58 4 obsidian
+  - setblock 4 -58 4 obsidian
+  - setblock 2 -60 4 nether_portal[axis=x]
+  - setblock 2 -59 4 nether_portal[axis=x]
+  - setblock 2 -58 4 nether_portal[axis=x]
+  - setblock 3 -60 4 nether_portal[axis=x]
+  - setblock 3 -59 4 nether_portal[axis=x]
+  - setblock 3 -58 4 nether_portal[axis=x]
+  - setblock 4 -60 -4 dirt
+  - setblock 5 -60 -4 water
+  - setblock 4 -59 -4 sugar_cane
+  - setblock -4 -60 4 structure_void
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

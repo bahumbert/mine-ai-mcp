@@ -10,7 +10,7 @@ import type { BotSnapshot, NearbyMob } from "./runtime-client.ts";
 const MULTIPLIERS: FeelingMultipliers = { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 };
 
 const snapshot = (mobs: readonly NearbyMob[] = []): BotSnapshot => ({
-  position: { x: 0, y: 64, z: 0 }, health: 20, food: 20, inventory: [], foods: [], mobs, players: [], policy: null,
+  position: { x: 0, y: 64, z: 0 }, dimension: "minecraft:overworld", health: 20, food: 20, inventory: [], foods: [], mobs, players: [], policy: null,
 });
 const cow: NearbyMob = { name: "cow", hostile: false, count: 2, distance: 8 };
 const zombie: NearbyMob = { name: "zombie", hostile: true, count: 1, distance: 12 };

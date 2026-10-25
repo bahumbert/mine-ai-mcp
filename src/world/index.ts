@@ -1,6 +1,8 @@
 export * from "./block-classification.js";
 export * from "./block-visibility.js";
+export * from "./buckets.js";
 export * from "./chunks.js";
+export * from "./containers.js";
 export * from "./daylight.js";
 export * from "./enchantments.js";
 export * from "./inventory-count.js";
@@ -9,4 +11,5 @@ export * from "./liquid.js";
 export * from "./placement-candidates.js";
 export * from "./placement.js";
 export * from "./nearby-placement.js";
+export * from "./own-placement.js";
 export * from "./loaded-block-scan.js";

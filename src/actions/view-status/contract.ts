@@ -228,6 +228,10 @@ export const liveSituationSchema = z.strictObject({
     sleeping: z.boolean(),
     raining: z.boolean(),
   }),
+  vehicle: z
+    .strictObject({ name: z.string().min(1), id: z.number().int() })
+    .nullable()
+    .describe("The vehicle the bot sits in (boat, minecart, horse...) from the client view; null on foot."),
   position: z.strictObject({
     x: z.number(),
     y: z.number(),

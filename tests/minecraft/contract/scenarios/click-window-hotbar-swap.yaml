@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-click-window-hotbar-swap
+tags:
+  - contract
+description: A number-key click swaps the clicked slot with the hotbar slot and the server, which makes the same swap,
+  sends nothing back; a click with a state id the server does not hold gets the whole window. Contract check
+  tests/minecraft/contract/checks/click-window-hotbar-swap.ts, also run on the fake bot (bot-contract.test.ts); setup
+  from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: click-window-hotbar-swap
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: cobblestone
+        count: 3
+      - item: dirt
+        count: 3
+      - item: torch
+        count: 3
+      - item: stick
+        count: 3
+      - item: oak_planks
+        count: 3
+      - item: bread
+        count: 3
+      - item: apple
+        count: 3
+      - item: coal
+        count: 3
+      - item: iron_ingot
+        count: 3
+      - item: gold_ingot
+        count: 3
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

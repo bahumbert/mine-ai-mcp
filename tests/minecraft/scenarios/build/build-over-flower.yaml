@@ -1,0 +1,38 @@
+template: ../../templates/flat-single-action.yaml
+
+name: build-over-flower
+tags: [regression]
+description: >-
+  A flower is not a replaceable plant (the game's replaceable block tag holds grass and ferns, not flowers), so a block
+  placed into its cell is refused by the server. A wall of three cobblestone blocks is asked over a cell holding a poppy
+  and a cell holding short grass. With remove_wrong_blocks the builder digs the poppy first and places there, and
+  places into the grass cell directly: all three cobblestone stand, the poppy is gone.
+
+geometry:
+  - fill: { block: stone, from: [-12, -60, -12], to: [16, -60, 12] }
+  - fill: { block: grass_block, from: [-1, -60, 4], to: [1, -60, 4] }
+  - fill: { block: poppy, from: [0, -59, 4], to: [0, -59, 4] }
+  - fill: { block: short_grass, from: [1, -59, 4], to: [1, -59, 4] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: cobblestone, count: 8 }
+
+params:
+  action: build_structure
+  expect: { status: succeeded }
+  input:
+    remove_wrong_blocks: true
+    blocks:
+      - { x: -1, y: -59, z: 4, block_name: cobblestone }
+      - { x: 0, y: -59, z: 4, block_name: cobblestone }
+      - { x: 1, y: -59, z: 4, block_name: cobblestone }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: blocksAt, block: cobblestone, positions: [[-1, -59, 4], [0, -59, 4], [1, -59, 4]] }

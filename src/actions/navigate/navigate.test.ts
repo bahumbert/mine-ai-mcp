@@ -3,49 +3,45 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import type { Bot } from "mineflayer";
-import { Vec3 } from "vec3";
 import { createMovements, type NavigationResult } from "../../navigation/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
-import { createNavigateAction, formatNavigateResult, type NavigateDependencies } from "./navigate.js";
-import { EventEmitter } from "node:events";
-import minecraftData from "minecraft-data";
+import { createNavigateAction, formatNavigateResult, navigate, toolLossObserverOf, type NavigateDependencies } from "./navigate.js";
+import { createFakeBot, createFakeClock, type FakeBotOptions, type FakeCell } from "../../test-support/fake-bot/index.js";
 
 const goalTestWorld = new GoalTestWorld();
 
-/** A bot on flat ground whose standing cells are at `groundY`: solid below, air from there up. */
-function botFixture(groundY = 64) {
-  const inventory = new Map<string, number>([
-    ["dirt", 4],
-    ["cobblestone", 11],
-  ]);
-  const bot = Object.assign(new EventEmitter(), {
-    blockAt: (cell: Vec3) =>
-      cell.y < groundY
-        ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-        : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) },
-    entity: { position: new Vec3(0.5, 64, 0.5), vehicle: null },
-    game: { dimension: "overworld", minY: -64, height: 384 },
-    pathfinder: { movements: {}, setGoal: () => {} },
-    clearControlStates: () => {},
-    deactivateItem: () => {},
-    currentWindow: null,
-    isSleeping: false,
-    dismount: () => {},
-    wake: async () => {},
-    registry: {
-      itemsByName: {
-        dirt: { id: 1 },
-        cobblestone: { id: 2 },
-      },
-    },
-    inventory: {
-      items: () => [...inventory].map(([name, count]) => ({ name, count })),
-      count: (itemId: number) => inventory.get(itemId === 1 ? "dirt" : itemId === 2 ? "cobblestone" : "") ?? 0,
-    },
-  }) as unknown as Bot;
-  return { bot, inventory };
+/** Every cell of the box from `from` to `to` (corners included) holding `block`. */
+function cellsIn(from: readonly [number, number, number], to: readonly [number, number, number], block: FakeCell): Record<string, FakeCell> {
+  const cells: Record<string, FakeCell> = {};
+  for (let x = from[0]; x <= to[0]; x++) for (let y = from[1]; y <= to[1]; y++) for (let z = from[2]; z <= to[2]; z++) cells[`${x},${y},${z}`] = block;
+  return cells;
+}
+
+interface Scene {
+  readonly cells?: Record<string, FakeCell>;
+  /** Item name to count; 4 dirt and 11 cobblestone when neither this nor `slots` is given. */
+  readonly carried?: Record<string, number>;
+  readonly slots?: FakeBotOptions["slots"];
+  readonly clock?: FakeBotOptions["clock"];
+}
+
+/** A bot at (0.5, 64, 0.5) on flat ground whose standing cells are at `groundY`: stone below, air from there up. */
+function flatGroundBot(groundY = 64, scene: Scene = {}) {
+  const harness = createFakeBot({
+    groundY: groundY - 1,
+    cells: scene.cells,
+    carried: scene.carried ?? (scene.slots === undefined ? { dirt: 4, cobblestone: 11 } : undefined),
+    slots: scene.slots,
+    clock: scene.clock,
+  });
+  /** Lower the count of `name` carried to `count`, as a route that placed some leaves it. */
+  const useUntil = (name: string, count: number) => {
+    const type = harness.bot.registry.itemsByName[name]!.id;
+    harness.inventory.toss(type, harness.inventory.count(type, null) - count);
+  };
+  return { ...harness, useUntil };
 }
 
 function dependencies(
@@ -64,18 +60,12 @@ function dependencies(
 const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
 
 test("dig navigation safely settles partial when its best pickaxe capability drops", async () => {
-  const { bot } = botFixture();
-  const items = [
-    { name: "diamond_pickaxe", count: 1, slot: 36, maxDurability: 1561, durabilityUsed: 1560 },
-    { name: "stone_pickaxe", count: 1, slot: 9, maxDurability: 131, durabilityUsed: 0 },
-  ];
-  bot.registry = minecraftData("1.21.4") as never;
-  const inventoryEvents = Object.assign(new EventEmitter(), { items: () => items, count: () => 0 });
-  bot.inventory = inventoryEvents as never;
+  const { bot, inventory } = flatGroundBot(64, { slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "stone_pickaxe" } } });
+  inventory.slots[36]!.durabilityUsed = 1560;
   const run: NavigateDependencies["navigate"] = async ({ stopSignal, onToolSelected }) => {
     onToolSelected?.(bot.registry.itemsByName.diamond_pickaxe!.id);
-    items.shift();
-    inventoryEvents.emit("updateSlot", 36, null);
+    // The last use broke it: the server empties its slot.
+    inventory.tossStack(inventory.slots[36]!);
     await Promise.resolve();
     assert.equal(stopSignal?.aborted, true);
     return { status: "stopped", reason: String(stopSignal?.reason), elapsedMs: 1 };
@@ -91,11 +81,7 @@ test("dig navigation safely settles partial when its best pickaxe capability dro
 });
 
 test("a midwater arrival records current completion without claiming grounded footing", async () => {
-  const { bot } = botFixture(59);
-  const dry = bot.blockAt;
-  bot.blockAt = ((cell: Vec3) => cell.y >= 59 && cell.y <= 63
-    ? { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({ level: 0 }) }
-    : dry(cell)) as Bot["blockAt"];
+  const { bot } = flatGroundBot(59, { cells: cellsIn([-8, 59, -8], [12, 63, 8], "water") });
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
     bot.entity.position.set(3.5, 61.2, 0.5);
     bot.entity.onGround = false;
@@ -107,7 +93,7 @@ test("a midwater arrival records current completion without claiming grounded fo
 });
 
 test("resumed navigation retains the request origin and stocks and sums only route elapsed time", async () => {
-  const { bot, inventory } = botFixture();
+  const { bot, useUntil } = flatGroundBot();
   let entered!: () => void;
   const started = new Promise<void>((resolve) => {
     entered = resolve;
@@ -120,13 +106,13 @@ test("resumed navigation retains the request origin and stocks and sums only rou
       attempts++;
       if (attempts === 1) {
         bot.entity.position.set(2.5, 64, 0.5);
-        inventory.set("cobblestone", 8);
+        useUntil("cobblestone", 8);
         entered();
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
         return { status: "stopped", reason: "reflex", elapsedMs: 100 };
       }
       bot.entity.position.set(4.5, 64, 0.5);
-      inventory.set("cobblestone", 6);
+      useUntil("cobblestone", 6);
       return { status: "completed", elapsedMs: 200 };
     }),
   );
@@ -151,12 +137,7 @@ test("resumed navigation retains the request origin and stocks and sums only rou
 });
 
 test("a soul-sand destination is supported and its fractional physical height satisfies the exact node receipt", async () => {
-  const { bot } = botFixture();
-  const blockAt = bot.blockAt;
-  bot.blockAt = ((cell: Vec3) =>
-    cell.y === 63
-      ? { name: "soul_sand", boundingBox: "block", shapes: [[0, 0, 0, 1, 0.875, 1]], getProperties: () => ({}) }
-      : blockAt(cell)) as Bot["blockAt"];
+  const { bot } = flatGroundBot(64, { cells: cellsIn([-8, 63, -8], [12, 63, 8], "soul_sand") });
   const run: NavigateDependencies["navigate"] = async () => {
     bot.entity.position.set(3.5, 63.875, 0.5);
     bot.entity.onGround = true;
@@ -173,7 +154,7 @@ test("a soul-sand destination is supported and its fractional physical height sa
 });
 
 test("surface navigation cannot succeed on a cave floor 122 blocks below the target", async () => {
-  const { bot } = botFixture(71);
+  const { bot } = flatGroundBot(71);
   bot.entity.position.set(-120, -55, 30);
   const run: NavigateDependencies["navigate"] = async ({ goal }) => {
     const resolved = goal.resolve(undefined as never);
@@ -199,12 +180,7 @@ test("surface navigation cannot succeed on a cave floor 122 blocks below the tar
 
 test("omitted height refuses a canopy, overhang, or Nether roof instead of choosing its top", async () => {
   for (const roof of ["oak_leaves", "stone", "bedrock"]) {
-    const { bot } = botFixture(64);
-    const blockAt = bot.blockAt;
-    bot.blockAt = ((cell: Vec3) =>
-      cell.y === 70
-        ? { name: roof, boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-        : blockAt(cell)) as Bot["blockAt"];
+    const { bot } = flatGroundBot(64, { cells: cellsIn([-8, 70, -8], [12, 70, 8], roof) });
     if (roof === "bedrock") bot.game.dimension = "the_nether";
     const run: NavigateDependencies["navigate"] = async ({ goal }) => {
       const resolved = goal.resolve(undefined as never);
@@ -224,12 +200,7 @@ test("omitted height refuses a canopy, overhang, or Nether roof instead of choos
 
 test("with near_y, a column under a canopy resolves to the floor nearest that height in one call", async () => {
   // Live 2026-10-07: each explore leg under trees was refused, then asked again with y (two calls, one shown failed).
-  const { bot } = botFixture(64);
-  const blockAt = bot.blockAt;
-  bot.blockAt = ((cell: Vec3) =>
-    cell.y === 70
-      ? { name: "oak_leaves", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-      : blockAt(cell)) as Bot["blockAt"];
+  const { bot } = flatGroundBot(64, { cells: cellsIn([-8, 70, -8], [12, 70, 8], "oak_leaves") });
   const run: NavigateDependencies["navigate"] = async ({ goal }) => {
     const resolved = goal.resolve(undefined as never);
     assert.equal(resolved.kind, "active");
@@ -280,11 +251,11 @@ test("parses one absolute destination and defaults its reached range", () => {
 });
 
 test("uses standard movements without an arbitrary route timeout and verifies the final position", async () => {
-  const { bot, inventory } = botFixture();
+  const { bot, useUntil } = flatGroundBot();
   const run: NavigateDependencies["navigate"] = async (options): Promise<NavigationResult> => {
     assert.equal("timeoutMs" in options, false);
     assert.equal(Reflect.get(options.movements, "name"), "standard");
-    inventory.set("cobblestone", 0);
+    useUntil("cobblestone", 0);
     bot.entity.position.set(9.5, 64, 0.5);
     return { status: "completed", elapsedMs: 31_000 };
   };
@@ -312,7 +283,7 @@ test("uses standard movements without an arbitrary route timeout and verifies th
 });
 
 test("uses the same feet-block distance as Pathfinder when verifying completion", async () => {
-  const { bot } = botFixture(-59);
+  const { bot } = flatGroundBot(-59);
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
     // This is the real regression: entity-centre distance is 2.55, while the
     // final Pathfinder node (2, -59, 8) validly satisfies GoalNear range 2.
@@ -336,7 +307,7 @@ test("uses the same feet-block distance as Pathfinder when verifying completion"
 });
 
 test("reports a Pathfinder stop with the observed partial route", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   const run: NavigateDependencies["navigate"] = async (routeBot) => {
     bot.entity.position.set(4, 64, 0);
     return { status: "stopped", reason: "No path to the goal", elapsedMs: 200 };
@@ -356,7 +327,7 @@ test("reports a Pathfinder stop with the observed partial route", async () => {
 });
 
 test("keeps caller cancellation as a runtime outcome", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   const controller = new AbortController();
   const run: NavigateDependencies["navigate"] = async () => {
     controller.abort("stop navigation");
@@ -372,7 +343,7 @@ test("keeps caller cancellation as a runtime outcome", async () => {
 });
 
 test("an unexpected dimension change on an ordinary route still fails without a cross-world distance", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   const run: NavigateDependencies["navigate"] = async () => {
     bot.game.dimension = "the_end";
     bot.entity.position.set(100.5, 49, 0.5);
@@ -417,7 +388,7 @@ test("formats the observed route rather than only its status", () => {
 });
 
 test("omitting y resolves the surface height and measures arrival in three dimensions", async () => {
-  const { bot } = botFixture(71);
+  const { bot } = flatGroundBot(71);
   let goalName = "";
   const run: NavigateDependencies["navigate"] = async (options): Promise<NavigationResult> => {
     goalName =
@@ -440,7 +411,7 @@ test("omitting y resolves the surface height and measures arrival in three dimen
 });
 
 test("dig=false and scaffold=false reach the movement policy", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   const movementOptions: unknown[] = [];
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
     bot.entity.position.set(10.5, 64, 0.5);
@@ -455,7 +426,7 @@ test("dig=false and scaffold=false reach the movement policy", async () => {
 });
 
 test("refuses a mid-air target instead of building up to it, and names the ground", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   let navigated = false;
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
     navigated = true;
@@ -476,7 +447,7 @@ test("refuses a mid-air target instead of building up to it, and names the groun
 });
 
 test("a nearby unsupported explicit height is refused without substituting the ground in its receipt", async () => {
-  const { bot } = botFixture(62);
+  const { bot } = flatGroundBot(62);
   bot.entity.position.set(29.5, 62, -46.5);
   let navigated = false;
   const output = await new ActionRunner().run(
@@ -501,7 +472,7 @@ test("a nearby unsupported explicit height is refused without substituting the g
 });
 
 test("build: true accepts a mid-air target on purpose and routes to it", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   let navigated = false;
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
     navigated = true;
@@ -518,7 +489,7 @@ test("build: true accepts a mid-air target on purpose and routes to it", async (
 });
 
 test("a supported target inside solid terrain is left to excavation policy", async () => {
-  const { bot } = botFixture();
+  const { bot } = flatGroundBot();
   let navigated = false;
   const run: NavigateDependencies["navigate"] = async () => {
     navigated = true;
@@ -534,13 +505,7 @@ test("a supported target inside solid terrain is left to excavation policy", asy
 });
 
 test("a target on a ledge within range is a place the bot can be", async () => {
-  const { bot } = botFixture();
-  const ledge = new Vec3(120, 96, -36);
-  const world = bot.blockAt;
-  bot.blockAt = ((cell: Vec3) =>
-    cell.equals(ledge)
-      ? { name: "dirt", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-      : world(cell)) as Bot["blockAt"];
+  const { bot } = flatGroundBot(64, { cells: { "120,96,-36": "dirt" } });
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
     bot.entity.position.set(120.5, 97, -35.5);
     return { status: "completed", elapsedMs: 5 };
@@ -554,14 +519,8 @@ test("a target on a ledge within range is a place the bot can be", async () => {
 });
 
 test("a route stopped at the shore of deep open water, with no boat carried, says the way crosses it", async () => {
-  const { bot } = botFixture();
   // Sea from x 10 to 40 (water y 50 to 63, its surface at 63); stone up to 63 elsewhere.
-  bot.blockAt = ((cell: Vec3) => {
-    if (cell.x >= 10 && cell.x <= 40 && cell.y >= 50 && cell.y <= 63) return { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
-    return cell.y < 64
-      ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-      : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
-  }) as unknown as Bot["blockAt"];
+  const { bot } = flatGroundBot(64, { cells: seaCells(10, 40) });
   const action = createNavigateAction(
     bot,
     fakeNavigation,
@@ -579,19 +538,14 @@ test("a route stopped at the shore of deep open water, with no boat carried, say
 });
 
 test("a route with no path is planned once more with the common block the bot carries when the policy list holds none", async () => {
-  const { bot } = botFixture();
-  const registry = minecraftData("1.21.4");
-  const stone = { name: "stone", count: 80, type: registry.itemsByName.stone!.id };
-  bot.registry = registry as never;
-  (bot as { version: string }).version = "1.21.4";
-  bot.inventory = { items: () => [stone], count: (type: number) => (type === stone.type ? stone.count : 0) } as never;
+  const { bot, useUntil } = flatGroundBot(64, { carried: { stone: 80 } });
   const movementOptions: unknown[] = [];
   let attempts = 0;
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
     attempts++;
     if (attempts === 1) return { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true };
     bot.entity.position.set(5.5, 64, 0.5);
-    stone.count = 74;
+    useUntil("stone", 74);
     return { status: "completed", elapsedMs: 1 };
   }, movementOptions));
   const output = await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1 });
@@ -601,11 +555,7 @@ test("a route with no path is planned once more with the common block the bot ca
 });
 
 test("a route with no path is not replanned with a fallback when the policy list already holds a scaffold block", async () => {
-  const { bot } = botFixture();
-  const registry = minecraftData("1.21.4");
-  const carried = [{ name: "dirt", count: 4, type: registry.itemsByName.dirt!.id }, { name: "stone", count: 80, type: registry.itemsByName.stone!.id }];
-  bot.registry = registry as never;
-  bot.inventory = { items: () => carried, count: () => 0 } as never;
+  const { bot } = flatGroundBot(64, { carried: { dirt: 4, stone: 80 } });
   const movementOptions: unknown[] = [];
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => (
     { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true }
@@ -614,17 +564,19 @@ test("a route with no path is not replanned with a fallback when the policy list
   assert.equal(movementOptions.length, 1);
 });
 
+/**
+ * Water from y 50 to its surface at 63, from x `seaFrom` to `seaTo`, across the lane z -8 to 8 the routes here keep to.
+ * The lane's side land (z ±9) lies just past the shore search (`SHORE_SEARCH_RADIUS` 8, `target-ground.ts`): widen it with that radius.
+ */
+function seaCells(seaFrom: number, seaTo: number, extra: Record<string, FakeCell> = {}): Record<string, FakeCell> {
+  return { ...cellsIn([seaFrom, 50, -8], [seaTo, 63, 8], "water"), ...extra };
+}
+
 /** A wide sea (water y 50 to 63, surface 63) from x -30 to 9, land (stone up to 63) beyond it on both sides. */
-function wideSeaBot(seaFrom = -30, seaTo = 9) {
-  const { bot, inventory } = botFixture();
-  bot.blockAt = ((cell: Vec3) => {
-    if (cell.x >= seaFrom && cell.x <= seaTo && cell.y >= 50 && cell.y <= 63) return { name: "water", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
-    return cell.y < 64
-      ? { name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], getProperties: () => ({}) }
-      : { name: "air", boundingBox: "empty", shapes: [], getProperties: () => ({}) };
-  }) as unknown as Bot["blockAt"];
-  bot.entity.position.set(0.5, 63, 0.5);
-  return { bot, inventory };
+function wideSeaBot(seaFrom = -30, seaTo = 9, scene: Scene = {}) {
+  const harness = flatGroundBot(64, { ...scene, cells: seaCells(seaFrom, seaTo, scene.cells) });
+  harness.bot.entity.position.set(0.5, 63, 0.5);
+  return harness;
 }
 
 test("at sea with no boat the bot swims to the nearest land first, then the deep-water guard refuses the crossing", async () => {
@@ -648,29 +600,149 @@ test("at sea with no boat the bot swims to the nearest land first, then the deep
   assert.match(error, /swam to land at 10, 64, 0 first/u);
 });
 
-test("at sea with no land within the search range the route goes as before", async () => {
+/** A kelp column in the sea at x, z, from the floor to the surface (run 16, Yuki: kelp beside her at sea). */
+function kelpColumn(x: number, z: number): Record<string, FakeCell> {
+  return { ...cellsIn([x, 50, z], [x, 62, z], "kelp_plant"), [`${x},63,${z}`]: "kelp" };
+}
+
+test("a kelp column beside a bot at sea is not land: the swim goes to the real shore", async () => {
+  const { bot } = wideSeaBot(-30, 9, { cells: kelpColumn(1, 0) });
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.set(10.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 5 };
+    }
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.match("error" in output.result ? String(output.result.error) : "", /swam to land at 10, 64, 0 first/u);
+});
+
+test("a target column topped by kelp resolves to the shore, not to the sea floor under the kelp", async () => {
+  const { bot } = wideSeaBot(-30, 9, { cells: kelpColumn(3, 0) });
+  bot.entity.position.set(20.5, 64, 0.5);
+  let revision = "";
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async (options) => {
+    const resolved = options.goal.resolve(undefined as never);
+    revision = resolved.kind === "active" ? resolved.revision : resolved.observation;
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  await new ActionRunner().run(action, { x: 3, z: 0 });
+  assert.match(revision, /^near:10,64,0/u);
+});
+
+test("a target on the top of a kelp column is admitted water, not a mid-air target", async () => {
+  const { bot } = wideSeaBot(-30, 9, { cells: kelpColumn(3, 0) });
+  bot.entity.position.set(20.5, 64, 0.5);
+  let routes = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    routes++;
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: 3, y: 63, z: 0, range: 0 });
+  assert.doesNotMatch("error" in output.result ? String(output.result.error) : "", /NAVIGATION_TARGET_UNSUPPORTED/u);
+  assert.equal(routes, 1);
+});
+
+test("from a seagrass shallow, the next navigate goes straight to dry land: no swim to land first", async () => {
+  const { bot } = flatGroundBot(64, { cells: { "0,64,0": "seagrass" } });
+  let routes = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    routes++;
+    bot.entity.position.set(10.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: 10, y: 64, z: 0 });
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(routes, 1);
+});
+
+test("from a sandbar one deep in the sea, with no boat, the bot swims to the nearest land first (reef start, owner 2026-10-19)", async () => {
+  const { bot } = wideSeaBot(-30, 9, { cells: cellsIn([0, 50, 0], [0, 62, 0], "stone") });
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.set(10.5, 64, 0.5);
+      return { status: "completed", elapsedMs: 5 };
+    }
+    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.equal(calls, 2);
+  assert.match("error" in output.result ? String(output.result.error) : "", /swam to land at 10, 64, 0 first/u);
+});
+
+test("at sea with no land found by the land search the asked route runs next, with no swim budget (the leg is a search, W7)", async () => {
   const { bot } = wideSeaBot(-200, 200);
   let calls = 0;
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
     calls++;
-    return { status: "stopped", reason: "no path found", elapsedMs: 5 };
+    return { status: "stopped", reason: "no path found", calculationFailed: true, elapsedMs: 5 };
   }));
   const output = await new ActionRunner().run(action, { x: -300, y: 64, z: 0 });
-  assert.equal(calls, 1);
+  assert.equal(calls, 2, "the land search, then the asked route");
   assert.equal(output.result.status, "failed");
-  assert.doesNotMatch("error" in output.result ? String(output.result.error) : "", /swam to land/u);
+  assert.doesNotMatch("error" in output.result ? String(output.result.error) : "", /swam to land|swim to land first/u);
+});
+
+test("a land leg that fails on the way still tries the asked route, and the failure names both (backlog 50)", async () => {
+  const { bot } = wideSeaBot();
+  const revisions: string[] = [];
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ goal }) => {
+    const resolved = goal.resolve(undefined as never);
+    revisions.push(resolved.kind === "active" ? resolved.revision : "invalid");
+    return revisions.length === 1
+      ? { status: "stopped", reason: "the swim stalled at 3, 63, 0", routeFailed: true, elapsedMs: 5 }
+      : { status: "stopped", reason: "no path found", elapsedMs: 5 };
+  }));
+  const output = await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.equal(revisions.length, 2);
+  assert.equal(revisions[0], "dry-land");
+  assert.match("error" in output.result ? String(output.result.error) : "", /the swim to land first stopped: the swim stalled at 3, 63, 0/u);
+});
+
+test("after a failed land leg, the next navigate from the sea searches for land again", async () => {
+  const { bot } = wideSeaBot();
+  const revisions: string[] = [];
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ goal }) => {
+    const resolved = goal.resolve(undefined as never);
+    revisions.push(resolved.kind === "active" ? resolved.revision : "invalid");
+    return { status: "stopped", reason: "the swim stalled", routeFailed: true, elapsedMs: 5 };
+  }));
+  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
+  assert.deepEqual(revisions.filter((revision) => revision === "dry-land").length, 2);
+});
+
+test("a cancel while a stopped route is judged ends the navigate with the cancel, not a stopped result (ACT-09)", async () => {
+  const { bot } = flatGroundBot(64);
+  const controller = new AbortController();
+  const deps = dependencies(async () => {
+    controller.abort(new Error("cancelled by the runner"));
+    return { status: "stopped", reason: "cancelled", elapsedMs: 0 };
+  });
+  await assert.rejects(
+    navigate(bot, parseNavigateRequest({ x: 10, y: 64, z: 0, dig: true }), { signal: controller.signal } as never, deps),
+    /cancelled by the runner/,
+  );
 });
 
 test("at sea with a boat carried the route is unchanged: no land leg", async () => {
-  const { bot } = wideSeaBot();
-  (bot.inventory as { items: () => unknown }).items = () => [{ name: "oak_boat", count: 1 }];
-  let calls = 0;
+  // The boat is put down, ridden and taken back on the shared fake's server (the crossing waits on the wall clock: a mocked one).
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot } = wideSeaBot(-30, 9, { carried: { oak_boat: 1 }, clock });
+  const startedAtX: number[] = [];
   const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
-    calls++;
+    startedAtX.push(bot.entity.position.x);
     return { status: "stopped", reason: "no path found", elapsedMs: 5 };
   }));
-  await new ActionRunner().run(action, { x: -60, y: 64, z: 0 });
-  assert.equal(calls, 1);
+  await clock.settle(new ActionRunner().run(action, { x: -60, y: 64, z: 0 }), 120_000);
+  assert.equal(startedAtX[0], 0.5, "the first leg starts where she is: no swim to land first");
+  assert.ok(startedAtX.length > 1 && startedAtX.at(-1)! < -28, "the boat took her over the sea, and the planner went on from the far bank");
 });
 
 test("a bot on land is not sent to land first", async () => {
@@ -686,8 +758,8 @@ test("a bot on land is not sent to land first", async () => {
 });
 
 /** A sea from x 0 to `seaTo` (water y 50 to 63), land either side; the bot on the west shore. */
-function swimBot(seaTo = 60) {
-  const { bot } = wideSeaBot(0, seaTo);
+function swimBot(seaTo = 60, scene: Scene = {}) {
+  const { bot } = wideSeaBot(0, seaTo, scene);
   bot.entity.position.set(-5.5, 64, 0.5);
   return bot;
 }
@@ -729,23 +801,70 @@ test("a swim of 20 blocks through deep water is within the budget", async () => 
 });
 
 test("the swim budget does not apply with a boat carried", async () => {
-  const bot = swimBot();
-  (bot.inventory as { items: () => unknown }).items = () => [{ name: "oak_boat", count: 1 }];
+  const bot = swimBot(60, { carried: { oak_boat: 1 } });
   const { navigate, walk } = swimming(bot, 40);
   await new ActionRunner().run(createNavigateAction(bot, fakeNavigation, dependencies(navigate)), { x: 80, y: 64, z: 0 });
   assert.equal(walk.stoppedAt, null);
 });
 
 test("the swim to land and a swim with no land in reach are not stopped by the budget", async () => {
-  // Land leg: the nearest land is 40 blocks of sea away on the west side.
-  const near = wideSeaBot(-39, 60);
+  // Land leg: land 40 blocks east; the leg's search swims there with no budget, and the asked route goes on from land.
+  const near = wideSeaBot(-39, 39);
   near.bot.entity.position.set(0.5, 63, 0.5);
-  const leg = swimming(near.bot, 40);
+  const leg = swimming(near.bot, 40, 39);
   await new ActionRunner().run(createNavigateAction(near.bot, fakeNavigation, dependencies(leg.navigate)), { x: 80, y: 64, z: 0 });
   assert.equal(leg.walk.stoppedAt, null);
-  // The open sea: no land within reach, the route goes as today.
+  // The open sea: the land search finds none, and the asked route swims free, as today.
   const open = wideSeaBot(-200, 200);
   const sea = swimming(open.bot, 40);
-  await new ActionRunner().run(createNavigateAction(open.bot, fakeNavigation, dependencies(sea.navigate)), { x: 210, y: 64, z: 0 });
+  let searched = false;
+  const noLandThenSwim: NavigateDependencies["navigate"] = async (options) => {
+    if (searched) return sea.navigate(options);
+    searched = true;
+    return { status: "stopped", reason: "no path found", calculationFailed: true, elapsedMs: 5 };
+  };
+  await new ActionRunner().run(createNavigateAction(open.bot, fakeNavigation, dependencies(noLandThenSwim)), { x: 210, y: 64, z: 0 });
   assert.equal(sea.walk.stoppedAt, null);
+});
+
+test("the legs of one navigate share one tool-loss observer, whose listeners go with the call (C14)", () => {
+  const { bot } = flatGroundBot(64, { carried: {} });
+  const lifetime = new AbortController();
+  const listeners = () => bot.listenerCount("heldItemChanged");
+  const first = toolLossObserverOf(bot, lifetime.signal);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(toolLossObserverOf(bot, lifetime.signal), first);
+  assert.equal(listeners(), 1, "three legs, one observer");
+  lifetime.abort();
+  assert.equal(listeners(), 0);
+  assert.notEqual(toolLossObserverOf(bot, new AbortController().signal), first, "another call has its own");
+});
+
+/** A settled route out of a pocket whose evidence names the rules it used. */
+function escapedResult(escapeRelaxed: readonly string[] | undefined): Parameters<typeof formatNavigateResult>[0] {
+  return {
+    status: "succeeded", navigation: {
+      startDimension: "overworld", endDimension: "overworld", target: { x: 0, y: 55, z: 0 }, range: 1,
+      start: { x: 0, y: 57, z: 0 }, end: { x: 0, y: 55, z: 0 }, remainingDistance: 0, elapsedMs: 10, scaffolding: [],
+      bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], escapeRelaxed,
+    },
+  } as unknown as Parameters<typeof formatNavigateResult>[0];
+}
+
+test("a route that dug down and beside flowing water to leave a pocket says both in its result text", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down", "dig_next_to_flowing_water"]));
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once and a dig next to flowing water was allowed/);
+  assert.doesNotMatch(formatNavigateResult(escapedResult(undefined)), /out of a pocket/);
+});
+
+test("a route that only dug down says nothing of flowing water", () => {
+  const text = formatNavigateResult(escapedResult(["dig_straight_down"]));
+  assert.match(text, /Dug down out of a pocket: your rule against digging straight down was set aside once\./);
+  assert.doesNotMatch(text, /flowing water/);
+});
+
+test("a route that only dug beside flowing water does not claim to have dug down", () => {
+  const text = formatNavigateResult(escapedResult(["dig_next_to_flowing_water"]));
+  assert.match(text, /Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once \(a water source and lava still refuse\)\./);
+  assert.doesNotMatch(text, /Dug down|digging straight down/);
 });

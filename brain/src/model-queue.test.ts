@@ -3,20 +3,46 @@ import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { ChatModel, ChatReply } from "./chat-model.ts";
+import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
 import { ModelQueue, startStaggered, type QueueSnapshot } from "./model-queue.ts";
 
 const REPLY: ChatReply = { text: "{}", promptTokens: null, contextTokens: null };
 
 /** A model whose calls stay open until the test settles them. */
-function controlled(name = "fake"): { model: ChatModel; settle: (index: number, error?: Error) => void; calls: () => number } {
+function controlled(name = "fake"): {
+  model: ChatModel;
+  settle: (index: number, error?: Error) => void;
+  calls: () => number;
+  /** What each call that reached the model said (its first turn), in the order they reached it. */
+  entered: string[];
+  /** Settles every call that reaches the model, including those a slot lets in meanwhile, until none is left. */
+  drain: () => Promise<void>;
+} {
   const pending: { resolve: (reply: ChatReply) => void; reject: (error: Error) => void }[] = [];
+  const entered: string[] = [];
+  let settled = 0;
   return {
-    model: { name, complete: () => new Promise<ChatReply>((resolve, reject) => pending.push({ resolve, reject })) },
+    model: {
+      name,
+      complete: (turns) => {
+        entered.push(turns[0]?.content ?? "");
+        return new Promise<ChatReply>((resolve, reject) => pending.push({ resolve, reject }));
+      },
+    },
     settle: (index, error) => (error === undefined ? pending[index]!.resolve(REPLY) : pending[index]!.reject(error)),
     calls: () => pending.length,
+    entered,
+    drain: async () => {
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (settled >= pending.length) return;
+        while (settled < pending.length) pending[settled++]!.resolve(REPLY);
+      }
+    },
   };
 }
+
+const say = (content: string): ChatTurn[] => [{ role: "user", content }];
 
 const signal = new AbortController().signal;
 
@@ -430,4 +456,129 @@ test("unknown slots run five calls at once with no wait", async () => {
   assert.equal(fake.calls(), 5);
   for (const index of [0, 1, 2, 3, 4]) fake.settle(index);
   for (const reply of await Promise.all(calls)) assert.equal(reply.waitMs, 0);
+});
+
+test("with 3 slots a 4th call reaches the model only once one of the first three ends, and the held time is not inside the call", async () => {
+  const queue = new ModelQueue({ slots: 3, file: null });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const calls = ["a", "b", "c", "d"].map((name) => model.complete(say(name), signal));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(fake.entered, ["a", "b", "c"]);
+  assert.equal(queue.inFlight(), 3, "the held one is waiting, not in flight");
+  assert.equal(queue.waiting(), 1);
+  fake.settle(1);
+  await calls[1];
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(fake.entered, ["a", "b", "c", "d"]);
+  assert.equal(queue.waiting(), 0);
+  await fake.drain();
+  await Promise.all(calls);
+  assert.equal(queue.inFlight(), 0);
+});
+
+test("held calls get the slot in the order they asked", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const calls = ["first", "second", "third", "fourth"].map((name) => model.complete(say(name), signal));
+  await fake.drain();
+  await Promise.all(calls);
+  assert.deepEqual(fake.entered, ["first", "second", "third", "fourth"]);
+});
+
+/** An abort controller that counts the listeners on its signal (a `{ once: true }` one leaves when the event fires). */
+function listenerCounted(): { abort: AbortController; listeners: () => number } {
+  const abort = new AbortController();
+  let listeners = 0;
+  const { addEventListener, removeEventListener } = abort.signal;
+  abort.signal.addEventListener = ((...args: Parameters<typeof addEventListener>) => {
+    listeners += 1;
+    if (typeof args[2] === "object" && args[2].once === true) addEventListener.call(abort.signal, args[0], () => (listeners -= 1), { once: true });
+    return addEventListener.apply(abort.signal, args);
+  }) as typeof addEventListener;
+  abort.signal.removeEventListener = ((...args: Parameters<typeof removeEventListener>) => {
+    listeners -= 1;
+    return removeEventListener.apply(abort.signal, args);
+  }) as typeof removeEventListener;
+  return { abort, listeners: () => listeners };
+}
+
+test("a held call whose signal aborts leaves the line; the next one gets the slot; no listener is left on either signal", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const running = model.complete(say("running"), signal);
+  const leaver = listenerCounted();
+  const stayer = listenerCounted();
+  const leaving = model.complete(say("leaving"), leaver.abort.signal);
+  const next = model.complete(say("next"), stayer.abort.signal);
+  assert.equal(queue.waiting(), 2);
+  const reason = new Error("stopped");
+  leaver.abort.abort(reason);
+  await assert.rejects(leaving, (error) => error === reason);
+  assert.equal(queue.waiting(), 1);
+  assert.equal(queue.inFlight(), 1, "the held one is waiting, not in flight");
+  assert.equal(leaver.listeners(), 0, "the aborted waiter's listener is gone");
+  fake.settle(0);
+  await running;
+  await fake.drain();
+  await next;
+  assert.deepEqual(fake.entered, ["running", "next"]);
+  assert.equal(stayer.listeners(), 0, "the waiter that got the slot dropped its listener");
+  assert.equal(queue.inFlight(), 0);
+});
+
+test("a held call whose signal is already aborted never reaches the model", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const running = model.complete(say("running"), signal);
+  const gone = AbortSignal.abort(new Error("gone"));
+  await assert.rejects(model.complete(say("late"), gone), /gone/u);
+  assert.equal(queue.waiting(), 0);
+  await fake.drain();
+  await running;
+  assert.deepEqual(fake.entered, ["running"]);
+});
+
+test("a call that rejects gives its slot to the next one", async () => {
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlled();
+  const model = queue.track(fake.model, "ada");
+  const failing = model.complete(say("failing"), signal);
+  const next = model.complete(say("next"), signal);
+  assert.deepEqual(fake.entered, ["failing"]);
+  fake.settle(0, new Error("boom"));
+  await assert.rejects(failing, /boom/u);
+  await fake.drain();
+  await next;
+  assert.deepEqual(fake.entered, ["failing", "next"]);
+  assert.equal(queue.inFlight(), 0);
+});
+
+test("with 20 calls on 3 slots, never more than 3 run at once and all 20 finish", async () => {
+  const queue = new ModelQueue({ slots: 3, file: null });
+  let running = 0;
+  let most = 0;
+  let finished = 0;
+  const model = queue.track(
+    {
+      name: "fake",
+      complete: async () => {
+        running += 1;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        running -= 1;
+        finished += 1;
+        return REPLY;
+      },
+    },
+    "ada",
+  );
+  await Promise.all(Array.from({ length: 20 }, () => model.complete([], signal)));
+  assert.equal(finished, 20);
+  assert.equal(most, 3);
+  assert.equal(queue.inFlight(), 0);
+  assert.equal(queue.waiting(), 0);
 });

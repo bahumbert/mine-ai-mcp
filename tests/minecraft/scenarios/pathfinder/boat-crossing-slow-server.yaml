@@ -1,0 +1,63 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-crossing-slow-server
+tags: [regression]
+description: >-
+  Run 20 hardening: the boat take-back stopped after 15 hits 300 ms apart, but a boat breaks above 40 damage, loses 1 a
+  server tick, and a hit sooner than 5 server ticks after the last weighs less than a full one. At 5 ticks a second the
+  hits are 1.5 ticks apart: 15 hits do not break the boat (measured 2026-10-25: 3 of 3 runs on the 15-hit take-back
+  ended with no boat carried; at 10 ticks a second the same 15 hits still broke it, 3 of 3, so the rate is 5), and the
+  bot stood on it. The take-back now keeps hitting until the boat is gone or 10 s pass. The navigate crosses a 40-block
+  sea at 5 ticks a second and must carry its boat again, then walk on.
+
+setup: ["tick rate 5"]
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea three deep and 40 long, 81 wide, from the bot's shore (x 0) to the far land (x 41), level with the water.
+  - fill: { block: water, from: [ 1, -63, -40 ], to: [ 40, -61, 40 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 1
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  actions:
+    # Across by boat, off at the far shore, the boat taken back at 5 ticks a second, then on foot.
+    - { action: navigate, input: { x: 60, y: -60, z: 0, range: 2 } }
+    - { action: navigate, input: { x: 75, y: -60, z: 10, range: 2 } }
+
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - kind: reach
+      who: Rower
+      pos: [ 75.5, -60, 10.5 ]
+      radius: 3.0
+    - kind: hasItem
+      who: Rower
+      item: oak_boat
+      count: 1
+    - kind: completion
+      who: Rower

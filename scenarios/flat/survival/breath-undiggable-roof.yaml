@@ -1,0 +1,37 @@
+name: breath-undiggable-roof
+description: A bot in a sealed bedrock water tunnel with no air anywhere, so surfacing cannot work and the roof cannot be dug. The breath reflex must be released after its 5 s without progress, stand down 2 s, and try again, while a status read still answers; peaceful, the bot is not required to survive.
+
+# SRV-01 (run 16, Yuki): a reflex that waits on a way out that does not exist held the body for 104 s. The claim is now
+# held to a no-progress window of 5 s; after it the reflex pauses 2 s (the owner's values) and claims again.
+
+minecraft: { version: "1.21.4" }
+
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -6 40 -50 6 air"
+
+geometry:
+  # Bedrock cannot be dug: the reflex finds no way up and nothing breaks the seal.
+  - fill: { block: bedrock, from: [-10, -63, -4], to: [38, -55, 4] }
+  # The water tunnel: two high, closed at both ends, no air pocket.
+  - fill: { block: water, from: [-9, -60, 0], to: [36, -59, 0] }
+
+players:
+  - name: Diver
+    pos: [-3.5, -60, 0.5]
+
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./breath-undiggable-roof.ts"]
+
+goal: { kind: completion, who: Diver, timeout: 60 }

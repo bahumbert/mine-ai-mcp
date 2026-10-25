@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { isBurning } from "../../perception/body.js";
+import { isBurning, isInLava, isInWater } from "../../perception/body.js";
 import { bowDrawAimedAtBot } from "../../perception/combat/attention.js";
 import { defendsOnContact, inDefensiveContact } from "../../perception/combat/contact.js";
 import { incomingFireball } from "../../perception/combat/fireball.js";
@@ -47,7 +47,8 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
     policy,
     health: bot.health,
     burning: isBurning(bot),
-    hideAllowed: permitsHide(policy, canRecover),
+    // A shelter needs ground: in a liquid the decision picks fight or evade (CMB-01).
+    hideAllowed: permitsHide(policy, canRecover) && !isInWater(bot) && !isInLava(bot),
     recoveryAvailable: canRecover,
     weapon: carriesCombatWeapon(bot),
     rangedWeapon: carriesRangedWeapon(bot),

@@ -12,6 +12,7 @@ import {
   type NavigationRuntime,
 } from "../../../navigation/index.js";
 import { isHeadPassable, isPassable, isSafeSupport, navigationFeet } from "../../../navigation/world/block-geometry.js";
+import { blockClass } from "../../../navigation/mineflayer/world.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { clearCombatRay, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { occupiedCell } from "../../../world/placement.js";
@@ -104,12 +105,11 @@ export class CombatPosition {
     plan.placements.every(this.canPlaceProtection) &&
     this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null;
 
-  /** Passable plants are not necessarily replaceable. Price the cells the
-   * server can actually fill before provoking a quarry or starting a wall. */
+  /** The cells the server can fill, priced before provoking a quarry or starting a wall: a plant is not always replaceable. */
   private canPlaceProtection = (cell: Vec3): boolean => {
     const observed = this.navigation.world.blockAt(cell.x, cell.y, cell.z);
-    const block = observed.kind === "loaded" ? this.bot.registry.blocksByStateId[observed.stateId] : null;
-    return isReplaceableForPlacement(block ?? null) && occupiedCell(this.bot, cell) === null;
+    const block = observed.kind === "loaded" ? blockClass(this.bot).fromStateId(observed.stateId, 0) : null;
+    return isReplaceableForPlacement(block, this.bot.version) && occupiedCell(this.bot, cell) === null;
   };
 
   /** Reject this geometry for this target position, not the target or the hunt. */

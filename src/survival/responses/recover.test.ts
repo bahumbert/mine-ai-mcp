@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { setCarriedCount } from "../../test-support/carried-counts.js";
+import { type FakeHarness, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../policy/contract.js";
 import { survivalResources } from "../state/resources.js";
 import { recoverUnderCover } from "./recover.js";
 
+/** A meal as the server answers it: one of the first carried stack leaves the window, hunger is full, health 18. */
+function eatOne({ bot, inventory }: FakeHarness): void {
+  const [food] = inventory.items();
+  setCarriedCount(inventory, bot.registry, food!.type, inventory.count(food!.type, null) - 1);
+  bot.food = 20;
+  bot.health = 18;
+}
+
 for (const healthAfterContact of [16, 8]) test(`defence with healing prohibited applies the health floor after contact at ${healthAfterContact}`, async () => {
-  const bot = botFixture({}, { health: 20, food: 10 });
+  const { bot } = createFakeBot({ health: 20, food: 10 });
   let threat = true, ticks = 0;
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal, recoverTo: 12, maximumMs: 90_000,
@@ -28,7 +37,7 @@ for (const healthAfterContact of [16, 8]) test(`defence with healing prohibited 
 });
 
 test("covered recovery waits for both restored health and the owner's passing threat", async () => {
-  const bot = botFixture({}, { health: 20, food: 20 });
+  const { bot } = createFakeBot({ health: 20, food: 20 });
   let threat = true, ticks = 0;
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
@@ -46,7 +55,7 @@ test("covered recovery waits for both restored health and the owner's passing th
 });
 
 test("healthy but still threatened cover cannot report recovered when its hold expires", async () => {
-  const bot = botFixture({}, { health: 20, food: 20 });
+  const { bot } = createFakeBot({ health: 20, food: 20 });
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal, recoverTo: 18, maximumMs: 0,
     isProtected: () => true, holdWhile: () => true,
@@ -58,14 +67,9 @@ test("healthy but still threatened cover cannot report recovered when its hold e
 });
 
 test("an incoming arrow invalidates recovery even while the shelter callback still says protected", async () => {
-  const bot = botFixture({}, { health: 8, food: 20 });
-  bot.entity.width = 0.6;
-  bot.entity.height = 1.8;
+  const { bot } = createFakeBot({ health: 8, food: 20,
+    entities: { 8: { name: "arrow", position: new Vec3(0.5, 65, 8.5), velocity: new Vec3(0, 0, -1.5), metadata: [] } } });
   bot.world.raycast = () => null;
-  bot.entities[8] = Object.assign(Object.create(Object.getPrototypeOf(bot.entity)), bot.entity, {
-    id: 8, name: "arrow", isValid: true,
-    position: bot.entity.position.offset(0, 1, 8), velocity: new Vec3(0, 0, -1.5), metadata: [],
-  });
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
     isProtected: () => true,
@@ -78,7 +82,7 @@ test("an incoming arrow invalidates recovery even while the shelter callback sti
 });
 
 test("a closed shelter containing soul fire is not a recovery position", async () => {
-  const bot = botFixture({ blocks: { "0,64,0": "soul_fire" } }, { health: 8, food: 20 });
+  const { bot } = createFakeBot({ cells: { "0,64,0": "soul_fire" }, health: 8, food: 20 });
   const survival = survivalResources();
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal,
@@ -96,13 +100,7 @@ test("a closed shelter containing soul fire is not a recovery position", async (
 });
 
 test("a spent protected hold survives damage, another cell, and unrelated policy edits", async () => {
-  const bot = botFixture(
-    {},
-    {
-      health: 6,
-      food: 20,
-    },
-  );
+  const { bot } = createFakeBot({ health: 6, food: 20 });
   const survival = survivalResources();
   let policy = DEFAULT_SURVIVAL_POLICY;
   let waits = 0;
@@ -135,26 +133,15 @@ test("a spent protected hold survives damage, another cell, and unrelated policy
 
 test("losing cover during a bite returns exposure without answering recovery", async () => {
   let protectedNow = true;
-  let released = 0;
-  const bot = botFixture(
-    { items: [{ name: "cooked_beef", count: 2 }] },
-    {
-      health: 7,
-      food: 10,
-      consume: async () => {
-        bot.usingHeldItem = true;
-        protectedNow = false;
-        bot.emit("physicsTick");
-        throw new Error("Consumption interrupted");
-      },
-      deactivateItem: () => {
-        bot.usingHeldItem = false;
-        released++;
-      },
-    },
-  );
+  const { bot, clock, server } = createFakeBot({ carried: { cooked_beef: 2 }, health: 7, food: 10 });
+  bot.consume = async () => {
+    bot.usingHeldItem = true;
+    protectedNow = false;
+    await bot.waitForTicks(1);
+    throw new Error("Consumption interrupted");
+  };
   const survival = survivalResources();
-  const result = await recoverUnderCover(bot, {
+  const recovery = recoverUnderCover(bot, {
     policy: () => DEFAULT_SURVIVAL_POLICY,
     signal: new AbortController().signal,
     recoverTo: 18,
@@ -167,8 +154,13 @@ test("losing cover during a bite returns exposure without answering recovery", a
     },
     survival,
   });
+  await clock.advance(1_000);
+  const result = await recovery;
   assert.deepEqual(result, { kind: "exposed", ate: null });
-  assert.equal(released, 1);
+  // The fake's deactivateItem tells the server the use is released (`block_dig` status 5) and clears usingHeldItem.
+  const releases = server.packets.filter(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 5);
+  assert.equal(releases.length, 1);
+  assert.equal(bot.usingHeldItem, false);
   assert.equal(bot.listenerCount("physicsTick"), 0);
   assert.deepEqual(survival.answered.snapshot(), []);
   assert.deepEqual(survival.budgets.snapshot(), []);
@@ -178,21 +170,15 @@ test("caller cancellation during an exposed bite remains terminal", async () => 
   const owner = new AbortController();
   const reason = new Error("Caller cancelled");
   let protectedNow = true;
-  const bot = botFixture(
-    { items: [{ name: "cooked_beef", count: 2 }] },
-    {
-      health: 7,
-      food: 10,
-      consume: async () => {
-        owner.abort(reason);
-        protectedNow = false;
-        bot.emit("physicsTick");
-        throw new Error("Consumption interrupted");
-      },
-    },
-  );
+  const { bot, clock } = createFakeBot({ carried: { cooked_beef: 2 }, health: 7, food: 10 });
+  bot.consume = async () => {
+    owner.abort(reason);
+    protectedNow = false;
+    await bot.waitForTicks(1);
+    throw new Error("Consumption interrupted");
+  };
   const survival = survivalResources();
-  await assert.rejects(
+  const rejected = assert.rejects(
     recoverUnderCover(bot, {
       policy: () => DEFAULT_SURVIVAL_POLICY,
       signal: owner.signal,
@@ -206,25 +192,20 @@ test("caller cancellation during an exposed bite remains terminal", async () => 
     }),
     (cause) => cause === reason,
   );
+  await clock.advance(1_000);
+  await rejected;
   assert.equal(bot.listenerCount("physicsTick"), 0);
   assert.deepEqual(survival.answered.snapshot(), []);
 });
 
 test("eating releases a shield raised by intruder defence during the same recovery hold", async () => {
   let releases = 0;
-  const bot = botFixture(
-    { items: [{ name: "cooked_beef", count: 2 }] },
-    {
-      health: 10,
-      food: 20,
-      consume: async () => {
-        assert.equal(bot.usingHeldItem, false, "a retained off-hand guard prevents native main-hand eating");
-        bot.inventory.items()[0]!.count--;
-        bot.food = 20;
-        bot.health = 18;
-      },
-    },
-  );
+  const harness = createFakeBot({ carried: { cooked_beef: 2 }, health: 10, food: 20 });
+  const { bot } = harness;
+  bot.consume = async () => {
+    assert.equal(bot.usingHeldItem, false, "a retained off-hand guard prevents native main-hand eating");
+    eatOne(harness);
+  };
   const result = await recoverUnderCover(bot, {
     policy: () => DEFAULT_SURVIVAL_POLICY,
     survival: survivalResources(),
@@ -254,10 +235,8 @@ test("eating releases a shield raised by intruder defence during the same recove
  * the meat and the floor, instead of spending it.
  */
 test("covered recovery keeps uncooked meat for cooking above the raw_food health floor and says so", async () => {
-  const bot = botFixture(
-    { items: [{ name: "beef", count: 4 }] },
-    { health: 12, food: 10, consume: async () => assert.fail("raw beef must not be eaten at health 12") },
-  );
+  const { bot } = createFakeBot({ carried: { beef: 4 }, health: 12, food: 10,
+    overrides: { consume: async () => assert.fail("raw beef must not be eaten at health 12") } });
   const survival = survivalResources();
   const result = await recoverUnderCover(bot, {
     policy: () => DEFAULT_SURVIVAL_POLICY,
@@ -279,18 +258,11 @@ test("covered recovery keeps uncooked meat for cooking above the raw_food health
 });
 
 test("below the raw_food health floor covered recovery spends the uncooked meat", async () => {
-  const bot = botFixture(
-    { items: [{ name: "beef", count: 4 }] },
-    {
-      health: 8,
-      food: 10,
-      consume: async () => {
-        bot.inventory.items()[0]!.count--;
-        bot.food = 20;
-        bot.health = 18;
-      },
-    },
-  );
+  const harness = createFakeBot({ carried: { beef: 4 }, health: 8, food: 10 });
+  const { bot } = harness;
+  bot.consume = async () => {
+    eatOne(harness);
+  };
   const result = await recoverUnderCover(bot, {
     policy: () => DEFAULT_SURVIVAL_POLICY,
     survival: survivalResources(),

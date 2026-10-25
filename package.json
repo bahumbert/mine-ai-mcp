@@ -39,12 +39,16 @@
     "typecheck:tests": "bunx --bun tsc -p tests/tsconfig.json --noEmit",
     "typecheck:brain": "bunx --bun tsc -p brain/tsconfig.json --noEmit",
     "typecheck:monitor": "bunx --bun tsc -p monitor/tsconfig.json --noEmit",
+    "typecheck:scripts": "bunx --bun tsc -p scripts/tsconfig.json --noEmit",
     "check": "bun scripts/check.ts",
     "test": "bun scripts/check.ts --all",
     "brain": "bun brain/src/main.ts",
     "monitor": "bun monitor/src/main.ts",
     "evidence:render": "bun scenarios/src/action-evidence-page.ts",
-    "scenarios": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat forever",
+    "scenarios": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios --repeat 10",
+    "scenarios:once": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios",
+    "scenarios:isolated": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
+    "scenarios:stop": "bun tests/minecraft/shared/submit.ts --stop",
     "scenarios:spectator": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --spectator",
     "scenarios:tailscale": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --tailscale"
   },
@@ -65,6 +69,7 @@
     "minecraft-data": "https://github.com/aibengineering/node-minecraft-data/releases/download/mine-ai-c932f743/minecraft-data-3.116.0.tgz"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.0.1",
     "highlight.js": "^11.12.0",
@@ -78,5 +83,8 @@
     "prismarine-physics": "github:aibengineering/prismarine-physics#56a6794611069272653b14eb078a1454633f4eb3",
     "prismarine-recipe": "github:aibengineering/prismarine-recipe#542f0600f5ddf07bb16df67fa1ac06e603bd28e0",
     "mineflayer": "github:aibengineering/mineflayer#9fa1140b90877a084efd988905df0c0eceaa78d0"
+  },
+  "patchedDependencies": {
+    "mine-labs@github:aibengineering/mine-labs#aba1cdf": "patches/mine-labs@github%3Aaibengineering%2Fmine-labs#aba1cdf.patch"
   }
 }

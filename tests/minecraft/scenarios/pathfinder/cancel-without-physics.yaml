@@ -1,0 +1,50 @@
+template: ../../templates/flat-single-action.yaml
+
+name: cancel-without-physics
+tags: [regression]
+description: >-
+  A cancel reached a walking route only on a physics tick. With no tick (a ride, an unloaded chunk under the feet, a
+  death waiting for the respawn) it waited for the runner's 30 s physics stall. A bot walking to a target twenty blocks
+  east has its client physics stopped and the navigate cancelled: the navigate settles cancelled within three seconds of
+  the cancel, and once physics runs again the next navigate arrives.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -10 -63 -10 28 -40 10 air"
+
+geometry:
+  - fill: { block: stone, from: [-9, -63, -9], to: [27, -61, 9] }
+
+players:
+  - name: Walker
+    pos: [0.5, -60, 0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/cancel-without-physics.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Walker,gamemode=!spectator]"
+
+params:
+  far: [20, -60, 0]
+  near: [-5, -60, 0]
+  walkMs: 1000
+  silentMs: 200
+  settleWithinMs: 3000
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Walker }

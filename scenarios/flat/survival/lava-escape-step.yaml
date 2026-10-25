@@ -1,11 +1,11 @@
 name: lava-escape-step
-description: With no natural bank or water, place a solid step into a lava pool and climb out before burning to death.
+description: Place a solid step into a lava pool with no natural bank or water and stand on it within seconds; peaceful, so only the escape is checked, not survival.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
-  difficulty: normal
+  difficulty: peaceful
   time: noon
-  gamerules: { doMobSpawning: false, naturalRegeneration: false }
+  gamerules: { doMobSpawning: false, naturalRegeneration: true }
 reset:
   - "fill -9 -61 -9 9 -54 9 air"
 geometry:

@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
 
 type Stack = { slot: number; name: string; used: number; maximum: number; warned: boolean };
 const worn = { 5: "head", 6: "chest", 7: "legs", 8: "feet", 45: "off_hand" } as const;
@@ -8,6 +8,7 @@ const breakSlots: Record<number, number> = { 48: 45, 49: 5, 50: 6, 51: 7, 52: 8 
 
 /** Low-volume inventory notices, independent of which action owns the bot. */
 export function observeEquipmentEvents(bot: Bot, data: SqlBotData): () => void {
+  const guarded = guardObservedWrite("equipment-events");
   let stacks: Stack[] = [];
   let pending = false;
   let disposed = false;
@@ -41,11 +42,11 @@ export function observeEquipmentEvents(bot: Bot, data: SqlBotData): () => void {
       const remaining = Math.max(0, item.maximum - item.used);
       item.warned = remaining / item.maximum <= 0.25 && (previous?.warned ?? false);
       if (remaining > 0 && remaining / item.maximum <= 0.25 && !item.warned) {
-        recordEvent(data, bot.username, {
+        guarded(() => recordEvent(data, bot.username, {
           type: "equipment_low_durability", observedAt: new Date().toISOString(),
           summary: `${item.name} durability low: ${Math.ceil(remaining / item.maximum * 100)}% left (${remaining}/${item.maximum}).`,
           payload: { item: item.name, slot: item.slot, location: location(item.slot), remaining, maximum: item.maximum },
-        });
+        }));
         item.warned = true;
       }
       if (item.slot === hand() || item.slot in worn) equipped.set(item.slot, { ...item });
@@ -62,11 +63,11 @@ export function observeEquipmentEvents(bot: Bot, data: SqlBotData): () => void {
     const slot = packet.entityStatus === 47 ? hand() : breakSlots[packet.entityStatus];
     if (slot === undefined) return;
     const item = snapshot().find(item => item.slot === slot) ?? equipped.get(slot);
-    recordEvent(data, bot.username, {
+    guarded(() => recordEvent(data, bot.username, {
       type: "equipment_broken", observedAt: new Date().toISOString(),
       summary: `${item?.name ?? location(slot).replaceAll("_", " ") + " equipment"} broke.`,
       payload: { item: item?.name ?? null, slot, location: location(slot), remaining: 0, maximum: item?.maximum ?? null },
-    });
+    }));
     equipped.delete(slot);
   };
   const onRespawn = () => { equipped.clear(); changed(); };

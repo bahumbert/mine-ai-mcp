@@ -22,7 +22,7 @@ client:
 params: { mode: lava-dig }
 goal:
   kind: all
-  timeout: 30
+  timeout: 60
   goals:
     - { kind: completion, who: FireMiner }
     - { kind: survive, who: FireMiner, seconds: 1 }

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { recordLastDeath } from "../../bot-data/index.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { createPickUpItemsAction } from "./pick-up-items.js";
 
 test("death recovery returns its named no-record refusal with schema-valid current position", async (t) => {
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const data = temporaryBotData({ closeAfter: t });
   const action = createPickUpItemsAction(bot, {} as never, data, createDiscardedItems());
   const lifetime = new AbortController();
@@ -26,7 +26,7 @@ test("death recovery returns its named no-record refusal with schema-valid curre
 });
 
 test("death recovery refuses another dimension before asking navigation to move", async (t) => {
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const data = temporaryBotData({ closeAfter: t });
   recordLastDeath(data, {
     botId: bot.username,
@@ -54,7 +54,7 @@ test("death recovery refuses another dimension before asking navigation to move"
 });
 
 test("stale death refusal preserves the retained recovery facts", async (t) => {
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   const data = temporaryBotData({ closeAfter: t });
   recordLastDeath(data, {
     botId: bot.username,

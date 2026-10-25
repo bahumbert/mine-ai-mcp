@@ -1,0 +1,53 @@
+template: ../../templates/flat-single-action.yaml
+
+name: buried-items-stay-buried
+tags: [regression]
+description: >-
+  Bury every log and every plug block in a disposal pit, then collect logs where there is no tree and collect
+  stone beside the pit. The burial keeps two plug blocks and plugs both cells, and the buried stacks are never
+  taken back: the bot carries no log and only the few blocks it mined. Guards run 16 (2026-10-19), where 13
+  burials came back through collect_block and routes that dug the plugged pit.
+
+reset:
+  - "fill -14 -63 -14 14 -54 14 air"
+
+geometry:
+  # A stone floor three deep, wider than the pit search radius plus its rim, so every pit cell is stone.
+  - fill: { block: stone, from: [-12, -63, -12], to: [12, -61, 12] }
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+      - { item: cobblestone, count: 40 }
+      - { item: oak_log, count: 16 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/buried-items-stay-buried.ts]
+
+params:
+  actions:
+    - action: drop_item
+      input: { items: [{ item_name: oak_log }, { item_name: cobblestone }], in_a_hole: true }
+    # No tree in the flat world: the only logs within 14 blocks are the buried ones, so this must find none (and not explore).
+    - action: collect_block
+      input: { block_name: oak_log, count: 1, scaffold: false, max_distance: 14 }
+      expect: failed
+    - action: collect_block
+      input: { block_name: stone, count: 3, scaffold: false }
+    # A route to the pit's own bottom cell, dig on: the shortest way is down through the plug, the guard volume refuses it.
+    - action: navigate
+      input: { x: 1, y: -62, z: 0, range: 0, scaffold: false }
+      expect: failed
+  # The plug cells hold after the route step, and the pit's own dig drops a couple of cobblestone and the collect mines three: 38 buried would show at once.
+  carried_at_most: { oak_log: 0, cobblestone: 12 }
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    - { kind: blocksAt, block: cobblestone, positions: [[1, -61, 0], [1, -60, 0]] }
+    - { kind: completion, who: Actor }

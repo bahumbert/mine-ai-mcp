@@ -1,0 +1,40 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-item-variant-components
+tags:
+  - contract
+description: A renamed, enchanted or damaged stack arrives with components and removedComponents lists and a null nbt; a
+  plain stack has empty lists. Contract check tests/minecraft/contract/checks/item-variant-components.ts, also run on the
+  fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: item-variant-components
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 0 -60 0 chest
+  - item replace block 0 -60 0 container.0 with cobblestone[custom_name='"first"'] 5
+  - item replace block 0 -60 0 container.1 with cobblestone[custom_name='"second"'] 7
+  - item replace block 0 -60 0 container.2 with cobblestone[enchantments={levels:{"minecraft:efficiency":1}}] 3
+  - item replace block 0 -60 0 container.3 with cobblestone 4
+  - item replace block 0 -60 0 container.4 with diamond_pickaxe[damage=5] 1
+  - item replace block 0 -60 0 container.5 with diamond_pickaxe 1
+  - item replace block 0 -60 0 container.6 with oak_planks[custom_name='"x"'] 64
+players:
+  - name: Actor
+    pos:
+      - -4.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

@@ -1,0 +1,30 @@
+name: swim-stroke-ticks
+description: Counts the physics ticks of each swim step (down, horizontal straight and turning, up) and of whole legs on the real server against the price the planner gives them, so the swim prices stay at or above the live stroke.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
+geometry:
+  # A channel 5 wide (never deep open water), 5 deep, 20 long. Two baffle walls (x 2 with the gap at z 2..3, x 5 with the
+  # gap at z -1..0) make the swim along it an S-bend: the straight strokes, the turns and the climbs are separate legs.
+  - fill: { block: stone, from: [-4, -62, -2], to: [17, -57, 4] }
+  - fill: { block: water, from: [-3, -61, -1], to: [16, -57, 3] }
+  - fill: { block: stone, from: [2, -61, -1], to: [2, -57, 1] }
+  - fill: { block: stone, from: [5, -61, 1], to: [5, -57, 3] }
+players:
+  - name: Diver
+    op: true
+    pos: [-2.5, -59, 0.5]
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./swim-stroke-ticks.ts"]
+params:
+  # Straight along z 0 to the first baffle, round the S-bend (10 strokes, one breath), up to the surface, down three cells, up three.
+  legs: [[1, -59, 0], [6, -59, 0], [6, -57, 0], [6, -60, 0], [6, -57, 0]]
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Diver }
+    - { kind: health, who: Diver, health: 20 }

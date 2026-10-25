@@ -1,0 +1,48 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-boat-follows-vehicle-move
+tags:
+  - contract
+description: The rider's vehicle_move moves the server's boat and the client sees it follow; a move into a block is
+  answered by the server's own vehicle_move with the last position it accepted; a bot not seated in the boat moves
+  nothing. Contract check tests/minecraft/contract/checks/boat-follows-vehicle-move.ts, also run on the fake bot
+  (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: boat-follows-vehicle-move
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 2 -61 -1 water
+  - setblock 2 -61 0 water
+  - setblock 2 -61 1 water
+  - setblock 3 -61 -1 water
+  - setblock 3 -61 0 water
+  - setblock 3 -61 1 water
+  - setblock 4 -61 -1 water
+  - setblock 4 -61 0 water
+  - setblock 4 -61 1 water
+entities:
+  - type: oak_boat
+    pos:
+      - 3.5
+      - -60.111
+      - 0.5
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

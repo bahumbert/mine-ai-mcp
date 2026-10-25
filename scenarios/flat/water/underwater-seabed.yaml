@@ -6,7 +6,7 @@ world:
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
   - fill: { block: stone, from: [-5, -61, -5], to: [9, -57, 5] }
-  - fill: { block: water, from: [-4, -60, -4], to: [8, -57, 4] }
+  - fill: { block: water, from: [-4, -60, -4], to: [8, -57, 3] }
 players:
   - name: Diver
     pos: [0.5, -57, 0.5]

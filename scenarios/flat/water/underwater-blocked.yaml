@@ -6,7 +6,7 @@ world:
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
   - fill: { block: stone, from: [-5, -61, -5], to: [9, -57, 5] }
-  - fill: { block: water, from: [-4, -60, -4], to: [8, -57, 4] }
+  - fill: { block: water, from: [-4, -60, -4], to: [8, -57, 3] }
   - fill: { block: stone, from: [-4, -58, -4], to: [8, -58, 4] }
 players:
   - name: Diver
@@ -18,7 +18,9 @@ client:
   args: ["../../src/client-host.ts", "./underwater.ts"]
 params:
   reject: true
-  legs: [[0, -59, 0]]
+  # The pocket's floor under the stone lid: no water route reaches it (a mid-water target is refused before any route).
+  refusal: ["[NAVIGATION_STOPPED]"]
+  legs: [[0, -60, 0]]
 
 goal:
   kind: all

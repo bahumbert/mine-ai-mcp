@@ -3,7 +3,7 @@ import type { Entity } from "prismarine-entity";
 import type { Vec3 } from "vec3";
 import type { DiscardedItems } from "../../world/discarded-items.js";
 import { carriedCount } from "../../world/inventory-count.js";
-import { droppedItemName } from "../../world/item-pickup.js";
+import { droppedItemName, isItemEntity as isItemEntityName } from "../../world/item-pickup.js";
 import type { ActionContext } from "../action.js";
 import { dropItemOutcomes, type DroppedItem, type DropRecipient } from "./contract.js";
 
@@ -23,7 +23,7 @@ type Point = { readonly x: number; readonly y: number; readonly z: number };
 
 /** An item entity, whose metadata (the item name) may not have arrived yet. */
 function isItemEntity(entity: Entity): boolean {
-  return droppedItemName(entity) !== null || entity.name === "item";
+  return droppedItemName(entity) !== null || isItemEntityName(entity);
 }
 
 export interface HandoverWatch {
@@ -132,7 +132,8 @@ export function recountAfterToss(bot: Bot, dropped: DroppedItem[], hole: Vec3 | 
     if (entry.dropped <= 0 || entry.error) continue;
     const now = carriedCount(bot, entry.item);
     if (now <= entry.carriedAfter) continue;
-    const net = Math.max(0, entry.carriedBefore - now);
+    // What came back since the toss, not the carried count against the start: a reflex may have used some between attempts.
+    const net = Math.max(0, entry.dropped - (now - entry.carriedAfter));
     dropped[index] = {
       ...entry,
       carriedAfter: now,

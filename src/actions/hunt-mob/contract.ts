@@ -202,8 +202,10 @@ export const huntMobOutcomes = {
     `[HUNT_NO_SHIELD] Refused before approaching: ${mob} is a hostile mob and, though a shield is carried, the combat policy forbids shield use, so the fight would be unshielded. ` +
     `Permit shields with set_survival_policy, or repeat this request with allow_without_shield: true to accept unblocked hits from this species.`,
   unknownMob: (mob: string) => `[UNKNOWN_HUNT_MOB] Minecraft has no entity registry entry named ${mob}.`,
-  unknownDrop: (drop: string, similar: readonly string[] = []) =>
-    `[UNKNOWN_HUNT_DROP] Minecraft has no item registry entry named ${drop}.${similar.length === 0 ? "" : ` Its items with that name are ${similar.join(", ")}.`}`,
+  unknownDrop: (drop: string, similar: readonly string[] = [], mobAnswer: string | null = null) =>
+    mobAnswer !== null
+      ? `[UNKNOWN_HUNT_DROP] ${mobAnswer}.`
+      : `[UNKNOWN_HUNT_DROP] Minecraft has no item registry entry named ${drop}.${similar.length === 0 ? "" : ` Its closest item ids are ${similar.join(", ")}.`}`,
   noLoadedTarget: (mob: string, drop: string, gained: number, requested: number) =>
     `[HUNT_TARGET_NOT_LOADED] No loaded ${mob} remained after observing ${drop} ${gained}/${requested}.`,
   dropNotGiven: (mob: string, drop: string, kills: number, chance: number | null = null) =>

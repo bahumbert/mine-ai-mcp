@@ -1,0 +1,38 @@
+template: ../../templates/flat-single-action.yaml
+name: tend-keeps-torches-and-saplings
+tags: [acceptance]
+description: >-
+  A plot a player has already started to use: a row of five grass cells with a torch on the first, an oak sapling on
+  the second, two tufts of short grass and a poppy on the rest. tend_crops clears only what the game calls ground
+  cover (the grass and the poppy), tills those three cells and plants wheat on them; the torch and the sapling stay
+  where they are on soil that is still grass, and the run says the two cells are occupied (partial, not failed).
+
+geometry:
+  - fill: { block: grass_block, from: [-4, -61, -6], to: [10, -61, 6] }
+  - fill: { block: torch, from: [2, -60, 0], to: [2, -60, 0] }
+  - fill: { block: oak_sapling, from: [3, -60, 0], to: [3, -60, 0] }
+  - fill: { block: short_grass, from: [4, -60, 0], to: [5, -60, 0] }
+  - fill: { block: poppy, from: [6, -60, 0], to: [6, -60, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 2.5]
+    inventory:
+      - { item: wooden_hoe, count: 1 }
+      - { item: wheat_seeds, count: 8 }
+
+params:
+  action: tend_crops
+  input: { x1: 2, z1: 0, x2: 6, z2: 0, y: -61, plant: wheat_seeds }
+  expect: { status: partial, errorContains: "[TEND_INCOMPLETE]" }
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: blockAt, block: torch, pos: [2, -60, 0] }
+    - { kind: blockAt, block: oak_sapling, pos: [3, -60, 0] }
+    - { kind: blocksAt, block: grass_block, positions: [[2, -61, 0], [3, -61, 0]] }
+    - { kind: blocksAt, block: farmland, positions: [[4, -61, 0], [5, -61, 0], [6, -61, 0]] }
+    - { kind: blocksAt, block: wheat, positions: [[4, -60, 0], [5, -60, 0], [6, -60, 0]] }

@@ -93,11 +93,54 @@ export function horizontalControlsToward(
   return { forward: ahead > brake, back: -ahead > brake, right: rightward > brake, left: -rightward > brake };
 }
 
-async function waitForHorizontalRest(port: HorizontalSteeringPort, signal: AbortSignal): Promise<void> {
+/** The slack a drive gets, beyond its ticks at 50 ms each, before physics that has stopped ends it. */
+const TICK_WALL_SLACK_MS = 1_000;
+const TICK_MS = 50;
+
+/**
+ * Wait one tick, but not past the signal or the wall-clock deadline: an abort
+ * rejects with the signal's reason at once, and a deadline answers "deadline".
+ * The port's own wait can outlive physics (a ride, an unloaded chunk), so it is
+ * raced, never trusted to end.
+ */
+async function waitTickOrStop(
+  port: HorizontalSteeringPort,
+  signal: AbortSignal,
+  deadlineAt: number,
+): Promise<"tick" | "deadline"> {
+  signal.throwIfAborted();
+  const remaining = deadlineAt - performance.now();
+  if (remaining <= 0) return "deadline";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const tick = port.waitForTick().then(() => "tick" as const);
+  // The loser of the race may fail later; nobody awaits it by then.
+  tick.catch(() => undefined);
+  try {
+    return await Promise.race([
+      tick,
+      new Promise<"deadline">((resolve) => {
+        timer = setTimeout(() => resolve("deadline"), remaining);
+      }),
+      new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function waitForHorizontalRest(
+  port: HorizontalSteeringPort,
+  signal: AbortSignal,
+  deadlineAt: number,
+): Promise<void> {
   let previous = { ...port.observe().position };
   for (let tick = 0; tick < REST_SETTLE_TICKS; tick += 1) {
-    signal.throwIfAborted();
-    await port.waitForTick();
+    if ((await waitTickOrStop(port, signal, deadlineAt)) === "deadline") return;
     const current = port.observe().position;
     if (Math.hypot(current.x - previous.x, current.z - previous.z) <= REST_SPEED) return;
     previous = { ...current };
@@ -118,6 +161,7 @@ export async function driveHorizontalSteering(
 ): Promise<HorizontalSteeringOutcome> {
   let previous = { ...port.observe().position };
   let outcome: HorizontalSteeringOutcome = { kind: "exhausted", ticks: request.maximumTicks };
+  const deadlineAt = performance.now() + request.maximumTicks * TICK_MS + TICK_WALL_SLACK_MS;
   try {
     for (let tick = 0; tick < request.maximumTicks; tick += 1) {
       request.signal.throwIfAborted();
@@ -146,13 +190,13 @@ export async function driveHorizontalSteering(
       // offset into that frame so locomotion never has to change look direction.
       const controls = horizontalControlsToward({ position, yaw }, target, brake);
       for (const control of CONTROLS) port.setControl(control, !atTarget && controls[control]);
-      await port.waitForTick();
+      if ((await waitTickOrStop(port, request.signal, deadlineAt)) === "deadline") break;
     }
   } finally {
     for (const control of CONTROLS) port.setControl(control, false);
   }
 
-  await waitForHorizontalRest(port, request.signal);
+  await waitForHorizontalRest(port, request.signal, deadlineAt);
   if (request.arrived()) return { kind: "arrived" };
   if (!request.target()) return { kind: "target_lost" };
   return outcome;

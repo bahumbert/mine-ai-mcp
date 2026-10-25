@@ -1,12 +1,13 @@
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaCell } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
-const cellSchema = z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() });
-const paramsSchema = z.strictObject({ cell: cellSchema, refuse: cellSchema });
+const paramsSchemaIn = (arena: ArenaFrame) => z.strictObject({ cell: arenaCell(arena), refuse: arenaCell(arena) });
 
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { cell, refuse } = paramsSchema.parse(context.scenario.params);
+  const { cell, refuse } = paramsSchemaIn(context.arena).parse(context.scenario.params);
 
   // Setup is frozen until the trial starts. Water needs 15 ticks to flow three cells.
   await context.waitForTicks(20);

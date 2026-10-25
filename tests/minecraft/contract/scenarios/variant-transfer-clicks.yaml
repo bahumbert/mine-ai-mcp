@@ -1,0 +1,110 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-variant-transfer-clicks
+tags:
+  - contract
+description: A plain hand laid on a renamed partial stack swaps them, a renamed hand right-clicked onto a plain partial stack
+  swaps them too (never one item put down), and a window closed with a stack in hand gives it to the inventory's free slot
+  or drops it as an item entity when the inventory is full. Contract check
+  tests/minecraft/contract/checks/variant-transfer-clicks.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: variant-transfer-clicks
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 0 -60 0 chest
+  - item replace block 0 -60 0 container.0 with cobblestone[custom_name='"first"'] 5
+  - item replace block 0 -60 0 container.1 with cobblestone 64
+  - item replace block 0 -60 0 container.2 with cobblestone 6
+  - item replace block 0 -60 0 container.3 with cobblestone[custom_name='"second"'] 3
+players:
+  - name: Actor
+    pos:
+      - -4.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: dirt
+        count: 1
+      - item: sand
+        count: 1
+      - item: gravel
+        count: 1
+      - item: oak_log
+        count: 1
+      - item: spruce_log
+        count: 1
+      - item: birch_log
+        count: 1
+      - item: jungle_log
+        count: 1
+      - item: acacia_log
+        count: 1
+      - item: dark_oak_log
+        count: 1
+      - item: stick
+        count: 1
+      - item: coal
+        count: 1
+      - item: iron_ingot
+        count: 1
+      - item: gold_ingot
+        count: 1
+      - item: diamond
+        count: 1
+      - item: emerald
+        count: 1
+      - item: redstone
+        count: 1
+      - item: lapis_lazuli
+        count: 1
+      - item: bread
+        count: 1
+      - item: apple
+        count: 1
+      - item: carrot
+        count: 1
+      - item: potato
+        count: 1
+      - item: beetroot
+        count: 1
+      - item: wheat
+        count: 1
+      - item: sugar
+        count: 1
+      - item: paper
+        count: 1
+      - item: string
+        count: 1
+      - item: feather
+        count: 1
+      - item: flint
+        count: 1
+      - item: bone
+        count: 1
+      - item: leather
+        count: 1
+      - item: clay_ball
+        count: 1
+      - item: brick
+        count: 1
+      - item: glowstone_dust
+        count: 1
+      - item: snowball
+        count: 1
+      - item: torch
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

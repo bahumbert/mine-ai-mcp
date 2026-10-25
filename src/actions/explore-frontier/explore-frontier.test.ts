@@ -1,9 +1,8 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../../bot-data/index.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { createMovements, type NavigationResult } from "../../navigation/index.js";
 import type { FrontierChunk, SessionFrontier } from "../../runtime/frontier.js";
@@ -55,28 +54,15 @@ function frontierFixture(initialBoundary = 0): TestFrontier {
   };
 }
 
-function botFixture(yaw = 0) {
-  const hostMovements = { name: "host" };
-  const pathfinder = {
-    movements: hostMovements as unknown,
-    setGoal: () => {},
-    setMovements(movements: unknown) {
-      this.movements = movements;
-    },
-  };
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0, 64, 0), yaw, vehicle: null },
-    game: { dimension: "overworld" },
-    pathfinder,
-    blockAt: () => null,
-    clearControlStates: () => {},
-    deactivateItem: () => {},
-    currentWindow: null,
-    isSleeping: false,
-    dismount: () => {},
-    wake: async () => {},
-  }) as unknown as Bot;
-  return { bot };
+/**
+ * An explorer at the origin's corner (0, 64, 0) in the overworld, on the shared fake bot, awake and holding nothing in
+ * use: the action's movement preparation (`session/prepare-body.ts`) lets go of the held item and would wake it.
+ */
+function explorerBot() {
+  return createFakeBot({
+    position: new Vec3(0, 64, 0),
+    overrides: { deactivateItem: () => {}, isSleeping: false, wake: async () => {} },
+  });
 }
 
 function completedNavigation(): NavigationResult {
@@ -108,18 +94,15 @@ function testDependencies(navigate: ExploreFrontierDependencies["navigate"]): {
 const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
 
 function biomeBotFixture(biomeAt: (feet: Vec3) => string) {
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   bot.entity.onGround = true;
-  const targetBiome = { name: "warped_forest" };
-  bot.registry = {
-    biomesByName: { "minecraft:warped_forest": targetBiome },
-    biomesArray: [targetBiome],
-    biomes: [{ name: "plains" }, targetBiome],
-  } as unknown as Bot["registry"];
-  bot.world = {
+  // The login registries key `biomesByName` by the server's ids (`minecraft:plains`); the biomes' own names carry none.
+  const biomeId = (name: string) => bot.registry.biomesArray.find((biome) => biome.name === name)!.id;
+  // Every column the test asks about is loaded; its biome at the feet comes from `biomeAt`, by the registry's ids.
+  Object.assign(bot.world, {
     getColumnAt: () => ({}),
-    getBiome: (feet: Vec3) => (biomeAt(feet) === "warped_forest" ? 1 : 0),
-  } as unknown as Bot["world"];
+    getBiome: (feet: Vec3) => biomeId(biomeAt(feet) === "warped_forest" ? "warped_forest" : "plains"),
+  });
   return bot;
 }
 
@@ -267,7 +250,7 @@ test("parses a bounded chunk request and resolves degree headings", () => {
 
 test("extends the requested boundary through short legs while pricing exploration scaffolds", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   let calls = 0;
   const runRoute: ExploreFrontierDependencies["navigate"] = async (options) => {
     assert.equal(options.timeoutMs, undefined, "terrain work must not be cut off by a per-leg clock");
@@ -340,7 +323,7 @@ test("explores with botData and populates nearestFrontier from frontier_navigati
   });
 
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     bot.entity.position = new Vec3(16, 64, 0);
     frontier.record({ dimension: "overworld", chunkX: 1, chunkZ: 0 });
@@ -368,7 +351,7 @@ test("explores with botData and populates nearestFrontier from frontier_navigati
 
 test("explores a diagonal as one normalized direction", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const runRoute: ExploreFrontierDependencies["navigate"] = async (options) => {
     assert.ok("goal" in options);
     const expectedX = Math.floor(16 / Math.sqrt(2));
@@ -399,7 +382,7 @@ test("explores a diagonal as one normalized direction", async () => {
 
 test("late spawn-ring commits cannot settle exploration without forward travel", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   let calls = 0;
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     calls += 1;
@@ -429,7 +412,7 @@ test("late spawn-ring commits cannot settle exploration without forward travel",
 
 test("side chunks are recorded without manufacturing directional progress", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     frontier.record({ dimension: "overworld", chunkX: 0, chunkZ: 8 });
     frontier.record({ dimension: "overworld", chunkX: 0, chunkZ: -8 });
@@ -452,7 +435,7 @@ test("side chunks are recorded without manufacturing directional progress", asyn
 
 test("another bot's shared write cannot settle this action", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     frontier.setBoundary(20);
     return stoppedNavigation();
@@ -473,7 +456,7 @@ test("another bot's shared write cannot settle this action", async () => {
 
 test("reports partial progress when navigation stops after one boundary column", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     frontier.record({ dimension: "overworld", chunkX: 1, chunkZ: 0 });
     bot.entity.position = new Vec3(16, 64, 0);
@@ -495,7 +478,7 @@ test("reports partial progress when navigation stops after one boundary column",
 
 test("caller cancellation remains a runtime outcome and always cleans up", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const controller = new AbortController();
   const runRoute: ExploreFrontierDependencies["navigate"] = async () => {
     controller.abort("test cancellation");
@@ -513,7 +496,7 @@ test("caller cancellation remains a runtime outcome and always cleans up", async
 
 test("a resumed request retains its original frontier target and cumulative own observations", async () => {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   let calls = 0;
   let announceStart = () => {};
   const started = new Promise<void>((resolve) => {
@@ -564,18 +547,27 @@ test("a resumed request retains its original frontier target and cumulative own 
   assert.equal(next.result.explored.newChunksRecorded, 1, "a new admitted request has fresh evidence");
 });
 
-test("an interrupted attempt that already expanded the requested column needs no replacement leg", async () => {
+/**
+ * An explorer whose every leg walks it one chunk east, into chunk (1, 0) which it records, and is then cut short by a
+ * reflex takeover through `interrupted`; `onLeg` hears each leg.
+ */
+function explorerTakenOverAfterOneChunk(onLeg: () => void) {
   const frontier = frontierFixture();
-  const { bot } = botFixture();
+  const { bot } = explorerBot();
   const interrupted = new AbortController();
-  let calls = 0;
   const { dependencies } = testDependencies(async () => {
-    calls++;
+    onLeg();
     bot.entity.position.x = 16;
     frontier.record({ dimension: "overworld", chunkX: 1, chunkZ: 0 });
     interrupted.abort("reflex takeover");
     return completedNavigation();
   });
+  return { frontier, bot, interrupted, dependencies };
+}
+
+test("an interrupted attempt that already expanded the requested column needs no replacement leg", async () => {
+  let calls = 0;
+  const { frontier, bot, interrupted, dependencies } = explorerTakenOverAfterOneChunk(() => calls++);
   const execute = beginExploreFrontier(bot, { heading: 90, chunks: 1 }, frontier, dependencies);
   await assert.rejects(execute({ signal: interrupted.signal }));
   assert.equal(frontier.listenerCount(), 0);
@@ -588,17 +580,8 @@ test("an interrupted attempt that already expanded the requested column needs no
 });
 
 test("resumption in another dimension settles the original expansion without another leg", async () => {
-  const frontier = frontierFixture();
-  const { bot } = botFixture();
-  const interrupted = new AbortController();
   let calls = 0;
-  const { dependencies } = testDependencies(async () => {
-    calls++;
-    bot.entity.position.x = 16;
-    frontier.record({ dimension: "overworld", chunkX: 1, chunkZ: 0 });
-    interrupted.abort("reflex takeover");
-    return completedNavigation();
-  });
+  const { frontier, bot, interrupted, dependencies } = explorerTakenOverAfterOneChunk(() => calls++);
   const execute = beginExploreFrontier(bot, { heading: 90, chunks: 2 }, frontier, dependencies);
   await assert.rejects(execute({ signal: interrupted.signal }));
   bot.game.dimension = "the_nether";

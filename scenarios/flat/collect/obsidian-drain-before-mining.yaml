@@ -1,5 +1,5 @@
 name: obsidian-drain-before-mining
-description: Plug the natural water feeding obsidian before starting the long dig beside lava.
+description: Mine obsidian with natural water beside it (never above it, because a block with water above is never mined, owner rule 2026-10-02) and lava on its other side, with no bucket in the pack; the bot must finish unhurt with the block.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
@@ -9,7 +9,7 @@ reset: ["fill -6 -61 -5 10 -54 5 air"]
 geometry:
   - fill: { block: stone, from: [-5, -61, -4], to: [9, -60, 4] }
   - setblock: { block: obsidian, at: [2, -60, 0] }
-  - setblock: { block: water, at: [3, -59, 0] }
+  - setblock: { block: water, at: [3, -60, 0] }
   - setblock: { block: lava, at: [2, -60, 1] }
 players:
   - name: DrainMiner

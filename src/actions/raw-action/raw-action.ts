@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
@@ -200,6 +201,7 @@ async function place(
   request: Extract<RawActionRequest, { operation: "place" }>,
   context: ActionContext,
   evidence: Evidence,
+  botData?: SqlBotData,
 ) {
   const support = new Vec3(
     request.support.x,
@@ -241,6 +243,8 @@ async function place(
     throw new Error(
       "[RAW_PLACE_NOT_OBSERVED] Mineflayer completed the attempt but the requested block was not observed at the target.",
     );
+  const placedBlock = bot.blockAt(evidence.target);
+  if (botData && placedBlock && evidence.beforeBlock !== placedBlock.name) recordPlacedContainer(botData, bot, { name: placedBlock.name, position: evidence.target });
 }
 
 function swing(
@@ -343,6 +347,7 @@ export async function executeRawAction(
   bot: Bot,
   request: RawActionRequest,
   context: ActionContext,
+  botData?: SqlBotData,
 ): Promise<RawActionResult> {
   context.signal?.throwIfAborted();
   const before = observation(bot);
@@ -371,7 +376,7 @@ export async function executeRawAction(
         await dig(bot, request, context, evidence);
         break;
       case "place":
-        await place(bot, request, context, evidence);
+        await place(bot, request, context, evidence, botData);
         break;
       case "swing":
         swing(bot, request, evidence);
@@ -444,7 +449,7 @@ export function formatRawActionResult(value: RawActionResult): string {
   return lines.join("\n");
 }
 
-export function createRawAction(bot: Bot) {
+export function createRawAction(bot: Bot, botData: SqlBotData) {
   return defineAction({
     checkpointSchema: executionCheckpointSchema,
     name: RAW_ACTION,
@@ -455,6 +460,6 @@ export function createRawAction(bot: Bot) {
     execution: { kind: "task" },
     annotations: rawActionAnnotations,
     parse: parseRawActionRequest,
-    execute: (request, context) => executeRawAction(bot, request, context),
+    execute: (request, context) => executeRawAction(bot, request, context, botData),
   });
 }

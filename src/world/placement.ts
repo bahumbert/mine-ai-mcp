@@ -5,6 +5,7 @@ import { blockClass } from "../navigation/mineflayer/world.js";
 import { asVec3, cellIntersectsBody, type Position3 } from "../utils/index.js";
 import { isReplaceableForPlacement } from "./block-classification.js";
 import { carriedCount, settleInventoryCount } from "./inventory-count.js";
+import { SERVER_ANSWER_TICKS, waitForServerAnswer } from "./world-age.js";
 import { recordCombatResourceReceipt } from "../runtime/combat-resource-receipts.js";
 import type { BlockHalf } from "./block-states.js";
 
@@ -46,7 +47,14 @@ export interface BlockPlacement {
   /** For stairs and slabs: the half a side-face click must give (ADR-013). */
   readonly half?: BlockHalf;
   readonly signal?: AbortSignal;
+  /** Called right before the placement packet is sent: an abort after it may still leave the block placed. */
+  readonly onSent?: () => void;
+  /** Longest wait for the server's answer on the wall clock; default `PLACEMENT_ANSWER_WALL_MS`. */
+  readonly answerWallMs?: number;
 }
+
+/** The wall-clock bound of the answer wait: a server seconds behind answers inside it, a stopped server clock does not. */
+export const PLACEMENT_ANSWER_WALL_MS = 5_000;
 
 /**
  * What refused a cell a build gave up on, so a caller can tell a refusal that asking again can change from one that
@@ -122,6 +130,7 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
   const face = asVec3(placement.face);
   const placementBot = bot as PlacementOptionsBot;
   let blockUpdateTimeout: string | null = null;
+  let sentAtAge: number | undefined;
   const consumesItem = bot.game.gameMode !== "creative";
   const inventoryBefore = consumesItem ? carriedCount(bot, placement.item.name) : 0;
   const cubeCell = fullCubeCell(bot, placement);
@@ -145,6 +154,8 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     const currentBlocker = occupiedCell(bot, cubeCell);
     if (currentBlocker) return { kind: "failed", error: currentBlocker, cause: "entity" };
     setSneaking(bot, true);
+    sentAtAge = bot.time?.age;
+    placement.onSent?.();
     await placeWithoutLooking(bot, placement.support, face, placement.half);
   } catch (cause) {
     if (placement.signal?.aborted) throw cause;
@@ -154,46 +165,60 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     setSneaking(bot, false);
   }
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const placedBlocks = placement.expectedCells.map((position) => bot.blockAt(asVec3(position)));
-    if (placedBlocks.every((block): block is WorldBlock => Boolean(block && placement.matches(block)))) {
-      if (consumesItem) {
-        // The block update precedes the slot update. Returning between them
-        // let a builder select the just-emptied stack for its next placement.
-        const inventory = await settleInventoryCount(bot, placement.item.name, inventoryBefore - 1, {
-          signal: placement.signal,
-        });
-        placement.signal?.throwIfAborted();
-        if (!inventory.confirmed) {
-          return {
-            kind: "failed",
-            error: `The block appeared, but consumption of ${placement.item.name} was not observed (inventory ${inventoryBefore} → ${inventory.count}).`,
-          };
-        }
-      }
-      recordCombatResourceReceipt(bot, { kind: "scaffold_placed" });
-      return { kind: "placed", block: placedBlocks[0] };
-    }
-
-    if (attempt < 4) {
-      try {
-        await bot.waitForTicks(1);
-        placement.signal?.throwIfAborted();
-      } catch (cause) {
-        if (placement.signal?.aborted) throw cause;
-        return { kind: "failed", error: message(cause) };
-      }
-    }
-  }
-
-  if (blockUpdateTimeout) {
+  const seen = await awaitPlacedBlocks(bot, placement, sentAtAge);
+  if (seen.kind === "missing") {
     return {
       kind: "failed",
-      error: `${blockUpdateTimeout}; physical verification after 5 ticks observed ${observedCells(bot, placement)}.`,
+      error: blockUpdateTimeout
+        ? `${blockUpdateTimeout}; ${seen.because}`
+        : `The expected block did not appear after placement: ${seen.because}`,
     };
   }
+  if (consumesItem) {
+    // The block update precedes the slot update. Returning between them
+    // let a builder select the just-emptied stack for its next placement.
+    const inventory = await settleInventoryCount(bot, placement.item.name, inventoryBefore - 1, {
+      ...(placement.signal && { signal: placement.signal }),
+      ...(sentAtAge !== undefined && { sentAtAge }),
+    });
+    placement.signal?.throwIfAborted();
+    if (!inventory.confirmed) {
+      return {
+        kind: "failed",
+        error: `The block appeared, but consumption of ${placement.item.name} was not observed (inventory ${inventoryBefore} → ${inventory.count}).`,
+      };
+    }
+  }
+  recordCombatResourceReceipt(bot, { kind: "scaffold_placed" });
+  return { kind: "placed", block: seen.blocks[0] };
+}
 
-  return { kind: "failed", error: "The expected block did not appear after placement." };
+type PlacedBlocksSeen =
+  | { kind: "seen"; blocks: [WorldBlock, ...WorldBlock[]] }
+  | { kind: "missing"; because: string };
+
+/**
+ * Wait for every expected cell to show the placed block: the world shows it, or the server answered (its world age
+ * moved `SERVER_ANSWER_TICKS` past the send) without it, or the wall clock ran out because the server clock stopped.
+ */
+async function awaitPlacedBlocks(bot: Bot, placement: BlockPlacement, sentAtAge: number | undefined): Promise<PlacedBlocksSeen> {
+  const look = () => placement.expectedCells.map((position) => bot.blockAt(asVec3(position)));
+  const allPlaced = () => look().every((block) => Boolean(block && placement.matches(block)));
+  const wallMs = placement.answerWallMs ?? PLACEMENT_ANSWER_WALL_MS;
+  const outcome = await waitForServerAnswer(bot, sentAtAge, {
+    until: allPlaced,
+    wallMs,
+    ...(placement.signal && { signal: placement.signal }),
+  });
+  if (outcome === "until" || allPlaced()) return { kind: "seen", blocks: look() as [WorldBlock, ...WorldBlock[]] };
+  const observed = observedCells(bot, placement);
+  return {
+    kind: "missing",
+    because:
+      outcome === "moved"
+        ? `the server moved ${SERVER_ANSWER_TICKS} ticks past it and ${observed}.`
+        : `the server's clock did not move ${SERVER_ANSWER_TICKS} ticks in ${wallMs} ms and ${observed}.`,
+  };
 }
 
 /** The six cells a block can be placed against, floor first so a seal lands the way a player would build it. */
@@ -266,7 +291,7 @@ export async function placeSolidBlockInto(
   const current = bot.blockAt(position);
   if (!current) return { kind: "failed", error: "The cell is not loaded." };
   if (current.boundingBox === "block") return { kind: "placed", block: current };
-  if (!isReplaceableForPlacement(current)) {
+  if (!isReplaceableForPlacement(current, bot.version)) {
     return { kind: "failed", error: `The cell holds ${current.name}, which a placement does not replace.` };
   }
   if (!item) return { kind: "failed", error: "No permitted full block is available for placement." };

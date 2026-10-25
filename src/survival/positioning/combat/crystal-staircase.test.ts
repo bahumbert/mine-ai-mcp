@@ -3,7 +3,8 @@ import type { NavigationRuntime } from "../../../navigation/index.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../../test-support/bot.js";
+import type { Item } from "prismarine-item";
+import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { buildCrystalStaircase, pillarShortfall, planCrystalStaircase, staircaseShortfall } from "./crystal-staircase.js";
 
 /** A native spike: obsidian strictly below the bedrock pedestal, the crystal one above it, and only the two narrow towers caged. */
@@ -16,19 +17,18 @@ for (const radius of [2, 3, 5]) test(`radius ${radius} staircase preserves its l
   if (radius === 2)
     for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) for (let y = 89; y <= 92; y++)
       if (Math.abs(x) === 2 || Math.abs(z) === 2 || y === 92) blocks[`${x},${y},${z}`] = "iron_bars";
-  const items = [{ name: "end_stone", count: 0 }];
-  const bot = botFixture({ blocks, items });
-  const readBlock = bot.blockAt.bind(bot);
-  bot.blockAt = position => readBlock(position.floored());
+  const { bot, world, inventory } = createFakeBot({ cells: blocks, groundY: null });
+  const carry = (count: number) => (inventory.updateSlot as (slot: number, item: Item | null) => void)
+    .call(inventory, 36, count > 0 ? itemOf(bot.registry, "end_stone", count) : null);
   const crystal = new Vec3(0.5, 90, 0.5);
   const plan = planCrystalStaircase(bot, crystal);
   assert.match(staircaseShortfall(bot, plan)!, /CRYSTAL_STAIRCASE_SHORTFALL.*carrying 0.*Gather at least.*approach "pillar".*about \d+ carried scaffold blocks/);
   assert.equal(plan.pillarBlocks, 88 - 60 - 1, "a pillar from the island surface to the rim's feet level");
   assert.match(pillarShortfall(bot, DEFAULT_SURVIVAL_POLICY, plan)!, /CRYSTAL_PILLAR_SHORTFALL.*about 27 scaffold blocks.*carrying 0/);
   assert.match(pillarShortfall(bot, { ...DEFAULT_SURVIVAL_POLICY, combat: { ...DEFAULT_SURVIVAL_POLICY.combat, terrain: { dig: true, place: false } } }, plan)!, /CRYSTAL_PILLAR_CONSTRAINED/);
-  items[0]!.count = 27;
+  carry(27);
   assert.equal(pillarShortfall(bot, DEFAULT_SURVIVAL_POLICY, plan), null);
-  items[0]!.count = 0;
+  carry(0);
   assert.equal(plan.cells.some(cell => cell.blockName === "air" && cell.position.x === 0 && cell.position.z === 0), false, "never excavate the blast-cover pedestal column");
   assert.equal(plan.cells.some(cell => cell.blockName === "air" && bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name === "obsidian"), false,
     "the tower is never mined");
@@ -62,7 +62,7 @@ for (const radius of [2, 3, 5]) test(`radius ${radius} staircase preserves its l
     if (above?.blockName === "end_stone") cornerSupports++;
   }
   assert.ok(wallTreads > 0 && cornerSupports > 0, "exercise both wall attachment and supported corners");
-  for (const cell of plan.cells) blocks[`${cell.position.x},${cell.position.y},${cell.position.z}`] = cell.blockName;
+  for (const cell of plan.cells) world.setCell(new Vec3(cell.position.x, cell.position.y, cell.position.z), cell.blockName);
   assert.equal(staircaseShortfall(bot, plan), null);
   assert.equal(await buildCrystalStaircase(bot, {} as NavigationRuntime, { ...DEFAULT_SURVIVAL_POLICY,
     combat: { ...DEFAULT_SURVIVAL_POLICY.combat, terrain: { dig: false, place: false } },
@@ -70,8 +70,8 @@ for (const radius of [2, 3, 5]) test(`radius ${radius} staircase preserves its l
   const rebuilt = planCrystalStaircase(bot, crystal);
   assert.deepEqual(rebuilt, plan, "a new crystal request must regenerate the same layout");
   for (const cell of plan.cells.filter(cell => cell.blockName === "end_stone").slice(-2))
-    blocks[`${cell.position.x},${cell.position.y},${cell.position.z}`] = "air";
+    world.setCell(new Vec3(cell.position.x, cell.position.y, cell.position.z), "air");
   assert.match(staircaseShortfall(bot, rebuilt)!, /2 end_stone blocks still needed; carrying 0/);
-  items[0]!.count = 2;
+  carry(2);
   assert.equal(staircaseShortfall(bot, rebuilt), null);
 });

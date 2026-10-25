@@ -4,15 +4,25 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
-import { botFixture, type BotFixtureOptions } from "../test-support/bot.js";
+import { plugin as toolPlugin } from "mineflayer-tool";
+import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
 const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
+
+/** The `physicsTick` listeners the tool plugin and the pathfinder it loads a tick later keep on a bot for good: a plugin cannot be unloaded, so a real bot keeps them after the host is gone. */
+const TOOL_PLUGIN_PHYSICS_LISTENERS = await (async () => {
+  const { bot } = createFakeBot();
+  bot.loadPlugin(toolPlugin);
+  await delay(0);
+  return bot.listenerCount("physicsTick");
+})();
 
 test("a kick reason that is a text component is logged whole, a plain one as it is", () => {
   assert.equal(kickReason("Server closed"), "Server closed");
@@ -28,26 +38,15 @@ async function configuration(t: TestContext) {
   return { ...parseHostOptions(["--data-root", directory]), listenPort: 0 };
 }
 
-function connectedBot(t: TestContext, fixture: BotFixtureOptions = {}) {
-  const client = Object.assign(new EventEmitter(), { uuid: "host-test", write: () => {} });
-  const bot = botFixture(
-    fixture,
-    {
-      _client: client,
-      tool: { equipForBlock: async () => {} },
-      getControlState: () => false,
-      clearControlStates: () => {},
-      quit: () => bot.emit("end", "Host test closed"),
-    },
-  );
-  Object.assign(bot.world, { getColumn: () => undefined });
-  // Mineflayer indexes equipment by window slot; the fixture takes a record.
-  const slots = new Array(46).fill(null);
-  for (const [slot, item] of Object.entries(fixture.slots ?? {})) slots[Number(slot)] = item;
-  bot.inventory.slots = slots;
+function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
+  const { bot } = createFakeBot({
+    slots,
+    // No chunk column is loaded: the frontier observes none.
+    loadedColumns: [],
+  });
   t.mock.method(mineflayer, "createBot", () => {
     queueMicrotask(() => {
-      client.emit("login", { worldState: { hashedSeed: 1n } });
+      bot._client.emit("login", { worldState: { hashedSeed: 1n } });
       bot.emit("spawn");
     });
     return bot;
@@ -64,7 +63,6 @@ test("a plugin startup failure still quits the newly created bot", async (t) => 
   const bot = connectedBot(t);
   const pluginFailure = new Error("Plugin loading failed");
   // Force the real plugin-loading boundary to fail before any spawn waiter exists.
-  delete (bot as Partial<typeof bot>).tool;
   bot.loadPlugin = () => {
     throw pluginFailure;
   };
@@ -108,7 +106,7 @@ test("failed HTTP binding releases the runtime and bot and retains combined clea
     return true;
   });
   assert.deepEqual(releases, ["database", "bot"]);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(bot.listenerCount("physicsTick"), TOOL_PLUGIN_PHYSICS_LISTENERS, "only the tool plugin's own listener is left");
   assert.equal(bot.listenerCount("error"), 0);
 });
 
@@ -156,7 +154,7 @@ test(
     });
     t.mock.method(bot, "quit", () => {
       releases.push("bot");
-      assert.equal(bot.listenerCount("physicsTick"), 0);
+      assert.equal(bot.listenerCount("physicsTick"), TOOL_PLUGIN_PHYSICS_LISTENERS, "only the tool plugin's own listener is left");
       bot.emit("end", "Host test closed");
     });
     bot.emit("end", "Connection lost during test");
@@ -172,10 +170,7 @@ test(
 
 test("health publishes the bot's own slots and the calls an observer cannot otherwise see", async (t) => {
   const options = await configuration(t);
-  connectedBot(t, {
-    items: [{ name: "cobblestone", count: 12, slot: 36 }],
-    slots: { 5: { name: "iron_helmet", count: 1 } },
-  });
+  connectedBot(t, { 36: { name: "cobblestone", count: 12 }, 5: { name: "iron_helmet", count: 1 } });
   await using host = await startRuntimeHost(source, options);
   const address = host.server.address();
   assert.ok(address && typeof address === "object");
@@ -185,7 +180,9 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
   // A Minecraft client is sent only another player's six equipment slots, so
   // the worn helmet and the carried stack can come only from this endpoint.
   assert.deepEqual(health.minecraft.inventory, [
-    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: null },
+    // A worn stack is a prismarine Item, as the real window holds: its maximum is the 1.21.4 data's
+    // (`prismarine-item` index.js:41, 50-51) and a new helmet has used none. No contract check covers armour yet.
+    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 } },
     { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null },
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);

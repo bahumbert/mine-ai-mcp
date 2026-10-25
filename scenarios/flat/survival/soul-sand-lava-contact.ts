@@ -1,10 +1,23 @@
-import { isBurning } from "../../../src/survival/perception/body.ts";
+import { setTimeout as sleep } from "node:timers/promises";
+import { isInLava } from "../../../src/survival/perception/body.ts";
 import { openRuntime, standStill } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 
-/** Pin the recorded edge overlap; ordinary runtime reflexes own all escape controls. */
+/** The escape must end within this wall-clock time of the teleport; the server's lava and fire damage race is not checked. */
+const ESCAPE_DEADLINE_MS = 5000;
+/** Horizontal reach from the teleport cell inside which the bot counts as still near where it started. */
+const NEAR_START_BLOCKS = 3;
+/** Soul-sand cells end at x = 1; a body centre below this has left the lava overlap. */
+const LAVA_OVERLAP_MIN_X = 0.7;
+const SOUL_SAND_EDGE_X = 1;
+
+/**
+ * Pins the recorded edge overlap (a soul-sand edge touching lava while Mineflayer's swimming flag is false) and the
+ * escape from it, not survival. The fixture is peaceful (damage still applies, regeneration ends the burn), so health
+ * and burning never decide the verdict.
+ */
 export const run: MineAiScenario = async (context) => {
-  const { bot, signal } = context;
+  const { bot, signal, log } = context;
   if (!(await standStill(context))) throw new Error("Soul-sand start did not settle.");
   await using runtime = await openRuntime(context, "soul-sand-lava-contact");
   let sawEdge = false;
@@ -15,7 +28,7 @@ export const run: MineAiScenario = async (context) => {
     died = true;
   };
   const observe = () => {
-    if (bot.entity.position.x > 0.7 && bot.entity.position.x < 1) {
+    if (bot.entity.position.x > LAVA_OVERLAP_MIN_X && bot.entity.position.x < SOUL_SAND_EDGE_X) {
       sawEdge = true;
       sawFalseSwimmingFlag ||= Reflect.get(bot.entity, "isInLava") === false;
     }
@@ -27,28 +40,38 @@ export const run: MineAiScenario = async (context) => {
   bot.on("physicsTick", observe);
   bot.on("death", death);
   try {
-    bot.chat("/tp @s 0.761841334797 -60.125 0.5");
-    // Lava leaves a long burn after exit. Keep observing through that damage,
-    // rather than passing as soon as the body has moved one cell.
-    for (let tick = 0; tick < 340 && !died; tick++) {
-      signal.throwIfAborted();
-      await bot.waitForTicks(1);
-    }
-    return {
-      status:
-        sawEdge && sawFalseSwimmingFlag && !died && !isBurning(bot) && bot.health > 0 && bot.entity.position.x < 0.7
-          ? "succeeded"
-          : "failed",
-      detail: JSON.stringify({
-        sawEdge,
-        sawFalseSwimmingFlag,
-        sawFireOwner,
-        died,
-        health: bot.health,
-        burning: isBurning(bot),
-        position: bot.entity.position,
-      }),
+    const startCell = { x: 0.761841334797, z: 0.5 };
+    bot.chat(`/tp @s ${startCell.x} -60.125 ${startCell.z}`);
+    const escaped = () => {
+      const { x, z } = bot.entity.position;
+      const nearStart = Math.hypot(x - startCell.x, z - startCell.z) <= NEAR_START_BLOCKS;
+      return (
+        sawEdge &&
+        sawFalseSwimmingFlag &&
+        sawFireOwner &&
+        !died &&
+        x < LAVA_OVERLAP_MIN_X &&
+        nearStart &&
+        !isInLava(bot)
+      );
     };
+    const deadline = performance.now() + ESCAPE_DEADLINE_MS;
+    // Polled on the wall clock: physics ticks can stop on a lagging server.
+    while (!escaped() && !died && performance.now() < deadline) {
+      signal.throwIfAborted();
+      await sleep(50, undefined, { signal });
+    }
+    const detail = JSON.stringify({
+      sawEdge,
+      sawFalseSwimmingFlag,
+      sawFireOwner,
+      died,
+      lava: isInLava(bot),
+      health: bot.health,
+      position: bot.entity.position,
+    });
+    log(detail);
+    return { status: escaped() ? "succeeded" : "failed", detail };
   } finally {
     bot.off("move", observe);
     bot.off("physicsTick", observe);

@@ -1,9 +1,13 @@
 import { reportRuntimeLiveness } from "./runtime-liveness.js";
+import { reportFaultToStderrAndParent, reportUnhandledRejections } from "./process-faults.js";
 import { startFreezeWatch } from "../diagnostics/freeze-watch.js";
 import type { RuntimeBootstrap } from "./host.js";
 
 // This private entrypoint can only be booted by the package's supervising host.
 if (!process.send) throw new Error("Start Mine AI MCP through startHost, not its private runtime process.");
+// First: a promise left unhandled while the runtime loads or runs is reported to the supervisor, it does not end this process.
+const faults = reportUnhandledRejections((fault) => reportFaultToStderrAndParent("mine-ai-mcp runtime", fault));
+process.once("exit", () => faults[Symbol.dispose]());
 const reporting = reportRuntimeLiveness();
 process.once("disconnect", () => process.exit(1));
 process.once("exit", () => reporting[Symbol.dispose]());

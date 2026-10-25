@@ -1,0 +1,92 @@
+/** The boat checks' shared steps: a seat the server confirms, what each side hears for 40 server ticks, and the get-off after. */
+import assert from "node:assert/strict";
+import type { Entity } from "prismarine-entity";
+import { getOff } from "../../../../src/actions/navigate/boat-get-off.ts";
+import type { ContractFixture } from "../checks.ts";
+import { answerArrives, afterClientTicks, serverQuiet } from "../server-answer.ts";
+import { type ContractSubject, type LocalPoint, settleWithin } from "../subject.ts";
+
+/**
+ * A boat on the floor two blocks east of the feet, in reach to mount. On land: a pool (2x3 water sources, 2026-10-21)
+ * answered the get-off the same way but drifted the boat out of reach and left a walk out of the water to chance.
+ */
+export const BOAT_FIXTURE: ContractFixture = {
+  cells: {},
+  carried: {},
+  position: [0.5, -60, 0.5],
+  entities: [{ name: "oak_boat", position: [2.5, -60, 0.5] }],
+};
+/** The bound of the runtime's own `getOff` call (its dismount waits of its own), not of a wait for the server's answer. */
+const GET_OFF_WALL_MS = 20_000;
+/** Physics ticks that show a free bot is not frozen (after a get-off, after a refused mount): 5 take a quarter of a second with the physics on. */
+export const FREE_BOT_PHYSICS_TICKS = 5;
+
+/** Where the seat fixture summons its boat, arena-local. */
+const BOAT_SUMMONED_AT = BOAT_FIXTURE.entities![0]!.position;
+
+/** The oak boat nearest where a fixture summoned it (arena-local `summonedAt`): another lane's boat, or one a scenario left, is not hers. */
+export function boatSummonedAt(subject: ContractSubject, summonedAtLocal: LocalPoint): Entity | undefined {
+  const summonedAt = subject.world(summonedAtLocal);
+  const boats = Object.values(subject.bot.entities).filter((entity) => entity.name === "oak_boat");
+  return boats.sort((a, b) => a.position.distanceTo(summonedAt) - b.position.distanceTo(summonedAt))[0];
+}
+
+/** Find the boat summoned at `summonedAt` (the seat fixture's by default), mount it, and check both sides have her seated. */
+export async function mountBoat(subject: ContractSubject, summonedAt: LocalPoint = BOAT_SUMMONED_AT): Promise<Entity> {
+  const { bot } = subject;
+  const boatOf = () => boatSummonedAt(subject, summonedAt);
+  await answerArrives(subject, () => boatOf() !== undefined, "no oak_boat entity in view");
+  const boat = boatOf()!;
+  bot.mount(boat);
+  await answerArrives(subject, () => bot.vehicle?.id === boat.id, "the mount was not confirmed (no passenger list)");
+  assert.equal(await subject.seatedOnServer(boat), true, "the server does not have her seated after the mount");
+  return boat;
+}
+
+/** What the client heard while `LISTEN_TICKS` of world age passed. */
+export interface HeardWhileSeated {
+  readonly positions: number;
+  /** Passenger lists of her boat that leave her out. */
+  readonly listsWithoutHer: number;
+  readonly physicsTicks: number;
+}
+
+/** Listen to positions, passenger lists and physics ticks while the server runs the ticks of an absence (`serverQuiet`: 40 observed, 21 proven). */
+export async function listenWhileSeated(subject: ContractSubject, boat: Entity): Promise<HeardWhileSeated> {
+  const { bot } = subject;
+  const heard = { positions: 0, listsWithoutHer: 0, physicsTicks: 0 };
+  const onPosition = () => void (heard.positions += 1);
+  const onPassengers = (packet: { entityId: number; passengers: number[] }) => {
+    if (packet.entityId === boat.id && !packet.passengers.includes(bot.entity.id)) heard.listsWithoutHer += 1;
+  };
+  const onTick = () => void (heard.physicsTicks += 1);
+  bot.on("forcedMove", onPosition);
+  bot._client.on("set_passengers", onPassengers);
+  bot.on("physicsTick", onTick);
+  try {
+    await serverQuiet(subject, "listening to a seated bot");
+  } finally {
+    bot.off("forcedMove", onPosition);
+    bot._client.off("set_passengers", onPassengers);
+    bot.off("physicsTick", onTick);
+  }
+  return heard;
+}
+
+/** A pool of water sources, 3x3, in the floor three blocks east of the feet: its cells hold no shapes, its surface is `WATER_SURFACE_Y`. */
+export const WATER_POOL_CELLS: Readonly<Record<string, string>> = Object.fromEntries(
+  [2, 3, 4].flatMap((x) => [-1, 0, 1].map((z) => [`${x},-61,${z}`, "water"])),
+);
+/** A source block's surface is 8/9 of its cell: a boat used on it was put at y -60.111 (Mine Labs 1.21.4, 2026-10-23). */
+export const WATER_SURFACE_Y = -61 + 8 / 9;
+
+/** The runtime's get-off (`getOff`), then the bot is free on the server and stands with physics running. */
+export async function getOffAndStand(subject: ContractSubject, boat: Entity): Promise<void> {
+  const { bot } = subject;
+  const settled = await settleWithin(subject, getOff(bot), GET_OFF_WALL_MS);
+  assert.ok(settled !== null && settled.error === undefined, `getOff: ${settled?.error?.message ?? "never ended"}`);
+  assert.equal(settled.value!.answered, true, `getOff ended on ${settled.value!.ended}`);
+  assert.equal(await subject.seatedOnServer(boat), false, "the server still has her seated after getOff");
+  assert.equal(bot.vehicle ?? null, null, "the client still has a vehicle after getOff");
+  await afterClientTicks(subject, FREE_BOT_PHYSICS_TICKS, "after getOff the bot is frozen");
+}

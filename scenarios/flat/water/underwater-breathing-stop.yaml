@@ -1,24 +1,37 @@
 name: underwater-breathing-stop
-description: Production underwater navigation and survival qualification (underwater-breathing-stop).
+description: A dive whose way up grows longer than its air mid-route makes the planned breathing stop, swims back to air through the siphons, breathes, and resumes to arrive, with no breath reflex.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
-  - fill: { block: stone, from: [-5, -61, -5], to: [9, -58, 5] }
-  - fill: { block: water, from: [-4, -60, -4], to: [8, -58, 4] }
-  - fill: { block: sand, from: [0, -61, 0], to: [3, -61, 0] }
+  # A pond 3 deep in three compartments (east x 5..8, middle 0..3, west -4..-2; z -4..3), walls up to -55 so nothing
+  # is crossed at the surface, joined by one siphon each at the floor: z -4 under x 4, z -1 under x -1. The way up from the
+  # first siphon (11 strokes at the 16 ticks a block counted live, scenario swim-stroke-ticks) is longer than the air left
+  # minus the dive's reserve and shorter than the air left: the stop is planned, and the return fits the breath.
+  - fill: { block: stone, from: [-5, -60, -5], to: [9, -55, 4] }
+  - fill: { block: air, from: [-4, -56, -4], to: [8, -55, 3] }
+  - fill: { block: water, from: [-4, -59, -4], to: [8, -57, 3] }
+  - fill: { block: stone, from: [4, -59, -4], to: [4, -55, 3] }
+  - fill: { block: water, from: [4, -59, -4], to: [4, -58, -4] }
+  - fill: { block: stone, from: [-1, -59, -4], to: [-1, -55, 3] }
+  - fill: { block: water, from: [-1, -59, -1], to: [-1, -58, -1] }
 players:
   - name: Diver
-    pos: [0.5, -58, 0.5]
+    op: true
+    pos: [7.5, -57, -2.5]
     inventory:
       - { item: iron_pickaxe, count: 1 }
 client:
   command: bun
   args: ["../../src/client-host.ts", "./underwater.ts"]
 params:
-  collect: 4
   breathing: true
+  # Laid over the east and middle compartments at depth: the way up is then through both siphons to the west one,
+  # ~11 cells, longer than the air left minus the dive's reserve. Lifted at the breathing report.
+  roof: { from: [0, -56, -4], to: [8, -56, 3], belowY: -58.5 }
+  # The middle compartment's floor, then up to its surface: the next action from where the resumed leg ends.
+  legs: [[1, -59, -2], [1, -57, -2]]
 
 goal:
   kind: all

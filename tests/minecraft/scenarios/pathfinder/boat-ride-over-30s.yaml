@@ -1,0 +1,59 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-ride-over-30s
+tags: [regression]
+description: >-
+  Run 20 (Vex, 19 min; five stalls in runs 16-17c): a boat ride over 30 s ended in the get-off and the physics-stall
+  watch counted the whole ride (no tick while seated) as silence, so the navigate failed with RUNTIME_PHYSICS_STALLED
+  between the get-off and the boat's take-back. One navigate crosses a 250-block sea (about 36 s at 7 blocks a second);
+  the boat must be picked back up whatever way the ride ends, and the bot must not be failed by the runtime.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea three deep and 250 long, 13 wide (deep open water at z 0: OPEN_WATER_SPAN 9), from the bot's shore (x 0) to the far land (x 251).
+  - fill: { block: water, from: [ 1, -63, -6 ], to: [ 250, -61, 6 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 1
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/single-action.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input: { x: 270, y: -60, z: 0, range: 2 }
+  # A ride can end "the water ahead is not loaded" and ride back: the world goals below judge it, the driver only refuses a runtime failure or a cancel.
+  expect: { status: settled }
+
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - kind: hasItem
+      who: Rower
+      item: oak_boat
+      count: 1
+    - kind: reach
+      who: Rower
+      pos: [ 270.5, -60, 0.5 ]
+      radius: 3.0
+    - kind: completion
+      who: Rower

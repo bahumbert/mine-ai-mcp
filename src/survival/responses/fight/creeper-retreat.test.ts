@@ -1,28 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../../test-support/bot.js";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { retreatFromCreepers } from "./creeper-retreat.js";
 import { CreeperClearance } from "../../perception/combat/creepers.js";
 
 test("an escape with no physical progress expires without claiming clearance", async () => {
-  const bot = botFixture();
-  bot.entity.position.set(0, 64, 0);
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: new Vec3(3, 64, 0) } as typeof bot.entity;
-  bot.blockAt = (position => ({ name: position.y < 64 ? "stone" : "air", boundingBox: position.y < 64 ? "block" : "empty" })) as typeof bot.blockAt;
+  const { bot, clock } = createFakeBot({ position: new Vec3(0, 64, 0), entities: { 7: { name: "creeper", position: new Vec3(3, 64, 0) } } });
   const controls = new Map<string, boolean>();
-  bot.setControlState = (control, value) => { controls.set(control, value); };
-  bot.lookAt = async () => {};
+  const setControlState = bot.setControlState.bind(bot);
+  bot.setControlState = (control, value) => { controls.set(control, value); setControlState(control, value); };
   let ticks = 0;
+  bot.on("physicsTick", () => { ticks++; });
   const clearance = new CreeperClearance(bot);
-  const timer = setInterval(() => { ticks++; bot.emit("physicsTick"); }, 1);
-  try {
-    assert.equal(await retreatFromCreepers(bot, new AbortController().signal, () => false,
-      { clearance, tick: () => ticks, dead: new Set() }), "expired");
-    assert.equal(clearance.pending, true);
-    assert.equal(controls.get("forward"), false);
-    assert.equal(controls.get("sprint"), false);
-  } finally { clearInterval(timer); }
+  const outcome = retreatFromCreepers(bot, new AbortController().signal, () => false, { clearance, tick: () => ticks, dead: new Set() });
+  // 90 ticks of no progress: 4.5 s of clock.
+  await clock.advance(5_000);
+  assert.equal(await outcome, "expired");
+  assert.equal(clearance.pending, true);
+  assert.equal(controls.get("forward"), false);
+  assert.equal(controls.get("sprint"), false);
   const abort = new AbortController();
   const retreat = retreatFromCreepers(bot, abort.signal, () => false);
   await Promise.resolve();

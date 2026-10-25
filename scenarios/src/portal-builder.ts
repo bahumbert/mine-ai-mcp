@@ -19,6 +19,7 @@ import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 
+import { scenarioBotData } from "./scenario-bot-data.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
 const paramsSchema = z.strictObject({
@@ -30,7 +31,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const params = paramsSchema.parse(context.scenario.params ?? {});
   const { highlighter } = attachHighlighter(bot);
   const runner = new ActionRunner({ highlighter });
-  const build = createBuildStructureAction(bot, context.navigation);
+  const build = createBuildStructureAction(bot, context.navigation, scenarioBotData(context));
   const activate = createActivatePortalAction(bot, context.navigation);
   const enterNether = createEnterNetherPortalAction(bot, context.navigation);
   const steps: string[] = [];

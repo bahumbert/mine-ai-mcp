@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
-import { cropFacts, tillFailure } from "./farm-body.js";
-import { formatTendCropsResult, settleTend } from "./tend-crops.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
+import { Vec3 } from "vec3";
+import { PLOT_FACTS, cutAfter, FakeFarm } from "../../test-support/fake-farm.js";
+import type { StallClock } from "../stall-watch.js";
+import { parseTendCropsRequest } from "./contract.js";
+import { beginTendCrops, formatTendCropsResult, settleTend } from "./tend-crops.js";
 import type { CellBlock } from "./tend-plot.js";
 import { tendEvidenceSchema, type TendEvidence } from "./contract.js";
 
-const bot = { version: "1.21.4", registry: minecraftData("1.21.4") } as unknown as Pick<Bot, "registry" | "version">;
+const { bot } = createFakeBot({ version: "1.21.4" });
 const crop = (name: string, age: number): CellBlock => ({ name, properties: { age }, liquid: false, empty: true, breakable: true });
 
 test("a crop is ripe in the state its loot table drops the crop in, and planted from its unripe drop", () => {
-  const crops = cropFacts(bot);
+  const crops = plotFacts(bot);
   assert.equal(crops.isRipe(crop("wheat", 7)), true);
   assert.equal(crops.isRipe(crop("wheat", 6)), false);
   assert.equal(crops.isRipe(crop("beetroots", 3)), true);
@@ -67,4 +70,82 @@ test("a failed hoe use is unchanged only when the server clock moved 20 ticks an
   assert.deepEqual(tillFailure(failed(0), true), { kind: "unconfirmed" });
   assert.deepEqual(tillFailure(failed(40), false), { kind: "error", error: "not confirmed" });
   assert.deepEqual(tillFailure(failed(null), true), { kind: "error", error: "not confirmed" });
+});
+
+test("a hoe use whose wait ended on the wall clock is never an untillable verdict", () => {
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 30, timedOut: true }, true), { kind: "unconfirmed" });
+  assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 40 }, true), { kind: "unchanged" });
+});
+
+// Reflex continuity (spec 2026-10-18, R2): the stall watch is per attempt, the totals are per request.
+/** A bot whose world never changes, on whose clock the tests count the stall watches opened and closed. */
+function stallClock() {
+  const harness = createFakeBot({ position: new Vec3(0, 64, 0) });
+  const state = { opened: 0, closed: 0 };
+  const clock: StallClock = {
+    now: harness.clock.now,
+    every: (tick, ms) => {
+      state.opened += 1;
+      const stop = harness.clock.every(tick, ms);
+      return () => { state.closed += 1; stop(); };
+    },
+  };
+  /** Let `ms` pass at once: one slice, so the watch samples once, as after a reflex's long hold. */
+  const advance = (ms: number) => harness.clock.advance(ms, ms);
+  return { state, clock, advance, quietBot: harness.bot };
+}
+
+const wheatPlot = () => parseTendCropsRequest({ x1: 0, z1: 0, x2: 1, z2: 0, y: 63 });
+
+test("a tend cut by a reflex runs again under a new stall watch and answers for both attempts", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutAfter(farm, "breakBlock", 1);
+  const { state, clock, advance, quietBot } = stallClock();
+  const run = beginTendCrops(quietBot, wheatPlot(), PLOT_FACTS, () => farm, () => {}, { stallMs: 60_000, clock });
+  await assert.rejects(run({}), /HUNGER/);
+  assert.deepEqual([state.opened, state.closed], [1, 1], "the cut attempt closed its watch");
+  await advance(600_000);
+  const result = await run({});
+  assert.equal(result.status, "succeeded", "the reflex's ten minutes are not a stall of the resumed attempt");
+  assert.deepEqual([result.tended.harvested, result.tended.planted], [2, 2]);
+  assert.deepEqual([state.opened, state.closed], [2, 2]);
+});
+
+test("a stall in the resumed attempt ends the request with what both attempts did", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  farm.set(2, 0, "farmland", "wheat", 7);
+  cutAfter(farm, "breakBlock", 1);
+  const { clock, advance, quietBot } = stallClock();
+  const originalReach = farm.reach.bind(farm);
+  let reaches = 0;
+  farm.reach = async (cell) => {
+    if (++reaches === 3) await advance(61_000);
+    return originalReach(cell);
+  };
+  const run = beginTendCrops(quietBot, parseTendCropsRequest({ x1: 0, z1: 0, x2: 2, z2: 0, y: 63 }), PLOT_FACTS, () => farm, () => {}, { stallMs: 60_000, clock });
+  await assert.rejects(run({}), /HUNGER/);
+  const result = await run({});
+  assert.equal(result.status, "partial");
+  assert.match("error" in result ? result.error : "", /TEND_STALLED/);
+  assert.ok(result.tended.harvested >= 2, "the harvests of the cut attempt are in the total");
+});
+
+test("ground cover is what the version's tags say, saplings never, and tilled soil is what its state shows moisture", () => {
+  const facts = plotFacts(bot);
+  assert.equal(facts.isGroundCover("short_grass"), true);
+  assert.equal(facts.isGroundCover("poppy"), true);
+  assert.equal(facts.isGroundCover("torch"), false);
+  assert.equal(facts.isGroundCover("oak_sapling"), false);
+  assert.equal(facts.isGroundCover("mangrove_propagule"), false);
+  assert.equal(plotFacts({ ...bot, version: "1.20.1" }).isGroundCover("short_grass"), false);
+  assert.equal(facts.isTilledSoil({ name: "farmland", properties: { moisture: 0 }, liquid: false, empty: false, breakable: true }), true);
+  assert.equal(facts.isTilledSoil({ name: "dirt", properties: {}, liquid: false, empty: false, breakable: true }), false);
+});
+
+test("the tilled soils are the registry blocks whose state holds moisture", () => {
+  assert.deepEqual(tilledSoilNames(bot), ["farmland"]);
 });

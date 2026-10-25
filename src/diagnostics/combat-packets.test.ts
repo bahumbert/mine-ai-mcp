@@ -1,12 +1,11 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import type { IncidentRecorder } from "./incident-recorder.js";
 import { observeCombatPackets } from "./combat-packets.js";
 
 test("item-use assignment tracing preserves values and restores the property on disposal", () => {
-  const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter(), entity: { id: 1 }, usingHeldItem: false }) as unknown as Bot;
+  const { bot } = createFakeBot();
   const records: any[] = [];
   const original = Object.getOwnPropertyDescriptor(bot, "usingHeldItem")!;
   const observer = observeCombatPackets(bot, { record: (_kind: string, facts: object) => records.push(facts) } as unknown as IncidentRecorder, 8);
@@ -24,14 +23,14 @@ test("item-use assignment tracing preserves values and restores the property on 
 test("combat telemetry preserves writes and orders commands against received flags without claiming acknowledgement", () => {
   const writes: unknown[] = [];
   const records: any[] = [];
-  const client = Object.assign(new EventEmitter(), {
-    write(name: string, params: unknown) {
-      assert.equal(this, client);
-      writes.push({ name, params });
-    },
-  });
+  const { bot } = createFakeBot();
+  const client = bot._client;
+  // The protocol writer the observer wraps: it records what reaches it and the receiver it is called on.
+  client.write = function (name: string, params: unknown) {
+    assert.equal(this, client);
+    writes.push({ name, params });
+  };
   const original = client.write;
-  const bot = Object.assign(new EventEmitter(), { _client: client, entity: { id: 1 } }) as unknown as Bot;
   const recorder = { record: (kind: string, facts: object) => records.push({ kind, ...facts }) } as unknown as IncidentRecorder;
   const observer = observeCombatPackets(bot, recorder, 8);
   const use = { hand: 1, sequence: 12, rotation: { x: 90, y: 0 }, ignored: "not captured" };
@@ -66,8 +65,10 @@ test("combat telemetry preserves writes and orders commands against received fla
 
 test("a failed protocol write remains a failure and cannot become a successful item command", () => {
   const failure = new Error("socket write failed");
-  const client = Object.assign(new EventEmitter(), { write() { throw failure; } });
-  const bot = Object.assign(new EventEmitter(), { _client: client, entity: { id: 1 } }) as unknown as Bot;
+  const { bot } = createFakeBot();
+  bot._client.write = () => {
+    throw failure;
+  };
   const records: any[] = [];
   using observer = observeCombatPackets(bot, { record: (_kind: string, facts: object) => records.push(facts) } as unknown as IncidentRecorder, 8);
   assert.throws(() => bot._client.write("block_dig", { status: 5, sequence: 1 }), (error) => error === failure);

@@ -1,13 +1,14 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { LIQUIDS, type LiquidName } from "../../world/liquid.js";
 import { actionResultSchema, type ActionOutput } from "../action.js";
 
 export const USE_BUCKET = "use_bucket" as const;
 export const USE_BUCKET_DESCRIPTION =
   "Fill a carried bucket from a water or lava source, or pour a full bucket into one exact cell. A fill without a cell finds the nearest source the way mining finds ore: every loaded column is searched, and when nothing is loaded the bot explores outward for a bounded time before reporting that it found none. A fill that names a flowing cell scoops the source feeding it when one is within a few cells. Navigates into reach and verifies the bucket and the world changed. To obtain obsidian, ask collect_block for it while carrying a water bucket: the mining process pours onto lava itself.";
 
-export const bucketLiquidSchema = z.enum(["water", "lava"]);
-export type BucketLiquid = z.output<typeof bucketLiquidSchema>;
+export const bucketLiquidSchema = z.enum(LIQUIDS);
+export type BucketLiquid = LiquidName;
 
 const coordinate = (axis: string) =>
   z.number().int().safe().describe(`Absolute ${axis} coordinate of the target cell.`);
@@ -66,9 +67,8 @@ export const bucketUseEvidenceSchema = z.strictObject({
   aimedAt: positionSchema.optional(),
   heldBefore: z.string().nullable(),
   heldAfter: z.string().nullable(),
-  /** Lava sources that became obsidian, and flowing lava that became cobblestone, within ten blocks of a pour. */
-  obsidianFormed: z.number().int().nonnegative(),
-  cobblestoneFormed: z.number().int().nonnegative(),
+  /** The solid blocks a pour made out of liquid within ten blocks of it, by name (obsidian, cobblestone, stone...). */
+  formed: z.record(z.string(), z.number().int().positive()),
   used: z.boolean(),
   /** Whether the fill had to explore beyond the loaded scan to find a source. */
   explored: z.boolean().optional(),

@@ -1,0 +1,33 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-shield-raised
+tags:
+  - contract
+description: "A shield used in the off hand sets the hand-in-use and off-hand bits; lowered, the off-hand bit stays. Contract check tests/minecraft/contract/checks/shield-raised.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: shield-raised
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: shield
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

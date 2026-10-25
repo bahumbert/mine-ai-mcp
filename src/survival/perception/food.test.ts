@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot } from "mineflayer";
-import minecraftData from "minecraft-data";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { DEFAULT_FOOD_POLICY } from "../policy/contract.js";
 import { selectPolicyFood } from "./food.js";
 
-const registry = minecraftData("1.21.4");
-
 function fed(health: number, food: number, carried: { name: string; count: number }[]): Bot {
-  return { health, food, registry, inventory: { items: () => carried } } as unknown as Bot;
+  return createFakeBot({ health, food, carried: Object.fromEntries(carried.map(({ name, count }) => [name, count])) }).bot;
 }
 
 test("a hunt's raw drops are held back at ordinary hunger and named as withheld", () => {

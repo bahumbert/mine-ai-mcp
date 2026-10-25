@@ -1,94 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
-import { Vec3 } from "vec3";
 import { parseViewStatusRequest, viewStatusResultSchema } from "./contract.js";
 import { createViewStatusAction, formatViewStatusResult, observeLiveSituation } from "./view-status.js";
-import { botFixture, registry } from "../../test-support/bot.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
-import { recordLastDeath } from "../../bot-data/index.js";
-import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
-
-const idleActivity = () => ({ owner: "idle" as const, activeAction: null });
-
-function stack(slot: number, name: string, count: number) {
-  return { slot, name, count };
-}
-
-/** One loaded entity, typed as the live server types it: a numeric registry id plus Mineflayer's category. */
-function loaded(id: number, name: string, position: Vec3) {
-  const registered = registry.entitiesByName[name];
-  if (!registered) throw new Error(`no entity named ${name} in the 1.21.4 registry`);
-  return {
-    id,
-    name,
-    metadata: [] as unknown[],
-    entityType: registered.id,
-    kind: registered.category,
-    isValid: true,
-    position,
-  };
-}
-
-/**
- * A bot asleep at night beside its base, with players, mobs of every kind, and
- * two drops loaded. The far ones are outside the sixteen-block nearby range and
- * inside the loaded chunks, which is the distinction the mob summary exists for.
- */
-function liveBot(): Bot {
-  const slots: ({ name: string; count: number } | null)[] = new Array(46).fill(null);
-  slots[5] = stack(5, "diamond_helmet", 1);
-  slots[45] = stack(45, "shield", 1);
-  return botFixture(
-    {},
-    {
-      entity: { position: new Vec3(-9.5, 99, 18.68), yaw: Math.PI / 2, pitch: 0, onGround: true, isInWater: false },
-      health: 18.08,
-      food: 12,
-      foodSaturation: 0.4,
-      time: { timeOfDay: 13826 },
-      isSleeping: true,
-      isRaining: false,
-      quickBarSlot: 0,
-      inventory: {
-        slots,
-        items: () => [stack(36, "stone_pickaxe", 1), stack(9, "cobblestone", 64), stack(10, "cobblestone", 12)],
-      },
-      players: {
-        TestBot: { username: "TestBot" },
-        Scout: { username: "Scout", entity: { position: new Vec3(-12, 99, 14) } },
-        Faraway: { username: "Faraway", entity: null },
-      },
-      entities: {
-        1: loaded(1, "zombie", new Vec3(-4.5, 99, 18.68)),
-        2: { ...loaded(2, "item", new Vec3(-9.5, 99, 20.68)), getDroppedItem: () => stack(0, "coal", 3) },
-        3: { ...loaded(3, "item", new Vec3(40, 99, 20.68)), getDroppedItem: () => stack(0, "dirt", 1) },
-        4: loaded(4, "cow", new Vec3(-8, 99, 18)),
-        5: loaded(5, "cow", new Vec3(-9.5, 99, 30)),
-        6: loaded(6, "bat", new Vec3(-9.5, 105, 18.68)),
-        7: loaded(7, "villager", new Vec3(-15.5, 99, 18.68)),
-        8: loaded(8, "cod", new Vec3(-9.5, 99, 8.68)),
-        9: loaded(9, "rabbit", new Vec3(30, 99, 18.68)),
-        10: loaded(10, "slime", new Vec3(-9.5, 99, 78.68)),
-        11: loaded(11, "player", new Vec3(-12, 99, 14)),
-        // A modded stack whose metadata never parsed: skipped, not a failed report.
-        12: {
-          ...loaded(12, "item", new Vec3(-9, 99, 20)),
-          getDroppedItem: () => {
-            throw new TypeError("undefined is not an object (evaluating 'networkItem.present')");
-          },
-        },
-      },
-    },
-  );
-}
+import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fixtures.test.js";
 
 test("reports the observed clock without predicting daylight outside the Overworld", (t) => {
   // Servers may supply a custom dimension beyond Mineflayer's built-in union.
   for (const dimension of ["the_nether", "the_end", "custom_dimension"]) {
-    const bot = liveBot();
+    // The time of day is the server's (`bot.time` is re-read from it), so the scene starts at 11934.
+    const bot = liveBot({ timeOfDay: 11934 });
     Object.assign(bot.game, { dimension });
-    bot.time.timeOfDay = 11934;
     bot.isSleeping = false;
     const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
     const result = viewStatusResultSchema.parse({ status: "succeeded", situation });
@@ -145,17 +67,21 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
     headingDegrees: 270,
     onGround: true,
     inWater: false,
-    inLava: null,
+    // Mineflayer's physics writes the body's lava test onto the entity every tick (prismarine-physics
+    // `PlayerState.apply`, index.js:859), so a live bot reports false here; no contract check covers it yet.
+    inLava: false,
   });
+  // Vanilla tools and armour carry their durability from the item data (prismarine-item reads `maxDurability` from
+  // the registry, `durabilityUsed` 0 on a fresh stack); no contract check covers it yet.
   assert.deepEqual(situation.inventory, {
     usedSlots: 3,
     freeSlots: 33,
     stacks: [
-      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: null },
+      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: { remaining: 363, maximum: 363 } },
       { slot: 9, location: "main", name: "cobblestone", count: 64, held: false, durability: null },
       { slot: 10, location: "main", name: "cobblestone", count: 12, held: false, durability: null },
-      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: null },
-      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: null },
+      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: { remaining: 131, maximum: 131 } },
+      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: { remaining: 336, maximum: 336 } },
     ],
     foods: [],
   });
@@ -262,10 +188,11 @@ test("refreshes the queryable status and inventory rows in the same read", (t) =
     { slot: 36, location: "hotbar", item_name: "stone_pickaxe", count: 1, held: 1 },
     { slot: 45, location: "off-hand", item_name: "shield", count: 1, held: 0 },
   ]);
+  // Fresh vanilla stacks: their whole durability from the item data, as in the inventory report above.
   assert.deepEqual(data.read("SELECT class, tier, item_name, durability_left FROM bot_tools WHERE item_name IS NOT NULL ORDER BY class"), [
-    { class: "helmet", tier: "diamond", item_name: "diamond_helmet", durability_left: null },
-    { class: "pickaxe", tier: "stone", item_name: "stone_pickaxe", durability_left: null },
-    { class: "shield", tier: "other", item_name: "shield", durability_left: null },
+    { class: "helmet", tier: "diamond", item_name: "diamond_helmet", durability_left: 363 },
+    { class: "pickaxe", tier: "stone", item_name: "stone_pickaxe", durability_left: 131 },
+    { class: "shield", tier: "other", item_name: "shield", durability_left: 336 },
   ]);
 });
 
@@ -341,6 +268,9 @@ test("public status reports own air, burning, lava, per-slot durability and live
 test("missing own metadata remains unknown even with a full oxygenLevel; observed zero and false remain facts", (t) => {
   const bot = liveBot();
   bot.oxygenLevel = 20;
+  // The entity as Mineflayer's login leaves it (`entities.js:100-112`), before the first physics tick writes its lava
+  // test (prismarine-physics `PlayerState.apply`): no `isInLava` yet.
+  Reflect.deleteProperty(bot.entity, "isInLava");
   const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
   const unknown = observeLiveSituation(bot, data, idleActivity);
   assert.equal(unknown.vitals.airSupplyTicks, null);
@@ -362,18 +292,19 @@ test("missing own metadata remains unknown even with a full oxygenLevel; observe
 });
 
 test("species-age groups expose a farther adult without losing the nearest baby or species total", (t) => {
-  const bot = liveBot();
+  const bot = liveBot({
+    entities: {
+      2942: loaded("piglin", FEET.offset(1, 0, 0)),
+      2941: loaded("piglin", FEET.offset(3, 0, 0)),
+      2943: loaded("piglin", FEET.offset(4, 0, 0)),
+      2944: loaded("piglin", FEET.offset(5, 0, 0)),
+    },
+  });
   const babyKey = registry.entitiesByName.piglin!.metadataKeys!.indexOf("baby");
-  const pigs = [
-    loaded(2942, "piglin", bot.entity.position.offset(1, 0, 0)),
-    loaded(2941, "piglin", bot.entity.position.offset(3, 0, 0)),
-    loaded(2943, "piglin", bot.entity.position.offset(4, 0, 0)),
-    loaded(2944, "piglin", bot.entity.position.offset(5, 0, 0)),
-  ];
-  pigs[0]!.metadata[babyKey] = true;
-  pigs[2]!.metadata[babyKey] = false;
-  pigs[3]!.metadata[babyKey] = "unsupported";
-  for (const pig of pigs) bot.entities[pig.id] = pig as unknown as Bot["entity"];
+  const pigs = [bot.entities[2942]!, bot.entities[2941]!, bot.entities[2943]!, bot.entities[2944]!];
+  Object.assign(pigs[0]!.metadata, { [babyKey]: true });
+  Object.assign(pigs[2]!.metadata, { [babyKey]: false });
+  Object.assign(pigs[3]!.metadata, { [babyKey]: "unsupported" });
   const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
   const groups = situation.nearby.mobs.filter((mob) => mob.name === "piglin");
   assert.deepEqual(
@@ -392,183 +323,4 @@ test("species-age groups expose a farther adult without losing the nearest baby 
   viewStatusResultSchema.parse(result);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, age unknown\) x1/);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, adult\) x2, nearest #2941/);
-});
-
-test("status exposes the retained death after the live position has changed", (t) => {
-  const bot = liveBot();
-  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
-  recordLastDeath(data, {
-    botId: "TestBot", dimension: "overworld", position: { x: 4.5, y: 63, z: -9.5 },
-    observedAt: "2026-09-13T09:00:00.000Z", cause: "fell from a high place",
-  });
-
-  const situation = observeLiveSituation(bot, data, idleActivity);
-
-  assert.deepEqual(situation.lastDeath, {
-    dimension: "overworld", position: { x: 4.5, y: 63, z: -9.5 },
-    observedAt: "2026-09-13T09:00:00.000Z", cause: "fell from a high place",
-  });
-  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /Last death: `4.5, 63, -9.5`/);
-});
-
-test("End observations name dragon phases, render the estimated head, and report loaded cage evidence", (t) => {
-  const bot = liveBot();
-  const dragon = { ...loaded(20, "ender_dragon", new Vec3(30.5, 80, 0.5)), yaw: 0 };
-  const phaseKey = registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("phase");
-  const healthKey = registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("health");
-  dragon.metadata[phaseKey] = 6;
-  dragon.metadata[healthKey] = 150;
-  bot.entities[20] = dragon as unknown as Bot["entity"];
-  bot.entities[21] = loaded(21, "end_crystal", new Vec3(0.5, 83, 0.5)) as unknown as Bot["entity"];
-  bot.entities[22] = loaded(22, "end_crystal", new Vec3(10.5, 83, 0.5)) as unknown as Bot["entity"];
-  bot.entities[23] = loaded(23, "end_crystal", new Vec3(20.5, 83, 0.5)) as unknown as Bot["entity"];
-  bot.blockAt = ((position: Vec3) => {
-    if (position.x === 2 && position.y === 83 && position.z === 0) return { name: "iron_bars" };
-    if (position.x === 18 && position.y === 82 && position.z === -2) return null;
-    return { name: "air" };
-  }) as Bot["blockAt"];
-
-  const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
-
-  assert.deepEqual(
-    situation.endFight.crystals.map(({ entityId, cage }) => ({ entityId, cage })),
-    [
-      { entityId: 21, cage: "present" },
-      { entityId: 22, cage: "none_observed" },
-      { entityId: 23, cage: "unknown" },
-    ],
-  );
-  assert.equal(situation.endFight.dragons[0]?.phaseName, "sitting_scanning");
-  assert.deepEqual(situation.endFight.dragons[0]?.headEstimate, { x: 30.5, y: 79, z: 7 });
-  assert.equal(situation.endFight.dragons[0]?.landingHeadEstimate, null);
-  const rendered = formatViewStatusResult({ status: "succeeded", situation });
-  assert.match(rendered, /phase 6 \(sitting_scanning\).*estimated head `30.5, 79, 7`/);
-  assert.match(rendered, /Crystal #21.*cage present/);
-  assert.match(rendered, /Crystal #23.*cage unknown/);
-  assert.match(rendered, /Bow tip: bows can hit caged crystals through gaps, but may waste arrows/);
-  viewStatusResultSchema.parse({ status: "succeeded", situation });
-});
-
-test("landing head preparation is reported only from observed fountain geometry", (t) => {
-  const bot = liveBot();
-  const dragon = { ...loaded(20, "ender_dragon", new Vec3(30.5, 80, 0.5)), yaw: 0 };
-  const phaseKey = registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("phase");
-  dragon.metadata[phaseKey] = 2;
-  bot.entities[20] = dragon as unknown as Bot["entity"];
-  const base = new Vec3(0, 60, 0);
-  bot.findBlocks = (() => [base]) as Bot["findBlocks"];
-  bot.blockAt = ((position: Vec3) => {
-    const pillar = position.x === 0 && position.z === 0 && position.y >= 60 && position.y <= 63;
-    const rim = position.y === 60 && ((Math.abs(position.x) === 3 && position.z === 0) || (position.x === 0 && Math.abs(position.z) === 3));
-    return { name: pillar || rim ? "bedrock" : "air" };
-  }) as Bot["blockAt"];
-
-  const observed = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
-  assert.equal(observed.endFight.dragons[0]?.phaseName, "landing_approach");
-  assert.equal(observed.endFight.dragons[0]?.headEstimate, null);
-  assert.deepEqual(observed.endFight.dragons[0]?.landingHeadEstimate, { x: 0.5, y: 63, z: 7 });
-  const rendered = formatViewStatusResult({ status: "succeeded", situation: observed });
-  assert.match(rendered, /Predicted head after landing: `0.5, 63, 7`; direction may change/);
-  assert.match(rendered, /prepare_dragon_perch.*attack_dragon_perch/);
-
-  bot.findBlocks = (() => []) as Bot["findBlocks"];
-  // The cached observation remains usable only while the actual fountain
-  // blocks are loaded. A missing search result alone does not erase them.
-  bot.blockAt = (() => null) as Bot["blockAt"];
-  const unknown = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
-  assert.equal(unknown.endFight.dragons[0]?.landingHeadEstimate, null);
-});
-
-/**
- * The water bucket is the one carried item that changes how far a route will
- * fall, and a model cannot read that off the stack list: three blocks without
- * one, eighty with. The report says so both ways round, and it names the
- * missing bucket rather than reporting a bare unavailable.
- */
-test("reports which movements the carried inventory unlocks, and what blocks the rest", (t) => {
-  const data = () => temporaryBotData({ botId: "TestBot", closeAfter: t });
-  const report = (bot: Bot) =>
-    formatViewStatusResult({ status: "succeeded", situation: observeLiveSituation(bot, data(), idleActivity) });
-
-  const empty = liveBot();
-  const dry = observeLiveSituation(empty, data(), idleActivity);
-  assert.deepEqual(dry.mobility.bucketDrop, { available: false, maximumBlocks: 0, blockedBy: ["no_water_bucket"] });
-  assert.deepEqual(dry.mobility.fallSave, { available: false, blockedBy: ["no_water_bucket"] });
-  assert.equal(dry.mobility.waterBuckets, 0);
-  assert.deepEqual(dry.mobility.scaffold, { available: true, item: "cobblestone", blocks: 76, blockedBy: [] });
-  assert.equal(viewStatusResultSchema.parse({ status: "succeeded", situation: dry }).situation.mobility.maximumDrop, 3);
-  const dryMarkdown = report(empty);
-  assert.match(
-    dryMarkdown,
-    /- Water buckets carried: 0; no planned bucket drops or emergency fall saves \(no water bucket carried\)/,
-  );
-  assert.match(dryMarkdown, /- Scaffold placement \(pillar up, bridge gaps\): cobblestone x76/);
-
-  const carried = liveBot();
-  carried.inventory.items = () => [stack(36, "water_bucket", 1), stack(9, "cobblestone", 64)] as never;
-  const wet = observeLiveSituation(carried, data(), idleActivity);
-  assert.deepEqual(wet.mobility.bucketDrop, { available: true, maximumBlocks: 80, blockedBy: [] });
-  assert.deepEqual(wet.mobility.fallSave, { available: true, blockedBy: [] });
-  assert.equal(wet.mobility.waterBuckets, 1);
-  // A stocked bot pays no standing text for a capability it already has.
-  assert.match(report(carried), /### Mobility\n- Water buckets carried: 1\n- Scaffold placement/);
-
-  // A full bucket is no help where the pour boils off before anything lands in it.
-  Object.assign(carried.game, { dimension: "the_nether" });
-  const nether = observeLiveSituation(carried, data(), idleActivity);
-  assert.deepEqual(nether.mobility.bucketDrop.blockedBy, ["water_evaporates_here"]);
-  assert.equal(nether.mobility.waterBuckets, 1);
-  assert.match(
-    report(carried),
-    /- Water buckets carried: 1; no planned bucket drops or emergency fall saves \(water evaporates in this dimension\)/,
-  );
-
-  // Nothing admitted to place: the route keeps its drops and loses its climbs.
-  const unarmed = liveBot();
-  unarmed.inventory.items = () => [stack(36, "stone_pickaxe", 1)] as never;
-  const noScaffold = observeLiveSituation(unarmed, data(), idleActivity);
-  assert.deepEqual(noScaffold.mobility.scaffold, { available: false, item: null, blocks: 0, blockedBy: ["no_scaffold_block"] });
-  assert.match(
-    report(unarmed),
-    /- Scaffold placement \(pillar up, bridge gaps\): unavailable \(no admitted scaffold block carried\)/,
-  );
-});
-
-test("reports straight-down digging from the live policy, and renders only its loss", async (t) => {
-  const bot = liveBot();
-  const observe = () => observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
-  const policy = new SurvivalPolicyState(bot);
-  assert.deepEqual(observe().mobility.digStraightDown, { available: true, blockedBy: [] });
-  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation: observe() }), /straight-down/);
-
-  await policy.edit({
-    operation: "set",
-    expected_revision: policy.snapshot().revision,
-    changes: { navigation: { dig_straight_down: false } },
-    lifetime: { kind: "session" },
-    reason: "never dig a shaft",
-  });
-  const stairs = observe();
-  assert.deepEqual(stairs.mobility.digStraightDown, { available: false, blockedBy: ["policy_disabled"] });
-  assert.equal(viewStatusResultSchema.parse({ status: "succeeded", situation: stairs }).situation.mobility.digStraightDown.available, false);
-  assert.match(
-    formatViewStatusResult({ status: "succeeded", situation: stairs }),
-    /- No straight-down digging \(switched off in the survival policy\); routes descend by staircase/,
-  );
-});
-
-/**
- * What a carried food restores is game data a model otherwise guesses at: a brain choosing between farming and
- * hunting, or counting a day's worth of food, reads it here, one line per food kind, most filling first.
- */
-test("lists each carried food once with its hunger points and saturation from game data", (t) => {
-  const bot = liveBot();
-  bot.inventory.items = () => [stack(9, "bread", 3), stack(10, "cobblestone", 64), stack(11, "cooked_beef", 2), stack(12, "bread", 1)] as never;
-  const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
-  assert.deepEqual(situation.inventory.foods, [
-    { name: "cooked_beef", count: 2, points: 8, saturation: 12.8 },
-    { name: "bread", count: 4, points: 5, saturation: 6 },
-  ]);
-  const markdown = formatViewStatusResult({ status: "succeeded", situation });
-  assert.match(markdown, /- Food carried: cooked_beef x2 \(8 hunger points, 12.8 saturation each\); bread x4 \(5 hunger points, 6 saturation each\)/);
 });

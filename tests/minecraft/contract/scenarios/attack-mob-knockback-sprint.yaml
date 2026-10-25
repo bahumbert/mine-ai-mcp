@@ -1,0 +1,42 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-attack-mob-knockback-sprint
+tags:
+  - contract
+description: "A sprinting hit with a rested swing pushes a mob 0.7 away in all and spends the sprint (the next hit with the key down is a plain 0.4); a mob with AI takes the same first push. Contract check tests/minecraft/contract/checks/attack-mob-knockback-sprint.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: attack-mob-knockback-sprint
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - difficulty easy
+  - time set 18000
+entities:
+  - type: zombie
+    pos:
+      - -1.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: iron_sword
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

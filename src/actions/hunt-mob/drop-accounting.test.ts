@@ -1,31 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { observeHuntDrops } from "./drop-accounting.js";
 import { huntDropSightingSchema } from "./contract.js";
 
+/** The item entities the tests drop, made by the harness and held back until a test lets the bot see one. */
+const DROP_IDS = [7, 8] as const;
+/** Another player, the collector the bot is not. */
+const OTHER_PLAYER_ID = 2;
+
 function fixture() {
-  const blocks = new Map<string, { name: string }>();
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { id: 1 },
-    entities: {} as Bot["entities"],
-    blockAt: (position: Vec3) => blocks.get(position.floored().toString()) ?? null,
-  }) as unknown as Bot;
+  const stacks = new Map<number, { name: string; count: number } | null>();
+  const harness = createFakeBot({
+    groundY: null,
+    // Unloaded chunks where the first test's drop is seen: the bot reads no block there.
+    cells: { "20,45,-19": "void", "20,44,-19": "void", "22,44,-19": "void", "22,43,-19": "void" },
+    entities: {
+      [OTHER_PLAYER_ID]: { name: "player", position: new Vec3(25, 45, -19) },
+      ...Object.fromEntries(
+        DROP_IDS.map((id) => [
+          id,
+          {
+            name: "item",
+            position: new Vec3(20, 45, -19),
+            getDroppedItem: () => {
+              const stack = stacks.get(id) ?? null;
+              return stack && itemOf(harness.bot.registry, stack.name, stack.count);
+            },
+          },
+        ]),
+      ),
+    },
+  });
+  const { bot, world } = harness;
+  const unseen = new Map(DROP_IDS.map((id) => [id, bot.entities[id]!]));
+  for (const id of DROP_IDS) delete bot.entities[id];
+  /** The listeners of the idle harness bot (its physics and digging), which an observation leaves as it found them. */
+  const idleEvents = bot.eventNames();
   const lifetime = new AbortController();
-  const item = (id: number, stack: { name: string; count: number } | null) => {
-    const state = { stack };
-    const entity = {
-      id,
-      isValid: true,
-      position: new Vec3(20, 45, -19),
-      getDroppedItem: () => state.stack,
-    } as Bot["entity"];
+  const item = (id: (typeof DROP_IDS)[number], stack: { name: string; count: number } | null) => {
+    stacks.set(id, stack);
+    const state = {
+      get stack() {
+        return stacks.get(id) ?? null;
+      },
+      set stack(next) {
+        stacks.set(id, next);
+      },
+    };
+    const entity = unseen.get(id)!;
     bot.entities[id] = entity;
     return { entity, state };
   };
-  return { bot, lifetime, item, blocks };
+  return { bot, lifetime, item, world, server: harness.entities, idleEvents, otherPlayer: bot.entities[OTHER_PLAYER_ID]! };
 }
 
 test("records late item metadata, current location, and unexplained disappearance without inventing a pickup", () => {
@@ -38,8 +66,7 @@ test("records late item metadata, current location, and unexplained disappearanc
   f.bot.emit("itemDrop", drop.entity);
   drop.entity.position = new Vec3(22, 44, -19);
   assert.equal(read()[0]!.position.y, 44);
-  f.bot.emit("entityGone", drop.entity);
-  delete f.bot.entities[7];
+  f.server.remove(7);
   const sighting = huntDropSightingSchema.parse(read()[0]);
   assert.equal(sighting.firstSeen, "during_hunt");
   assert.equal(sighting.state, "no_longer_observed");
@@ -47,14 +74,14 @@ test("records late item metadata, current location, and unexplained disappearanc
   assert.equal(sighting.collectedByBot, false);
   assert.deepEqual(sighting.blocks, { atPosition: null, belowPosition: null });
   f.lifetime.abort();
-  assert.deepEqual(f.bot.eventNames(), [], "request settlement detaches every listener");
+  assert.deepEqual(f.bot.eventNames(), f.idleEvents, "request settlement detaches every listener");
 });
 
 test("records a drop moving from air into lava without claiming destruction or pickup", () => {
   const f = fixture();
-  f.blocks.set(new Vec3(20, 45, -19).toString(), { name: "air" });
-  f.blocks.set(new Vec3(20, 44, -19).toString(), { name: "lava" });
-  f.blocks.set(new Vec3(20, 43, -19).toString(), { name: "basalt" });
+  f.world.setCell(new Vec3(20, 45, -19), "air");
+  f.world.setCell(new Vec3(20, 44, -19), "lava");
+  f.world.setCell(new Vec3(20, 43, -19), "basalt");
   const read = observeHuntDrops(f.bot, "magma_cream", f.lifetime.signal);
   const drop = f.item(7, { name: "magma_cream", count: 1 });
   f.bot.emit("itemDrop", drop.entity);
@@ -63,8 +90,7 @@ test("records a drop moving from air into lava without claiming destruction or p
   f.bot.emit("entityMoved", drop.entity);
   // Removal may arrive without readable item metadata; retain the last movement observation.
   drop.state.stack = null;
-  f.bot.emit("entityGone", drop.entity);
-  delete f.bot.entities[7];
+  f.server.remove(7);
   const sighting = huntDropSightingSchema.parse(read()[0]);
   assert.deepEqual(sighting.blocks, { atPosition: "lava", belowPosition: "basalt" });
   assert.equal(sighting.position.y, 44.56);
@@ -72,7 +98,7 @@ test("records a drop moving from air into lava without claiming destruction or p
   assert.equal(sighting.collectedByBot, false);
   assert.equal(sighting.collectedByOther, false);
   f.lifetime.abort();
-  assert.deepEqual(f.bot.eventNames(), []);
+  assert.deepEqual(f.bot.eventNames(), f.idleEvents);
 });
 
 test("a partial collection can leave a loaded remainder; other collectors are distinct", () => {
@@ -85,7 +111,7 @@ test("a partial collection can leave a loaded remainder; other collectors are di
     read().map((s) => [s.state, s.observedCount, s.collectedByBot]),
     [["loaded", 2, true]],
   );
-  f.bot.emit("playerCollect", { id: 2 } as Bot["entity"], drop.entity);
+  f.bot.emit("playerCollect", f.otherPlayer, drop.entity);
   delete f.bot.entities[7];
   assert.equal(read()[0]!.collectedByOther, true);
   assert.equal(read()[0]!.firstSeen, "already_loaded");

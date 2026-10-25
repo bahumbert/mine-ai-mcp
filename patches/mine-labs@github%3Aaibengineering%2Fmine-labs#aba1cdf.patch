@@ -1,0 +1,959 @@
+diff --git a/src/client/node.ts b/src/client/node.ts
+index 43f1573..4444d28 100644
+--- a/src/client/node.ts
++++ b/src/client/node.ts
+@@ -29,6 +29,8 @@ export interface NodeClientSession {
+   username: string;
+   version: string;
+   scenario: ScenarioDefinition;
++  /** What `init` carried in `env` (empty for a client spawned with its environment). */
++  env: Record<string, string>;
+   arranged: Promise<void>;
+   start: Promise<void>;
+   signal: AbortSignal;
+@@ -83,6 +85,7 @@ export async function runNodeClient(client: (session: NodeClientSession) => void
+     username: init.username,
+     version: init.version,
+     scenario: init.scenario,
++    env: init.env ?? {},
+     arranged: arranged.promise,
+     start: started.promise,
+     signal: cancellation.signal,
+diff --git a/src/client/process.ts b/src/client/process.ts
+index b35d721..5f331ba 100644
+--- a/src/client/process.ts
++++ b/src/client/process.ts
+@@ -28,6 +28,40 @@ import {
+ import type { ClientCommandSpec, ScenarioDefinition } from "../scenario/schema.js";
+ import { registerManagedChild, settledWithin } from "../process/children.js";
+ 
++/** Lines of a client's output kept before its handover; the oldest are dropped past this. */
++export const CLIENT_AHEAD_MAX_LINES = 200;
++const CLIENT_AHEAD_MAX_LINE_CHARS = 2_000;
++/** How long a handover waits for the stdio of a client that already exited, to read the last of its stderr. */
++const CLOSED_GRACE_MS = 1_000;
++const FAILED_HANDOVER_STDERR_LINES = 10;
++
++export interface ClientOutputLine {
++  readonly stream: "stdout" | "stderr";
++  readonly line: string;
++}
++
++/**
++ * A client process spawned before its trial, waiting for `init`. It keeps the lines the child writes (a bounded
++ * tail) until a trial takes it over, so a client that dies while it waits can still say why.
++ */
++export interface ClientAhead {
++  readonly child: ChildProcessWithoutNullStreams;
++  /** Resolves once the child's stdio has closed (it exited) or it failed to spawn; never rejects. */
++  readonly closed: Promise<void>;
++  /** Set when the process could not be spawned (a missing command). */
++  spawnError(): Error | undefined;
++  /** The bounded tail of what the child wrote so far, oldest first; empty after the handover. */
++  recentOutput(): readonly ClientOutputLine[];
++  /**
++   * The handover: pass the kept lines to `sink` in the order written, then every later line as it arrives.
++   * Returns how many older lines the bound dropped. Meant to be called once.
++   */
++  takeOver(sink: (entry: ClientOutputLine) => void): number;
++}
++
++/** Hands a trial a client booted earlier, or `undefined` to have the trial spawn one on the spot. */
++export type ClientProvider = (client: ClientCommandSpec, username: string) => ClientAhead | undefined;
++
+ export interface ScenarioClientProcess {
+   readonly ready: Promise<void>;
+   readonly prepared: Promise<void>;
+@@ -44,6 +78,12 @@ export interface LaunchScenarioClientOptions {
+   username: string;
+   version: string;
+   artifactsDirectory: string;
++  /**
++   * Asked for the process before one is spawned. A client it hands over was spawned without the trial's values, so
++   * `init` carries them in `env` (`client.env` and `MINE_LABS_ARTIFACTS_DIR`): the client applies them over what the
++   * process was spawned with.
++   */
++  clientProvider?: ClientProvider;
+   readyTimeoutMs?: number;
+   preparedTimeoutMs?: number;
+   log: (message: string) => void;
+@@ -59,8 +99,11 @@ const SIGNAL_GRACE_MS = 5_000;
+ 
+ /** Launch one scenario client behind the language-neutral JSON-lines protocol. */
+ export function launchScenarioClient(options: LaunchScenarioClientOptions): ScenarioClientProcess {
+-  const child = spawnClient(options.client, options.artifactsDirectory);
+-  registerManagedChild(child);
++  const provided = pickClientAhead(options);
++  const failure = provided && handoverFailure(provided);
++  if (provided && failure) return failedHandover(provided, failure, options);
++  const spawned = provided ?? spawnClientAhead(options.client, { MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory });
++  const { child } = spawned;
+   const ready = Promise.withResolvers<void>();
+   const prepared = Promise.withResolvers<void>();
+   const exited = Promise.withResolvers<void>();
+@@ -75,8 +118,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     ready.reject(new Error(`client '${options.username}' did not become ready within ${(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS) / 1000}s`));
+   }, options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
+ 
+-  const output = createInterface({ input: child.stdout });
+-  output.on("line", (line) => {
++  const onStdoutLine = (line: string): void => {
+     let event;
+     try {
+       event = parseClientEvent(line);
+@@ -114,10 +156,11 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+         options.onCompletion(event.completion);
+         return;
+     }
+-  });
+-
+-  const errors = createInterface({ input: child.stderr });
+-  errors.on("line", (line) => options.log(`client '${options.username}' stderr: ${line}`));
++  };
++  const dropped = spawned.takeOver(({ stream, line }) =>
++    stream === "stdout" ? onStdoutLine(line) : options.log(`client '${options.username}' stderr: ${line}`),
++  );
++  if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
+   child.stdin.on("error", (error) => {
+     if (!stopping) options.log(`client '${options.username}' stdin error: ${error.message}`);
+   });
+@@ -148,8 +191,6 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     options.log(`client '${options.username}' process error: ${error.message}`);
+   });
+   child.once("exit", (code, signal) => {
+-    output.close();
+-    errors.close();
+     const detail = `client '${options.username}' exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
+     // A prepared client that exits cannot report an unfinished outcome later.
+     // Preserve its first reported completion and keep normal teardown quiet.
+@@ -168,6 +209,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+     username: options.username,
+     version: options.version,
+     scenario: options.scenario,
++    ...(provided && { env: { ...options.client.env, MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory } }),
+   });
+ 
+   return {
+@@ -225,13 +267,101 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+   };
+ }
+ 
+-function spawnClient(client: ClientCommandSpec, artifactsDirectory: string): ChildProcessWithoutNullStreams {
+-  return spawn(client.command, client.args, {
++/**
++ * Spawn a client and keep its output until something takes it over: the trial that launches it now, or a trial
++ * that is handed it later through a `ClientProvider`. `env` goes on top of `client.env` in the process environment.
++ */
++export function spawnClientAhead(client: ClientCommandSpec, env: Record<string, string> = {}): ClientAhead {
++  const child = spawn(client.command, client.args, {
+     cwd: client.cwd,
+-    env: { ...process.env, ...client.env, MINE_LABS_ARTIFACTS_DIR: artifactsDirectory },
++    env: { ...process.env, ...client.env, ...env },
+     stdio: ["pipe", "pipe", "pipe"],
+     windowsHide: true,
+   });
++  registerManagedChild(child);
++  const kept: ClientOutputLine[] = [];
++  let dropped = 0;
++  let sink: ((entry: ClientOutputLine) => void) | undefined;
++  let spawnError: Error | undefined;
++  const closed = Promise.withResolvers<void>();
++
++  // The sink gets every line whole (a protocol line can be long); only the kept tail is shortened.
++  const record = (stream: ClientOutputLine["stream"]) => (line: string) => {
++    if (sink) return sink({ stream, line });
++    kept.push({ stream, line: line.length > CLIENT_AHEAD_MAX_LINE_CHARS ? `${line.slice(0, CLIENT_AHEAD_MAX_LINE_CHARS)}...` : line });
++    if (kept.length > CLIENT_AHEAD_MAX_LINES) {
++      kept.shift();
++      dropped += 1;
++    }
++  };
++  const stdout = createInterface({ input: child.stdout });
++  const stderr = createInterface({ input: child.stderr });
++  stdout.on("line", record("stdout"));
++  stderr.on("line", record("stderr"));
++  // Nobody owns the pipe until the handover: a client that dies while it waits must not crash this process.
++  child.stdin.on("error", () => undefined);
++  child.once("error", (error) => {
++    spawnError = error;
++    closed.resolve();
++  });
++  child.once("close", () => {
++    stdout.close();
++    stderr.close();
++    closed.resolve();
++  });
++
++  return {
++    child,
++    closed: closed.promise,
++    spawnError: () => spawnError,
++    recentOutput: () => [...kept],
++    takeOver(next) {
++      const earlier = dropped;
++      for (const entry of kept.splice(0)) next(entry);
++      dropped = 0;
++      sink = next;
++      return earlier;
++    },
++  };
++}
++
++function pickClientAhead(options: LaunchScenarioClientOptions): ClientAhead | undefined {
++  if (!options.clientProvider) return undefined;
++  try {
++    return options.clientProvider(options.client, options.username);
++  } catch (cause) {
++    throw new Error(`client '${options.username}': the client provider failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
++  }
++}
++
++/** Why a client handed over cannot be used (it exited, or never spawned), or undefined when it is alive. */
++function handoverFailure(ahead: ClientAhead): string | undefined {
++  const { child } = ahead;
++  const spawnError = ahead.spawnError();
++  if (spawnError) return `could not start (${spawnError.message})`;
++  if (child.exitCode === null && child.signalCode === null) return undefined;
++  return `exited${child.exitCode === null ? "" : ` with code ${child.exitCode}`}${child.signalCode ? ` (${child.signalCode})` : ""}`;
++}
++
++/**
++ * The process of a client that was already gone at the handover: `ready` fails at once with how it ended and the
++ * last of its stderr, instead of after the ready timeout.
++ */
++function failedHandover(ahead: ClientAhead, reason: string, options: LaunchScenarioClientOptions): ScenarioClientProcess {
++  const ready = Promise.withResolvers<void>();
++  ready.promise.catch(() => undefined);
++  void (async () => {
++    await settledWithin(ahead.closed, CLOSED_GRACE_MS);
++    const stderr: string[] = [];
++    const dropped = ahead.takeOver(({ stream, line }) => {
++      options.log(`client '${options.username}' ${stream}: ${line}`);
++      if (stream === "stderr") stderr.push(line);
++    });
++    if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
++    const tail = stderr.slice(-FAILED_HANDOVER_STDERR_LINES).join("; ");
++    ready.reject(new Error(`client '${options.username}' ${reason} before it was handed over${tail ? `: ${tail}` : ""}`));
++  })();
++  return { ready: ready.promise, prepared: new Promise<void>(() => undefined), arranged() {}, start() {}, async stop() {} };
+ }
+ 
+ function send(child: ChildProcessWithoutNullStreams, command: ClientCommand): void {
+diff --git a/src/client/protocol.ts b/src/client/protocol.ts
+index 20fe378..2d6ae6a 100644
+--- a/src/client/protocol.ts
++++ b/src/client/protocol.ts
+@@ -33,6 +33,8 @@ export type ClientCommand =
+       username: string;
+       version: string;
+       scenario: ScenarioDefinition;
++      /** Environment the client applies over its own: sent to a client that was spawned before its trial. */
++      env?: Record<string, string>;
+     }
+   | { type: "arranged" }
+   | { type: "start" }
+@@ -59,6 +61,7 @@ const clientCommandSchema = z.discriminatedUnion("type", [
+     username: z.string(),
+     version: z.string(),
+     scenario: scenarioDefinitionSchema,
++    env: z.record(z.string(), z.string()).optional(),
+   }),
+   z.object({ type: z.literal("arranged") }),
+   z.object({ type: z.literal("start") }),
+diff --git a/src/index.ts b/src/index.ts
+index 7f0cb7e..ec90fa9
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -22,6 +22,31 @@ export {
+   type TrialContext,
+ } from "./session/run.js";
+ export { SessionController, type TrialCancellation } from "./session/controller.js";
++export { runScenarioTrial, type ScenarioTrialOptions } from "./trial/run.js";
++export { MinecraftServer, prepareWorldDir, serverJavaArgs } from "./server/server.js";
++export { writeRunResult } from "./report/artifacts.js";
++export {
++  CLIENT_AHEAD_MAX_LINES,
++  launchScenarioClient,
++  spawnClientAhead,
++  type ClientAhead,
++  type ClientOutputLine,
++  type ClientProvider,
++  type LaunchScenarioClientOptions,
++  type ScenarioClientProcess,
++} from "./client/process.js";
++export { canResetScenario, worldCompatibilityKey } from "./session/reuse.js";
++export {
++  boxedClearEntities,
++  CLEAR_ENTITIES,
++  compileScenario,
++  MAX_RCON_COMMAND_BYTES,
++  tickBlockCommands,
++  unpinCommands,
++  type CompileOptions,
++  type EntityBox,
++  type TickBlocks,
++} from "./scenario/compile.js";
+ export {
+   scenarioSchema,
+   scenarioDefinitionSchema,
+@@ -40,3 +65,5 @@ export {
+   type EntitySpec,
+   type Geometry,
+ } from "./scenario/schema.js";
++export type { ArenaTrialOptions } from "./trial/arena.js";
++export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
+diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
+index 54fe980..9c2e6e5
+--- a/src/scenario/compile.ts
++++ b/src/scenario/compile.ts
+@@ -17,7 +17,7 @@ import { join } from "node:path";
+ import type { Dimension, Scenario } from "./schema.js";
+ import { posToCommand } from "./schema.js";
+ import { writeTextFile } from "../util/fs.js";
+-import { commandVerb, inDimension, resourceId, withoutDimension } from "../util/minecraft.js";
++import { CHECKED_COMMAND_PREFIX, commandVerb, inDimension, resourceId, withoutDimension } from "../util/minecraft.js";
+ 
+ export interface CompiledScenario {
+   /** One-shot commands run over rcon after world load, before client players join. */
+@@ -93,6 +93,26 @@ export const FORCELOAD_CHUNK_LIMIT = 256;
+  */
+ export const CLEAR_ENTITIES = "kill @e[type=!minecraft:player]";
+ 
++/** A block box in the overworld: the part of a shared server one scenario lane owns. */
++export interface EntityBox {
++  minX: number;
++  minY: number;
++  minZ: number;
++  maxX: number;
++  maxY: number;
++  maxZ: number;
++}
++
++/**
++ * `CLEAR_ENTITIES` limited to a lane's box, so a lane clearing its arena never
++ * kills the mobs of the lanes sharing its server. The selector box starts at
++ * the min corner and spans `max - min` blocks on each axis.
++ */
++export function boxedClearEntities(box: EntityBox): string {
++  const { minX, minY, minZ, maxX, maxY, maxZ } = box;
++  return `kill @e[type=!minecraft:player,x=${minX},y=${minY},z=${minZ},dx=${maxX - minX},dy=${maxY - minY},dz=${maxZ - minZ}]`;
++}
++
+ /**
+  * Pin one region's chunks. `forceload` is per dimension: run bare over rcon
+  * it marks overworld chunks, which does nothing for an arena in the Nether.
+@@ -121,8 +141,17 @@ export function regionLoadedProbes(region: SetupRegion): string[] {
+ /** What vanilla says to a block query in a chunk it has not loaded. */
+ export const UNLOADED_POSITION = /not loaded/iu;
+ 
+-/** Release every pin, once per dimension the regions were pinned in. */
+-export function unpinCommands(regions: readonly SetupRegion[]): string[] {
++/**
++ * Release the pins of `regions`: by default every pin, once per dimension they
++ * were pinned in. `scoped` removes only the chunks of each region, for a lane
++ * on a shared server whose neighbours' pins must stay.
++ */
++export function unpinCommands(regions: readonly SetupRegion[], options: { scoped?: boolean } = {}): string[] {
++  if (options.scoped) {
++    return regions.map((region) =>
++      inDimension(region.dimension, `forceload remove ${region.minX} ${region.minZ} ${region.maxX} ${region.maxZ}`),
++    );
++  }
+   const dimensions = [...new Set(regions.map((region) => region.dimension))];
+   return dimensions.map((dimension) => inDimension(dimension, "forceload remove all"));
+ }
+@@ -165,6 +194,21 @@ const ALLOW_LARGE_FIXTURE_COMMANDS = "gamerule commandModificationBlockLimit 100
+ // it silences — so this does not affect anything `Rcon` reads back.
+ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
+ 
++// A command block logs and broadcasts its output to ops every time it runs, so
++// a scenario's tick commands, run every tick, would flood the log and chat.
++const QUIET_COMMAND_BLOCKS = "gamerule commandBlockOutput false";
++
++/**
++ * Options of a scenario that shares its server with other lanes (all absent:
++ * the compiled output of a scenario with its own server, unchanged).
++ */
++export interface CompileOptions {
++  /** The lane's box: entity clears stay inside it and the server-wide block limit is left alone. */
++  entityBox?: EntityBox;
++  /** The tick commands run as command blocks (see `tickBlockCommands`), so the output gamerule is silenced. */
++  tickBlocks?: boolean;
++}
++
+ /**
+  * Turn a scenario into world-mutation commands:
+  * - geometry/setup → rcon setup commands (runs once, right after boot)
+@@ -172,12 +216,20 @@ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
+  * - scenario.tick → a datapack with a `#minecraft:tick` function so commands
+  *   fire reliably every tick (rcon spam would starve the server loop)
+  */
+-export function compileScenario(s: Scenario): CompiledScenario {
++export function compileScenario(s: Scenario, options: CompileOptions = {}): CompiledScenario {
+   // Everything a scenario places is in its arena dimension. Rcon runs in the
+   // overworld, so each world edit is pointed at the arena; the server-wide
+   // settings between them (gamerules, time, difficulty) have no dimension.
+   const arena = (command: string): string => inDimension(s.world.dimension, command);
+-  const setup: string[] = [QUIET_COMMAND_FEEDBACK, ALLOW_LARGE_FIXTURE_COMMANDS, ...s.reset.map(arena)];
++  // A lane of a shared server leaves the block limit to the server's owner: two
++  // lanes setting it at random could shrink it between another lane's raise and its clone.
++  const blockLimit = options.entityBox ? [] : [ALLOW_LARGE_FIXTURE_COMMANDS];
++  const setup: string[] = [
++    QUIET_COMMAND_FEEDBACK,
++    ...(options.tickBlocks ? [QUIET_COMMAND_BLOCKS] : []),
++    ...blockLimit,
++    ...s.reset.map(arena),
++  ];
+ 
+   for (const g of s.geometry) {
+     if ("fill" in g) {
+@@ -209,15 +261,13 @@ export function compileScenario(s: Scenario): CompiledScenario {
+ 
+   // Entities first: the reset clears blocks, and anything the scenario summoned
+   // would otherwise be left standing in the cleared space.
+-  const teardown =
+-    s.reset.length > 0
+-      ? [ALLOW_LARGE_FIXTURE_COMMANDS, CLEAR_ENTITIES, ...s.reset.map(arena)]
+-      : [ALLOW_LARGE_FIXTURE_COMMANDS, CLEAR_ENTITIES];
++  const clearEntities = options.entityBox ? boxedClearEntities(options.entityBox) : CLEAR_ENTITIES;
++  const teardown = [...blockLimit, clearEntities, ...s.reset.map(arena)];
+ 
+   const region = setupRegion([...setup, ...activation], s);
+   // Authored reset commands cannot account for blocks placed or dug by clients.
+   // Every reusable arena still needs its pristine block snapshot.
+-  const snapshot = arenaSnapshot(region);
++  const snapshot = arenaSnapshot(region, blockLimit.length > 0);
+ 
+   return { setup, activation, teardown, region, snapshot };
+ }
+@@ -237,17 +287,17 @@ export function compileScenario(s: Scenario): CompiledScenario {
+  * setup list, so it cannot rely on the gamerule that list sets, and a 32,768
+  * block default would silently truncate the copy of a large arena.
+  */
+-function arenaSnapshot(region: SetupRegion | null): ArenaSnapshot | null {
++function arenaSnapshot(region: SetupRegion | null, raiseBlockLimit: boolean): ArenaSnapshot | null {
+   if (!region) return null;
+   const scratch = scratchRegion(region);
+   // Snapshot the actual expanded arena, which can exceed the setup fill size.
+   const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
+-  const allowSnapshot = `gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`;
++  const allowSnapshot = raiseBlockLimit ? [`gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`] : [];
+   const arenaBox = `${region.minX} ${region.minY} ${region.minZ} ${region.maxX} ${region.maxY} ${region.maxZ}`;
+   const scratchBox = `${scratch.minX} ${scratch.minY} ${scratch.minZ} ${scratch.maxX} ${scratch.maxY} ${scratch.maxZ}`;
+   return {
+-    save: [allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
+-    restore: [allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
++    save: [...allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
++    restore: [...allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
+     pin: [region, scratch],
+   };
+ }
+@@ -414,3 +464,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
+     JSON.stringify({ values: [`${ns}:tick`] }, null, 2),
+   );
+ }
++
++/** Where a lane's tick command blocks sit: inside the flat world's dirt, under every arena floor. */
++export const TICK_BLOCK_Y = -63;
++
++/**
++ * The longest command (in bytes) the server's RCON answers: 1446 is, 1447 is never read
++ * (measured on 1.21.4, scenario-capacity-probe/rcon-limit.ts). A command block is
++ * installed by an RCON `setblock` carrying its command (inside the checked-command
++ * prefix), so this bounds the command.
++ */
++export const MAX_RCON_COMMAND_BYTES = 1446;
++
++/** The command blocks that run a scenario's `tick` commands, and how to take them away again. */
++export interface TickBlocks {
++  /** `setblock` commands, the last chain block first and the repeating head last, so the chain is whole when the head first fires. */
++  install: string[];
++  /** `setblock ... air` commands, the head first so nothing fires while the chain is taken apart. */
++  remove: string[];
++  /** The blocks' chunk, which the runner pins for as long as they stand. */
++  region: SetupRegion;
++}
++
++/**
++ * A scenario's `tick` commands as command blocks instead of a datapack function.
++ *
++ * Installing a datapack means `reload`, which blocks the server thread for up
++ * to half a second and so freezes every other lane of a shared server. One
++ * repeating command block (always active) followed by chain command blocks
++ * (always active) runs the commands in the scenario's order, every tick, with
++ * no reload. The row starts at `control` and runs east, one block per command.
++ * `null` when there are no commands.
++ */
++export function tickBlockCommands(
++  commands: readonly string[],
++  control: { x: number; z: number },
++  dimension: Dimension,
++): TickBlocks | null {
++  if (commands.length === 0) return null;
++  const inArena = (command: string): string => inDimension(dimension, command);
++  const blocks = commands.map((command, index) => {
++    const kind = index === 0 ? "repeating_command_block" : "chain_command_block";
++    const position = `${control.x + index} ${TICK_BLOCK_Y} ${control.z}`;
++    const state = `minecraft:${kind}[facing=east]{Command:"${snbtString(inArena(command))}",auto:1b,TrackOutput:0b}`;
++    const install = inArena(`setblock ${position} ${state}`);
++    // The install runs through `executeChecked`, which wraps it in a prefix.
++    const bytes = Buffer.byteLength(CHECKED_COMMAND_PREFIX + install);
++    if (bytes > MAX_RCON_COMMAND_BYTES) {
++      throw new Error(
++        `tick command ${index + 1} needs a ${bytes}-byte setblock to install, above the ${MAX_RCON_COMMAND_BYTES} the server's RCON reads; shorten it, or run this scenario on a server of its own: ${command.slice(0, 60)}...`,
++      );
++    }
++    return { position, install };
++  });
++  const maxX = control.x + commands.length - 1;
++  return {
++    install: blocks.map((block) => block.install).reverse(),
++    remove: blocks.map((block) => inArena(`setblock ${block.position} minecraft:air`)),
++    region: {
++      dimension,
++      minX: control.x,
++      maxX,
++      minY: TICK_BLOCK_Y,
++      maxY: TICK_BLOCK_Y,
++      minZ: control.z,
++      maxZ: control.z,
++      chunks: chunkSpan(control.x, control.z, maxX, control.z),
++    },
++  };
++}
++
++/** The inside of an SNBT string literal: backslashes first, then quotes. */
++function snbtString(text: string): string {
++  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
++}
+diff --git a/src/server/rcon.ts b/src/server/rcon.ts
+index 0baaaf1..73400f9
+--- a/src/server/rcon.ts
++++ b/src/server/rcon.ts
+@@ -28,7 +28,7 @@ import RconClientModule from "rcon-srcds";
+ import { z } from "zod";
+ import { AsyncLocalStorage } from "node:async_hooks";
+ import type { Dimension } from "../scenario/schema.js";
+-import { inDimension, resourceId } from "../util/minecraft.js";
++import { CHECKED_COMMAND_PREFIX, inDimension, resourceId } from "../util/minecraft.js";
+ 
+ interface RconTransport {
+   authenticate(password: string): Promise<boolean>;
+@@ -127,7 +127,7 @@ export class Rcon {
+       // `execute ... run /setworldspawn ...`, which is a parse error and
+       // reported as "setup command failed" against a command that is fine.
+       const inner = cmd.startsWith("/") ? cmd.slice(1) : cmd;
+-      const output = await this.command(`execute store success score #ml_command ml_query run ${inner}`);
++      const output = await this.command(`${CHECKED_COMMAND_PREFIX}${inner}`);
+       const succeeded = (await this.readScore("#ml_command", "ml_query")) === 1;
+       if (!succeeded && !options.acceptedNoOp?.test(output)) {
+         throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
+diff --git a/src/server/server.ts b/src/server/server.ts
+index 51aeb89..152d0f2
+--- a/src/server/server.ts
++++ b/src/server/server.ts
+@@ -94,6 +94,20 @@ export interface ServerConfig {
+   structures: boolean;
+   operators: OperatorProfile[];
+   maxPlayers?: number;
++  /** Seconds an empty server waits before it pauses; 0 never pauses. Absent keeps the game's default (60 on 1.21.4). */
++  pauseWhenEmptySeconds?: number;
++  /** Command blocks run only when the server is asked to allow them (vanilla default: off). */
++  enableCommandBlocks?: boolean;
++  /** Java heap cap, `-Xmx` syntax ("4G"); absent keeps the default heap. */
++  maxHeap?: string;
++}
++
++/** The heap cap a server gets when `maxHeap` is not asked for. */
++export const DEFAULT_MAX_HEAP = "2G";
++
++/** The arguments `java` is started with: heap bounds, then the server jar. */
++export function serverJavaArgs(cfg: Pick<ServerConfig, "maxHeap">, jar: string): string[] {
++  return ["-Xms512M", `-Xmx${cfg.maxHeap ?? DEFAULT_MAX_HEAP}`, "-jar", jar, "nogui"];
+ }
+ 
+ export class MinecraftServer {
+@@ -135,6 +149,9 @@ export class MinecraftServer {
+     seed?: number | string;
+     structures?: boolean;
+     maxPlayers?: number;
++    pauseWhenEmptySeconds?: number;
++    enableCommandBlocks?: boolean;
++    maxHeap?: string;
+     spectatorNames?: string[];
+   }): Promise<MinecraftServer> {
+     // Validate local configuration before acquiring resources that need release.
+@@ -153,6 +170,9 @@ export class MinecraftServer {
+       seed: opts.seed,
+       structures: opts.structures ?? false,
+       maxPlayers: opts.maxPlayers,
++      pauseWhenEmptySeconds: opts.pauseWhenEmptySeconds,
++      enableCommandBlocks: opts.enableCommandBlocks,
++      maxHeap: opts.maxHeap,
+       operators: [...operators, ...(opts.spectatorNames ?? []).map((name): OperatorProfile => ({
+         name, uuid: offlinePlayerUuid(name), level: 2, bypassesPlayerLimit: true,
+       }))],
+@@ -205,6 +225,8 @@ export class MinecraftServer {
+       "view-distance=8",
+       "simulation-distance=8",
+       `max-players=${this.cfg.maxPlayers ?? 10}`,
++      ...(this.cfg.pauseWhenEmptySeconds === undefined ? [] : [`pause-when-empty-seconds=${this.cfg.pauseWhenEmptySeconds}`]),
++      ...(this.cfg.enableCommandBlocks ? ["enable-command-block=true"] : []),
+     ];
+     const root = join(this.cfg.worldDir, "..");
+     await writeTextFile(join(root, "server.properties"), lines.join("\n"));
+@@ -221,7 +243,7 @@ export class MinecraftServer {
+     const javaName = process.platform === "win32" ? "javaw.exe" : "java";
+     const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", javaName) : javaName;
+     this.log(`starting ${this.cfg.version} server on ${this.cfg.host}:${this.cfg.gamePort} (rcon :${this.cfg.rconPort})`);
+-    this.proc = spawn(java, ["-Xms512M", "-Xmx2G", "-jar", this.jar, "nogui"], {
++    this.proc = spawn(java, serverJavaArgs(this.cfg, this.jar), {
+       cwd: root,
+       stdio: ["ignore", "pipe", "pipe"],
+       windowsHide: true,
+diff --git a/src/trial/arena.ts b/src/trial/arena.ts
+new file mode 100644
+index 0000000..d9aa2f5
+--- /dev/null
++++ b/src/trial/arena.ts
+@@ -0,0 +1,60 @@
++/**
++ * What a trial needs to know to share its server with other trials.
++ *
++ * A trial normally owns its server: it clears every entity, reloads a tick
++ * datapack and releases every chunk pin. A lane of a shared server must do none
++ * of that, because each of those reaches the neighbouring lanes. `arena` on the
++ * trial options switches all of them at once; this module holds the options and
++ * the choices that follow from them, so `run.ts` stays a runner.
++ */
++
++import { boxedClearEntities, CLEAR_ENTITIES, tickBlockCommands } from "../scenario/compile.js";
++import type { CompileOptions, EntityBox, TickBlocks } from "../scenario/compile.js";
++import type { Scenario } from "../scenario/schema.js";
++
++export interface ArenaTrialOptions {
++  /** The lane's name, e.g. "lane-3": only for logs and errors. */
++  id: string;
++  /** Entity clears of this trial stay inside the box. */
++  entityBox: EntityBox;
++  /** Block x,z of the lane's repeating command block; its chain runs east from it (y -63). */
++  controlChunk: { x: number; z: number };
++}
++
++/** The arena options of one running trial, with the command blocks its tick commands become. */
++export interface LaneContext {
++  arena: ArenaTrialOptions;
++  /** Null when the scenario has no tick commands. */
++  tickBlocks: TickBlocks | null;
++}
++
++/** Throws for trial options a lane cannot honour, before anything touches the world. */
++export function assertLaneTrial(opts: { arena?: ArenaTrialOptions; scenario: Scenario; reuseServer?: boolean; holdPreparedWorld?: boolean }): void {
++  const { arena } = opts;
++  if (!arena) return;
++  if (!opts.reuseServer) throw new Error(`${arena.id}: a lane shares its server, so the trial must set reuseServer`);
++  if (opts.holdPreparedWorld) throw new Error(`${arena.id}: spectator lanes are not supported (holdPreparedWorld freezes the whole server)`);
++  // The tick command blocks stand at y -63 of the overworld; the other dimensions start at y 0, and an entity box only reaches the overworld.
++  if (opts.scenario.world.dimension !== "overworld") {
++    throw new Error(`${arena.id}: a lane runs in the overworld, this scenario is in ${opts.scenario.world.dimension}; run it on a server of its own`);
++  }
++}
++
++/**
++ * The lane of a trial, or undefined for a trial that owns its server. Throws
++ * for a tick command the server's RCON cannot carry, still before the world is touched.
++ */
++export function laneContextOf(arena: ArenaTrialOptions | undefined, scenario: Scenario): LaneContext | undefined {
++  if (!arena) return undefined;
++  return { arena, tickBlocks: tickBlockCommands(scenario.tick, arena.controlChunk, scenario.world.dimension) };
++}
++
++/** What `compileScenario` is told for a lane; nothing for a trial that owns its server. */
++export function compileOptionsOf(lane: LaneContext | undefined): CompileOptions | undefined {
++  return lane ? { entityBox: lane.arena.entityBox, tickBlocks: true } : undefined;
++}
++
++/** The entity clear before a reused trial: boxed in a lane. */
++export function clearEntitiesOf(lane: LaneContext | undefined): string {
++  return lane ? boxedClearEntities(lane.arena.entityBox) : CLEAR_ENTITIES;
++}
+diff --git a/src/trial/run.ts b/src/trial/run.ts
+index 2465cf9..b583cff
+--- a/src/trial/run.ts
++++ b/src/trial/run.ts
+@@ -31,16 +31,16 @@ import {
+   unpinCommands,
+   UNLOADED_POSITION,
+   writeDatapack,
+-  CLEAR_ENTITIES,
+   FORCELOAD_CHUNK_LIMIT,
+   type ArenaSnapshot,
+   type SetupRegion,
+ } from "../scenario/compile.js";
++import { assertLaneTrial, clearEntitiesOf, compileOptionsOf, laneContextOf, type ArenaTrialOptions, type LaneContext } from "./arena.js";
+ import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
+ import { preparePlayerForTrial } from "../player/prepare.js";
+ import { watchOperatorSpectators } from "../player/operators.js";
+ import { delay } from "../util/fs.js";
+-import { launchScenarioClient, type ScenarioClientProcess } from "../client/process.js";
++import { launchScenarioClient, type ClientProvider, type ScenarioClientProcess } from "../client/process.js";
+ import type { ClientCompletion } from "../client/protocol.js";
+ 
+ export interface RunResult {
+@@ -87,6 +87,13 @@ export interface ScenarioTrialOptions {
+   onGoalProgress?: (goal: GoalResult) => void;
+   /** The arranged clients are waiting at the start line; a managed spectator may connect now. */
+   onPrepared?: () => void | Promise<void>;
++  /**
++   * Every setup command of the arrangement succeeded; called before the settle
++   * delay, the clients' boot and join. Never called when the arrangement
++   * throws; a throw here is an arrangement error (the lane's ticks stop, the
++   * restore runs).
++   */
++  onArranged?: () => void | Promise<void>;
+   /** World setup is complete; hold here before players join the frozen standby. */
+   onWorldPrepared?: () => void | Promise<void>;
+   /** Keep a speculative fixture frozen until its observer has joined. */
+@@ -101,6 +108,15 @@ export interface ScenarioTrialOptions {
+   waitForSpectator?: boolean;
+   /** Clear server-side player state and non-player entities before a reused-server trial. */
+   reuseServer?: boolean;
++  /**
++   * Run as one lane of a server other trials share: entity clears and chunk
++   * unpins stay inside the lane, tick commands run as command blocks (no
++   * datapack, no `reload`) and the server-wide block limit is left alone.
++   * Needs `reuseServer`; not combinable with `holdPreparedWorld`.
++   */
++  arena?: ArenaTrialOptions;
++  /** Hands a trial's client a process booted earlier (see `LaunchScenarioClientOptions.clientProvider`). */
++  clientProvider?: ClientProvider;
+   startedAt?: number;
+   signal?: AbortSignal;
+ }
+@@ -151,6 +167,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+ /** Arrange and measure one trial on an already-running Mine Labs server. */
+ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
+   const { scenario, server, log } = opts;
++  assertLaneTrial(opts);
+   const startedAt = opts.startedAt ?? Date.now();
+   const result = emptyResult(scenario, startedAt);
+   result.gamePort = server.gamePort;
+@@ -158,8 +175,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+   let clientsPrepared = false;
+   // Armed before the world is arranged, so a human who is already connected —
+   // or who joins while the fixture is being built — is a spectator before the
+-  // mobs exist rather than a survival body standing in the arrangement.
+-  const operatorWatch = server.rcon
++  // mobs exist rather than a survival body standing in the arrangement. A lane
++  // has no spectator (it is headless) and one watch per lane would poll the
++  // shared server's RCON every two seconds for nothing.
++  const operatorWatch = server.rcon && !opts.arena
+     ? watchOperatorSpectators({
+         commands: server.rcon,
+         operatorNames: server.operatorNames,
+@@ -175,10 +194,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+   // exactly when the next trial most needs it put back — so this cannot be the
+   // return value of `arrangeScenario`, which a throw would discard.
+   let arenaBackup: ArenaSnapshot | null = null;
++  let lane: LaneContext | undefined;
+ 
+   try {
+-    if (opts.reuseServer) arenaBackup = await snapshotArena(server, scenario, log);
+-    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld));
++    lane = laneContextOf(opts.arena, scenario);
++    if (opts.reuseServer) arenaBackup = await snapshotArena(server, scenario, log, lane);
++    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld), lane, opts.onArranged);
+     try {
+       await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
+       await connectScenarioClients({ ...opts, clients });
+@@ -214,7 +235,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+     // The session retains the world for inspection and restores it before reuse.
+     if (opts.reuseServer && arenaBackup) {
+       const backup = arenaBackup;
+-      const restore = (restoreLog: (message: string) => void) => clearScenario(server, scenario, backup, restoreLog);
++      const restore = (restoreLog: (message: string) => void) => clearScenario(server, scenario, backup, restoreLog, lane);
+       if (opts.deferReset) opts.deferReset(restore);
+       else await restore(log);
+     }
+@@ -296,6 +317,7 @@ async function connectScenarioClients(
+       username: player.name,
+       version: scenario.minecraft.version,
+       artifactsDirectory,
++      clientProvider: opts.clientProvider,
+       log,
+       onChat: (message) => clients.chat.get(player.name)?.push(message),
+       onCompletion: (completion) => recordClientCompletion(player.name, completion, clients, log),
+@@ -443,9 +465,10 @@ async function snapshotArena(
+   server: MinecraftServer,
+   scenario: Scenario,
+   log: (message: string) => void,
++  lane?: LaneContext,
+ ): Promise<ArenaSnapshot> {
+   if (!server.rcon) throw new Error("rcon unavailable before arena snapshot");
+-  const { snapshot } = compileScenario(scenario);
++  const { snapshot } = compileScenario(scenario, compileOptionsOf(lane));
+   if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
+   const pinned = await pinRegions(server.rcon, snapshot.pin, log);
+   if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
+@@ -455,7 +478,7 @@ async function snapshotArena(
+     }
+     return snapshot;
+   } finally {
+-    await unpinRegions(server.rcon, snapshot.pin);
++    await unpinRegions(server.rcon, snapshot.pin, Boolean(lane));
+   }
+ }
+ 
+@@ -465,15 +488,22 @@ async function clearScenario(
+   scenario: Scenario,
+   backup: ArenaSnapshot,
+   log: (message: string) => void,
++  lane?: LaneContext,
+ ): Promise<void> {
+   if (!server.rcon) throw new Error("rcon unavailable during arena restore");
++  const failures: unknown[] = [];
+   // A still-running scenario tick can replace blocks immediately after clone.
+-  await writeDatapack({ ...scenario, tick: [] }, server.worldDir);
+-  await server.rcon.executeChecked("reload");
+-  const { teardown } = compileScenario(scenario);
++  if (lane) await stopTickBlocks(server.rcon, lane, log, failures);
++  else {
++    await writeDatapack({ ...scenario, tick: [] }, server.worldDir);
++    await server.rcon.executeChecked("reload");
++  }
++  const { teardown } = compileScenario(scenario, compileOptionsOf(lane));
+   const pinned = await pinRegions(server.rcon, backup.pin, log);
+-  if (!pinned) throw new Error("Arena cannot be pinned for restore; refusing to reuse the dirty world");
+-  const failures: unknown[] = [];
++  if (!pinned) {
++    await releaseTickBlocksPin(server.rcon, lane);
++    throw new Error("Arena cannot be pinned for restore; refusing to reuse the dirty world");
++  }
+   try {
+     for (const command of [...teardown, ...backup.restore]) {
+       try {
+@@ -485,7 +515,8 @@ async function clearScenario(
+       }
+     }
+   } finally {
+-    await unpinRegions(server.rcon, backup.pin);
++    await unpinRegions(server.rcon, backup.pin, Boolean(lane));
++    await releaseTickBlocksPin(server.rcon, lane);
+   }
+   if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
+ }
+@@ -502,34 +533,85 @@ async function arrangeScenario(
+   log: (message: string) => void,
+   reuseServer: boolean,
+   holdPreparedWorld = false,
++  lane?: LaneContext,
++  onArranged?: () => void | Promise<void>,
+ ): Promise<() => Promise<void>> {
+   const rcon = server.rcon;
+   if (!rcon) throw new Error("rcon unavailable before arrangement");
+-  if (reuseServer) await rcon.command(CLEAR_ENTITIES);
+-  // A standby's tick commands must not run during setup or the selection wait.
+-  await writeDatapack(holdPreparedWorld ? { ...scenario, tick: [] } : scenario, server.worldDir);
+-  await rcon.command("reload");
+-  const { setup, region } = compileScenario(scenario);
++  if (reuseServer) await rcon.command(clearEntitiesOf(lane));
++  if (!lane) {
++    // A standby's tick commands must not run during setup or the selection wait.
++    await writeDatapack(holdPreparedWorld ? { ...scenario, tick: [] } : scenario, server.worldDir);
++    await rcon.command("reload");
++  }
++  const { setup, region } = compileScenario(scenario, compileOptionsOf(lane));
+   const regions = region ? [region] : [];
+-  const pinned = await pinRegions(rcon, regions, log);
++  let pinned = false;
+   const release = async (): Promise<void> => {
+-    if (pinned) await unpinRegions(rcon, regions);
++    if (pinned) await unpinRegions(rcon, regions, Boolean(lane));
+   };
+   try {
++    if (lane) await installTickBlocks(rcon, lane, log);
++    pinned = await pinRegions(rcon, regions, log);
+     // Chunks must load first; then no redstone, fluid, or scheduled block tick
+     // can advance between the first setup command and the start boundary.
+     if (holdPreparedWorld) await rcon.executeChecked("tick freeze");
+     for (const command of setup) {
+       await rcon.executeChecked(command, { acceptedNoOp: acceptedNoOp(command) });
+     }
++    await onArranged?.();
+   } catch (error) {
+     await release();
++    // The lane's ticks must not keep running while the restore waits its turn.
++    if (lane) await stopTickBlocks(rcon, lane, log, []);
+     throw error;
+   }
+   await delay(1500);
+   return release;
+ }
+ 
++/**
++ * Install a lane's tick commands: pin the chunk of the command blocks and wait
++ * until it is loaded, then place the chain tail first and the repeating head
++ * last, so the whole chain stands when the head first fires. A failure here
++ * leaves the pin and any placed block to `clearScenario`, which always runs.
++ */
++async function installTickBlocks(rcon: NonNullable<MinecraftServer["rcon"]>, lane: LaneContext, log: (message: string) => void): Promise<void> {
++  const blocks = lane.tickBlocks;
++  if (!blocks) return;
++  if (!(await pinRegions(rcon, [blocks.region], log))) throw new Error(`${lane.arena.id}: the chunk of the tick command blocks cannot be pinned (more than the force-load limit or none); run this scenario on a server of its own`);
++  for (const command of blocks.install) await rcon.executeChecked(command);
++}
++
++/** What vanilla answers a `setblock ... air` over air: the block is already gone, which is what the removal wants. */
++const BLOCK_ALREADY_AIR = /^Could not set the block$/u;
++
++/**
++ * Take the lane's tick command blocks away, the head first. A removal that
++ * fails goes to `failures` (a block still ticking dirties the lane for good)
++ * and into the log; it never hides the error that brought us here.
++ */
++async function stopTickBlocks(
++  rcon: NonNullable<MinecraftServer["rcon"]>,
++  lane: LaneContext,
++  log: (message: string) => void,
++  failures: unknown[],
++): Promise<void> {
++  for (const command of lane.tickBlocks?.remove ?? []) {
++    try {
++      await rcon.executeChecked(command, { acceptedNoOp: BLOCK_ALREADY_AIR });
++    } catch (error) {
++      failures.push(error);
++      log(`${lane.arena.id}: tick block removal failed: ${command} → ${error instanceof Error ? error.message : String(error)}`);
++    }
++  }
++}
++
++/** Release the chunk the lane's tick command blocks stood in. */
++async function releaseTickBlocksPin(rcon: NonNullable<MinecraftServer["rcon"]>, lane: LaneContext | undefined): Promise<void> {
++  if (lane?.tickBlocks) await unpinRegions(rcon, [lane.tickBlocks.region], true);
++}
++
+ /** Spawn the scenario's live entities only after every client is prepared. */
+ async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
+   if (!server.rcon) throw new Error("rcon unavailable before activation");
+@@ -586,8 +668,8 @@ async function pinRegions(
+ const REGION_LOAD_TIMEOUT_MS = 30_000;
+ 
+ /** Release what `pinRegions` pinned, in every dimension it pinned. */
+-async function unpinRegions(rcon: NonNullable<MinecraftServer["rcon"]>, regions: readonly SetupRegion[]): Promise<void> {
+-  for (const command of unpinCommands(regions)) await rcon.command(command);
++async function unpinRegions(rcon: NonNullable<MinecraftServer["rcon"]>, regions: readonly SetupRegion[], scoped = false): Promise<void> {
++  for (const command of unpinCommands(regions, { scoped })) await rcon.command(command);
+ }
+ 
+ async function waitForClientPhase(
+diff --git a/src/util/minecraft.ts b/src/util/minecraft.ts
+index 0dfa0ed..e5450d0
+--- a/src/util/minecraft.ts
++++ b/src/util/minecraft.ts
+@@ -47,3 +47,6 @@ export function withoutDimension(command: string): string {
+ export function commandVerb(command: string): string {
+   return withoutDimension(command).split(/\s+/u)[0] ?? "";
+ }
++
++/** What `Rcon.executeChecked` puts before a command, so a command near the RCON size limit counts it. */
++export const CHECKED_COMMAND_PREFIX = "execute store success score #ml_command ml_query run ";

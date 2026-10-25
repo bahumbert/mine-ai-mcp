@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
-import { createRequire } from "node:module";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
-import type { Item } from "prismarine-item";
+import { Vec3 } from "vec3";
+import { CarriedCounts } from "./carried-counts.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot } from "./fake-bot/index.js";
+import { registryNameOf } from "./fake-bot/item-variants.js";
 
 export const craftingRegistry = minecraftData("1.21.4");
-const CraftItem = (createRequire(import.meta.url)("prismarine-item") as (registry: object) => typeof Item)(
-  craftingRegistry,
-);
 
 type Recipe = ReturnType<Bot["recipesAll"]>[number];
 
@@ -46,56 +44,45 @@ const RECIPES = [
 
 export { recipe as craftingRecipe };
 
-/** `recipes`: extra recipes offered before the fixture's own, as Mineflayer lists other wood families first. */
+/** Where `craftingBot` stands its crafting table when one is available: next to the bot, within reach. */
+const TABLE = new Vec3(1, 64, 0);
+
+/**
+ * A bot on the shared fake (`harness`) carrying `carried` in its inventory window, with the recipes above and a
+ * `craft` that applies a recipe's delta to that window, as the server's slot updates would. `counts` is the window's
+ * totals by item id (`CarriedCounts`: a test's `counts.set` rewrites the stacks). `tableAvailable` stands a crafting
+ * table next to the bot and `findBlock` answers it. `recipes`: extra recipes offered before the fixture's own, as
+ * Mineflayer lists other wood families first. `clock`: the harness's (a mocked one the test drives); the world age is
+ * the server's own, which only the harness clock moves.
+ * `groundY`: the fake world's ground, as `createFakeBot` takes it (`null`: open air, for a test that reads what blocks
+ * are near the bot and must not count the stone under it).
+ */
 export function craftingBot(
   carried: Readonly<Record<string, number>>,
   tableAvailable = false,
   recipes: readonly Recipe[] = [],
+  { clock, groundY }: { readonly clock?: FakeClock; readonly groundY?: FakeBotOptions["groundY"] } = {},
 ) {
   const known = [...recipes, ...RECIPES];
-  const counts = new Map(
-    Object.entries(carried).map(([name, count]) => {
-      const item = craftingRegistry.itemsByName[name];
-      assert.ok(item, `unknown test item ${name}`);
-      return [item.id, count] as const;
-    }),
-  );
+  for (const name of Object.keys(carried)) assert.ok(craftingRegistry.itemsByName[registryNameOf(name)], `unknown test item ${name}`);
   const craftCalls: string[] = [];
-  // The inventory window announces slot changes, as the real one does, so a
-  // craft that waits for the server's count has something to listen to.
-  const inventory = Object.assign(new EventEmitter(), {
-    inventoryStart: 9,
-    inventoryEnd: 45,
-    count: (id: number) => counts.get(id) ?? 0,
-    items: () =>
-      [...counts.entries()]
-        .filter(([, count]) => count > 0)
-        .flatMap(([id, count]) => {
-          const stackSize = craftingRegistry.items[id].stackSize;
-          return Array.from(
-            { length: Math.ceil(count / stackSize) },
-            (_, index) => new CraftItem(id, Math.min(stackSize, count - index * stackSize)),
-          );
-        }),
-  });
-  const bot = {
-    version: "1.21.4",
-    registry: craftingRegistry,
-    inventory,
-    currentWindow: null,
-    closeWindow: () => undefined,
-    waitForTicks: async () => undefined,
-    findBlock: () => (tableAvailable ? { name: "crafting_table" } : null),
-    recipesAll: (itemType: number, _metadata: number | null, craftingTable: boolean | object | null) =>
-      known.filter(
-        (candidate) => candidate.result.id === itemType && (!candidate.requiresTable || Boolean(craftingTable)),
-      ),
-    craft: async (selected: Recipe, applications: number) => {
-      craftCalls.push(craftingRegistry.items[selected.result.id].name);
-      for (const item of selected.delta) {
-        counts.set(item.id, (counts.get(item.id) ?? 0) + item.count * applications);
-      }
+  const harness = createFakeBot({
+    clock,
+    groundY,
+    version: craftingRegistry.version.minecraftVersion,
+    carried,
+    cells: tableAvailable ? { [`${TABLE.x},${TABLE.y},${TABLE.z}`]: "crafting_table" } : {},
+    overrides: {
+      closeWindow: async () => undefined,
+      findBlock: () => (tableAvailable ? harness.world.blockAt(TABLE) : null),
+      recipesAll: (itemType, _metadata, craftingTable) =>
+        known.filter((candidate) => candidate.result.id === itemType && (!candidate.requiresTable || Boolean(craftingTable))),
+      craft: async (selected, applications = 1) => {
+        craftCalls.push(craftingRegistry.items[selected.result.id].name);
+        for (const item of selected.delta) counts.set(item.id, (counts.get(item.id) ?? 0) + item.count * applications);
+      },
     },
-  } as unknown as Bot;
-  return { bot, counts, craftCalls };
+  });
+  const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
+  return { bot: harness.bot, counts, craftCalls, harness };
 }

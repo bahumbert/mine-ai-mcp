@@ -1,6 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { createRequire } from "node:module";
-import { recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -30,6 +30,7 @@ const LOCAL_CHAT_PATTERN = /^\[From ([\d.]+) blocks away\] <([A-Za-z0-9_]{1,16})
 /** Mineflayer emits `chat:<pattern name>`; its typings only list the built-in events. */
 const LOCAL_CHAT_EVENT = `chat:${LOCAL_CHAT_PATTERN_NAME}` as keyof BotEvents;
 type CancelForegroundAction = (reason: string) => unknown;
+type GuardedWrite = ReturnType<typeof guardObservedWrite>;
 
 /** Records one chat or whisper line heard or sent by the bot, with the speaker's distance when the server gives it. */
 function recordPlayerMessage(bot: Bot, data: SqlBotData, channel: "chat" | "whisper", username: string, message: string, distance?: number): void {
@@ -50,10 +51,10 @@ function recordPlayerMessage(bot: Bot, data: SqlBotData, channel: "chat" | "whis
 }
 
 /** Records the talk lines `LOCAL_CHAT_PATTERN` matched: distance, speaker and text per match. */
-function recordLocalChat(bot: Bot, data: SqlBotData, matches: readonly (readonly string[])[]): void {
+function recordLocalChat(bot: Bot, data: SqlBotData, matches: readonly (readonly string[])[], guarded: GuardedWrite): void {
   for (const [distance, username, message] of matches) {
     if (distance !== undefined && username !== undefined && message !== undefined) {
-      recordPlayerMessage(bot, data, "chat", username, message, Number(distance));
+      guarded(() => recordPlayerMessage(bot, data, "chat", username, message, Number(distance)));
     }
   }
 }
@@ -64,34 +65,21 @@ export function observePlayerEvents(
   data: SqlBotData,
   cancelForegroundAction: CancelForegroundAction,
 ): () => void {
-  const onChat: PlayerMessageListener = (username, message) => recordPlayerMessage(bot, data, "chat", username, message);
-  const onWhisper: PlayerMessageListener = (username, message) => recordPlayerMessage(bot, data, "whisper", username, message);
+  const guarded = guardObservedWrite("player-events");
+  const onChat: PlayerMessageListener = (username, message) => guarded(() => recordPlayerMessage(bot, data, "chat", username, message));
+  const onWhisper: PlayerMessageListener = (username, message) =>
+    guarded(() => recordPlayerMessage(bot, data, "whisper", username, message));
   // Localized Chat delivers talk as a system line, so `chat` never fires for it.
-  const onLocalChat = (matches: readonly (readonly string[])[]) => recordLocalChat(bot, data, matches);
+  const onLocalChat = (matches: readonly (readonly string[])[]) => recordLocalChat(bot, data, matches, guarded);
   let lastDeathMessage: string | null = null;
   const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
     if (packet.playerId !== undefined && packet.playerId !== bot.entity?.id) return;
     lastDeathMessage = deathMessage(bot, packet.message);
   };
   const onDeath: DeathListener = () => {
-    const position = {
-      x: bot.entity.position.x,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z,
-    };
-    const dimension = bot.game.dimension;
-    const observedAt = new Date().toISOString();
     const cause = lastDeathMessage;
     lastDeathMessage = null;
-    const summary = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
-
-    cancelForegroundAction(`${bot.username} died${cause ? `: ${cause}` : ""}.`);
-    recordEvent(data, bot.username, {
-      type: "player_death",
-      observedAt,
-      summary,
-      payload: { dimension, position, cause },
-    });
+    recordPlayerDeath(bot, data, cause, cancelForegroundAction, guarded);
   };
 
   // Respawn updates the dimension before the destination position packet.
@@ -107,17 +95,7 @@ export function observePlayerEvents(
     if (crossing === null) return;
     const { from, to } = crossing;
     crossing = null;
-    const position = {
-      x: bot.entity.position.x,
-      y: bot.entity.position.y,
-      z: bot.entity.position.z,
-    };
-    recordEvent(data, bot.username, {
-      type: "player_dimension_change",
-      observedAt: new Date().toISOString(),
-      summary: `${bot.username} arrived in ${to} from ${from}.`,
-      payload: { from, to, position },
-    });
+    recordDimensionArrival(bot, data, from, to, guarded);
   };
 
   bot.addChatPattern(LOCAL_CHAT_PATTERN_NAME, LOCAL_CHAT_PATTERN, { repeat: true, parse: true });
@@ -139,6 +117,50 @@ export function observePlayerEvents(
     bot.off(LOCAL_CHAT_EVENT, onLocalChat as never);
     bot.removeChatPattern(LOCAL_CHAT_PATTERN_NAME);
   };
+}
+
+/** The foreground action is cancelled before the event is written, so a failing write cannot keep the dead bot working. */
+function recordPlayerDeath(
+  bot: Bot,
+  data: SqlBotData,
+  cause: string | null,
+  cancelForegroundAction: CancelForegroundAction,
+  guarded: GuardedWrite,
+): void {
+  const position = {
+    x: bot.entity.position.x,
+    y: bot.entity.position.y,
+    z: bot.entity.position.z,
+  };
+  const dimension = bot.game.dimension;
+  const observedAt = new Date().toISOString();
+  const summary = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
+
+  cancelForegroundAction(`${bot.username} died${cause ? `: ${cause}` : ""}.`);
+  guarded(() =>
+    recordEvent(data, bot.username, {
+      type: "player_death",
+      observedAt,
+      summary,
+      payload: { dimension, position, cause },
+    }),
+  );
+}
+
+function recordDimensionArrival(bot: Bot, data: SqlBotData, from: string, to: string, guarded: GuardedWrite): void {
+  const position = {
+    x: bot.entity.position.x,
+    y: bot.entity.position.y,
+    z: bot.entity.position.z,
+  };
+  guarded(() =>
+    recordEvent(data, bot.username, {
+      type: "player_dimension_change",
+      observedAt: new Date().toISOString(),
+      summary: `${bot.username} arrived in ${to} from ${from}.`,
+      payload: { from, to, position },
+    }),
+  );
 }
 
 function addressesUsername(message: string, username: string): boolean {

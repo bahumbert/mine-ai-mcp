@@ -272,26 +272,51 @@ test("a remembered farm in chunks that are not loaded is kept, not replaced by a
   assert.deepEqual(calls(runtime), ["tend_crops"]);
 });
 
-test("a till that failed on two cells of a block name is remembered, and a later success forgets it (SF2)", async () => {
-  const farm = async (runtime: FakeRuntime, soil: TillFacts) => runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { soil }));
-  const have = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+/** A runtime standing `east` blocks east of the origin: its new farm is a plot in the chunk there (the game's chunk is 16 wide). */
+function farmRuntimeAt(east: number, inventory: { name: string; count: number }[]): FakeRuntime {
+  const runtime = farmRuntime(inventory);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: east + 0.5, y: 64, z: 0.5 } };
+  return runtime;
+}
+
+const haveForFarm = [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }];
+const farmWith = async (runtime: FakeRuntime, soil: TillFacts) => runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime, { soil }));
+
+test("a till that failed on a block name at two places is remembered, and a later success forgets it (SF2, SKL-02)", async () => {
   const soil = new TillFacts();
-  // One failed cell on dirt (a block on top, lag) and one on podzol: nothing is refused.
-  const once = farmRuntime(have);
+  // One failed cell on dirt (a block on top, lag) and one on podzol, on the plot in chunk 0: nothing is refused.
+  const once = farmRuntime(haveForFarm);
   once.tendUntillable = { dirt: [{ x: 1, z: 1 }], podzol: [{ x: 1, z: 2 }] };
   once.tendSkipped = { "not tillable (dirt)": [{ x: 1, z: 1 }], "not tillable (podzol)": [{ x: 1, z: 2 }], "unreachable: no path": [{ x: 3, z: 3 }] };
-  await farm(once, soil);
+  await farmWith(once, soil);
   assert.deepEqual([soil.refuses("dirt"), soil.refuses("podzol"), soil.refuses("unreachable: no path")], [false, false, false]);
-  // Podzol failing on a second cell is refused; dirt stays soil.
-  const twice = farmRuntime(have);
-  twice.tendUntillable = { podzol: [{ x: 2, z: 2 }] };
-  await farm(twice, soil);
+  // Podzol failing on a plot in another chunk is a second place: refused; dirt stays soil.
+  const elsewhere = farmRuntimeAt(40, haveForFarm);
+  elsewhere.tendUntillable = { podzol: [{ x: 42, z: 2 }] };
+  await farmWith(elsewhere, soil);
   assert.deepEqual([soil.refuses("podzol"), soil.refuses("dirt")], [true, false]);
   // A till that worked on podzol later forgets the failures.
-  const worked = farmRuntime(have);
+  const worked = farmRuntime(haveForFarm);
   worked.tendTilledSoil = { podzol: 3 };
-  await farm(worked, soil);
+  await farmWith(worked, soil);
   assert.equal(soil.refuses("podzol"), false);
+});
+
+test("many untillable cells of one plot in one call, and two bots tending one plot, are one place: the name stays soil (SKL-02)", async () => {
+  const soil = new TillFacts();
+  const many = farmRuntime(haveForFarm);
+  many.tendUntillable = { grass_block: [{ x: -1, z: 2 }, { x: 0, z: 2 }, { x: 1, z: 2 }, { x: 2, z: 2 }, { x: 1, z: 3 }] };
+  await farmWith(many, soil);
+  assert.equal(soil.refuses("grass_block"), false);
+  // A second bot tending the same plot (the facts are shared by every bot of the process) adds no new place.
+  const second = farmRuntime(haveForFarm);
+  second.tendUntillable = { grass_block: [{ x: 0, z: 3 }, { x: 1, z: 4 }] };
+  await farmWith(second, soil);
+  assert.equal(soil.refuses("grass_block"), false);
+  // Next action from that state: the farm is still made on grass.
+  const next = farmRuntime(haveForFarm);
+  const result = await farmWith(next, soil);
+  assert.equal(result.status, "done", JSON.stringify(result));
 });
 
 test("a hoe that broke mid-plot teaches nothing: dirt stays soil and the next farm on dirt is made (V1)", async () => {
@@ -310,10 +335,14 @@ test("a hoe that broke mid-plot teaches nothing: dirt stays soil and the next fa
   const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(next, { soil }));
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.ok(calls(next).includes("tend_crops"));
-  // Cells a hoe really was used on without a change still refuse the name (T5 behaviour kept).
+  // Cells a hoe really was used on without a change, at two places, still refuse the name (T5 behaviour kept).
   const real = farmRuntime(have);
   real.tendUntillable = { dirt: [{ x: 1, z: 1 }, { x: 2, z: 1 }] };
   await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(real, { soil }));
+  assert.equal(soil.refuses("dirt"), false);
+  const realElsewhere = farmRuntimeAt(40, have);
+  realElsewhere.tendUntillable = { dirt: [{ x: 41, z: 1 }] };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(realElsewhere, { soil }));
   assert.equal(soil.refuses("dirt"), true);
 });
 

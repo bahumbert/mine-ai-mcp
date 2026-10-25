@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { observeExecution, type ExecutionEvent } from "../execution/execution-scope.js";
+import { processFaultSchema } from "./process-faults.js";
 
 // Four liveness observations per second; five seconds leaves 25 seconds before
 // the observed Minecraft keepalive timeout. This never limits action duration.
@@ -58,6 +59,8 @@ export const runtimeMessageSchema = z.discriminatedUnion("kind", [
     event: executionSchema,
     activity: activitySchema,
   }),
+  /** A promise the runtime left unhandled: the supervisor records it as a `process_fault` incident. */
+  z.object({ kind: z.literal("fault"), fault: processFaultSchema }),
 ]);
 
 /**

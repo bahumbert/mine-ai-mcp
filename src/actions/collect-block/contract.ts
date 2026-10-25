@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { BlockColour } from "@aibengineering/minecraft-block-highlighter";
 import { actionOutputSchema, actionResultSchema, type ActionOutput } from "../action.js";
 import { asVec3, type Position3 } from "../../utils/index.js";
+import { isLiquid } from "../../world/block-classification.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────────────────
 
@@ -21,7 +22,7 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "The response lists every cell broken and its distance from where the run started, and names a tool that broke during the run (collected.toolLost). " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
   "Obsidian is the one block the bot makes rather than finds: ask for it while carrying a water bucket and, with no obsidian loaded, the process walks to lava, pours, scoops the water back, and mines what formed. " +
-  "Name the block to break, not the item wanted: cobblestone and cobbled_deepslate are the no-silk-touch drops of stone and deepslate, which are almost everywhere underground, while naturally placed cobblestone is structure-bound and most often the walls of a dungeon around a spawner. " +
+  "Name the block to break, not the item wanted, as an exact block name or a block tag such as logs (every natural log); a name that is no block and no tag fails at once and lists the blocks that drop the item. Cobblestone and cobbled_deepslate are the no-silk-touch drops of stone and deepslate, which are almost everywhere underground, while naturally placed cobblestone is structure-bound and most often the walls of a dungeon around a spawner. " +
   "For general collection tasks, prefer count greater than 1 without an exact x/y/z target; use exact coordinates only when that specific block matters. " +
   "With exact coordinates, omit count or set it to 1; larger counts are rejected.";
 export const MAX_COLLECT_BLOCKS = 32;
@@ -29,7 +30,6 @@ export const MAX_COLLECT_BLOCKS = 32;
 export const MAX_COLLECT_BREAKS = 4096;
 /** The largest `max_distance`: a few loaded view distances. */
 export const MAX_COLLECT_DISTANCE = 1024;
-export const NON_MINEABLE_FLUIDS = new Set(["water", "lava", "bubble_column"]);
 /**
  * How many blocks past the request may be broken before the run gives up.
  *
@@ -75,6 +75,19 @@ function describeItems(itemNames: readonly string[]): string {
 export const outcomes = {
   coordinatesTogether: "x, y, and z must be provided together.",
   exactTargetCount: "Exact coordinates select one block. Omit count or set it to 1. To collect multiple blocks, omit x, y, and z.",
+  /** The selector is no block and no block tag; what follows names the next ask: droppers, a recipe, or close names. */
+  unknownBlock: (
+    selector: string,
+    alternatives: { readonly droppers: readonly string[]; readonly madeByRecipe: boolean; readonly closest: readonly string[] },
+  ) =>
+    `[COLLECT_UNKNOWN_BLOCK] Minecraft has no block or block tag named ${selector}. ` +
+    (alternatives.droppers.length > 0
+      ? `Blocks that drop it: ${alternatives.droppers.join(", ")}. Name one of them as block_name.`
+      : alternatives.madeByRecipe
+        ? "No block drops it: craft it or smelt it (view_crafting_requirements, view_smelting_recipes)."
+        : alternatives.closest.length > 0
+          ? `Closest names: ${alternatives.closest.join(", ")}. Name one of them as block_name.`
+          : "Name an exact block name or a block tag as block_name."),
   notMineable: (blockName: string) => `${blockName} is not a mineable block.`,
   invalidTarget: "block_name must identify a block after the optional minecraft: prefix.",
   targetMismatch: (position: Position3, observedName: string, selector: string) =>
@@ -110,13 +123,13 @@ const collectBlockSelectorSchema = z
       context.addIssue({ code: "custom", message: outcomes.invalidTarget });
       return z.NEVER;
     }
-    if (NON_MINEABLE_FLUIDS.has(selector)) {
+    if (isLiquid({ name: selector })) {
       context.addIssue({ code: "custom", message: outcomes.notMineable(blockName) });
       return z.NEVER;
     }
     return selector;
   })
-  .describe("Exact Minecraft block name, or logs for any log block.");
+  .describe("Exact Minecraft block name, or a block tag such as logs (every natural log).");
 
 /** External MCP arguments. */
 export const collectBlockInputSchema = z

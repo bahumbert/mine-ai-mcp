@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-left-under-feet-by-shore
+tags: [regression]
+description: >-
+  Run 20 (Dirk 41 min, Vex 19 min; run 17c Theo): a crossing cut between the get-off and the take-back left the bot
+  standing on its boat over shallow water by the far shore. Every later movement looked for the boat only over deep open
+  water with none carried, so it never broke it, and the server kept the bot on the boat while its client saw water and
+  air. The first navigate is cancelled at the get-off's shift; the second must take the boat under her feet back and cross.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea 13 wide: three deep from x 1 to 32, two deep from x 33 to 40, the far land (x 41) level with the water. The
+  # ride stops about 2.7 blocks short of the bank over water two deep: no bank to cut, 8 cells from deep water.
+  - fill: { block: water, from: [ 1, -63, -6 ], to: [ 32, -61, 6 ] }
+  - fill: { block: water, from: [ 33, -62, -6 ], to: [ 40, -61, 6 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 1
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/cancel-after-get-off.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  target: [ 60, -60, 0 ]
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: reach
+      who: Rower
+      pos: [ 60.5, -60, 0.5 ]
+      radius: 3.0
+    - kind: hasItem
+      who: Rower
+      item: oak_boat
+      count: 1
+    - kind: completion
+      who: Rower

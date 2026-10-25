@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { craftItemResultSchema, smeltItemResultSchema, viewBlocksResultSchema, viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
+import type { ArenaFrame } from "../arena/frame.ts";
+import { arenaCell } from "../arena/params.ts";
 import type { ScenarioRun } from "../scenario.ts";
 
-const positionSchema = z.strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() });
-const paramsSchema = z.strictObject({ table: positionSchema, furnace: positionSchema });
+const paramsSchemaIn = (arena: ArenaFrame) => z.strictObject({ table: arenaCell(arena), furnace: arenaCell(arena) });
 
 /** Keep intermediate recipe evidence before later steps consume the crafted items. */
 export const run: ScenarioRun = async (context) => {
-  const { table, furnace } = paramsSchema.parse(context.scenario.params);
+  const { table, furnace } = paramsSchemaIn(context.arena).parse(context.scenario.params);
   const call = async (action: string, input: Record<string, unknown>) => {
     const output = await context.call(action, input);
     assert.equal(output.result.status, "succeeded", output.summary);

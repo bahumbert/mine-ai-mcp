@@ -56,6 +56,15 @@ export function snapshotEntityIds(bot: Bot): ReadonlySet<number> {
   return new Set(Object.values(bot.entities).map((entity) => entity.id));
 }
 
+/**
+ * Whether the entity is a dropped item, whatever its stack metadata says yet. The names are the ones prismarine-entity's
+ * `getDroppedItem` checks (the dropped-item entity's name is Java code, no registry trait says it): a name test beside
+ * the metadata read, which can be empty when the entity has just spawned.
+ */
+export function isItemEntity(entity: Pick<Bot["entity"], "name">): boolean {
+  return entity.name === "item" || entity.name === "Item" || entity.name === "item_stack";
+}
+
 /** Item metadata can arrive after the entity, so unreadable metadata is not evidence yet. */
 export function droppedItemName(entity: Bot["entity"]): string | null {
   try {

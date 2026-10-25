@@ -1,25 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { flatWorld } from "../../test-support/navigation.js";
 import { SupportedPositionHold } from "./supported-position.js";
 
 /**
  * A body standing on the flat world's floor, with every control the hold writes
- * recorded rather than sent. `overrides` carries whatever else the case needs:
- * the protocol client, or a `waitForTicks` that decides what the body does
- * while the hold waits for its landing.
+ * recorded as the hold writes them. A case that needs the body to do something
+ * while the hold waits for its landing assigns its own `waitForTicks`.
  */
-function holdFixture(feetX: number, yaw: number, overrides: Record<string, unknown> = {}, edge = false) {
+function holdFixture(feetX: number, yaw: number, edge = false) {
   const controls = new Map<string, boolean>();
-  const bot = botFixture(
-    { position: { x: feetX, y: 63, z: 0.5 } },
-    { setControlState: (key: string, value: boolean) => controls.set(key, value), ...overrides },
-  );
+  const { bot, server } = createFakeBot({ position: { x: feetX, y: 63, z: 0.5 } });
+  const setControlState = bot.setControlState.bind(bot);
+  bot.setControlState = (key, value) => {
+    controls.set(key, value);
+    setControlState(key, value);
+  };
   bot.entity.yaw = yaw;
   const world = flatWorld();
   if (edge) for (let z = -5; z <= 5; z++) world.load({ x: 1, y: 62, z }, { stateId: 0 });
-  return { bot, body: bot.entity, controls, hold: new SupportedPositionHold(bot, world) };
+  return { bot, server, body: bot.entity, controls, hold: new SupportedPositionHold(bot, world) };
 }
 
 /** Whether the hold currently asks for no movement at all. */
@@ -48,7 +49,7 @@ test("combat holds the supporting cell through a knockback hop without changing 
 });
 
 test("losing observed support releases an earlier combat correction", () => {
-  const { body, controls, hold } = holdFixture(0.8, 0, {}, true);
+  const { body, controls, hold } = holdFixture(0.8, 0, true);
   hold.tick();
   assert.equal(controls.get("left"), true);
   body.position.set(0.8, 61, 0.5);
@@ -117,24 +118,22 @@ test("a route that stops airborne hands back its latest observed support", async
 });
 
 test("a correction's crouch reaches the 1.21.4 server, and its release always does", () => {
-  const protocol: string[] = [];
-  const { body, controls, hold } = holdFixture(0.8, 0, {
-    version: "1.21.4",
-    _client: { write: (name: string, fields: { actionId: number }) => protocol.push(`${name}:${fields.actionId}`) },
-  }, true);
+  const { body, controls, hold, server } = holdFixture(0.8, 0, true);
+  // 1.21.4 reads the shift from `entity_action`; Mineflayer's own control also writes `player_input`, which is not asked about here.
+  const protocol = () => server.packets.filter((packet) => packet.name === "entity_action").map((packet) => `${packet.name}:${(packet.data as { actionId: number }).actionId}`);
   hold.tick();
   assert.equal(controls.get("sneak"), true, "an off-centre body corrects inward crouched");
   hold.tick();
-  assert.deepEqual(protocol, ["entity_action:0"], "one press for the whole correction, not one per tick");
+  assert.deepEqual(protocol(), ["entity_action:0"], "one press for the whole correction, not one per tick");
 
   body.position.set(0.5, 63, 0.5);
   hold.tick();
   assert.equal(controls.get("sneak"), false, "a centred body stands");
-  assert.deepEqual(protocol, ["entity_action:0", "entity_action:1"], "the server hears the release");
+  assert.deepEqual(protocol(), ["entity_action:0", "entity_action:1"], "the server hears the release");
 
   hold.release();
   assert.deepEqual(
-    protocol,
+    protocol(),
     ["entity_action:0", "entity_action:1", "entity_action:1"],
     "release repeats the stop whatever the hold last wrote, so a latched server stands too",
   );

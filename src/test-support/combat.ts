@@ -6,6 +6,8 @@ import type { ResponseContext } from "../survival/control/combat/context.js";
 import { createCombatController } from "../survival/control/combat/controller.js";
 import { CombatExecution } from "../survival/control/combat/execution.js";
 import { combatResourceRefusal } from "../survival/control/combat/preparation.js";
+import type { CombatController } from "../survival/index.js";
+import type { FakeServer } from "./fake-bot/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { CreeperClearance } from "../survival/perception/combat/creepers.js";
 import { DEFAULT_COMBAT_POLICY } from "../survival/policy/combat/contract.js";
@@ -14,6 +16,7 @@ import { CombatPosition } from "../survival/positioning/combat/position.js";
 import { EndCombat } from "../survival/responses/end/execute.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { survivalResources, type SurvivalResources } from "../survival/state/resources.js";
+import { SurvivalPolicyState } from "../survival/state/survival-policy.js";
 
 const resources = new Set<Disposable>();
 function own<T extends Disposable>(resource: T): T {
@@ -83,4 +86,57 @@ export function combatTestContext(bot: Bot): ResponseContext {
     attackerIds: new Set(),
     unreachableIds: new Set(),
   };
+}
+
+/**
+ * The bot's combat, with its policy, fighting each engagement through `engage`: it stops at once, is never in the End,
+ * finishes safe and clear at (0, 64, 0) and cannot recover on its own. `overrides` replace any of its members.
+ */
+export function engagingCombat(
+  bot: Bot,
+  engage: CombatController["engage"],
+  overrides: Partial<CombatController> = {},
+): CombatController {
+  return {
+    resourceRefusal: () => null,
+    policy: new SurvivalPolicyState(bot),
+    runEnd: async () => {
+      throw new Error("Unexpected End combat");
+    },
+    endDanger: () => false,
+    activePosition: () => null,
+    execution: () => null,
+    onDecision: () => () => {},
+    finish: async () => ({
+      observedAt: 1,
+      kind: "safe" as const,
+      basis: "clear" as const,
+      position: { x: 0, y: 64, z: 0 },
+    }),
+    canRecover: () => false,
+    activeEngagement: () => null,
+    stop: async () => {},
+    engage,
+    ...overrides,
+  };
+}
+
+/** The `engage` of a test whose combat must never fight a mob: it fails the test that reaches it. */
+export const unexpectedEngage: CombatController["engage"] = async () => {
+  throw new Error("Unexpected engage");
+};
+
+/** The ids of the entities the client hit (`use_entity`, left click), in order, as the server received them. */
+export const attackedIds = ({ packets }: Pick<FakeServer, "packets">): number[] =>
+  packets.filter((packet) => packet.name === "use_entity" && (packet.data as { mouse: number }).mouse === 1).map((packet) => (packet.data as { target: number }).target);
+
+/**
+ * `react` to each hit the client writes, at the moment it writes it. The target need not be an entity the server
+ * knows: the dragon's parts are ids the server alone holds, so the packet is all the fake can show of the swing.
+ */
+export function onAttack(server: Pick<FakeServer, "onPacket">, react: (targetId: number) => void): () => void {
+  return server.onPacket("use_entity", (data) => {
+    const { target, mouse } = data as { target: number; mouse: number };
+    if (mouse === 1) react(target);
+  });
 }

@@ -6,7 +6,7 @@ import { anyGoal, exactBlockGoal } from "../goals/index.js";
 import { observeMineflayerBlock } from "../mineflayer/world.js";
 import type { NavigationResult } from "../navigate.js";
 import { driveHorizontalSteering, steeringPortFor } from "../steering/local-steering.js";
-import { isSafeSupport, navigationFeet } from "../world/block-geometry.js";
+import { isDryAir, isSafeSupport, navigationFeet } from "../world/block-geometry.js";
 
 export type PortalBlock = "end_portal" | "nether_portal";
 
@@ -18,7 +18,7 @@ interface PortalEntry {
 
 function clear(bot: Bot, cell: Vec3): boolean {
   const block = bot.blockAt(cell);
-  return block !== null && block.boundingBox === "empty" && block.name !== "lava" && block.name !== "water";
+  return block !== null && isDryAir(observeMineflayerBlock(block));
 }
 
 /** End portals need a supported edge; Nether portals have supported cells inside their vertical opening. */

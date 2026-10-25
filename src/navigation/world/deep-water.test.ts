@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { holdsWater, isDeepOpenWater, type WaterAt } from "./deep-water.js";
+import { feetAtSea, holdsWater, isDeepOpenWater, type WaterAt } from "./deep-water.js";
+import { MemoryWorld } from "./memory-world.js";
+import { UNLOADED } from "./world.js";
 
 /** Water in a box (inclusive), nothing else. */
 function box(min: [number, number, number], max: [number, number, number]): WaterAt {
@@ -31,4 +33,38 @@ test("kelp, seagrass and waterlogged blocks hold the sea's water; dry blocks do 
   assert.equal(holdsWater("oak_stairs", { waterlogged: true }), true);
   assert.equal(holdsWater("oak_stairs", { waterlogged: false }), false);
   assert.equal(holdsWater("sand"), false);
+});
+
+const cellKinds = (() => {
+  const world = new MemoryWorld();
+  world.load({ x: 0, y: 0, z: 0 }, { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true, safeToBreak: false } });
+  world.load({ x: 1, y: 0, z: 0 }, { stateId: 1 });
+  world.load({ x: 2, y: 0, z: 0 }, { stateId: 0 });
+  return { water: world.blockAt(0, 0, 0), stone: world.blockAt(1, 0, 0), air: world.blockAt(2, 0, 0) };
+})();
+
+/** Water where `water` says, stone under y 50 elsewhere, air above; cells `unloaded` says are not loaded. */
+function seaReader(water: WaterAt, unloaded: (x: number, z: number) => boolean = () => false) {
+  return (x: number, y: number, z: number) =>
+    unloaded(x, z) ? UNLOADED : water(x, y, z) ? cellKinds.water : y < 50 ? cellKinds.stone : cellKinds.air;
+}
+
+/** A sea 13 deep (y 50..62) with a shelf one deep (water at y 62 only) from x -4 to `shelfEnd`, z -4 to 4, round the start. */
+function shelfSea(shelfEnd: number): WaterAt {
+  const sea = box([-30, 50, -30], [30, 62, 30]);
+  return (x, y, z) => sea(x, y, z) && (y === 62 || x < -4 || x > shelfEnd || Math.abs(z) > 4);
+}
+
+test("a sandbar start one deep, joined to deep open water within three water cells, is at sea", () => {
+  assert.equal(feetAtSea(seaReader(shelfSea(0)), { x: 0, y: 62, z: 0 }), true);
+  assert.equal(feetAtSea(seaReader(shelfSea(2)), { x: 0, y: 62, z: 0 }), true, "three cells along the shelf");
+});
+
+test("a wade four water cells from deep open water is not at sea, nor a pond two deep and five wide", () => {
+  assert.equal(feetAtSea(seaReader(shelfSea(3)), { x: 0, y: 62, z: 0 }), false);
+  assert.equal(feetAtSea(seaReader(box([-2, 61, -2], [2, 62, 2])), { x: 0, y: 62, z: 0 }), false);
+});
+
+test("water past a cell that is not loaded does not join the start to the sea", () => {
+  assert.equal(feetAtSea(seaReader(shelfSea(0), (x) => x === 1), { x: 0, y: 62, z: 0 }), false);
 });

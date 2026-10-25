@@ -18,6 +18,7 @@ import {
   routePlan,
   stepUpStep,
 } from "../../test-support/navigation.js";
+import { watch } from "../../test-support/pending.js";
 import type { MovementPreparation } from "../bot.js";
 import type { PlannedStep } from "../movements/movement.js";
 import type { NavigationObservation, Position3 } from "../world/world.js";
@@ -354,12 +355,9 @@ test("route cancellation waits for an active physical effect to settle", async (
   await nextTurn();
   assert.equal(cancelCalled, true);
 
-  let routeSettled = false;
-  void execution.then(() => {
-    routeSettled = true;
-  });
+  const routeSettled = watch(execution);
   await nextTurn();
-  assert.equal(routeSettled, false);
+  assert.equal(routeSettled.over, false);
 
   settleEffect();
   assert.equal((await execution).kind, "cancelled");
@@ -510,6 +508,65 @@ test("route cancellation clears controls and detaches its physics-tick subscript
   assert.equal((await execution).kind, "cancelled");
   assert.equal(bot.subscriptions, 1);
   assert.equal(bot.ticks.size, 0);
+  assert.equal(bot.ownedControlCount, 0);
+});
+
+test("a moving step whose physics stopped settles cancelled about a second after the abort", async () => {
+  const bot = new TickDrivenBot();
+  const controller = new AbortController();
+  const execution = executeSingleStep({
+    step: walkStep("no-tick", 0, 3),
+    world: flatWorld(),
+    bot,
+    signal: controller.signal,
+  });
+  await nextTurn();
+  assert.ok(bot.controls > 0, "the step took the controls");
+  const abortedAt = performance.now();
+  controller.abort();
+  // The fake never ticks: before the watchdog this wait ended only with the runner's 30 s stall.
+  const result = await execution;
+  const waited = performance.now() - abortedAt;
+  assert.equal(result.kind, "cancelled");
+  assert.ok(waited >= 900 && waited < 1_500, `settled after ${waited} ms`);
+  assert.equal(bot.ownedControlCount, 0);
+  assert.equal(bot.ticks.size, 0);
+});
+
+test("a tick after the watchdog settled applies no control", async () => {
+  const bot = new TickDrivenBot();
+  const controller = new AbortController();
+  const execution = executeSingleStep({
+    step: walkStep("late-tick", 0, 3),
+    world: flatWorld(),
+    bot,
+    signal: controller.signal,
+  });
+  await nextTurn();
+  controller.abort();
+  const lateTick = [...bot.ticks];
+  assert.equal((await execution).kind, "cancelled");
+  bot.lastIntent = null;
+  for (const tick of lateTick) tick();
+  assert.equal(bot.lastIntent, null);
+  assert.equal(bot.ownedControlCount, 0);
+});
+
+test("after a no-tick cancel the next run on the same bot walks to its goal", async () => {
+  const bot = new TickDrivenBot();
+  const first = new AbortController();
+  const cancelled = executeSingleStep({ step: walkStep("silent", 0, 3), world: flatWorld(), bot, signal: first.signal });
+  await nextTurn();
+  first.abort();
+  assert.equal((await cancelled).kind, "cancelled");
+  assert.equal(bot.ticks.size, 0);
+  // Physics is back: only the new run moves the body, and it reaches its goal.
+  const second = executeSingleStep({ step: walkStep("resumed", 0, 3), world: flatWorld(), bot });
+  await nextTurn();
+  bot.tickAt(0);
+  bot.tickAt(3);
+  assert.equal((await second).kind, "exhausted");
+  assert.equal(bot.current.position.x, 3.5);
   assert.equal(bot.ownedControlCount, 0);
 });
 

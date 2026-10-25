@@ -38,6 +38,7 @@ export function stationaryExcavation(
             expectedStateId: dig.stateId,
             toolType: dig.toolType,
             brings: dig.brings,
+            stance: feet,
           })),
           { kind: "move", movement: "walk", target: { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 } },
         ],

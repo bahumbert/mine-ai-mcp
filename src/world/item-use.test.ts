@@ -1,73 +1,78 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
+import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { watch } from "../test-support/pending.js";
 import { useItemAt } from "./item-use.js";
-import type { InventoryItem } from "./placement.js";
 
-/** A bot whose world and hand change `ticksUntilEffect` ticks after the item is used. */
-function usingBot(ticksUntilEffect: number, stackedBuckets = false) {
+/** One client tick, in ms of clock. */
+const TICK_MS = 50;
+
+/**
+ * A bot that carries `carried` and stands by a water source at (3, 63, 0) over obsidian. The server answers its use of an
+ * item `ticksUntilEffect` ticks later: a held bucket fills (contract check `bucket-pour-and-fill`: the only bucket of a
+ * stack becomes the water bucket, one of several leaves the rest held and the water bucket in a free slot) and takes the
+ * water; for any other item the water cell turns to air, scripted here as the effect that item would have. `calls` records
+ * what the code under test did, in order.
+ * A look that fills the bucket aims just over the source's surface (y 63.9; 63.889 is the surface): from the eye a lower aim
+ * meets the floor's edge first, as it would in the game.
+ */
+function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, number>> = { bucket: 1 }) {
   const target = new Vec3(3, 63, 0);
   const calls: string[] = [];
-  let ticksSinceUse = -1;
-  const effected = () => ticksSinceUse >= ticksUntilEffect;
-  const bot = {
-    usingHeldItem: false,
-    get heldItem() {
-      return { name: effected() && !stackedBuckets ? "water_bucket" : "bucket" };
-    },
-    inventory: {
-      items: () => [
-        { name: "bucket", count: effected() ? 1 : 2 },
-        { name: "water_bucket", count: effected() ? 1 : 0 },
-      ],
-    },
-    equip: async (item: InventoryItem) => {
-      calls.push(`equip ${item.name}`);
-    },
-    lookAt: async (point: Vec3, force: boolean) => {
-      calls.push(`look ${point.x},${point.y},${point.z} force=${force}`);
-    },
-    activateItem: () => {
-      calls.push("use");
-      ticksSinceUse = 0;
-      bot.usingHeldItem = true;
-    },
-    deactivateItem: () => {
-      calls.push("release");
-      bot.usingHeldItem = false;
-    },
-    waitForTicks: async () => {
-      if (ticksSinceUse >= 0) ticksSinceUse += 1;
-    },
-    blockAt: (position: Vec3) =>
-      position.equals(target) ? { name: effected() ? "air" : "water", position } : { name: "stone", position },
-  } as unknown as Bot & { usingHeldItem: boolean };
-  return { bot, calls, target };
+  const harness = createFakeBot({ lagMs: ticksUntilEffect * TICK_MS, carried, cells: { "3,63,0": "water", "3,62,0": "obsidian" } });
+  const { bot, server, world } = harness;
+  const effect = () => world.setCell(target, "air");
+  const equip = bot.equip;
+  bot.equip = async (item, destination) => {
+    calls.push(`equip ${typeof item === "object" ? item?.name : item}`);
+    await equip(item, destination);
+  };
+  const lookAt = bot.lookAt;
+  bot.lookAt = async (point, force) => {
+    calls.push(`look ${point.x},${point.y},${point.z} force=${force}`);
+    await lookAt(point, force);
+  };
+  // The hand is the fake's (`activateItem` writes `use_item`, `deactivateItem` releases) and so is a bucket's answer.
+  const activateItem = bot.activateItem;
+  bot.activateItem = (offHand) => {
+    calls.push("use");
+    activateItem(offHand);
+  };
+  server.onPacket("use_item", () => server.answer(effect));
+  const deactivateItem = bot.deactivateItem;
+  bot.deactivateItem = () => {
+    calls.push("release");
+    deactivateItem();
+  };
+  const stack = (name: string): Item => bot.inventory.items().find((item) => item.name === name)!;
+  return { ...harness, calls, target, stack, obsidian: bot.blockAt(new Vec3(3, 62, 0))! };
 }
 
 test("equips, looks with force, uses, and confirms the cell and the hand", async () => {
-  const { bot, calls, target } = usingBot(3);
-  const result = await useItemAt(bot, {
-    item: { name: "bucket" } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
-    expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
-    expectedHeldItem: "water_bucket",
-  });
+  const { bot, calls, clock, target, stack } = usingBot(3);
+  const result = await clock.settle(useItemAt(bot, {
+      item: stack("bucket"),
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+      expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
+      expectedHeldItem: "water_bucket",
+    }), 4 * TICK_MS);
 
   assert.deepEqual(result, { kind: "used" });
-  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.5,0.5 force=true", "use", "release"]);
+  // The bucket becomes a water bucket: Mineflayer ends the use itself (`inventory.js:84-103` checkActiveItem), so no release is sent.
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.9,0.5 force=true", "use"]);
 });
 
 test("an unconfirmed use reports what it observed, whichever evidence it was waiting for", async () => {
   const world = usingBot(1_000);
-  const unchanged = await useItemAt(world.bot, {
-    item: { name: "bucket" } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
-    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
-    expectedHeldItem: "water_bucket",
-    timeoutTicks: 5,
-  });
+  const unchanged = await world.clock.settle(useItemAt(world.bot, {
+      item: world.stack("bucket"),
+      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+      expectedHeldItem: "water_bucket",
+      timeoutTicks: 5,
+    }), 6 * TICK_MS);
 
   assert.equal(unchanged.kind, "failed");
   if (unchanged.kind !== "failed") return;
@@ -76,14 +81,13 @@ test("an unconfirmed use reports what it observed, whichever evidence it was wai
   assert.equal(world.bot.usingHeldItem, false, "an unconfirmed use still releases the item");
 
   // A water bucket already in inventory is not evidence of a new scoop.
-  const carried = usingBot(1_000);
-  Object.defineProperty(carried.bot, "inventory", { value: { items: () => [{ name: "water_bucket", count: 1 }] } });
-  const noGain = await useItemAt(carried.bot, {
-    item: { name: "bucket", count: 2 } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.9, z: 0.5 },
-    expectedInventoryGain: { item: "water_bucket", count: 1 },
-    timeoutTicks: 5,
-  });
+  const carried = usingBot(1_000, { bucket: 2, water_bucket: 1 });
+  const noGain = await carried.clock.settle(useItemAt(carried.bot, {
+      item: carried.stack("bucket"),
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+      expectedInventoryGain: { item: "water_bucket", count: 1 },
+      timeoutTicks: 5,
+    }), 6 * TICK_MS);
 
   assert.equal(noGain.kind, "failed");
   if (noGain.kind !== "failed") return;
@@ -91,62 +95,175 @@ test("an unconfirmed use reports what it observed, whichever evidence it was wai
 });
 
 test("a stacked bucket fill is confirmed by a new inventory item while the empty bucket stays held", async () => {
-  const { bot } = usingBot(2, true);
-  const result = await useItemAt(bot, {
-    item: { name: "bucket", count: 2 } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.9, z: 0.5 },
-    expectedInventoryGain: { item: "water_bucket", count: 1 },
-  });
+  const { bot, clock, stack } = usingBot(2, { bucket: 2 });
+  const result = await clock.settle(useItemAt(bot, {
+      item: stack("bucket"),
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+      expectedInventoryGain: { item: "water_bucket", count: 1 },
+    }), 3 * TICK_MS);
   assert.deepEqual(result, { kind: "used" });
   assert.equal(bot.heldItem?.name, "bucket");
 });
 
 test("an item that acts on a block is used on the named face", async () => {
-  const { bot, calls, target } = usingBot(1);
+  const { bot, calls, clock, obsidian, stack, target } = usingBot(1, { flint_and_steel: 1 });
   const activated: string[] = [];
-  Object.assign(bot, {
-    activateBlock: async (block: { name: string }, face: Vec3) => {
-      activated.push(`${block.name} ${face.x},${face.y},${face.z}`);
-      bot.activateItem();
-    },
-  });
-  const result = await useItemAt(bot, {
-    item: { name: "flint_and_steel" } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.01, z: 0.5 },
-    on: { block: { name: "obsidian" } as never, face: { x: 0, y: 1, z: 0 } },
-    expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
-  });
+  bot.activateBlock = async (block, face) => {
+    activated.push(`${block.name} ${face?.x},${face?.y},${face?.z}`);
+    bot.activateItem();
+  };
+  const result = await clock.settle(useItemAt(bot, {
+      item: stack("flint_and_steel"),
+      lookAt: { x: 3.5, y: 63.01, z: 0.5 },
+      on: { block: obsidian, face: { x: 0, y: 1, z: 0 } },
+      expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
+    }), 2 * TICK_MS);
   assert.deepEqual(result, { kind: "used" });
   assert.deepEqual(activated, ["obsidian 0,1,0"]);
   assert.equal(calls.filter((call) => call === "use").length, 1);
 });
 
-test("a hand that need not change is not waited on", async () => {
-  const { bot, target } = usingBot(2);
-  const result = await useItemAt(bot, {
-    item: { name: "flint_and_steel" } as InventoryItem,
-    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
-    expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
+test("onSent fires once, after the equip and the look, right before the use goes out", async () => {
+  const { bot, calls, clock, stack } = usingBot(1);
+  const result = await clock.settle(useItemAt(bot, {
+      item: stack("bucket"),
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+      onSent: () => calls.push("sent"),
+    }), 2 * TICK_MS);
+  assert.deepEqual(result, { kind: "used" });
+  assert.deepEqual(calls, ["equip bucket", "look 3.5,63.9,0.5 force=true", "sent", "use"]);
+});
+
+test("onSent also fires before a use on a block, and not when the look throws or the signal aborts before the send", async () => {
+  const onBlock = usingBot(1, { flint_and_steel: 1 });
+  onBlock.bot.activateBlock = async () => {
+    onBlock.calls.push("activateBlock");
+  };
+  await onBlock.clock.settle(useItemAt(onBlock.bot, {
+      item: onBlock.stack("flint_and_steel"),
+      lookAt: { x: 3.5, y: 63.01, z: 0.5 },
+      on: { block: onBlock.obsidian, face: { x: 0, y: 1, z: 0 } },
+      onSent: () => onBlock.calls.push("sent"),
+      timeoutTicks: 1,
+    }), 2 * TICK_MS);
+  assert.deepEqual(
+    onBlock.calls.filter((call) => call === "sent" || call === "activateBlock"),
+    ["sent", "activateBlock"],
+  );
+
+  let sent = 0;
+  const countSent = () => {
+    sent += 1;
+  };
+  const lookThrows = usingBot(1);
+  lookThrows.bot.lookAt = async () => {
+    throw new Error("look failed");
+  };
+  const failed = await useItemAt(lookThrows.bot, {
+    item: lookThrows.stack("bucket"),
+    lookAt: { x: 0, y: 0, z: 0 },
+    onSent: countSent,
   });
+  assert.equal(failed.kind, "failed");
+
+  const stop = new AbortController();
+  const abortBeforeSend = usingBot(1);
+  abortBeforeSend.bot.lookAt = async () => {
+    stop.abort();
+  };
+  await assert.rejects(
+    useItemAt(abortBeforeSend.bot, {
+      item: abortBeforeSend.stack("bucket"),
+      lookAt: { x: 0, y: 0, z: 0 },
+      signal: stop.signal,
+      onSent: countSent,
+    }),
+    { name: "AbortError" },
+  );
+  assert.equal(sent, 0);
+});
+
+test("a hand that need not change is not waited on", async () => {
+  const { bot, clock, stack, target } = usingBot(2, { flint_and_steel: 1 });
+  const result = await clock.settle(useItemAt(bot, {
+      item: stack("flint_and_steel"),
+      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      expectedCells: [{ position: target, matches: (block) => block.name === "air" }],
+    }), 3 * TICK_MS);
   assert.deepEqual(result, { kind: "used" });
 });
 
 test("an unconfirmed use says how far the server clock moved after the use went out", async () => {
-  for (const [serverTicksPerClientTick, expected] of [[0, 0], [1, 5]] as const) {
+  // A stopped server sends no time packet; a running one sends a packet of 20 ticks each second (contract check
+  // `world-age-per-second`): the 40 client ticks of the wait last 2 s of clock, two packets.
+  for (const [serverRuns, expected] of [[false, 0], [true, 40]] as const) {
     const world = usingBot(1_000);
-    const time = { age: 1_000 };
-    Object.defineProperty(world.bot, "time", { value: time });
-    const wait = world.bot.waitForTicks;
-    world.bot.waitForTicks = async (ticks?: number) => {
-      time.age += serverTicksPerClientTick;
-      return wait(ticks ?? 1);
-    };
-    const result = await useItemAt(world.bot, {
-      item: { name: "bucket" } as InventoryItem,
-      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
-      expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
-      timeoutTicks: 5,
-    });
+    if (!serverRuns) world.server.stop();
+    const result = await world.clock.settle(useItemAt(world.bot, {
+        item: world.stack("bucket"),
+        lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+        expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+        timeoutTicks: 40,
+      }), 41 * TICK_MS);
     assert.deepEqual(result.kind === "failed" ? result.serverTicksWaited : null, expected);
   }
+});
+
+/** Server wait: the world age (not client ticks) decides, and the wall clock bounds it. */
+function serverWaitWorld(ticksUntilEffect = 1_000) {
+  const world = usingBot(ticksUntilEffect);
+  return { ...world, timing: { now: world.clock.now, sleep: world.clock.sleep } };
+}
+
+test("a server wait confirms an unchanged block only once the world age moved 40 ticks", async () => {
+  const world = serverWaitWorld();
+  const result = await world.clock.settle(useItemAt(world.bot, {
+      item: world.stack("bucket"),
+      lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+      expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+      serverWait: { ticks: 40, wallMs: 10_000, ...world.timing },
+    }), 2_100);
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") return;
+  assert.ok((result.serverTicksWaited ?? 0) >= 40);
+  assert.equal(result.timedOut, undefined);
+});
+
+test("a server wait on a frozen world age ends on the wall clock and says it timed out", async () => {
+  const world = serverWaitWorld();
+  world.server.stop();
+  const pending = useItemAt(world.bot, {
+    item: world.stack("bucket"),
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    serverWait: { ticks: 40, wallMs: 10_000, ...world.timing },
+  });
+  const wait = watch(pending);
+
+  await world.clock.advance(9_900);
+  assert.equal(wait.over, false, "still inside the 10 s wall bound");
+  const result = await world.clock.settle(pending, 150);
+
+  assert.equal(result.kind === "failed" ? result.timedOut : null, true);
+  assert.equal(world.bot.usingHeldItem, false);
+});
+
+test("a server wait frozen 10 s then moving again still sees a change that arrives late", async () => {
+  // The server answers the use only once it runs again: the cell turns to air 10 s after the use went out.
+  const world = serverWaitWorld(0);
+  world.server.stop();
+  world.clock.after(10_000, () => world.server.resume());
+  const pending = useItemAt(world.bot, {
+    item: world.stack("bucket"),
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    serverWait: { ticks: 40, wallMs: 15_000, ...world.timing },
+  });
+  const wait = watch(pending);
+
+  await world.clock.advance(9_900);
+  assert.equal(wait.over, false, "the server has not answered yet");
+  const result = await world.clock.settle(pending, 200);
+
+  assert.deepEqual(result, { kind: "used" });
 });

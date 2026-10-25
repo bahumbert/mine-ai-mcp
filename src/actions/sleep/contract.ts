@@ -62,7 +62,9 @@ export const sleepOutcomes = {
   dimensionUnsafe: "[BED_DIMENSION_UNSAFE] Beds explode in the Nether and the End.",
   alreadySleeping: "Bot is already sleeping in a bed.",
   noBedFound:
-    "[BED_NOT_FOUND] No unoccupied bed found within 32 blocks and no bed carried in inventory. Gather 3 wool (from sheep) and 3 wood planks to craft a bed.",
+    "[BED_NOT_FOUND] No unoccupied bed found in the loaded world and no bed carried in inventory. Gather 3 wool (from sheep) and 3 wood planks to craft a bed.",
+  placedBedNotLoaded: (position: Position3) =>
+    `[BED_NOT_LOADED] The bed this request placed at ${position.x},${position.y},${position.z} is in a chunk that is not loaded, so it cannot be checked: go back near it (navigate to ${position.x},${position.y},${position.z}), then call sleep again.`,
   placementFailed: (reason: string) => `[BED_PLACEMENT_FAILED] ${reason}`,
   unreachable: (position: Position3, cause: string) =>
     `[BED_UNREACHABLE] Could not navigate to bed at ${position.x},${position.y},${position.z}: ${cause}`,

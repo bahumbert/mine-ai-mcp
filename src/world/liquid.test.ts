@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
-import { pourAim } from "./liquid.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { observeFormations, pourAim, settledFormations, watchFormations } from "./liquid.js";
 
 /**
  * The vanilla rule these tests encode, measured in the `pour-through-lava`
@@ -27,7 +27,7 @@ function shore(): Record<string, string> {
 }
 
 test("a pour aimed through a pool lands in the lava cell itself", () => {
-  const bot = botFixture({ blocks: shore(), position: cell(3.5, 61, 0.5) });
+  const { bot } = createFakeBot({ cells: shore(), groundY: null, position: cell(3.5, 61, 0.5) });
 
   const aim = pourAim(bot, lands(cell(4, 60, 0)));
 
@@ -39,7 +39,7 @@ test("a pour aimed through a pool lands in the lava cell itself", () => {
 });
 
 test("a pour whose ray would cross liquid first is refused", () => {
-  const bot = botFixture({ blocks: shore(), position: cell(3.5, 61, 0.5) });
+  const { bot } = createFakeBot({ cells: shore(), groundY: null, position: cell(3.5, 61, 0.5) });
 
   // A source in the middle of the pool: every cell around it is lava, so the
   // only face that lands there is its own floor, and the ray to that floor
@@ -53,19 +53,19 @@ test("a pour whose ray would cross liquid first is refused", () => {
 test("a pool under a lid offers no pour, because every ray meets the lid", () => {
   const named = shore();
   for (let x = 3; x <= 7; x += 1) named[`${x},61,0`] = "stone";
-  const bot = botFixture({ blocks: named, position: cell(2.5, 62, 0.5) });
+  const { bot } = createFakeBot({ cells: named, groundY: null, position: cell(2.5, 62, 0.5) });
 
   assert.equal(pourAim(bot, lands(cell(4, 60, 0))), null);
 });
 
 test("a cell out of the ray's reach is refused however good it scores", () => {
-  const bot = botFixture({ blocks: shore(), position: cell(0.5, 61, 0.5) });
+  const { bot } = createFakeBot({ cells: shore(), groundY: null, position: cell(0.5, 61, 0.5) });
 
   assert.equal(pourAim(bot, lands(cell(6, 60, 0))), null);
 });
 
 test("the highest-scoring landing wins, and the shortest ray breaks a tie", () => {
-  const bot = botFixture({ blocks: shore(), position: cell(3.5, 61, 0.5) });
+  const { bot } = createFakeBot({ cells: shore(), groundY: null, position: cell(3.5, 61, 0.5) });
   const underfoot = cell(3, 61, 0);
   const source = cell(4, 60, 0);
   const score = (high: Vec3) => (landing: Vec3) =>
@@ -75,4 +75,86 @@ test("the highest-scoring landing wins, and the shortest ray breaks a tie", () =
   // score still beats it, and with the scores level it wins.
   assert.deepEqual(pourAim(bot, score(source))?.landing, source);
   assert.deepEqual(pourAim(bot, score(underfoot))?.landing, underfoot);
+});
+
+/** A world whose cells the test changes between observations: air where nothing is named. */
+function changingWorld(initial: Record<string, string>) {
+  return createFakeBot({ cells: initial, groundY: null });
+}
+
+test("lava flowing onto water forms stone and it is counted by name", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "water", "1,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  world.setCell(cell(0, 0, 0), "stone");
+
+  assert.deepEqual(observeFormations(bot, watch), { stone: 1 });
+});
+
+test("water on lava counts each block it made under its own name", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava", "2,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  world.setCell(cell(0, 0, 0), "obsidian");
+  world.setCell(cell(1, 0, 0), "obsidian");
+  world.setCell(cell(2, 0, 0), "cobblestone");
+
+  assert.deepEqual(observeFormations(bot, watch), { obsidian: 2, cobblestone: 1 });
+});
+
+test("a block placed where air was is not formed by a liquid", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "water" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  world.setCell(cell(1, 0, 0), "dirt");
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("air a liquid flowed into and that then hardened is counted", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  world.setCell(cell(1, 0, 0), "lava");
+  assert.deepEqual(observeFormations(bot, watch), {});
+  world.setCell(cell(1, 0, 0), "cobblestone");
+
+  assert.deepEqual(observeFormations(bot, watch), { cobblestone: 1 });
+});
+
+test("a block that stood there before the pour is not counted", () => {
+  const { bot } = changingWorld({ "0,0,0": "lava", "1,0,0": "obsidian" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("a cell beyond the formation radius is not watched", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "lava", "11,0,0": "water" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+
+  world.setCell(cell(11, 0, 0), "stone");
+
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
+test("a pour is settled when the blocks it made stop changing, and the last count is returned", async () => {
+  const { bot, world, clock } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+  let ticks = 0;
+  bot.on("physicsTick", () => {
+    ticks += 1;
+    if (ticks === 3) world.setCell(cell(0, 0, 0), "obsidian");
+    if (ticks === 5) world.setCell(cell(1, 0, 0), "obsidian");
+  });
+
+  let ticksAtSettle = 0;
+  const settled = settledFormations(bot, watch, undefined).then((counts) => {
+    ticksAtSettle = ticks;
+    return counts;
+  });
+  await clock.advance(5_000);
+
+  assert.deepEqual(await settled, { obsidian: 2 });
+  assert.ok(ticksAtSettle >= 15, "waited for ten quiet ticks after the last change");
 });

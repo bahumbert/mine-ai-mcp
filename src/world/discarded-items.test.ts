@@ -72,3 +72,13 @@ test("forget lets go of ids at once and ignores ones never remembered", () => {
   discarded.forget([7, 99]);
   assert.deepEqual([...discarded.ignored(500)], [9]);
 });
+
+test("ignored adds the ids the buried provider lists, past the wall-clock memory too", () => {
+  let buried = [3, 4];
+  const discarded = createDiscardedItems(1_000, () => buried);
+  discarded.remember([7], 0);
+  assert.deepEqual([...discarded.ignored(500)].sort(), [3, 4, 7]);
+  assert.deepEqual([...discarded.ignored(5_000)].sort(), [3, 4], "the claim expired, the pit still holds its stacks");
+  buried = [];
+  assert.deepEqual([...discarded.ignored(5_000)], [], "a pit forgotten releases its ids");
+});

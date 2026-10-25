@@ -1,0 +1,286 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-weapon-damage-pickaxes
+tags:
+  - contract
+description: "Each pickaxe the tests swing costs three unarmored zombies its vanilla damage at its vanilla swing speed. Contract check tests/minecraft/contract/checks/weapon-damage-pickaxes.ts (table: weapon-tools.ts), also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: weapon-damage-pickaxes
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - difficulty easy
+  - time set 18000
+entities:
+  - type: zombie
+    pos:
+      - -1.5
+      - -60
+      - -3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -0.5
+      - -60
+      - -3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 0.5
+      - -60
+      - -3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 1.5
+      - -60
+      - -3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - -3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -1.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -0.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 1.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -3.5
+      - -60
+      - -1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - -1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - -1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - -1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -3.5
+      - -60
+      - -0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - -0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - -0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - -0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -3.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -3.5
+      - -60
+      - 1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - 1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - 1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - 1.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -3.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -1.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -0.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 1.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 3.5
+      - -60
+      - 3.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -1.5
+      - -60
+      - 4.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -0.5
+      - -60
+      - 4.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 0.5
+      - -60
+      - 4.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 1.5
+      - -60
+      - 4.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - 4.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: wooden_pickaxe
+        count: 1
+      - item: stone_pickaxe
+        count: 1
+      - item: iron_pickaxe
+        count: 1
+      - item: golden_pickaxe
+        count: 1
+      - item: diamond_pickaxe
+        count: 1
+      - item: netherite_pickaxe
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

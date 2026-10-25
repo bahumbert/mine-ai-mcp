@@ -51,6 +51,12 @@ export type PlannedOperation =
        * the cell is clear when the operation completes.
        */
       readonly brings: readonly BlockPosition[];
+      /**
+       * The feet cell the planner priced the dig from (`digContextAt`): in water over a solid floor it priced the body
+       * as standing, so the executor holds it on that floor (`holdWaterPosition`). Absent for a break not planned from
+       * a stance (an in-place or pin-release break, priced as the body stands): the hold keeps the depth it finds.
+       */
+      readonly stance?: BlockPosition;
     }
   | { readonly kind: "place"; readonly placement: PlacementPlan }
   | {

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { sameDimensionSql } from "./bot-data-sql.ts";
 import { McpBotRuntime, type ToolClient } from "./runtime-client.js";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 
 function dropsClient(sources: readonly Record<string, unknown>[]): ToolClient {
   const data = { result: { drops: { items: [{ item: "wheat", sources, mobs: [] }], blocks: [] } } };
@@ -32,6 +35,7 @@ function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>
   return client;
 }
 
+// check-reads: src/bot-data/bot-data.sql
 const dropsReply = () => ({ structuredContent: { response: { format: "json", data: { result: { drops: { items: [{ item: "wheat", sources: [], mobs: [] }], blocks: [] } } } } } });
 const lost = () => Promise.reject(new Error("Streamable HTTP error: 404 session not found"));
 
@@ -168,4 +172,192 @@ test("an unreadable tool listing is asked for once and logged once, not on every
   } finally {
     warn.mock.restore();
   }
+});
+
+function queryClient(rows: readonly (readonly (string | number | null)[])[]): ToolClient & { readonly queries: string[] } {
+  const queries: string[] = [];
+  return {
+    queries,
+    callTool: async (call) => {
+      queries.push(String((call.arguments as { sql: string }).sql));
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", query: { rows } } } } } };
+    },
+    close: async () => {},
+  };
+}
+
+const AT = { x: 8, y: 64, z: 0 };
+
+test("knownContainers reads only containers the bot placed (placed_containers), with the observed slots when opened", async () => {
+  // Review 2026-10-19 #8: a chest the bot only opened (a village chest, another bot's) took the deposit.
+  const client = queryClient([[10, 64, -3, "chest", 27, 4], [12, 64, 5, "barrel", null, null]]);
+  const found = await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
+  assert.deepEqual(found, [
+    { x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 },
+    { x: 12, y: 64, z: 5, blockName: "barrel", slotCount: null, usedSlots: 0 },
+  ]);
+  assert.match(client.queries[0]!, /FROM placed_containers p LEFT JOIN observed_containers c ON c\.container_key = p\.container_key/u);
+  assert.match(client.queries[0]!, /p\.placed_by_bot_id = 'Tester'/u);
+  assert.doesNotMatch(client.queries[0]!, /observed_by_bot_id/u);
+});
+
+test("knownContainers also takes a container the bot opened inside a protected region it owns (owner 2026-10-19)", async () => {
+  const client = queryClient([]);
+  await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
+  assert.match(client.queries[0]!, /JOIN protected_regions r ON .*lower\(r\.owner\) = lower\('Tester'\)/u);
+  assert.match(client.queries[0]!, /c\.block_x BETWEEN r\.min_x AND r\.max_x AND c\.block_y BETWEEN r\.min_y AND r\.max_y AND c\.block_z BETWEEN r\.min_z AND r\.max_z/u);
+});
+
+test("knownContainers reads the rows of a real Minecraft username (letters, digits, underscore, 1-16)", async () => {
+  // Review 2026-10-18 #4: the check was /^w{1,16}$/ (the letter w), so every real name got [] and the chest deposit never ran live.
+  const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
+  const runtime = McpBotRuntime.over(client);
+  for (const owner of ["Tester", "Dirk_77", "a", "x".repeat(16)]) {
+    assert.deepEqual(await runtime.knownContainers(owner, AT, 32, "overworld"), [{ x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 }], owner);
+  }
+  assert.equal(client.queries.length, 4);
+  assert.match(client.queries[0]!, /placed_by_bot_id = 'Tester'/u);
+});
+
+test("knownContainers refuses a name or a dimension that could break the SQL literal, without querying", async () => {
+  const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
+  const runtime = McpBotRuntime.over(client);
+  for (const owner of ["O'Neil", "x'; DROP TABLE observed_containers; --", "", "x".repeat(17), "two words", "a\"b", "a\b"]) {
+    assert.deepEqual(await runtime.knownContainers(owner, AT, 32, "overworld"), [], JSON.stringify(owner));
+  }
+  for (const dimension of ["", "over'world", "x".repeat(65), "a b"]) {
+    assert.deepEqual(await runtime.knownContainers("Tester", AT, 32, dimension), [], JSON.stringify(dimension));
+  }
+  assert.deepEqual(client.queries, []);
+});
+
+test("knownContainers in the Nether asks the Nether: an overworld row is never matched", async () => {
+  const client = queryClient([]);
+  const runtime = McpBotRuntime.over(client);
+  await runtime.knownContainers("Tester", AT, 32, "the_nether");
+  await runtime.knownContainers("Tester", AT, 32, "minecraft:overworld");
+  assert.match(client.queries[0]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'the_nether'/u);
+  assert.doesNotMatch(client.queries[0]!, /overworld/u);
+  // Either spelling the server reports for the overworld asks for the same rows.
+  assert.match(client.queries[1]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'overworld'/u);
+});
+
+test("sameDimensionSql strips minecraft: on both sides and refuses a value that could break the literal", () => {
+  assert.equal(sameDimensionSql("p.dimension", "minecraft:the_nether"), "replace(p.dimension, 'minecraft:', '') = 'the_nether'");
+  assert.equal(sameDimensionSql("dimension", "overworld"), "replace(dimension, 'minecraft:', '') = 'overworld'");
+  for (const value of ["", "o'x", "a;b", "x".repeat(65), "a b", "\"x\""]) assert.equal(sameDimensionSql("dimension", value), null, JSON.stringify(value));
+  assert.equal(sameDimensionSql("dimension", "custom:the_deep-1.5/x"), "replace(dimension, 'minecraft:', '') = 'custom:the_deep-1.5/x'");
+});
+
+function statusClient(situation: Record<string, unknown>): ToolClient {
+  const data = { result: { situation: { position: { x: 0, y: 64, z: 0 }, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] }, ...situation } } };
+  return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
+}
+
+test("status carries the dimension view_status names; a runtime that names none is the overworld", async () => {
+  assert.equal((await McpBotRuntime.over(statusClient({ dimension: "the_nether" })).status()).dimension, "the_nether");
+  assert.equal((await McpBotRuntime.over(statusClient({})).status()).dimension, "minecraft:overworld");
+});
+
+test("knownContainers' SQL runs on the real bot-data schema: placed, never opened, another bot's, opened only, in an own region, other dimension", async () => {
+  // A stub `call` cannot see a typo in the SQL (review 2026-10-18 #4: a regex typo passed every test and killed the deposit live).
+  const database = new DatabaseSync(":memory:");
+  database.exec(readFileSync(new URL("../../src/bot-data/bot-data.sql", import.meta.url), "utf8"));
+  const placed = (dimension: string, x: number, bot: string) => database.prepare("INSERT INTO placed_containers VALUES (?, ?, ?, 64, 0, 'chest', ?, 'now')").run(`${dimension}|${x}|64|0`, dimension, x, bot);
+  const opened = (dimension: string, x: number, used: number) => database.prepare("INSERT INTO observed_containers VALUES (?, ?, ?, 64, 0, 'chest', 27, ?, 'Tester', 'now')").run(`${dimension}|${x}|64|0`, dimension, x, JSON.stringify(Array.from({ length: used }, () => ({}))));
+  placed("minecraft:overworld", 10, "Tester");
+  opened("minecraft:overworld", 10, 4);
+  placed("overworld", 12, "Tester");
+  placed("overworld", 14, "Mira");
+  opened("overworld", 16, 2);
+  opened("overworld", 20, 5);
+  placed("the_nether", 11, "Tester");
+  database.exec("INSERT INTO protected_regions (dimension, min_x, min_y, min_z, max_x, max_y, max_z, owner, label, reason, created_by_bot_id, created_at) VALUES ('overworld', 18, 60, -3, 24, 70, 3, 'tester', 'house', 'x', 'Tester', 'now')");
+  const client: ToolClient = {
+    callTool: async (call) => {
+      const rows = database.prepare(String((call.arguments as { sql: string }).sql)).all().map((row) => Object.values(row));
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", query: { rows } } } } } };
+    },
+    close: async () => {},
+  };
+  const runtime = McpBotRuntime.over(client);
+  const near = { x: 8, y: 64, z: 0 };
+  const overworld = await runtime.knownContainers("Tester", near, 32, "overworld");
+  assert.deepEqual(overworld.map(({ x, slotCount, usedSlots }) => [x, slotCount, usedSlots]), [[10, 27, 4], [12, null, 0], [20, 27, 5]]);
+  assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "minecraft:overworld")).map(({ x }) => x), [10, 12, 20], "either spelling of the overworld asks the same rows");
+  assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "the_nether")).map(({ x }) => x), [11]);
+  assert.deepEqual((await runtime.knownContainers("Tester", near, 5, "overworld")).map(({ x }) => x), [10, 12], "the reach bounds it, nearest first");
+  assert.deepEqual(await runtime.knownContainers("Mira", near, 32, "overworld"), [{ x: 14, y: 64, z: 0, blockName: "chest", slotCount: null, usedSlots: 0 }]);
+});
+
+/** A client answering `view_status` with a bot in `dimension` and `query_bot_data` with `answer(sql)`, recording the SQL. */
+function worldClient(dimension: string, answer: (sql: string) => readonly (readonly (string | number | null)[])[]): ToolClient & { readonly queries: string[] } {
+  const queries: string[] = [];
+  const situation = { position: { x: 0, y: 64, z: 0 }, dimension, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] } };
+  return {
+    queries,
+    callTool: async (call) => {
+      if (call.name === "view_status") return { structuredContent: { response: { format: "json", data: { result: { situation } } } } };
+      const sql = String((call.arguments as { sql: string }).sql);
+      queries.push(sql);
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", query: { rows: answer(sql) } } } } } };
+    },
+    close: async () => {},
+  };
+}
+
+const ORIGIN = { x: 0, y: 64, z: 0 };
+const FAR = { x: 200, y: 64, z: 0 };
+
+test("the five frontier-map queries ask the dimension the bot is in, never a literal overworld (T6 of the review #8 pattern)", async () => {
+  for (const [dimension, bare] of [["the_nether", "the_nether"], ["minecraft:overworld", "overworld"], ["overworld", "overworld"]] as const) {
+    const client = worldClient(dimension, () => []);
+    const runtime = McpBotRuntime.over(client);
+    await runtime.seenAt("oak_log", ORIGIN, 64);
+    await runtime.seenPlaces("oak_log", ORIGIN, 64, 3);
+    await runtime.waterAlong(ORIGIN, FAR);
+    await runtime.unseenAlong(ORIGIN, FAR);
+    await runtime.nearestLand(ORIGIN);
+    assert.equal(client.queries.length, 5, dimension);
+    for (const sql of client.queries) {
+      const asksIt = sql.includes(`replace(c.dimension, 'minecraft:', '') = '${bare}'`) || sql.includes(`replace(dimension, 'minecraft:', '') = '${bare}'`);
+      assert.ok(asksIt, `${dimension}: ${sql}`);
+      if (bare !== "overworld") assert.doesNotMatch(sql, /overworld/u, sql);
+    }
+  }
+});
+
+test("seenPlaces names the dimension the places are in", async () => {
+  const runtime = McpBotRuntime.over(worldClient("the_nether", () => [[24, 8]]));
+  assert.deepEqual(await runtime.seenPlaces("nether_quartz_ore", ORIGIN, 0, 3), [{ dimension: "the_nether", x: 24, z: 8 }]);
+});
+
+test("the frontier-map queries run on the real bot-data schema, each in the dimension the bot is in", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(readFileSync(new URL("../../src/bot-data/bot-data.sql", import.meta.url), "utf8"));
+  const chunk = (dimension: string, x: number, z: number, water: number, materials: readonly string[]) => {
+    database.prepare("INSERT INTO frontier_chunks VALUES (?, ?, ?, ?, 'now', 'now', ?, 1)").run(`${dimension}|${x}|${z}`, dimension, x, z, water);
+    for (const material of materials) database.prepare("INSERT INTO frontier_chunk_materials VALUES (?, ?)").run(`${dimension}|${x}|${z}`, material);
+  };
+  chunk("overworld", 5, 0, 0.9, ["oak_log"]);          // 88 blocks east: water, logs
+  chunk("overworld", 6, 0, 0.9, []);
+  chunk("minecraft:overworld", 12, 0, 0.1, ["oak_log"]); // stored with the prefix: land, logs
+  chunk("the_nether", 3, 0, 0.0, ["nether_quartz_ore"]);
+  chunk("the_nether", 4, 0, 0.0, []);
+  const asked = (dimension: string) => McpBotRuntime.over(worldClient(dimension, (sql) => database.prepare(sql).all().map((row) => Object.values(row).map((cell) => (typeof cell === "bigint" ? Number(cell) : (cell as string | number | null))))));
+  const overworld = asked("minecraft:overworld");
+  assert.deepEqual((await overworld.seenPlaces("oak_log", ORIGIN, 0, 5)).map(({ x }) => x), [88, 200], "both spellings stored, nearest first");
+  assert.deepEqual(await overworld.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5), [], "a nether record is not an overworld place");
+  assert.equal((await overworld.waterAlong(ORIGIN, { x: 120, y: 64, z: 8 }))?.share, 0.9);
+  assert.equal(await overworld.waterAlong(ORIGIN, { x: 50, y: 64, z: 8 }), null, "chunks 0-3 of the overworld were never explored; the nether's are not counted");
+  assert.deepEqual(await overworld.nearestLand(ORIGIN), { x: 200, z: 8 });
+  assert.equal(await overworld.unseenAlong({ x: 90, y: 64, z: 8 }, { x: 150, y: 64, z: 8 }), 30, "chunk 7 of the overworld (30 blocks on) is the first one never seen");
+  const nether = asked("the_nether");
+  assert.deepEqual((await nether.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5)).map(({ x }) => x), [56]);
+  assert.deepEqual(await nether.seenPlaces("oak_log", ORIGIN, 0, 5), [], "an overworld record is not a nether place");
+  assert.deepEqual(await nether.seenAt("oak_log", ORIGIN, 0), { dimension: "overworld", x: 88, z: 8 }, "seen only in another dimension: that one, named");
+  assert.deepEqual(await nether.seenAt("nether_quartz_ore", ORIGIN, 0), { dimension: "the_nether", x: 56, z: 8 });
+  assert.equal(await nether.seenAt("nether_quartz_ore", ORIGIN, 100), null, "inside the range already searched");
+  assert.equal(await nether.waterAlong(ORIGIN, { x: 56, y: 64, z: 8 }).then((water) => water?.share), 0);
+  assert.deepEqual(await nether.nearestLand(ORIGIN), { x: 56, z: 8 });
 });

@@ -1,0 +1,53 @@
+template: ../../templates/flat-single-action.yaml
+
+name: breath-air-pocket
+tags: [regression]
+description: >-
+  Live run 15 (2026-10-17): Sana and Nora drowned under a stone roof with an air pocket a few blocks away, because the
+  breath reflex knew only sky-open columns and held jump under the roof. A bot idles in a sealed bedrock water tunnel
+  (nothing to dig, no sky column), the only air an air pocket four blocks west. No action runs, so only the breath
+  reflex can save it: it must swim to the pocket (the goal checks it stands there) and breathe.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -6 40 -50 6 air"
+
+geometry:
+  # Bedrock cannot be dug: the reflex cannot dig up, and nothing else breaks the seal.
+  - fill: { block: bedrock, from: [-10, -63, -4], to: [38, -55, 4] }
+  # The water tunnel: two high, from the pocket to the far east end.
+  - fill: { block: water, from: [-9, -60, 0], to: [36, -59, 0] }
+  # The air pocket four blocks west of the start: two cells of air above the water.
+  - fill: { block: air, from: [-8, -58, 0], to: [-7, -58, 0] }
+
+players:
+  - name: Actor
+    pos: [-3.5, -60, 0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/idle-then-breathe.ts
+
+params:
+  idleSeconds: 40
+  minimumAirTicks: 200
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: reach, who: Actor, pos: [-7.5, -59, 0.5], radius: 2 }
+    - { kind: health, who: Actor, health: 14 }
+    - { kind: completion, who: Actor }

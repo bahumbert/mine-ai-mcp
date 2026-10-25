@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { progressChange, RequestProgress } from "./progress.js";
 
 test("combat resources retain request totals and each waiter gets its own delta", () => {
@@ -47,12 +48,14 @@ test("a replacement with identical wear is still a new waiter-local durability i
 });
 
 test("reflex activity counts entries, accrues time in state, and yields waiter-local deltas", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const progress = new RequestProgress(null);
   const hide = { kind: "withheld", reflex: "hostile", name: "hide", exclusion: "prohibited", detail: "hide" } as const;
   const fight = { kind: "response", reflex: "hostile", name: "fight", exclusion: null, detail: null } as const;
   progress.reflexActivity({ kind: "active", state: hide });
   progress.reflexActivity({ kind: "entered", state: fight });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await clock.advance(20);
   progress.reflexActivity({ kind: "left", state: fight });
   const first = progress.snapshot();
   const carried = first.reflexActivity.find((state) => state.name === "hide");

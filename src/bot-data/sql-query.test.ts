@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { installMinecraftKnowledge } from "./minecraft-knowledge.js";
 import { defineSqlQuery, installActionQueryCatalog, readSqlQuery } from "./sql-query.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 
-const REGISTRY = { version: { minecraftVersion: "test" } } as unknown as Bot["registry"];
+const REGISTRY = createFakeBot().bot.registry;
 
 test("binds one canonical query definition for both execution and catalog inspection", (t) => {
   const data = temporaryBotData({ closeAfter: t });

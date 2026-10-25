@@ -209,21 +209,17 @@ async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: Kn
   return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
 }
 
-const cellSchema = z.object({ x: z.number(), z: z.number() });
-
 /**
- * What a tend says of the ground (SF2): each cell a hoe was used on without the block changing (`untillable`) counts
- * against its block name, then each soil a till worked on clears its name, so one call with both leaves the name
- * usable. Skip reasons teach nothing: a hoe that broke or a use that timed out says nothing of the block (run 14b).
- * The facts refuse a name only on repeated failures at different cells (see {@link TillFacts}).
+ * What a tend says of the ground (SF2): each block name a hoe was used on without the block changing (`untillable`)
+ * counts once against it, at this plot (all its cells of one call are one place), then each soil a till worked on
+ * clears its name, so one call with both leaves the name usable. Skip reasons teach nothing: a hoe that broke or a use
+ * that timed out says nothing of the block (run 14b). The facts refuse a name only on failures at different places
+ * and for a while (see {@link TillFacts}).
  */
-function learnSoil(soil: TillFacts | undefined, tended: { readonly untillable?: Readonly<Record<string, readonly unknown[]>> | undefined; readonly tilledSoil?: Readonly<Record<string, number>> | undefined } | undefined): void {
+function learnSoil(soil: TillFacts | undefined, plot: FarmPlot, tended: { readonly untillable?: Readonly<Record<string, readonly unknown[]>> | undefined; readonly tilledSoil?: Readonly<Record<string, number>> | undefined } | undefined): void {
   if (soil === undefined) return;
   for (const [block, cells] of Object.entries(tended?.untillable ?? {})) {
-    for (const cell of cells) {
-      const at = cellSchema.safeParse(cell).data;
-      if (at !== undefined) soil.failed(block, at);
-    }
+    if (cells.length > 0) soil.failed(block, plot.water);
   }
   for (const block of Object.keys(tended?.tilledSoil ?? {})) soil.tilled(block);
 }
@@ -234,7 +230,7 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   const tended = tendedSchema.safeParse(outcome.result).data?.tended;
-  learnSoil(context.soil, tended);
+  learnSoil(context.soil, plot, tended);
   const after = tended?.after;
   const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});

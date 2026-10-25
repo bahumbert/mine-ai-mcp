@@ -1,0 +1,51 @@
+name: fight-no-progress
+description: "An invulnerable zombie without AI two blocks from the bot: nothing it does or suffers changes. The fight is released after its 30 s without progress, its target stands down for 10 s, and a status read answers throughout."
+
+# SRV-01 (hostile): a fight that neither deals nor takes damage and moves nothing held the body for good. The claim is now
+# held to a no-progress window of 30 s; after it the reflex stands down from that target for 10 s (the owner's values).
+
+minecraft:
+  version: "1.21.4"
+
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -2 -60 -4 8 -56 4 air"
+
+setup:
+  - "difficulty normal"
+
+# The driver's scripted hit is attributed to the zombie, so the game knocks the bot back about a block towards -x:
+# from 2 blocks it landed out of melee reach, where an ordinary melee attacker is not fought, and the fight ended at
+# once (1 run in 6 under load). This wall behind the bot stops the knockback inside reach.
+geometry:
+  - fill: { block: stone, from: [-1, -60, -1], to: [-1, -59, 1] }
+
+entities:
+  - type: zombie
+    pos: [2.5, -60, 0.5]
+    # Invulnerable and without AI: swings land on it for nothing, and it never hits back.
+    nbt: "{PersistenceRequired:1b,NoAI:1b,Invulnerable:1b}"
+
+players:
+  - name: Fighter
+    pos: [0.5, -60, 0.5]
+    # Opped so the driver can have the zombie "hit" it once: that makes the zombie an observed attacker.
+    op: true
+    inventory:
+      - { item: iron_sword, count: 1 }
+
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./fight-no-progress.ts"]
+
+goal: { kind: completion, who: Fighter, timeout: 100 }

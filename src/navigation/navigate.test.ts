@@ -10,7 +10,7 @@ import { exactBlockGoal } from "./goals/index.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { runNavigation } from "./navigate.js";
 import type { NavigationRequest, Navigator } from "./orchestration/navigator.js";
-import type { NavigationEvidence, NavigationOutcome } from "./orchestration/outcome.js";
+import type { NavigationEvidence, NavigationFailure, NavigationOutcome } from "./orchestration/outcome.js";
 
 const evidence = (unrestoredPassages: NavigationEvidence["unrestoredPassages"] = []) =>
   ({ unrestoredPassages }) as unknown as NavigationEvidence;
@@ -181,4 +181,34 @@ test("a route ended by a failed break names the block, and only a break is named
     request,
   );
   assert.equal(placement.status === "stopped" && placement.failedBreak, undefined);
+});
+
+test("a route is marked failed only when the route or the movement itself failed", async () => {
+  const closest = { position: { x: 0, y: 63, z: 0 }, heuristic: 1, routeCost: 1, basis: "best_heuristic_search_node" as const };
+  const search = { queued: 0, visited: 9, farthestVisited: 3, generated: 9, slices: 1, computeMs: 5 };
+  const movement = { kind: "operation_failed" as const, stepId: "s", phase: "moving" as const, observation: "no" };
+  const failures: ReadonlyArray<readonly [NavigationFailure, boolean]> = [
+    [{ kind: "no_path", search, closest }, true],
+    [{ kind: "search_limit", search, limit: { kind: "search_time", limit: 2000, observed: 2001, closest } }, true],
+    [{ kind: "no_progress", reason: "planning_stalled", observation: "20000 ms" }, true],
+    [{ kind: "movement_failed", movement }, true],
+    [{ kind: "invalid_goal", observation: "the goal is a portal" }, false],
+    [{ kind: "world_unavailable", observation: "chunks not loaded" }, false],
+    [{ kind: "resource_changed", observation: "the pickaxe is gone" }, false],
+    [{ kind: "restoration_incomplete", observation: "a doorway stayed open" }, false],
+    [{ kind: "internal_error", message: "boom" }, false],
+  ];
+  for (const [failure, expected] of failures) {
+    const result = await runNavigation(fakeNavigator(() => ({ kind: "failed", failure, evidence: evidence() })).navigator, request);
+    assert.equal(result.status === "stopped" && result.routeFailed === true, expected, failure.kind);
+  }
+  const stopped = await runNavigation(fakeNavigator(() => ({ kind: "stopped", reason: "the pickaxe broke", evidence: evidence() })).navigator, request);
+  assert.equal(stopped.status === "stopped" && stopped.routeFailed, undefined);
+});
+
+test("an escape request reaches the run as an escape, and a plain one does not", async () => {
+  const { navigator, requests } = fakeNavigator(() => ({ kind: "completed", evidence: evidence() }));
+  await runNavigation(navigator, { ...request, escape: true });
+  await runNavigation(navigator, request);
+  assert.deepEqual(requests.map((started) => started.escape), [true, undefined]);
 });

@@ -11,11 +11,13 @@ import { buildCheckpointSchema } from "../checkpoint-schemas.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { DIG_REACH } from "../../navigation/movements/excavation.js";
 import {
   build,
+  BuildProgress,
   type BuildCell,
   type BuildCellState,
   type BuildRequest,
@@ -25,7 +27,8 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { placeBlock } from "../../world/index.js";
-import { defineAction, type ActionContext } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { describeProtectedRegion, protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 import {
@@ -84,6 +87,18 @@ function productionPhysics(
       return visibleBlockAim(bot.world, eye, target, DIG_REACH, observeMineflayerBlock(block).collisionShapes) !== null;
     },
     place: (placement) => placeBlock(bot, placement),
+  };
+}
+
+/** The physics with every placement it confirms also remembered when the block is a container the bot just put down. */
+function recordingPlacements(bot: Bot, botData: SqlBotData, physics: BuildStructurePhysics): BuildStructurePhysics {
+  return {
+    ...physics,
+    place: async (placement) => {
+      const result = await physics.place(placement);
+      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block);
+      return result;
+    },
   };
 }
 
@@ -203,27 +218,23 @@ function describeLeft(group: StructureAudit["left"][number]): string {
 
 // ── Action execution ──────────────────────────────────────────────────────────────────────
 
-export async function buildStructure(
-  bot: Bot,
-  request: BuildStructureRequest,
-  context: ActionContext,
-  physics: BuildStructurePhysics,
-): Promise<BuildStructureResult> {
-  const dimension = bot.game.dimension;
-  const correct = () => request.cells.filter((cell) => bot.game.dimension === dimension && bot.blockAt(new Vec3(cell.x, cell.y, cell.z))?.name === cell.blockName).length;
-  const initial = correct();
-  let placed = 0;
-  context.observeProgress?.(() => ({ baseline: { correct: initial },
-    checkpoint: { phase: "building", correct: correct(), requested: request.cells.length, remaining: request.cells.length - correct(), placed },
-    completion: { kind: "current", observed: correct() === request.cells.length, owes: "All requested cells currently contain their specified blocks." },
-  }));
+/** What one build request keeps across the attempts a reflex cuts it into. */
+interface BuildRun {
+  readonly bot: Bot;
+  readonly request: BuildStructureRequest;
+  readonly physics: BuildStructurePhysics;
+  readonly dimension: string;
+  readonly progress: BuildProgress;
+  readonly kept: ReadonlySet<number>;
+  readonly toolLoss: ReturnType<typeof observeToolTierLoss> | null;
+}
+
+/** Why the request cannot start at all (a block the game lacks, a region someone else owns), else null. */
+function requestRefusal(run: BuildRun): BuildStructureResult | null {
+  const { bot, request, dimension } = run;
   for (const cell of request.cells) {
     if (!bot.registry.blocksByName[cell.blockName]) {
-      return {
-        status: "failed",
-        error: buildStructureOutcomes.unknownBlock(cell.blockName),
-        structure: null,
-      };
+      return { status: "failed", error: buildStructureOutcomes.unknownBlock(cell.blockName), structure: null };
     }
   }
   // Someone else's protected build is not this bot's to change, whoever asked (ADR-012).
@@ -232,35 +243,29 @@ export async function buildStructure(
     const region = protectedRegionAt(regions, dimension, cell.x, cell.y, cell.z, bot.username);
     return region === null ? [] : [region];
   });
-  if (foreign[0] !== undefined) {
-    return {
-      status: "failed",
-      error: buildStructureOutcomes.protectedRegion(foreign.length, describeProtectedRegion(foreign[0])),
-      structure: null,
-    };
-  }
-  const kept = new Set((request.keep ?? []).map((cell) => packKey(cell.x, cell.y, cell.z)));
-  const toolLoss = request.removeWrongBlocks ? observeToolTierLoss(bot) : null;
-  let result: BuildResult;
-  try {
-    result = await build(bot, {
-      ...physics,
-      // Its own correct cells, and what earlier calls of the same structure built (`keep`): a route to the roof must
-      // not dig through the walls (live 2026-10-01: 11 cells of a finished house dug out).
-      movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : new Set([...protectedCells, ...kept])),
-      route: (options) => physics.route({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
-      breakInPlace: (options) => physics.breakInPlace({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
-      place: async (placement) => {
-        const result = await physics.place(placement);
-        if (result.kind === "placed") placed++;
-        return result;
-      },
-      cells: request.cells.map(toBuildCell),
-      removeWrongBlocks: request.removeWrongBlocks,
-      signal: context.signal,
-      ...(toolLoss && request.onToolLoss !== "continue" && { stopSignal: toolLoss.signal }),
-    });
-  } finally { toolLoss?.close(); }
+  if (foreign[0] === undefined) return null;
+  return {
+    status: "failed",
+    error: buildStructureOutcomes.protectedRegion(foreign.length, describeProtectedRegion(foreign[0])),
+    structure: null,
+  };
+}
+
+/** One attempt: build what is still wrong with the request's shared progress, then settle the whole request's audit. */
+async function buildAttempt(run: BuildRun, context: ActionContext): Promise<BuildStructureResult> {
+  const { bot, request, physics, progress, kept, toolLoss } = run;
+  const result = await build(bot, {
+    ...physics,
+    // Its own correct cells, and what earlier calls of the same structure built (`keep`): a route to the roof must
+    // not dig through the walls (live 2026-10-01: 11 cells of a finished house dug out).
+    movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : new Set([...protectedCells, ...kept])),
+    route: (options) => physics.route({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
+    breakInPlace: (options) => physics.breakInPlace({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
+    cells: request.cells.map(toBuildCell),
+    removeWrongBlocks: request.removeWrongBlocks,
+    signal: context.signal,
+    ...(toolLoss && request.onToolLoss !== "continue" && { stopSignal: toolLoss.signal }),
+  }, false, progress);
   const structure = audit(bot, result);
   const lost = toolLoss?.loss();
   if (lost && request.onToolLoss !== "continue") return { status: "partial", error: lost.reason, structure };
@@ -273,6 +278,46 @@ export async function buildStructure(
         structure.missing.map((entry) => `${entry.count} ${entry.block}`).join(", "),
       );
   return { status: "failed", error, structure };
+}
+
+/**
+ * Take the request: the baselines, the progress and the tool-loss watch are made once here, and the executor it returns
+ * runs one attempt each time the runner calls it (again after a reflex), doing only what the world still needs. The
+ * watch closes when `lifetime` ends.
+ */
+export function beginBuildStructure(
+  bot: Bot,
+  request: BuildStructureRequest,
+  physics: BuildStructurePhysics,
+  observe: ObserveRequest = () => {},
+  lifetime?: AbortSignal,
+): RequestExecution<BuildStructureResult> {
+  const dimension = bot.game.dimension;
+  const correct = () => request.cells.filter((cell) => bot.game.dimension === dimension && bot.blockAt(new Vec3(cell.x, cell.y, cell.z))?.name === cell.blockName).length;
+  const initial = correct();
+  const toolLoss = request.removeWrongBlocks ? observeToolTierLoss(bot) : null;
+  lifetime?.addEventListener("abort", () => toolLoss?.close(), { once: true });
+  const run: BuildRun = {
+    bot, request, physics, dimension, toolLoss,
+    progress: new BuildProgress(),
+    kept: new Set((request.keep ?? []).map((cell) => packKey(cell.x, cell.y, cell.z))),
+  };
+  observe(() => ({ baseline: { correct: initial },
+    checkpoint: { phase: "building", correct: correct(), requested: request.cells.length, remaining: request.cells.length - correct(), placed: run.progress.placed },
+    completion: { kind: "current", observed: correct() === request.cells.length, owes: "All requested cells currently contain their specified blocks." },
+  }));
+  return async (context) => requestRefusal(run) ?? buildAttempt(run, context);
+}
+
+export async function buildStructure(
+  bot: Bot,
+  request: BuildStructureRequest,
+  context: ActionContext,
+  physics: BuildStructurePhysics,
+): Promise<BuildStructureResult> {
+  const lifetime = new AbortController();
+  try { return await beginBuildStructure(bot, request, physics, context.observeProgress, lifetime.signal)(context); }
+  finally { lifetime.abort("Build request settled."); }
 }
 
 // ── Action definition ─────────────────────────────────────────────────────────────────────
@@ -304,6 +349,7 @@ export function formatBuildStructureResult(result: BuildStructureResult): string
 export function createBuildStructureAction(
   bot: Bot,
   navigation: NavigationRuntime,
+  botData: SqlBotData,
   physics?: BuildStructurePhysics,
 ) {
   return defineAction({
@@ -313,10 +359,10 @@ export function createBuildStructureAction(
     inputSchema: buildStructureInputSchema,
     resultSchema: buildStructureResultSchema,
     formatResult: formatBuildStructureResult,
-    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: buildStructureAnnotations,
     parse: parseBuildStructureRequest,
-    execute: (request, context) =>
-      buildStructure(bot, request, context, physics ?? productionPhysics(bot, navigation, request)),
+    begin: (request, lifetime, observe) =>
+      beginBuildStructure(bot, request, recordingPlacements(bot, botData, physics ?? productionPhysics(bot, navigation, request)), observe, lifetime),
   });
 }

@@ -4,6 +4,7 @@ import { PREPARE_DRAGON_PERCH } from "../actions/prepare-dragon-perch/contract.j
 import { DESTROY_END_CRYSTAL } from "../actions/destroy-end-crystal/contract.js";
 import { COLLECT_MOB_DROP } from "../actions/hunt-mob/contract.js";
 import type { ActionRunner } from "../session/action-runner.js";
+import { isItemEntity } from "../world/item-pickup.js";
 import { onCombatResourceReceipt } from "./combat-resource-receipts.js";
 
 const COMBAT_ACTIONS = new Set<string>([COLLECT_MOB_DROP, DESTROY_END_CRYSTAL, ATTACK_DRAGON_PERCH, PREPARE_DRAGON_PERCH]);
@@ -66,7 +67,7 @@ export function observeCombatResourceEvents(bot: Bot, runner: ActionRunner): () 
   const playerCollect = (collector: Bot["entity"], collected: Bot["entity"]) => {
     if (collector.id !== bot.entity.id || !combatActive()) return;
     try {
-      const stack = collected.name === "item" ? collected.getDroppedItem() : null;
+      const stack = isItemEntity(collected) ? collected.getDroppedItem() : null;
       const amountCollected = collected.name === "arrow" || collected.name === "spectral_arrow" ? 1
         : stack?.name === "arrow" ? stack.count : 0;
       for (let amount = 0; amount < amountCollected; amount++)

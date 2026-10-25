@@ -6,8 +6,18 @@ import { createMovements, nearGoal, type Navigate, type NavigationRuntime } from
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { chestOpeningObstruction } from "../../world/chest-clearance.js";
-import { defineAction, type ActionContext } from "../action.js";
+import { isLocationOwnedContainer } from "../../world/containers.js";
+import type { ObserveRequest } from "../../session/request.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
+import {
+  OpenedContainer,
+  UseContainerActionError,
+  type ContainerBlock,
+  type ContainerLayoutAttempt,
+  type ContainerOperationAttempt,
+} from "./opened-container.js";
+import type { ClickWaitTiming } from "./window-answer.js";
 import {
   parseUseContainerRequest,
   USE_CONTAINER,
@@ -26,15 +36,6 @@ import {
 
 const CONTAINER_REACH = 4.5;
 
-type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
-type ContainerBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
-type ContainerStack = ReturnType<ContainerWindow["containerItems"]>[number];
-type ContainerOperationAttempt = { readonly kind: "completed" } | { readonly kind: "failed"; readonly cause: unknown };
-
-type ContainerLayoutAttempt =
-  | { readonly kind: "completed"; readonly movedStacks: number }
-  | { readonly kind: "failed"; readonly movedStacks: number; readonly cause: unknown };
-
 interface TransferExecution extends RequestedContainerItem {
   readonly available: number;
   readonly attempt: ContainerOperationAttempt | { readonly kind: "not_attempted" };
@@ -45,25 +46,6 @@ interface TransferBatchExecution {
   readonly compaction: ContainerLayoutAttempt | { readonly kind: "not_attempted" };
 }
 
-interface PlannedContainerStack {
-  readonly slot: number;
-  readonly count: number;
-  readonly representative: ContainerStack;
-}
-
-interface OrganizationPlan {
-  readonly stacks: readonly PlannedContainerStack[];
-  readonly contents: readonly ContainerContent[];
-}
-
-interface OrganizationSettlement {
-  readonly execution: ContainerLayoutAttempt;
-  readonly matchedSlots: number;
-  readonly contentsPreserved: boolean;
-  readonly playerInventoryPreserved: boolean;
-  readonly cursorEmpty: boolean;
-}
-
 type InspectRequest = Extract<UseContainerRequest, { readonly operation: "inspect" }>;
 type TransferRequest = Extract<UseContainerRequest, { readonly operation: "deposit" | "withdraw" }>;
 type OrganizeRequest = Extract<UseContainerRequest, { readonly operation: "organize" }>;
@@ -71,204 +53,16 @@ type InspectTarget = Extract<ContainerTarget, { readonly operation: "inspect" }>
 type TransferTarget = Extract<ContainerTarget, { readonly operation: "deposit" | "withdraw" }>;
 type OrganizeTarget = Extract<ContainerTarget, { readonly operation: "organize" }>;
 
-class UseContainerActionError extends Error {}
-
 export interface UseContainerDependencies {
   readonly navigate: Navigate;
   readonly createMovements: typeof createMovements;
   readonly now: () => Date;
+  /** The clock the waits for the server's answers to a click read; the wall clock when absent (a test passes the fake clock's). */
+  readonly waitTiming?: ClickWaitTiming;
 }
 
 function productionDependencies(navigate: Navigate): UseContainerDependencies {
   return { navigate, createMovements, now: () => new Date() };
-}
-
-class OpenedContainer implements Disposable {
-  static async open(bot: Bot, block: ContainerBlock): Promise<OpenedContainer> {
-    try {
-      const window = await bot.openContainer(block);
-      return new OpenedContainer(window, (slot) => bot.clickWindow(slot, 0, 0));
-    } catch (cause) {
-      throw new UseContainerActionError(useContainerOutcomes.openFailed(cause), { cause });
-    }
-  }
-
-  private constructor(
-    private readonly window: ContainerWindow,
-    private readonly clickSlot: (slot: number) => Promise<void>,
-  ) {}
-
-  get slotCount(): number {
-    return this.window.inventoryStart;
-  }
-
-  contents(): ContainerContent[] {
-    return this.containerStacks().map(({ slot, name: item, count }) => ({ slot, item, count }));
-  }
-
-  observedItemNames(): string[] {
-    return [...new Set(this.containerStacks().map(({ name }) => name))].sort();
-  }
-
-  planOrganization(itemOrder: readonly string[]): OrganizationPlan {
-    const groups = groupCompatibleStacks(this.containerStacks());
-    const stacks: PlannedContainerStack[] = [];
-
-    for (const itemName of itemOrder) {
-      for (const group of groups.filter(({ representative }) => representative.name === itemName)) {
-        const fullStacks = Math.floor(group.totalCount / group.representative.stackSize);
-        for (let index = 0; index < fullStacks; index += 1) {
-          stacks.push({
-            slot: stacks.length,
-            count: group.representative.stackSize,
-            representative: group.representative,
-          });
-        }
-        const remainder = group.totalCount % group.representative.stackSize;
-        if (remainder > 0) stacks.push({ slot: stacks.length, count: remainder, representative: group.representative });
-      }
-    }
-
-    return {
-      stacks,
-      contents: stacks.map(({ slot, count, representative }) => ({ slot, item: representative.name, count })),
-    };
-  }
-
-  async transfer(
-    operation: "deposit" | "withdraw",
-    itemType: number,
-    count: number,
-  ): Promise<ContainerOperationAttempt> {
-    try {
-      if (operation === "deposit") await this.window.deposit(itemType, null, count);
-      else await this.window.withdraw(itemType, null, count);
-      return { kind: "completed" };
-    } catch (cause) {
-      return { kind: "failed", cause };
-    }
-  }
-
-  async compact(signal?: AbortSignal): Promise<ContainerLayoutAttempt> {
-    let movedStacks = 0;
-    try {
-      for (const group of groupCompatibleStacks(this.containerStacks())) {
-        movedStacks += await this.compactGroup(group.representative, signal);
-      }
-      return { kind: "completed", movedStacks };
-    } catch (cause) {
-      signal?.throwIfAborted();
-      return { kind: "failed", movedStacks, cause };
-    }
-  }
-
-  async organize(plan: OrganizationPlan, signal?: AbortSignal): Promise<OrganizationSettlement> {
-    const containerBefore = stackTotals(this.containerStacks());
-    const playerInventoryBefore = stackLayout(this.window.items());
-    const execution = await this.executeOrganization(plan, signal);
-    const after = this.containerStacks();
-    const matchedSlots = plan.stacks.filter((expected) => stackAt(after, expected.slot, expected)).length;
-
-    return {
-      execution,
-      matchedSlots,
-      contentsPreserved: stackTotals(after) === containerBefore,
-      playerInventoryPreserved: stackLayout(this.window.items()) === playerInventoryBefore,
-      cursorEmpty: this.window.selectedItem === null,
-    };
-  }
-
-  private async executeOrganization(plan: OrganizationPlan, signal?: AbortSignal): Promise<ContainerLayoutAttempt> {
-    const settledSlots = new Set<number>();
-    const compaction = await this.compact(signal);
-    if (compaction.kind === "failed") return compaction;
-    let movedStacks = compaction.movedStacks;
-
-    try {
-      for (const desired of plan.stacks) {
-        signal?.throwIfAborted();
-        const current = this.containerStacks();
-        if (stackAt(current, desired.slot, desired)) {
-          settledSlots.add(desired.slot);
-          continue;
-        }
-
-        const source = current.find(
-          (candidate) =>
-            !settledSlots.has(candidate.slot) &&
-            sameItemKind(candidate, desired.representative) &&
-            candidate.count === desired.count,
-        );
-        if (!source) {
-          throw new Error(`No source stack remained for planned slot ${desired.slot}.`);
-        }
-
-        await this.moveStack(source, desired.slot, current);
-        movedStacks += 1;
-        settledSlots.add(desired.slot);
-      }
-      return { kind: "completed", movedStacks };
-    } catch (cause) {
-      signal?.throwIfAborted();
-      return { kind: "failed", movedStacks, cause };
-    }
-  }
-
-  private async compactGroup(representative: ContainerStack, signal?: AbortSignal): Promise<number> {
-    let mergedStacks = 0;
-
-    while (true) {
-      signal?.throwIfAborted();
-      const partials = this.containerStacks()
-        .filter((stack) => sameItemKind(stack, representative) && stack.count < stack.stackSize)
-        .sort((left, right) => right.count - left.count);
-      if (partials.length < 2) return mergedStacks;
-
-      const destination = partials[0]!;
-      const source = partials.at(-1)!;
-      await this.clickSlot(source.slot);
-      await this.clickSlot(destination.slot);
-      if (this.window.selectedItem) await this.clickSlot(source.slot);
-      if (this.window.selectedItem) throw new Error("A compacted container stack remained held by the cursor.");
-      mergedStacks += 1;
-    }
-  }
-
-  private async moveStack(
-    source: ContainerStack,
-    destinationSlot: number,
-    current: readonly ContainerStack[],
-  ): Promise<void> {
-    const destination = current.find(({ slot }) => slot === destinationSlot);
-    if (!destination || !sameItemKind(destination, source)) {
-      await this.moveOrSwapStack(source.slot, destinationSlot);
-      return;
-    }
-
-    // Left-clicking two stacks of the same item merges them, so use one empty slot as a swap buffer.
-    const bufferSlot = this.window.firstEmptyContainerSlot();
-    if (bufferSlot === null) {
-      throw new Error("No empty container slot was available to swap matching item stacks.");
-    }
-    await this.moveOrSwapStack(destinationSlot, bufferSlot);
-    await this.moveOrSwapStack(source.slot, destinationSlot);
-    await this.moveOrSwapStack(bufferSlot, source.slot);
-  }
-
-  private async moveOrSwapStack(sourceSlot: number, destinationSlot: number): Promise<void> {
-    await this.clickSlot(sourceSlot);
-    await this.clickSlot(destinationSlot);
-    if (this.window.selectedItem) await this.clickSlot(sourceSlot);
-    if (this.window.selectedItem) throw new Error("A container stack remained held by the cursor after its slot move.");
-  }
-
-  private containerStacks(): ContainerStack[] {
-    return this.window.containerItems().sort((left, right) => left.slot - right.slot);
-  }
-
-  [Symbol.dispose](): void {
-    this.window.close();
-  }
 }
 
 function target(bot: Bot, request: InspectRequest): InspectTarget;
@@ -295,18 +89,6 @@ function target(bot: Bot, request: UseContainerRequest): ContainerTarget {
     operation: request.operation,
     items: request.items.map(({ itemName: item, count: requested }) => ({ item, requested })),
   };
-}
-
-function isLocationOwnedContainer(blockName: string): boolean {
-  return (
-    blockName === "chest" ||
-    blockName === "trapped_chest" ||
-    blockName === "barrel" ||
-    blockName === "hopper" ||
-    blockName === "dropper" ||
-    blockName === "dispenser" ||
-    blockName.endsWith("_shulker_box")
-  );
 }
 
 function requestedItemNames(request: UseContainerRequest): readonly string[] {
@@ -337,53 +119,45 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   return left.every((value) => rightValues.has(value));
 }
 
-interface CompatibleStackGroup {
-  readonly representative: ContainerStack;
-  totalCount: number;
+/** What one container request keeps across the attempts a reflex splits it into. */
+interface ContainerProgress {
+  /** Carried counts of the requested items when the request began: what moved since is the difference. */
+  readonly carriedBefore: ReadonlyMap<string, number>;
+  /** What the container held when the request first opened it (null until then): the chest's own share of the change. */
+  contentsAtFirstOpening: readonly ContainerContent[] | null;
 }
 
-function groupCompatibleStacks(stacks: readonly ContainerStack[]): CompatibleStackGroup[] {
-  const groups: CompatibleStackGroup[] = [];
-  for (const stack of stacks) {
-    const existing = groups.find(({ representative }) => sameItemKind(representative, stack));
-    if (existing) existing.totalCount += stack.count;
-    else groups.push({ representative: stack, totalCount: stack.count });
-  }
-  return groups;
+type ContainerObservation = Pick<ContainerUseEvidence, "blockName" | "slotCount" | "contents" | "observedAt">;
+
+function carriedOf(bot: Bot, itemName: string): number {
+  const registryItem = bot.registry.itemsByName[itemName];
+  return registryItem ? bot.inventory.count(registryItem.id, null) : 0;
 }
 
-function sameItemKind(left: ContainerStack, right: ContainerStack): boolean {
-  return (
-    left.type === right.type &&
-    left.metadata === right.metadata &&
-    JSON.stringify(left.nbt) === JSON.stringify(right.nbt)
-  );
-}
-
-function stackAt(stacks: readonly ContainerStack[], slot: number, expected: PlannedContainerStack): boolean {
-  const actual = stacks.find((stack) => stack.slot === slot);
-  return actual !== undefined && sameItemKind(actual, expected.representative) && actual.count === expected.count;
-}
-
-function stackIdentity(stack: ContainerStack): string {
-  return `${stack.type}\u0000${stack.metadata}\u0000${JSON.stringify(stack.nbt)}`;
-}
-
-function stackTotals(stacks: readonly ContainerStack[]): string {
-  const totals = new Map<string, number>();
-  for (const stack of stacks) {
-    const identity = stackIdentity(stack);
-    totals.set(identity, (totals.get(identity) ?? 0) + stack.count);
-  }
-  return JSON.stringify([...totals].sort(([left], [right]) => left.localeCompare(right)));
-}
-
-function stackLayout(stacks: readonly ContainerStack[]): string {
-  return JSON.stringify(
-    stacks
-      .map((stack) => ({ slot: stack.slot, identity: stackIdentity(stack), count: stack.count }))
-      .sort((left, right) => left.slot - right.slot),
-  );
+/**
+ * How much of each requested item earlier attempts already moved: the smaller of what the inventory changed and what
+ * the container changed since the request first opened it. Eaten food (inventory down, chest unchanged) and picked-up
+ * items (inventory up, chest unchanged) credit nothing; another bot using the chest at the same time is capped by the
+ * inventory change (review 2026-10-19). Two entries naming one item share the moved amount in order.
+ */
+function movedByEarlierAttempts(
+  bot: Bot,
+  progress: ContainerProgress,
+  operation: "deposit" | "withdraw",
+  items: readonly RequestedContainerItem[],
+  containerNow: readonly ContainerContent[],
+): number[] {
+  const credited = new Map<string, number>();
+  const containerAtFirstOpening = progress.contentsAtFirstOpening ?? containerNow;
+  return items.map(({ itemName, count }) => {
+    const inventoryChange = carriedOf(bot, itemName) - (progress.carriedBefore.get(itemName) ?? 0);
+    const containerChange = itemCount(containerNow, itemName) - itemCount(containerAtFirstOpening, itemName);
+    const moved =
+      operation === "deposit" ? Math.min(-inventoryChange, containerChange) : Math.min(inventoryChange, -containerChange);
+    const mine = Math.min(count, Math.max(0, moved - (credited.get(itemName) ?? 0)));
+    credited.set(itemName, (credited.get(itemName) ?? 0) + mine);
+    return mine;
+  });
 }
 
 async function executeTransferBatch(
@@ -393,16 +167,17 @@ async function executeTransferBatch(
   items: readonly RequestedContainerItem[],
   itemTypes: ReadonlyMap<string, number>,
   before: readonly ContainerContent[],
+  alreadyMoved: readonly number[],
   signal?: AbortSignal,
 ): Promise<TransferBatchExecution> {
   const executions: TransferExecution[] = [];
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     if (signal?.aborted) break;
     const itemType = itemTypes.get(item.itemName)!;
     const available = operation === "deposit" ? bot.inventory.count(itemType, null) : itemCount(before, item.itemName);
-    const attempted = Math.min(available, item.count);
+    const attempted = Math.min(available, item.count - alreadyMoved[index]!);
     const attempt =
-      attempted === 0 ? { kind: "not_attempted" as const } : await container.transfer(operation, itemType, attempted);
+      attempted <= 0 ? { kind: "not_attempted" as const } : await container.transfer(operation, itemType, attempted, signal);
     executions.push({ ...item, available, attempt });
   }
   return {
@@ -411,16 +186,19 @@ async function executeTransferBatch(
   };
 }
 
+/** What each item moved in all: earlier attempts' share (from the inventory) plus what this attempt's window shows. */
 function settleTransfers(
   operation: "deposit" | "withdraw",
   executions: readonly TransferExecution[],
   before: readonly ContainerContent[],
   after: readonly ContainerContent[],
+  alreadyMoved: readonly number[],
 ): ContainerTransferResult[] {
-  return executions.map((execution) => {
+  return executions.map((execution, index) => {
     const beforeCount = itemCount(before, execution.itemName);
     const afterCount = itemCount(after, execution.itemName);
-    const transferred = Math.max(0, operation === "deposit" ? afterCount - beforeCount : beforeCount - afterCount);
+    const thisAttempt = Math.max(0, operation === "deposit" ? afterCount - beforeCount : beforeCount - afterCount);
+    const transferred = alreadyMoved[index]! + thisAttempt;
     const item = execution.itemName;
     const requested = execution.count;
     if (transferred === requested) return { status: "succeeded", item, requested, transferred };
@@ -437,48 +215,170 @@ function settleTransfers(
   });
 }
 
-/** Open one exact container, execute one requested container transaction, and retain its observed slot layout. */
-export async function useContainer(
+/** Move the container into interaction reach: pathfinder status is not enough, the distance is what counts. */
+async function reachContainer(
+  bot: Bot,
+  position: ReturnType<typeof asVec3>,
+  context: ActionContext,
+  dependencies: UseContainerDependencies,
+): Promise<void> {
+  if (bot.entity.position.distanceTo(position) <= CONTAINER_REACH) return;
+  const route = await dependencies
+    .navigate({
+      movements: dependencies.createMovements(bot),
+      goal: nearGoal(position, 2),
+      signal: context.signal,
+    })
+    .catch((cause: unknown) => {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      throw new UseContainerActionError(useContainerOutcomes.routeStopped(reason), { cause });
+    });
+  if (bot.entity.position.distanceTo(position) > CONTAINER_REACH) {
+    throw new UseContainerActionError(useContainerOutcomes.routeStopped(describeNavigation(route)));
+  }
+}
+
+/** Read the open container, memorize it, and return what was seen. */
+function observeContainer(
+  bot: Bot,
+  data: SqlBotData,
+  container: OpenedContainer,
+  block: ContainerBlock,
+  dependencies: UseContainerDependencies,
+): ContainerObservation {
+  const contents = container.contents();
+  const observedAt = dependencies.now().toISOString();
+  recordContainerObservation(data, {
+    dimension: bot.game.dimension,
+    x: block.position.x,
+    y: block.position.y,
+    z: block.position.z,
+    blockName: block.name,
+    slotCount: container.slotCount,
+    contents,
+    observedByBotId: bot.username,
+    observedAt,
+  });
+  return { blockName: block.name, slotCount: container.slotCount, contents, observedAt };
+}
+
+/** Deposit or withdraw what earlier attempts have not moved yet, and judge the whole request by what moved in all. */
+async function transferResult(
+  bot: Bot,
+  container: OpenedContainer,
+  request: TransferRequest,
+  progress: ContainerProgress,
+  itemTypes: ReadonlyMap<string, number>,
+  before: ContainerObservation,
+  observeAgain: () => ContainerObservation,
+  context: ActionContext,
+): Promise<UseContainerResult> {
+  const transferTarget = target(bot, request);
+  progress.contentsAtFirstOpening ??= before.contents;
+  const alreadyMoved = movedByEarlierAttempts(bot, progress, request.operation, request.items, before.contents);
+  const execution = await executeTransferBatch(
+    bot,
+    container,
+    request.operation,
+    request.items,
+    itemTypes,
+    before.contents,
+    alreadyMoved,
+    context.signal,
+  );
+  const after = observeAgain();
+  context.signal?.throwIfAborted();
+
+  const transfers = settleTransfers(request.operation, execution.items, before.contents, after.contents, alreadyMoved);
+  const containerEvidence: ContainerUseEvidence = {
+    ...transferTarget,
+    ...after,
+    transfers,
+  };
+  if (transfers.every(({ status }) => status === "succeeded") && execution.compaction.kind !== "failed") {
+    return { status: "succeeded", container: containerEvidence };
+  }
+  const error =
+    execution.compaction.kind === "failed"
+      ? useContainerOutcomes.compactionFailed(execution.compaction.cause)
+      : useContainerOutcomes.batchIncomplete(transfers);
+  return transfers.some(({ transferred }) => transferred > 0)
+    ? { status: "partial", error, container: containerEvidence }
+    : { status: "failed", error, target: transferTarget, container: containerEvidence };
+}
+
+/** Lay the container out in the requested order; the plan is made again from what the container holds now. */
+async function organizeResult(
+  bot: Bot,
+  container: OpenedContainer,
+  request: OrganizeRequest,
+  observeAgain: () => ContainerObservation,
+  context: ActionContext,
+): Promise<UseContainerResult> {
+  const organizeTarget = target(bot, request);
+  const observedItemNames = container.observedItemNames();
+  if (!sameStringSet(observedItemNames, request.itemOrder)) {
+    return {
+      status: "failed",
+      error: useContainerOutcomes.itemOrderMismatch(observedItemNames, request.itemOrder),
+      target: organizeTarget,
+    };
+  }
+
+  const plan = container.planOrganization(request.itemOrder);
+  const organization = await container.organize(plan, context.signal);
+  const after = observeAgain();
+  context.signal?.throwIfAborted();
+  const containerEvidence: ContainerUseEvidence = {
+    ...organizeTarget,
+    ...after,
+    plannedContents: [...plan.contents],
+    matchedSlots: organization.matchedSlots,
+    contentsPreserved: organization.contentsPreserved,
+    playerInventoryPreserved: organization.playerInventoryPreserved,
+    cursorEmpty: organization.cursorEmpty,
+  };
+  if (
+    organization.execution.kind === "completed" &&
+    organization.matchedSlots === plan.stacks.length &&
+    after.contents.length === plan.stacks.length &&
+    organization.contentsPreserved &&
+    organization.playerInventoryPreserved &&
+    organization.cursorEmpty
+  ) {
+    return { status: "succeeded", container: containerEvidence };
+  }
+
+  const error =
+    organization.execution.kind === "failed"
+      ? useContainerOutcomes.organizeFailed(organization.execution.cause)
+      : useContainerOutcomes.organizeIncomplete(
+          organization.matchedSlots,
+          plan.stacks.length,
+          organization.contentsPreserved,
+          organization.playerInventoryPreserved,
+          organization.cursorEmpty,
+        );
+  return organization.execution.movedStacks > 0
+    ? { status: "partial", error, container: containerEvidence }
+    : { status: "failed", error, target: organizeTarget, container: containerEvidence };
+}
+
+/** One attempt: reach and open the exact container, then do the operation's share of the request still owed. */
+async function attemptContainerUse(
   bot: Bot,
   data: SqlBotData,
   request: UseContainerRequest,
+  progress: ContainerProgress,
   context: ActionContext,
   dependencies: UseContainerDependencies,
 ): Promise<UseContainerResult> {
   context.signal?.throwIfAborted();
   const targetValue = target(bot, request);
-  const inventoryCounts = () => {
-    const counts: Record<string, number> = {};
-    for (const item of bot.inventory.items()) counts[item.name] = (counts[item.name] ?? 0) + item.count;
-    return counts;
-  };
-  const progressBefore = context.observeProgress ? inventoryCounts() : null;
-  context.observeProgress?.(() => ({ baseline: { inventory: progressBefore },
-    checkpoint: { phase: request.operation, inventory: inventoryCounts(), windowOpen: bot.currentWindow != null,
-      requested: request.operation === "deposit" || request.operation === "withdraw" ? request.items.map((item) => ({ ...item })) : [] },
-    completion: { kind: "event", observed: false, owes: "Container observation or requested transfer/layout operations confirmed before closing the window." },
-  }));
-
   try {
     const itemTypes = resolveItemTypes(bot, request);
-
-    // Pathfinder status is not enough: move until the container is observably within interaction reach.
     const position = asVec3(request);
-    if (bot.entity.position.distanceTo(position) > CONTAINER_REACH) {
-      const route = await dependencies
-        .navigate({
-          movements: dependencies.createMovements(bot),
-          goal: nearGoal(position, 2),
-          signal: context.signal,
-        })
-        .catch((cause: unknown) => {
-          const reason = cause instanceof Error ? cause.message : String(cause);
-          throw new UseContainerActionError(useContainerOutcomes.routeStopped(reason), { cause });
-        });
-      if (bot.entity.position.distanceTo(position) > CONTAINER_REACH) {
-        throw new UseContainerActionError(useContainerOutcomes.routeStopped(describeNavigation(route)));
-      }
-    }
+    await reachContainer(bot, position, context, dependencies);
 
     const block = bot.blockAt(position);
     if (!block) return { status: "failed", error: useContainerOutcomes.blockUnloaded, target: targetValue };
@@ -493,114 +393,16 @@ export async function useContainer(
 
     const obstruction = chestOpeningObstruction(bot, block.name, position);
     if (obstruction) return { status: "failed", error: obstruction, target: targetValue };
-    using container = await OpenedContainer.open(bot, block);
-    const observeAndRemember = () => {
-      const contents = container.contents();
-      const observedAt = dependencies.now().toISOString();
-      recordContainerObservation(data, {
-        dimension: bot.game.dimension,
-        x: block.position.x,
-        y: block.position.y,
-        z: block.position.z,
-        blockName: block.name,
-        slotCount: container.slotCount,
-        contents,
-        observedByBotId: bot.username,
-        observedAt,
-      });
-      return { blockName: block.name, slotCount: container.slotCount, contents, observedAt };
-    };
-    const before = observeAndRemember();
+    using container = await OpenedContainer.open(bot, block, dependencies.waitTiming);
+    const observeAgain = () => observeContainer(bot, data, container, block, dependencies);
+    const before = observeAgain();
     context.signal?.throwIfAborted();
 
     if (request.operation === "inspect") {
-      const inspectTarget = target(bot, request);
-      return {
-        status: "succeeded",
-        container: { ...inspectTarget, ...before },
-      };
+      return { status: "succeeded", container: { ...target(bot, request), ...before } };
     }
-
-    if (request.operation === "deposit" || request.operation === "withdraw") {
-      const transferTarget = target(bot, request);
-      const execution = await executeTransferBatch(
-        bot,
-        container,
-        request.operation,
-        request.items,
-        itemTypes,
-        before.contents,
-        context.signal,
-      );
-      const after = observeAndRemember();
-      context.signal?.throwIfAborted();
-
-      const transfers = settleTransfers(request.operation, execution.items, before.contents, after.contents);
-      const containerEvidence: ContainerUseEvidence = {
-        ...transferTarget,
-        ...after,
-        transfers,
-      };
-      if (transfers.every(({ status }) => status === "succeeded") && execution.compaction.kind !== "failed") {
-        return { status: "succeeded", container: containerEvidence };
-      }
-      const error =
-        execution.compaction.kind === "failed"
-          ? useContainerOutcomes.compactionFailed(execution.compaction.cause)
-          : useContainerOutcomes.batchIncomplete(transfers);
-      return transfers.some(({ transferred }) => transferred > 0)
-        ? { status: "partial", error, container: containerEvidence }
-        : { status: "failed", error, target: transferTarget, container: containerEvidence };
-    }
-
-    if (request.operation !== "organize") throw new Error(`Unhandled container operation: ${request.operation}`);
-    const organizeTarget = target(bot, request);
-    const observedItemNames = container.observedItemNames();
-    if (!sameStringSet(observedItemNames, request.itemOrder)) {
-      return {
-        status: "failed",
-        error: useContainerOutcomes.itemOrderMismatch(observedItemNames, request.itemOrder),
-        target: organizeTarget,
-      };
-    }
-
-    const plan = container.planOrganization(request.itemOrder);
-    const organization = await container.organize(plan, context.signal);
-    const after = observeAndRemember();
-    context.signal?.throwIfAborted();
-    const containerEvidence: ContainerUseEvidence = {
-      ...organizeTarget,
-      ...after,
-      plannedContents: [...plan.contents],
-      matchedSlots: organization.matchedSlots,
-      contentsPreserved: organization.contentsPreserved,
-      playerInventoryPreserved: organization.playerInventoryPreserved,
-      cursorEmpty: organization.cursorEmpty,
-    };
-    if (
-      organization.execution.kind === "completed" &&
-      organization.matchedSlots === plan.stacks.length &&
-      after.contents.length === plan.stacks.length &&
-      organization.contentsPreserved &&
-      organization.playerInventoryPreserved &&
-      organization.cursorEmpty
-    ) {
-      return { status: "succeeded", container: containerEvidence };
-    }
-
-    const error =
-      organization.execution.kind === "failed"
-        ? useContainerOutcomes.organizeFailed(organization.execution.cause)
-        : useContainerOutcomes.organizeIncomplete(
-            organization.matchedSlots,
-            plan.stacks.length,
-            organization.contentsPreserved,
-            organization.playerInventoryPreserved,
-            organization.cursorEmpty,
-          );
-    return organization.execution.movedStacks > 0
-      ? { status: "partial", error, container: containerEvidence }
-      : { status: "failed", error, target: organizeTarget, container: containerEvidence };
+    if (request.operation === "organize") return await organizeResult(bot, container, request, observeAgain, context);
+    return await transferResult(bot, container, request, progress, itemTypes, before, observeAgain, context);
   } catch (cause) {
     context.signal?.throwIfAborted();
     if (cause instanceof UseContainerActionError) {
@@ -608,6 +410,47 @@ export async function useContainer(
     }
     throw cause;
   }
+}
+
+function inventoryCounts(bot: Bot): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of bot.inventory.items()) counts[item.name] = (counts[item.name] ?? 0) + item.count;
+  return counts;
+}
+
+/**
+ * One request's executor: the carried counts at `begin` live across attempts, so an attempt after a reflex moves only
+ * what is still owed and the result covers the whole request.
+ */
+export function beginUseContainer(
+  bot: Bot,
+  data: SqlBotData,
+  request: UseContainerRequest,
+  observe: ObserveRequest | undefined,
+  dependencies: UseContainerDependencies,
+): RequestExecution<UseContainerResult> {
+  const progress: ContainerProgress = {
+    carriedBefore: new Map(requestedItemNames(request).map((itemName) => [itemName, carriedOf(bot, itemName)])),
+    contentsAtFirstOpening: null,
+  };
+  const inventoryBefore = observe ? inventoryCounts(bot) : null;
+  observe?.(() => ({ baseline: { inventory: inventoryBefore },
+    checkpoint: { phase: request.operation, inventory: inventoryCounts(bot), windowOpen: bot.currentWindow != null,
+      requested: request.operation === "deposit" || request.operation === "withdraw" ? request.items.map((item) => ({ ...item })) : [] },
+    completion: { kind: "event", observed: false, owes: "Container observation or requested transfer/layout operations confirmed before closing the window." },
+  }));
+  return (context) => attemptContainerUse(bot, data, request, progress, context, dependencies);
+}
+
+/** Open one exact container, execute one requested container transaction, and retain its observed slot layout. */
+export function useContainer(
+  bot: Bot,
+  data: SqlBotData,
+  request: UseContainerRequest,
+  context: ActionContext,
+  dependencies: UseContainerDependencies,
+): Promise<UseContainerResult> {
+  return beginUseContainer(bot, data, request, context.observeProgress, dependencies)(context);
 }
 
 export function formatUseContainerResult(result: UseContainerResult): string {
@@ -668,11 +511,11 @@ export function createUseContainerAction(
     resultSchema: useContainerResultSchema,
     formatResult: formatUseContainerResult,
     execution: {
-      kind: "task",
+      kind: "resumable_task",
       prepare: (signal) => prepareBotForMovement(bot, navigation, signal),
     },
     annotations: useContainerAnnotations,
     parse: parseUseContainerRequest,
-    execute: (request, context) => useContainer(bot, data, request, context, dependencies),
+    begin: (request, _lifetime, observe) => beginUseContainer(bot, data, request, observe, dependencies),
   });
 }

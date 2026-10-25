@@ -1,49 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture, registry } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { parseViewBlocksRequest } from "./contract.js";
 import { formatViewBlocksResult, viewBlocks } from "./view-blocks.js";
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
 interface Placed {
+  /** A block name, or `"void"` for a cell in a chunk the bot has not loaded. */
   readonly name: string;
-  readonly properties?: Record<string, unknown>;
+  readonly properties?: Record<string, string | number | boolean>;
 }
 
-/** One loaded chunk column at the origin, y 0 to 80, holding the named blocks over air. */
-function fakeBot(placed: Record<string, Placed>, feet = new Vec3(0.5, 64, 0.5)) {
-  const stateOf = (name: string) => registry.blocksByName[name]!.defaultState;
-  const sections = Array.from({ length: 5 }, (_unused, index) => {
-    const sectionY = index * 16;
-    return {
-      solidBlockCount: 1,
-      data: {},
-      get: (local: { x: number; y: number; z: number }) => {
-        const block = placed[key(local.x, sectionY + local.y, local.z)];
-        return block ? stateOf(block.name) : 0;
-      },
-    };
-  });
-  return botFixture(
-    { position: feet },
-    {
-      world: { getColumns: () => [{ chunkX: 0, chunkZ: 0, column: { minY: 0, sections } }] },
-      blockAt: (at: Vec3) => {
-        if (at.x < 0 || at.x > 15 || at.z < 0 || at.z > 15 || at.y < 0 || at.y >= 80) return null;
-        const block = placed[key(at.x, at.y, at.z)];
-        const name = block?.name ?? "air";
-        const definition = registry.blocksByName[name]!;
-        return {
-          name,
-          position: at,
-          boundingBox: definition.boundingBox,
-          getProperties: () => block?.properties ?? {},
-        };
-      },
-    },
-  );
+/** One loaded chunk column at the origin holding the named blocks over air. */
+function fakeBot(placed: Record<string, Placed>, options: { readonly version?: string } = {}) {
+  return createFakeBot({
+    version: options.version,
+    position: new Vec3(0.5, 64, 0.5),
+    groundY: null,
+    loadedColumns: [[0, 0]],
+    cells: Object.fromEntries(
+      Object.entries(placed).map(([cell, block]) => [cell, block.properties ? { name: block.name, properties: block.properties } : block.name]),
+    ),
+  }).bot;
 }
 
 test("a view needs at least one of find, box, or cells, dedupes names, and defaults the limit", () => {
@@ -104,10 +84,36 @@ test("a name Minecraft has no block for fails the view rather than finding nothi
   assert.match((result as { error: string }).error, /no block named unobtainium/);
 });
 
+test("find takes a block tag as it takes a block name: every member of the tag is found", () => {
+  const bot = fakeBot({
+    [key(3, 64, 0)]: { name: "oak_log" },
+    [key(5, 64, 0)]: { name: "birch_log" },
+    [key(7, 64, 0)]: { name: "stripped_oak_log" },
+    [key(9, 64, 0)]: { name: "oak_planks" },
+  });
+  const result = viewBlocks(bot, { find: { blockNames: ["overworld_natural_logs"], limit: 12 }, box: null, cells: [] });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(result.blocks.find![0]!.listed.map((hit) => hit.name), ["oak_log", "birch_log"]);
+});
+
+test("find with the singular log fails as an unknown name; logs finds natural logs only", () => {
+  const bot = fakeBot({ [key(3, 64, 0)]: { name: "oak_log" }, [key(5, 64, 0)]: { name: "stripped_oak_log" } });
+  const singular = viewBlocks(bot, { find: { blockNames: ["log"], limit: 12 }, box: null, cells: [] });
+  assert.equal(singular.status, "failed");
+  const plural = viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] });
+  assert.deepEqual(plural.blocks.find![0]!.listed.map((hit) => hit.name), ["oak_log"]);
+});
+
+test("find on a version with no shipped tags knows block names only", () => {
+  const bot = fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }, { version: "1.19.4" });
+  assert.equal(viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] }).status, "failed");
+  assert.equal(viewBlocks(bot, { find: { blockNames: ["oak_log"], limit: 12 }, box: null, cells: [] }).status, "succeeded");
+});
+
 test("kinds give each named block's game data, harvest tools cheapest tier first, without reading the world", () => {
   const request = parseViewBlocksRequest({ kinds: ["stone", "iron_ore", "dirt", "minecraft:stone"] });
   assert.deepEqual(request.kinds, ["stone", "iron_ore", "dirt"]);
-  const result = viewBlocks(Object.assign(fakeBot({}), { version: "1.21.4" }), request);
+  const result = viewBlocks(fakeBot({}), request);
   assert.equal(result.status, "succeeded");
   const kinds = result.blocks.kinds!;
   assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, tags: undefined });
@@ -123,7 +129,7 @@ test("kinds give each named block's game data, harvest tools cheapest tier first
 });
 
 test("kinds name the game's block tags, so every wood's log is a log and a pumpkin, mined with an axe too, is not", () => {
-  const bot = Object.assign(fakeBot({}), { version: "1.21.4" });
+  const bot = fakeBot({});
   const kinds = viewBlocks(bot, parseViewBlocksRequest({ kinds: ["spruce_log", "crimson_stem", "pumpkin"] })).blocks.kinds!;
   assert.ok(kinds.spruce_log!.tags.includes("logs"));
   assert.ok(kinds.crimson_stem!.tags.includes("logs"));
@@ -162,6 +168,7 @@ test("cells report shape, liquid level, and waterlogging", () => {
     [key(2, 64, 1)]: { name: "water", properties: { level: 3 } },
     [key(3, 64, 1)]: { name: "oak_slab", properties: { waterlogged: true, type: "bottom" } },
     [key(4, 64, 1)]: { name: "stone" },
+    [key(40, 64, 1)]: { name: "void" },
   });
   const result = viewBlocks(bot, {
     find: null,
@@ -195,7 +202,7 @@ test("cells report shape, liquid level, and waterlogging", () => {
 
 test("kinds say whether a block is a full cube, from the runtime's own geometry", () => {
   const request = parseViewBlocksRequest({ kinds: ["dirt", "cobblestone", "oak_stairs", "oak_slab", "glass_pane", "oak_door"] });
-  const bot = Object.assign(fakeBot({}), { version: "1.21.4" });
+  const bot = fakeBot({});
   const kinds = viewBlocks(bot, request).blocks.kinds!;
   assert.equal(kinds.dirt!.full_cube, true);
   assert.equal(kinds.cobblestone!.full_cube, true);

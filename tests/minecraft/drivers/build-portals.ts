@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioRun } from "../scenario.ts";
 
 const paramsSchema = z.strictObject({
@@ -15,7 +16,7 @@ export const run: ScenarioRun = async (context) => {
   const completed: string[] = [];
   for (const { label, ...frame } of frames) {
     const output = await context.call("build_structure", {
-      portal_frame: frame, remove_wrong_blocks: true,
+      portal_frame: arenaActionInput(frame, context.arena), remove_wrong_blocks: true,
     });
     completed.push(`${label}: ${output.summary}`);
     if (output.result.status !== "succeeded") {

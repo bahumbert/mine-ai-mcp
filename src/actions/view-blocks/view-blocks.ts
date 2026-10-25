@@ -60,7 +60,7 @@ function nameAt(bot: Bot, position: Vec3): string {
 function selectedStateIds(bot: Bot, name: string): Set<number> {
   const stateIds = new Set<number>();
   for (const block of Object.values(bot.registry.blocksByName)) {
-    if (!blockMatchesSelector(block.name, name)) continue;
+    if (!blockMatchesSelector(block.name, name, bot)) continue;
     for (let stateId = block.minStateId; stateId <= block.maxStateId; stateId += 1) stateIds.add(stateId);
   }
   return stateIds;

@@ -3,7 +3,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { structureWorld } from "../../test-support/structure-world.js";
 import { parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
-import { formatBuildStructureResult, buildStructure } from "./build-structure.js";
+import { formatBuildStructureResult, buildStructure, beginBuildStructure, createBuildStructureAction } from "./build-structure.js";
+import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { packKey } from "../../navigation/index.js";
 
@@ -211,4 +212,206 @@ test("the result says how much scaffold the routes placed, took down and left", 
   };
   const markdown = formatBuildStructureResult({ status: "succeeded", structure } as never);
   assert.match(markdown, /Scaffold: 5 placed by the routes, 4 taken down, 1 still standing \(9 67 2\)/);
+});
+
+// Reflex continuity (spec 2026-10-18, R2): a reflex that takes the body mid-build hands it back, and the build goes on
+// from what it already did instead of starting over or leaving its scaffold.
+type Physics = ReturnType<typeof structureWorld>["physics"];
+const fresh = () => new AbortController();
+const aborted = (controller: AbortController, reason: string) => {
+  controller.abort(new Error(reason));
+  return controller.signal.reason as Error;
+};
+
+/** The physics with the `n`th placement cut short by the reflex: the block goes down, then the attempt is aborted. */
+function abortingAfterPlacement(physics: Physics, n: number, controller: AbortController, throwFromPlace: boolean): Physics {
+  let placed = 0;
+  return {
+    ...physics,
+    place: async (placement) => {
+      const result = await physics.place(placement);
+      placed += 1;
+      if (placed === n) {
+        const reason = aborted(controller, "[HUNGER] reflex");
+        if (throwFromPlace) throw reason;
+      }
+      return result;
+    },
+  };
+}
+
+test("a build cut short after two of four cells goes on with the other two, each counted once", async () => {
+  const { bot, physics, placements, blocks } = structureWorld();
+  const first = fresh();
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0], [5, 64, 0]]), removeWrongBlocks: false };
+  const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 2, first, false), () => {});
+  await assert.rejects(run({ signal: first.signal }), /HUNGER/);
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.structure!.placed, 4);
+  assert.deepEqual([...placements].sort(), ["2,64,0", "3,64,0", "4,64,0", "5,64,0"], "no cell placed twice");
+  assert.equal(blocks.get("5,64,0")!.name, "cobblestone");
+});
+
+test("a placement that landed just before the abort threw is still counted", async () => {
+  const { bot, physics, placements } = structureWorld();
+  const first = fresh();
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
+  const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 2, first, true), () => {});
+  await assert.rejects(run({ signal: first.signal }), /HUNGER/);
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.structure!.placed, 3, "the block placed by the cut attempt is not lost from the total");
+  assert.equal(placements.length, 3);
+});
+
+test("a cell built by someone else between the attempts is not placed again nor counted as ours", async () => {
+  const { bot, physics, put, placements } = structureWorld();
+  const first = fresh();
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
+  const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 1, first, false), () => {});
+  await assert.rejects(run({ signal: first.signal }));
+  put(new Vec3(3, 64, 0), "cobblestone");
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.structure!.placed, 2);
+  assert.deepEqual(placements, ["2,64,0", "4,64,0"]);
+});
+
+test("water the fall reflex left in a cell to build is placed over, and a leftover block is dug when the request says so", async () => {
+  const { bot, physics, put, placements } = structureWorld();
+  const first = fresh();
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: true };
+  const run = beginBuildStructure(bot, request, abortingAfterPlacement(physics, 1, first, false), () => {});
+  await assert.rejects(run({ signal: first.signal }));
+  put(new Vec3(3, 64, 0), "water");
+  put(new Vec3(4, 64, 0), "dirt");
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.structure!.dug, 1);
+  assert.deepEqual([...placements].sort(), ["2,64,0", "3,64,0", "4,64,0"]);
+});
+
+test("a build that already finished answers a second call with the same success and touches nothing", async () => {
+  const { bot, physics, placements } = structureWorld();
+  const request = { cells: cells([[2, 64, 0], [3, 64, 0]]), removeWrongBlocks: false };
+  const run = beginBuildStructure(bot, request, physics, () => {});
+  const done = await run({ signal: fresh().signal });
+  const again = await run({ signal: fresh().signal });
+  assert.equal(again.status, "succeeded");
+  assert.equal(again.structure!.placed, done.structure!.placed);
+  assert.equal(placements.length, 2);
+});
+
+/** A route that, on its first leg, puts scaffold down the way a pillaring route does and reports it. */
+function scaffoldingFirstRoute(world: ReturnType<typeof structureWorld>, scaffold: [number, number, number][], afterScaffold?: () => void): Physics {
+  let placed = false;
+  return {
+    ...world.physics,
+    route: async (options) => {
+      if (!placed) {
+        placed = true;
+        for (const [x, y, z] of scaffold) {
+          world.put(new Vec3(x, y, z), "dirt");
+          // The state the world holds there, as the route reads it back after its placement.
+          options.onPlacement?.({ position: { x, y, z }, stateId: world.harness.world.getBlockStateId(new Vec3(x, y, z)) });
+        }
+        afterScaffold?.();
+      }
+      return world.physics.route(options);
+    },
+  };
+}
+
+test("scaffold standing when the reflex cut the build is taken down by the attempt that finishes it", async () => {
+  const world = structureWorld();
+  const first = fresh();
+  const physics = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2]], () => { aborted(first, "[FALL] reflex"); });
+  const request = { cells: cells([[10, 64, 0], [11, 64, 0]]), removeWrongBlocks: false };
+  const run = beginBuildStructure(world.bot, request, physics, () => {});
+  await assert.rejects(run({ signal: first.signal }), /FALL/);
+  assert.equal(world.blocks.get("9,66,2")!.name, "dirt", "the cut attempt left its scaffold standing");
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.equal(world.blocks.get("9,66,2")!.name, "air");
+  assert.equal(world.blocks.get("9,65,2")!.name, "air");
+  assert.deepEqual(result.structure!.scaffold, { placed: 2, removed: 2, left: [], leftCount: 0 });
+});
+
+test("a build cut while taking its scaffold down resumes into the takedown and leaves none", async () => {
+  const world = structureWorld();
+  const cut = fresh();
+  const physics = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2], [9, 67, 2]]);
+  let broken = 0;
+  const run = beginBuildStructure(world.bot, { cells: cells([[10, 64, 0]]), removeWrongBlocks: false }, {
+    ...physics,
+    breakInPlace: async (options) => {
+      const result = await physics.breakInPlace(options);
+      broken += 1;
+      if (broken === 1) throw aborted(cut, "[HUNGER] reflex");
+      return result;
+    },
+  }, () => {});
+  await assert.rejects(run({ signal: cut.signal }), /HUNGER/);
+  assert.equal(world.blocks.get("9,67,2")!.name, "air", "the highest block was already down");
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual([65, 66, 67].map((y) => world.blocks.get(`9,${y},2`)!.name), ["air", "air", "air"]);
+  assert.equal(result.structure!.scaffold!.placed, 3);
+  assert.equal(result.structure!.scaffold!.leftCount, 0);
+});
+
+test("scaffold that another bot already took down is skipped, not dug twice", async () => {
+  const world = structureWorld();
+  const first = fresh();
+  const dug: string[] = [];
+  const base = scaffoldingFirstRoute(world, [[9, 65, 2], [9, 66, 2]], () => { aborted(first, "[FALL] reflex"); });
+  const physics: Physics = {
+    ...base,
+    breakInPlace: async (options) => {
+      dug.push(`${options.position.x},${options.position.y},${options.position.z}`);
+      return base.breakInPlace(options);
+    },
+  };
+  const run = beginBuildStructure(world.bot, { cells: cells([[10, 64, 0]]), removeWrongBlocks: false }, physics, () => {});
+  await assert.rejects(run({ signal: first.signal }));
+  world.put(new Vec3(9, 66, 2), "air");
+  const result = await run({ signal: fresh().signal });
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(dug, ["9,65,2"]);
+});
+
+/** The action as the catalog builds it (a fake world's physics under the real wrapper), run to the end. */
+async function buildAsAction(world: ReturnType<typeof structureWorld>, data: ReturnType<typeof temporaryBotData>, list: StructureCell[]) {
+  (world.bot as { username: string }).username = "Builder";
+  const action = createBuildStructureAction(world.bot, {} as never, data, world.physics);
+  const run = action.begin({ cells: list, removeWrongBlocks: false }, new AbortController().signal, () => {});
+  return run({ signal: new AbortController().signal });
+}
+const placedContainers = (data: ReturnType<typeof temporaryBotData>) =>
+  data.read("SELECT container_key, block_name, placed_by_bot_id FROM placed_containers ORDER BY container_key");
+
+test("a house's chest placed by build_structure is recorded, and the walls around it are not", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const world = structureWorld({ carried: { chest: 1, cobblestone: 4 } });
+
+  const result = await buildAsAction(world, data, [
+    ...cells([[2, 64, 0], [3, 64, 0]]),
+    { x: 4, y: 64, z: 0, blockName: "chest" },
+  ]);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainers(data), [
+    { container_key: "overworld|4|64|0", block_name: "chest", placed_by_bot_id: "Builder" },
+  ]);
+});
+
+test("a chest already standing in the plan is not recorded: the bot did not place it", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const world = structureWorld({ carried: { cobblestone: 4 } });
+  world.put(new Vec3(4, 64, 0), "chest");
+
+  const result = await buildAsAction(world, data, [{ x: 4, y: 64, z: 0, blockName: "chest" }]);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainers(data), []);
 });

@@ -1,9 +1,14 @@
-node_modules
-dist
-.git
-.mine-labs
-runs
-private
-.env
-.env.*
-*.log
+# Allow-list: the image holds the public runtime only (src/, docker/, the package manifests and tsconfigs).
+# A new top-level path the image needs is added here (docker/README.md, "Build context").
+*
+!src/
+!docker/
+!package.json
+!bun.lock
+!tsconfig.json
+!tsconfig.build.json
+!tsconfig.check.json
+!README.md
+!LICENSE
+**/node_modules
+**/*.log

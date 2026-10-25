@@ -7,6 +7,7 @@ import {
 import { Vec3 } from "vec3";
 import { cellIntersectsPlayerBody } from "../../../src/utils/index.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
+import { scenarioBotData } from "../../src/scenario-bot-data.ts";
 
 export const run: MineAiScenario = async (context) => {
   const { bot } = context;
@@ -36,7 +37,7 @@ export const run: MineAiScenario = async (context) => {
     return { status: "failed", detail: "Fixture bot must occupy the doorway before replacement." };
   }
   const placed = await runner.run(
-    createPlaceBlockAction(bot, context.navigation),
+    createPlaceBlockAction(bot, context.navigation, scenarioBotData(context)),
     { block_name: "birch_door", x: target.x, y: target.y, z: target.z },
     context.signal,
   );

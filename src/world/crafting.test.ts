@@ -20,6 +20,8 @@ const capacityControls: readonly Readonly<Record<string, number>>[] = [
   { cobblestone: 34 * 64, oak_log: 2 },
   { cobblestone: 35 * 64, oak_log: 1 },
   { cobblestone: 34 * 64, oak_log: 2, oak_planks: 60 },
+  // A renamed partial stack does not take the plain output, but an empty slot still does.
+  { cobblestone: 33 * 64, oak_log: 2, renamed_oak_planks: 60 },
 ];
 for (const carried of capacityControls) {
   test(`one application can store planks with ${JSON.stringify(carried)}`, async () => {
@@ -33,3 +35,12 @@ for (const carried of capacityControls) {
     assert.deepEqual(craftCalls, ["oak_planks"]);
   });
 }
+
+test("renamed planks do not make room for plain planks: the output of a craft with no empty slot is refused before it would be dropped", async () => {
+  const { bot, craftCalls } = craftingBot({ cobblestone: 34 * 64, oak_log: 2, renamed_oak_planks: 60 });
+  const selected = bot.recipesAll(bot.registry.itemsByName.oak_planks!.id, null, null)[0]!;
+  const result = await executeCraftPlan(bot, [{ recipe: selected, applications: 1 }], null);
+  assert.equal(result.kind, "failed");
+  assert.match(String((result as { cause: unknown }).cause), /execution needs inventory room.*oak_planks/);
+  assert.deepEqual(craftCalls, []);
+});

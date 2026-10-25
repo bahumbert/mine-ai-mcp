@@ -2,22 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { collectBlockInputSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
-import type { Bot } from "mineflayer";
-import { breakBudget, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
-import { botFixture } from "../../test-support/bot.js";
+import { breakBudget, collectBlock, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
+import { sourcesOf } from "../../world/block-drops.js";
+import { CarriedCounts } from "../../test-support/carried-counts.js";
+import { type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+
+/** Rewrite how many of `name` the harness's window carries, as the server's slot updates would. */
+function carry(harness: FakeHarness, name: string, total: number): void {
+  new CarriedCounts(harness.inventory, harness.bot.registry).set(harness.bot.registry.itemsByName[name]!.id, total);
+}
+
+/** Full stacks of stone filling `stacks` inventory slots, the filler that leaves the window's other slots empty. */
+const stoneStacks = (stacks: number) => stacks * 64;
 
 test("capacity admission allows a clearing break with free space or a compatible partial stack", () => {
-  let empty = 4;
-  const stacks = [{ name: "cobbled_deepslate", count: 63, stackSize: 64 }];
-  const bot = {
-    inventory: { inventoryStart: 9, inventoryEnd: 45, emptySlotCount: () => empty, items: () => stacks },
-  } as unknown as Bot;
+  // 63 cobbled deepslate in one slot and 31 full stacks of stone: four of the 36 slots empty.
+  const harness = createFakeBot({ carried: { cobbled_deepslate: 63, stone: stoneStacks(31) } });
+  const { bot } = harness;
   const request = parseCollectBlockRequest({ block_name: "deepslate", count: 1 });
   const collectable = new Set(["cobbled_deepslate"]);
   assert.equal(inventoryStop(bot, request, collectable), null);
-  empty = 0;
+  carry(harness, "stone", stoneStacks(35));
   assert.equal(inventoryStop(bot, request, collectable), null);
-  stacks[0]!.count = 64;
+  carry(harness, "cobbled_deepslate", 64);
   assert.match(inventoryStop(bot, request, collectable) ?? "", /INVENTORY_FULL.*no room in a stack of cobbled_deepslate/);
   assert.equal(inventoryStop(bot, { ...request, allowFullInventory: true }, collectable), null);
 });
@@ -28,14 +36,15 @@ test("capacity admission allows a clearing break with free space or a compatible
  * ground had nowhere to go, so the run waited for the server to despawn it.
  */
 test("a running collection asks whether the drop being walked to can enter, not whether any matching stack can", () => {
-  const stacks = [{ name: "birch_log", count: 3, stackSize: 64 }];
-  const bot = {
-    inventory: { inventoryStart: 9, inventoryEnd: 45, emptySlotCount: () => 0, items: () => stacks },
+  // Three birch logs and 35 full stacks of stone: no empty slot, room for birch only.
+  const harness: FakeHarness = createFakeBot({
+    carried: { birch_log: 3, stone: stoneStacks(35) },
     entities: {
-      7: { id: 7, name: "item", getDroppedItem: () => ({ name: "oak_log" }) },
-      8: { id: 8, name: "item", getDroppedItem: () => ({ name: "birch_log" }) },
+      7: { name: "item", position: new Vec3(0, 64, 0), getDroppedItem: () => itemOf(harness.bot.registry, "oak_log") },
+      8: { name: "item", position: new Vec3(0, 64, 0), getDroppedItem: () => itemOf(harness.bot.registry, "birch_log") },
     },
-  } as unknown as Bot;
+  });
+  const { bot } = harness;
   const request = parseCollectBlockRequest({ block_name: "logs", count: 4 });
   const collectable = new Set(["oak_log", "birch_log"]);
   const drop = (entityId: number) => ({ kind: "drop" as const, entityId, position: { x: 0, y: 64, z: 0 } });
@@ -50,8 +59,8 @@ test("a running collection asks whether the drop being walked to can enter, not 
 });
 
 test("sixteen obsidian cannot conceal a casting bucket absent from the final inventory", () => {
-  const stacks = [{ name: "obsidian", count: 16 }];
-  const bot = { inventory: { items: () => stacks } } as unknown as Bot;
+  const harness = createFakeBot({ carried: { obsidian: 16 } });
+  const { bot } = harness;
   const request = parseCollectBlockRequest({ block_name: "obsidian", count: 16 });
   const result = settle(bot, request, { water_bucket: 1 }, new Set(["obsidian"]), new Vec3(0, 0, 0), {
     status: "satisfied",
@@ -61,7 +70,7 @@ test("sixteen obsidian cannot conceal a casting bucket absent from the final inv
   assert.equal(result.status, "partial");
   assert.equal(result.collected.gained, 16);
   assert.match(result.error ?? "", /CASTING_BUCKET_MISSING.*1 to 0/);
-  stacks.push({ name: "bucket", count: 1 });
+  carry(harness, "bucket", 1);
   assert.equal(
     settle(bot, request, { water_bucket: 1 }, new Set(["obsidian"]), new Vec3(0, 0, 0), {
       status: "satisfied",
@@ -74,7 +83,7 @@ test("sixteen obsidian cannot conceal a casting bucket absent from the final inv
 
 /** Observed live on 2026-10-02: 27 minutes, 881 blocks walked, 7 of 32 stone, settled only by a server kick. */
 test("a stalled collection settles with what it got and how far it walked meanwhile", () => {
-  const bot = { inventory: { items: () => [{ name: "cobblestone", count: 30 }] } } as unknown as Bot;
+  const { bot } = createFakeBot({ carried: { cobblestone: 30 } });
   const request = parseCollectBlockRequest({ block_name: "stone", count: 32 });
   const result = settle(bot, request, { cobblestone: 23 }, new Set(["cobblestone", "stone"]), new Vec3(0, 0, 0), {
     status: "stopped",
@@ -89,7 +98,7 @@ test("a stalled collection settles with what it got and how far it walked meanwh
 });
 
 test("the break budget follows how often a break yields the item: grass gives seeds one time in eight", () => {
-  const bot = Object.assign(botFixture(), { version: "1.21.4" });
+  const { bot } = createFakeBot({ version: "1.21.4" });
   assert.equal(collectionChance(bot, ["short_grass"], new Set(["short_grass", "wheat_seeds"])), 0.125);
   // Twice the breaks expected at that chance, so bad luck rarely cuts the run short.
   assert.equal(breakBudget(16, collectionChance(bot, ["short_grass"], new Set(["short_grass", "wheat_seeds"]))), 260);
@@ -190,7 +199,8 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
     "[NO_TARGET_IN_RANGE] No dark_oak_log block left within 64 blocks of where the run started; the nearest loaded one is at -150,70,-260, 712 blocks from the start.",
   );
   // Nothing loaded at all, in range or beyond.
-  const bot = Object.assign(botFixture(), { version: "1.21.4", world: { getColumns: () => [] } }) as unknown as Bot;
+  // No column loaded: an empty list, as a client with no chunk loaded answers.
+  const { bot } = createFakeBot({ version: "1.21.4", loadedColumns: [] });
   const result = settle(bot, request, {}, new Set(["dark_oak_log"]), new Vec3(0, 64, 0), { status: "no_targets", broken: [], reason: null });
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /^\[NO_TARGET_IN_RANGE\] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either\./u);
@@ -199,7 +209,7 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
 /** Live run 13: a shovel that broke while collecting dirt was only a sentence in the stop reason, and the fetch went on by hand. */
 test("a tool that broke during the run is reported as a field of the result, not only in the stop reason", () => {
   const request = parseCollectBlockRequest({ block_name: "dirt", count: 4 });
-  const bot = Object.assign(botFixture(), { inventory: { items: () => [{ name: "dirt", count: 2 }] } }) as unknown as Bot;
+  const { bot } = createFakeBot({ carried: { dirt: 2 } });
   const stopped = settle(bot, request, {}, new Set(["dirt"]), new Vec3(0, 64, 0), { status: "stopped", broken: [], reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains." });
   const lost = {
     class: "shovel" as const,
@@ -220,4 +230,68 @@ test("max_breaks caps the break budget whatever the drop chance asks for", () =>
   assert.equal(breakBudget(5, 0.005), 2004, "no cap: twice the expected breaks");
   assert.equal(breakBudget(5, 0.005, 12), 12);
   assert.equal(breakBudget(5, 1, 12), 9, "a sure drop needs fewer breaks than the cap: the cap does not raise it");
+});
+
+// ── An unknown name is refused before any movement (ACT-02) ────────────────────────────────
+
+/** A navigation runtime that fails the test on any use: an unknown name must never reach it. */
+const untouchedNavigation = new Proxy({}, {
+  get: (_target, property) => { throw new Error(`the refusal reached navigation.${String(property)}`); },
+}) as unknown as NavigationRuntime;
+
+function refusedBot(version = "1.21.4") {
+  return createFakeBot({ version }).bot;
+}
+
+async function refusal(selector: string, version = "1.21.4", extra: Record<string, unknown> = {}) {
+  const request = parseCollectBlockRequest({ block_name: selector, count: 3, ...extra });
+  return collectBlock(refusedBot(version), untouchedNavigation, request, {});
+}
+
+test("a name that is an item, not a block, fails at once naming the blocks that drop it", async () => {
+  const result = await refusal("coal");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named coal\./u);
+  const droppers = sourcesOf("coal", "1.21.4").slice(0, 5).map((source) => source.block);
+  assert.ok(droppers.length > 0);
+  assert.ok((result.error ?? "").includes(`Blocks that drop it: ${droppers.join(", ")}. Name one of them as block_name.`));
+  assert.equal(result.collected.blocksBroken, 0);
+  assert.equal(result.collected.gained, 0);
+});
+
+test("an item no block drops but a recipe makes fails at once saying craft or smelt", async () => {
+  for (const item of ["iron_ingot", "iron_pickaxe", "bread"]) {
+    assert.equal(sourcesOf(item, "1.21.4").length, 0, `${item} must have no block source for this test`);
+    const result = await refusal(item);
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /No block drops it: craft it or smelt it \(view_crafting_requirements, view_smelting_recipes\)\./u);
+  }
+});
+
+test("a name that is nothing fails with the closest registry names", async () => {
+  const result = await refusal("deepslat_coal_ore");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named deepslat_coal_ore\./u);
+  assert.match(result.error ?? "", /Closest names: [^.]*deepslate_coal_ore/u);
+});
+
+test("the singular log is unknown and its refusal suggests the logs", async () => {
+  const result = await refusal("log");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\] Minecraft has no block or block tag named log\./u);
+  const closest = /Closest names: ([^.]*)\./u.exec(result.error ?? "")?.[1] ?? "";
+  assert.match(closest, /\blogs\b/u);
+  assert.match(closest, /oak_log/u);
+});
+
+test("a version with no shipped tags matches exact names only: logs is the unknown-name refusal, not an exploration", async () => {
+  const result = await refusal("logs", "1.19.4");
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
+});
+
+test("a refusal with coordinates names the unknown block, not a cell mismatch", async () => {
+  const result = await refusal("coal", "1.21.4", { count: 1, x: 3, y: 64, z: 3 });
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
 });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { armSignal, waitForSignal } from "./signals.js";
 
 test("armSignal: an already true condition or an already delivered cancellation resolves without listening", async () => {
@@ -52,12 +53,15 @@ test("armSignal: neither a timeout nor a cancellation is a sighting, and both re
 });
 
 test("armSignal: an unbounded signal listens until its caller stops it", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const emitter = new EventEmitter();
   let ready = false;
   const signal = armSignal(emitter, "update", () => (ready ? "late" : null), {});
   assert.equal(emitter.listenerCount("update"), 1);
 
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  // An hour: longer than any deadline a default could set.
+  await clock.advance(3_600_000, 60_000);
   assert.equal(emitter.listenerCount("update"), 1, "no deadline may retire an unbounded signal");
 
   ready = true;

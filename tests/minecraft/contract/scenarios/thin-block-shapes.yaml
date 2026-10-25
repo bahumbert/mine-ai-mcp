@@ -1,0 +1,35 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-thin-block-shapes
+tags:
+  - contract
+description: A carpet is 1/16 high, a single snow layer has no collision shape, a lone fence is 1.5 high and a bottom
+  slab 0.5. Contract check tests/minecraft/contract/checks/thin-block-shapes.ts, also run on the fake bot
+  (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: thin-block-shapes
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -2 -60 2 white_carpet
+  - setblock 0 -60 2 snow[layers=1]
+  - setblock 2 -60 2 oak_fence
+  - setblock 4 -60 2 stone_slab[type=bottom]
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

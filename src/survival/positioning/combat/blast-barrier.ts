@@ -22,7 +22,7 @@ export function blastBarrierCells(bot: Bot, threats: readonly CreeperObservation
         if (cells.has(cell.toString()) || occupiedCell(bot, cell)) continue;
         const block = bot.blockAt(cell);
         const support = findPlacementSupport(bot, cell);
-        if (!block || !isReplaceableForPlacement(block) || !support) continue;
+        if (!block || !isReplaceableForPlacement(block, bot.version) || !support) continue;
         const face = support.support.position.offset(0.5 + support.face.x / 2, 0.5 + support.face.y / 2, 0.5 + support.face.z / 2);
         if (face.distanceTo(bot.entity.position.offset(0, 1.62, 0)) <= 4.5) cells.set(cell.toString(), cell);
       }

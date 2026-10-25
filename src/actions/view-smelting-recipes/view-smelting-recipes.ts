@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { fuelCapacity, NAMED_FUELS, smeltingData } from "../../world/smelting.js";
+import { fuelsOf, smeltingData } from "../../world/smelting.js";
 import { withSimilar } from "../../world/similar-names.js";
 import { defineAction, type ActionContext } from "../action.js";
 import {
@@ -13,15 +13,6 @@ import {
   type ViewSmeltingRecipesRequest,
   type ViewSmeltingRecipesResult,
 } from "./contract.js";
-
-/** Every furnace fuel this version has: the named ones, then each burnable plank, log and wood. */
-function fuels(bot: Pick<Bot, "registry">): { item: string; itemsSmelted: number }[] {
-  const wooden = Object.keys(bot.registry.itemsByName)
-    .filter((name) => /_(planks|log|wood)$/u.test(name) && fuelCapacity(name) > 0)
-    .sort();
-  return [...NAMED_FUELS.filter((name) => bot.registry.itemsByName[name] !== undefined), ...wooden]
-    .map((item) => ({ item, itemsSmelted: fuelCapacity(item) }));
-}
 
 /** The furnace recipes making each requested item, from the data shipped for the bot's version. */
 export async function viewSmeltingRecipes(
@@ -38,7 +29,7 @@ export async function viewSmeltingRecipes(
     items: request.items
       .filter((item) => !unknown.includes(item))
       .map((item) => ({ item, recipes: (data?.recipes ?? []).filter((recipe) => recipe.output === item).map((recipe) => ({ ...recipe, inputs: [...recipe.inputs] })) })),
-    fuels: fuels(bot),
+    fuels: fuelsOf(Object.keys(bot.registry.itemsByName), bot.version),
   };
   if (unknown.length > 0) {
     const names = Object.keys(bot.registry.itemsByName);
@@ -46,6 +37,18 @@ export async function viewSmeltingRecipes(
   }
   if (data === null) return { status: "failed", error: viewSmeltingRecipesOutcomes.dataUnavailable(bot.version), smelting };
   return { status: "succeeded", smelting };
+}
+
+/** How many fuels of one worth are named in the line; the rest are counted (the evidence holds them all). */
+const FUEL_EXAMPLES = 3;
+
+/** `worth: examples and n more` for each worth, the largest first: a long list of planks, doors and signs is not what a model needs to pick a fuel. */
+function fuelsLine(fuels: readonly { item: string; itemsSmelted: number }[]): string {
+  const byWorth = new Map<number, string[]>();
+  for (const { item, itemsSmelted } of fuels) byWorth.set(itemsSmelted, [...(byWorth.get(itemsSmelted) ?? []), item]);
+  const groups = [...byWorth].sort(([a], [b]) => b - a).map(([worth, items]) =>
+    `${worth}: ${items.slice(0, FUEL_EXAMPLES).join(", ")}${items.length > FUEL_EXAMPLES ? ` and ${items.length - FUEL_EXAMPLES} more` : ""}`);
+  return `- Fuels (items smelted each): ${groups.join("; ")}`;
 }
 
 export function formatViewSmeltingRecipesResult(result: ViewSmeltingRecipesResult): string {
@@ -56,7 +59,7 @@ export function formatViewSmeltingRecipesResult(result: ViewSmeltingRecipesResul
       ? `- ${item}: no furnace recipe`
       : `- ${item}: ${recipes.map((recipe) => `one of ${recipe.inputs.join(", ")} → ${recipe.count} (${recipe.cookingTicks} ticks)`).join("; ")}`);
   }
-  lines.push(`- Fuels (items smelted each): ${smelting.fuels.map(({ item, itemsSmelted }) => `${item} ${itemsSmelted}`).join(", ")}`);
+  lines.push(fuelsLine(smelting.fuels));
   return lines.join("\n");
 }
 

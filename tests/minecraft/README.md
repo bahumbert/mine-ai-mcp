@@ -101,6 +101,11 @@ Every step must succeed, and the sequence stops on the first failure. Final
 inventory and world assertions stay in Mine Labs goals. Use a custom driver only
 when the scenario needs logic beyond an ordered list of successful calls.
 
+A scenario's `params` hold arena-local coordinates (the same YAML runs at offset zero and in a shared-server lane). A
+driver parses them through `arena/params.ts` built from `context.arena` (`arenaPoint`, `arenaCell`, `arenaX`), passes an
+action input taken from params through `arenaActionInput(input, context.arena)`, and compares an observed position only
+with those world-coordinate values; `drivers/lane-offset.test.ts` fails a driver that skips this.
+
 ## Combined behavior scenarios
 
 Related regressions share a fixture while retaining their own stage or physical
@@ -176,6 +181,108 @@ Starting grounded is the default. Add an exception only when a real fixture
 needs to start off the ground; there is no configuration option for it now.
 The action starts only after Mine Labs sends `start`.
 
+## Contract checks: the fake bot against the real server
+
+`contract/` holds the answers of Mineflayer and a 1.21.4 server that the shared fake bot
+(`src/test-support/fake-bot/`) must give: each check in `contract/checks/` is one module
+`{ name, fixture, run(subject) }` acting on the bot directly and asserting with `node:assert`.
+The same check runs twice:
+
+- on the fake, by `contract/bot-contract.test.ts` (`bun test`, mocked clock);
+- on the real server, by `contract/scenarios/<check>.yaml` (tag `contract`) with
+  `drivers/bot-contract.ts`. This driver is the one that acts on the bot itself
+  and sends op commands as chat (`setblock`, `execute ... on vehicle`): the YAML's
+  player is `op: true`. A check our runtime would disturb (its idle-water control, its
+  vehicle watch) runs on the bare bot: `client-host.ts <driver> --without-runtime`.
+
+The subject (`contract/subject.ts`) is `{ bot, wait, now, setBlock, seatedOnServer, setWeather, summonItem, hurtBot, kill, explode }`:
+wall time and op commands on a server, the harness clock and its server side on
+the fake. A YAML's `setup`, player and entities equal `setupCommands(check.fixture)`
+(`contract/setup-commands.test.ts` fails on a YAML edited alone).
+
+**The rule:** only a contract change changes the fake. A fake answer that differs
+from the server shows as a check red on the server; the fake and its own test
+change in the same commit as the check. A test that needs an answer the fake lacks
+gets a new check first. Run them before any change to the fake, not in the soak run
+(owner, 2026-10-21): their YAMLs live in `contract/scenarios/`, outside the `scenarios/`
+folder that `bun run scenarios` and `scenarios:once` take.
+
+```bash
+bunx --bun mine-labs run tests/minecraft/contract/scenarios --repeat 3 -p <port>
+```
+
+## Shared server: many scenarios at once
+
+`bun run scenarios:once` (and `bun tests/minecraft/shared/submit.ts <yaml|dir>...`) send the scenarios to one
+long-lived daemon instead of starting a Mine Labs server per run. The daemon keeps one or more servers per **settings
+key** (world type, seed, time, difficulty, tick rate and the effective value of every gamerule) warm, and runs each
+scenario on a **lane** of such a server: the scenario is shifted to `z = 512 × lane` (`tests/minecraft/arena/`), so
+many arenas share one world. A scenario the shift refuses (a natural `default` world, a settings verb it cannot
+lift, a `kill` goal, tag `exclusive`...) gets a server of its own at offset 0, started at the same time as the others.
+A scenario whose client is not `tests/minecraft/client-host.ts` (every legacy `scenarios/` YAML: its driver does not
+read the arena frame, so its coordinates would stay at offset zero) also gets a server of its own; the daemon log
+names the reason (`placement.ts`, T7e4). The next scenario on a reusable server of its own logs in under another player
+name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or hotbar slot is saved from its predecessor.
+
+- **Admission is detected, never a fixed count.** Every 5 s the daemon reads each server's tick time P95 (`tick query`),
+  the CPU busy share (`/proc/stat`) and `MemAvailable`, and starts a trial (and a new server for it, at most one per
+  sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what busy servers and young
+  clients still have to grow into; idle warm servers are not counted, a trial admitted onto one needs its growth
+  free too) covers the client, the concurrency target (starts at 28, see below) is not reached.
+  With none of its own trials running the daemon admits one whatever the foreign load. Submissions take turns (a batch
+  never waits behind another's whole queue), and a trial that has waited 3 samples for room for a new server keeps
+  that room from the trials after it. A trial that waits prints the bound that holds it every 30 s. Constants and their
+  env overrides (`MINE_AI_SCENARIO_*`): `tests/minecraft/shared/config.ts`.
+- **The target follows demand and our own load.** It grows by one when, in the last pass, a queued trial was refused
+  by the target alone, no bound was breached for 60 s (`GROW_AFTER`), the last growth is 15 s old (`GROW_EVERY`) and the
+  cpu projected with one more trial of ours stays under 85 %; it has no ceiling of its own. A cpu breach with our trials
+  running halves it only when the daemon's own process tree (itself, the java servers, the clients) used at least half of
+  the busy cpu (`OWN_SHARE_HALVE`, read from `/proc/<pid>/stat`); under that the load is other workers' and only the
+  cpu bound holds admission (log `target change: foreign load`). A full memory ledger leaves the target alone (it refuses admissions itself, and stops growth).
+- **A shared server takes no lane that would wait too long for the arrangement turn.** One arrangement or restore at a
+  time per server: a lane trial counts on its server's queue from admission until its arrangement is done, and again
+  while its restore is queued or running. A server whose queue would make the next trial wait over 5 s
+  (`ARRANGE_QUEUE_MS`; the median mutex time of its last 20 trials, 800 ms until 3 trials settled) is passed over, so
+  the next server of the key (a new one, when memory allows) takes the trial; when no new server can start, the trial
+  takes the server with the shortest queue rather than wait. `MINE_AI_SCENARIO_SERVERS_PER_KEY` (default 1) above 1 starts that many
+  servers of a key at once when it has `SERVERS_PER_KEY x (MAX_PLAYERS - 2) / 2` trials queued, each trial on the shortest queue.
+- **The daemon boots a submission's clients before their trials** (`CLIENTS_AHEAD` per submission, `CLIENTS_AHEAD_MAX` in all): a
+  client host (`bun client-host.ts <driver>`) loads its driver and waits for `init`, so a lane's `join` is only the login. Never
+  beside a timing trial (`--lock`, `exclusive`), at `CPU_ADMIT`, or past the memory ledger; never shared between submissions; a
+  client command that fails to boot twice in a row (`CLIENT_BOOT_FAILURE_LIMIT`) fails its submission's trials with the client's
+  stderr; a cancelled or ended submission kills the clients it did not use. Log: `client boot s<n> <command>: boot=<ms> ms`.
+- **The daemon log** (`.tmp/scenario-server/daemon.log`) has, per sample, `sample: ... | cpu= own= load1= mem= ledger=
+  target= running= queued= servers= starts= held=<bound:count,...>` (and `target change: halved|foreign load|grew`),
+  per settled trial `trial <name> lane <k|own> server <id> queue= serverWait= mutexWait= arrange= [settle=] join= trial=
+  restoreWait= restore= hold=` (ms: submission to admission, server not yet ready, the phases of the run log (`settle`, arrangement to the first `init`, only when the runner asked for a client; `join` then runs from `init`), admission
+  to the lane's return), and per server `server <id> (...) starting: <reason>` / `stopping: <reason>`.
+- **Killing the submitter ends its trials, not the daemon.** `submit` going away (Ctrl-C, `kill`, even `kill -9` of a
+  script that wraps it) closes its socket: the daemon cancels that submission's queued and running trials and goes on
+  serving the others; its servers stay warm for the next submit.
+- **A timing batch gets servers of its own, nothing global** (`--lock`, owner 2026-10-24). Scenarios that count ticks or
+  world age (`world-age-per-second`, `attack-cooldown-damage`, the contract checks with a "measured bound") run with
+  `--lock --lanes 1`: the daemon makes servers for that batch alone, gives them no trial of another submission, starts
+  its trials only while the machine's CPU is under `CPU_CALM` (60 %), and stops the servers when the batch ends. Other
+  batches keep running on their own servers beside it, but while a timing trial runs, or waits for a calm machine, they
+  start only under `CPU_CALM` too. A scenario tagged `exclusive` is a timing trial by itself (server of its own, same calm rule). The one hold
+  left is `--hold` (the master's `scenario-repeat.sh --load`, a load-only flake fix): it waits for the queue ahead
+  of it to empty and admits nothing else until it ends.
+- **Lanes are free slots** handed out lowest first and held until the trial and its restore have settled; a trial is
+  aborted at `goal.timeout` + 120 s on the wall clock, and a server whose restore or abort does not finish in 60 s is
+  marked sick (no admission, stopped once it drains). One arrangement or restore at a time per server.
+- **Commands** (all through `submit.ts`; scripts `scenario-run.sh` and `scenario-repeat.sh` call it):
+  `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (servers of
+  the batch's own on a calm machine: timing batches; no file lock), `--hold` (master only: runs alone once the queue
+  ahead is empty), `--out DIR`
+  (evidence, default `.mine-labs`), `--isolated` (today's `mine-labs run`, one server per worker), `--stop` (daemon
+  stops once its trials end; `bun run scenarios:stop`). The clients run from the YAML's own checkout, so a worker tests
+  its own code; the submitter's `MINE_AI_*` variables reach the clients through `client.env`.
+- **The daemon** listens on `/tmp/mine-ai-scenarios.sock`, owns game ports 25400-25559, logs to
+  `.tmp/scenario-server/daemon.log` of the checkout that started it, exits after 10 idle minutes. A change to
+  `tests/minecraft/arena`, `tests/minecraft/shared` or `patches/` is tested on a daemon of its own: `--socket
+  /tmp/mine-<name>.sock --port <base>` (40 ports from `<base>`, below 25360 so it meets neither the default block nor
+  25566-25574 and 25575+). After a kill of the daemon the next start kills the java servers it left (`.tmp/scenario-server/pids`, by PID).
+
 ## Runtime boundary and evidence
 
 The host builds `createMinecraftRuntime` once. Drivers receive only `scenario`
@@ -196,7 +303,7 @@ The implementation has three responsibility boundaries:
 - `drivers/single-action.ts`: read the YAML request, call the action, and check its expected result.
 
 Player-arrangement observation uses the shared helper at
-`../../scenarios/src/player-preparation.ts`.
+`player-preparation.ts` (next to this README).
 
 `runWithRuntime` creates the runtime and waits for the start signal before timing
 the driver's run. Preparation
@@ -254,7 +361,7 @@ stay in the host.
 Run the Minecraft suite once:
 
 ```bash
-bunx --bun mine-labs run tests/minecraft/scenarios --repeat 1
+bun run scenarios:once   # = bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1; exits 1 on a red or cancelled scenario
 ```
 
 Build the highlighter from the installed dependency and open the spectator:

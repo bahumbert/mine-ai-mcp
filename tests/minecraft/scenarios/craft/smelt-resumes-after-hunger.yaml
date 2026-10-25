@@ -1,0 +1,64 @@
+template: ../../templates/flat-single-action.yaml
+
+name: smelt-resumes-after-hunger
+tags: [regression]
+description: >-
+  Smelt eight raw iron in a furnace named by position 25 blocks away while the hunger effect drains the bot. The hunger
+  reflex takes the body (walk, eat), and its verdict is always resume: the smelt must continue where it stopped and finish
+  once, with all eight ingots and the one furnace still standing. Run 15 lost 24 smelts this way: the order was cancelled
+  by the reflex and asked again from the start. Needs the interruption recorded, so a smelt that merely finished before the
+  bot was hungry cannot pass.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    randomTickSpeed: 0
+
+reset:
+  - "fill 20 -60 -4 30 -55 4 air"
+
+# Not peaceful: the food bar does not drain there, so the hunger effect would not bring it under the reflex's threshold.
+setup:
+  - "difficulty easy"
+
+geometry:
+  - fill: { block: furnace, from: [25, -60, 0], to: [25, -60, 0] }
+
+players:
+  - name: Smelter
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: raw_iron, count: 8 }
+      - { item: coal, count: 2 }
+      - { item: cooked_beef, count: 4 }
+
+params:
+  action: smelt_item
+  expect: { status: succeeded, interruptionContains: "[HUNGER]" }
+  input:
+    item_name: raw_iron
+    count: 8
+    fuel_item_name: coal
+    x: 25
+    y: -60
+    z: 0
+
+# Hunger starts once, when the bot reaches the furnace and starts to cook. Mine Labs gives the bot Saturation at setup, so a short
+# dose (10 s at level 99, run 1 and 2 here) never brought food under 14: 40 s at level 30 does, about 35 s into an 80 s smelt.
+tick:
+  - "gamemode spectator @a[name=!Smelter,gamemode=!spectator]"
+  - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run effect give @s minecraft:hunger 40 29 true"
+  - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run tag @s add hungry"
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - { kind: hasItem, who: Smelter, item: iron_ingot, count: 8 }
+    - { kind: blocksAt, block: furnace, positions: [[25, -60, 0]] }
+    - { kind: survive, who: Smelter, seconds: 1 }
+    - { kind: completion, who: Smelter }

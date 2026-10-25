@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+
+name: boat-ride-cancelled-then-navigate
+tags: [regression]
+description: >-
+  ACT-01 (spec 2026-10-19 boat-interruption): a navigate cancelled in the middle of a boat ride over deep water got
+  the bot off by shift at once, in the water and without the boat. The ride now stays seated in the stopped boat (it
+  does not drift, the boat item is not dropped), and the next navigate gets off, takes the boat back and crosses.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A sea three deep and 100 long, 81 wide, from the bot's shore (x 0) to the far land (x 101).
+  - fill: { block: water, from: [ 1, -63, -40 ], to: [ 100, -61, 40 ] }
+
+players:
+  - name: Rower
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - item: oak_boat
+        count: 1
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/cancel-mid-ride.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Rower,gamemode=!spectator]"
+
+params:
+  target: [ 105, -60, 0 ]
+  cancelPastX: 30
+  farBankX: 90
+  settleWithinMs: 5000
+
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - kind: reach
+      who: Rower
+      pos: [ 105.5, -60, 0.5 ]
+      radius: 3.0
+    - kind: hasItem
+      who: Rower
+      item: oak_boat
+      count: 1
+    - kind: completion
+      who: Rower

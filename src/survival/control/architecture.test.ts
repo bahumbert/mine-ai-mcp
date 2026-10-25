@@ -3,6 +3,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { sourceImports } from "../../test-support/imports.js";
 
+// check-reads: src/survival/policy/**/*.ts, src/survival/perception/**/*.ts, src/survival/responses/**/*.ts
 const survival = fileURLToPath(new URL("../", import.meta.url));
 
 test("survival policy selects from facts without importing the bot, mutable stores or physical execution", () => {

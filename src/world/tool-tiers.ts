@@ -57,7 +57,8 @@ function equipmentTier(name: string): EquipmentTier {
   return (materialPrefix.exec(name)?.[1] as EquipmentTier | undefined) ?? "other";
 }
 
-function durability(item: Item): Pick<ToolSnapshotEntry, "durabilityLeft" | "maximumDurability"> {
+/** Durability left and the maximum of a carried item; both null for an item with no durability. */
+export function durabilityOf(item: Item): Pick<ToolSnapshotEntry, "durabilityLeft" | "maximumDurability"> {
   const maximum = item.maxDurability;
   const used = item.durabilityUsed;
   return Number.isFinite(maximum) && maximum > 0 && Number.isFinite(used)
@@ -122,7 +123,7 @@ export function snapshotTools(bot: Bot): ToolSnapshot {
       tier: equipmentTier(item.name),
       item: item.name,
       slot: Number.isInteger(item.slot) ? item.slot : null,
-      ...durability(item),
+      ...durabilityOf(item),
     } satisfies ToolSnapshotEntry];
   });
   const choose = (kind: EquipmentClass) => candidates.filter((entry) => entry.class === kind).sort((a, b) =>

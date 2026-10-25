@@ -1,0 +1,69 @@
+template: ../../templates/flat-single-action.yaml
+
+name: at-sea-land-behind-kelp
+tags: [regression]
+description: >-
+  Run 16 (Yuki) and run 10 (Ayla). A bot at sea with no boat swims to the nearest land before the asked route; that
+  land was looked for in a 32-block ring of columns, which took a kelp column beside the bot for land and missed land 41
+  blocks away. Now the land is found by a search bounded by its own limits. The bot stands on a 1x1 sandbar (at sea,
+  water consolidation W2) with a kelp column beside it, an island 41 blocks west, and the target on an island 121
+  blocks east across the sea. It must swim to the west island first; from there the deep water east is refused (no
+  boat), as the owner's deep-water rule says, instead of swimming the 121 blocks.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # The sea, three deep and 121 wide (z -60 to 60), from x -100 to x 140: the shores round it are 61 blocks off or more.
+  - fill: { block: water, from: [ -100, -63, -60 ], to: [ -41, -61, 60 ] }
+  - fill: { block: water, from: [ -40, -63, -60 ], to: [ 19, -61, 60 ] }
+  - fill: { block: water, from: [ 20, -63, -60 ], to: [ 79, -61, 60 ] }
+  - fill: { block: water, from: [ 80, -63, -60 ], to: [ 140, -61, 60 ] }
+  # Two islands, their tops level with the land round the sea: the near one 41 blocks west of the start (the nearest
+  # dry ground) and the target's, 121 blocks east.
+  - fill: { block: stone, from: [ -45, -63, -2 ], to: [ -41, -61, 2 ] }
+  - fill: { block: stone, from: [ 121, -63, -5 ], to: [ 130, -61, 5 ] }
+  # The sandbar under the start, one water cell deep.
+  - fill: { block: stone, from: [ 0, -63, 0 ], to: [ 0, -62, 0 ] }
+  # A kelp column one block east of the start, from the sea floor to the surface.
+  - fill: { block: kelp_plant, from: [ 1, -63, 0 ], to: [ 1, -62, 0 ] }
+  - fill: { block: kelp, from: [ 1, -61, 0 ], to: [ 1, -61, 0 ] }
+
+players:
+  - name: Swimmer
+    pos: [ 0.5, -61, 0.5 ]
+
+tick:
+  - "gamemode spectator @a[name=!Swimmer,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 125
+    y: -60
+    z: 0
+    range: 1.5
+  expect:
+    status: failed
+    errorContains: "swam to land at"
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - kind: reach
+      who: Swimmer
+      pos: [ -42.5, -60, 0.5 ]
+      radius: 3.0
+    - kind: health
+      who: Swimmer
+      health: 20
+    - kind: completion
+      who: Swimmer

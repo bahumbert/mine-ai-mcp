@@ -17,6 +17,8 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
     if (!item) throw new Error(`Missing ${name}`);
     await bot.equip(item, slot);
   }
+  // The attacker stays frozen inside the shelter shell: freed, it is pushed out of the shell within three ticks and
+  // circles the walls, so whether the bot gets a swing in before the box closes was the mob's timing (2026-10-20).
   const equipment = neutral ? "" : ',HandItems:[{id:"minecraft:stone_sword",count:1},{}]';
   bot.chat(`/summon minecraft:${species} 0.5 -60 -0.1 {NoAI:1b,PersistenceRequired:1b${equipment}}`);
   await bot.waitForTicks(10);
@@ -59,13 +61,13 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
     abort.abort(new Error("fixture death"));
   };
   bot.on("death", onDeath);
-  if (!neutral) bot.chat(`/data merge entity @e[type=minecraft:${species},limit=1] {NoAI:0b}`);
   try {
     using responseOwner1 = new ScenarioCombat(bot, navigation);
     const result = await hideInPlace(bot, {
       signal: AbortSignal.any([signal, abort.signal]),
       recoverTo: 18,
-      maximumMs: 1000,
+      // The whole hide, repelling included, must fit (construction ends at this budget).
+      maximumMs: 12_000,
       threatContext: {
         ...responseOwner1.context,
         resolvedIds: new Set(),

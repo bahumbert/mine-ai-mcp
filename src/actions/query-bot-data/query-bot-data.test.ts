@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { updateBotStatus } from "../../bot-data/bot-status.js";
 import { installMinecraftKnowledge } from "../../bot-data/minecraft-knowledge.js";
 import { SqlBotData } from "../../bot-data/sql-bot-data.js";
 import { queryBotDataCellSchema } from "./contract.js";
 import { createQueryBotDataAction, formatQueryBotDataResult, queryBotData } from "./query-bot-data.js";
 import { persistentBotData, temporaryBotData } from "../../test-support/bot-data.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 
-const REGISTRY = {
-  itemsArray: [{ id: 17, name: "oak_log", displayName: "Oak Log", stackSize: 64 }],
-} as unknown as Bot["registry"];
+/** The connection's registry, as the shared fake bot carries it (1.21.4): its items include oak_log, "Oak Log". */
+const REGISTRY = createFakeBot().bot.registry;
 
 test("queries bot data and Minecraft knowledge on one connection", async (t) => {
   const data = temporaryBotData({ closeAfter: t });

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { cellKey } from "../utils/index.js";
-import { findStandingSpot } from "./nearby-placement.js";
+import { findStandingSpot, placeCarriedBlockNearby } from "./nearby-placement.js";
 import { setProtectedRegionsProvider } from "./protected-regions.js";
 
 /** Every cell of the box becomes `name`; later calls overwrite earlier ones. */
@@ -14,7 +14,7 @@ function fill(cells: Record<string, string>, name: string, [x0, y0, z0]: number[
 
 /** Open air above, stone up to y=59 and the feet of the bot at (0, 62, 0). */
 function botIn(cells: Record<string, string>) {
-  return botFixture({ blocks: cells, position: { x: 0.5, y: 62, z: 0.5 } });
+  return createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 } }).bot;
 }
 
 /** A lake of water (y 60..62) for x <= 4, dry stone ground (top y=61) from x = shoreX on. */
@@ -78,4 +78,48 @@ test("a spot is skipped when no cell can be filled from it", () => {
   fill(cells, "stone", [5, 62, -14], [14, 70, 14]);
   fill(cells, "air", [8, 62, 0], [8, 63, 0]);
   assert.equal(findStandingSpot(botIn(cells)), null);
+});
+
+function craftingTableBot() {
+  const cells: Record<string, string> = {};
+  fill(cells, "stone", [-6, 50, -6], [6, 61, 6]);
+  return createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 } }).bot;
+}
+
+test("the cell is reported right before the placement packet, so an aborted placement still names it", async () => {
+  const bot = craftingTableBot();
+  const controller = new AbortController();
+  let reported: readonly Vec3[] | null = null;
+  let reportedBeforePacket = false;
+  Object.assign(bot, {
+    _placeBlockWithOptions: async () => {
+      reportedBeforePacket = reported !== null;
+      controller.abort(new Error("reflex took the body"));
+      throw controller.signal.reason;
+    },
+  });
+
+  await assert.rejects(
+    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onPlacementSent: (cells) => (reported = cells) }),
+    /reflex took the body/,
+  );
+
+  assert.equal(reportedBeforePacket, true);
+  assert.equal(reported!.length, 1);
+  assert.equal(reported![0]!.y, 62, "an air cell on the stone floor");
+  assert.ok(reported![0]!.distanceTo(bot.entity.position) <= 4);
+});
+
+test("a placement cut before the packet is sent reports no cell: nothing of it is ours", async () => {
+  const bot = craftingTableBot();
+  const controller = new AbortController();
+  controller.abort(new Error("reflex took the body"));
+  let reported = false;
+
+  await assert.rejects(
+    placeCarriedBlockNearby(bot, "crafting_table", { signal: controller.signal, onPlacementSent: () => (reported = true) }),
+    /reflex took the body/,
+  );
+
+  assert.equal(reported, false);
 });

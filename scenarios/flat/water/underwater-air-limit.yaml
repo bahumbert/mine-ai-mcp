@@ -6,7 +6,7 @@ world:
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
   - fill: { block: stone, from: [-5, -61, -5], to: [9, -49, 5] }
-  - fill: { block: water, from: [-4, -60, -4], to: [8, -49, 4] }
+  - fill: { block: water, from: [-4, -60, -4], to: [8, -49, 3] }
 players:
   - name: Diver
     op: true
@@ -24,4 +24,7 @@ goal:
     - { kind: health, who: Diver, health: 20 }
 params:
   reject: true
+  # The seabed is beyond one breath from the surface: the search stops where the air allows, before any deep dive.
+  refusal: ["[NAVIGATION_STOPPED]"]
+  minYAbove: -55
   legs: [[0, -60, 0]]

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { findLoadedBlockPositions, type LoadedBlockScan } from "./loaded-block-scan.js";
 
 interface TestSection {
@@ -12,18 +13,29 @@ interface TestSection {
 }
 
 interface TestColumn {
-  chunkX: number;
-  chunkZ: number;
+  /** Strings, as prismarine-world hands them over (`prismarine-world/src/world.js:195-203`); `loadedColumns` turns them into numbers. */
+  chunkX: string;
+  chunkZ: string;
   column: { minY: number; sections: (TestSection | undefined)[] };
 }
 
+/**
+ * A bot whose loaded columns are the scripted ones: the scan reads their packed states, so the test counts the reads and
+ * picks each section's palette itself, which the fake world's cells cannot show.
+ */
 function scannerBot(columns: TestColumn[]): Bot {
-  return {
-    world: { getColumns: () => columns },
-    blockAt: () => {
-      throw new Error("the raw scanner must not construct Prismarine blocks");
+  const { bot } = createFakeBot({
+    overrides: {
+      blockAt: () => {
+        throw new Error("the raw scanner must not construct Prismarine blocks");
+      },
     },
-  } as unknown as Bot;
+  });
+  // Hand-made columns carry only the surface the scanner reads (`LoadedChunkSection`), not Prismarine's whole chunk.
+  // Stopgap that stays (T3b-B): the fake's columns hold the world's real cells, and these tests count the reads and pick each
+  // section's palette, which real columns cannot show.
+  bot.world.getColumns = () => columns as unknown as ReturnType<Bot["world"]["getColumns"]>;
+  return bot;
 }
 
 /**
@@ -41,7 +53,7 @@ function countedColumn(minY: number, palette: number[], matching: Record<string,
       return matching[`${position.x},${position.y},${position.z}`] ?? 0;
     },
   };
-  return { reads, columns: [{ chunkX: 0, chunkZ: 0, column: { minY, sections: [section] } }] };
+  return { reads, columns: [{ chunkX: "0", chunkZ: "0", column: { minY, sections: [section] } }] };
 }
 
 /**
@@ -111,7 +123,7 @@ function referenceScan(columns: TestColumn[], scan: LoadedBlockScan): Vec3[] {
         for (let z = 0; z < 16; z++) {
           for (let x = 0; x < 16; x++) {
             if (!scan.stateIds.has(section.get({ x, y, z }))) continue;
-            const position = new Vec3(chunkX * 16 + x, column.minY + index * 16 + y, chunkZ * 16 + z);
+            const position = new Vec3(Number(chunkX) * 16 + x, column.minY + index * 16 + y, Number(chunkZ) * 16 + z);
             if (
               scan.radius !== undefined &&
               (position.x - center.x) ** 2 + (position.z - center.z) ** 2 > scan.radius ** 2
@@ -146,7 +158,7 @@ for (const density of ["dense", "sparse", "mixed"] as const) {
             get: ({ x, y, z }) => states[y * 256 + z * 16 + x]!,
           });
         }
-        columns.push({ chunkX, chunkZ, column: { minY: -64, sections } });
+        columns.push({ chunkX: String(chunkX), chunkZ: String(chunkZ), column: { minY: -64, sections } });
       }
     }
     for (const center of [new Vec3(-0.2, -48.1, 15.9), new Vec3(16, 20, 16)]) {
@@ -170,10 +182,10 @@ test("single-value sections need no packed reads and distant sections stop once 
     throw new Error("this section must not be read");
   };
   const columns: TestColumn[] = [
-    { chunkX: 100, chunkZ: 100, column: { minY: 64, sections: [{ solidBlockCount: 4096, data: {}, get: neverRead }] } },
+    { chunkX: "100", chunkZ: "100", column: { minY: 64, sections: [{ solidBlockCount: 4096, data: {}, get: neverRead }] } },
     {
-      chunkX: 0,
-      chunkZ: 0,
+      chunkX: "0",
+      chunkZ: "0",
       column: {
         minY: 64,
         sections: [
@@ -194,7 +206,7 @@ test("single-value sections need no packed reads and distant sections stop once 
 
 test("sparse scans retain distant matches and observe single-value container replacement", () => {
   const section: TestSection = { solidBlockCount: 4096, data: { value: 1 }, get: () => 1 };
-  const columns: TestColumn[] = [{ chunkX: 100, chunkZ: -100, column: { minY: -64, sections: [undefined, section] } }];
+  const columns: TestColumn[] = [{ chunkX: "100", chunkZ: "-100", column: { minY: -64, sections: [undefined, section] } }];
   const request = { center: new Vec3(0, 64, 0), stateIds: new Set([7]), limit: 256 };
   const bot = scannerBot(columns);
   assert.deepEqual(findLoadedBlockPositions(bot, request), []);

@@ -82,6 +82,8 @@ export function botFixture(options: BotFixtureOptions = {}, overrides: Record<st
     username: options.username ?? "TestBot",
     addChatPattern: () => 0,
     removeChatPattern: () => undefined,
+    /** The protocol client: listeners on it (window properties, packets) need something to attach to. */
+    _client: new EventEmitter(),
     registry,
     inventory,
     entity: {

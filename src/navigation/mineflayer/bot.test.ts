@@ -1,10 +1,13 @@
-import { installNetherVinePhysics, MineflayerBot, type MineflayerBotSurface } from "./bot.js";
+import { installNetherVinePhysics, MineflayerBot, mineflayerBotSurface, type MineflayerBotSurface } from "./bot.js";
+import { waterStancesHeld } from "../steering/hold-water-position.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../world/memory-world.js";
 import type { Position3 } from "../world/world.js";
+import { createFakeBot, flush } from "../../test-support/fake-bot/index.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
+import { watch } from "../../test-support/pending.js";
 
 /** A Mineflayer surface that does nothing, standing on the origin, with the given parts replaced. */
 function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface {
@@ -14,6 +17,7 @@ function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface
     entities: {},
     inventory: { items: () => [] },
     setControlState: () => undefined,
+    holdWaterStance: () => () => undefined,
     waitForTicks: async () => undefined,
     lookAt: async () => undefined,
     equip: async () => undefined,
@@ -186,6 +190,33 @@ test("digging straight down keeps the current yaw and owns its own aim", async (
   // And Mineflayer must not re-aim afterwards, or the fix is undone.
   assert.equal(digForceLook, "ignore");
   assert.equal(lookedAtCalls, 0);
+});
+
+test("a break planned from a water stance holds that floor and lands on it before the swing; one with none swings at once", async () => {
+  // lava-interrupts-mining under load: the body at -59.62 over its floor at -60 dug obsidian x5 slower off the ground.
+  for (const stance of [{ x: 2, y: -60, z: 0 }, undefined]) {
+    const events: string[] = [];
+    const stances: unknown[] = [];
+    const bot = surface({
+      entity: { position: { x: 2.7, y: -59.62, z: 0.5 }, onGround: false, isInWater: true, yaw: 0 },
+      holdWaterStance: (_signal, _setControl, held) => {
+        stances.push(held);
+        return () => undefined;
+      },
+      // A landing that ran out: the dig still goes ahead.
+      landOnStanceFloor: async (at) => (events.push(`land ${at.x},${at.y},${at.z}`), false),
+      blockAt: () => ({ name: "obsidian" }),
+      dig: async () => void events.push("dig"),
+    });
+    const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+      { kind: "break", position: { x: 2, y: -59, z: 1 }, expectedStateId: 1, toolType: null, brings: [], ...(stance && { stance }) },
+      { runId: "run", planId: "plan", stepId: "excavate", attempt: 1 },
+      new AbortController().signal,
+    );
+    assert.deepEqual(await effect.completion, { kind: "accepted" });
+    assert.deepEqual(stances, [stance], "the hold is given the planned stance");
+    assert.deepEqual(events, stance ? ["land 2,-60,0", "dig"] : ["dig"]);
+  }
 });
 
 test("a dig at the edge of reach centres on the stance search judged it from before giving up", async () => {
@@ -678,4 +709,92 @@ test("a mob entering the scaffold cell while aiming prevents the placement packe
   assert.deepEqual(await effect.completion, { kind: "failed", observation: "Placement cell overlaps enderman #77" });
   assert.equal(effect.issued, false);
   assert.equal(packets, 0);
+});
+
+/**
+ * Mineflayer's `dig` resolves when its own timer ends and it has written air into the client world itself, whether or not
+ * the server broke the block (ghost air, run 16). The surface's `watchServerChange` stands for the server's packets.
+ */
+function serverWatchedDig(answer: () => Promise<boolean>) {
+  const order: string[] = [];
+  const asked: Position3[] = [];
+  let disposed = 0;
+  const bot = surface({
+    blockAt: () => ({ name: "stone" }),
+    dig: async () => {
+      order.push("dig");
+    },
+    watchServerChange: () => {
+      order.push("watch");
+      return {
+        answer: async () => {
+          order.push("answer");
+          return answer();
+        },
+        dispose: () => {
+          disposed += 1;
+        },
+      };
+    },
+    requestCellResync: async (cell) => {
+      asked.push(cell);
+      return "resent";
+    },
+  });
+  const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] },
+    { runId: "run", planId: "plan", stepId: "downward", attempt: 1 },
+    new AbortController().signal,
+  );
+  return { effect, order, asked, disposed: () => disposed };
+}
+
+test("a break is accepted only once the server has answered for its cell, and the watch began before the dig", async () => {
+  let answered!: (value: boolean) => void;
+  const run = serverWatchedDig(() => new Promise<boolean>((resolve) => (answered = resolve)));
+  const settled = watch(run.effect.completion);
+  await flush();
+  assert.equal(settled.over, false, "mineflayer's own air write is not the server's answer");
+  answered(true);
+  assert.deepEqual(await run.effect.completion, { kind: "accepted" });
+  assert.deepEqual(run.order, ["watch", "dig", "answer"]);
+  assert.deepEqual(run.asked, []);
+  assert.equal(run.disposed(), 1);
+});
+
+test("a break the server never answers fails after asking it to resend the cell", async () => {
+  const run = serverWatchedDig(async () => false);
+  const completion = await run.effect.completion;
+  assert.equal(completion.kind, "failed");
+  assert.match(completion.kind === "failed" ? completion.observation : "", /server did not confirm breaking the block at 0,\s?62,\s?0/);
+  assert.match(completion.kind === "failed" ? completion.observation : "", /asked it to resend the cell/);
+  assert.deepEqual(run.asked, [{ x: 0, y: 62, z: 0 }]);
+  assert.equal(run.disposed(), 1);
+});
+
+test("a dig that throws still removes the server watch", async () => {
+  const bot = surface({
+    blockAt: () => ({ name: "stone" }),
+    dig: async () => {
+      throw new Error("dig interrupted");
+    },
+    watchServerChange: () => ({ answer: async () => true, dispose: () => void (disposed += 1) }),
+  });
+  let disposed = 0;
+  const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] },
+    { runId: "run", planId: "plan", stepId: "downward", attempt: 1 },
+    new AbortController().signal,
+  );
+  assert.equal((await effect.completion).kind, "failed");
+  assert.equal(disposed, 1);
+});
+
+test("a water stance held through the bot surface is counted on the raw bot the runtime asks (review 2026-10-19 #2)", () => {
+  const { bot: raw } = createFakeBot();
+  Object.assign(raw.entity, { isInWater: true });
+  const release = mineflayerBotSurface(raw).holdWaterStance(undefined, () => {});
+  assert.equal(waterStancesHeld(raw), 1, "runtime.steering asks with the raw bot");
+  release();
+  assert.equal(waterStancesHeld(raw), 0);
 });

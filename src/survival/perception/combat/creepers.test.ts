@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../../test-support/bot.js";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { CreeperClearance } from "./creepers.js";
 
 test("fuse timing survives repeated reads and only regains the observed unwind time", () => {
-  const bot = botFixture({ groundY: 63 });
-  const swell = bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   const metadata: unknown[] = [];
+  const { bot } = createFakeBot({ entities: { 7: { name: "creeper", position: new Vec3(2.5, 64, 0.5), metadata } } });
+  const swell = bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   metadata[swell] = -1;
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true,
-    position: bot.entity.position.offset(2, 0, 0), metadata } as typeof bot.entity;
   const clearance = new CreeperClearance(bot);
   const remaining = (tick: number) => clearance.observe(tick, new Set())[0]!.fuseRemainingTicks;
   assert.equal(remaining(0), 30);
@@ -26,9 +24,7 @@ test("fuse timing survives repeated reads and only regains the observed unwind t
 });
 
 test("clearance survives another target's death and missing creeper observation until separation is sustained", () => {
-  const bot = botFixture();
-  bot.entity.position.set(0, 64, 0);
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: new Vec3(3, 64, 0) } as typeof bot.entity;
+  const { bot } = createFakeBot({ position: new Vec3(0, 64, 0), entities: { 7: { name: "creeper", position: new Vec3(3, 64, 0) } } });
   const clearance = new CreeperClearance(bot);
   clearance.require(clearance.observe(0, new Set()));
   delete bot.entities[7];
@@ -45,16 +41,14 @@ test("clearance survives another target's death and missing creeper observation 
   assert.equal(clearance.pending, false);
 });
 test("confirmed creeper death discharges its own clearance immediately", () => {
-  const bot = botFixture();
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: bot.entity.position.clone() } as typeof bot.entity;
+  const { bot } = createFakeBot({ entities: { 7: { name: "creeper", position: new Vec3(0.5, 64, 0.5) } } });
   const clearance = new CreeperClearance(bot);
   clearance.require(clearance.observe(0, new Set()));
   clearance.observe(1, new Set([7]));
   assert.equal(clearance.pending, false);
 });
 test("clearance from another dimension cannot constrain a new fight", () => {
-  const bot = botFixture();
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: bot.entity.position.clone() } as typeof bot.entity;
+  const { bot } = createFakeBot({ entities: { 7: { name: "creeper", position: new Vec3(0.5, 64, 0.5) } } });
   const clearance = new CreeperClearance(bot);
   clearance.require(clearance.observe(0, new Set()));
   delete bot.entities[7];
@@ -64,12 +58,10 @@ test("clearance from another dimension cannot constrain a new fight", () => {
 });
 
 test("only an observed unwind behind solid cover clears a nearby live fuse", () => {
-  const bot = botFixture({ groundY: 63 });
-  bot.entity.position.set(0, 64, 0);
   const metadata: unknown[] = [];
+  const { bot } = createFakeBot({ position: new Vec3(0, 64, 0), entities: { 7: { name: "creeper", position: new Vec3(3, 64, 0), metadata } } });
   const swell = bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   metadata[swell] = 1;
-  bot.entities[7] = { id: 7, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: new Vec3(3, 64, 0), metadata } as typeof bot.entity;
   const clearance = new CreeperClearance(bot);
   clearance.require(clearance.observe(0, new Set()));
   bot.world.raycast = () => ({ x: 1, y: 64, z: 0, face: 4, intersect: new Vec3(1, 64, 0) });
@@ -82,9 +74,8 @@ test("only an observed unwind behind solid cover clears a nearby live fuse", () 
 
 test("blast and removal settle only the matching fuse, in either packet order", () => {
   for (const removalFirst of [false, true]) {
-    const bot = botFixture({ groundY: 63 });
-    bot.entity.position.set(0, 64, 0);
-    for (const id of [7, 8]) bot.entities[id] = { id, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: new Vec3(id - 4, 64, 0) } as typeof bot.entity;
+    const { bot } = createFakeBot({ position: new Vec3(0, 64, 0), entities: {
+      7: { name: "creeper", position: new Vec3(3, 64, 0) }, 8: { name: "creeper", position: new Vec3(4, 64, 0) } } });
     const clearance = new CreeperClearance(bot);
     clearance.require(clearance.observe(0, new Set()));
     if (removalFirst) delete bot.entities[7];
@@ -100,14 +91,10 @@ test("blast and removal settle only the matching fuse, in either packet order", 
 });
 
 test("two covered fuses can unwind at different times without rearming each other", () => {
-  const bot = botFixture({ groundY: 63 });
-  bot.entity.position.set(0, 64, 0);
+  const { bot } = createFakeBot({ position: new Vec3(0, 64, 0), entities: {
+    7: { name: "creeper", position: new Vec3(3, 64, 0), metadata: [] }, 8: { name: "creeper", position: new Vec3(4, 64, 0), metadata: [] } } });
   const swell = bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
-  for (const id of [7, 8]) {
-    const metadata: unknown[] = [];
-    metadata[swell] = 1;
-    bot.entities[id] = { id, name: "creeper", width: 0.6, height: 1.7, isValid: true, position: new Vec3(id - 4, 64, 0), metadata } as typeof bot.entity;
-  }
+  for (const id of [7, 8]) Reflect.set(bot.entities[id]!.metadata, swell, 1);
   const clearance = new CreeperClearance(bot);
   clearance.require(clearance.observe(0, new Set()));
   bot.world.raycast = () => ({ x: 1, y: 64, z: 0, face: 4, intersect: new Vec3(1, 64, 0) });

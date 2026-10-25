@@ -5,6 +5,7 @@ import { isDryPlacementSite, isLiquid, supportsFlatPlacement } from "./block-cla
 import { placeBlock, findPlacementSupport, type WorldBlock } from "./placement.js";
 import { chestOpeningObstruction } from "./chest-clearance.js";
 import { protectedRegionAt, readProtectedRegions } from "./protected-regions.js";
+import { CRAFTING_STATION } from "./workstations.js";
 
 /** Vanilla block-interaction reach, measured from the bot's feet cell like every other placement here. */
 const NEARBY_PLACEMENT_REACH = 4;
@@ -51,7 +52,7 @@ function chooseCell(
         const position = feet.offset(dx, dy, dz);
         const distance = position.distanceTo(feet);
         if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, body)) continue;
-        if (!isDryPlacementSite(bot.blockAt(position))) continue;
+        if (!isDryPlacementSite(bot.blockAt(position), bot.version)) continue;
         if (chestOpeningObstruction(bot, itemName, position)) continue;
         if (!inRegions && protectedRegionAt(regions, bot.game.dimension, position.x, position.y, position.z) !== null) continue;
         const placement = findPlacementSupport(bot, position, supportsFlatPlacement);
@@ -91,7 +92,7 @@ function canStandAt(bot: Bot, feet: Vec3): boolean {
  * Live 2026-10-02: a bot logged in standing in water, and a bot leveling inside its own cut had no free cell either;
  * a player takes a few steps to open dry ground first. The caller walks there and places again.
  */
-export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, itemName = "crafting_table"): Vec3 | null {
+export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, itemName: string = CRAFTING_STATION): Vec3 | null {
   const origin = bot.entity.position.floored();
   const spots: { readonly feet: Vec3; readonly distance: number }[] = [];
   for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
@@ -124,7 +125,12 @@ export function findStandingSpot(bot: Bot, maxRadius = STANDING_SPOT_RADIUS, ite
 export async function placeCarriedBlockNearby(
   bot: Bot,
   itemName: string,
-  options: { readonly maxRadius?: number; readonly signal?: AbortSignal } = {},
+  options: {
+    readonly maxRadius?: number;
+    readonly signal?: AbortSignal;
+    /** Told the cell right before the placement packet goes out (not at the choice): a caller cut off after it knows where its block may stand. */
+    readonly onPlacementSent?: (cells: readonly Vec3[]) => void;
+  } = {},
 ): Promise<NearbyPlacement> {
   const item = bot.inventory.items().find((candidate) => candidate.name === itemName);
   if (!item) return { kind: "no_item" };
@@ -139,6 +145,7 @@ export async function placeCarriedBlockNearby(
     expectedCells: [cell.position],
     matches: (block) => block.name === itemName,
     signal: options.signal,
+    onSent: () => options.onPlacementSent?.([cell.position]),
   });
   if (result.kind === "placed") return { kind: "placed", position: cell.position, block: result.block };
   return { kind: "failed", position: cell.position, error: result.error };

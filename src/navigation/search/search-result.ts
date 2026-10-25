@@ -63,7 +63,11 @@ export interface PartialRouteCheckpoint {
 export interface SearchEvidence {
   readonly queued: number;
   readonly visited: number;
+  /** The largest distance in blocks (Chebyshev, feet cells) from the root of any visited node; 0 when only the root was visited. */
+  readonly farthestVisited: number;
   readonly generated: number;
   readonly slices: number;
   readonly computeMs: number;
+  /** Set when the search was exhausted: the first digs around the start the policy refused, counted by cause. */
+  readonly startRefusals?: Readonly<Record<string, number>>;
 }

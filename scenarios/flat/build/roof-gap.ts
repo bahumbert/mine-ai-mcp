@@ -1,6 +1,7 @@
 import { Vec3 } from "vec3";
 import { ActionRunner, createBuildStructureAction } from "@aibengineering/mine-ai-mcp";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
+import { scenarioBotData } from "../../src/scenario-bot-data.ts";
 import { standStill } from "../../src/runtime.ts";
 
 export const run: MineAiScenario = async (context) => {
@@ -31,7 +32,7 @@ export const run: MineAiScenario = async (context) => {
     for (let z = 0; z <= 4; z++) blocks.push({ x, y: -58, z, block_name: "cobblestone" });
   }
   const result = await new ActionRunner().run(
-    createBuildStructureAction(context.bot, context.navigation),
+    createBuildStructureAction(context.bot, context.navigation, scenarioBotData(context)),
     { blocks, remove_wrong_blocks: true },
     context.signal,
   );
