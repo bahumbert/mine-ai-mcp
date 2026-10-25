@@ -97,3 +97,61 @@ test("the machine reading's own cpu and load average reach the scheduler's sampl
   assert.equal(report?.ownCpu, 0.4);
   assert.equal(report?.load1, 6.5);
 });
+
+// A server whose java process is gone (the OOM killer, a crash) is stopped at once, not after STALL_STOP.
+
+test("a server whose java process is gone for two samples is stopped at once, well before STALL_STOP", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  fake.replies.set("tick query", new Error("connection reset"));
+  const logged: string[] = [];
+  const deps = depsOf(rig.pool, rig, { residentMbOf: async () => 0, log: message => logged.push(message), now: () => 100 });
+  await sampleOnce(deps);
+  assert.equal(fake.stopped, false, "one reading of 0 MB could be a /proc read that failed");
+  await sampleOnce(deps);
+  assert.equal(fake.stopped, true);
+  assert.equal(rig.pool.get(managed.id), undefined);
+  assert.equal(managed.died.aborted, true, "the trials on it are told it died");
+});
+
+test("a /proc reading that fails once is not a death: a reading that finds the process again starts the count over", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  fake.replies.set("tick query", new Error("RCON timed out"));
+  const readings = [0, 1_234, 0, 1_234];
+  const deps = depsOf(rig.pool, rig, { residentMbOf: async () => readings.shift() ?? 1_234, now: () => 100 });
+  for (let sample = 0; sample < 4; sample++) await sampleOnce(deps);
+  assert.equal(fake.stopped, false);
+  assert.equal(managed.died.aborted, false);
+});
+
+test("a server whose tick query is still unanswered is checked for its java process all the same", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  fake.command = () => new Promise<string>(() => {});
+  const deps = depsOf(rig.pool, rig, { residentMbOf: async () => 0, now: () => 100 });
+  void sampleOnce(deps);
+  await sampleOnce(deps);
+  await sampleOnce(deps);
+  assert.equal(managed.died.aborted, true, "the first query never answers; the second and third samples still read the process");
+});
+
+test("a server whose java pid is unknown has no liveness reading: only STALL_STOP stops it", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  fake.javaPid = () => null;
+  fake.replies.set("tick query", new Error("RCON timed out"));
+  const deps = depsOf(rig.pool, rig, { residentMbOf: async () => 0, now: () => 500 });
+  await sampleOnce(deps);
+  await sampleOnce(deps);
+  assert.equal(fake.stopped, false);
+  assert.equal(managed.died.aborted, false);
+});
+
+test("a server the pool stops itself (idle) is not counted as a death", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  await sampleOnce(depsOf(rig.pool, rig, { now: () => rig.config.serverIdleMs + 10 }));
+  assert.equal(fake.stopped, true);
+  assert.equal(managed.died.aborted, false);
+});

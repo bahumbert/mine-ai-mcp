@@ -128,8 +128,13 @@ test("a trial on a server of its own says own, and one that never ran says its p
   const failing = rig.submit([{ name: "f", placement: lanePlacement("k") }]);
   rig.clock += 5_000;
   rig.sample();
+  await rig.settle();
+  // The first failed start sends f back to the queue; the second one is its error.
+  rig.factory.failNextStart = true;
+  rig.clock += 5_000;
+  rig.sample();
   await failing.finished;
-  assert.match(rig.logs.find(line => line.startsWith("trial f "))!, /^trial f lane 1 server s2 queue=5000 .* phases=none hold=\d+$/u);
+  assert.match(rig.logs.find(line => line.startsWith("trial f "))!, /^trial f lane 1 server s3 queue=10000 .* phases=none hold=\d+$/u);
 });
 
 test("the second scenario on a reusable server of its own logs in under another body: the same server, a name it has not saved", async () => {

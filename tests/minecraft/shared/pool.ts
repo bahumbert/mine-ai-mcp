@@ -34,6 +34,8 @@ type ServerStatus = ServerReading["status"];
 const HOLD_WINDOW = 20;
 /** Settled trials a server needs before its own median replaces ARRANGE_HOLD_MS. */
 const HOLD_MIN_TRIALS = 3;
+/** Samples in a row a server's java process must read as gone before the pool stops it (one /proc read that fails is no death). */
+const JAVA_GONE_READINGS = 2;
 
 /**
  * One lane trial's place in its server's arrangement queue: the arrangement it waits for, then the restore it waits for.
@@ -45,6 +47,8 @@ export interface MutexQueueMarks {
   restoreQueued(): void;
   restoreDone(): void;
   leave(): void;
+  /** The arrangement has not run yet (it may be running): nothing of the trial outside its server exists, so it can start over on another server. */
+  arrangementPending(): boolean;
 }
 
 function median(values: readonly number[]): number {
@@ -60,6 +64,8 @@ export interface ManagedServer {
   readonly mutex: ArrangementMutex;
   /** Resolves with the server once its setup commands ran; rejects when it could not start. */
   readonly ready: Promise<ScenarioServer>;
+  /** Aborts, with the reason, when the pool stops the server because its java process is gone: the trials on it cannot finish. */
+  readonly died: AbortSignal;
 }
 
 interface PoolEntry extends ManagedServer {
@@ -67,6 +73,9 @@ interface PoolEntry extends ManagedServer {
   readonly reservedFor: number | null;
   readonly lanes: LanePool | null;
   readonly stall: StallWatch;
+  readonly death: AbortController;
+  /** Samples in a row in which its java process read as gone. */
+  javaGoneReadings: number;
   server: ScenarioServer | null;
   status: ServerStatus;
   running: number;
@@ -125,13 +134,14 @@ export class ServerPool {
     const id = `s${this.#nextId++}`;
     this.#started += 1;
     this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) starting: ${reason}`);
+    const death = new AbortController();
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
       lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null,
-      stall: new StallWatch(this.config.stallStopMs, now), server: null, status: "starting", running: 0,
+      stall: new StallWatch(this.config.stallStopMs, now), death, javaGoneReadings: 0, server: null, status: "starting", running: 0,
       lastTrialAt: now, msptP95: null, residentMb: 0, idleReusable: false, retire: false,
       mutexQueued: 0, holds: [], nextBody: 0,
-      ready: this.#create(id, spec),
+      ready: this.#create(id, spec), died: death.signal,
     };
     this.#entries.set(id, entry);
     entry.ready.then(server => { entry.server = server; entry.status = "ready"; }, () => { this.#entries.delete(id); });
@@ -217,6 +227,7 @@ export class ServerPool {
       restoreQueued: () => take("restore", true),
       restoreDone: () => take("restore", false),
       leave: () => { take("arrangement", false); take("restore", false); },
+      arrangementPending: () => waiting.arrangement,
     };
   }
 
@@ -253,15 +264,36 @@ export class ServerPool {
     this.#entries.get(id)?.stall.answered(now);
   }
 
+  /** One sample's reading of the server's java process: gone (0 MB resident) or running. A reading that finds it running starts the count over, since one /proc read can fail. */
+  noteJavaProcess(id: string, running: boolean): void {
+    const entry = this.#entries.get(id);
+    if (entry) entry.javaGoneReadings = running ? 0 : entry.javaGoneReadings + 1;
+  }
+
+  /**
+   * Stop, at once, the servers whose java process read as gone in JAVA_GONE_READINGS samples in a row, and tell the trials on them (`died`):
+   * waiting for STALL_STOP and the RCON timeouts of every command would keep sending trials to a server that is not there. Returns their ids.
+   */
+  async stopDeadJava(): Promise<string[]> {
+    const dead = [...this.#entries.values()].filter(entry => entry.status !== "starting" && entry.javaGoneReadings >= JAVA_GONE_READINGS);
+    for (const entry of dead) entry.death.abort("its java process is gone");
+    return this.#stopRemoved(dead, "has no java process any more", "java process gone");
+  }
+
   /** Stop, now and by force of the server, the servers silent for STALL_STOP; their trials fail on the dead RCON. Returns their ids. */
   async stopStalled(now: number): Promise<string[]> {
     const stalled = [...this.#entries.values()].filter(entry => entry.status === "ready" && entry.stall.isStalled(now));
-    for (const entry of stalled) {
-      this.log(`server ${entry.id} answered nothing for ${this.config.stallStopMs} ms: stopping it`);
+    return this.#stopRemoved(stalled, `answered nothing for ${this.config.stallStopMs} ms`, "stalled");
+  }
+
+  /** Takes the entries out of the pool, logs why, and stops their servers. */
+  async #stopRemoved(entries: readonly PoolEntry[], why: string, reason: string): Promise<string[]> {
+    for (const entry of entries) {
+      this.log(`server ${entry.id} ${why}: stopping it`);
       this.#entries.delete(entry.id);
     }
-    await Promise.allSettled(stalled.map(entry => this.#stop(entry, "stalled")));
-    return stalled.map(entry => entry.id);
+    await Promise.allSettled(entries.map(entry => this.#stop(entry, reason)));
+    return entries.map(entry => entry.id);
   }
 
   /** A trial ended: free, quarantine or keep its lane as the end says, and decide what happens to the server. */

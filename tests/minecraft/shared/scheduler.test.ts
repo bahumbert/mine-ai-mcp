@@ -186,10 +186,14 @@ test("two refused scenarios of different worlds each get a server of their own, 
   await handle.finished;
 });
 
-test("a server that fails to start ends its trial as an error with the cause, never retried silently", async () => {
+test("a server that fails to start twice in a row ends its trial as an error with the cause: it is sent back once, never retried forever", async () => {
   const rig = new SchedulerRig();
   rig.factory.failNextStart = true;
   const handle = rig.submit([{ name: "a", placement: lanePlacement("k") }]);
+  rig.sample();
+  await rig.settle();
+  rig.factory.failNextStart = true;
+  rig.clock += 5_000;
   rig.sample();
   await rig.settle();
   const summary = await handle.finished;

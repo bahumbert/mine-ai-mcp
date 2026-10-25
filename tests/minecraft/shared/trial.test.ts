@@ -384,7 +384,7 @@ test("a trial cancelled while it waits for the mutex still reports its phases", 
 function queueMarks(events: string[]): NonNullable<TrialJob["queue"]> {
   return {
     arranged: () => { if (!events.includes("arranged")) events.push("arranged"); }, restoreQueued: () => events.push("restoreQueued"),
-    restoreDone: () => events.push("restoreDone"), leave: () => events.push("leave"),
+    restoreDone: () => events.push("restoreDone"), leave: () => events.push("leave"), arrangementPending: () => !events.includes("arranged"),
   };
 }
 

@@ -178,6 +178,39 @@ test("a ready server that answered nothing for STALL_STOP is stopped and leaves 
   assert.deepEqual(pool.readings().map(reading => reading.id), [talking.id]);
 });
 
+test("a ready server whose java process read as gone twice in a row is stopped, left the pool and told its trials, a sick one included", async () => {
+  const { factory, pool } = setup();
+  const dead = pool.startServer(spec({ key: "dead" }), 0);
+  const sick = pool.startServer(spec({ key: "sick" }), 0);
+  const alive = pool.startServer(spec({ key: "alive" }), 0);
+  await Promise.all([dead.ready, sick.ready, alive.ready]);
+  pool.markSick(sick.id);
+  for (const id of [dead.id, sick.id]) for (const running of [false, false]) pool.noteJavaProcess(id, running);
+  pool.noteJavaProcess(alive.id, false);
+  assert.deepEqual(await pool.stopDeadJava(), [dead.id, sick.id]);
+  assert.deepEqual(factory.created.map(server => server.stopped), [true, true, false]);
+  assert.equal(dead.died.aborted, true);
+  assert.equal(dead.died.reason, "its java process is gone");
+  assert.equal(alive.died.aborted, false, "one reading is no death");
+  assert.deepEqual(pool.readings().map(reading => reading.id), [alive.id]);
+});
+
+test("a server still starting is never called dead, and a server the pool stops itself does not tell its trials it died", async () => {
+  const { factory, pool } = setup();
+  const idle = pool.startServer(spec({ key: "idle" }), 0);
+  await idle.ready;
+  factory.startGate = new Promise(() => {});
+  const starting = pool.startServer(spec({ key: "starting" }), 0);
+  for (const id of [idle.id, starting.id]) for (let reading = 0; reading < 3; reading++) pool.noteJavaProcess(id, false);
+  assert.deepEqual(await pool.stopDeadJava(), [idle.id], "only a ready server is called dead");
+  assert.equal(starting.died.aborted, false);
+  const { pool: other } = setup();
+  const own = other.startServer(spec(), 0);
+  await own.ready;
+  await other.stopAll();
+  assert.equal(own.died.aborted, false);
+});
+
 test("a server still starting is never called stalled", async () => {
   const { factory, pool } = setup();
   factory.startGate = new Promise(() => {});

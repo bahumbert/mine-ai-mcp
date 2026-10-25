@@ -229,10 +229,15 @@ test("a cancelled submission kills the clients it booted and had not handed over
 }));
 
 test("a trial whose server never started returns its booted client to the submission's spares, and what is left when the submission ends is killed", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
+  // Two starts fail: the first sends a back to the queue with its client, the second is its error.
   rig.factory.failNextStart = true;
   const handle = rig.submit(lanes("a", "b"), { maxLanes: 1 });
   rig.sample();
   await booted(rig, 1, 2);
+  await rig.settle();
+  rig.factory.failNextStart = true;
+  rig.clock += 5_000;
+  rig.sample();
   await rig.settle();
   rig.clock += 5_000;
   rig.sample();
@@ -344,4 +349,35 @@ test("the boots of one pass are counted against the cpu bound: a machine near it
   rig.sample({ cpuBusy: 0.84 });
   assert.ok(clients.spawned.length >= 1 && clients.spawned.length <= 2, `${clients.spawned.length} clients booted in one pass at 84% cpu with the bound at 85%`);
   assert.ok(rig.scheduler.runningCount >= 1, "foreign load does not hold the trials back");
+}));
+
+// A trial whose server died.
+
+test("a trial waiting for the arrangement turn of a server that died, sent back to the queue with no room for a new server, returns the client booted for it to the submission's spares", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
+  holdArrangements(rig);
+  rig.submit(lanes("a", "b"));
+  rig.sample();
+  await booted(rig, 1, 2);
+  await rig.settle();
+  const client = fixtureScenario(60).client;
+  assert.equal(rig.ahead!.unclaimedCount(1, client), 0, "a and b each hold their client");
+  await rig.killJavaOf(0, 3_000);
+  assert.equal(rig.ahead!.unclaimedCount(1, client), 1, "b never arranged and waits for a server: its client is back among the spares; a still holds its own");
+  assert.equal(clients.spawned.length, 2);
+}));
+
+// T7h-b deviation, owner 2026-10-25 (Q6): a timing trial may take a client booted for another trial of its tuple; none boots for it or beside it.
+
+test("an exclusive entry takes a client already booted for its submission's tuple, and nothing new boots", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
+  const spare = rig.ahead!.spawn(1, fixtureScenario(60).client);
+  assert.equal(spare, null, "the client starts booting");
+  await booted(rig, 1, 1);
+  const handle = rig.submit([{ name: "timed", placement: ownPlacement("own:t", true, true) }]);
+  assert.equal(handle.id, 1);
+  rig.sample();
+  await rig.settle();
+  await rig.until(() => rig.running.length === 1, "the exclusive entry running");
+  assert.equal(rig.running[0]!.clients[0], clients.spawned[0]!.ahead, "it took the client booted before it");
+  assert.equal(clients.spawned.length, 1, "no boot for it, none beside it");
+  await rig.drain();
 }));

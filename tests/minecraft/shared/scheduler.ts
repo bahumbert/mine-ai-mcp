@@ -1,62 +1,27 @@
 // The queue of trials and the loop that admits them: each sample, and each time a trial settles, the first admissible trial starts.
 import { join } from "node:path";
-import type { ClientCommandSpec, RunResult, Scenario } from "mine-labs";
+import type { ClientCommandSpec, Scenario } from "mine-labs";
 import {
   advanceAdmissionState, decideAdmission, EMPTY_TALLY, initialAdmissionState, ledgerMb, noteWallBoundHit,
   type AdmissionDecision, type AdmissionRequest, type AdmissionSample, type AdmissionState, type AdmissionTally,
 } from "./admission.ts";
 import type { Lane } from "../arena/lanes.ts";
 import { renameBodyOnOwnServer } from "../arena/own-body.ts";
-import { shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
-import { spreadThreshold, type ScenarioServerConfig } from "./config.ts";
+import { shiftScenario } from "../arena/shift-scenario.ts";
+import { spreadThreshold } from "./config.ts";
 import { clientAheadRefusal } from "./client-ahead-gate.ts";
-import { clientTupleOf, type ClientsAhead } from "./client-ahead.ts";
+import { clientTupleOf } from "./client-ahead.ts";
 import { trialLine, type SampleReport } from "./daemon-lines.ts";
 import { isTimingTrial, reservePlacement, runsOurClientHost, type Placement } from "./placement.ts";
-import type { ManagedServer, MutexQueueMarks, ServerPool } from "./pool.ts";
+import type { ManagedServer, MutexQueueMarks } from "./pool.ts";
 import { fileRunIo, type RunIo } from "./run-io.ts";
+import type {
+  MachineReading, SchedulerDeps, SubmissionEntry, SubmissionHandle, SubmissionSpec, SubmissionSummary,
+} from "./scheduler-types.ts";
 import { serverSpecFor } from "./server-spec.ts";
-import { executeTrial, type TrialEnd, type TrialRunner } from "./trial.ts";
+import { executeTrial, type TrialEnd } from "./trial.ts";
 
-export interface SubmissionEntry {
-  readonly name: string;
-  readonly scenario: Scenario;
-  readonly placement: Placement;
-}
-
-export type SubmissionEvent =
-  | { readonly type: "info"; readonly text: string }
-  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string };
-
-export interface SubmissionSpec {
-  readonly entries: readonly SubmissionEntry[];
-  readonly repeat: number;
-  /** `--lanes N`: at most this many of this submission's trials at once. */
-  readonly maxLanes: number | null;
-  /** A timing batch: its trials run on servers reserved for it, start on a calm machine, and nothing else is held back for it. */
-  readonly lock: boolean;
-  /** A load batch (`--load`, the master's only): waits for the queue ahead of it to empty, then nothing else starts until it ends. */
-  readonly hold: boolean;
-  readonly outDir: string;
-  readonly emit: (event: SubmissionEvent) => void;
-}
-
-export interface SubmissionSummary { readonly runs: number; readonly passed: number; readonly failed: number; readonly cancelled: number }
-
-export interface SubmissionHandle {
-  readonly id: number;
-  readonly finished: Promise<SubmissionSummary>;
-  cancel(reason: string): void;
-}
-
-export interface MachineReading {
-  readonly cpuBusy: number | null;
-  /** The share of the machine our process tree used over the same window; absent or null when it could not be read. */
-  readonly ownCpu?: number | null;
-  readonly load1?: number | null;
-  readonly memAvailableMb: number;
-  readonly threads: number;
-}
+export type { MachineReading, SchedulerDeps, SubmissionEntry, SubmissionEvent, SubmissionHandle, SubmissionSpec, SubmissionSummary } from "./scheduler-types.ts";
 
 /** Where a trial stands from admission on: what the daemon's trial line and the server's mutex queue need. */
 interface Admitted {
@@ -65,18 +30,8 @@ interface Admitted {
   readonly queue: MutexQueueMarks | null;
   /** Which player body a server of its own gives this scenario (0 for the first). */
   readonly body: number;
-}
-
-export interface SchedulerDeps {
-  readonly pool: ServerPool;
-  readonly config: ScenarioServerConfig;
-  readonly now: () => number;
-  readonly log: (message: string) => void;
-  readonly runTrial: TrialRunner;
-  readonly runIo?: RunIo;
-  readonly shift?: (scenario: Scenario, lane: Lane) => Shifted;
-  /** Boots a submission's scenario clients before their trials; absent for a runner that takes none (a test's fake). */
-  readonly clientsAhead?: ClientsAhead;
+  /** What the trial's client reserved in the ledger at admission. */
+  readonly clientMb: number;
 }
 
 interface QueuedTrial {
@@ -95,6 +50,8 @@ interface QueuedTrial {
   roomSamples: number;
   /** A timing trial whose last refusal was the cpu bound: it holds the other trials to CPU_CALM so the load drains. */
   waitingForCalm: boolean;
+  /** Its server failed to start once and it went back to the queue: a second failure is its error. */
+  sentBack: boolean;
 }
 
 interface Submission {
@@ -192,7 +149,7 @@ export class Scheduler {
       for (const entry of entries) {
         this.#queue.push({
           sequence: ++this.#sequence, aheadClient: aheadClients.get(entry) ?? null, players: entry.scenario.players.length, queuedAt: this.deps.now(),
-          heldBy: null, submission, entry, refusal: null, roomSamples: 0, waitingForCalm: false,
+          heldBy: null, submission, entry, refusal: null, roomSamples: 0, waitingForCalm: false, sentBack: false,
         });
         submission.queued += 1;
       }
@@ -508,7 +465,7 @@ export class Scheduler {
     submission.running += 1;
     submission.queued -= 1;
     this.#queue.splice(this.#queue.indexOf(queued), 1);
-    void this.#run(queued, managed, lane, { at: now, queue, body });
+    void this.#run(queued, managed, lane, { at: now, queue, body, clientMb });
     return null;
   }
 
@@ -521,13 +478,48 @@ export class Scheduler {
     try {
       end = await this.#execute(queued, managed, lane, admitted, runDir, io, wait);
     } catch (error) {
+      if (error instanceof ServerStartFailed && this.#sendBack(queued, admitted, "its server failed to start")) return;
       const detail = error instanceof Error ? error.message : String(error);
       end = {
         result: { scenario: entry.name, outcome: "error", elapsedMs: 0, goal: { state: "pending", detail }, goalText: "", error: detail },
         lane: error instanceof FreshBodyRefused ? "quarantined" : "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0,
       };
     }
-    this.#settle(queued, managed, lane, admitted, wait.serverMs, end, runDir);
+    if (managed.died.aborted && admitted.queue?.arrangementPending() && this.#sendBack(queued, admitted, "its server died before its arrangement")) return;
+    this.#settle(queued, managed, lane, admitted, wait.serverMs, blameDeadServer(managed, queued.submission, end), runDir);
+  }
+
+  /** A server that failed to start or died before this trial's arrangement never ran it: it goes back to the queue once, to be placed on another server; a second failure stays its error. Returns false when it stays one. */
+  #sendBack(queued: QueuedTrial, admitted: Admitted, why: string): boolean {
+    const { submission, entry } = queued;
+    if (queued.sentBack || submission.abort.signal.aborted) return false;
+    queued.sentBack = true;
+    this.#unadmit(queued, admitted);
+    // The client of the admission never started a trial: it is not growing into the ledger.
+    const young = this.#young.findIndex(client => client.at === admitted.at && client.mb === admitted.clientMb);
+    if (young >= 0) this.#young.splice(young, 1);
+    this.#tally = { ...this.#tally, reservedMb: this.#tally.reservedMb - admitted.clientMb };
+    this.deps.log(`${entry.name}: ${why}, back in the queue`);
+    const next = this.#queue.findIndex(other => other.sequence > queued.sequence);
+    this.#queue.splice(next < 0 ? this.#queue.length : next, 0, queued);
+    queued.refusal = null;
+    queued.heldBy = null;
+    queued.roomSamples = 0;
+    submission.queued += 1;
+    this.#pump(false);
+    return true;
+  }
+
+  /** The trial leaves what admission gave it: its place in the mutex queue, its booked client, its count among the running. */
+  #unadmit(queued: QueuedTrial, admitted: Admitted): void {
+    const { submission, entry } = queued;
+    admitted.queue?.leave();
+    // A client it was kept and never took (its server did not start, or died) goes back to the submission's spares.
+    this.deps.clientsAhead?.trialEnded(queued.sequence);
+    this.#running -= 1;
+    if (this.#isTiming(submission, entry)) this.#timingRunning -= 1;
+    this.#tally = { ...this.#tally, trials: this.#tally.trials - 1 };
+    submission.running -= 1;
   }
 
   /** The scenario this trial runs: shifted into its lane, or on a server of its own under the body that server is up to. */
@@ -548,14 +540,14 @@ export class Scheduler {
     const { entry, submission } = queued;
     const waitedFrom = this.deps.now();
     const server = await managed.ready.catch((error: unknown) => {
-      throw new Error(`server failed to start: ${error instanceof Error ? error.message : String(error)}`);
+      throw new ServerStartFailed(`server failed to start: ${error instanceof Error ? error.message : String(error)}`);
     }).finally(() => { wait.serverMs = this.deps.now() - waitedFrom; });
     const scenario = this.#scenarioFor(entry, lane, admitted.body);
     const run = await io.open(runDir);
     try {
       const end = await executeTrial({ runTrial: this.deps.runTrial, config: this.deps.config }, {
         name: entry.name, scenario, lane, server, mutex: managed.mutex, runDir, log: run.log, queue: admitted.queue ?? undefined,
-        signal: submission.abort.signal, reuseServer: lane !== null || (entry.placement.kind === "own" && entry.placement.reusable),
+        signal: AbortSignal.any([submission.abort.signal, managed.died]), reuseServer: lane !== null || (entry.placement.kind === "own" && entry.placement.reusable),
         clientProvider: this.deps.clientsAhead?.providerFor(submission.id, queued.sequence, run.log),
       });
       await io.writeResult(runDir, end.result);
@@ -568,19 +560,13 @@ export class Scheduler {
   #settle(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted, serverWaitMs: number, end: TrialEnd, runDir: string): void {
     const { submission, entry } = queued;
     const now = this.deps.now();
-    admitted.queue?.leave();
-    // A client it was kept and never took (its server did not start) goes back to the submission's spares.
-    this.deps.clientsAhead?.trialEnded(queued.sequence);
     this.deps.log(trialLine({
       name: entry.name, lane: lane?.index ?? null, serverId: managed.id, queueMs: admitted.at - queued.queuedAt, serverWaitMs,
       phases: end.phases, holdMs: now - admitted.at,
     }));
     this.deps.pool.finishTrial(managed.id, lane, end, now, { reusable: entry.placement.kind === "own" && entry.placement.reusable });
     if (end.hitWallBound) this.#admission = noteWallBoundHit(this.#admission, managed.id);
-    this.#running -= 1;
-    if (this.#isTiming(submission, entry)) this.#timingRunning -= 1;
-    this.#tally = { ...this.#tally, trials: this.#tally.trials - 1 };
-    submission.running -= 1;
+    this.#unadmit(queued, admitted);
     const { result } = end;
     submission.summary.runs += 1;
     if (result.outcome === "pass") submission.summary.passed += 1;
@@ -596,3 +582,15 @@ export class Scheduler {
 
 /** The next scenario on a reused server of its own cannot have a fresh body: its end keeps that server from being reused, or every later scenario of the key would fail the same way. */
 class FreshBodyRefused extends Error {}
+
+/** The server did not start: the trial never touched it, so it can be placed on another one. */
+class ServerStartFailed extends Error {}
+
+/** A trial that did not pass on a server whose java died ended because of the death, whatever it saw of it (an abort, a dead RCON, a lost client). */
+function blameDeadServer(managed: ManagedServer, submission: { readonly abort: AbortController }, end: TrialEnd): TrialEnd {
+  const { result } = end;
+  if (!managed.died.aborted || submission.abort.signal.aborted || result.outcome === "pass") return end;
+  const seen = result.error && result.outcome !== "cancelled" ? ` (the trial saw: ${result.error})` : "";
+  const error = `server ${managed.id} died: ${String(managed.died.reason)}${seen}; this trial is not a result of the scenario, run it again`;
+  return { ...end, result: { ...result, outcome: "error", error, goal: { state: "pending", detail: error } } };
+}

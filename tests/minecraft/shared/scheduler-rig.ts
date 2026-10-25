@@ -7,6 +7,7 @@ import { loadScenarioServerConfig, type ScenarioServerConfig } from "./config.ts
 import { FakeFactory } from "./fake-servers.ts";
 import type { Placement } from "./placement.ts";
 import { ServerPool } from "./pool.ts";
+import { sampleOnce } from "./sampler.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 import { Scheduler, type SubmissionEvent, type SubmissionHandle, type SubmissionSpec } from "./scheduler.ts";
 import type { TrialRunInput } from "./trial.ts";
@@ -94,6 +95,20 @@ export class SchedulerRig {
       }),
       repeat: 1, maxLanes: null, lock: false, hold: false, outDir: "/tmp/out", emit: event => this.events.push(event), ...overrides,
     });
+  }
+
+  /** Two samples in which the java process of the fake server `created[index]` reads 0 MB (the sampler's two readings of a death); the machine has `memAvailableMb` free. */
+  async killJavaOf(index: number, memAvailableMb = 28_000): Promise<void> {
+    const deadPid = 9_999;
+    this.factory.created[index]!.javaPid = () => deadPid;
+    const deps = {
+      pool: this.pool, scheduler: this.scheduler, config: this.config, now: () => this.clock, log: () => {},
+      machine: { read: async () => ({ cpuBusy: 0.2, memAvailableMb, threads: 24 }) },
+      residentMbOf: async (pid: number) => (pid === deadPid ? 0 : 1_000),
+    };
+    await sampleOnce(deps);
+    await sampleOnce(deps);
+    await this.settle();
   }
 
   /** Let promise callbacks (server ready, prepared, settled) run. */

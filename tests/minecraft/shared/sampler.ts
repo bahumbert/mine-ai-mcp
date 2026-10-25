@@ -21,6 +21,11 @@ const unparsedLogged = new WeakSet<ScenarioServer>();
 const queryOutstanding = new WeakSet<ScenarioServer>();
 
 async function readServerHealth(deps: SamplerDeps, id: string, server: ScenarioServer): Promise<void> {
+  // The process is read apart from the query: a dead server's query fails or never answers, and says nothing of why.
+  // A server with no known pid has no reading and is left to the stall window.
+  const pid = server.javaPid();
+  const residentMb = pid === null ? 0 : await deps.residentMbOf(pid);
+  if (pid !== null) deps.pool.noteJavaProcess(id, residentMb > 0);
   if (queryOutstanding.has(server)) return;
   queryOutstanding.add(server);
   // No bound of our own: RCON times each command out at 10 s, and an answer that comes late still shows the server alive.
@@ -32,8 +37,7 @@ async function readServerHealth(deps: SamplerDeps, id: string, server: ScenarioS
     unparsedLogged.add(server);
     deps.log(`server ${id}: tick query answer not understood, tick time unknown: ${answer.slice(0, 200)}`);
   }
-  const pid = server.javaPid();
-  deps.pool.setHealth(id, { msptP95: reading?.p95Ms ?? null, residentMb: pid === null ? 0 : await deps.residentMbOf(pid) });
+  deps.pool.setHealth(id, { msptP95: reading?.p95Ms ?? null, residentMb });
 }
 
 export async function sampleOnce(deps: SamplerDeps): Promise<void> {
@@ -42,6 +46,7 @@ export async function sampleOnce(deps: SamplerDeps): Promise<void> {
     ...deps.pool.healthTargets().map(target => readServerHealth(deps, target.id, target.server)),
   ]);
   const now = deps.now();
+  await deps.pool.stopDeadJava();
   await deps.pool.stopStalled(now);
   deps.scheduler.onSample(machine, now);
   await deps.pool.reap(now, deps.scheduler.queuedKeys());

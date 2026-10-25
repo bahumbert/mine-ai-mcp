@@ -26,7 +26,7 @@ export class FakeServer implements ScenarioServer {
     return reply;
   }
 
-  javaPid(): number { return 4242; }
+  javaPid(): number | null { return 4242; }
 
   async stop(): Promise<void> { this.stopped = true; }
 }
