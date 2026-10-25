@@ -12,15 +12,14 @@ import { minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "../time-spe
 import { stackSizeOf } from "./item-ids.ts";
 import { carriedOf, sideText } from "./items.ts";
 import { AGREED_STATES } from "./trade.ts";
-import type { ItemCount, Trade } from "./types.ts";
+import { type ItemCount, MINUTE_MS, type Trade } from "./types.ts";
 
-const MIN_MS = 60_000;
 /** A need, and a partner's refusal, are forgotten after this long. */
-const ASK_MEMORY_MS = 10 * 60_000;
+const ASK_MEMORY_MS = 10 * MINUTE_MS;
 /** Two trading objectives that fail before any ask within this long pause trading for as long. */
-const FAST_FAILURE_WINDOW_MS = 5 * 60_000;
+const FAST_FAILURE_WINDOW_MS = 5 * MINUTE_MS;
 const FAST_FAILURES_TO_PAUSE = 2;
-const PAUSE_MS = 5 * 60_000;
+const PAUSE_MS = 5 * MINUTE_MS;
 const MAX_NEEDS = 3;
 const MAX_OFFER_STACKS = 5;
 /** Longest run of words that makes one item id ("iron ingot" = 2, "white stained glass" = 3). */
@@ -177,9 +176,9 @@ export interface TradingShare {
  * restart) fall outside it.
  */
 export function tradingShare(times: readonly ActivityTime[], now: number, startedAt: number): TradingShare {
-  const windowMinutes = Math.min(RECENT_MINUTES, Math.max(0, now - startedAt) / MIN_MS);
+  const windowMinutes = Math.min(RECENT_MINUTES, Math.max(0, now - startedAt) / MINUTE_MS);
   if (windowMinutes <= 0) return { share: 0, windowMinutes: 0 };
-  const minutes = minutesByPurpose(times, now - windowMinutes * MIN_MS).find((total) => total.activity === "trading")?.minutes ?? 0;
+  const minutes = minutesByPurpose(times, now - windowMinutes * MINUTE_MS).find((total) => total.activity === "trading")?.minutes ?? 0;
   return { share: Math.min(1, minutes / windowMinutes), windowMinutes };
 }
 
@@ -279,8 +278,11 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
       if (talked.reason === "did_not_come") asks.refused.missed(partner, want, now());
       return talked;
     };
-    const unfinished = (talked: SkillResult): SkillResult | null =>
-      talked.status === "stopped" || signal.aborted ? { status: "stopped" } : talked.status === "failed" && (talked.reason === "no_talk" || talked.reason === "did_not_come") ? noTalk(talked) : null;
+    const unfinished = (talked: SkillResult): SkillResult | null => {
+      if (talked.status === "stopped" || signal.aborted) return { status: "stopped" };
+      if (talked.status === "failed" && (talked.reason === "no_talk" || talked.reason === "did_not_come")) return noTalk(talked);
+      return null;
+    };
     let ended = unfinished(await talk(since));
     if (ended !== null) return ended;
     asks.resume();

@@ -12,7 +12,7 @@ import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
 import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, owedItems, proposeTrade, settleTrade } from "./trade.ts";
-import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from "./types.ts";
+import { type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
 const COLLECT_WATCH_MS = 5_000;
@@ -25,7 +25,7 @@ const RECENT_NEAR_MS = 30_000;
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
 const GIVE_ATTEMPTS = 2;
 /** A propose or accept that repeats a trade that ended `done` this recently is a late chat reply, not a new deal. */
-const REPEAT_AFTER_DONE_MS = 2 * 60_000;
+const REPEAT_AFTER_DONE_MS = 2 * MINUTE_MS;
 
 export interface TradeControllerDeps {
   readonly self: string;
@@ -46,14 +46,13 @@ export interface TradeControllerDeps {
 
 type EventName = TradeEvent["event"];
 
-interface PendingJudgment {
-  readonly partner: string;
-  readonly trade: Trade;
-  readonly since: number;
-}
+/** What the last tick saw: my inventory and where each player stood. */
+interface Seen { readonly inventory: BotSnapshot["inventory"]; readonly partners: ReadonlyMap<string, Position | null> }
+
+interface PendingJudgment { readonly partner: string; readonly trade: Trade; readonly since: number }
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
-const EVENT_OF_STATE: Partial<Record<Trade["state"], EventName>> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
+const EVENT_OF_STATE: Record<TradeState, EventName> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
 
 const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
 const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
@@ -63,7 +62,7 @@ const dealKey = (items: readonly ItemCount[]): string => JSON.stringify([...item
 export const sameDealTerms = (a: Pick<TradeDecision, "give" | "get">, b: Pick<TradeDecision, "give" | "get">): boolean => dealKey(a.give) === dealKey(b.give) && dealKey(a.get) === dealKey(b.get);
 
 export class TradeController implements BoardPeer {
-  private previous: { inventory: BotSnapshot["inventory"]; partners: ReadonlyMap<string, Position | null> } | null = null;
+  private previous: Seen | null = null;
   private position: Position | null = null;
   private partners: ReadonlyMap<string, Position | null> = new Map();
   /** Hand-offs the agent was asked for and has not ended, by trade id. */
@@ -96,7 +95,7 @@ export class TradeController implements BoardPeer {
 
   /** Null when a propose or accept can become a trade, else the reason that is sent back to the chat tier once. */
   checkDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): string | null {
-    return checkTradeDecision({ decision: this.termsOf(d, speaker), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, reach: this.deps.settings.tradeReach, givenOutside: this.creditedTo(speaker) });
+    return checkTradeDecision({ decision: this.termsOf(d, d.action === "accept" ? this.offerFromPartner(speaker) : undefined), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, reach: this.deps.settings.tradeReach, givenOutside: this.creditedTo(speaker) });
   }
 
   /** The proposal the partner (a bot of this brain) posted to me, still open. */
@@ -105,8 +104,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** What an accept stands for: the proposer's terms, mirrored, when a bot of this brain proposed to me; else what my model wrote. */
-  private termsOf(d: TradeDecision, partner: string): TradeDecision {
-    const offer = d.action === "accept" ? this.offerFromPartner(partner) : undefined;
+  private termsOf(d: TradeDecision, offer: BoardOffer | undefined): TradeDecision {
     return offer === undefined ? d : { action: "accept", give: offer.get, get: offer.give, first: flipped(offer.first) };
   }
 
@@ -125,10 +123,15 @@ export class TradeController implements BoardPeer {
       const now = this.deps.now();
       const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now });
       await this.record(agreed, "agreed");
-      const current = await this.claimEarlier(agreed, now);
-      if (await this.giveIfCovered(current, trade.partner)) return;
-      if (this.isGiveDue(current, now, null)) this.takeGive(current);
+      await this.startAgreed(agreed, trade.partner, now);
     });
+  }
+
+  /** A trade just agreed: earlier gives and payments are claimed, then my side is given at once if covered, or handed to the agent if due. */
+  private async startAgreed(agreed: Trade, partner: string, now: number, carried?: BotSnapshot["inventory"]): Promise<void> {
+    const current = await this.claimEarlier(agreed, now, carried);
+    if (await this.giveIfCovered(current, partner)) return;
+    if (this.isGiveDue(current, now, null)) this.takeGive(current);
   }
 
   /** The partner declined the proposal I posted: my record is cancelled. */
@@ -148,24 +151,20 @@ export class TradeController implements BoardPeer {
       this.previous ??= { inventory: snapshot.inventory, partners: new Map(snapshot.players.map((p) => [p.username, p.position])) };
       const mine = this.openWith(speaker);
       const local = this.deps.board?.isLocal(speaker) === true;
-      const offer = d.action === "accept" ? this.offerFromPartner(speaker) : undefined;
-      const terms = this.termsOf(d, speaker);
+      const theirOffer = this.offerFromPartner(speaker);
+      const offer = d.action === "accept" ? theirOffer : undefined;
+      const terms = this.termsOf(d, offer);
       const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
-      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && this.offerFromPartner(speaker) === undefined ? this.repeatOfDone(speaker, terms, now) : undefined;
+      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? this.repeatOfDone(speaker, terms, now) : undefined;
       if (repeated !== undefined) {
         this.deps.log(`trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
         return null;
       }
       if (d.action === "propose") {
-        if (mine !== undefined) {
-          this.deps.log(`trade: a proposal to ${speaker} ignored, ${mine.id} is still open`);
-          return null;
-        }
-        if (local && this.offerFromPartner(speaker) !== undefined) {
-          this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
-          return null;
-        }
-        return this.proposeAndPost(deal, now);
+        const blocked = mine !== undefined ? `a proposal to ${speaker} ignored, ${mine.id} is still open` : local && theirOffer !== undefined ? `my proposal to ${speaker} dropped, their older proposal to me stands` : null;
+        if (blocked === null) return this.proposeAndPost(deal, now);
+        this.deps.log(`trade: ${blocked}`);
+        return null;
       }
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) {
@@ -182,13 +181,10 @@ export class TradeController implements BoardPeer {
         // Before the record: saving an agreed trade takes its id off the board.
         if (offer !== undefined) this.deps.board?.accept(offer.id, this.deps.self);
         await this.record(agreed, "agreed");
-        const current = await this.claimEarlier(agreed, now, snapshot.inventory);
-        if (await this.giveIfCovered(current, speaker)) return agreed.id;
-        if (this.isGiveDue(current, now, null)) this.takeGive(current);
+        await this.startAgreed(agreed, speaker, now, snapshot.inventory);
         return agreed.id;
       }
-      const theirs = this.offerFromPartner(speaker);
-      if (theirs !== undefined) this.deps.board?.decline(theirs.id, this.deps.self, d.action === "decline" ? "declined" : "cancelled");
+      if (theirOffer !== undefined) this.deps.board?.decline(theirOffer.id, this.deps.self, d.action === "decline" ? "declined" : "cancelled");
       if (mine !== undefined) await this.record(cancelTrade(mine, now, d.action === "decline" ? "I declined" : "I cancelled"), "cancelled");
       return null;
     });
@@ -211,11 +207,10 @@ export class TradeController implements BoardPeer {
   /** A `give_item` the partner took, outside the trade's hand-off, counts toward my side of the oldest open trade with them whose side has the item (a proposed one too; capped at what is lacking); the side covered and agreed, the trade is given. */
   gaveOutside(partner: string, item: string, count: number): Promise<void> {
     return this.exclusive(async () => {
-      const trade = this.deps.book.trades().filter((t) => isOpen(t) && same(t.partner, partner) && (t.state === "proposed" || t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null && t.give.some((g) => g.item === item))
-        .sort((a, b) => a.createdAt - b.createdAt)[0];
+      const trade = this.deps.book.trades().filter((t) => same(t.partner, partner) && (t.state === "proposed" || t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null && t.give.some((g) => g.item === item)) .sort((a, b) => a.createdAt - b.createdAt)[0];
       if (trade === undefined) {
         this.earlier.gave(partner, item, count, this.deps.now());
-        return void this.deps.log(`trade: ${count} ${item} given to ${partner} outside a hand-off matches no open trade of mine; not counted yet, kept for a trade proposed within ${EARLIER_GIVE_MS / 60_000} min`);
+        return void this.deps.log(`trade: ${count} ${item} given to ${partner} outside a hand-off matches no open trade of mine; not counted yet, kept for a trade proposed within ${EARLIER_GIVE_MS / MINUTE_MS} min`);
       }
       this.creditGiven(trade, item, count);
       await this.giveIfCovered(trade, partner);
@@ -228,8 +223,14 @@ export class TradeController implements BoardPeer {
     if (!due || trade.give.length === 0 || (this.leftToGiveOf(trade) ?? []).length > 0) return false;
     this.givenOutside.delete(trade.id);
     const gave = markGave(trade, this.deps.now());
-    await this.record({ ...gave, note: gave.note === "" ? `gave ${sideText(trade.give)} to ${partner}, outside the hand-off` : gave.note }, "gave", ...(gave.state === "done" ? (["done"] as const) : []));
+    await this.recordStep(gave, "gave", `gave ${sideText(trade.give)} to ${partner}, outside the hand-off`);
     return true;
+  }
+
+  /** Saves a trade that moved by one event, adding `done` when that move finished it; an empty note takes `note`. */
+  private recordStep(trade: Trade, event: EventName, note?: string): Promise<void> {
+    const t = trade.note === "" && note !== undefined ? { ...trade, note } : trade;
+    return this.record(t, event, ...(t.state === "done" ? (["done"] as const) : []));
   }
 
   /** What of my side the partner already took, per item: the credit of their open trade and the earlier gives still inside the window. */
@@ -245,7 +246,7 @@ export class TradeController implements BoardPeer {
   private async claimEarlier(trade: Trade, now: number, carried = this.previous?.inventory ?? []): Promise<Trade> {
     for (const e of this.earlier.claimGives(trade, now)) this.creditGiven(trade, e.item, e.count);
     const { trade: next, used } = creditTrade(trade, trade.state === "agreed" ? this.earlier.claimGains(trade, carried, now) : [], now);
-    if (used.length > 0) await this.record(next, "received", ...(next.state === "done" ? (["done"] as const) : []));
+    if (used.length > 0) await this.recordStep(next, "received");
     return next;
   }
 
@@ -336,7 +337,7 @@ export class TradeController implements BoardPeer {
   /** Whether the agent should tick: a trade is open, one broken by them may still be paid late, a hand-off or a judgment is waiting. */
   busy(withWindow = true): boolean {
     const now = this.deps.now();
-    const waiting = this.deps.book.trades().some((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && now - (t.endedAt ?? now) < this.deps.settings.offersForgetMinutes * 60_000 && owedItems(t).length > 0));
+    const waiting = this.deps.book.trades().some((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && now - (t.endedAt ?? now) < this.deps.settings.offersForgetMinutes * MINUTE_MS && owedItems(t).length > 0));
     return waiting || (withWindow && this.earlier.watching(now)) || this.pending.size > 0 || this.judging.length > 0 || this.running.size > 0;
   }
 
@@ -344,7 +345,7 @@ export class TradeController implements BoardPeer {
   onlyWatching(): boolean { return this.busy() && !this.busy(false); }
 
   /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */
-  handoffEnded(tradeId: string, outcome: "done" | "items_gone" | "not_taken" | "failed", detail: string): Promise<void> {
+  handoffEnded(tradeId: string, outcome: Exclude<HandoffEnd["outcome"], "dropped">, detail: string): Promise<void> {
     return this.exclusive(async () => {
       const kind = this.pending.get(tradeId) ?? "give";
       this.pending.delete(tradeId);
@@ -355,7 +356,7 @@ export class TradeController implements BoardPeer {
         this.deps.log(`trade: collect for ${tradeId} ${outcome}: ${detail}`);
       } else if (outcome === "done") {
         const gave = markGave(trade, now);
-        await this.record({ ...gave, note: gave.note === "" ? detail : gave.note }, "gave", ...(gave.state === "done" ? (["done"] as const) : []));
+        await this.recordStep(gave, "gave", detail);
       } else if (outcome === "items_gone") {
         await this.record(failTrade(trade, now, detail), "broken");
       } else {
@@ -432,18 +433,19 @@ export class TradeController implements BoardPeer {
 
   /** The newest trade with that partner proposed at or after `since`; a read, nothing is written. */
   latestWith(partner: string, since: number): Trade | null {
-    let newest: Trade | null = null;
-    for (const t of this.deps.book.trades()) {
-      if (same(t.partner, partner) && t.createdAt >= since && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
-    }
-    return newest;
+    return this.newest((t) => same(t.partner, partner) && t.createdAt >= since);
   }
 
   /** The newest trade with any partner created at or after `since` that is agreed or further; a read, nothing is written. */
   agreedSince(since: number): Trade | null {
+    return this.newest((t) => t.createdAt >= since && AGREED_STATES.has(t.state));
+  }
+
+  /** The newest trade the filter keeps; on equal `createdAt` the later one in the book wins. */
+  private newest(match: (t: Trade) => boolean): Trade | null {
     let newest: Trade | null = null;
     for (const t of this.deps.book.trades()) {
-      if (t.createdAt >= since && AGREED_STATES.has(t.state) && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
+      if (match(t) && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
     }
     return newest;
   }
@@ -459,15 +461,12 @@ export class TradeController implements BoardPeer {
     await this.deps.book.update(trade.partner, (r) => (ended ? withEndedTrade(r, trade) : withTrade(r, trade)));
     for (const event of events) this.deps.journal({ kind: "trade", event, partner: trade.partner, tradeId: trade.id, give: trade.give, get: trade.get, first: trade.first, note: trade.note });
     if (!ended) return;
-    this.nobodyGave.delete(trade.id);
-    this.watches.delete(trade.id);
-    this.givenOutside.delete(trade.id);
-    this.giveTakenAt.delete(trade.id);
+    for (const held of [this.nobodyGave, this.watches, this.givenOutside, this.giveTakenAt]) held.delete(trade.id);
     // A cancelled trade moved nothing: there is nothing to judge.
     if (trade.state !== "cancelled") this.judging.push({ partner: trade.partner, trade, since: this.deps.now() });
   }
 
-  private async creditGains(snapshot: BotSnapshot, previous: { inventory: BotSnapshot["inventory"]; partners: ReadonlyMap<string, Position | null> }, ownStepYields: ReadonlySet<string>, now: number): Promise<void> {
+  private async creditGains(snapshot: BotSnapshot, previous: Seen, ownStepYields: ReadonlySet<string>, now: number): Promise<void> {
     const gains = inventoryGains(previous.inventory, snapshot.inventory);
     if (gains.length === 0) return;
     const trades = this.deps.book.trades();
@@ -483,10 +482,10 @@ export class TradeController implements BoardPeer {
       const { trade: next, used } = creditTrade(trade, items, now);
       if (used.length === 0) continue;
       this.watches.delete(id);
-      await this.record({ ...next, note: next.note }, "received", ...(next.state === "done" ? (["done"] as const) : []));
+      await this.recordStep(next, "received");
     }
     const kept = this.earlier.keepUnpaid({ gains, credited, mined, partners, previous: previous.partners, self: snapshot.position, handoffDistance: this.deps.settings.handoffDistance, recentlyNear: this.recentlyNear(now) }, now);
-    if (kept.length > 0) this.deps.log(`trade: ${sideText(kept)} picked up while a player talked to me, with no trade agreed yet; kept for a trade agreed within ${EARLIER_GIVE_MS / 60_000} min`);
+    if (kept.length > 0) this.deps.log(`trade: ${sideText(kept)} picked up while a player talked to me, with no trade agreed yet; kept for a trade agreed within ${EARLIER_GIVE_MS / MINUTE_MS} min`);
   }
 
   /** Remembers who stands within hand-off distance now; the ones not near for a while are forgotten. */
@@ -507,7 +506,7 @@ export class TradeController implements BoardPeer {
       const settled = settleTrade(trade, now, this.deps.settings, { givePending: this.giveRunning(trade.id, now) });
       if (settled.nobodyGave) this.nobodyGave.add(trade.id);
       else this.nobodyGave.delete(trade.id);
-      if (settled.trade.state !== trade.state) await this.record(settled.trade, EVENT_OF_STATE[settled.trade.state] ?? "gave");
+      if (settled.trade.state !== trade.state) await this.record(settled.trade, EVENT_OF_STATE[settled.trade.state]);
       if (isOpen(settled.trade) && this.isGiveDue(settled.trade, now, this.position)) this.takeGive(settled.trade);
       if (isOpen(settled.trade) && this.isAwaitDue(settled.trade, now)) this.takeAwait(settled.trade);
     }
@@ -540,7 +539,7 @@ export class TradeController implements BoardPeer {
 
   /** A give for the trade is pending and was taken less than the pay-back time ago: it is bounded by its own walk, toss and wait. */
   private giveRunning(tradeId: string, now: number): boolean {
-    return this.pending.get(tradeId) === "give" && now - (this.giveTakenAt.get(tradeId) ?? now) < this.deps.settings.payBackMinutes * 60_000;
+    return this.pending.get(tradeId) === "give" && now - (this.giveTakenAt.get(tradeId) ?? now) < this.deps.settings.payBackMinutes * MINUTE_MS;
   }
 
   private takeGive(t: Trade): void {

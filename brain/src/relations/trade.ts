@@ -2,9 +2,7 @@
 import { manhattan } from "../conversation/state.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { sideText } from "./items.ts";
-import type { ItemCount, Trade, TradeSettings } from "./types.ts";
-
-const MINUTE_MS = 60_000;
+import { type ItemCount, MINUTE_MS, type Trade, type TradeSettings, type TradeState } from "./types.ts";
 
 interface DealArgs {
   readonly self: string;
@@ -36,14 +34,16 @@ export function agreeTrade(t: Trade | null, a: DealArgs): Trade {
 /** A trade that was agreed and has not fallen apart: agreed, being paid, or done. */
 export const AGREED_STATES: ReadonlySet<Trade["state"]> = new Set(["agreed", "i_gave", "they_gave", "done"]);
 
+const OPEN_STATES: ReadonlySet<TradeState> = new Set(["proposed", "agreed", "i_gave", "they_gave"]);
+
 /** Open: still moving. A broken trade is ended, though a late payment can still close it (see `awaitsPayment`). */
 export function isOpen(t: Trade): boolean {
-  return t.state === "proposed" || t.state === "agreed" || t.state === "i_gave" || t.state === "they_gave";
+  return OPEN_STATES.has(t.state);
 }
 
 /** True for trades whose credits are still accepted: open and agreed ones, and ones they left unpaid. */
 function awaitsPayment(t: Trade): boolean {
-  return t.state === "agreed" || t.state === "i_gave" || t.state === "they_gave" || (t.state === "broken" && t.brokenBy === "them");
+  return (t.state !== "proposed" && OPEN_STATES.has(t.state)) || (t.state === "broken" && t.brokenBy === "them");
 }
 
 /** What they still owe, item by item (counts above zero only). */
@@ -166,8 +166,9 @@ function nearDistance(o: { partners: ReadonlyMap<string, Position | null>; previ
   const distances = [positionOf(o.partners, name), positionOf(o.previous, name)]
     .filter((p): p is Position => p !== null)
     .map((p) => manhattan(o.self, p));
+  if (distances.length === 0) return null;
   const best = Math.min(...distances);
-  return distances.length > 0 && best <= o.handoffDistance ? best : null;
+  return best <= o.handoffDistance ? best : null;
 }
 
 /**

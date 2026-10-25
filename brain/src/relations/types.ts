@@ -66,6 +66,9 @@ export interface Relation {
   readonly lastDealt: number;
 }
 
+/** Trade times are set in minutes. */
+export const MINUTE_MS = 60_000;
+
 export interface TradeSettings {
   readonly payBackMinutes: number;
   readonly startMinutes: number;

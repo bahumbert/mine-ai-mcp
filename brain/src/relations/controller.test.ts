@@ -996,3 +996,35 @@ test("the payment is capped by the inventory of the snapshot that agrees the tra
   await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
   assert.deepEqual(theirTrade(h).received, [], "the 5 iron are no longer carried in the snapshot at hand");
 });
+
+test("journal order: a full trade is proposed, agreed, gave, received, done", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "propose", first: "me" }), "Theo", s);
+  await h.c.onDecision(decision({ action: "accept", first: "me" }), "Theo", s);
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave 5 bread");
+  h.state.now += 1_000;
+  await h.c.tick(s, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...s.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.deepEqual(h.events.filter((e) => e.kind === "trade").map((e) => e.event), ["proposed", "agreed", "gave", "received", "done"]);
+});
+
+test("agreedSince: on equal creation times the later trade in the book wins", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "accept", give: bread(2), first: "them" }), "Theo", s);
+  await h.c.onDecision(decision({ action: "accept", give: bread(3), first: "them" }), "Bruno", s);
+  const [first, second] = h.book.trades();
+  assert.equal(first!.createdAt, second!.createdAt, "created in the same millisecond");
+  assert.deepEqual(h.c.agreedSince(0)?.give, bread(3));
+});
+
+test("a give handed over keeps the note the trade already holds", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  const agreed = theirTrade(h);
+  await h.book.update("Theo", (r) => withTrade(r, { ...agreed, note: "x" }));
+  await h.c.handoffEnded(agreed.id, "done", "d");
+  assert.equal(theirTrade(h).note, "x");
+});

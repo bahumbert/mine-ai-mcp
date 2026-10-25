@@ -3,10 +3,11 @@ import { targetItems, type Step } from "../actions.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { TradeController } from "./controller.ts";
+import { carriedOf } from "./items.ts";
 
 /** What the current objective lacks: its wanted items none of which is carried (names only, the model weighs how much). */
 export function describeLacks(wanted: Iterable<string>, inventory: BotSnapshot["inventory"]): string[] {
-  return [...wanted].filter((item) => !inventory.some((stack) => stack.name === item));
+  return [...wanted].filter((item) => carriedOf(inventory, item) === 0);
 }
 
 export interface RefusedTrade {

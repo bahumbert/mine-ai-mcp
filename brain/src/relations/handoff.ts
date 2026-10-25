@@ -4,7 +4,7 @@ import { manhattan } from "../conversation/state.ts";
 import type { Position } from "../runtime-client.ts";
 import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import { carriedOf, sideText } from "./items.ts";
-import type { ItemCount } from "./types.ts";
+import { type ItemCount, MINUTE_MS } from "./types.ts";
 
 /** How far around itself a collect looks for the partner's items. */
 export const COLLECT_RADIUS = 6;
@@ -15,7 +15,6 @@ export const COLLECT_RADIUS = 6;
 export const PICK_BACK_RADIUS = 8;
 /** How often a wait for the partner's payment looks at whether it came. */
 const AWAIT_POLL_MS = 1_000;
-const MINUTE_MS = 60_000;
 export type Handoff =
   | { readonly kind: "give"; readonly tradeId: string; readonly partner: string; readonly items: readonly ItemCount[] }
   | { readonly kind: "collect"; readonly tradeId: string; readonly items: readonly ItemCount[] }

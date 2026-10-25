@@ -2,9 +2,8 @@
 import { z } from "zod";
 import { sideText } from "./items.ts";
 import { isOpen } from "./trade.ts";
-import type { ItemCount, Judged, Relation, RelationFacts, SaidItem, Trade } from "./types.ts";
+import { type ItemCount, type Judged, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type Trade } from "./types.ts";
 
-const MINUTE_MS = 60_000;
 const KEPT_ENDED_TRADES = 3;
 const MAX_WORD = 20;
 const MAX_WHY = 200;

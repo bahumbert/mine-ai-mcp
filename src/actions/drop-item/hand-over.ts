@@ -19,6 +19,13 @@ export const HANDOVER_SETTLE_TICKS = 100;
  */
 export const HANDOVER_WALL_MS = 30_000;
 
+type Point = { readonly x: number; readonly y: number; readonly z: number };
+
+/** An item entity, whose metadata (the item name) may not have arrived yet. */
+function isItemEntity(entity: Entity): boolean {
+  return droppedItemName(entity) !== null || entity.name === "item";
+}
+
 export interface HandoverWatch {
   readonly recipientName: string;
   /**
@@ -51,16 +58,16 @@ function stackCount(entity: Entity | undefined): number {
   }
 }
 
-/** The pickup count a `collect` packet carries; the stack's count when an older server does not say. */
-function pickedUpCount(packet: CollectPacket, entity: Entity | undefined): number {
-  const announced = packet.pickupItemCount;
-  return Number.isInteger(announced) && (announced as number) > 0 ? (announced as number) : stackCount(entity);
-}
-
 interface CollectPacket {
   readonly collectorEntityId: number;
   readonly collectedEntityId: number;
   readonly pickupItemCount?: number;
+}
+
+/** The pickup count a `collect` packet carries; the stack's count when an older server does not say. */
+function pickedUpCount(packet: CollectPacket, entity: Entity | undefined): number {
+  const announced = packet.pickupItemCount;
+  return typeof announced === "number" && Number.isInteger(announced) && announced > 0 ? announced : stackCount(entity);
 }
 
 /**
@@ -142,7 +149,7 @@ export interface HandOverAndRecount {
   readonly dropped: DroppedItem[];
   readonly tossedIds: ReadonlySet<number>;
   readonly entityBaseline: ReadonlySet<number>;
-  readonly droppedAt: { x: number; y: number; z: number };
+  readonly droppedAt: Point;
   readonly discarded: DiscardedItems;
   readonly dependencies: { readonly handoverWallMs?: number };
   readonly context: ActionContext;
@@ -209,20 +216,20 @@ export function rememberDiscards(bot: Bot, baseline: ReadonlySet<number>, discar
   const ids = Object.values(bot.entities)
     .filter((entity) => !baseline.has(entity.id))
     .filter((entity) => entity.position.distanceTo(bot.entity.position) <= DISCARD_ATTRIBUTION_RADIUS)
-    .filter((entity) => droppedItemName(entity) !== null || entity.name === "item")
+    .filter(isItemEntity)
     .map((entity) => entity.id);
   discarded.remember(ids);
   return new Set(ids);
 }
 
 /** An item entity that was not there before the toss and lies near where it was made. */
-export function cameFromToss(entity: Entity, baseline: ReadonlySet<number>, from: { x: number; y: number; z: number }): boolean {
-  if (baseline.has(entity.id) || (droppedItemName(entity) === null && entity.name !== "item")) return false;
+export function cameFromToss(entity: Entity, baseline: ReadonlySet<number>, from: Point): boolean {
+  if (baseline.has(entity.id) || !isItemEntity(entity)) return false;
   return Math.hypot(entity.position.x - from.x, entity.position.z - from.z) <= DISCARD_ATTRIBUTION_RADIUS;
 }
 
 /** "took X of N" counts against what the toss put on the ground, not the net drop left after a pick-back. */
-export function handOverLine(recipient: DropRecipient, at: { x: number; y: number; z: number }): string {
+export function handOverLine(recipient: DropRecipient, at: Point): string {
   const tossed = recipient.tossedCount;
   const where = `\`${at.x.toFixed(1)}, ${at.y.toFixed(1)}, ${at.z.toFixed(1)}\``;
   if (recipient.collected) {

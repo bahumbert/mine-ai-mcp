@@ -229,3 +229,10 @@ test("D2: a give already made (done or i_gave) is untouched by the deadline", ()
   assert.equal(done.state, "done");
   assert.equal(settleTrade(done, t0 + 60 * MIN, settings).trade.state, "done");
 });
+
+test("a payment is credited in every state that awaits it and in no other", () => {
+  const credited = (state: Trade["state"], brokenBy: Trade["brokenBy"] = null): boolean => creditTrade({ ...deal("them"), state, brokenBy }, ingots, t0 + MIN).used.length > 0;
+  assert.deepEqual((["proposed", "agreed", "i_gave", "they_gave", "done", "cancelled"] as const).map((state) => credited(state)), [false, true, true, true, false, false]);
+  assert.equal(credited("broken", "them"), true, "a trade they left unpaid takes a late payment");
+  assert.equal(credited("broken", "me"), false, "a trade I broke does not");
+});
