@@ -1,4 +1,4 @@
-import { COAST_TICKS } from "../../world/player-physics.js";
+import { COAST_TICKS, PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import {
   blockPosition,
   type BlockObservation,
@@ -79,6 +79,51 @@ export function safeSupportingCell(world: WorldView, position: Position3): Block
       if (isSafeSupport(floor) && (!nearest || distance(at) < distance(nearest))) nearest = at;
     }
   return nearest;
+}
+
+/** How far a collision top may sit from the feet and still hold the body: a body settles on a top within this. */
+const HOLD_TOLERANCE = 0.1;
+
+/**
+ * Whether a block's collision holds the body's feet up: a top of a collision box under the footprint within
+ * {@link HOLD_TOLERANCE} of the feet. The body rests on a block, not on an entity, so false at a position the server
+ * stands on a boat (a boat floats above a carpet or a slab it rests on, and over water). True wins over unknown; null
+ * when nothing holds her and a cell under the footprint is not loaded. Read from the collision boxes, not
+ * from `traits.empty` (a snow layer is "empty" to the raycast yet its box holds a body up; liquids have no box); the
+ * cell below the first is read too, for a box taller than its cell (a fence, 1.5).
+ */
+export function heldByBlockAt(read: WorldView["blockAt"], feet: Position3): boolean | null {
+  let unknown = false;
+  for (const cell of footprintCellsBelow(feet)) {
+    const block = read(cell.x, cell.y, cell.z);
+    if (block.kind === "unloaded") unknown = true;
+    else if (block.collisionShapes.some((box) => boxHoldsFeet(box, cell, feet))) return true;
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * The cells a body's footprint may rest on: the column at the feet, up to the cell a top within {@link HOLD_TOLERANCE}
+ * above them lies in (snow two layers, a lily pad: tops of 0.1 or less), and the cell below it for a box taller than its cell.
+ */
+function footprintCellsBelow(feet: Position3): BlockPosition[] {
+  const top = Math.floor(feet.y + HOLD_TOLERANCE);
+  const cells: BlockPosition[] = [];
+  for (let x = Math.floor(feet.x - PLAYER_HALF_WIDTH); x <= Math.floor(feet.x + PLAYER_HALF_WIDTH); x++)
+    for (let z = Math.floor(feet.z - PLAYER_HALF_WIDTH); z <= Math.floor(feet.z + PLAYER_HALF_WIDTH); z++)
+      cells.push({ x, y: top, z }, { x, y: top - 1, z });
+  return cells;
+}
+
+/** A collision box of the cell whose top is at the feet and which lies under the footprint. */
+function boxHoldsFeet(box: CollisionBox, cell: BlockPosition, feet: Position3): boolean {
+  return (
+    Math.abs(cell.y + box.maxY - feet.y) <= HOLD_TOLERANCE &&
+    cell.x + box.minX < feet.x + PLAYER_HALF_WIDTH &&
+    cell.x + box.maxX > feet.x - PLAYER_HALF_WIDTH &&
+    cell.z + box.minZ < feet.z + PLAYER_HALF_WIDTH &&
+    cell.z + box.maxZ > feet.z - PLAYER_HALF_WIDTH
+  );
 }
 
 /**

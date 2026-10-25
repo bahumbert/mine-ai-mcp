@@ -67,20 +67,39 @@ export function recoverPhysics(bot: Bot): void {
   resumePhysics(bot);
 }
 
+/** The last passenger list the server sent for each vehicle the bot has heard of, per bot. */
+const listedRiders = new WeakMap<Bot, Map<number, readonly number[]>>();
+
+/**
+ * Who sits in a vehicle: the last passenger list the server sent for it (empty when none was heard, or the vehicle is
+ * gone). Not `entity.passengers`: Mineflayer moves a passenger between vehicles but never removes one a list leaves out
+ * (mineflayer `entities.js:794-811`), so a rider who left stays listed there. Kept by {@link watchVehicle}.
+ */
+export function ridersOf(bot: Bot, vehicleId: number): readonly number[] {
+  return listedRiders.get(bot)?.get(vehicleId) ?? [];
+}
+
 /** Watches for the server letting her off her vehicle, for as long as the runtime lives; returns the stop. */
 export function watchVehicle(bot: Bot): () => void {
+  const lists = new Map<number, readonly number[]>();
+  listedRiders.set(bot, lists);
   const letOff = () => {
     if (forgetVehicle(bot) !== null) resumePhysics(bot);
   };
   const onPassengers = (packet: { readonly entityId: number; readonly passengers: readonly number[] }) => {
+    lists.set(packet.entityId, [...packet.passengers]);
     if (letsHerOff(bot, currentVehicle(bot), packet)) letOff();
   };
   const onGone = (entity: Entity) => {
+    lists.delete(entity.id);
     const vehicle = currentVehicle(bot);
     if (vehicle !== null && entity.id === vehicle.id) letOff();
   };
   // A death ends the ride on the server too, and the respawn brings its own position: forgotten, no fake one fed.
+  // The lists go too: Mineflayer neither clears its entities nor emits entityGone at a respawn, and a boat emptied meanwhile
+  // would keep the rider it had.
   const onDeath = () => {
+    lists.clear();
     forgetVehicle(bot);
   };
   bot._client.on("set_passengers", onPassengers);
@@ -88,6 +107,7 @@ export function watchVehicle(bot: Bot): () => void {
   bot.on("death", onDeath);
   bot.on("respawn", onDeath);
   return () => {
+    if (listedRiders.get(bot) === lists) listedRiders.delete(bot);
     bot._client.off("set_passengers", onPassengers);
     bot.off("entityGone", onGone);
     bot.off("death", onDeath);

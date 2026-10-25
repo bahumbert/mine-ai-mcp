@@ -9,8 +9,9 @@ import type { NavigationRuntime } from "../navigation/index.js";
 /**
  * The boat part of the preparation: a boat she was left riding (an exploration ride that stopped for want of land, a
  * cancelled ride) is got off, and she then stands on it; it is taken back whatever she carries (live 2026-10-19, Cleo:
- * with a second boat carried nothing broke it and the server kept her seated), or one she stands on out at sea with none
- * carried (got off it at a login or a stop; live 2026-10-10: Vex, a whole run, every way on refused "no boat is carried").
+ * with a second boat carried nothing broke it and the server kept her seated), or any boat she stands on wherever it
+ * floats ({@link boatUnderFeet}: a stop or a cut take-back left her on it; live 2026-10-10 Vex at sea, run 20 Dirk and
+ * Vex by a shore).
  */
 export async function leaveBoatSeat(bot: Bot, signal?: AbortSignal): Promise<void> {
   const justLeft: Entity | null = isBoatEntity(bot.entity.vehicle) ? (await getOff(bot)).vehicle : null;

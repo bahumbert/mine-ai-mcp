@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import { boatUnderFeetAtSea, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
+import { boatUnderFeet, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong, takeBoatBack } from "./boat-crossing.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
@@ -51,17 +51,17 @@ test("the far shore is left where its bank is low enough to climb out of the wat
   assert.equal(lowBankAlong(farBankSea(200).bot, { x: 39.5, z: 0.5 }, east, 62), null);
 });
 
-test("a boat she stands on out at sea, none carried, is found; not one she carries, rides, stands beside or on land", () => {
+test("a boat she stands on out at sea is found, carried boats or not; not one she rides, stands beside or on land", () => {
   // Live 2026-10-10: Vex stood on his own boat at sea a whole run, every way refused "no boat is carried".
   const atSea = new Vec3(20.5, 62.49, 0.5);
   const standing = new Vec3(20.5, 63.05, 0.5);
-  assert.equal(boatUnderFeetAtSea(shoreSea({ feet: standing, boat: atSea }).bot)?.id, 7);
-  assert.equal(boatUnderFeetAtSea(shoreSea({ feet: standing, boat: atSea, carried: { oak_boat: 1 } }).bot), null);
+  assert.equal(boatUnderFeet(shoreSea({ feet: standing, boat: atSea }).bot)?.id, 7);
+  assert.equal(boatUnderFeet(shoreSea({ feet: standing, boat: atSea, carried: { oak_boat: 1 } }).bot)?.id, 7, "standing on one pins her whatever she carries (owner 2026-10-25)");
   const riding = shoreSea({ feet: standing, boat: atSea });
   riding.bot.entity.vehicle = riding.bot.entities[7]!;
-  assert.equal(boatUnderFeetAtSea(riding.bot), null);
-  assert.equal(boatUnderFeetAtSea(shoreSea({ feet: new Vec3(24.5, 63.05, 0.5), boat: atSea }).bot), null);
-  assert.equal(boatUnderFeetAtSea(shoreSea({ feet: new Vec3(0.5, 63.05, 0.5), boat: new Vec3(0.5, 62.49, 0.5) }).bot), null);
+  assert.equal(boatUnderFeet(riding.bot), null);
+  assert.equal(boatUnderFeet(shoreSea({ feet: new Vec3(24.5, 63.05, 0.5), boat: atSea }).bot), null);
+  assert.equal(boatUnderFeet(shoreSea({ feet: new Vec3(0.5, 63.05, 0.5), boat: new Vec3(0.5, 62.49, 0.5) }).bot), null);
 });
 
 test("a boat taken back is broken by hand and its item picked up", async () => {

@@ -42,7 +42,7 @@ export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
-export { hasSupportedCorridor } from "./world/block-geometry.js";
+export { hasSupportedCorridor, heldByBlockAt } from "./world/block-geometry.js";
 export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
 
 // The navigation transaction.

@@ -23,8 +23,8 @@ import { scenarioTestContext } from "../scenario-test-context.ts";
 const MINECRAFT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** A lane's z offset (`LANE_SPACING` 512) and an x offset no lane has, so a driver that forgets or doubles either axis is seen. */
 const SIDEWAYS = arenaFrame({ x: 64, z: 1536 });
-/** Drivers that wait on the wall clock for a boat ride have their own test (`cancel-mid-ride.test.ts`). */
-const OWN_TEST = new Set(["cancel-mid-ride.ts"]);
+/** Drivers that wait on the wall clock for a boat ride have their own test (`cancel-mid-ride.test.ts`, `cancel-after-get-off.test.ts`). */
+const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts"]);
 /** Wall-clock waits of a driver's params, cut to nothing: the census reads what the driver asks, not how long it waits. */
 const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0 };
 

@@ -116,14 +116,19 @@ export interface ShoreOptions {
   /** On a mocked clock (install it with `using`), for code that waits on the wall clock. */
   readonly mocked?: boolean;
   readonly physics?: boolean;
+  /** Water this deep (default 13: y 50 to 62). */
+  readonly waterDepth?: number;
+  /** Cells written after the sea, `"x,y,z"` to the block (a carpet on the land, a cell not loaded). */
+  readonly cells?: Readonly<Record<string, FakeCell>>;
 }
 
 /** Land (stone up to y 62) with a sea from x 10 to 40 (water y 50 to 62), 17 rows wide along z (deep water is read with room to the sides): what the shore-reading functions look along. */
 export function shoreSea(options: ShoreOptions = {}): FakeHarness {
   const cells: Record<string, FakeCell> = {};
   for (let x = 10; x <= 40; x += 1) {
-    for (let z = -8; z <= 8; z += 1) for (let y = 50; y <= SURFACE_Y; y += 1) cells[`${x},${y},${z}`] = "water";
+    for (let z = -8; z <= 8; z += 1) for (let y = SURFACE_Y - (options.waterDepth ?? 13) + 1; y <= SURFACE_Y; y += 1) cells[`${x},${y},${z}`] = "water";
   }
+  Object.assign(cells, options.cells);
   return createFakeBot({
     clock: options.mocked === true ? createFakeClock({ mode: "mocked" }) : undefined,
     position: options.feet ?? new Vec3(0.5, SURFACE_Y + 1, 0.5),

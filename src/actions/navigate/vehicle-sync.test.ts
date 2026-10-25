@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot, listenersAddedSince } from "../../test-support/fake-bot/index.js";
-import { forgetVehicle, recoverPhysics, watchVehicle } from "./vehicle-sync.js";
+import { forgetVehicle, recoverPhysics, ridersOf, watchVehicle } from "./vehicle-sync.js";
 
 /** A bot by boat 7, seated in it by the server unless `seated` is false; the client records the positions fed to Mineflayer's own handler. */
 async function ridingBot({ seated = true } = {}) {
@@ -103,4 +103,38 @@ test("a respawn while seated forgets the vehicle too, and the listeners go with 
   assert.equal(dismounts.length, 1);
   stop();
   assert.equal(added("death") + added("respawn"), 0);
+});
+
+// Mineflayer moves a passenger between vehicles but never removes one a list leaves out (entities.js:794-811): the riders
+// are what the server last listed, not `entity.passengers`.
+test("the riders of a boat are the last passenger list the server sent for it; none heard, none; gone with the boat and the watch", async () => {
+  const { bot, client, entities, stop } = await ridingBot({ seated: false });
+  assert.deepEqual(ridersOf(bot, 7), [], "no list heard");
+  client.emit("set_passengers", { entityId: 7, passengers: [31, 1] });
+  assert.deepEqual(ridersOf(bot, 7), [31, 1]);
+  client.emit("set_passengers", { entityId: 7, passengers: [1] });
+  assert.deepEqual(ridersOf(bot, 7), [1], "the later list replaces the earlier");
+  client.emit("set_passengers", { entityId: 9, passengers: [5] });
+  assert.deepEqual(ridersOf(bot, 7), [1], "another boat's list is not hers");
+  client.emit("set_passengers", { entityId: 7, passengers: [] });
+  assert.deepEqual(ridersOf(bot, 7), [], "a list that leaves everyone out is kept as sent");
+  client.emit("set_passengers", { entityId: 7, passengers: [31] });
+  entities.remove(7);
+  assert.deepEqual(ridersOf(bot, 7), [], "the boat gone (unloaded or broken)");
+  client.emit("set_passengers", { entityId: 9, passengers: [5] });
+  stop();
+  assert.deepEqual(ridersOf(bot, 9), [], "nothing is kept once the watch is stopped");
+});
+
+// Mineflayer neither clears its entities nor emits entityGone at a respawn: a list heard before the death would outlive a
+// boat emptied meanwhile, and pin her on it.
+test("the passenger lists heard before a death or a respawn are forgotten", async () => {
+  const { bot, client, stop } = await ridingBot({ seated: false });
+  client.emit("set_passengers", { entityId: 7, passengers: [31] });
+  bot.emit("respawn");
+  assert.deepEqual(ridersOf(bot, 7), []);
+  client.emit("set_passengers", { entityId: 7, passengers: [31] });
+  bot.emit("death");
+  assert.deepEqual(ridersOf(bot, 7), []);
+  stop();
 });

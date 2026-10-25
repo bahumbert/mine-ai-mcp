@@ -15,12 +15,13 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
-import type { MineflayerBlock } from "../../navigation/index.js";
+import { heldByBlockAt, liveBlockReader, type MineflayerBlock } from "../../navigation/index.js";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { holdsWater, isDeepOpenWater, type WaterAt } from "../../navigation/world/deep-water.js";
 import { getOff } from "./boat-get-off.js";
 import { MOUNT_WALL_MS, mountBoat } from "./boat-mount.js";
-import { currentVehicle } from "./vehicle-sync.js";
+import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
+import { currentVehicle, ridersOf } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
 const BOAT_STEP = 0.35;
@@ -37,6 +38,12 @@ const LANDING_SEARCH = 48;
 const DROP_REACH = 10;
 /** How far along the straight way the water is looked for. */
 const LINE_REACH = 160;
+/** A boat is under her feet when its centre is this close to them... */
+const BOAT_UNDER_FEET_WITHIN = 1.5;
+/** ...and its origin (the bottom of its box) at most this far below them: a boat is 0.5625 high and rests 0.477 below the surface block's top (contract boat-follows-vehicle-move). */
+const BOAT_UNDER_FEET_DEPTH = 1.2;
+/** Half the width of a boat's box: 1.375 wide (fake-bot-vehicle.test.ts, from contract boat-follows-vehicle-move). */
+const BOAT_HALF_WIDTH = 0.6875;
 /** How far from where she stands a boat is still hers to break: the one she got off. */
 export const BOAT_REACH = 6;
 
@@ -482,29 +489,40 @@ export async function takeBoatBack(bot: Bot, boat: Entity | null, signal?: Abort
 }
 
 /**
- * A boat she stands on (not in) out on deep water, with none carried; null otherwise. Live 2026-10-10: Vex stood on
- * a boat at sea a whole run (got off it at a login or a stop), every way refused "no boat is carried" and no
- * crafting table could be set on the water to make one: taken back, it is the way off the sea.
+ * A boat she stands on (not in): the server holds her up on the boat entity while her client, which sees only blocks,
+ * sees water and air under her feet (run 20: Dirk 41 min by a shore, Vex 19 min a few blocks off deep water; run 17c:
+ * Theo over water two deep; live 2026-10-10: Vex at sea). Standing on one pins every route, so any such boat is the one
+ * to take back, whoever put it there and whatever she carries. Null when she is seated (the get-off comes first), when
+ * a block holds her up or nothing is known of the cells under her ({@link heldByBlockAt}: a boat beside the bank she
+ * stands on is not broken), and when the server's last passenger list for the boat names another rider
+ * ({@link ridersOf}: another bot's or a player's boat).
  */
-export function boatUnderFeetAtSea(bot: Bot, justLeft?: Entity | null): Entity | null {
+export function boatUnderFeet(bot: Bot): Entity | null {
   if (bot.entity.vehicle || bot.entities === undefined) return null;
   const feet = bot.entity.position;
-  // The boat she has just got off is hers whatever the server set her down on.
-  const boat = nearestBoat(bot, feet, 1.5, (entity) => entity === justLeft || (feet.y >= entity.position.y && feet.y - entity.position.y < 1.2));
-  if (boat === null || carriesBoat(bot)) return null;
-  const [x, z] = [Math.floor(boat.position.x), Math.floor(boat.position.z)];
-  const surface = waterSurface(bot, x, z, Math.floor(feet.y));
-  return surface !== null && isDeepOpenWater((wx, wy, wz) => isWater(bot, wx, wy, wz), x, surface, z) ? boat : null;
+  if (heldByBlockAt(liveBlockReader(bot), feet) !== false) return null;
+  return nearestBoat(bot, feet, BOAT_UNDER_FEET_WITHIN, (boat) => feet.y >= boat.position.y && feet.y - boat.position.y < BOAT_UNDER_FEET_DEPTH && footprintOnBoat(feet, boat) && hasNoOtherRider(bot, boat));
+}
+
+/** Her footprint overlaps the boat's box horizontally: a boat beside her, or one she swims past, is not under her feet. */
+function footprintOnBoat(feet: Vec3, boat: Entity): boolean {
+  const reach = BOAT_HALF_WIDTH + PLAYER_HALF_WIDTH;
+  return Math.abs(feet.x - boat.position.x) < reach && Math.abs(feet.z - boat.position.z) < reach;
+}
+
+/** Whether the server's last passenger list for this boat names nobody but her (none heard: nobody). */
+function hasNoOtherRider(bot: Bot, boat: Entity): boolean {
+  return ridersOf(bot, boat.id).every((id) => id === bot.entity.id);
 }
 
 /**
  * The boat to break after a get-off: the one she just left while it is within reach, whatever she carries (live
  * 2026-10-19, Cleo: with a second boat carried nothing broke the one she left, and the server kept her seated); else a
- * boat under her feet at sea ({@link boatUnderFeetAtSea}).
+ * boat under her feet ({@link boatUnderFeet}).
  */
 export function boatToTakeBack(bot: Bot, justLeft: Entity | null): Entity | null {
   const stillThere = justLeft !== null && bot.entities[justLeft.id] !== undefined && justLeft.position.distanceTo(bot.entity.position) <= BOAT_REACH;
-  return stillThere ? justLeft : boatUnderFeetAtSea(bot, justLeft);
+  return stillThere ? justLeft : boatUnderFeet(bot);
 }
 
 /**
