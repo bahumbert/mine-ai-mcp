@@ -113,7 +113,10 @@ export class AgentRelations {
    */
   look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): LookAnswer {
     const now = (this.deps.clock ?? realClock).now();
-    if (signal.aborted || !this.trades.busy()) return "idle";
+    if (signal.aborted || !this.trades.busy()) {
+      this.trades.forgetSeen();
+      return "idle";
+    }
     if (this.looking || (this.trades.onlyWatching() && now - this.lastLookAt < WATCH_LOOK_MS)) return "busy_wait";
     this.looking = true;
     this.lastLookAt = now;
@@ -122,7 +125,10 @@ export class AgentRelations {
       this.trades.reconcileHandoffs(onStack);
       await this.trades.tick(snapshot, ownStepYields, signal);
     })()
-      .catch((error: unknown) => this.deps.log(`trade check failed: ${String(error)}`))
+      .catch((error: unknown) => {
+        this.trades.forgetSeen();
+        this.deps.log(`trade check failed: ${String(error)}`);
+      })
       .finally(() => { this.looking = false; });
     return "ticked";
   }

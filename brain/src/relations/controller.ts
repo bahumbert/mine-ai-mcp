@@ -270,9 +270,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** A hand-off found nothing left to give: the agent ended it, so it is no longer pending (no retake clock). */
-  handoffSkipped(tradeId: string): void {
-    this.pending.delete(tradeId);
-  }
+  handoffSkipped(tradeId: string): void { this.pending.delete(tradeId); }
 
   /** Whether their payment is still to come for a trade: it is agreed and nothing came yet (the wait for their side ends otherwise). */
   awaits(tradeId: string): boolean {
@@ -337,6 +335,9 @@ export class TradeController implements BoardPeer {
 
   /** Busy for a player's window alone (no trade, hand-off or judgment): the agent may poll slowly. */
   onlyWatching(): boolean { return this.busy() && !this.busy(false); }
+
+  /** No baseline: the next tick counts no gain. The agent's look calls it whenever no tick ran on the yields it dropped. */
+  forgetSeen(): void { this.previous = null; }
 
   /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */
   handoffEnded(tradeId: string, outcome: Exclude<HandoffEnd["outcome"], "dropped">, detail: string): Promise<void> {
@@ -421,9 +422,7 @@ export class TradeController implements BoardPeer {
     return task;
   }
 
-  private find(tradeId: string): Trade | undefined {
-    return this.deps.book.trades().find((t) => t.id === tradeId);
-  }
+  private find(tradeId: string): Trade | undefined { return this.deps.book.trades().find((t) => t.id === tradeId); }
 
   /** The newest trade with that partner proposed at or after `since`; a read, nothing is written. */
   latestWith(partner: string, since: number): Trade | null {
@@ -435,9 +434,7 @@ export class TradeController implements BoardPeer {
     return newestTrade(this.deps.book.trades(), (t) => t.createdAt >= since && AGREED_STATES.has(t.state));
   }
 
-  private openWith(partner: string): Trade | undefined {
-    return this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner));
-  }
+  private openWith(partner: string): Trade | undefined { return this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner)); }
 
   /** Saves the trade in its partner's record (counting an end into the facts) and journals the events. */
   private async record(trade: Trade, ...events: EventName[]): Promise<void> {
