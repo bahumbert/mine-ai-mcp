@@ -1,20 +1,18 @@
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
-import { ActionRunner } from "../../session/action-runner.js";
+import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import { attackedIds, engagingCombat } from "../../test-support/combat.js";
+import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
 import { SurvivalObserver } from "../evidence/status.js";
-import { SurvivalPolicyState } from "../state/survival-policy.js";
+import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { observeHostileResponse } from "../control/combat/observation.js";
@@ -22,8 +20,6 @@ import { executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import { attachHostileReflex } from "./hostile.js";
-
-type Entity = Parameters<Bot["attack"]>[0];
 
 for (const escapes of [true, false]) {
   test(`withdrawal ${escapes ? "resumes its request after safe separation" : "returns when escape has no path"}`, async () => {
@@ -36,8 +32,8 @@ for (const escapes of [true, false]) {
         fixture.bot.entity.position.x = 60;
         return { status: "completed", elapsedMs: 1 };
       },
+      { entities: { 7: hostile("blaze", 5) } },
     );
-    fixture.bot.entities[7] = hostile(7, "blaze", 5);
     let attempts = 0;
     const input = z.object({ destination: z.number() });
     const action = defineAction({
@@ -82,26 +78,49 @@ for (const escapes of [true, false]) {
   });
 }
 
-function hostile(id: number, name: string, x: number): Entity {
-  return {
-    id,
-    name,
-    displayName: name,
-    kind: "Hostile mobs",
-    isValid: true,
-    height: 2,
-    width: 0.6,
-    metadata: [],
-    position: new Vec3(x, 64, 0),
-  } as unknown as Entity;
+/** What a skeleton's arrow costs the bot (`projectile-hit-bot`: 3 on easy) and the most clock its flight takes in these scenes (48 blocks at 1.6 a tick: 30 server ticks). */
+const ARROW_DAMAGE = 3;
+const ARROW_FLIGHT_MS = 2_000;
+/** A health that leaves the bot between the engage bar (12) and the critical one (8) after one arrow, and after two. */
+const HEALTH_BEFORE_ARROWS = 14.5;
+
+/** The clock runs a slice at a time until the shot has landed on the bot (her health fell), at most `limitMs`: the test then reads the state the hit left. */
+async function landed(fixture: { readonly bot: FakeBot; readonly clock: { advance(ms: number): Promise<void> } }, limitMs: number): Promise<void> {
+  const before = fixture.bot.health;
+  for (let passed = 0; fixture.bot.health >= before && passed < limitMs; passed += 50) await fixture.clock.advance(50);
+  assert.ok(fixture.bot.health < before, `the shot did not land within ${limitMs} ms of clock`);
+}
+
+/** A hostile the bot sees at the start, `x` blocks along the row the bot stands on (its size is the game's). */
+function hostile(name: string, x: number): FakeEntitySpec {
+  return { name, kind: "Hostile mobs", position: new Vec3(x, 64, 0) };
+}
+
+/** The ten cells of a closed shelter around the bot at (0, 64, 0): four sides at two levels, the cap and the floor. */
+function sealedCells(): Record<string, FakeCell> {
+  const cells: Record<string, FakeCell> = { "0,66,0": "stone", "0,63,0": "stone" };
+  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const y of [64, 65]) cells[`${x},${y},${z}`] = "stone";
+  return cells;
+}
+
+/**
+ * The hostile stays in sight of a bot sealed in stone. The game would hide it behind the walls (the fake's raycast
+ * stops at them), but these tests are about the reflex's answer to a hostile in sight under the hide bar, so the
+ * ray is scripted clear: what the old fixture's world did for every ray.
+ */
+function seeThroughShelter(bot: FakeBot): void {
+  bot.world.raycast = () => null;
 }
 
 test("an automatic target disappearing resumes the original request without claiming a kill", async () => {
-  const fixture = reflexFixture(async (targetId) => {
-    fixture.bot.entities[targetId]!.isValid = false;
-    return { ...died(targetId), kind: "target_lost", attacks: 0 };
-  });
-  fixture.bot.entities[7] = hostile(7, "blaze", 5);
+  const fixture = reflexFixture(
+    async (targetId) => {
+      fixture.entities.remove(targetId);
+      return { ...died(targetId), kind: "target_lost", attacks: 0 };
+    },
+    undefined,
+    { entities: { 7: hostile("blaze", 5) } },
+  );
   let attempts = 0;
   const input = z.object({ count: z.number() });
   const action = defineAction({
@@ -137,64 +156,53 @@ test("an automatic target disappearing resumes the original request without clai
   }
 });
 
-function reflexFixture(
-  engage: CombatController["engage"],
-  navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }),
-) {
-  const bot = Object.assign(new EventEmitter(), {
+/** What a test sets on the fake bot at the start, and how its runner is configured (its clock is the fake bot's). */
+interface FixtureOptions extends Pick<FakeBotOptions, "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food"> {
+  readonly runner?: Omit<ActionRunnerOptions, "clock">;
+}
+
+/** The recorded encounters, oldest first, as `response -> outcome`. */
+function recordedEncounters(data: SqlBotData): string[] {
+  return data
+    .read(
+      "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
+    )
+    .map((row) => {
+      const payload = JSON.parse(String(row.payload_json)) as { response: string; outcome: string };
+      return `${payload.response} -> ${payload.outcome}`;
+    });
+}
+
+function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
+  const { bot, clock, combat, world, inventory, entities, server } = createFakeBot({
     username: "ReflexBot",
-    _client: new EventEmitter(),
-    health: 20,
-    game: { gameMode: "survival", dimension: "overworld" },
-    food: 20,
+    position: new Vec3(0, 64, 0),
     // Open air with nothing carried: a hide here can dig nothing and place
     // nothing, which is the state the standing-down rule exists for.
-    inventory: Object.assign(new EventEmitter(), { items: () => [], slots: new Array(46).fill(null) }),
-    registry: minecraftData("1.21.4"),
-    blockAt: () => null,
-    world: { raycast: () => null },
-    entity: { id: 1, onGround: true, position: new Vec3(0, 64, 0), width: 0.6, height: 1.8 },
-    entities: {} as Record<number, Entity>,
-    isSleeping: false,
-    clearControlStates: () => undefined,
-    deactivateItem: () => undefined,
-    equip: async () => undefined,
-    unequip: async () => undefined,
-    attack: () => undefined,
-  }) as unknown as Bot;
+    groundY: null,
+    entities: options.entities,
+    carried: options.carried,
+    health: options.health,
+    food: options.food,
+    slots: options.slots,
+    cells: options.cells,
+    overrides: options.overrides,
+  });
+  // The fake's own `death` listener (its physics stop at a death): the count of the code under test is on top of it.
+  const harnessDeathListeners = bot.listenerCount("death");
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "reflex-test", scope: { kind: "bot", botId: "reflex-bot" } },
   });
-  const runner = new ActionRunner();
+  const runner = new ActionRunner({ clock, ...options.runner });
   const navigation = {
     onEvent: () => () => {},
     active: false,
     cancel: () => undefined,
     navigate,
   } as unknown as NavigationRuntime;
-  const controller: CombatController = {
-    resourceRefusal: () => null,
-    policy: new SurvivalPolicyState(bot),
-    engage,
-    stop: async () => undefined,
-    runEnd: async () => {
-      throw new Error("Unexpected End combat");
-    },
-    endDanger: () => false,
-    activePosition: () => null,
-    execution: () => null,
-    onDecision: () => () => {},
-    finish: async () => ({
-      observedAt: 1,
-      kind: "safe" as const,
-      basis: "clear" as const,
-      position: { x: 0, y: 64, z: 0 },
-    }),
-    canRecover: () => false,
-    activeEngagement: () => null,
-  };
-  const driver = new ReflexDriver(bot, runner);
+  const controller = engagingCombat(bot, engage);
+  const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const perception = new CombatPerception(bot);
   const attached = attachHostileReflex(bot, driver, navigation, controller, perception);
   const status = new SurvivalObserver(bot, runner, driver, controller);
@@ -211,6 +219,16 @@ function reflexFixture(
   };
   return {
     bot,
+    clock,
+    /** What other actors do: hurt the bot, shoot her, kill a mob. */
+    combat,
+    world,
+    inventory,
+    /** The packets the client wrote, in order. */
+    server,
+    /** The server's entities after the start: `spawn` a mob the bot meets later, `remove` one. */
+    entities,
+    driver,
     runner,
     navigation,
     controller,
@@ -218,18 +236,20 @@ function reflexFixture(
     perception,
     data,
     summary: () => readNotificationSummary(data, bot.username),
-    /** The recorded encounters, oldest first, as `response -> outcome`. */
-    recorded: () =>
-      data
-        .read(
-          "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
-        )
-        .map((row) => {
-          const payload = JSON.parse(String(row.payload_json)) as { response: string; outcome: string };
-          return `${payload.response} -> ${payload.outcome}`;
-        }),
+    recorded: () => recordedEncounters(data),
+    /** One client tick at once, with no time passing: a test reads the state the tick left before the promise queue runs. */
     tick: () => bot.emit("physicsTick"),
+    /** The `death` listeners an idle bot has: the fake's own and the code under test's. */
+    deathListenersAtRest: harnessDeathListeners + DEATH_LISTENERS_AT_REST,
   };
+}
+
+type ReflexFixture = ReturnType<typeof reflexFixture>;
+
+/** The response a bot at 11 health runs for `directive`, settled and read as its encounter receipt. */
+async function evadeReceipt(fixture: ReflexFixture, directive: HostileResponse, signal = new AbortController().signal) {
+  const response = await executeHostileResponse(fixture.bot, fixture.navigation, fixture.controller, directive, fixture.observer.threats, 11, signal);
+  return encounterReceipt(completeResponse(response, signal));
 }
 
 function died(targetId: number): CombatOutcome {
@@ -246,23 +266,14 @@ function died(targetId: number): CombatOutcome {
 }
 
 test("a food-policy revocation cancels a protected automatic recovery bite", async () => {
-  const fixture = reflexFixture(async () => { throw new Error("A hide must not engage"); });
-  fixture.bot.blockAt = (() => ({
-    name: "stone", boundingBox: "block", shapes: [[0, 0, 0, 1, 1, 1]], hardness: 1.5, position: new Vec3(0, 0, 0),
-  })) as unknown as Bot["blockAt"];
-  fixture.bot.health = 2;
-  fixture.bot.food = 10;
-  fixture.bot.entities[7] = hostile(7, "zombie", 12);
-  fixture.bot.inventory.items = () => [{ name: "beef", count: 2 } as Item];
-  let rejectBite!: (cause: Error) => void;
-  fixture.bot.consume = () => new Promise<void>((_resolve, reject) => {
-    fixture.bot.usingHeldItem = true;
-    rejectBite = reject;
+  const fixture = reflexFixture(async () => { throw new Error("A hide must not engage"); }, undefined, {
+    cells: sealedCells(),
+    entities: { 7: hostile("zombie", 12) },
+    carried: { beef: 2 },
+    health: 2,
+    food: 10,
   });
-  fixture.bot.deactivateItem = () => {
-    fixture.bot.usingHeldItem = false;
-    rejectBite?.(new Error("bite released"));
-  };
+  seeThroughShelter(fixture.bot);
   try {
     fixture.tick();
     assert.ok(await until(() => fixture.bot.usingHeldItem));
@@ -273,7 +284,6 @@ test("a food-policy revocation cancels a protected automatic recovery bite", asy
     assert.equal(fixture.controller.policy.settling, false);
     assert.equal(fixture.bot.inventory.items()[0]?.count, 2);
   } finally {
-    rejectBite?.(new Error("test cleanup"));
     await fixture.observer.close();
     fixture.data.close();
   }
@@ -293,9 +303,8 @@ for (const kind of ["mob", "end"] as const) {
       assert.equal(active, null, "the old combat owner must release before a new fight starts");
       defenses++;
       return died(id);
-    });
+    }, undefined, { entities: { 7: hostile("zombie", 2) } });
     fixture.controller.activeEngagement = () => active;
-    fixture.bot.entities[7] = hostile(7, "zombie", 2);
     const request = z.strictObject({});
     const action = defineAction({
       name: "occupied_combat_test",
@@ -346,15 +355,13 @@ for (const kind of ["mob", "end"] as const) {
 }
 
 test("an incoming blaze projectile starts combat before damage beyond observation range", async () => {
-  const fixture = reflexFixture(async (id) => died(id));
+  const fixture = reflexFixture(async (id) => died(id), undefined, {
+    entities: {
+      7: hostile("blaze", 26),
+      8: { name: "small_fireball", kind: "Projectiles", position: new Vec3(20, 65, 0), velocity: new Vec3(0, 0, 0) },
+    },
+  });
   try {
-    fixture.bot.entities[7] = hostile(7, "blaze", 26);
-    fixture.bot.entities[8] = Object.assign(hostile(8, "small_fireball", 20), {
-      kind: "Projectiles",
-      position: new Vec3(20, 65, 0),
-      velocity: new Vec3(0, 0, 0),
-      width: 0.3125,
-    });
     fixture.bot._client.emit("spawn_entity", {
       entityId: 8,
       type: fixture.bot.registry.entitiesByName.small_fireball!.id,
@@ -373,15 +380,13 @@ test("an incoming blaze projectile starts combat before damage beyond observatio
 });
 
 test("a blaze shot travelling away does not attribute another victim's combat to us", async () => {
-  const fixture = reflexFixture(async (id) => died(id));
+  const fixture = reflexFixture(async (id) => died(id), undefined, {
+    entities: {
+      7: hostile("blaze", 26),
+      8: { name: "small_fireball", kind: "Projectiles", position: new Vec3(20, 65, 0), velocity: new Vec3(0.5, 0, 0) },
+    },
+  });
   try {
-    fixture.bot.entities[7] = hostile(7, "blaze", 26);
-    fixture.bot.entities[8] = Object.assign(hostile(8, "small_fireball", 20), {
-      kind: "Projectiles",
-      position: new Vec3(20, 65, 0),
-      velocity: new Vec3(0.5, 0, 0),
-      width: 0.3125,
-    });
     fixture.bot._client.emit("spawn_entity", {
       entityId: 8,
       type: fixture.bot.registry.entitiesByName.small_fireball!.id,
@@ -397,6 +402,9 @@ test("a blaze shot travelling away does not attribute another victim's combat to
   }
 });
 
+/** "death" listeners the code under test keeps on an idle bot: the hostile reflex's own and the body-tick pacer's (the driver ticks through it). */
+const DEATH_LISTENERS_AT_REST = 3;
+
 /** Let the claimed response run to its recorded event, or give up after a bounded number of turns. */
 async function until(condition: () => boolean, turns = 50): Promise<boolean> {
   for (let turn = 0; turn < turns; turn += 1) {
@@ -407,18 +415,21 @@ async function until(condition: () => boolean, turns = 50): Promise<boolean> {
 }
 
 test("the automatic enderman response holds its stance across a teleport", async () => {
-  const fixture = reflexFixture(async (targetId, signal, movement) => {
-    assert.equal(movement, "hold");
-    fixture.bot.entities[targetId]!.position.x = 8;
-    fixture.bot.emit("physicsTick");
-    assert.equal(signal.aborted, false, "a teleport beyond melee reach does not cancel the guard");
-    return died(targetId);
-  });
-  const enderman = hostile(7, "enderman", 3);
+  const fixture = reflexFixture(
+    async (targetId, signal, movement) => {
+      assert.equal(movement, "hold");
+      fixture.bot.entities[targetId]!.position.x = 8;
+      fixture.tick();
+      assert.equal(signal.aborted, false, "a teleport beyond melee reach does not cancel the guard");
+      return died(targetId);
+    },
+    undefined,
+    { entities: { 7: hostile("enderman", 3) } },
+  );
+  const enderman = fixture.bot.entities[7]!;
   Reflect.set(enderman.metadata, fixture.bot.registry.entitiesByName.enderman!.metadataKeys!.indexOf("creepy"), true);
-  fixture.bot.entities[7] = enderman;
   try {
-    fixture.bot.emit("entityHurt", fixture.bot.entity, enderman);
+    fixture.combat.hurtBot(1, 7);
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 1));
     assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
@@ -429,8 +440,7 @@ test("the automatic enderman response holds its stance across a teleport", async
 });
 
 test("claims an idle body for a hostile in contact and records what happened", async () => {
-  const fixture = reflexFixture(async (targetId) => died(targetId));
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
+  const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("zombie", 3) } });
 
   fixture.tick();
   assert.equal(fixture.runner.status().owner, "takeover");
@@ -438,19 +448,18 @@ test("claims an idle body for a hostile in contact and records what happened", a
 
   assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
   assert.equal(fixture.runner.status().busy, false);
-  assert.ok(await until(() => fixture.bot.listenerCount("death") === 2));
+  assert.ok(await until(() => fixture.bot.listenerCount("death") === fixture.deathListenersAtRest));
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
 });
 
 test("a denied reflex claim removes its death listener", async () => {
-  const fixture = reflexFixture(async (targetId) => died(targetId));
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
+  const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("zombie", 3) } });
   Object.defineProperty(fixture.runner, "claim", {
     value: () => ({ kind: "busy", activeAction: { action: "other", startedAt: new Date().toISOString() } }),
   });
   fixture.tick();
-  assert.equal(fixture.bot.listenerCount("death"), 2);
+  assert.equal(fixture.bot.listenerCount("death"), fixture.deathListenersAtRest);
   assert.deepEqual(fixture.recorded(), []);
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
@@ -468,26 +477,13 @@ test("an emergency retreat excludes momentum-dependent parkour while preserving 
       fixture.bot.entity.position.x = -40;
       return { status: "completed", elapsedMs: 0 };
     },
+    { entities: { 7: hostile("zombie", 3) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
   assert.equal(directive.kind, "evade");
   try {
-    const result = encounterReceipt(
-      completeResponse(
-        await executeHostileResponse(
-          fixture.bot,
-          fixture.navigation,
-          fixture.controller,
-          directive,
-          fixture.observer.threats,
-          11,
-          new AbortController().signal,
-        ),
-        new AbortController().signal,
-      ),
-    );
+    const result = await evadeReceipt(fixture, directive);
     assert.equal(called, true);
     assert.equal(result.outcome, "safe_separation");
   } finally {
@@ -504,32 +500,21 @@ test("an admitted low-health escape is not stopped for a stationary guard it can
       fixture.bot.entity.position.x = -40;
       return { status: "completed", elapsedMs: 0 };
     },
+    { entities: { 7: hostile("blaze", 3) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "blaze", 3);
   const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
   assert.equal(directive.kind, "evade");
   fixture.bot.health = 7;
-  fixture.bot.inventory.slots[45] = { name: "shield" } as NonNullable<Bot["inventory"]["slots"][number]>;
-  fixture.bot.entities[8] = Object.assign(hostile(8, "small_fireball", 8), {
+  fixture.inventory.updateSlot(45, itemOf(fixture.bot.registry, "shield", 1));
+  fixture.entities.spawn({
+    id: 8,
+    ...hostile("small_fireball", 8),
     position: new Vec3(8, 65, 0),
     velocity: new Vec3(-0.5, 0, 0),
   });
   try {
-    const result = encounterReceipt(
-      completeResponse(
-        await executeHostileResponse(
-          fixture.bot,
-          fixture.navigation,
-          fixture.controller,
-          directive,
-          fixture.observer.threats,
-          11,
-          new AbortController().signal,
-        ),
-        new AbortController().signal,
-      ),
-    );
+    const result = await evadeReceipt(fixture, directive);
     assert.equal(result.outcome, "safe_separation");
     assert.equal(result.projectileGuards, 0);
   } finally {
@@ -547,25 +532,12 @@ test("direct encounter cancellation cannot report safe separation after route cl
       fixture.bot.entity.position.x = -40;
       return { status: "completed", elapsedMs: 0 };
     },
+    { entities: { 7: hostile("zombie", 3) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
   assert.equal(directive.kind, "evade");
-  const result = encounterReceipt(
-    completeResponse(
-      await executeHostileResponse(
-        fixture.bot,
-        fixture.navigation,
-        fixture.controller,
-        directive,
-        fixture.observer.threats,
-        11,
-        cancellation.signal,
-      ),
-      cancellation.signal,
-    ),
-  );
+  const result = await evadeReceipt(fixture, directive, cancellation.signal);
   assert.equal(result.outcome, "cancelled");
   assert.equal(result.error, "operator cancellation");
   await fixture.observer[Symbol.asyncDispose]();
@@ -581,6 +553,7 @@ for (const floor of ["safe", "damaging", "airborne"] as const) {
         fixture.bot.entity.onGround = floor !== "airborne";
         return { status: "stopped", reason: "navigation timeout", elapsedMs: 15_000 };
       },
+      { entities: { 7: hostile("zombie", 3) } },
     );
     const world = new MemoryWorld();
     world.load({ x: -40, y: 63, z: 0 }, { stateId: 1, traits: { damaging: floor === "damaging" } });
@@ -588,23 +561,9 @@ for (const floor of ["safe", "damaging", "airborne"] as const) {
     world.load({ x: -40, y: 65, z: 0 }, { stateId: 0 });
     Object.defineProperty(fixture.navigation, "world", { value: world });
     fixture.bot.health = 11;
-    fixture.bot.entities[7] = hostile(7, "zombie", 3);
     const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
     assert.equal(directive.kind, "evade");
-    const result = encounterReceipt(
-      completeResponse(
-        await executeHostileResponse(
-          fixture.bot,
-          fixture.navigation,
-          fixture.controller,
-          directive,
-          fixture.observer.threats,
-          11,
-          new AbortController().signal,
-        ),
-        new AbortController().signal,
-      ),
-    );
+    const result = await evadeReceipt(fixture, directive);
     assert.equal(result.outcome, floor === "safe" ? "safe_separation" : "capability_limit");
     await fixture.observer[Symbol.asyncDispose]();
     fixture.data.close();
@@ -621,9 +580,8 @@ test("a controller cancellation after a policy edit preserves the cancellation r
       reason: "test",
     });
     return { ...died(targetId), kind: "cancelled" };
-  });
+  }, undefined, { entities: { 7: hostile("blaze", 3) } });
   try {
-    fixture.bot.entities[7] = hostile(7, "blaze", 3);
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 1));
     assert.deepEqual(fixture.recorded(), ["fight -> cancelled"]);
@@ -635,9 +593,13 @@ test("a controller cancellation after a policy edit preserves the cancellation r
 });
 
 test("unchanged failed fight stays suppressed when no alternate response is permitted", async () => {
-  const fixture = reflexFixture(async () => {
-    throw new Error("equipment unavailable");
-  });
+  const fixture = reflexFixture(
+    async () => {
+      throw new Error("equipment unavailable");
+    },
+    undefined,
+    { entities: { 7: hostile("zombie", 3) } },
+  );
   await fixture.controller.policy.edit({
     operation: "set",
     expected_revision: fixture.controller.policy.snapshot().revision,
@@ -645,7 +607,6 @@ test("unchanged failed fight stays suppressed when no alternate response is perm
     lifetime: { kind: "session" },
     reason: "test",
   });
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
 
   fixture.tick();
   assert.ok(await until(() => fixture.recorded().length === 1));
@@ -672,13 +633,11 @@ test("the reflex awaits combat recovery and records its capability limit", async
             observation: "No food remains.",
             attacks: 2,
           });
-      }),
+      }), undefined, { entities: { 7: hostile("skeleton", 5) } },
   );
-  fixture.bot.entities[7] = hostile(7, "skeleton", 5);
   fixture.tick();
   assert.ok(await until(() => engaging));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   assert.equal(fixture.runner.status().busy, true, "health alone does not settle the encounter");
   recoveryBlocked();
   assert.ok(await until(() => !fixture.runner.status().busy));
@@ -700,9 +659,8 @@ test("melee contact ending releases the reflex without marking the target unreac
         assert.equal(movement, "hold");
         engaging = true;
         signal.addEventListener("abort", () => resolve({ ...died(targetId), kind: "cancelled" }), { once: true });
-      }),
+      }), undefined, { entities: { 7: hostile("magma_cube", 3) } },
   );
-  fixture.bot.entities[7] = hostile(7, "magma_cube", 3);
   fixture.tick();
   assert.ok(await until(() => engaging));
   fixture.bot.entities[7]!.position.y = 58;
@@ -721,19 +679,17 @@ test("ending the original melee contact cannot drop the owner while another fuse
   const fixture = reflexFixture((targetId, signal) => new Promise(resolve => {
     engaging = true;
     signal.addEventListener("abort", () => resolve({ ...died(targetId), kind: "cancelled" }), { once: true });
-  }));
-  fixture.bot.entities[7] = hostile(7, "magma_cube", 3);
+  }), undefined, { entities: { 7: hostile("magma_cube", 3) } });
   fixture.tick();
   assert.ok(await until(() => engaging));
-  const creeper = hostile(8, "creeper", 2);
-  fixture.bot.entities[8] = creeper;
+  const creeper = fixture.entities.spawn({ id: 8, ...hostile("creeper", 2) });
   const swell = fixture.bot.registry.entitiesByName.creeper!.metadataKeys!.indexOf("swell_dir");
   Reflect.set(creeper.metadata, swell, 1);
   fixture.perception.creeperClearance.require(fixture.perception.creeperClearance.observe(fixture.perception.tick, new Set()));
   fixture.bot.entities[7]!.position.y = 58;
   fixture.tick();
   assert.equal(await until(() => !fixture.runner.status().busy, 5), false);
-  delete fixture.bot.entities[8];
+  fixture.entities.remove(8);
   fixture.tick();
   assert.equal(await until(() => !fixture.runner.status().busy, 5), false, "missing is not discharged");
   fixture.perception.creeperClearance.resolve(8);
@@ -761,13 +717,11 @@ test("damage below the hide threshold does not stop an already admitted escape",
     assert.equal(stopSignal?.aborted, false, "health loss must not interrupt the admitted route");
     return { status: "completed", elapsedMs: 1000 };
   };
-  const fixture = reflexFixture(async (targetId) => died(targetId), navigate);
+  const fixture = reflexFixture(async (targetId) => died(targetId), navigate, { entities: { 7: hostile("zombie", 3) } });
   fixture.bot.health = 9;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   fixture.tick();
   assert.ok(await until(() => escaping));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   fixture.tick();
   assert.equal(fixture.runner.status().busy, true);
   assert.deepEqual(fixture.recorded(), []);
@@ -801,12 +755,10 @@ test("one evade retains its first threat and records a new contact encountered a
       fixture.bot.entity.position = new Vec3(-40, 64, 0);
       return { status: "completed", elapsedMs: 0 };
     },
+    // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping.
+    { entities: { 7: hostile("blaze", 4), 8: hostile("blaze", -26) }, slots: { 45: { name: "shield" } } },
   );
-  // Admit guarded retreat; these assertions concern its contact bookkeeping.
-  fixture.bot.inventory.slots[45] = { name: "shield", count: 1 } as Item;
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "blaze", 4);
-  fixture.bot.entities[8] = hostile(8, "blaze", -26);
   const listeners = fixture.bot.listenerCount("physicsTick");
   fixture.tick();
   assert.ok(await until(() => !fixture.runner.status().busy));
@@ -828,16 +780,14 @@ test("one evade retains its first threat and records a new contact encountered a
 });
 
 test("a hostile that has hurt the bot is in contact from beyond the contact range", async () => {
-  const fixture = reflexFixture(async (targetId) => died(targetId));
-  const skeleton = hostile(7, "skeleton", 12);
-  fixture.bot.entities[7] = skeleton;
+  const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("skeleton", 12) } });
 
   fixture.tick();
   assert.equal(fixture.runner.status().busy, false);
-  fixture.bot.emit("entityHurt", fixture.bot.entity, skeleton);
-  fixture.tick();
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  // The clock's slice that lands the arrow also runs the reflex's tick and the fight the stub ends at once: the body is idle again when the slice returns, so the takeover shows only in the record.
+  await landed(fixture, ARROW_FLIGHT_MS);
 
-  assert.equal(fixture.runner.status().owner, "takeover");
   assert.ok(await until(() => fixture.recorded().length === 1));
   assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
   await fixture.observer[Symbol.asyncDispose]();
@@ -851,7 +801,7 @@ test("a hostile that has hurt the bot is in contact from beyond the contact rang
  * and a bot that did not move a block in a hundred and sixty ticks.
  */
 test("a hide that could not be built is recorded once and then the reflex stands down", async () => {
-  const fixture = reflexFixture(async (targetId) => died(targetId));
+  const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("zombie", 3) } });
   await fixture.controller.policy.edit({
     operation: "set",
     expected_revision: fixture.controller.policy.snapshot().revision,
@@ -860,7 +810,6 @@ test("a hide that could not be built is recorded once and then the reflex stands
     reason: "test",
   });
   fixture.bot.health = 7;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
 
   fixture.tick();
   assert.ok(await until(() => fixture.recorded().length === 1));
@@ -877,7 +826,7 @@ test("a hide that could not be built is recorded once and then the reflex stands
 });
 
 test("a changed shelter permission retries a failed hide while an unrelated bow edit does not", async () => {
-  const fixture = reflexFixture(async (targetId) => died(targetId));
+  const fixture = reflexFixture(async (targetId) => died(targetId), undefined, { entities: { 7: hostile("zombie", 3) } });
   const edit = (bow: boolean, place: boolean) =>
     fixture.controller.policy.edit({
       operation: "set",
@@ -889,7 +838,6 @@ test("a changed shelter permission retries a failed hide while an unrelated bow 
   try {
     await edit(false, false);
     fixture.bot.health = 7;
-    fixture.bot.entities[7] = hostile(7, "zombie", 3);
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 1 && !fixture.runner.status().busy));
 
@@ -912,10 +860,8 @@ test("records a session teardown during a response as cancelled, not failed", as
     (_targetId, signal) =>
       new Promise((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-      }),
+      }), undefined, { entities: { 7: hostile("zombie", 3) } },
   );
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
-
   fixture.tick();
   fixture.runner.cancelActive("Minecraft runtime closed");
 
@@ -937,14 +883,12 @@ test("an admitted low-health escape still yields to session cancellation", async
           () => resolve({ status: "stopped", reason: "session cancelled", elapsedMs: 0 }),
           { once: true },
         );
-      }),
+      }), { entities: { 7: hostile("zombie", 3) } },
   );
   fixture.bot.health = 9;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   fixture.tick();
   assert.ok(await until(() => escaping));
-  fixture.bot.health = 7;
-  fixture.bot.emit("health");
+  fixture.combat.setHealth(7);
   fixture.runner.cancelActive("Minecraft runtime closed");
   assert.ok(await until(() => !fixture.runner.status().busy));
   assert.deepEqual(fixture.recorded(), ["evade -> cancelled"]);
@@ -959,9 +903,8 @@ test("cancellation does not conceal a different failure while combat releases th
       new Promise((_resolve, reject) => {
         engaged = true;
         signal.addEventListener("abort", () => reject(new Error("shield release failed")), { once: true });
-      }),
+      }), undefined, { entities: { 7: hostile("zombie", 3) } },
   );
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   try {
     fixture.tick();
     assert.ok(await until(() => engaged));
@@ -979,25 +922,21 @@ test("cancellation does not conceal a different failure while combat releases th
 });
 
 test("a cancelled escape preserves its attack and kill evidence when navigation throws", async () => {
-  let attacks = 0;
   const fixture = reflexFixture(
     async (targetId) => died(targetId),
     async () => {
       fixture.tick();
-      fixture.bot.emit("entityDead", fixture.bot.entities[7]!);
+      fixture.combat.kill(7);
       fixture.runner.cancelActive("footing recovery");
       throw new Error("navigation released during cancellation");
     },
+    { entities: { 7: hostile("zombie", 2) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "zombie", 2);
-  fixture.bot.attack = () => {
-    attacks++;
-  };
   try {
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 1));
-    assert.equal(attacks, 1);
+    assert.equal(attackedIds(fixture.server).length, 1);
     const row = fixture.data.read(
       "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
     )[0]!;
@@ -1025,11 +964,10 @@ for (const cleanup of ["returns", "throws"] as const) {
             cleanup === "throws"
               ? reject(signal.reason ?? new Error("cleanup failed after death"))
               : resolve({ ...died(targetId), kind: "bot_died", attacks: 3 });
-        }),
+        }), undefined, { entities: { 7: hostile("zombie", 15) } },
     );
-    fixture.bot.entities[7] = hostile(7, "zombie", 15);
     fixture.bot.entity.position = new Vec3(12, 70, 9);
-    fixture.bot.entities[7].position = new Vec3(15, 70, 9);
+    fixture.bot.entities[7]!.position = new Vec3(15, 70, 9);
     // Real player-events cancellation happens on death, before cleanup settles.
     const cancelOnDeath = () => {
       fixture.runner.cancelActive("bot died");
@@ -1041,7 +979,7 @@ for (const cleanup of ["returns", "throws"] as const) {
     fixture.bot.emit("death");
     fixture.bot.health = 20;
     fixture.bot.entity.position = new Vec3(79.5, 66, 134.5);
-    fixture.bot.entities[7].position = new Vec3(200, 70, 9);
+    fixture.bot.entities[7]!.position = new Vec3(200, 70, 9);
     fixture.bot.emit("respawn");
     finish();
     assert.ok(await until(() => fixture.recorded().length === 1));
@@ -1059,7 +997,7 @@ for (const cleanup of ["returns", "throws"] as const) {
     assert.deepEqual(payload.finalDistances, [{ id: 7, distance: 3 }]);
     assert.equal(payload.attacks, cleanup === "returns" ? 3 : 0);
     fixture.bot.off("death", cancelOnDeath);
-    assert.equal(fixture.bot.listenerCount("death"), 2);
+    assert.equal(fixture.bot.listenerCount("death"), fixture.deathListenersAtRest);
     await fixture.observer[Symbol.asyncDispose]();
     fixture.data.close();
   });
@@ -1074,13 +1012,11 @@ test("safe separation answers old distant attack contact, while later damage re-
       fixture.bot.entity.position.x = -20;
       return { status: "completed", elapsedMs: 0 };
     },
+    // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping. A skeleton shoots arrows: a blaze's ball would set her on fire, and a burning bot under the engage bar hides instead of retreating.
+    { entities: { 7: hostile("skeleton", 28) }, slots: { 45: { name: "shield" } }, health: HEALTH_BEFORE_ARROWS },
   );
-  // Admit guarded retreat; these assertions concern its contact bookkeeping.
-  fixture.bot.inventory.slots[45] = { name: "shield", count: 1 } as Item;
-  fixture.bot.health = 11;
-  const shooter = hostile(7, "blaze", 28);
-  fixture.bot.entities[7] = shooter;
-  fixture.bot.emit("entityHurt", fixture.bot.entity, shooter);
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
   fixture.tick();
   assert.ok(await until(() => fixture.recorded().length === 1));
   assert.deepEqual(fixture.recorded(), ["evade -> safe_separation"]);
@@ -1089,8 +1025,9 @@ test("safe separation answers old distant attack contact, while later damage re-
     await until(() => !fixture.runner.status().busy);
   }
   assert.equal(routes, 1, "already answered contact must not repeatedly claim the same satisfied escape");
-  fixture.bot.emit("entityHurt", fixture.bot.entity, shooter);
-  fixture.tick();
+  // The bot is 48 blocks from the skeleton now: the second arrow lands 30 ticks after it is shot, past the first one's hurt window (20 ticks).
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
   assert.ok(await until(() => fixture.recorded().length === 2));
   assert.equal(routes, 2);
   await fixture.observer[Symbol.asyncDispose]();
@@ -1098,22 +1035,28 @@ test("safe separation answers old distant attack contact, while later damage re-
 });
 
 test("safe separation cannot erase a new attack observed during the response", async () => {
+  let routes = 0;
   const fixture = reflexFixture(
     async (id) => died(id),
     async () => {
       fixture.bot.entity.position.x = -20;
-      fixture.bot.emit("entityHurt", fixture.bot.entity, fixture.bot.entities[7]);
+      // The first route ends when a second arrow has landed: the new attack is seen during it. A later route (the second arrow's own contact) is not waited on.
+      if (++routes === 1) {
+        fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+        await new Promise<void>((resolve) => fixture.bot.once("entityHurt", () => resolve()));
+      }
       return { status: "completed", elapsedMs: 0 };
     },
+    // A shield in the off hand admits guarded retreat; these assertions concern its contact bookkeeping.
+    { entities: { 7: hostile("skeleton", 28) }, slots: { 45: { name: "shield" } }, health: HEALTH_BEFORE_ARROWS },
   );
-  // Admit guarded retreat; these assertions concern its contact bookkeeping.
-  fixture.bot.inventory.slots[45] = { name: "shield", count: 1 } as Item;
-  fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "blaze", 28);
-  fixture.bot.emit("entityHurt", fixture.bot.entity, fixture.bot.entities[7]);
-  fixture.tick();
-  assert.ok(await until(() => fixture.recorded().length === 1));
-  assert.equal(fixture.observer.threats.attackerIds.has(7), true);
+  fixture.combat.shootBot("arrow", 7, ARROW_DAMAGE);
+  await landed(fixture, ARROW_FLIGHT_MS);
+  await fixture.clock.advance(ARROW_FLIGHT_MS);
+  // Before: one response recorded and the attacker still filed. With time passing the clock goes on into the answer to the new attack: a second response is recorded (the erased attack would leave one), and it ends the contact.
+  assert.ok(await until(() => fixture.recorded().length === 2));
+  assert.deepEqual(fixture.recorded(), ["evade -> safe_separation", "evade -> safe_separation"]);
+  assert.equal(routes, 2);
   await fixture.observer[Symbol.asyncDispose]();
   fixture.data.close();
 });
@@ -1121,10 +1064,9 @@ test("safe separation cannot erase a new attack observed during the response", a
 test("failed evade immediately yields to the newly chosen hide response", async () => {
   const fixture = reflexFixture(
     async (targetId) => died(targetId),
-    async () => ({ status: "stopped", reason: "timeout", elapsedMs: 15_000 }),
+    async () => ({ status: "stopped", reason: "timeout", elapsedMs: 15_000 }), { entities: { 7: hostile("zombie", 3) } },
   );
   fixture.bot.health = 9;
-  fixture.bot.entities[7] = hostile(7, "zombie", 3);
   fixture.tick();
   assert.ok(await until(() => !fixture.runner.status().busy && fixture.recorded().length === 1));
   assert.deepEqual(fixture.recorded(), ["evade -> capability_limit"]);
@@ -1143,31 +1085,16 @@ test("evade refreshes a completed route when a newly observed cube is still in c
       routes++;
       if (routes === 1) {
         fixture.bot.entity.position.x = 40;
-        fixture.bot.entities[8] = hostile(8, "magma_cube", 35);
-        fixture.bot.emit("entitySpawn", fixture.bot.entities[8]);
+        fixture.entities.spawn({ id: 8, ...hostile("magma_cube", 35) });
       } else fixture.bot.entity.position.x = 80;
       return { status: "completed", elapsedMs: 1 };
-    },
+    }, { entities: { 7: hostile("magma_cube", 3) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "magma_cube", 3);
   const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
   assert.equal(directive.kind, "evade");
   try {
-    const result = encounterReceipt(
-      completeResponse(
-        await executeHostileResponse(
-          fixture.bot,
-          fixture.navigation,
-          fixture.controller,
-          directive,
-          fixture.observer.threats,
-          11,
-          new AbortController().signal,
-        ),
-        new AbortController().signal,
-      ),
-    );
+    const result = await evadeReceipt(fixture, directive);
     assert.equal(routes, 2);
     assert.equal(result.outcome, "safe_separation");
     assert.ok(result.finalDistances.every((entry) => entry.distance >= 36));
@@ -1181,30 +1108,16 @@ test("a cube killed during retreat does not fail separation against its last pos
   const fixture = reflexFixture(
     async (targetId) => died(targetId),
     async () => {
-      fixture.bot.emit("entityDead", fixture.bot.entities[7]!);
-      delete fixture.bot.entities[7];
+      fixture.combat.kill(7);
+      fixture.entities.remove(7);
       return { status: "completed", elapsedMs: 1 };
-    },
+    }, { entities: { 7: hostile("magma_cube", 3) } },
   );
   fixture.bot.health = 11;
-  fixture.bot.entities[7] = hostile(7, "magma_cube", 3);
   const directive = observeHostileResponse(fixture.bot, fixture.observer.threats);
   assert.equal(directive.kind, "evade");
   try {
-    const result = encounterReceipt(
-      completeResponse(
-        await executeHostileResponse(
-          fixture.bot,
-          fixture.navigation,
-          fixture.controller,
-          directive,
-          fixture.observer.threats,
-          11,
-          new AbortController().signal,
-        ),
-        new AbortController().signal,
-      ),
-    );
+    const result = await evadeReceipt(fixture, directive);
     assert.equal(result.outcome, "safe_separation");
     assert.deepEqual(result.finalDistances, []);
   } finally {
@@ -1222,22 +1135,15 @@ test("a cube killed during retreat does not fail separation against its last pos
 test("a hide that leaves the bot under the hide bar does not resume a withdrawal", async () => {
   const fixture = reflexFixture(async () => {
     throw new Error("A hide must not engage");
-  });
-  // Already sealed in, so the hide goes straight to the hold; two health with
+  }, undefined, { cells: sealedCells(), entities: { 7: hostile("zombie", 12) } });
+  // Already sealed in (the cells around the bot), so the hide goes straight to the hold; two health with
   // hunger below the regeneration bar and nothing to eat, so the hold has
   // nothing to wait for and ends at once.
-  fixture.bot.blockAt = (() => ({
-    name: "stone",
-    boundingBox: "block",
-    shapes: [[0, 0, 0, 1, 1, 1]],
-    hardness: 1.5,
-    position: new Vec3(0, 0, 0),
-  })) as unknown as Bot["blockAt"];
   fixture.bot.health = 2;
   fixture.bot.food = 10;
+  seeThroughShelter(fixture.bot);
   // In sight and inside observation range, outside the contact range: under the
   // hide bar that is contact, and the answer is a hide.
-  fixture.bot.entities[7] = hostile(7, "zombie", 12);
   let attempts = 0;
   const input = z.object({});
   const action = defineAction({
@@ -1288,16 +1194,9 @@ test("a hide that leaves the bot under the hide bar does not resume a withdrawal
 test("a recovered hide resumes the same admitted request", async () => {
   const fixture = reflexFixture(async () => {
     throw new Error("A hide must not engage");
-  });
-  fixture.bot.blockAt = (() => ({
-    name: "stone",
-    boundingBox: "block",
-    shapes: [[0, 0, 0, 1, 1, 1]],
-    hardness: 1.5,
-    position: new Vec3(0, 0, 0),
-  })) as unknown as Bot["blockAt"];
+  }, undefined, { cells: sealedCells(), entities: { 7: hostile("zombie", 12) } });
   fixture.bot.health = 2;
-  fixture.bot.entities[7] = hostile(7, "zombie", 12);
+  seeThroughShelter(fixture.bot);
   let attempts = 0;
   const input = z.object({ count: z.number() });
   const action = defineAction({
@@ -1343,21 +1242,23 @@ test("a recovered hide resumes the same admitted request", async () => {
 
 for (const inUse of [false, true]) {
   test(`nearby hostile shield preparation respects active item use (${inUse})`, async () => {
-    const fixture = reflexFixture(async () => assert.fail("Preparation must not engage"));
-    const shield = { name: "shield", type: fixture.bot.registry.itemsByName.shield!.id, count: 1, slot: 10 } as Item;
-    fixture.bot.inventory.items = () => [shield];
+    const fixture = reflexFixture(async () => assert.fail("Preparation must not engage"), undefined, {
+      entities: { 7: hostile("zombie", 12) },
+      slots: { 10: { name: "shield" } },
+    });
     fixture.bot.usingHeldItem = inUse;
-    fixture.bot.entities[7] = hostile(7, "zombie", 12);
     let equips = 0;
-    fixture.bot.equip = async (_item, destination) => {
+    // A spy on the fake's own `equip`, which moves the shield to the off hand.
+    const equip = fixture.bot.equip;
+    fixture.bot.equip = async (item, destination) => {
       assert.equal(destination, "off-hand");
       equips++;
-      fixture.bot.inventory.slots[45] = shield;
+      await equip(item, destination);
     };
     try {
       fixture.tick();
       if (!inUse) assert.ok(await until(() => equips === 1));
-      else await new Promise((resolve) => setTimeout(resolve, 10));
+      else await fixture.clock.advance(50);
       fixture.tick();
       assert.equal(equips, inUse ? 0 : 1);
       assert.equal(fixture.bot.usingHeldItem, inUse);
@@ -1367,3 +1268,118 @@ for (const inUse of [false, true]) {
     }
   });
 }
+
+/** A fight neither side can win: the engage waits for its abort, then reports itself cancelled. Time is the fake bot's clock. */
+function standoffScene(...zombies: number[]) {
+  const engaged: number[] = [];
+  const fixture = reflexFixture(
+    async (targetId, signal) => {
+      engaged.push(targetId);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { ...died(targetId), kind: "cancelled", attacks: 0 };
+    },
+    undefined,
+    {
+      runner: { cancelGraceMs: 500 },
+      entities: Object.fromEntries(zombies.map((id, index) => [id, hostile("zombie", 3 + index)])),
+    },
+  );
+  /** Time passes in 50 ms slices of the fake clock, with a physics tick at each. */
+  const pass = (ms: number) => fixture.clock.advance(ms);
+  const decision = () => JSON.stringify(fixture.driver.snapshot()[0]?.decision ?? null);
+  const active = () => fixture.runner.status().activeAction?.action === "hostile_reflex";
+  const close = async () => {
+    await fixture.observer[Symbol.asyncDispose]();
+    fixture.data.close();
+  };
+  return { ...fixture, engaged, pass, active, decision, close };
+}
+
+test("a fight with no damage, no movement and no threat gone is released after 30 s and its target stands down 10 s", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(29_000);
+    assert.ok(scene.active(), "29 s: the window is open");
+    await scene.pass(2_000);
+    assert.equal(scene.active(), false, "released at 30 s");
+    assert.deepEqual(scene.engaged, [7]);
+    await scene.pass(8_000);
+    assert.deepEqual(scene.engaged, [7], "no new fight on target 7 within the stand-down");
+    await scene.pass(3_000);
+    assert.deepEqual(scene.engaged, [7, 7], "after 10 s the reflex fights target 7 again");
+  } finally {
+    await scene.close();
+  }
+});
+
+test("after the stand-down of its fight the decision picks evade, and target A is not fought again", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(31_000);
+    assert.equal(scene.active(), false);
+    await scene.pass(500);
+    assert.ok(scene.recorded().some((outcome) => outcome.startsWith("evade ->")), `an evade ran: ${scene.recorded().join(", ")}`);
+    assert.deepEqual(scene.engaged, [7], "the standoff is not fought again while it stands down");
+    assert.match(scene.decision(), /"answered"/, "the fight stays excluded as answered");
+  } finally {
+    await scene.close();
+  }
+});
+
+/** Runs a standoff for 100 s, giving `mark` at second 20, 40, 60, 80; true when the fight is never released. */
+async function keptAlive(mark: (scene: ReturnType<typeof standoffScene>) => void, ...zombies: number[]) {
+  const scene = standoffScene(...(zombies.length === 0 ? [7] : zombies));
+  try {
+    for (let second = 1; second <= 100; second++) {
+      if (second % 20 === 0) mark(scene);
+      await scene.pass(1_000);
+      if (!scene.active()) return false;
+    }
+    return true;
+  } finally {
+    await scene.close();
+  }
+}
+
+test("blocked hits keep a shielded fight alive past 30 s", async () => {
+  assert.equal(await keptAlive((scene) => scene.bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 })), true);
+});
+
+test("an answered swing resets the clock", async () => {
+  assert.equal(await keptAlive((scene) => scene.combat.hurt(7, null, 1)), true);
+});
+
+test("a target that moves resets the clock", async () => {
+  let x = 3;
+  // Back and forth inside contact range: each move is 1.5 blocks from the last mark.
+  assert.equal(await keptAlive((scene) => { x = x === 3 ? 1.5 : 3; scene.bot.entities[7]!.position = new Vec3(x, 64, 0); }), true);
+});
+
+test("a threat that dies resets the clock", async () => {
+  // One threat dies at each of the four marks (a dead threat dies once; the fifth mark, at second 100, has none left): the target 7 is the nearest and the last to go.
+  const dying = [8, 9, 10, 7];
+  assert.equal(await keptAlive((scene) => { const id = dying.shift(); if (id !== undefined) scene.combat.kill(id); }, 7, 8, 9, 10), true);
+});
+
+test("a standoff with no mark at all is released inside 100 s", async () => {
+  assert.equal(await keptAlive(() => {}), false);
+});
+
+test("the probes of a limited fight are off after it: no listener is left on the bot or its connection", async () => {
+  const scene = standoffScene(7);
+  try {
+    const before = [scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")];
+    await scene.pass(31_000);
+    assert.equal(scene.active(), false);
+    assert.deepEqual([scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")], before);
+  } finally {
+    await scene.close();
+  }
+});
+
+test("a closed-shelter hold is progress", async () => {
+  const closed = (scene: ReturnType<typeof standoffScene>) => {
+    for (const [key, block] of Object.entries(sealedCells())) scene.world.setCell(new Vec3(...(key.split(",").map(Number) as [number, number, number])), block);
+  };
+  assert.equal(await keptAlive(closed), true);
+});

@@ -5,9 +5,10 @@
  * does not reliably report one, so the scenario runs in a process of its own
  * and says on stdout whether the runtime saw one.
  *
- * The bot reaches the goal while the plan-ahead search is thinking, so the
- * arrival is judged by that background search; the caller's quantity is met
- * right then and the arrival callback throws the abort reason, a bare string.
+ * The bot reaches the goal while the plan-ahead search is thinking. The search
+ * never judges that arrival: the foreground does, once the segment is walked and
+ * the search is drained, and its arrival callback throws the abort reason, a bare
+ * string, because the caller's quantity is met right then.
  */
 import { nearGoal } from "../goals/index.js";
 import { createMovementPolicy } from "../movements/policy.js";

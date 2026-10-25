@@ -30,6 +30,22 @@ export interface MinecraftMcpHttpApplicationOptions {
   log?(message: string): void;
 }
 
+/** Drops the client sessions idle since before `cutoff`; a close that fails is logged, it never rejects into the reaper's timer. */
+export function closeIdleClientSessions(
+  transports: Map<string, { lastActiveAt: number; server: MinecraftMcpHostedServer }>,
+  cutoff: number,
+  log: (message: string) => void,
+): void {
+  for (const [sessionId, record] of transports) {
+    if (record.lastActiveAt >= cutoff) continue;
+    transports.delete(sessionId);
+    log(`MCP client session expired: ${sessionId}`);
+    // An async wrapper: a close that throws before returning a promise fails the same way as one that rejects.
+    void (async () => record.server.close())().catch((cause: unknown) =>
+      log(`MCP client session ${sessionId} did not close cleanly: ${cause instanceof Error ? cause.message : String(cause)}`));
+  }
+}
+
 /**
  * Purpose: Host any number of short-lived MCP client sessions above one
  * process-owned Minecraft session without coupling transport closure to bot
@@ -56,15 +72,10 @@ export function createMinecraftMcpHttpApplication(
     60_000,
     options.clientIdleTimeoutMs ?? 30 * 60_000,
   );
-  const idleReaper = setInterval(() => {
-    const cutoff = Date.now() - clientIdleTimeoutMs;
-    for (const [sessionId, record] of transports) {
-      if (record.lastActiveAt >= cutoff) continue;
-      transports.delete(sessionId);
-      log(`MCP client session expired: ${sessionId}`);
-      void record.server.close();
-    }
-  }, Math.min(60_000, clientIdleTimeoutMs));
+  const idleReaper = setInterval(
+    () => closeIdleClientSessions(transports, Date.now() - clientIdleTimeoutMs, log),
+    Math.min(60_000, clientIdleTimeoutMs),
+  );
   idleReaper.unref();
 
   app.use((request, response, next) => {

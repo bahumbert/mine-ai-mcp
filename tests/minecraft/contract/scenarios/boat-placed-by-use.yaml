@@ -1,0 +1,47 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-boat-placed-by-use
+tags:
+  - contract
+description: A boat held and used is put where the look meets water or ground within the reach of 4.5 blocks (the
+  entity at that point facing her look, the stack one boat lighter, a rest level 0.37 below the water surface); nothing
+  is put for the sky, ground past the reach, a wall, or a spot another boat holds. Contract check
+  tests/minecraft/contract/checks/boat-placed-by-use.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: boat-placed-by-use
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 2 -61 -1 water
+  - setblock 2 -61 0 water
+  - setblock 2 -61 1 water
+  - setblock 3 -61 -1 water
+  - setblock 3 -61 0 water
+  - setblock 3 -61 1 water
+  - setblock 4 -61 -1 water
+  - setblock 4 -61 0 water
+  - setblock 4 -61 1 water
+  - setblock -3 -60 0 stone
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: oak_boat
+        count: 3
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

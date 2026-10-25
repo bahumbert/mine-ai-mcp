@@ -1,0 +1,42 @@
+template: ../../templates/flat-single-action.yaml
+name: shelter-dig-in-and-climb-out
+tags: [regression]
+description: >-
+  The night shelter's own calls in order, in a 7x7 block of dirt six deep under the actor: three raw_action digs
+  under its feet, a carried dirt placed against the support beside the top dug cell, the roof dug, then a
+  navigate to the surface spot. The bot must stand on the surface at the end. Guards SKL-01 (the shelter
+  said done while the bot was still in its hole): the runtime has to take the next action from the hole.
+
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+
+geometry:
+  - fill: { block: bedrock, from: [-6, -64, -6], to: [6, -64, 6] }
+  - fill: { block: dirt, from: [-3, -63, -3], to: [3, -60, 3] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: dirt, count: 4 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -61, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -62, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: place, block_name: dirt, x: 1, y: -60, z: 0, face: west } }
+    - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
+    - { action: navigate, input: { x: 0, y: -59, z: 0, range: 1 } }
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: reach, who: Actor, pos: [0.5, -59, 0.5], radius: 1.5 }
+    - { kind: completion, who: Actor }

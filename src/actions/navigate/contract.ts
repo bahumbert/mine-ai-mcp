@@ -125,6 +125,20 @@ export const navigationEvidenceSchema = z.strictObject({
     .boolean()
     .optional()
     .describe("The bot ended in its boat on the water at the target's x z (a target on open water); absent when not."),
+  boatLeft: z
+    .strictObject({
+      cause: z.enum(["not_found", "still_there", "left_nearby", "item_not_picked_up"]),
+      reason: z.string(),
+      hits: z.number().int().nonnegative(),
+      elapsedMs: z.number().int().nonnegative(),
+      goneAfterHit: z.number().int().positive().nullable(),
+    })
+    .optional()
+    .describe("The boat ridden across was not taken back (the crossing itself succeeded): why, how many hits were sent in how many ms, and the hit after which the boat left the view (null: it did not); absent when it was taken back."),
+  escapeRelaxed: z
+    .array(z.string())
+    .optional()
+    .describe("The rules this route set aside once to leave a pocket and actually used: dig_straight_down for a dig down, dig_next_to_flowing_water for a dig that let in flowing water; absent when none."),
   landLeg: z
     .strictObject({ x: z.number().int(), y: z.number().int(), z: z.number().int() })
     .optional()

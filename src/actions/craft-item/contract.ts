@@ -76,6 +76,8 @@ export const craftItemOutcomes = {
     `[CRAFT_PLAN_UNAVAILABLE] The recursive planner found recipes but could not produce concrete plans for: ${itemList(items)}.`,
   craftingTableRequired:
     "[CRAFTING_TABLE_REQUIRED] This recipe batch needs a crafting table within the bot's four-block interaction reach; none is in reach and no carried one could be placed beside the bot.",
+  tableNotLoaded: (cell: { x: number; y: number; z: number }) =>
+    `[CRAFTING_TABLE_NOT_LOADED] The crafting table this request placed at (${cell.x}, ${cell.y}, ${cell.z}) is in a chunk that is not loaded: go back near it (navigate to ${cell.x}, ${cell.y}, ${cell.z}), then call craft_item again.`,
   executionFailed: (cause: unknown, unreadable = 0) =>
     `[CRAFT_EXECUTION_FAILED] Mineflayer stopped while executing the selected recipe batch: ${cause instanceof Error ? cause.message : String(cause)}` +
     // Live 2026-10-07 (NeoForge): with a modded item carried, the server's inventory updates cannot be read whole, and

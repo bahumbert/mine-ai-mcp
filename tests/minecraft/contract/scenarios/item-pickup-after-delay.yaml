@@ -1,0 +1,108 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-item-pickup-after-delay
+tags:
+  - contract
+  - exclusive
+description: "The server picks an item entity up once its pickup delay is over, in reach of the bot and with room:
+  collect, the slot and the removal in one tick; a pickup that fits only in part sends the slot alone and the client
+  never hears the new count; a full inventory picks nothing up. Contract check
+  tests/minecraft/contract/checks/item-pickup-after-delay.ts, also run on the fake bot (bot-contract.test.ts); setup
+  from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: item-pickup-after-delay
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: cobblestone
+        count: 59
+      - item: dirt
+        count: 1
+      - item: sand
+        count: 1
+      - item: gravel
+        count: 1
+      - item: stick
+        count: 1
+      - item: coal
+        count: 1
+      - item: iron_ingot
+        count: 1
+      - item: gold_ingot
+        count: 1
+      - item: diamond
+        count: 1
+      - item: emerald
+        count: 1
+      - item: redstone
+        count: 1
+      - item: glass
+        count: 1
+      - item: clay_ball
+        count: 1
+      - item: brick
+        count: 1
+      - item: paper
+        count: 1
+      - item: book
+        count: 1
+      - item: string
+        count: 1
+      - item: feather
+        count: 1
+      - item: flint
+        count: 1
+      - item: bone
+        count: 1
+      - item: leather
+        count: 1
+      - item: apple
+        count: 1
+      - item: bread
+        count: 1
+      - item: carrot
+        count: 1
+      - item: potato
+        count: 1
+      - item: wheat
+        count: 1
+      - item: sugar
+        count: 1
+      - item: egg
+        count: 1
+      - item: snowball
+        count: 1
+      - item: arrow
+        count: 1
+      - item: torch
+        count: 1
+      - item: ladder
+        count: 1
+      - item: oak_planks
+        count: 1
+      - item: oak_log
+        count: 1
+      - item: stone
+        count: 1
+      - item: granite
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

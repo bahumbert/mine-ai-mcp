@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import minecraftData from "minecraft-data";
 import { Vec3 } from "vec3";
 import { SqlBotData, botEventSchema } from "../../bot-data/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
+import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { createLocateStrongholdAction, loadedStrongholdFrame } from "./locate-stronghold.js";
 import { locateStrongholdInputSchema, locateStrongholdResultSchema } from "./contract.js";
 import { StrongholdEyeFlights, awaitFlight } from "./throw-eye.js";
@@ -23,27 +22,40 @@ const bearing = (x: number, z: number, tx: number, tz: number): Bearing => {
 };
 const makeData = () =>
   SqlBotData.create({ storage: { kind: "temporary" }, identity: { worldId: "test", scope: { kind: "shared" } } });
-function fixture() {
-  const events = new EventEmitter();
-  let activations = 0;
-  const bot = Object.assign(events, {
-    username: "Locator",
-    game: { dimension: "overworld" },
-    registry,
-    entity: { position: new Vec3(0, 70, 0), height: 1.8, onGround: true, effects: {} },
-    entities: {},
-    world: { getColumns: () => [] },
-    inventory: Object.assign(new EventEmitter(), { items: () => [], slots: [] }),
-    activateItem: () => {
-      activations++;
-    },
-    equip: async () => {},
-    blockAt: () => null,
-  }) as unknown as Bot;
-  return { bot, activations: () => activations };
-}
-const eye = (id = 42) => ({ id, uuid: `eye-${id}`, name: "eye_of_ender", position: new Vec3(0, 71.5, 0) });
+/** The eyes of ender the tests throw: the ids of the entities the server spawns, the first the one the bot threw. */
+const THROWN_EYE_ID = 42;
+const OTHER_EYE_ID = 99;
 
+/**
+ * The locator's harness bot at (0, 70, 0). Its world has no chunk columns (`findLoadedBlockPositions` scans those):
+ * `loadedColumns` lists the chunks a test names (none by default). Recovering a spent eye
+ * waits on the global timers: a test that reaches it passes a mocked clock and installs it.
+ */
+function fixture(clock?: FakeClock, loadedColumns: readonly (readonly [number, number])[] = []) {
+  let activations = 0;
+  const harness = createFakeBot({
+    clock,
+    username: "Locator",
+    position: new Vec3(0, 70, 0),
+    loadedColumns,
+    overrides: {
+      activateItem: () => {
+        activations++;
+      },
+    },
+  });
+  const { bot } = harness;
+  /** The server spawns an eye (`entitySpawn`, on the bot): by default at the bot's hand, where it throws one. */
+  const eye = (id = THROWN_EYE_ID, position = new Vec3(0, 71.5, 0)) => harness.entities.spawn({ id, name: "eye_of_ender", position, uuid: `eye-${id}` });
+  return { bot, harness, activations: () => activations, eye };
+}
+
+/** Put `stacks` in the window's slots from `first` on, as the server's `set_slot` does. */
+function fillSlots(harness: FakeHarness, first: number, stacks: readonly ({ name: string; count: number } | null)[]) {
+  stacks.forEach((stack, index) => {
+    if (stack) harness.inventory.updateSlot(first + index, itemOf(harness.bot.registry, stack.name, stack.count));
+  });
+}
 test("intersects forward rays in every quadrant without slope singularities", () => {
   for (const [x, z] of [
     [0, -500],
@@ -103,18 +115,17 @@ test("cancelling the wait preserves later airborne measurements and removes flig
   const store = new StrongholdThrows(data, "Locator", "overworld", "trip");
   flights.start(store);
   assert.equal(store.read()[0]?.state, "pending");
-  const entity = eye();
-  f.bot.emit("entitySpawn", entity as never);
+  const entity = f.eye();
   entity.position = new Vec3(0, 74, -3);
-  f.bot.emit("entityMoved", entity as never);
+  f.bot.emit("entityMoved", entity);
   const stop = new AbortController();
   const waiting = flights.wait(stop.signal);
   stop.abort(new Error("cancelled for test"));
   await assert.rejects(waiting, /cancelled for test/);
   assert.equal(store.read()[0]?.end_json?.z, -3);
   entity.position = new Vec3(0, 79, -12);
-  f.bot.emit("entityMoved", entity as never);
-  f.bot.emit("entityGone", entity as never);
+  f.bot.emit("entityMoved", entity);
+  f.harness.entities.remove(entity.id);
   await flights.wait();
   assert.equal(store.read().length, 1);
   assert.equal(store.read()[0]?.end_json?.z, -12);
@@ -129,13 +140,10 @@ test("unrelated eyes are ignored and runtime disposal persists an incomplete obs
   const flights = new StrongholdEyeFlights(f.bot);
   const store = new StrongholdThrows(data, "Locator", "overworld", "trip");
   flights.start(store);
-  const unrelated = eye(99);
-  unrelated.position = new Vec3(50, 70, 0);
-  f.bot.emit("entitySpawn", unrelated as never);
+  f.eye(OTHER_EYE_ID, new Vec3(50, 70, 0));
   assert.equal(store.read()[0]?.entity_uuid, null);
-  const entity = eye();
-  f.bot.emit("entitySpawn", entity as never);
-  f.bot.emit("entityGone", unrelated as never);
+  f.eye();
+  f.harness.entities.remove(OTHER_EYE_ID);
   assert.equal(store.read()[0]?.state, "tracking");
   flights[Symbol.dispose]();
   assert.equal(store.read()[0]?.state, "incomplete");
@@ -157,27 +165,12 @@ test("published input rejects unknown arguments and defaults the durable search"
 });
 test("masonry alone is not confirmation; a loaded frame produces a typed durable final event", async () => {
   using data = makeData();
-  const f = fixture();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(clock, [[0, 0]]);
   using flights = new StrongholdEyeFlights(f.bot);
-  let material = registry.blocksByName.stone_bricks!.minStateId;
-  f.bot.world.getColumns = () =>
-    [
-      {
-        chunkX: 0,
-        chunkZ: 0,
-        column: {
-          minY: 0,
-          sections: [
-            {
-              solidBlockCount: 1,
-              data: {},
-              palette: [material],
-              get: (pos: Vec3) => (pos.x === 1 && pos.y === 5 && pos.z === 1 ? material : 0),
-            },
-          ],
-        },
-      },
-    ] as never;
+  const frameCell = new Vec3(1, 5, 1);
+  f.harness.world.setCell(frameCell, registry.blocksByName.stone_bricks!.minStateId!);
   assert.equal(loadedStrongholdFrame(f.bot, f.bot.entity.position, 128), null);
   const navigation = { navigate: async () => ({ status: "completed", elapsedMs: 1 }) } as unknown as NavigationRuntime;
   const action = createLocateStrongholdAction(f.bot, navigation, data, flights);
@@ -188,11 +181,14 @@ test("masonry alone is not confirmation; a loaded frame produces a typed durable
   const id = store.begin({ x: 0, y: 70, z: 0 });
   store.observe(id, id, { x: 0, y: 71, z: 0 }, { x: 0, y: 65, z: 0 });
   store.finish(id, "observed");
-  material = registry.blocksByName.end_portal_frame!.minStateId;
-  const result = await action.begin(
-    action.parse({ phase: "locate", continue_without_recommended_items: true }),
-    new AbortController().signal, () => {},
-  )({});
+  f.harness.world.setCell(frameCell, registry.blocksByName.end_portal_frame!.minStateId!);
+  const result = await clock.settle(
+    action.begin(
+      action.parse({ phase: "locate", continue_without_recommended_items: true }),
+      new AbortController().signal, () => {},
+    )({}),
+    20_000,
+  );
   assert.equal(result.status, "succeeded");
   assert.deepEqual(result.confirmation?.position, { x: 1, y: 5, z: 1 });
   locateStrongholdResultSchema.parse(result);
@@ -256,13 +252,14 @@ test("saved bearings resume navigation without requiring or spending another eye
     "iron_sword",
     "shield",
   ];
-  f.bot.inventory.slots = [
-    null,
-    ...stock.map((name) => ({
+  fillSlots(
+    f.harness,
+    1,
+    stock.map((name) => ({
       name,
       count: name === "arrow" ? 64 : name === "cooked_beef" ? 16 : 1,
     })),
-  ] as never;
+  );
   const equipped = await action.begin(
     action.parse({ search_id: "trip", phase: "locate" }),
     new AbortController().signal, () => {},
@@ -283,8 +280,8 @@ test("saved bearings resume navigation without requiring or spending another eye
 });
 
 test("supply checklist rejects partial stacks, unsafe food, raw pumpkins and weak equipment", () => {
-  const { bot } = fixture();
-  bot.inventory.slots = [
+  const { bot, harness } = fixture();
+  fillSlots(harness, 0, [
     { name: "bow", count: 1 }, // Uncrafted output must not satisfy the checklist.
     { name: "arrow", count: 63 },
     { name: "rotten_flesh", count: 64 },
@@ -292,7 +289,7 @@ test("supply checklist rejects partial stacks, unsafe food, raw pumpkins and wea
     { name: "stone_sword", count: 1 },
     { name: "golden_chestplate", count: 1 },
     { name: "shield", count: 1 },
-  ] as never;
+  ]);
   const supplies = strongholdSupplies(bot);
   assert.equal(supplies.filter((item) => item.carried >= item.required).length, 1);
   assert.equal(supplies.find((item) => item.recommendation === "Shield")?.carried, 1);
@@ -314,7 +311,9 @@ test("locate cannot skip the estimate phase even with a supply override", async 
 
 test("a descending vertical eye leads to local survey, without another throw", async () => {
   using data = makeData();
-  const f = fixture();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(clock);
   using flights = new StrongholdEyeFlights(f.bot);
   const store = new StrongholdThrows(data, "Locator", "overworld", "trip");
   const id = store.begin({ x: 0, y: 70, z: 0 });
@@ -330,10 +329,13 @@ test("a descending vertical eye leads to local survey, without another throw", a
     },
   } as unknown as NavigationRuntime;
   const action = createLocateStrongholdAction(f.bot, navigation, data, flights);
-  const result = await action.begin(
-    action.parse({ search_id: "trip", phase: "locate", continue_without_recommended_items: true }),
-    new AbortController().signal, () => {},
-  )({});
+  const result = await clock.settle(
+    action.begin(
+      action.parse({ search_id: "trip", phase: "locate", continue_without_recommended_items: true }),
+      new AbortController().signal, () => {},
+    )({}),
+    20_000,
+  );
   assert.equal(routes, 2, JSON.stringify(result));
   assert.deepEqual(result.estimate, { x: 0, z: 0 });
   assert.equal(result.confirmation, null);
@@ -348,9 +350,8 @@ test("a cancelled body can move before the spent eye's spawn packet arrives", as
   const store = new StrongholdThrows(data, "Locator", "overworld", "trip");
   flights.start(store);
   f.bot.entity.position = new Vec3(20, 70, 0);
-  const entity = eye();
-  f.bot.emit("entitySpawn", entity as never);
+  const entity = f.eye();
   assert.equal(store.read()[0]?.entity_uuid, entity.uuid);
-  f.bot.emit("entityGone", entity as never);
+  f.harness.entities.remove(entity.id);
   await flights.wait();
 });

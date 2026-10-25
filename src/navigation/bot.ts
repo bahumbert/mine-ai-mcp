@@ -29,6 +29,9 @@ export type MovementPreparation =
   | { readonly kind: "completed"; readonly arrival: PlannedStep["validArrivals"][number] }
   | { readonly kind: "failed"; readonly observation: string };
 
+/** What a resend of a cell came to: the server sent it, said nothing in time, or the bot could not ask without using an item. */
+export type CellResync = "resent" | "unanswered" | "unavailable";
+
 export interface NavigationBot {
   /** One reading of the bot and what is around it; see `NavigationObservation`. */
   observe(): NavigationObservation;
@@ -50,7 +53,22 @@ export interface NavigationBot {
     token: AttemptToken,
     signal: AbortSignal,
   ): EffectHandle;
+  /**
+   * The longest the body can take to dig the block of a break operation from its state now, in ms: its tool, its
+   * enchantments and effects, and both of Minecraft's penalties (x5 in water, x5 off the ground) for a body with any
+   * part in water; null when the block is not loaded. The planner prices the stance it plans (water at the head cell,
+   * ground = a solid cell below, `solidFloorUnder`), so a body in water above a solid cell is priced as standing (the
+   * water hold lets it sink onto that floor); the executor sets a break's confirmation deadline from this instead.
+   * Optional so fakes keep the planned deadline.
+   */
+  longestBreakDurationMs?(operation: Extract<PlannedOperation, { kind: "break" }>): number | null;
   stabilize(signal: AbortSignal): Promise<{ kind: "stable" } | { kind: "failed"; observation: string }>;
+  /**
+   * Ask the server to send `cell` again (see `mineflayer/cell-resync.ts`) and wait for its packet: the way out of a client
+   * that holds air where the server holds a block (the cell under the feet) or the reverse (a break the server dropped).
+   * Optional so fakes without a server need no change; an abort rejects with the signal's reason.
+   */
+  requestCellResync?(cell: Position3, signal: AbortSignal): Promise<CellResync>;
   /** Fit the body inside its current stance before a neighbouring passage can close. */
   centerOnCell(cell: Position3, signal: AbortSignal): Promise<boolean>;
   /** Retain supported footing or the water column while calculating; release before moving. */

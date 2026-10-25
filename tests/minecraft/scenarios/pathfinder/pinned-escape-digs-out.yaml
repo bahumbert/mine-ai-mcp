@@ -1,0 +1,72 @@
+template: ../../templates/flat-single-action.yaml
+
+name: pinned-escape-digs-out-of-a-corridor
+tags: [regression]
+description: >-
+  Run 15 P2: the pinned escape took its relaxed routing hold and dropped it as the action started, so Dirk's escape
+  routed under the ordinary rules and failed like the three navigates before it. A bot in a four-cell corridor of
+  stone, with water behind every wall and over the roof and the persona override navigation.dig_straight_down false,
+  fails three navigates to a cave cell under the corridor's south wall (only two digs straight down and a step south
+  reach it). After the (here shortened) pinned window the fourth navigate runs as an escape and must dig down twice
+  and arrive: the hold must last the whole action.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [-6, -63, -6], to: [6, -50, 6] }
+  # Source water one block behind every wall and over the roof (stone at y -55): every side and upward dig opens into water.
+  - fill: { block: water, from: [-1, -57, -2], to: [4, -56, -2] }
+  - fill: { block: water, from: [-1, -57, 2], to: [4, -56, 2] }
+  - fill: { block: water, from: [-2, -57, -1], to: [-2, -56, 1] }
+  - fill: { block: water, from: [5, -57, -1], to: [5, -56, 1] }
+  - fill: { block: water, from: [-1, -54, -1], to: [4, -54, 1] }
+  # Sources in the stone under the corridor's north side, beside every floor cell a staircase could dig except the two under
+  # the start (the escape's): the style override only forbids digging straight down, so without them the bot would simply
+  # dig a staircase to the cave through the floor.
+  - fill: { block: water, from: [-1, -58, -1], to: [-1, -58, -1] }
+  - fill: { block: water, from: [1, -58, -1], to: [4, -58, -1] }
+  # The corridor is four cells long, so the search leaves its start by 3 blocks and the automatic escape never fires. The cave
+  # under the south wall has the wall as its head room: no move from the corridor enters it.
+  - fill: { block: air, from: [0, -57, 0], to: [3, -56, 0] }
+  - fill: { block: air, from: [0, -59, 1], to: [0, -58, 1] }
+
+players:
+  - name: Pinned
+    pos: [0.5, -57, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/pinned-escape.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Pinned,gamemode=!spectator]"
+
+params:
+  pinnedWindowMs: 2000
+  waitTicks: 70
+  target: [0, -59, 1]
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: Pinned
+      pos: [0.5, -59, 1.5]
+      radius: 1.0
+    - { kind: health, who: Pinned, health: 20 }
+    - { kind: completion, who: Pinned }

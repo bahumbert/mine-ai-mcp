@@ -1,0 +1,41 @@
+template: ../../templates/flat-single-action.yaml
+name: shelter-navigate-out-of-roofed-hole
+tags: [regression]
+description: >-
+  The state an order or a failed roof dig leaves the night shelter in: the actor stands in its three-deep hole in
+  a block of dirt with the roof placed over it, and the next action is only a navigate to the surface. The bot
+  has to get out of the roofed hole (dig the roof or a way up) and stand on the surface within the bound. Guards
+  SKL-01: a hole that a failed climb out leaves must not trap the next order.
+
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+
+geometry:
+  - fill: { block: bedrock, from: [-6, -64, -6], to: [6, -64, 6] }
+  - fill: { block: dirt, from: [-3, -63, -3], to: [3, -60, 3] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: dirt, count: 4 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -61, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -62, z: 0 } }
+    - { action: raw_action, waitTicks: 10, input: { operation: place, block_name: dirt, x: 1, y: -60, z: 0, face: west } }
+    - { action: navigate, input: { x: 0, y: -59, z: 0, range: 1 } }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: reach, who: Actor, pos: [0.5, -59, 0.5], radius: 1.5 }
+    - { kind: completion, who: Actor }

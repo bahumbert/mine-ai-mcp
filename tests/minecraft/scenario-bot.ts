@@ -3,17 +3,27 @@ import { setTimeout as delay } from "node:timers/promises";
 import mineflayer, { type Bot } from "mineflayer";
 import type { NodeClientSession } from "mine-labs/client";
 import { BOT_PHYSICS_OPTIONS, assertBotPluginsLoaded, loadBotPlugins } from "@aibengineering/mine-ai-mcp";
-import { observeScenarioPlayerPreparation } from "../../scenarios/src/player-preparation.ts";
+import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../../src/world/world-age.ts";
+import { observeScenarioPlayerPreparation } from "./player-preparation.ts";
 
 type PreparationSession = Pick<NodeClientSession, "scenario" | "signal" | "ready" | "arranged">;
 
+/** The wall-clock bound of the wait for the server to read the slot change: two time packets a second apart, with room for a server running slow. */
+const SLOT_CHANGE_WALL_MS = 5_000;
+
+export interface PreparationOptions {
+  /** How long on the wall clock the slot change may wait for its server ticks. */
+  readonly slotChangeWallMs?: number;
+}
+
 /** Physics stays paused until the arranged player and its starting terrain arrive. */
-export async function prepareScenarioBot(bot: Bot, session: PreparationSession): Promise<void> {
+export async function prepareScenarioBot(bot: Bot, session: PreparationSession, options: PreparationOptions = {}): Promise<void> {
   bot.physicsEnabled = false;
   try {
     loadBotPlugins(bot);
     await waitForSpawnAndVitals(bot, session.signal);
     assertBotPluginsLoaded(bot);
+    await startOnSlotZero(bot, session.signal, options.slotChangeWallMs ?? SLOT_CHANGE_WALL_MS);
     await waitForArrangement(bot, session);
     await waitForStandingColumn(bot, session.signal);
   } finally {
@@ -62,6 +72,22 @@ async function waitForSpawnAndVitals(bot: Bot, signal: AbortSignal): Promise<voi
     signal.throwIfAborted();
     if (timeout.aborted) throw new Error(`Bot '${bot.username}' did not spawn and receive vitals within 60 seconds.`);
     throw cause;
+  }
+}
+
+/**
+ * Mineflayer takes the selected hotbar slot the server sends at login, and a reused body keeps the one its last trial
+ * left (`inventory.js:764-767`; `boat-placed-by-use` ends on slot 1). Every action and check assumes slot 0, and Mine Labs
+ * fills the server's selected slot with a declared main hand after this change, so the player is not reported ready
+ * until the server has had `SERVER_ANSWER_TICKS` ticks to read it: it answers a `held_item_slot` with nothing
+ * (`unequip-hand.ts:3`), so the world age moving on is the only proof.
+ */
+async function startOnSlotZero(bot: Bot, signal: AbortSignal, wallMs: number): Promise<void> {
+  if (bot.quickBarSlot === 0) return;
+  signal.throwIfAborted();
+  bot.setQuickBarSlot(0);
+  if ((await waitForWorldAge(bot, SERVER_ANSWER_TICKS, { wallMs, signal })) === "timeout") {
+    throw new Error(`slot 0 not confirmed by ${SERVER_ANSWER_TICKS} server ticks within ${wallMs / 1000} s`);
   }
 }
 

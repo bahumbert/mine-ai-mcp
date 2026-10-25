@@ -1,4 +1,4 @@
-import { holdWaterPosition } from "../../steering/hold-water-position.js";
+import { holdWaterPosition, stanceFloorAt } from "../../steering/hold-water-position.js";
 /**
  * Make obsidian where there is none: water flowing onto lava sources.
  *
@@ -17,15 +17,16 @@ import { holdWaterPosition } from "../../steering/hold-water-position.js";
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { liveBlockReader } from "../../mineflayer/world.js";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { isLiquidSource } from "../../../world/liquid.js";
 import {
-  countFormations,
   HORIZONTAL,
   isReplaceableForPlacement,
   pourAim,
   settledFormations,
+  watchFormations,
   USE_RAY_REACH,
   type PourAim,
   type useItemAt,
@@ -46,6 +47,9 @@ export const CAST_REACH = 2;
 const EXPOSING_BREAKS = 3;
 /** The scoop is retried once: the poured cell spends a moment under its own flow. */
 const SCOOP_ATTEMPTS = 2;
+
+/** The one block a cast makes: water poured onto lava sources. A code-only fact: the game's recipe, not a data file. */
+export const CAST_BLOCK = "obsidian";
 
 /** The physical effects a cast needs, which the mine request already owns. */
 export interface CastPhysics {
@@ -85,7 +89,7 @@ function castScore(bot: Bot, sources: ReadonlySet<string>, landing: Vec3): numbe
     const beside = landing.plus(direction);
     if (sources.has(cellKey(beside))) return true;
     // A buried source's stone lid blocks flow from a neighbouring shore cell.
-    return sources.has(cellKey(beside.offset(0, -1, 0))) && isReplaceableForPlacement(bot.blockAt(beside));
+    return sources.has(cellKey(beside.offset(0, -1, 0))) && isReplaceableForPlacement(bot.blockAt(beside), bot.version);
   });
   return reachesSource ? 1 : null;
 }
@@ -190,9 +194,11 @@ export async function castOntoPool(
 
   // The newly poured flow can otherwise carry the bot away while formations
   // settle, leaving both the original scoop ray and the bucket out of reach.
-  const releaseStance = holdWaterPosition(bot, physics.signal);
+  // A pour from a floor (the cast needs the body on the ground) keeps it there if the pour reaches the body.
+  const floor = stanceFloorAt(liveBlockReader(bot), bot.entity.position.floored());
+  const releaseStance = holdWaterPosition(bot, physics.signal, undefined, floor);
   try {
-    const before = countFormations(bot, aim.landing);
+    const watch = watchFormations(bot, aim.landing);
     const use = await physics.useItem(bot, {
       item,
       lookAt: aim.lookAt,
@@ -203,11 +209,11 @@ export async function castOntoPool(
     if (use.kind === "failed") return { kind: "failed", reason: use.error };
     // Water spreads for a while and turns every source it reaches; counting the
     // obsidian is this step's evidence that the pour was worth anything.
-    const after = await settledFormations(bot, aim.landing, physics.signal);
+    const formed = await settledFormations(bot, watch, physics.signal);
     return {
       kind: "cast",
       landing: aim.landing,
-      obsidianFormed: Math.max(0, after.obsidian - before.obsidian),
+      obsidianFormed: formed[CAST_BLOCK] ?? 0,
       waterRecovered: await scoopBack(bot, physics, aim),
     };
   } finally {

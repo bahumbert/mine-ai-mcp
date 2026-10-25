@@ -1,0 +1,43 @@
+template: ../../templates/flat-single-action.yaml
+
+name: place-block-resumes-after-hunger
+tags: [regression]
+description: >-
+  Resume credit (spec 2026-10-19, S1): a resumed place_block credits only the block its own placement packet put
+  down, never one a reflex put in a cell near the target. The actor carries four cobblestone and cooked beef and is
+  asked to place one cobblestone 40 blocks away; the hunger effect makes the hunger reflex claim the body on the way
+  (it eats and says resume). The request must finish once, name [HUNGER] among its interruptions, leave the block at
+  the target and exactly one cobblestone fewer (three carried: a second placement would leave two).
+
+reset:
+  - "fill -4 -59 -6 50 -40 6 air"
+
+geometry:
+  - fill: { block: stone, from: [-4, -60, -6], to: [50, -60, 6] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: cobblestone, count: 4 }
+      - { item: cooked_beef, count: 16 }
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  # Hunger from the moment the action walks off: the bot stands still until the request starts, and the effect is
+  # renewed every tick while it is away from where it started, so food falls below the reflex's threshold in seconds.
+  - "execute as Actor unless entity @s[x=0,y=-59,z=0,distance=..3] run effect give @s minecraft:hunger 2 255 true"
+
+params:
+  action: place_block
+  input: { block_name: cobblestone, x: 40, y: -59, z: 0 }
+  expect: { status: succeeded, interruptionContains: "[HUNGER]" }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: blocksAt, block: cobblestone, positions: [[40, -59, 0]] }
+    - { kind: hasItem, who: Actor, item: cobblestone, count: 3 }
+    - { kind: survive, who: Actor, seconds: 5 }

@@ -8,13 +8,14 @@ import type { MineRequest, MineTarget } from "./mine-process.js";
 const DROP_PROXIMITY_SQUARED = 9;
 
 /**
- * How long a just-broken source remains a provisional drop target.
+ * How long a just-broken source remains a provisional drop target while no item entity has appeared.
  *
- * Baritone bounds the same wait with `mineDropLoiterDurationMSThanksLouca` and
- * keeps its expected drops in a map with timestamps. Once an item entity is
- * observed, its live position owns the target instead.
+ * Baritone bounds the same wait with `mineDropLoiterDurationMSThanksLouca` (250 ms), but a server seconds behind
+ * (run 15) spawns the drop later, and the collect had ended by then: the loiter is 5 s of the monotonic clock, the
+ * clock the caller passes to `noteBreak` and `update`. It ends at once when the item entity appears, so a picked-up
+ * drop never leaves the break anticipated; one that never spawns is counted in `lostDrops`.
  */
-const DROP_LOITER_MS = 250;
+const DROP_LOITER_MS = 5_000;
 
 /**
  * Mineflayer can apply an item's destroy-entity packet before its inventory
@@ -47,6 +48,7 @@ export class MineDropTracker {
     }
   >();
   readonly #anticipatedDrops = new Map<string, { readonly position: BlockPosition; readonly expiresAt: number }>();
+  #lostDrops = 0;
   /** When the bot began overlapping each live item, and the gain it had then. */
   readonly #touching = new Map<number, { readonly since: number; readonly inventoryGain: number }>();
 
@@ -56,6 +58,11 @@ export class MineDropTracker {
     private readonly droppedBlacklist: ReadonlySet<number>,
     private readonly anticipatedBlacklist: ReadonlySet<string>,
   ) {}
+
+  /** Breaks whose item entity never appeared within the loiter. */
+  get lostDrops(): number {
+    return this.#lostDrops;
+  }
 
   get anticipating(): boolean {
     return this.#anticipatedDrops.size > 0;
@@ -84,12 +91,15 @@ export class MineDropTracker {
 
   update(targets: readonly MineTarget[], observedAt: number): MineTarget[] {
     const found = [...targets];
+    // An anticipated drop ranks after every block and live drop: with 5 s of loiter, a collect whose blocks rarely
+    // drop (leaves for apples) would otherwise walk to and wait on each broken cell. It is a target only at the end.
+    const nothingElseToDo = targets.length === 0;
     // Baritone keeps a just-broken location in `anticipatedDrops` while the
     // server is between its block-change and item-spawn packets. Without that
     // bridge, removing the final requested block briefly invalidates the goal
     // and ends collection before its drop can exist.
     for (const [key, anticipated] of this.#anticipatedDrops) {
-      if (anticipated.expiresAt <= observedAt || this.anticipatedBlacklist.has(key)) {
+      if (this.anticipatedBlacklist.has(key)) {
         this.#anticipatedDrops.delete(key);
         continue;
       }
@@ -106,11 +116,18 @@ export class MineDropTracker {
             left.position.distanceSquared(asVec3(anticipated.position)) -
             right.position.distanceSquared(asVec3(anticipated.position)),
         )[0];
+      if (!spawnedItem && anticipated.expiresAt <= observedAt) {
+        this.#anticipatedDrops.delete(key);
+        this.#lostDrops++;
+        continue;
+      }
       if (spawnedItem) {
+        // The item entity owns the target from here (observed drops below); the anticipation has done its job.
+        this.#anticipatedDrops.delete(key);
         if (!found.some((target) => target.kind === "drop" && target.entityId === spawnedItem.id)) {
           found.push({ position: spawnedItem.position.floored(), kind: "drop", entityId: spawnedItem.id });
         }
-      } else if (!found.some((target) => cellKey(target.position) === key)) {
+      } else if (nothingElseToDo && !found.some((target) => cellKey(target.position) === key)) {
         found.push({ position: anticipated.position, kind: "anticipated_drop" });
       }
     }

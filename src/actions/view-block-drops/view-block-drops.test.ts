@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { formatViewBlockDropsResult, parseViewBlockDropsRequest, viewBlockDrops } from "./index.js";
 
-function bot(version: string): Pick<Bot, "registry" | "version"> {
-  return { version, registry: minecraftData("1.21.4") as unknown as Bot["registry"] };
+/** A bot on 1.21.4's registry that reports `version` as its server's, in `dimension`, with the `loaded` mobs around it. */
+function bot(version: string, dimension = "overworld", loaded: readonly string[] = []) {
+  const entities = Object.fromEntries(loaded.map((name, index) => [index + 2, { name, position: new Vec3(index + 3, 64, 0) }]));
+  const { bot } = createFakeBot({ version: "1.21.4", dimension, entities });
+  bot.version = version;
+  return bot;
 }
 
 test("items list the blocks an ordinary break gathers them from; blocks list everything they drop", async () => {
@@ -44,10 +48,22 @@ test("items also list the mobs that drop them, hostile ones marked", async () =>
   // Live 2026-10-04: with block loot tables only, a bed's wool was planned from string, never from sheep.
   const result = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["white_wool", "beef", "string"] }), {});
   const mobs = (item: string) => result.drops.items.find((entry) => entry.item === item)!.mobs;
-  assert.deepEqual(mobs("white_wool"), [{ mob: "sheep", chance: 1, hostile: false }]);
+  assert.deepEqual(mobs("white_wool"), [{ mob: "sheep", chance: 1, hostile: false, spawnsInDimension: true, loaded: 0 }]);
   assert.ok(mobs("beef").some((source) => source.mob === "cow" && !source.hostile));
   assert.ok(mobs("string").some((source) => source.mob === "spider" && source.hostile));
   assert.match(formatViewBlockDropsResult(result), /white_wool: from white_wool; hunted from sheep/u);
+});
+
+test("mob sources are ordered by loaded, then spawning in the bot's dimension, with hostile from the hunt category", async () => {
+  const request = parseViewBlockDropsRequest({ items: ["porkchop"] });
+  const mobs = async (dimension: string, loaded: readonly string[] = []) =>
+    (await viewBlockDrops(bot("1.21.4", dimension, loaded), request, {})).drops.items[0]!.mobs;
+  assert.equal((await mobs("overworld"))[0]!.mob, "pig");
+  assert.equal((await mobs("the_nether"))[0]!.mob, "hoglin");
+  assert.equal((await mobs("overworld", ["hoglin", "hoglin"]))[0]!.mob, "hoglin");
+  assert.equal((await mobs("overworld", ["hoglin", "hoglin"]))[0]!.loaded, 2);
+  const hoglin = (await mobs("overworld")).find((source) => source.mob === "hoglin")!;
+  assert.deepEqual({ hostile: hoglin.hostile, spawnsInDimension: hoglin.spawnsInDimension }, { hostile: true, spawnsInDimension: false });
 });
 
 test("at least one item or block is asked; unknown names and versions without data are reported", async () => {
@@ -60,4 +76,17 @@ test("at least one item or block is asked; unknown names and versions without da
   const older = await viewBlockDrops(bot("1.20.1"), parseViewBlockDropsRequest({ items: ["raw_iron"] }), {});
   assert.equal(older.status, "failed");
   assert.match(older.error ?? "", /^\[DROP_DATA_UNAVAILABLE\]/u);
+});
+
+test("the text names the loaded count and a source that does not spawn in this dimension", async () => {
+  const result = await viewBlockDrops(bot("1.21.4", "overworld", ["hoglin"]), parseViewBlockDropsRequest({ items: ["porkchop"] }), {});
+  assert.match(formatViewBlockDropsResult(result), /hunted from hoglin \(hostile\) \(1 loaded nearby\), pig/u);
+  const quiet = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["porkchop"] }), {});
+  assert.match(formatViewBlockDropsResult(quiet), /pig, hoglin \(hostile\) \(does not spawn in this dimension\)/u);
+});
+
+test("an unknown item that is a mob is answered with its drops", async () => {
+  const unknown = await viewBlockDrops(bot("1.21.4"), parseViewBlockDropsRequest({ items: ["cow", "raw_beef"] }), {});
+  assert.equal(unknown.status, "failed");
+  assert.match(unknown.error ?? "", /cow is a mob, not an item: it drops beef, leather \(get_items beef hunts it\), raw_beef \(closest: beef, cooked_beef\)/u);
 });

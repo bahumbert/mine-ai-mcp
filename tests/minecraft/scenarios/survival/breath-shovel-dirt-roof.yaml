@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: breath-shovel-dirt-roof
+tags: [regression]
+description: >-
+  Water consolidation W3 (owner 2026-10-19): the breath reflex digs its roof only when the dig and the rise end before
+  the air runs out plus at most half the bot's health (run 16, Yuki: a stone roof dug by hand under water ran to her
+  death). A roof that fits must still be dug: a bot idles in a sealed one-cell water pocket in bedrock, a dirt roof
+  over its head and open air above it, a stone shovel carried. Only the breath reflex can save it: it must dig the dirt
+  with the shovel and rise to breathe.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -5 -63 -5 5 -50 5 air"
+
+geometry:
+  - fill: { block: bedrock, from: [-3, -63, -3], to: [3, -57, 3] }
+  # The pocket: feet and head cells of water, the dirt roof over the head, air above the roof.
+  - fill: { block: water, from: [0, -60, 0], to: [0, -59, 0] }
+  - fill: { block: dirt, from: [0, -58, 0], to: [0, -58, 0] }
+  - fill: { block: air, from: [0, -57, 0], to: [0, -57, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: stone_shovel, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/idle-then-breathe.ts
+
+params:
+  idleSeconds: 40
+  minimumAirTicks: 200
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: blockAt, who: Actor, pos: [0, -58, 0], block: air }
+    - { kind: health, who: Actor, health: 14 }
+    - { kind: completion, who: Actor }

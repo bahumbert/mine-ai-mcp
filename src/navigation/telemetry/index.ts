@@ -120,6 +120,13 @@ export type NavigationEvent =
       readonly atMs: number;
       readonly start: { readonly x: number; readonly y: number; readonly z: number };
     }
+  | {
+      /** A rule of the bot's own style was set aside for this run so that it can leave a pocket: only `dig_straight_down` so far. */
+      readonly kind: "escape_relaxed";
+      readonly runId: string;
+      readonly atMs: number;
+      readonly relaxed: readonly string[];
+    }
   | { readonly kind: "cleanup_completed"; readonly runId: string; readonly atMs: number }
   | {
       readonly kind: "run_settled";

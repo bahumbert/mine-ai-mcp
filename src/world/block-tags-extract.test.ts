@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { zip } from "../test-support/zip.js";
-import { extractBlockTags } from "./block-tags-extract.js";
+import { extractBlockTags, extractTags } from "./block-tags-extract.js";
 
 const tag = (name: string, values: unknown[]) => ({ [`data/minecraft/tags/block/${name}.json`]: JSON.stringify({ values }) });
 
@@ -28,4 +28,9 @@ test("a tag that includes itself through another ends instead of looping", () =>
   const tags = extractBlockTags(JAR);
   assert.deepEqual(tags.loop_a, ["stone"]);
   assert.deepEqual(tags.loop_b, ["stone"]);
+});
+
+test("the same extraction reads the item tags of the jar, block tags left out", () => {
+  const tags = extractTags(JAR, "item");
+  assert.deepEqual(tags, { logs: ["oak_log"] });
 });

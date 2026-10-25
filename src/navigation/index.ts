@@ -35,20 +35,21 @@ export type {
   BreakBlockInPlaceResult,
 } from "./execution/in-place-break.js";
 export { SupportedPositionController } from "./execution/supported-position-controller.js";
-export { setSneaking } from "./mineflayer/sneak.js";
+export { setSneaking, writeShiftKey } from "./mineflayer/sneak.js";
 export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/portal-entry.js";
 export { createNavigationRuntime, createMovements } from "./runtime.js";
+export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
-export { type SwimCellReader, swimExitPath } from "./world/swimming.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
-export { hasSupportedCorridor } from "./world/block-geometry.js";
-export { isPassable, isHeadPassable, isSafeSupport } from "./world/block-geometry.js";
+export { hasSupportedCorridor, heldByBlockAt } from "./world/block-geometry.js";
+export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
 
 // The navigation transaction.
 export { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "./navigate.js";
 export type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 export { describeCalculationFailure, type NavigationCalculationFailure } from "./orchestration/process-events.js";
+export { RELAXED_DIG_STRAIGHT_DOWN, RELAXED_FLOWING_WATER } from "./orchestration/escape-policy.js";
 
 // Goals: what a route is asked to satisfy.
 export type { Goal } from "./goals/goal.js";
@@ -71,7 +72,9 @@ export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
 
 // Movement policy: what a route may do, and what it costs.
 export { STANDARD_SCAFFOLD_ITEMS, TERRAIN_BREAK_PENALTY } from "./mineflayer/movement-policy.js";
-export { observeMineflayerBlock } from "./mineflayer/world.js";
+export { longestBreakDurationMs } from "./mineflayer/break-duration.js";
+export { SWIM_UP_TICKS } from "./world/swimming.js";
+export { liveBlockReader, observeMineflayerBlock } from "./mineflayer/world.js";
 export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";
@@ -82,3 +85,4 @@ export type { NavigationEvent } from "./telemetry/index.js";
 export { canOccupyWater } from "./mineflayer/water.js";
 
 export { canAccessLiquid, liquidAccessGoal } from "./goals/liquid-access.js";
+export { dryLandGoal } from "./goals/dry-land.js";

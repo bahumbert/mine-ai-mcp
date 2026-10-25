@@ -1,4 +1,4 @@
-import { COAST_TICKS } from "../../world/player-physics.js";
+import { COAST_TICKS, PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import {
   blockPosition,
   type BlockObservation,
@@ -79,6 +79,57 @@ export function safeSupportingCell(world: WorldView, position: Position3): Block
       if (isSafeSupport(floor) && (!nearest || distance(at) < distance(nearest))) nearest = at;
     }
   return nearest;
+}
+
+/**
+ * How far a collision top may sit from the feet and still hold the body. Our choice, unmeasured as a game fact (no
+ * contract check reads how close to a top the server settles a body). It takes in snow of two layers and a lily pad
+ * (tops of 0.1 or less) and a bank top level with the water: a boat resting 0.477 below the water-level top (contract
+ * `boat-follows-vehicle-move`) and 0.5625 high (plan 2026-10-25-run20-boat-fixes, unmeasured here) puts her feet 0.0855
+ * above that bank's top, inside this, so the bank edge holds her and the boat beside it is left alone (intended).
+ */
+const HOLD_TOLERANCE = 0.1;
+
+/**
+ * Whether a block's collision holds the body's feet up: a top of a collision box under the footprint within
+ * {@link HOLD_TOLERANCE} of the feet. The body rests on a block, not on an entity, so false at a position the server
+ * stands on a boat (a boat floats above a carpet or a slab it rests on, and over water). True wins over unknown; null
+ * when nothing holds her and a cell under the footprint is not loaded. Read from the collision boxes, not
+ * from `traits.empty` (a snow layer is "empty" to the raycast yet its box holds a body up; liquids have no box); the
+ * cell below the first is read too, for a box taller than its cell (a fence, 1.5).
+ */
+export function heldByBlockAt(read: WorldView["blockAt"], feet: Position3): boolean | null {
+  let unknown = false;
+  for (const cell of footprintCellsBelow(feet)) {
+    const block = read(cell.x, cell.y, cell.z);
+    if (block.kind === "unloaded") unknown = true;
+    else if (block.collisionShapes.some((box) => boxHoldsFeet(box, cell, feet))) return true;
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * The cells a body's footprint may rest on: the column at the feet, up to the cell a top within {@link HOLD_TOLERANCE}
+ * above them lies in (snow two layers, a lily pad: tops of 0.1 or less), and the cell below it for a box taller than its cell.
+ */
+function footprintCellsBelow(feet: Position3): BlockPosition[] {
+  const top = Math.floor(feet.y + HOLD_TOLERANCE);
+  const cells: BlockPosition[] = [];
+  for (let x = Math.floor(feet.x - PLAYER_HALF_WIDTH); x <= Math.floor(feet.x + PLAYER_HALF_WIDTH); x++)
+    for (let z = Math.floor(feet.z - PLAYER_HALF_WIDTH); z <= Math.floor(feet.z + PLAYER_HALF_WIDTH); z++)
+      cells.push({ x, y: top, z }, { x, y: top - 1, z });
+  return cells;
+}
+
+/** A collision box of the cell whose top is at the feet and which lies under the footprint. */
+function boxHoldsFeet(box: CollisionBox, cell: BlockPosition, feet: Position3): boolean {
+  return (
+    Math.abs(cell.y + box.maxY - feet.y) <= HOLD_TOLERANCE &&
+    cell.x + box.minX < feet.x + PLAYER_HALF_WIDTH &&
+    cell.x + box.maxX > feet.x - PLAYER_HALF_WIDTH &&
+    cell.z + box.minZ < feet.z + PLAYER_HALF_WIDTH &&
+    cell.z + box.maxZ > feet.z - PLAYER_HALF_WIDTH
+  );
 }
 
 /**
@@ -273,6 +324,22 @@ export function isLiquid(block: BlockObservation): boolean {
 /** A loaded cell holding neither liquid nor anything unloaded: dry, whatever else it holds. */
 export function isDry(block: BlockObservation): boolean {
   return block.kind === "loaded" && (block.bits & TRAIT_LIQUID) === 0 && !block.traits.waterlogged;
+}
+
+/** A loaded cell with no collision box and nothing wet in it: air, or a plant that holds no water. */
+export function isDryAir(block: BlockObservation): boolean {
+  return block.kind === "loaded" && block.traits.empty && isDry(block);
+}
+
+/**
+ * Whether a body stands here on dry ground, as routes judge cells: feet and head dry and passable (a carpet or snow
+ * layer is walked on at floor level), safe support below. Unloaded cells are never dry ground.
+ */
+export function standsOnDryGround(read: WorldView["blockAt"], feet: BlockPosition): boolean {
+  const body = read(feet.x, feet.y, feet.z);
+  const head = read(feet.x, feet.y + 1, feet.z);
+  return isPassable(body) && isDry(body) && isHeadPassable(head) && isDry(head) &&
+    isSafeSupport(read(feet.x, feet.y - 1, feet.z));
 }
 
 export function isFalling(block: BlockObservation): boolean {

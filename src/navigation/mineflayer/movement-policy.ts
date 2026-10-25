@@ -1,6 +1,7 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
+import { sealedPitRefusal } from "./sealed-pit-refusal.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
  * and what each costs, answered with Mineflayer's own knowledge of blocks,
@@ -13,14 +14,14 @@ import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameO
  * to save a corner.
  */
 import type { Bot } from "mineflayer";
+import { lavaSpreadsIntoBody } from "../../world/lava-flow.js";
 import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
-import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
+import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
-import { isDeepOpenWater, type WaterAt } from "../world/deep-water.js";
-import { OPEN_COLUMN_REACH } from "../world/swimming.js";
+import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
   packKey,
   type BlockObservation,
@@ -30,30 +31,6 @@ import {
 } from "../world/world.js";
 import { blockClass, observeMineflayerBlock } from "./world.js";
 import { tagsOf } from "../../world/block-tags.js";
-
-/**
- * Whether a bot with its feet in this cell is out on deep open water. The sea above counts as much as the sea under
- * the feet: a bot on the sea floor stands in water too shallow to be "deep" by its own cell alone (live 2026-10-10:
- * stranded on the floor, every way up refused as a swim across deep water). So the whole water column over the feet is
- * asked. Already swimming (feet and head in water) under a roof is at sea too: a 1-wide roofed pocket fails the
- * open-water span test (live 2026-10-10), and refusing the sea there leaves no way out. With open air over the water
- * (a river mouth, a shore) it is not: run 7 swam ~130 blocks out to sea that way. `solidAt` says whether a cell holds
- * something solid (false when not loaded).
- */
-export function feetAtSea(water: WaterAt, feet: BlockPosition, solidAt: (x: number, y: number, z: number) => boolean): boolean {
-  const roofed = (): boolean => {
-    for (let y = feet.y; y <= feet.y + OPEN_COLUMN_REACH; y++) {
-      if (water(feet.x, y, feet.z)) continue;
-      return solidAt(feet.x, y, feet.z);
-    }
-    return false;
-  };
-  let answer = isDeepOpenWater(water, feet.x, feet.y - 1, feet.z) ||
-    (water(feet.x, feet.y, feet.z) && water(feet.x, feet.y + 1, feet.z) && roofed());
-  for (let y = feet.y; !answer && water(feet.x, y, feet.z) && y <= feet.y + OPEN_COLUMN_REACH; y++)
-    answer = isDeepOpenWater(water, feet.x, y, feet.z);
-  return answer;
-}
 
 /** The only carried blocks standard navigation may spend to create a route: the cheap, plentiful block of each terrain. */
 export const STANDARD_SCAFFOLD_ITEMS = DEFAULT_SCAFFOLD_BLOCKS;
@@ -183,22 +160,44 @@ function liquidAt(world: WorldView, x: number, y: number, z: number): "source" |
  * checks separately prevent dropping a dry miner through an aquifer roof.
  */
 function opensIntoLiquid(world: WorldView, x: number, y: number, z: number): boolean {
-  const above = world.blockAt(x, y + 1, z);
-  if (above.kind === "loaded" && above.traits.liquid !== null) return true;
+  return liquidsOpenedInto(world, x, y, z).length > 0;
+}
 
+/** What a liquid cell a break would open into is: lava, a water source, or flowing water. */
+type OpenedLiquid = "lava" | "source" | "flowing";
+
+/** Every liquid cell that breaking the block would open into, by the rule of `opensIntoLiquid`. */
+function liquidsOpenedInto(world: WorldView, x: number, y: number, z: number): OpenedLiquid[] {
+  const opened: OpenedLiquid[] = [];
+  const note = (cx: number, cy: number, cz: number) => {
+    const block = world.blockAt(cx, cy, cz);
+    if (block.kind === "loaded" && block.traits.liquid !== null)
+      opened.push(block.traits.liquid === "lava" ? "lava" : block.traits.liquidSource ? "source" : "flowing");
+  };
+  const above = world.blockAt(x, y + 1, z);
+  if (above.kind === "loaded" && above.traits.liquid !== null) note(x, y + 1, z);
   for (const [dx, dz] of [
     [1, 0],
     [-1, 0],
     [0, 1],
     [0, -1],
   ] as const) {
-    if (above.kind === "loaded" && above.traits.empty && liquidAt(world, x + dx, y + 1, z + dz)) return true;
+    if (above.kind === "loaded" && above.traits.empty && liquidAt(world, x + dx, y + 1, z + dz)) note(x + dx, y + 1, z + dz);
     const adjacent = liquidAt(world, x + dx, y, z + dz);
     if (adjacent === null) continue;
-    if (adjacent === "source") return true;
-    if (liquidAt(world, x + dx, y - 1, z + dz) === null) return true;
+    if (adjacent === "source" || liquidAt(world, x + dx, y - 1, z + dz) === null) note(x + dx, y, z + dz);
   }
-  return false;
+  return opened;
+}
+
+/**
+ * Whether breaking the block would let in flowing water only: every liquid it opens into is a non-source water cell, and
+ * at least one is (a break that opens into nothing needs no exception). A source or any lava keeps the refusal. Asked
+ * by an escape leg alone (owner, 2026-10-18, Sana: falling water beside her cell shut her in for 164 minutes).
+ */
+function opensOnlyIntoFlowingWater(world: WorldView, x: number, y: number, z: number): boolean {
+  const opened = liquidsOpenedInto(world, x, y, z);
+  return opened.length > 0 && opened.every((liquid) => liquid === "flowing");
 }
 
 function dryGroundedDigTime(bot: Bot, block: WorldBlock, item: InventoryItem | null): number {
@@ -400,6 +399,8 @@ export const MAXIMUM_BUCKET_DROP = 80;
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };
 const DEEP_WATER_STEP: PolicyDecision = { kind: "prohibited", reason: DEEP_WATER_REASON };
 const AVOIDED_STEP: PolicyDecision = { kind: "prohibited", reason: "movement policy avoids this block" };
+/** Lava beside or above the cell flows into it on its next update; an escape leg prices this instead (`relaxedForEscape`). */
+const LAVA_SPREAD_STEP: PolicyDecision = { kind: "prohibited", reason: LAVA_SPREAD_REASON };
 const OPENS_INTO_LIQUID: PolicyDecision = {
   kind: "prohibited",
   cause: "opens_into_liquid",
@@ -410,7 +411,7 @@ const OPENS_INTO_LIQUID: PolicyDecision = {
  * that closes its own surface ends in the breath reflex pulling the bot out, again and again (live: dirt for a house
  * site taken from a pond bottom). Gathering and routes take what is on land instead.
  */
-export const BREAK_UNDER_WATER = "the block is under water: the bot never mines under water";
+export { BREAK_UNDER_WATER };
 const UNDER_WATER: PolicyDecision = { kind: "prohibited", reason: BREAK_UNDER_WATER };
 const AVOIDED_BITS = TRAIT_DAMAGING | TRAIT_LAVA;
 
@@ -514,10 +515,7 @@ export function createMineflayerMovementPolicy(
     (observation.kind === "loaded" && avoidedStates[observation.stateId] === 1);
 
   const allowDeepWater = options.allowDeepWater ?? false;
-  const waterIn = (world: WorldView): WaterAt => (x, y, z) => {
-    const block = world.blockAt(x, y, z);
-    return block.kind === "loaded" && (block.traits.liquid === "water" || block.traits.waterlogged);
-  };
+  const waterIn = (world: WorldView): WaterAt => waterAtOf((x, y, z) => world.blockAt(x, y, z));
   // Whether the bot itself is out on deep water, read once per cell it stands in (search asks of every step).
   let seaCell = "";
   let seaAnswer = false;
@@ -526,10 +524,7 @@ export function createMineflayerMovementPolicy(
     const key = `${feet.x},${feet.y},${feet.z}`;
     if (key !== seaCell) {
       seaCell = key;
-      seaAnswer = feetAtSea(waterIn(world), feet, (x, y, z) => {
-        const block = world.blockAt(x, y, z);
-        return block.kind === "loaded" && block.collisionShapes.length > 0;
-      });
+      seaAnswer = feetAtSea((x, y, z) => world.blockAt(x, y, z), feet);
     }
     return seaAnswer;
   };
@@ -547,8 +542,8 @@ export function createMineflayerMovementPolicy(
     confirmBreak: (observation, position, world) => {
       if (observation.kind === "unloaded") return unloaded.decision;
       if (refusedAtCell(observation, position)) return prohibited.decision;
-      const inRegion = regionRefusal(position.x, position.y, position.z);
-      if (inRegion !== null) return inRegion;
+      const refused = regionRefusal(position.x, position.y, position.z) ?? sealedPitRefusal(bot, position.x, position.y, position.z);
+      if (refused !== null) return refused;
       if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return UNDER_WATER;
       return opensIntoLiquid(world, position.x, position.y, position.z) ? OPENS_INTO_LIQUID : ALLOWED_STEP;
     },
@@ -560,8 +555,8 @@ export function createMineflayerMovementPolicy(
       // given: a requested break is judged by cell, and a protected cell
       // refuses before the tool is questioned.
       if (refusedAtCell(observation, position)) return prohibited;
-      const inRegion = regionRefusal(position.x, position.y, position.z);
-      if (inRegion !== null) return { decision: inRegion, tool: verdict.tool };
+      const refused = regionRefusal(position.x, position.y, position.z) ?? sealedPitRefusal(bot, position.x, position.y, position.z);
+      if (refused !== null) return { decision: refused, tool: verdict.tool };
       if (verdict === unharvestable) return verdict;
       if (liquidAt(world, position.x, position.y + 1, position.z) !== null) return { decision: UNDER_WATER, tool: verdict.tool };
       // Last, and with the tool it would have used: a caller that owns the
@@ -585,6 +580,7 @@ export function createMineflayerMovementPolicy(
         const observation = world.blockAt(x, y + dy, z);
         if (avoids(observation)) return AVOIDED_STEP;
       }
+      if (lavaSpreadsIntoBody(world, x, y, z, bot.game.dimension)) return LAVA_SPREAD_STEP;
       if (!allowDeepWater && isDeepOpenWater(waterIn(world), x, y, z) && !atSea(world)) return DEEP_WATER_STEP;
       return ALLOWED_STEP;
     },
@@ -602,6 +598,7 @@ export function createMineflayerMovementPolicy(
   return Object.freeze({
     ...policy,
     ...(ownRegionEscape !== undefined && { ownRegionEscape }),
+    opensOnlyIntoFlowingWater: (x: number, y: number, z: number, world: WorldView) => opensOnlyIntoFlowingWater(world, x, y, z),
     get allowDownward() {
       return readNavigationPolicy(bot).dig_straight_down;
     },

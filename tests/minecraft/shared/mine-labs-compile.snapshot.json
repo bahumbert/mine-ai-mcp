@@ -1,0 +1,6518 @@
+{
+ "tests/minecraft/contract/scenarios/air-supply-under-water.yaml": {
+  "sha256": "7206966d78ccd4f76e48d462fff09961f15d77a8978bdd5934f6e8122d4ffaeb",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock -1 -60 0 glass",
+    "setblock 1 -60 0 glass",
+    "setblock 0 -60 -1 glass",
+    "setblock 0 -60 1 glass",
+    "setblock -1 -59 0 glass",
+    "setblock 1 -59 0 glass",
+    "setblock 0 -59 -1 glass",
+    "setblock 0 -59 1 glass",
+    "setblock 0 -60 0 water"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/boat-dismount-ignored.yaml": {
+  "sha256": "97de29cc6ef2b8771d65197ec55ca252e9c6ba8185e01597ee9f662c092ddbdc",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [
+    "summon minecraft:oak_boat 2.5 -60 0.5"
+   ],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/boat-get-off-by-shift.yaml": {
+  "sha256": "e8607cfde8cddf013920189dbf995eb6c19267279fee2cbe51fbfd2bd8a974e9",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [
+    "summon minecraft:oak_boat 2.5 -60 0.5"
+   ],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/columns-hold-cells.yaml": {
+  "sha256": "fc84d7cac20dbf257bcb5164489ed692ab3f3ba87e68d9c0026f1caa70d06d97",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock 2 -60 0 oak_stairs[facing=east,half=top]",
+    "setblock -3 -60 -4 gold_block"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/dig-time-and-update.yaml": {
+  "sha256": "905ac70e787bcf835d72b495f7828ae8f19fbbc0ec9af8ec24568aeca5349607",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock -1 -60 0 glass",
+    "setblock -1 -59 0 glass",
+    "setblock 0 -60 1 glass",
+    "setblock 0 -59 1 glass",
+    "setblock 0 -60 -1 glass",
+    "setblock 0 -59 -1 glass",
+    "setblock 0 -58 0 glass",
+    "setblock 2 -60 0 glass",
+    "setblock 1 -60 1 glass",
+    "setblock 1 -60 -1 glass",
+    "setblock 2 -59 0 glass",
+    "setblock 1 -59 1 glass",
+    "setblock 1 -59 -1 glass",
+    "setblock 1 -58 0 glass",
+    "setblock 1 -60 0 dirt",
+    "setblock 1 -59 0 dirt"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/equip-hand-and-off-hand.yaml": {
+  "sha256": "820d9109bbae92ea8d3c3e253667326eebee23423808f327fafac8cc763e99ba",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/find-blocks-matching.yaml": {
+  "sha256": "05493d3d9be497a57a3b5f4d8148ed0c241fd2faacc21302e1ea619b95a48e02",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock 0 -60 4 gold_block",
+    "setblock 3 -60 0 gold_block",
+    "setblock 0 -60 2 gold_block"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/items-match-slots.yaml": {
+  "sha256": "88a589a16429be7b4ad398d4fd64d32eadb46873781cae10b6f0c04d76dfae5a",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/placement-block-update.yaml": {
+  "sha256": "82ee0258f30074974a69962258ba28958b7a1520a0cb01d0230f320020046380",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/state-id-agrees.yaml": {
+  "sha256": "7da854aff20ea96be305a9fa1b6d54a7e07f7630a4dd0b97e1d85e69d1620a0e",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock 2 -60 0 oak_stairs[facing=east,half=top]"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/stop-digging-both-windows.yaml": {
+  "sha256": "e81f7baf8930beee8a52c3f5f13856514fd48dfae2959128eff5bc9ad9196a42",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock 1 -60 0 dirt",
+    "setblock -1 -60 0 dirt"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/thin-block-shapes.yaml": {
+  "sha256": "8e02f09aae600858dab16dd8f7b2bc871f2b30c8d0ce478e11b08823f9ee7f2b",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air",
+    "setblock -2 -60 2 white_carpet",
+    "setblock 0 -60 2 snow[layers=1]",
+    "setblock 2 -60 2 oak_fence",
+    "setblock 4 -60 2 stone_slab[type=bottom]"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/toss-count-and-entity.yaml": {
+  "sha256": "48200787911ed9b78460b6ca5ce393a364a0da6c40626830528981cf7faa075e",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/wait-for-ticks-and-age.yaml": {
+  "sha256": "ce2270106573e88c08846d0ea47e89f935b99aeec651982671a220926b28f773",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/contract/scenarios/world-age-per-second.yaml": {
+  "sha256": "d60d026793f4b919ee399797880e0855be17bdec9707e6932567b51aea86d467",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "fill -6 -61 -6 6 -61 6 stone",
+    "fill -6 -60 -6 6 -55 6 air"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/barter/ground-first.yaml": {
+  "sha256": "33933d5c4f8696305de1f9577e12a052252140baa50817bd9e622a9eeb13e45d",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill 3 -60 -1 3 -60 1 stone",
+    "time set noon",
+    "difficulty normal",
+    "gamerule doMobSpawning false",
+    "gamerule doDaylightCycle false"
+   ],
+   "activation": [
+    "summon minecraft:piglin 2 -60 0.5 {IsBaby:0b,IsImmuneToZombification:1b,PersistenceRequired:1b}",
+    "summon minecraft:item 5 -60 0.5 {Item:{id:\"minecraft:ender_pearl\",count:1},PickupDelay:0s}"
+   ],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -8,
+    "minY": -64,
+    "minZ": -9,
+    "maxX": 13,
+    "maxY": -44,
+    "maxZ": 9,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -8 -64 -9 13 -44 9 525 -64 -9"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 525 -64 -9 546 -44 9 -8 -64 -9"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -8,
+      "minY": -64,
+      "minZ": -9,
+      "maxX": 13,
+      "maxY": -44,
+      "maxZ": 9,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 525,
+      "minY": -64,
+      "minZ": -9,
+      "maxX": 546,
+      "maxY": -44,
+      "maxZ": 9,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/bucket/fill-flowing.yaml": {
+  "sha256": "f8b0e9ef2636be09f1bfc4389c8c8de0877e105ccc9b50d93703189c46242f76",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -20 -59 -20 20 -40 20 air",
+    "fill -20 -61 -20 20 -61 20 stone",
+    "fill -20 -60 -20 20 -60 20 stone",
+    "fill 3 -59 -1 12 -59 1 stone",
+    "fill 4 -59 0 11 -59 0 air",
+    "setblock 4 -59 0 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -20 -59 -20 20 -40 20 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -28,
+    "minY": -64,
+    "minZ": -28,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 28,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -28 -64 -28 28 -24 28 540 -64 -28"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -28 596 -24 28 -28 -64 -28"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -28,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 596,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/bucket/pour-farm-hole.yaml": {
+  "sha256": "8a321daf9a3c727eb8ff089a1f9c497b31eeb70c45ed96bedf2dc1ced829499f",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -2 -61 -4 12 -61 4 grass_block",
+    "fill 4 -63 0 4 -61 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/block-states.yaml": {
+  "sha256": "89baf1918ac11f1d0b5b3f63b6bf736cab95a2fb5c072fefdffd49ea1b0b17b1",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -60 -10 14 -60 10 stone",
+    "fill 2 -59 -6 2 -58 -6 cobblestone",
+    "fill 8 -59 -6 8 -58 -6 cobblestone",
+    "fill 4 -59 2 6 -59 2 cobblestone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/build-over-flower.yaml": {
+  "sha256": "b2cb1f681c52298a3796063194d56dd79d0528e60b43997d036294cd6a813b28",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -12 -60 -12 16 -60 12 stone",
+    "fill -1 -60 4 1 -60 4 grass_block",
+    "fill 0 -59 4 0 -59 4 poppy",
+    "fill 1 -59 4 1 -59 4 short_grass",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/build-resumes-after-hunger.yaml": {
+  "sha256": "949dec949e6ee738bfaa10f9d92fee487f4172b877a5db729fb560555c14487d",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -12 -60 -12 16 -60 12 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/keep-built-cells.yaml": {
+  "sha256": "a07bdb5378323cb424348d9064d00209837709290719dc50d026be77db04cb33",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -12 -60 -12 16 -60 12 stone",
+    "fill -2 -59 -2 2 -52 2 cobblestone",
+    "fill -1 -59 -1 1 -52 1 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/place-block-resumes-after-hunger.yaml": {
+  "sha256": "13e810063950d27c49f1a9d5661b64eac9e0cdaee07b9bd62fd6b8f8363b96ce",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -59 -6 50 -40 6 air",
+    "fill -4 -60 -6 50 -60 6 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -59 -6 50 -40 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 58,
+    "maxY": -24,
+    "maxZ": 14,
+    "chunks": 10
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -14 58 -24 14 570 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 570 -64 -14 640 -24 14 -12 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 58,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 10
+     },
+     {
+      "dimension": "overworld",
+      "minX": 570,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 640,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/place-block-slow-server.yaml": {
+  "sha256": "15a1846477f6b9b8a349da8f002e71cfb199e56b583061333c7991361d80ba43",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -60 -6 8 -60 6 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "tick rate 2"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/build/portals-through-leaves.yaml": {
+  "sha256": "4448b03962e809b5cded64e1404b00e76811cda27adc34a909cee19744415c74",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill 1 -60 0 2 -60 0 obsidian",
+    "fill 0 -59 0 0 -57 0 obsidian",
+    "fill 3 -59 0 3 -57 0 obsidian",
+    "fill 1 -56 0 2 -56 0 obsidian",
+    "setblock 0 -60 0 cobblestone",
+    "setblock 3 -60 0 cobblestone",
+    "setblock 0 -56 0 cobblestone",
+    "fill 3 -56 -2 4 -56 0 oak_leaves",
+    "setblock 4 -56 1 oak_leaves",
+    "setblock 4 -57 -1 oak_leaves",
+    "fill 10 -59 -1 13 -56 1 oak_leaves",
+    "fill 20 -59 -1 23 -56 1 oak_leaves",
+    "fill 21 -60 0 22 -60 0 obsidian",
+    "fill 20 -59 0 20 -57 0 obsidian",
+    "setblock 23 -59 0 obsidian",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -8,
+    "minY": -64,
+    "minZ": -10,
+    "maxX": 31,
+    "maxY": -40,
+    "maxZ": 9,
+    "chunks": 6
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -8 -64 -10 31 -40 9 543 -64 -10"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 543 -64 -10 582 -40 9 -8 -64 -10"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -8,
+      "minY": -64,
+      "minZ": -10,
+      "maxX": 31,
+      "maxY": -40,
+      "maxZ": 9,
+      "chunks": 6
+     },
+     {
+      "dimension": "overworld",
+      "minX": 543,
+      "minY": -64,
+      "minZ": -10,
+      "maxX": 582,
+      "maxY": -40,
+      "maxZ": 9,
+      "chunks": 8
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/cast-obsidian.yaml": {
+  "sha256": "a89a3530beb4c55cd828c1c1d8d3d7456155d6f12d950365097730e8581fc6c3",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "time set noon",
+    "difficulty peaceful",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0",
+    "gamerule doFireTick false"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": 1600,
+    "minY": 71,
+    "minZ": 1592,
+    "maxX": 1616,
+    "maxY": 91,
+    "maxZ": 1608,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 1600 71 1592 1616 91 1608 2128 71 1592"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 2128 71 1592 2144 91 1608 1600 71 1592"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": 1600,
+      "minY": 71,
+      "minZ": 1592,
+      "maxX": 1616,
+      "maxY": 91,
+      "maxZ": 1608,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 2128,
+      "minY": 71,
+      "minZ": 1592,
+      "maxX": 2144,
+      "maxY": 91,
+      "maxZ": 1608,
+      "chunks": 4
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/coal-under-sand.yaml": {
+  "sha256": "bebe7b1e83a50a9fed3bbcdcad5bdf596225dda8cabc9f5e47c7eb4e702e24ef",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -20 -59 -20 20 -40 20 air",
+    "fill -16 -60 -16 16 -60 16 stone",
+    "fill -8 -59 -4 0 -52 4 sand",
+    "setblock -4 -57 0 coal_ore",
+    "setblock -4 -57 1 coal_ore",
+    "setblock -4 -56 1 coal_ore",
+    "setblock -4 -58 1 coal_ore",
+    "setblock -5 -58 1 coal_ore",
+    "setblock -3 -57 1 coal_ore",
+    "setblock -4 -57 2 coal_ore",
+    "setblock -4 -58 2 coal_ore",
+    "setblock -4 -56 2 coal_ore",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -20 -59 -20 20 -40 20 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -28,
+    "minY": -64,
+    "minZ": -28,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 28,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -28 -64 -28 28 -24 28 540 -64 -28"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -28 596 -24 28 -28 -64 -28"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -28,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 596,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/dirt-sealed-in-bedrock.yaml": {
+  "sha256": "8009e246aa8d33fa0abd0cd8128cd3ed03081229a58396ab74b3e977f0e656bf",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -20 -59 -20 20 -40 20 air",
+    "fill -20 -64 -20 20 -60 20 stone",
+    "fill 2 -59 -1 4 -56 1 bedrock",
+    "setblock 3 -58 0 dirt",
+    "setblock -10 -59 0 dirt",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -20 -59 -20 20 -40 20 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -28,
+    "minY": -64,
+    "minZ": -28,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 28,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -28 -64 -28 28 -24 28 540 -64 -28"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -28 596 -24 28 -28 -64 -28"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -28,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 596,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/exact-collection-preservation.yaml": {
+  "sha256": "a10b3f9b2ef088bb1f49f0f35d19093b7350ef0cc8a0d5cd8263553615b0a0ad",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -25 -60 -9 9 -54 9 air",
+    "fill -25 -61 -9 -4 -61 9 andesite",
+    "setblock -21 -60 0 birch_door[facing=east,half=lower,hinge=left,open=true,powered=false]",
+    "setblock -21 -59 0 birch_door[facing=east,half=upper,hinge=left,open=true,powered=false]",
+    "setblock -18 -60 0 birch_door[facing=east,half=lower,hinge=left,open=true,powered=false]",
+    "setblock -18 -59 0 birch_door[facing=east,half=upper,hinge=left,open=true,powered=false]",
+    "setblock -15 -60 0 oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]",
+    "setblock -15 -59 0 oak_door[facing=east,half=upper,hinge=left,open=false,powered=false]",
+    "setblock -14 -60 4 coal_ore",
+    "setblock -12 -60 4 coal_ore",
+    "fill -3 -61 -9 9 -61 9 bedrock",
+    "fill -3 -58 -9 9 -58 9 bedrock",
+    "fill 1 -60 -6 5 -59 6 bedrock",
+    "fill 1 -60 0 5 -59 0 air",
+    "setblock 2 -60 0 chest{Items:[{Slot:0b,id:\"minecraft:ender_pearl\",count:12},{Slot:1b,id:\"minecraft:gold_ingot\",count:64},{Slot:2b,id:\"minecraft:gold_ingot\",count:15}]}",
+    "setblock 3 -60 0 crafting_table",
+    "setblock 6 -60 0 chest",
+    "setblock 6 -60 2 crafting_table",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -25 -60 -9 9 -54 9 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -33,
+    "minY": -64,
+    "minZ": -17,
+    "maxX": 17,
+    "maxY": -38,
+    "maxZ": 17,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -33 -64 -17 17 -38 17 529 -64 -17"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 529 -64 -17 579 -38 17 -33 -64 -17"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -33,
+      "minY": -64,
+      "minZ": -17,
+      "maxX": 17,
+      "maxY": -38,
+      "maxZ": 17,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 529,
+      "minY": -64,
+      "minZ": -17,
+      "maxX": 579,
+      "maxY": -38,
+      "maxZ": 17,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/inventory-fills-during-collection.yaml": {
+  "sha256": "10645079028b6645385c5891c29fac2cb96c031370f319598aa73d6eced8a2ac",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "time set noon",
+    "difficulty peaceful",
+    "gamerule doMobSpawning false",
+    "gamerule doDaylightCycle false",
+    "fill 2 -60 0 5 -60 0 stone"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -8,
+    "minY": -64,
+    "minZ": -8,
+    "maxX": 13,
+    "maxY": -44,
+    "maxZ": 8,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -8 -64 -8 13 -44 8 525 -64 -8"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 525 -64 -8 546 -44 8 -8 -64 -8"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -8,
+      "minY": -64,
+      "minZ": -8,
+      "maxX": 13,
+      "maxY": -44,
+      "maxZ": 8,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 525,
+      "minY": -64,
+      "minZ": -8,
+      "maxX": 546,
+      "maxY": -44,
+      "maxZ": 8,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/iron-around-lava.yaml": {
+  "sha256": "2f6f50352df67131697c26be4ddf88fedeecbf115b217fe1081cadd7d82177c4",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -62 -16 20 -40 16 air",
+    "fill -16 -61 -16 20 -61 16 stone",
+    "fill -16 -60 -16 20 -60 16 stone",
+    "fill 3 -60 -4 7 -60 4 lava",
+    "setblock 5 -59 -2 iron_ore",
+    "setblock 5 -59 0 iron_ore",
+    "setblock 5 -59 2 iron_ore",
+    "setblock 11 -59 -2 iron_ore",
+    "setblock 11 -59 0 iron_ore",
+    "setblock 11 -59 2 iron_ore",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -62 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/mixed-resource-site.yaml": {
+  "sha256": "c61a81849965c102416d7dbc3960304496502d4ad87dea837d1337abd3dee7e2",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -16 -63 -16 20 -61 16 bedrock",
+    "fill -12 -60 -12 18 -60 12 andesite",
+    "fill 4 -59 -5 8 -56 5 stone",
+    "fill 4 -58 -4 4 -58 -2 coal_ore",
+    "fill 4 -58 1 4 -58 3 iron_ore",
+    "fill 9 -59 -4 9 -59 4 stone",
+    "fill 10 -59 -4 10 -58 4 stone",
+    "fill 11 -57 -2 11 -57 2 copper_ore",
+    "fill 5 -59 -12 13 -53 -6 deepslate",
+    "setblock 5 -58 -10 diamond_ore",
+    "setblock 5 -57 -9 diamond_ore",
+    "setblock 5 -58 -8 diamond_ore",
+    "fill -5 -59 4 -2 -59 7 dirt",
+    "fill -5 -58 5 -4 -58 7 dirt",
+    "fill 4 -60 8 7 -60 9 clay",
+    "fill 4 -60 11 7 -60 11 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/mixed-sand.yaml": {
+  "sha256": "d0fc908568a186219ebd83c7276b58ccd91a991a79a6d133cfbd1fcc77548728",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -59 -6 14 -52 6 air",
+    "fill -4 -60 -6 14 -60 6 sandstone",
+    "fill 3 -59 -3 5 -59 -2 sand",
+    "fill 5 -59 2 5 -57 2 sand",
+    "fill 8 -59 0 8 -57 0 sand",
+    "fill 11 -59 -2 11 -57 -2 sand",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -59 -6 14 -52 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 22,
+    "maxY": -36,
+    "maxZ": 14,
+    "chunks": 6
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -14 22 -36 14 534 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -14 568 -36 14 -12 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 22,
+      "maxY": -36,
+      "maxZ": 14,
+      "chunks": 6
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 568,
+      "maxY": -36,
+      "maxZ": 14,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/mixed-trees.yaml": {
+  "sha256": "377a219936beb94002f15b7d900669812c8c14d4f3fdd1e4947cc82b48ed13d3",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -12 -60 -12 14 -60 12 grass_block",
+    "fill 4 -54 -2 8 -52 2 oak_leaves",
+    "fill 5 -51 -1 7 -51 1 oak_leaves",
+    "fill 6 -59 0 6 -53 0 oak_log",
+    "fill 4 -54 6 8 -52 10 birch_leaves",
+    "fill 5 -51 7 7 -51 9 birch_leaves",
+    "fill 6 -59 8 6 -53 8 birch_log",
+    "fill -10 -59 5 -6 -57 8 spruce_leaves",
+    "fill -8 -59 -2 -8 -59 6 spruce_log[axis=z]",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/netherrack-bank.yaml": {
+  "sha256": "6a24a6ed893413f7d22b87ef98c53d9dd4ab345a6568cb226ccb3f09a7fa2530",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -6 -60 -6 6 -48 6 air",
+    "fill -6 -60 -6 6 -60 6 bedrock",
+    "fill -4 -59 -4 4 -53 4 netherrack",
+    "fill 0 -56 0 0 -55 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -6 -60 -6 6 -48 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -14,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 14,
+    "maxY": -32,
+    "maxZ": 14,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -14 -64 -14 14 -32 14 526 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 526 -64 -14 554 -32 14 -14 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -14,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 14,
+      "maxY": -32,
+      "maxZ": 14,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 526,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 554,
+      "maxY": -32,
+      "maxZ": 14,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/no-flood-under-sea.yaml": {
+  "sha256": "86e8d5e606d6f8f722b00547501aa6a931f6c37ba45203e57a421262935b46bd",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -9 -63 -9 9 -40 9 air",
+    "fill -8 -63 -8 8 -57 8 stone",
+    "fill -8 -56 -8 8 -42 8 water",
+    "fill -3 -56 -3 0 -53 3 stone",
+    "fill 1 -56 -3 1 -53 3 dirt",
+    "fill 0 -55 0 0 -54 0 air",
+    "setblock 0 -55 0 water",
+    "time set noon",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -9 -63 -9 9 -40 9 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -17,
+    "minY": -64,
+    "minZ": -17,
+    "maxX": 17,
+    "maxY": -24,
+    "maxZ": 17,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -17 -64 -17 17 -24 17 529 -64 -17"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 529 -64 -17 563 -24 17 -17 -64 -17"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -17,
+      "minY": -64,
+      "minZ": -17,
+      "maxX": 17,
+      "maxY": -24,
+      "maxZ": 17,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 529,
+      "minY": -64,
+      "minZ": -17,
+      "maxX": 563,
+      "maxY": -24,
+      "maxZ": 17,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/obsidian-by-exploring.yaml": {
+  "sha256": "32f4375e52ac4621c586fed6c700001a5a5ba76f3e0ed88cfbe6c45c4c152bb2",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -88 -59 -88 88 -40 88 air",
+    "fill -88 -61 -88 88 -61 88 stone",
+    "fill -88 -60 -88 88 -60 88 stone",
+    "fill 78 -60 -3 82 -60 3 lava",
+    "fill -82 -60 -3 -78 -60 3 lava",
+    "fill -3 -60 78 3 -60 82 lava",
+    "fill -3 -60 -82 3 -60 -78 lava",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -88 -59 -88 88 -40 88 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -96,
+    "minY": -64,
+    "minZ": -96,
+    "maxX": 96,
+    "maxY": -24,
+    "maxZ": 96,
+    "chunks": 169
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1527209",
+     "clone -96 -64 -96 96 -24 96 608 -64 -96"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1527209",
+     "clone 608 -64 -96 800 -24 96 -96 -64 -96"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -96,
+      "minY": -64,
+      "minZ": -96,
+      "maxX": 96,
+      "maxY": -24,
+      "maxZ": 96,
+      "chunks": 169
+     },
+     {
+      "dimension": "overworld",
+      "minX": 608,
+      "minY": -64,
+      "minZ": -96,
+      "maxX": 800,
+      "maxY": -24,
+      "maxZ": 96,
+      "chunks": 169
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/obsidian-hazards.yaml": {
+  "sha256": "8624d23995166aa0c4085c8c49bdf5a05ce0635bbd810cc1aed5ebe8e6fc8b4f",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -59 -10 30 -40 10 air",
+    "fill -8 -63 -10 30 -60 10 stone",
+    "setblock 2 -60 0 obsidian",
+    "setblock 3 -60 0 lava",
+    "setblock 12 -60 0 obsidian",
+    "setblock 13 -60 0 water",
+    "fill 24 -59 -1 25 -58 1 stone",
+    "setblock 24 -60 0 obsidian",
+    "setblock 25 -60 0 lava",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -59 -10 30 -40 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 38,
+    "maxY": -24,
+    "maxZ": 18,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -18 38 -24 18 550 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 550 -64 -18 604 -24 18 -16 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 38,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 550,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 604,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/obsidian-in-rock.yaml": {
+  "sha256": "66eaeded548980c4044e22ce944939ef1a353059161c2a843958f7452e9105e9",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -20 -56 -20 20 -40 20 air",
+    "fill -20 -61 -20 20 -57 20 stone",
+    "setblock 5 -59 0 lava",
+    "fill 10 -57 0 12 -57 1 lava",
+    "setblock 12 -57 1 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -20 -56 -20 20 -40 20 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -28,
+    "minY": -64,
+    "minZ": -28,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 28,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -28 -64 -28 28 -24 28 540 -64 -28"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -28 596 -24 28 -28 -64 -28"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -28,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 596,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/obsidian-scoop-before-mining.yaml": {
+  "sha256": "0015604ec440725a3dec0257abcb9edee5decfb86f0ef9d41c8a78a7335aea6e",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -6 -61 -5 10 -54 5 air",
+    "fill -5 -61 -4 9 -60 4 stone",
+    "setblock 2 -60 0 obsidian",
+    "setblock 3 -60 0 water",
+    "setblock 2 -60 1 lava",
+    "time set noon",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -6 -61 -5 10 -54 5 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -14,
+    "minY": -64,
+    "minZ": -13,
+    "maxX": 18,
+    "maxY": -38,
+    "maxZ": 13,
+    "chunks": 6
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -14 -64 -13 18 -38 13 530 -64 -13"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 530 -64 -13 562 -38 13 -14 -64 -13"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -14,
+      "minY": -64,
+      "minZ": -13,
+      "maxX": 18,
+      "maxY": -38,
+      "maxZ": 13,
+      "chunks": 6
+     },
+     {
+      "dimension": "overworld",
+      "minX": 530,
+      "minY": -64,
+      "minZ": -13,
+      "maxX": 562,
+      "maxY": -38,
+      "maxZ": 13,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/parkour-ore-gap.yaml": {
+  "sha256": "a27751d97011f1f0a444a13cdce41051432de96ad98486aa99ddb5f42e02d909",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -64 -6 14 -40 6 air",
+    "fill 0 -63 -3 4 -63 3 bedrock",
+    "fill 1 -62 -2 3 -62 2 lava",
+    "fill -6 -55 -1 0 -55 1 blue_concrete",
+    "fill 4 -55 -3 10 -55 3 blue_concrete",
+    "setblock 7 -54 0 coal_ore",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -64 -6 14 -40 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 22,
+    "maxY": -24,
+    "maxZ": 14,
+    "chunks": 8
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -14 22 -24 14 534 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -14 574 -24 14 -18 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 22,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 8
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 574,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/protected-region.yaml": {
+  "sha256": "282cf33d698f8282653ed3da8c95f8762e59aead2ba4b76161bfc7a94e9e828d",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -32 20 -40 32 air",
+    "fill -14 -63 -14 16 -61 14 bedrock",
+    "fill -14 -60 -14 16 -60 14 stone",
+    "fill 2 -59 -1 4 -59 1 dirt",
+    "fill 10 -59 4 11 -59 5 dirt",
+    "fill -4 -59 -30 -4 -57 30 dirt",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -32 20 -40 32 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -40,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 40,
+    "chunks": 24
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -40 28 -24 40 540 -64 -40"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -40 592 -24 40 -24 -64 -40"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -40,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 40,
+      "chunks": 24
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -40,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 40,
+      "chunks": 30
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/sand-single.yaml": {
+  "sha256": "ec035ef641114f326ec240c501d1d46c2ebaaf342e8a728bce484a8eedfe2451",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -60 -6 8 -60 6 stone",
+    "setblock 2 -59 0 sand",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/seeds-from-grass-many.yaml": {
+  "sha256": "1d2b9c3705789387861abd63f089d0d325d16c8ab0ac678dba72437223d38ac0",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -20 -61 -20 20 -61 20 grass_block",
+    "fill -18 -60 -18 18 -60 18 short_grass",
+    "fill 0 -60 0 0 -60 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -28,
+    "minY": -64,
+    "minZ": -28,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 28,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -28 -64 -28 28 -24 28 540 -64 -28"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -28 596 -24 28 -28 -64 -28"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -28,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -28,
+      "maxX": 596,
+      "maxY": -24,
+      "maxZ": 28,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/seeds-from-grass.yaml": {
+  "sha256": "6c7c565bbaebe2a1666c7432dd8bb57816bd344dca25817a106921dccd3924a9",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -12 -61 -12 12 -61 12 grass_block",
+    "fill -10 -60 -10 10 -60 10 short_grass",
+    "fill 0 -60 0 0 -60 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/collect/unknown-item-name.yaml": {
+  "sha256": "1ba0d4fd26bfb0b917113c341b6e80ec1c4e03c693af8ecb4ff1702721a8943b",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -60 -6 8 -60 6 stone",
+    "fill 2 -59 -1 4 -57 1 stone",
+    "setblock 2 -58 0 coal_ore",
+    "setblock 3 -58 0 deepslate_coal_ore",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/combat/busy-dig-interrupted.yaml": {
+  "sha256": "25521bf19754b0e79d2528b9dee5efb34a2e50c70fdd11c1d5f910671b6c5258",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill 6 -60 -6 14 -55 6 air",
+    "fill 8 -60 -3 11 -57 3 stone",
+    "time set midnight",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0",
+    "difficulty normal"
+   ],
+   "activation": [
+    "summon minecraft:zombie -14.5 -60 0.5 {PersistenceRequired:1b}"
+   ],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "kill @e[type=!minecraft:player]",
+    "fill 6 -60 -6 14 -55 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -23,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 22,
+    "maxY": -39,
+    "maxZ": 14,
+    "chunks": 8
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -23 -64 -14 22 -39 14 534 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -14 579 -39 14 -23 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -23,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 22,
+      "maxY": -39,
+      "maxZ": 14,
+      "chunks": 8
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 579,
+      "maxY": -39,
+      "maxZ": 14,
+      "chunks": 8
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/craft/smelt-resumes-after-hunger.yaml": {
+  "sha256": "7cc63e877f0f8a91998432250b05cbc61eb03eac25f6eed44c98db22173637ca",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill 20 -60 -4 30 -55 4 air",
+    "fill 25 -60 0 25 -60 0 furnace",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0",
+    "difficulty easy"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill 20 -60 -4 30 -55 4 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -8,
+    "minY": -64,
+    "minZ": -12,
+    "maxX": 38,
+    "maxY": -39,
+    "maxZ": 12,
+    "chunks": 8
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -8 -64 -12 38 -39 12 550 -64 -12"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 550 -64 -12 596 -39 12 -8 -64 -12"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -8,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 38,
+      "maxY": -39,
+      "maxZ": 12,
+      "chunks": 8
+     },
+     {
+      "dimension": "overworld",
+      "minX": 550,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 596,
+      "maxY": -39,
+      "maxZ": 12,
+      "chunks": 8
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/craft/workshop.yaml": {
+  "sha256": "a0d345c736043531fc44d3cd680cf442db789fde766e1d093dcb6977209b542d",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -59 -4 8 -52 4 air",
+    "fill -4 -60 -4 8 -60 4 andesite",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "tick rate 16"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -59 -4 8 -52 4 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -12,
+    "maxX": 16,
+    "maxY": -36,
+    "maxZ": 12,
+    "chunks": 6
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -12 16 -36 12 528 -64 -12"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -12 556 -36 12 -12 -64 -12"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 16,
+      "maxY": -36,
+      "maxZ": 12,
+      "chunks": 6
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 556,
+      "maxY": -36,
+      "maxZ": 12,
+      "chunks": 4
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/drop/buried-items-stay-buried.yaml": {
+  "sha256": "d52a47dce56a602bf9469abe6884982a1923984d10f7be7b97569183ad4b6cf3",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -14 -63 -14 14 -54 14 air",
+    "fill -12 -63 -12 12 -61 12 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -14 -63 -14 14 -54 14 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -22,
+    "minY": -64,
+    "minZ": -22,
+    "maxX": 22,
+    "maxY": -38,
+    "maxZ": 22,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -22 -64 -22 22 -38 22 534 -64 -22"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -22 578 -38 22 -22 -64 -22"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -22,
+      "minY": -64,
+      "minZ": -22,
+      "maxX": 22,
+      "maxY": -38,
+      "maxZ": 22,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -22,
+      "maxX": 578,
+      "maxY": -38,
+      "maxZ": 22,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/drop/disposal-hole-bedrock.yaml": {
+  "sha256": "586dc4b7655f37e3ba06693a4784f8d28755db39288487ca012a6cdc939b6fea",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -63 -10 10 -54 10 air",
+    "fill -10 -63 -10 10 -61 10 bedrock",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -63 -10 10 -54 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 18,
+    "maxY": -38,
+    "maxZ": 18,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -18 18 -38 18 530 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 530 -64 -18 566 -38 18 -18 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 18,
+      "maxY": -38,
+      "maxZ": 18,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 530,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 566,
+      "maxY": -38,
+      "maxZ": 18,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/explore/lava-shore-preference.yaml": {
+  "sha256": "276810c8411d08abc725358d5854a723007d809b5feab6acd8b615d3d53593ed",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill 1 -60 -80 10 -59 80 air",
+    "fill 1 -61 -80 10 -61 80 lava",
+    "time set noon",
+    "difficulty normal",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -8,
+    "minY": -64,
+    "minZ": -88,
+    "maxX": 18,
+    "maxY": -43,
+    "maxZ": 88,
+    "chunks": 36
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -8 -64 -88 18 -43 88 530 -64 -88"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 530 -64 -88 556 -43 88 -8 -64 -88"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -8,
+      "minY": -64,
+      "minZ": -88,
+      "maxX": 18,
+      "maxY": -43,
+      "maxZ": 88,
+      "chunks": 36
+     },
+     {
+      "dimension": "overworld",
+      "minX": 530,
+      "minY": -64,
+      "minZ": -88,
+      "maxX": 556,
+      "maxY": -43,
+      "maxZ": 88,
+      "chunks": 24
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/explore/necessary-lava-bridge.yaml": {
+  "sha256": "f24f23394683b6e68dcd2e97676cd9b5ed0e50a59ba036a10f61c01041e38382",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill 1 -60 -32 10 -59 32 air",
+    "fill 1 -61 -32 10 -61 32 lava",
+    "fill -8 -64 -1 16 -30 -1 bedrock",
+    "fill -8 -64 1 16 -30 1 bedrock",
+    "fill -8 -64 -1 -8 -30 1 bedrock",
+    "time set noon",
+    "difficulty normal",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -40,
+    "maxX": 24,
+    "maxY": -14,
+    "maxZ": 40,
+    "chunks": 18
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -40 24 -14 40 536 -64 -40"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 536 -64 -40 576 -14 40 -16 -64 -40"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -40,
+      "maxX": 24,
+      "maxY": -14,
+      "maxZ": 40,
+      "chunks": 18
+     },
+     {
+      "dimension": "overworld",
+      "minX": 536,
+      "minY": -64,
+      "minZ": -40,
+      "maxX": 576,
+      "maxY": -14,
+      "maxZ": 40,
+      "chunks": 24
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/farm/harvest-replant.yaml": {
+  "sha256": "e12d2fc826c62341c48292e019f1e3254146786bb9ffb51b2fd157bd002f5d4e",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -4 -61 -6 10 -61 6 grass_block",
+    "fill 2 -61 -2 6 -61 2 farmland[moisture=7]",
+    "fill 4 -61 0 4 -61 0 water",
+    "fill 2 -60 -2 6 -60 2 wheat[age=3]",
+    "fill 4 -60 0 4 -60 0 air",
+    "fill 2 -60 -2 2 -60 -2 wheat[age=7]",
+    "fill 3 -60 -2 3 -60 -2 wheat[age=7]",
+    "fill 5 -60 -2 5 -60 -2 wheat[age=7]",
+    "fill 6 -60 -2 6 -60 -2 wheat[age=7]",
+    "fill 2 -60 2 2 -60 2 wheat[age=7]",
+    "fill 3 -60 2 3 -60 2 wheat[age=7]",
+    "fill 5 -60 2 5 -60 2 wheat[age=7]",
+    "fill 6 -60 2 6 -60 2 wheat[age=7]",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/farm/tend-crops.yaml": {
+  "sha256": "2b07fa3200b1c0a8e65f8500eafd253d07919c4d5b55a70d722cc0a3d257a23e",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -4 -61 -6 10 -61 6 grass_block",
+    "fill 4 -61 0 4 -61 0 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/farm/tend-keeps-torches-and-saplings.yaml": {
+  "sha256": "de8bd52daac138fae261fd6ccc7792189acd1815e830943788af79e8629607bb",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -4 -61 -6 10 -61 6 grass_block",
+    "fill 2 -60 0 2 -60 0 torch",
+    "fill 3 -60 0 3 -60 0 oak_sapling",
+    "fill 4 -60 0 5 -60 0 short_grass",
+    "fill 6 -60 0 6 -60 0 poppy",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/hunt/arrow-hunt-spends-no-arrows.yaml": {
+  "sha256": "0561f0e632b514376e287a362aa1944c59983c107509b69d9b0b970d7ef3e605",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 72 -40 56 air",
+    "time set midnight",
+    "difficulty normal",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [
+    "summon minecraft:skeleton 13.5 -60 2.5 {PersistenceRequired:1b,HandItems:[{id:\"minecraft:bow\",count:1},{id:\"minecraft:arrow\",count:1}],HandDropChances:[0.0f,2.0f]}",
+    "summon minecraft:skeleton 19.5 -60 -2.5 {PersistenceRequired:1b,HandItems:[{id:\"minecraft:bow\",count:1},{id:\"minecraft:arrow\",count:1}],HandDropChances:[0.0f,2.0f]}"
+   ],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 72 -40 56 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 80,
+    "maxY": -24,
+    "maxZ": 64,
+    "chunks": 56
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 80 -24 64 592 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 592 -64 -24 696 -24 64 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 80,
+      "maxY": -24,
+      "maxZ": 64,
+      "chunks": 56
+     },
+     {
+      "dimension": "overworld",
+      "minX": 592,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 696,
+      "maxY": -24,
+      "maxZ": 64,
+      "chunks": 49
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/at-sea-land-behind-kelp.yaml": {
+  "sha256": "55391f13e8b109431e130389d776f87346495807c99d30902777b58dfc9e1437",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -100 -63 -60 -41 -61 60 water",
+    "fill -40 -63 -60 19 -61 60 water",
+    "fill 20 -63 -60 79 -61 60 water",
+    "fill 80 -63 -60 140 -61 60 water",
+    "fill -45 -63 -2 -41 -61 2 stone",
+    "fill 121 -63 -5 130 -61 5 stone",
+    "fill 0 -63 0 0 -62 0 stone",
+    "fill 1 -63 0 1 -62 0 kelp_plant",
+    "fill 1 -61 0 1 -61 0 kelp",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -108,
+    "minY": -64,
+    "minZ": -68,
+    "maxX": 148,
+    "maxY": -24,
+    "maxZ": 68,
+    "chunks": 170
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1443569",
+     "clone -108 -64 -68 148 -24 68 660 -64 -68"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1443569",
+     "clone 660 -64 -68 916 -24 68 -108 -64 -68"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -108,
+      "minY": -64,
+      "minZ": -68,
+      "maxX": 148,
+      "maxY": -24,
+      "maxZ": 68,
+      "chunks": 170
+     },
+     {
+      "dimension": "overworld",
+      "minX": 660,
+      "minY": -64,
+      "minZ": -68,
+      "maxX": 916,
+      "maxY": -24,
+      "maxZ": 68,
+      "chunks": 170
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/boat-at-sea-two-boats-then-navigate.yaml": {
+  "sha256": "5587cceedcc5479cbc04c31d250177485eaf7337ac51f20b8aa56b054b17f862",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill 1 -63 -40 100 -61 40 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -48,
+    "maxX": 108,
+    "maxY": -24,
+    "maxZ": 48,
+    "chunks": 63
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -48 108 -24 48 620 -64 -48"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 620 -64 -48 752 -24 48 -24 -64 -48"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 108,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 63
+     },
+     {
+      "dimension": "overworld",
+      "minX": 620,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 752,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 70
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/boat-crossing-then-walk.yaml": {
+  "sha256": "efd0148d4319c148725965d4d04c80d8556c391df0cb05244c79f1913068a88b",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill 1 -63 -40 40 -61 40 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -48,
+    "maxX": 48,
+    "maxY": -24,
+    "maxZ": 48,
+    "chunks": 42
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -48 48 -24 48 560 -64 -48"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 560 -64 -48 632 -24 48 -24 -64 -48"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 48,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 42
+     },
+     {
+      "dimension": "overworld",
+      "minX": 560,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 632,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 35
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/boat-left-at-sea.yaml": {
+  "sha256": "7022b34a7ceab6ab1a2ce9d010444066325602e9546b3a7c786b11c3541eb6f7",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill 1 -63 -40 100 -61 40 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -48,
+    "maxX": 108,
+    "maxY": -24,
+    "maxZ": 48,
+    "chunks": 63
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -48 108 -24 48 620 -64 -48"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 620 -64 -48 752 -24 48 -24 -64 -48"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 108,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 63
+     },
+     {
+      "dimension": "overworld",
+      "minX": 620,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 752,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 70
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/boat-ride-cancelled-then-navigate.yaml": {
+  "sha256": "8f512fd70acb43387520808b9d9533479af479064693e55f2e1f702d79cb948c",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill 1 -63 -40 100 -61 40 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -48,
+    "maxX": 108,
+    "maxY": -24,
+    "maxZ": 48,
+    "chunks": 63
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -48 108 -24 48 620 -64 -48"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 620 -64 -48 752 -24 48 -24 -64 -48"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 108,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 63
+     },
+     {
+      "dimension": "overworld",
+      "minX": 620,
+      "minY": -64,
+      "minZ": -48,
+      "maxX": 752,
+      "maxY": -24,
+      "maxZ": 48,
+      "chunks": 70
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/cancel-without-physics.yaml": {
+  "sha256": "2ef0b6c39fdbd264ca8549d18f60410d340c380e7cfbca66ecb55022793e8c56",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -63 -10 28 -40 10 air",
+    "fill -9 -63 -9 27 -61 9 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -63 -10 28 -40 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 36,
+    "maxY": -24,
+    "maxZ": 18,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -18 36 -24 18 548 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 548 -64 -18 602 -24 18 -18 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 36,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 548,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 602,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/cave-excavation-course.yaml": {
+  "sha256": "2e70a26ef80540621d70acd9c045cf48d4e2a694a4f87da4fea5f9f9651fa98b",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -64 -4 50 -46 4 air",
+    "fill -9 -61 -3 11 -53 3 bedrock",
+    "fill -8 -59 -1 -1 -56 1 air",
+    "fill 0 -59 -1 10 -58 1 air",
+    "setblock 0 -59 -1 moss_carpet",
+    "setblock 0 -59 0 moss_carpet",
+    "setblock 0 -59 1 moss_carpet",
+    "setblock 5 -59 -1 moss_carpet",
+    "setblock 5 -58 -1 moss_carpet",
+    "setblock 5 -59 0 moss_carpet",
+    "setblock 5 -58 0 moss_carpet",
+    "setblock 8 -59 -1 moss_carpet",
+    "setblock 8 -58 -1 moss_carpet",
+    "setblock 8 -59 0 moss_carpet",
+    "setblock 8 -58 0 moss_carpet",
+    "setblock 8 -59 1 moss_carpet",
+    "setblock 8 -58 1 moss_carpet",
+    "setblock 10 -60 0 gold_block",
+    "fill 13 -60 -2 24 -52 2 bedrock",
+    "fill 14 -59 0 23 -53 0 air",
+    "fill 18 -59 0 23 -59 0 stone",
+    "fill 20 -58 0 23 -58 0 stone",
+    "setblock 18 -58 0 pointed_dripstone[vertical_direction=up,thickness=tip]",
+    "setblock 20 -57 0 pointed_dripstone[vertical_direction=up,thickness=tip]",
+    "fill 29 -59 -3 47 -49 3 bedrock",
+    "fill 30 -57 0 45 -56 0 air",
+    "fill 38 -57 0 38 -54 0 sand",
+    "setblock 45 -58 0 emerald_block",
+    "fill 11 -60 -2 14 -53 2 bedrock",
+    "fill 11 -59 0 14 -58 0 air",
+    "fill 24 -58 -2 30 -50 2 bedrock",
+    "fill 23 -57 0 30 -56 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -64 -4 50 -46 4 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -12,
+    "maxX": 58,
+    "maxY": -30,
+    "maxZ": 12,
+    "chunks": 12
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -12 58 -30 12 570 -64 -12"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 570 -64 -12 646 -30 12 -18 -64 -12"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 58,
+      "maxY": -30,
+      "maxZ": 12,
+      "chunks": 12
+     },
+     {
+      "dimension": "overworld",
+      "minX": 570,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 646,
+      "maxY": -30,
+      "maxZ": 12,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/cobweb-cell-breakout.yaml": {
+  "sha256": "8ffa1bf06f55a7afa88263b991c9e9b0d3037bfe04d3fed4d15b91ed38fed278",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -8 14 -40 8 air",
+    "fill -4 -62 -8 14 -61 8 stone",
+    "fill 1 -60 0 1 -59 0 cobweb",
+    "fill -1 -60 0 -1 -59 0 cobweb",
+    "fill 0 -60 1 0 -59 1 cobweb",
+    "fill 0 -60 -1 0 -59 -1 cobweb",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -8 14 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -16 22 -24 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 568 -24 16 -12 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 568,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/cobweb-in-the-body.yaml": {
+  "sha256": "7e905748bcaa6dcdfe207cefd713d9bb2ae21bda3178185ed62f66c5ee73e80c",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -8 14 -40 8 air",
+    "fill -4 -62 -8 14 -61 8 deepslate",
+    "fill -1 -60 -1 -1 -57 1 deepslate",
+    "fill 1 -60 -1 1 -57 1 deepslate",
+    "fill 0 -60 -1 0 -57 -1 deepslate",
+    "setblock 0 -60 1 deepslate",
+    "setblock 0 -59 0 cobweb",
+    "setblock 0 -59 1 cobweb",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -8 14 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -16 22 -24 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 568 -24 16 -12 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 568,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/dig-down-under-lag.yaml": {
+  "sha256": "d8efa33dc8f6354b2555a272ef3bd7dea3ae2623c6fadd3423975db5dfd15dc8",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -63 -8 8 -40 8 air",
+    "fill -5 -63 -5 5 -56 5 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0",
+    "tick rate 4"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -63 -8 8 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 16,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 16 -24 16 528 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -16 560 -24 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 16,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 560,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/gauntlet-lava-parkour.yaml": {
+  "sha256": "697e419ca5760ca3d49596b8be884298a12e0f88e71a869f6f65dba1fd191d82",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -9 -64 -6 43 -46 10 air",
+    "fill -6 -63 -3 41 -63 7 bedrock",
+    "fill -6 -62 -3 -6 -50 7 bedrock",
+    "fill 41 -62 -3 41 -50 7 bedrock",
+    "fill -6 -62 -3 41 -50 -3 bedrock",
+    "fill -6 -62 7 41 -50 7 bedrock",
+    "fill -5 -62 -2 40 -62 6 lava",
+    "fill -5 -60 -1 0 -60 1 blue_concrete",
+    "fill 2 -60 -1 2 -60 1 blue_concrete",
+    "fill 5 -60 -1 5 -60 1 blue_concrete",
+    "fill 9 -60 -1 9 -60 1 blue_concrete",
+    "fill 12 -59 -1 12 -59 0 blue_concrete",
+    "setblock 13 -58 1 cut_copper",
+    "setblock 14 -57 2 cut_copper",
+    "setblock 15 -56 3 cut_copper",
+    "fill 16 -58 2 20 -58 4 emerald_block",
+    "fill 20 -62 1 36 -50 1 bedrock",
+    "fill 20 -62 5 36 -50 5 bedrock",
+    "setblock 21 -57 3 blue_concrete",
+    "setblock 22 -56 3 blue_concrete",
+    "fill 23 -56 3 24 -56 3 blue_concrete",
+    "fill 25 -58 2 26 -58 4 blue_concrete",
+    "fill 27 -58 2 29 -58 2 magma_block",
+    "fill 27 -58 4 29 -58 4 blue_concrete",
+    "fill 30 -62 1 30 -50 5 bedrock",
+    "fill 30 -57 4 30 -56 4 air",
+    "setblock 30 -57 4 oak_door[facing=east,half=lower,hinge=left,open=false,powered=false]",
+    "setblock 30 -56 4 oak_door[facing=east,half=upper,hinge=left,open=false,powered=false]",
+    "fill 31 -58 2 35 -58 4 emerald_block",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -9 -64 -6 43 -46 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -17,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 51,
+    "maxY": -30,
+    "maxZ": 18,
+    "chunks": 18
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -17 -64 -14 51 -30 18 563 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 563 -64 -14 631 -30 18 -17 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -17,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 51,
+      "maxY": -30,
+      "maxZ": 18,
+      "chunks": 18
+     },
+     {
+      "dimension": "overworld",
+      "minX": 563,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 631,
+      "maxY": -30,
+      "maxZ": 18,
+      "chunks": 15
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/ghost-air-resync.yaml": {
+  "sha256": "f0805eea2c4082e973380990f035953d946887821861a3c93400afac3c58817c",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -63 -10 28 -40 10 air",
+    "fill -9 -63 -9 27 -61 9 stone",
+    "fill 0 -61 0 0 -61 0 chest",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -63 -10 28 -40 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 36,
+    "maxY": -24,
+    "maxZ": 18,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -18 36 -24 18 548 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 548 -64 -18 602 -24 18 -18 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 36,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 548,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 602,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/lava-containment.yaml": {
+  "sha256": "57ca178b3b07cd3701ee25d2566c82d4323c193373dc372b748f678b864382c8",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -62 -12 46 -48 12 air",
+    "fill -6 -61 -10 20 -54 10 bedrock",
+    "fill -4 -59 -3 2 -56 3 stone",
+    "fill -3 -59 -2 1 -58 2 air",
+    "fill 2 -59 -2 11 -58 2 stone",
+    "fill 3 -57 -2 10 -55 2 stone",
+    "fill 4 -57 -2 9 -56 2 lava",
+    "fill 2 -59 -7 11 -57 -3 stone",
+    "fill 12 -59 -7 18 -56 3 stone",
+    "fill 13 -59 -6 17 -58 2 air",
+    "setblock 14 -60 0 gold_block",
+    "fill 21 -61 -7 45 -51 7 bedrock",
+    "fill 22 -59 -4 25 -58 0 air",
+    "fill 33 -59 -4 36 -58 0 air",
+    "fill 26 -59 0 32 -58 0 stone",
+    "fill 26 -59 1 32 -58 1 lava",
+    "fill 26 -59 -4 32 -58 -4 stone",
+    "setblock 35 -60 0 emerald_block",
+    "fill 19 -61 -7 21 -54 7 bedrock",
+    "fill 17 -59 -4 25 -58 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -62 -12 46 -48 12 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -20,
+    "maxX": 54,
+    "maxY": -32,
+    "maxZ": 20,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -20 54 -32 20 566 -64 -20"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 566 -64 -20 636 -32 20 -16 -64 -20"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 54,
+      "maxY": -32,
+      "maxZ": 20,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 566,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 636,
+      "maxY": -32,
+      "maxZ": 20,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/movement-course.yaml": {
+  "sha256": "bcbd9c9564a90d8dceb33be5ceea4212c79247f3dd43be6971e7482b42b2769a",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -63 -12 88 -46 12 air",
+    "fill 0 -61 -10 1 -61 6 nether_bricks",
+    "fill 0 -60 0 1 -58 6 nether_bricks",
+    "fill 0 -60 -1 1 -59 -1 nether_bricks",
+    "fill 0 -60 -2 1 -60 -2 nether_bricks",
+    "fill -1 -60 -10 -1 -53 6 bedrock",
+    "fill 2 -60 -10 2 -53 6 bedrock",
+    "fill 13 -61 -4 71 -61 4 andesite",
+    "fill 13 -60 -4 71 -47 -4 bedrock",
+    "fill 13 -60 4 71 -47 4 bedrock",
+    "fill 13 -60 -4 13 -47 4 bedrock",
+    "fill 17 -60 -3 17 -60 3 oak_stairs[facing=east,half=bottom]",
+    "fill 18 -60 -3 18 -60 3 stone",
+    "fill 18 -59 -3 18 -59 3 oak_stairs[facing=east,half=bottom]",
+    "fill 19 -60 -3 19 -59 3 stone",
+    "fill 19 -58 -3 19 -58 3 oak_stairs[facing=east,half=bottom]",
+    "fill 20 -60 -3 20 -58 3 stone",
+    "fill 20 -57 -3 20 -57 3 oak_stairs[facing=east,half=bottom]",
+    "fill 21 -60 -3 23 -57 3 stone",
+    "fill 24 -60 -3 24 -58 3 stone",
+    "fill 24 -57 -3 24 -57 3 oak_stairs[facing=west,half=bottom]",
+    "fill 25 -60 -3 25 -59 3 stone",
+    "fill 25 -58 -3 25 -58 3 oak_stairs[facing=west,half=bottom]",
+    "fill 26 -60 -3 26 -60 3 stone",
+    "fill 26 -59 -3 26 -59 3 oak_stairs[facing=west,half=bottom]",
+    "fill 27 -60 -3 27 -60 3 oak_stairs[facing=west,half=bottom]",
+    "fill 34 -61 -3 47 -61 3 soul_sand",
+    "setblock 36 -61 0 stone",
+    "setblock 45 -60 0 stone",
+    "fill 57 -60 -3 59 -56 3 bedrock",
+    "setblock 56 -60 0 vine[east=true]",
+    "setblock 56 -59 0 vine[east=true]",
+    "setblock 56 -58 0 vine[east=true]",
+    "setblock 56 -57 0 vine[east=true]",
+    "setblock 56 -56 0 vine[east=true]",
+    "setblock 60 -60 0 ladder[facing=east]",
+    "setblock 60 -59 0 ladder[facing=east]",
+    "setblock 60 -58 0 ladder[facing=east]",
+    "setblock 60 -57 0 ladder[facing=east]",
+    "setblock 60 -56 0 ladder[facing=east]",
+    "fill 72 -63 -2 84 -63 10 bedrock",
+    "fill 72 -62 -2 72 -47 10 bedrock",
+    "fill 84 -62 -2 84 -47 10 bedrock",
+    "fill 72 -62 -2 84 -47 -2 bedrock",
+    "fill 72 -62 10 84 -47 10 bedrock",
+    "setblock 74 -61 0 bedrock",
+    "setblock 75 -60 1 bedrock",
+    "setblock 76 -59 2 bedrock",
+    "setblock 77 -58 3 bedrock",
+    "setblock 78 -57 4 bedrock",
+    "setblock 79 -56 5 bedrock",
+    "fill 80 -56 4 82 -56 6 emerald_block",
+    "fill 72 -60 0 73 -59 0 air",
+    "fill 72 -61 0 74 -61 0 bedrock",
+    "fill 2 -61 -8 16 -61 -8 andesite",
+    "fill 16 -61 -8 16 -61 0 andesite",
+    "fill 2 -60 -8 2 -59 -8 air",
+    "fill 16 -60 -4 16 -59 -4 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -63 -12 88 -46 12 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -20,
+    "maxX": 96,
+    "maxY": -30,
+    "maxZ": 20,
+    "chunks": 32
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -20 96 -30 20 608 -64 -20"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 608 -64 -20 716 -30 20 -12 -64 -20"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 96,
+      "maxY": -30,
+      "maxZ": 20,
+      "chunks": 32
+     },
+     {
+      "dimension": "overworld",
+      "minX": 608,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 716,
+      "maxY": -30,
+      "maxZ": 20,
+      "chunks": 28
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/obsidian-lava-approach.yaml": {
+  "sha256": "68ca365a90835b4b89c953eba95f788be9b2e2e9e75a764eb4eb58cf95865363",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0",
+    "gamerule doFireTick false",
+    "difficulty peaceful"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": 40,
+    "minY": -23,
+    "minZ": 60,
+    "maxX": 56,
+    "maxY": -3,
+    "maxZ": 76,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 40 -23 60 56 -3 76 568 -23 60"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 568 -23 60 584 -3 76 40 -23 60"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": 40,
+      "minY": -23,
+      "minZ": 60,
+      "maxX": 56,
+      "maxY": -3,
+      "maxZ": 76,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 568,
+      "minY": -23,
+      "minZ": 60,
+      "maxX": 584,
+      "maxY": -3,
+      "maxZ": 76,
+      "chunks": 4
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/obstacle-course-scaffolding.yaml": {
+  "sha256": "1cd1dfdd47f6d0fbd614657401fdc8b3dfacd484c45fd2547d113d0b3fba3dac",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -4 20 -40 4 air",
+    "fill -4 -62 -4 20 -62 4 lava",
+    "fill -3 -62 -3 17 -40 -3 bedrock",
+    "fill -3 -62 3 17 -40 3 bedrock",
+    "fill -3 -62 -3 -3 -40 3 bedrock",
+    "fill 17 -62 -3 17 -40 3 bedrock",
+    "fill -2 -60 0 0 -60 0 stone",
+    "fill 1 -60 -1 3 -55 1 stone",
+    "fill 8 -55 0 9 -55 0 stone",
+    "fill 10 -61 -2 10 -40 2 stone",
+    "setblock 11 -56 0 stone",
+    "setblock 12 -57 0 stone",
+    "fill 13 -58 -1 16 -58 1 stone",
+    "setblock 14 -57 0 chest",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -4 20 -40 4 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -12,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 12,
+    "chunks": 6
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -12 28 -24 12 540 -64 -12"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -12 580 -24 12 -12 -64 -12"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 12,
+      "chunks": 6
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -12,
+      "maxX": 580,
+      "maxY": -24,
+      "maxZ": 12,
+      "chunks": 8
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/open-cavern-breakthrough.yaml": {
+  "sha256": "48dd77d7d70700a44fc4a8f649d18f979ec380a0ff21d66a1650046fc38565f2",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -6 -62 -10 24 -40 12 air",
+    "fill -6 -61 -10 24 -60 10 stone",
+    "fill -4 -49 -3 5 -45 3 stone",
+    "fill -3 -48 -2 2 -46 2 air",
+    "fill 3 -48 -2 5 -46 2 stone",
+    "fill 5 -50 -2 6 -50 2 stone",
+    "fill 7 -52 -2 9 -52 2 stone",
+    "fill 10 -55 0 12 -55 3 stone",
+    "fill 13 -58 2 15 -58 5 stone",
+    "fill 16 -60 2 20 -60 6 stone",
+    "setblock 18 -60 4 diamond_block",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -6 -62 -10 24 -40 12 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -14,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 32,
+    "maxY": -24,
+    "maxZ": 20,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -14 -64 -18 32 -24 20 544 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 544 -64 -18 590 -24 20 -14 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -14,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 32,
+      "maxY": -24,
+      "maxZ": 20,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 544,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 590,
+      "maxY": -24,
+      "maxZ": 20,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/perch-bridge-with-stone.yaml": {
+  "sha256": "05375ce550795a4d40acfc187470834c2485468b304a31427597f8b65746cd69",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -8 14 -30 8 air",
+    "fill -4 -62 -8 14 -61 8 stone",
+    "fill 0 -60 0 0 -53 0 stone",
+    "fill 6 -60 -1 8 -53 1 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -8 14 -30 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -14,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -16 22 -14 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 568 -14 16 -12 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 568,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/perch-drop-into-kelp.yaml": {
+  "sha256": "6c8fcd560c102e0c2970be15dd48660b9147881f30a50ee8ebf94e56a254de05",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -8 14 -30 8 air",
+    "fill -4 -62 -8 14 -61 8 stone",
+    "fill 0 -60 -4 7 -58 4 stone",
+    "fill 1 -60 -3 6 -59 3 kelp_plant",
+    "fill 1 -58 -3 6 -58 3 kelp",
+    "fill 0 -57 0 0 -39 0 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -8 14 -30 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -14,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -16 22 -14 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 568 -14 16 -12 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 568,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/perch-drop-into-water.yaml": {
+  "sha256": "793e2df09f7935d6c4e28195ce4160268a3d6ce3353e95746e6c25d41923919c",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -62 -8 14 -30 8 air",
+    "fill -4 -62 -8 14 -61 8 stone",
+    "fill 0 -60 -4 7 -58 4 stone",
+    "fill 1 -60 -3 6 -58 3 water",
+    "fill 0 -57 0 0 -39 0 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -62 -8 14 -30 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -14,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -16 22 -14 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 568 -14 16 -12 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 568,
+      "maxY": -14,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/perch-over-lake-with-boats.yaml": {
+  "sha256": "9afb1f4b9ee121756aa0d2000e18c91d4ecc1c4fa9c03c78bced9ba620f2d47a",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -2 -62 -8 34 -25 8 air",
+    "fill -2 -62 -8 34 -61 8 stone",
+    "fill -1 -60 -6 -1 -40 6 stone",
+    "fill 0 -60 -6 22 -40 -6 stone",
+    "fill 0 -60 6 22 -40 6 stone",
+    "fill 0 -60 -5 22 -53 5 water",
+    "fill 23 -60 -6 34 -53 6 stone",
+    "setblock 8 -31 0 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -2 -62 -8 34 -25 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -10,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 42,
+    "maxY": -9,
+    "maxZ": 16,
+    "chunks": 12
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -10 -64 -16 42 -9 16 554 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 554 -64 -16 606 -9 16 -10 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -10,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 42,
+      "maxY": -9,
+      "maxZ": 16,
+      "chunks": 12
+     },
+     {
+      "dimension": "overworld",
+      "minX": 554,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 606,
+      "maxY": -9,
+      "maxZ": 16,
+      "chunks": 12
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/pillar-descent-over-lava.yaml": {
+  "sha256": "3a1b58376aac1f5315aef8679e7d03bb218b29b148a7d21a1775e15343f20e95",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -14 -62 -14 14 -40 14 air",
+    "fill -13 -62 -13 13 -62 13 bedrock",
+    "fill -13 -61 -13 13 -57 -13 bedrock",
+    "fill -13 -61 13 13 -57 13 bedrock",
+    "fill -13 -61 -13 -13 -57 13 bedrock",
+    "fill 13 -61 -13 13 -57 13 bedrock",
+    "fill -12 -61 -12 12 -57 12 lava",
+    "fill 0 -61 0 0 -58 0 bedrock",
+    "setblock 0 -57 0 gold_block",
+    "fill 0 -56 0 0 -45 0 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -14 -62 -14 14 -40 14 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -22,
+    "minY": -64,
+    "minZ": -22,
+    "maxX": 22,
+    "maxY": -24,
+    "maxZ": 22,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -22 -64 -22 22 -24 22 534 -64 -22"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -22 578 -24 22 -22 -64 -22"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -22,
+      "minY": -64,
+      "minZ": -22,
+      "maxX": 22,
+      "maxY": -24,
+      "maxZ": 22,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -22,
+      "maxX": 578,
+      "maxY": -24,
+      "maxZ": 22,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/pinned-box-refused.yaml": {
+  "sha256": "4dcc439e6591be07a8d59e31c90fdcecf40fc8187091457c7e2caea7a66a2bec",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -63 -8 8 -40 8 air",
+    "fill -3 -63 -3 3 -54 3 stone",
+    "fill 0 -58 0 0 -57 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -63 -8 8 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 16,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 16 -24 16 528 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -16 560 -24 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 16,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 560,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/pinned-escape-digs-out.yaml": {
+  "sha256": "faae2daf4ecf3faa7f707b4651ea8a5fe89a31e5761f3abbabe2eb07dc1e8c22",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -63 -8 8 -40 8 air",
+    "fill -6 -63 -6 6 -50 6 stone",
+    "fill -1 -57 -2 4 -56 -2 water",
+    "fill -1 -57 2 4 -56 2 water",
+    "fill -2 -57 -1 -2 -56 1 water",
+    "fill 5 -57 -1 5 -56 1 water",
+    "fill -1 -54 -1 4 -54 1 water",
+    "fill -1 -58 -1 -1 -58 -1 water",
+    "fill 1 -58 -1 4 -58 -1 water",
+    "fill 0 -57 0 3 -56 0 air",
+    "fill 0 -59 1 0 -58 1 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -63 -8 8 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 16,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 16 -24 16 528 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -16 560 -24 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 16,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 560,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/pocket-dig-down-scaffold.yaml": {
+  "sha256": "91e312c40076f912f12d8ef065b97a359267a8fb3ca3bb7421023d75f361d06b",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -63 -8 8 -40 8 air",
+    "fill -5 -63 -5 5 -50 5 stone",
+    "fill -2 -57 -1 -2 -55 1 water",
+    "fill 2 -56 -1 2 -55 1 water",
+    "fill -1 -57 -2 1 -55 -2 water",
+    "fill -1 -57 2 1 -55 2 water",
+    "fill -1 -53 -1 1 -53 1 water",
+    "fill 0 -57 0 0 -55 0 air",
+    "fill 1 -58 0 1 -57 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -63 -8 8 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 16,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 16 -24 16 528 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -16 560 -24 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 16,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 560,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/pocket-dig-down.yaml": {
+  "sha256": "c3284d4a6bc3b9c749530d174430e0897dd7a75332366003a17cc29c1616ad32",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -63 -8 8 -40 8 air",
+    "fill -5 -63 -5 5 -50 5 stone",
+    "fill -2 -57 -1 -2 -56 1 water",
+    "fill 2 -56 -1 2 -55 1 water",
+    "fill -1 -57 -2 1 -56 -2 water",
+    "fill -1 -57 2 1 -56 2 water",
+    "fill -1 -54 -1 1 -54 1 water",
+    "fill 0 -57 0 0 -56 0 air",
+    "fill 1 -58 0 1 -57 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -63 -8 8 -40 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 16,
+    "maxY": -24,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 16 -24 16 528 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 528 -64 -16 560 -24 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 16,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 528,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 560,
+      "maxY": -24,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/roofed-dive-fails-back.yaml": {
+  "sha256": "cb6e9981b0280cb3b376e9caa2c8eb48b60a90ffcfaf29fb637a9495e333bfd3",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -63 -10 28 -40 10 air",
+    "fill -7 -63 -4 20 -54 4 stone",
+    "fill -6 -61 -2 -1 -54 2 air",
+    "fill -6 -61 -2 -1 -60 2 water",
+    "fill 0 -61 0 5 -60 0 water",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -63 -10 28 -40 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 36,
+    "maxY": -24,
+    "maxZ": 18,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -18 36 -24 18 548 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 548 -64 -18 602 -24 18 -18 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 36,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 548,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 602,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/sandbar-start-at-sea.yaml": {
+  "sha256": "8794664b0df3f8652086f62fe7e2e8f8c4475c2d1c23c4acbae0569f61a82b99",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill 1 -63 -12 25 -61 12 water",
+    "fill 6 -63 0 6 -62 0 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 33,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 33 -24 24 545 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 545 -64 -24 602 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 33,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 545,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 602,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/swim-out-from-overhang.yaml": {
+  "sha256": "7c8dee0da2ea6e2f7522419f4c79b8125e04f63456f9eccb88be6345d3c12d98",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -10 -63 -10 28 -40 10 air",
+    "fill -9 -63 -9 27 -61 9 stone",
+    "fill -9 -60 -9 19 -53 9 water",
+    "fill 20 -60 -9 27 -53 9 stone",
+    "fill -1 -57 -4 1 -57 4 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -10 -63 -10 28 -40 10 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -18,
+    "minY": -64,
+    "minZ": -18,
+    "maxX": 36,
+    "maxY": -24,
+    "maxZ": 18,
+    "chunks": 20
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -18 -64 -18 36 -24 18 548 -64 -18"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 548 -64 -18 602 -24 18 -18 -64 -18"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -18,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 36,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 20
+     },
+     {
+      "dimension": "overworld",
+      "minX": 548,
+      "minY": -64,
+      "minZ": -18,
+      "maxX": 602,
+      "maxY": -24,
+      "maxZ": 18,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/pathfinder/vine-chasm-parkour.yaml": {
+  "sha256": "2c890b7b1db669e6e7e9d9345e46e03f42eccabd57a77070c0ff60ebcf5f9310",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -12 -61 -12 16 -38 14 air",
+    "fill -12 -61 -12 16 -61 14 andesite",
+    "fill -6 -46 -2 0 -46 2 stone",
+    "fill 5 -51 -2 12 -51 2 stone",
+    "fill 4 -41 -1 4 -41 1 oak_leaves",
+    "setblock 4 -42 0 vine[up=true]",
+    "setblock 4 -43 0 vine[up=true]",
+    "setblock 4 -44 0 vine[up=true]",
+    "setblock 4 -45 0 vine[up=true]",
+    "setblock 4 -46 0 vine[up=true]",
+    "setblock 4 -47 0 vine[up=true]",
+    "setblock 4 -48 0 vine[up=true]",
+    "setblock 4 -49 0 vine[up=true]",
+    "setblock 4 -50 0 vine[up=true]",
+    "fill 0 -46 3 0 -46 10 stone",
+    "setblock 1 -47 10 stone",
+    "setblock 2 -48 10 stone",
+    "setblock 3 -49 10 stone",
+    "setblock 4 -50 10 stone",
+    "fill 5 -51 3 5 -51 10 stone",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -12 -61 -12 16 -38 14 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -20,
+    "minY": -64,
+    "minZ": -20,
+    "maxX": 24,
+    "maxY": -22,
+    "maxZ": 22,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -20 -64 -20 24 -22 22 536 -64 -20"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 536 -64 -20 580 -22 22 -20 -64 -20"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -20,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 24,
+      "maxY": -22,
+      "maxZ": 22,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 536,
+      "minY": -64,
+      "minZ": -20,
+      "maxX": 580,
+      "maxY": -22,
+      "maxZ": 22,
+      "chunks": 16
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/shelter/dig-in-and-climb-out.yaml": {
+  "sha256": "837741f613e189d8845d7dbbdda940bd39150fe3aa15d763314cfdabc6592b95",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -64 -6 6 -64 6 bedrock",
+    "fill -3 -63 -3 3 -60 3 dirt",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/shelter/navigate-out-of-roofed-hole.yaml": {
+  "sha256": "c163adef9a889e27101f693f24e33eb185e9ce697e439503be6180625eaf5778",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -16 -59 -16 20 -40 16 air",
+    "fill -6 -64 -6 6 -64 6 bedrock",
+    "fill -3 -63 -3 3 -60 3 dirt",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -16 -59 -16 20 -40 16 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -24,
+    "minY": -64,
+    "minZ": -24,
+    "maxX": 28,
+    "maxY": -24,
+    "maxZ": 24,
+    "chunks": 16
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -24 -64 -24 28 -24 24 540 -64 -24"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 540 -64 -24 592 -24 24 -24 -64 -24"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -24,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 28,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 16
+     },
+     {
+      "dimension": "overworld",
+      "minX": 540,
+      "minY": -64,
+      "minZ": -24,
+      "maxX": 592,
+      "maxY": -24,
+      "maxZ": 24,
+      "chunks": 20
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/survival/breath-air-pocket.yaml": {
+  "sha256": "6da022f340fa5b8602131e1634145d968d7f66e49bbf23f7db36d571f122ba0c",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -12 -63 -6 40 -50 6 air",
+    "fill -10 -63 -4 38 -55 4 bedrock",
+    "fill -9 -60 0 36 -59 0 water",
+    "fill -8 -58 0 -7 -58 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -12 -63 -6 40 -50 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -20,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 48,
+    "maxY": -34,
+    "maxZ": 14,
+    "chunks": 12
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -20 -64 -14 48 -34 14 560 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 560 -64 -14 628 -34 14 -20 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -20,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 48,
+      "maxY": -34,
+      "maxZ": 14,
+      "chunks": 12
+     },
+     {
+      "dimension": "overworld",
+      "minX": 560,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 628,
+      "maxY": -34,
+      "maxZ": 14,
+      "chunks": 10
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/survival/breath-seagrass-head.yaml": {
+  "sha256": "80b2b63e64871dea862a22520c54d61c5d992fde79ef575171818e91907e67ee",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -12 -63 -6 40 -50 6 air",
+    "fill -10 -63 -4 38 -55 4 bedrock",
+    "fill -9 -60 0 36 -59 0 water",
+    "fill -1 -58 0 0 -58 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0",
+    "fill -4 -60 0 -2 -60 0 minecraft:tall_seagrass[half=lower]",
+    "fill -4 -59 0 -2 -59 0 minecraft:tall_seagrass[half=upper]"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -12 -63 -6 40 -50 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -20,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 48,
+    "maxY": -34,
+    "maxZ": 14,
+    "chunks": 12
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -20 -64 -14 48 -34 14 560 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 560 -64 -14 628 -34 14 -20 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -20,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 48,
+      "maxY": -34,
+      "maxZ": 14,
+      "chunks": 12
+     },
+     {
+      "dimension": "overworld",
+      "minX": 560,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 628,
+      "maxY": -34,
+      "maxZ": 14,
+      "chunks": 10
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/survival/breath-shovel-dirt-roof.yaml": {
+  "sha256": "e7615851aa9bef89e2173fea9dbbf00e3977537d31a165098f02ff9d941c1f6d",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -5 -63 -5 5 -50 5 air",
+    "fill -3 -63 -3 3 -57 3 bedrock",
+    "fill 0 -60 0 0 -59 0 water",
+    "fill 0 -58 0 0 -58 0 dirt",
+    "fill 0 -57 0 0 -57 0 air",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -5 -63 -5 5 -50 5 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -13,
+    "minY": -64,
+    "minZ": -13,
+    "maxX": 13,
+    "maxY": -34,
+    "maxZ": 13,
+    "chunks": 4
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -13 -64 -13 13 -34 13 525 -64 -13"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 525 -64 -13 551 -34 13 -13 -64 -13"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -13,
+      "minY": -64,
+      "minZ": -13,
+      "maxX": 13,
+      "maxY": -34,
+      "maxZ": 13,
+      "chunks": 4
+     },
+     {
+      "dimension": "overworld",
+      "minX": 525,
+      "minY": -64,
+      "minZ": -13,
+      "maxX": 551,
+      "maxY": -34,
+      "maxZ": 13,
+      "chunks": 6
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/survival/container-resumes-after-hunger.yaml": {
+  "sha256": "717edb69a4e3295773ceb3733191021c924e70407d8f6157260400b354176ad1",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -4 -59 -6 70 -40 6 air",
+    "fill -4 -61 -6 70 -60 6 stone",
+    "setblock 64 -59 0 chest{Items:[{Slot:0b,id:\"minecraft:cobblestone\",count:64},{Slot:1b,id:\"minecraft:cobblestone\",count:64},{Slot:2b,id:\"minecraft:cobblestone\",count:64}]}",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -4 -59 -6 70 -40 6 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -12,
+    "minY": -64,
+    "minZ": -14,
+    "maxX": 78,
+    "maxY": -24,
+    "maxZ": 14,
+    "chunks": 12
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -12 -64 -14 78 -24 14 590 -64 -14"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 590 -64 -14 680 -24 14 -12 -64 -14"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -12,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 78,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 12
+     },
+     {
+      "dimension": "overworld",
+      "minX": 590,
+      "minY": -64,
+      "minZ": -14,
+      "maxX": 680,
+      "maxY": -24,
+      "maxZ": 14,
+      "chunks": 14
+     }
+    ]
+   }
+  }
+ },
+ "tests/minecraft/scenarios/survival/smelt-in-deep-water.yaml": {
+  "sha256": "5eaae0ac355099297682ddf00ff5902a530f1799d5fd384d0edcd62b03473afb",
+  "compiled": {
+   "setup": [
+    "gamerule sendCommandFeedback false",
+    "gamerule commandModificationBlockLimit 1000000",
+    "fill -8 -62 -8 14 -50 8 air",
+    "fill -8 -61 -8 14 -61 8 grass_block",
+    "fill -8 -62 -8 14 -62 8 dirt",
+    "fill -5 -60 -5 5 -60 5 stone",
+    "fill -4 -61 -4 4 -60 4 water",
+    "fill 2 -61 0 2 -61 0 furnace",
+    "time set noon",
+    "gamerule doDaylightCycle false",
+    "gamerule doMobSpawning false",
+    "gamerule keepInventory true",
+    "gamerule naturalRegeneration false",
+    "gamerule randomTickSpeed 0"
+   ],
+   "activation": [],
+   "teardown": [
+    "gamerule commandModificationBlockLimit 1000000",
+    "kill @e[type=!minecraft:player]",
+    "fill -8 -62 -8 14 -50 8 air"
+   ],
+   "region": {
+    "dimension": "overworld",
+    "minX": -16,
+    "minY": -64,
+    "minZ": -16,
+    "maxX": 22,
+    "maxY": -34,
+    "maxZ": 16,
+    "chunks": 9
+   },
+   "snapshot": {
+    "save": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone -16 -64 -16 22 -34 16 534 -64 -16"
+    ],
+    "restore": [
+     "gamerule commandModificationBlockLimit 1000000",
+     "clone 534 -64 -16 572 -34 16 -16 -64 -16"
+    ],
+    "pin": [
+     {
+      "dimension": "overworld",
+      "minX": -16,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 22,
+      "maxY": -34,
+      "maxZ": 16,
+      "chunks": 9
+     },
+     {
+      "dimension": "overworld",
+      "minX": 534,
+      "minY": -64,
+      "minZ": -16,
+      "maxX": 572,
+      "maxY": -34,
+      "maxZ": 16,
+      "chunks": 9
+     }
+    ]
+   }
+  }
+ }
+}

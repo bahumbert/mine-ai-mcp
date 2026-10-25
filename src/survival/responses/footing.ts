@@ -186,7 +186,7 @@ export class FootingRecovery implements Disposable {
           const block = this.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
           const support = findPlacementSupport(this.bot, cell);
           const item = preferredScaffoldItem(this.bot);
-          if (!block || !isReplaceableForPlacement(block) || !support || !item || occupiedCell(this.bot, cell))
+          if (!block || !isReplaceableForPlacement(block, this.bot.version) || !support || !item || occupiedCell(this.bot, cell))
             continue;
           const face = support.support.position.offset(
             0.5 + support.face.x / 2,

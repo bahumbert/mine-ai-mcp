@@ -13,7 +13,7 @@ import { bucketDropTotals } from "../../navigation/mineflayer/water-landing.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
-import { armSignal, asVec3, type Position3 } from "../../utils/index.js";
+import { armSignal, asVec3, timeoutSignal, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { navigateCheckpointSchema } from "../checkpoint-schemas.js";
 import { formatNavigateResult } from "../navigate/navigate.js";
@@ -164,7 +164,7 @@ export function beginPortalEntry(
       if (lost) return { status: "partial", error: lost.reason, navigation: receipt() };
       if (bot.game.dimension === startDimension && route.status === "completed") {
         const callerSignal = context.signal ?? new AbortController().signal;
-        const entrySignal = AbortSignal.any([callerSignal, AbortSignal.timeout(30_000)]);
+        const entrySignal = AbortSignal.any([callerSignal, timeoutSignal(30_000)]);
         const entry = await enterPortal(bot, cell, block, entrySignal);
         elapsedMs += entry.elapsedMs;
         route = entry;

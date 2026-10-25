@@ -13,31 +13,53 @@ const SOIL_TAG = "dirt";
 /** What the runtime reports for a cell of a chunk that is not loaded. */
 const UNLOADED = "unloaded";
 
-/** Different cells a till must fail on, with no success in between, before a block name is taken for untillable. */
-const REFUSED_AFTER_CELLS = 2;
+/** Different places (chunks of a plot's middle) a till must fail at before a block name is refused. */
+const REFUSED_AFTER_PLACES = 2;
+/** How long a refusal holds after its latest failure (wall clock); then one site of that name may be tried again. */
+export const REFUSAL_HOLD_MS = 30 * 60_000;
+/** Places remembered per block name; the oldest is dropped beyond this, so a long run cannot grow the map. */
+const KEPT_PLACES = 8;
+/** The game's chunk width: two cells of one plot, or two bots on one plot, are one place. */
+const CHUNK = 16;
 
 /**
  * Block names a till failed on, learned from play and shared by every character of the process: the `dirt` tag lists
  * what a hoe may turn into soil only roughly (podzol, mud, moss carry it), so the game's answer to an actual till is
- * what counts. A single failure proves nothing (a block on top, an animal, lag): a name is refused only once it failed
- * on {@link REFUSED_AFTER_CELLS} different cells, and any till that works on it forgets the failures. No name is
- * listed in code.
+ * what counts. A single place proves nothing (a block on top, an animal, lag, one odd plot): a name is refused only
+ * once it failed at {@link REFUSED_AFTER_PLACES} different places, and only for {@link REFUSAL_HOLD_MS} after the
+ * latest failure. Then one site of that name is tried again (the probe): a failure there refuses it again at once
+ * (the earlier places still count), a till that works forgets the failures. No name is listed in code.
  */
 export class TillFacts {
-  /** Per block name, the cells ("x,z") a till failed on since the last one that worked. */
-  readonly #failed = new Map<string, Set<string>>();
-  /** A till failed on this block at this cell. */
-  failed(block: string, cell: { readonly x: number; readonly z: number }): void {
-    const cells = this.#failed.get(block) ?? new Set<string>();
-    cells.add(`${cell.x},${cell.z}`);
-    this.#failed.set(block, cells);
+  /** Per block name, the time of the latest failure at each place (chunk "x,z" of a plot's middle), oldest first. */
+  readonly #failed = new Map<string, Map<string, number>>();
+  readonly #now: () => number;
+  constructor(now: () => number = () => performance.now()) {
+    this.#now = now;
+  }
+  /** A till failed on this block on the plot with this middle (all the failures of one call are one failure). */
+  failed(block: string, plotMiddle: { readonly x: number; readonly z: number }): void {
+    const places = this.#failed.get(block) ?? new Map<string, number>();
+    const place = `${Math.floor(plotMiddle.x / CHUNK)},${Math.floor(plotMiddle.z / CHUNK)}`;
+    places.delete(place);
+    places.set(place, this.#now());
+    while (places.size > KEPT_PLACES) places.delete(places.keys().next().value!);
+    this.#failed.set(block, places);
   }
   /** A till worked on this block: it is soil, whatever failed before. */
   tilled(block: string): void {
     this.#failed.delete(block);
   }
+  /** How many places a till failed at on this block (at most {@link KEPT_PLACES}). */
+  failedPlaces(block: string): number {
+    return this.#failed.get(block)?.size ?? 0;
+  }
   refuses(block: string): boolean {
-    return (this.#failed.get(block)?.size ?? 0) >= REFUSED_AFTER_CELLS;
+    const places = this.#failed.get(block);
+    if (places === undefined || places.size < REFUSED_AFTER_PLACES) return false;
+    const latest = Math.max(...places.values());
+    // A clock that went back (now before the latest failure) is still within the hold.
+    return this.#now() - latest < REFUSAL_HOLD_MS;
   }
 }
 
@@ -86,12 +108,15 @@ interface Problems {
   readonly wrong: readonly string[];
   /** Cells whose block is not known (unloaded or not read): never taken for air or for soil. */
   readonly unknown: number;
+  /** Whether a counted block is one a hoe failed on lately (the farm skill must not send the bot back to it). */
+  readonly learned: boolean;
 }
 
 /** What is wrong with the plot's cells at soil level: nothing wrong and nothing unknown when the plot is fit. */
 function problems(plot: FarmPlot, area: BlockArea, tags: Tags, newSite: boolean, facts: TillFacts | undefined): Problems {
   const counts = new Map<string, number>();
   let unknown = 0;
+  let learned = false;
   const y = plot.water.y;
   for (let x = plot.min.x; x <= plot.max.x; x += 1) for (let z = plot.min.z; z <= plot.max.z; z += 1) {
     const block = area.blocks.get(areaKey(x, y, z));
@@ -111,10 +136,12 @@ function problems(plot: FarmPlot, area: BlockArea, tags: Tags, newSite: boolean,
       else if (!isOpen(area, x, y, z)) counts.set("roofed", (counts.get("roofed") ?? 0) + 1);
       continue;
     }
-    const reason = !isSoil(block, tags, middle, facts) ? block : newSite && !isOpen(area, x, y, z) ? "roofed" : null;
+    const refused = facts?.refuses(block) === true;
+    learned ||= refused;
+    const reason = !isSoil(block, tags, middle, facts) ? (refused ? `${block} (a hoe failed on it at ${facts.failedPlaces(block)} places lately)` : block) : newSite && !isOpen(area, x, y, z) ? "roofed" : null;
     if (reason !== null) counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
-  return { wrong: [...counts].map(([reason, count]) => `${count} ${reason}`), unknown };
+  return { wrong: [...counts].map(([reason, count]) => `${count} ${reason}`), unknown, learned };
 }
 
 const fit = (found: Problems): boolean => found.wrong.length === 0 && found.unknown === 0;
@@ -166,7 +193,7 @@ export async function chooseSite(runtime: BotRuntime, plot: FarmPlot, facts?: Ti
   }
   if (best !== null) return { plot: best.plot };
   const why = [...asked.wrong, ...(asked.unknown > 0 ? [`${asked.unknown} not loaded`] : [])].join(", ");
-  return { refusal: `no ground to farm within ${SITE_RADIUS} blocks around y ${plot.water.y}: the plot there is ${why}; walk to grass or dirt under the open sky and farm there` };
+  return { refusal: `no ground to farm within ${SITE_RADIUS} blocks around y ${plot.water.y}: the plot there is ${why}; walk to ${asked.learned ? "ground a hoe tills" : "grass or dirt"} under the open sky and farm there` };
 }
 
 /**

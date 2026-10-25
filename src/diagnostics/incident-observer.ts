@@ -5,6 +5,7 @@ import type { IncidentReference, IncidentRetention, IncidentTrigger } from "../b
 import { writeIncidentArtifact } from "../bot-data/incident-log.js";
 import type { NavigationRuntime } from "../navigation/index.js";
 import { deathMessage } from "../runtime/player-events.js";
+import type { ReflexLimitKind } from "../session/abort.js";
 import type { ActionRunnerStatus } from "../session/action-runner.js";
 import type { CombatExecutionSnapshot, CombatPhase } from "../survival/control/combat/execution.js";
 import type { SurvivalStatus } from "../survival/evidence/contract.js";
@@ -450,6 +451,9 @@ export function observeIncidents(
     capture: () => capture("operator"),
     physicsStalled: (action: string) => {
       void capture("physics_stalled", { action, vehicleId: currentVehicle(bot)?.id ?? null, lastVehicleId });
+    },
+    reflexLimit: (reflex: string, limit: ReflexLimitKind) => {
+      void capture("reflex_limit", { reflex, limit });
     },
     status: () => ({ ...recorder.status(), physicsSamples, observationMs, maxObservationMs }),
     connectionLost: onEnd,

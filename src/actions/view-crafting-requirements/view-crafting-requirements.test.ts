@@ -108,3 +108,10 @@ test("with nothing carried, the plan names the wood the explored world has", asy
   const seen = (item: string) => (item === "birch_log" ? 7 : 0);
   assert.deepEqual((await viewCraftingRequirements(bot, request, {}, seen)).requirements.plan?.requiredMaterials, [{ item: "birch_log", count: 1 }]);
 });
+
+test("an unknown item that is a mob is answered with what the mob drops; other unknown names with closest ids", async () => {
+  const { bot } = craftingBot({}, false);
+  const result = await viewCraftingRequirements(bot, { items: [{ itemName: "cow", count: 1 }, { itemName: "sticks", count: 1 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /cow is a mob, not an item: it drops beef, leather \(get_items beef hunts it\), sticks \(closest: stick/u);
+});

@@ -75,3 +75,30 @@ test("when making the tool fails, the build's wording says why; a stop is passed
   const stopping: ToolLossDeps = { reserved: [], inventory: async () => [], getItems: async () => ({ status: "stopped", detail: "" }) };
   assert.deepEqual(await new ToolLosses().handle(LOST, stopping), { status: "stopped" });
 });
+
+test("a step may allow several losses per class and in all; the one past either cap is refused", async () => {
+  const carried = [{ name: "oak_planks", count: 20 }, { name: "stick", count: 8 }];
+  const context = deps(carried);
+  const twice = new ToolLosses({ perClass: 2, total: 10 });
+  assert.equal((await twice.handle(LOST, context)).status, "remade");
+  carried.length = 2;
+  assert.equal((await twice.handle(LOST, context)).status, "remade");
+  carried.length = 2;
+  const third = await twice.handle(LOST, context);
+  assert.equal(third.status, "refused");
+  assert.match(third.status === "refused" ? third.note : "", /lost 3 times in this step/u);
+
+  const total = new ToolLosses({ perClass: 5, total: 2 });
+  assert.equal((await total.handle(LOST, context)).status, "remade");
+  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context)).status, "remade");
+  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_axe was lost; no axe remains.", context)).status, "refused");
+});
+
+test("a loss is told to the caller, and a tool no work is left for is not made", async () => {
+  const lost: string[] = [];
+  const context = { ...deps([{ name: "oak_planks", count: 8 }]), onLost: (toolClass: string) => lost.push(toolClass), stillNeeded: (toolClass: string) => toolClass !== "pickaxe" };
+  assert.deepEqual(await new ToolLosses().handle(LOST, context), { status: "unneeded" });
+  assert.deepEqual(context.asked, []);
+  assert.deepEqual((await new ToolLosses().handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context)).status, "remade");
+  assert.deepEqual(lost, ["pickaxe", "shovel"]);
+});

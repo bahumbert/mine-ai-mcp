@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { parseDebugExecuteJavaScriptRequest } from "./contract.js";
 import { executeDebugJavaScript, formatDebugExecuteJavaScriptResult } from "./debug-execute-javascript.js";
 
@@ -13,7 +13,7 @@ test("executes awaited code with the live bot, Vec3, and captured console in sco
   assert.throws(() => parseDebugExecuteJavaScriptRequest({ code: "return 1", timeout: 10 }));
   assert.throws(() => parseDebugExecuteJavaScriptRequest({ code: "   " }));
 
-  const bot = botFixture({ blocks: { "1,60,0": "spruce_log" }, position: new Vec3(0.5, 60, 0.5) });
+  const { bot } = createFakeBot({ cells: { "1,60,0": "spruce_log" }, position: new Vec3(0.5, 60, 0.5) });
   const result = await executeDebugJavaScript(bot, {
     code: [
       "const target = bot.blockAt(new Vec3(1, 60, 0));",
@@ -34,7 +34,7 @@ test("executes awaited code with the live bot, Vec3, and captured console in sco
 });
 
 test("returns the debug stack and prior console output when the program throws", async () => {
-  const result = await executeDebugJavaScript(botFixture({ position: new Vec3(0.5, 60, 0.5) }), {
+  const result = await executeDebugJavaScript(createFakeBot({ position: new Vec3(0.5, 60, 0.5) }).bot, {
     code: "console.warn('before failure'); throw new Error('diagnostic boom');",
   });
 

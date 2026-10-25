@@ -24,7 +24,7 @@ function roofless(read: WorldView["blockAt"], x: number, y: number, z: number): 
 export function waterMiningStance(read: WorldView["blockAt"], feet: BlockPosition, supported: boolean): boolean {
   const body = read(feet.x, feet.y, feet.z);
   if (body.kind !== "loaded" || body.traits.liquid !== "water" || !body.traits.liquidSource ||
-    body.traits.waterlogged || body.collisionShapes.length > 0) return false;
+    body.collisionShapes.length > 0) return false;
   const head = read(feet.x, feet.y + 1, feet.z);
   if (head.kind !== "loaded") return false;
   if (head.traits.liquid === null && isHeadPassable(head)) return roofless(read, feet.x, feet.y + 2, feet.z);

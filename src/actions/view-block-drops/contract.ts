@@ -54,6 +54,10 @@ const mobSourceSchema = z.strictObject({
   chance: z.number().positive().max(1),
   /** The game counts the species as hostile (a fight, not a hunt). */
   hostile: z.boolean(),
+  /** The species spawns naturally in the bot's dimension (worldgen biome spawners). */
+  spawnsInDimension: z.boolean(),
+  /** How many of that species are loaded now; sources with some loaded come first. */
+  loaded: z.number().int().nonnegative(),
 });
 
 export const blockDropsEvidenceSchema = z.strictObject({

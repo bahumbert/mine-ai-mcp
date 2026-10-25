@@ -15,7 +15,8 @@ import type { NavigationRuntime } from "../navigation/index.js";
 import { seenInWorld, type SessionFrontier } from "../runtime/frontier.js";
 import type { ForegroundCancellation } from "../session/action-runner.js";
 import type { CombatController } from "../survival/index.js";
-import { createDiscardedItems } from "../world/discarded-items.js";
+import { createDiscardedItems, DISCARD_MEMORY_MS } from "../world/discarded-items.js";
+import { sealedPitItemIds } from "../world/sealed-pits.js";
 import type { Action } from "./action.js";
 import { createActivatePortalAction } from "./activate-portal/index.js";
 import { createAttackDragonPerchAction } from "./attack-dragon-perch/index.js";
@@ -96,7 +97,7 @@ export function createActions(
 ) {
   // One registry, shared: the dropper records what it threw away and the hunt's
   // sweep reads the same set, so a deliberate discard is not picked back up.
-  const discarded = createDiscardedItems();
+  const discarded = createDiscardedItems(DISCARD_MEMORY_MS, () => sealedPitItemIds(bot));
   // One measure for the crafting planner's questions: it keeps its answers while the bot stays put, since each scan
   // of the loaded blocks blocks the event loop.
   const seen = seenInWorld(bot, frontier);
@@ -105,7 +106,7 @@ export function createActions(
     createDestroyEndCrystalAction(bot, combat),
     createAttackDragonPerchAction(bot, combat),
     createShootDragonAction(bot, combat),
-    createBuildStructureAction(bot, navigation),
+    createBuildStructureAction(bot, navigation, botData),
     createTendCropsAction(bot, navigation),
     createCancelForegroundAction(cancelForegroundAction),
     createCollectBlockAction(bot, navigation, discarded),
@@ -126,10 +127,10 @@ export function createActions(
     createNoteDeleteAction(botData, bot.username),
     createProtectRegionAction(bot, protectedRegions),
     createUnprotectRegionAction(protectedRegions),
-    createPlaceBlockAction(bot, navigation),
+    createPlaceBlockAction(bot, navigation, botData),
     createPrepareDragonPerchAction(bot, combat),
     createPickUpItemsAction(bot, navigation, botData, discarded),
-    createRawAction(bot),
+    createRawAction(bot, botData),
     createQueryBotDataAction(botData, () => updateBotStatus(botData, snapshotBotStatus(bot))),
     createReadRecentEventsAction(botData, bot.username),
     createSendMessageAction(bot),

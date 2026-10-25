@@ -35,7 +35,12 @@ export interface BlockTraits {
   readonly empty: boolean;
   readonly liquid: "water" | "lava" | null;
   readonly liquidSource: boolean;
-  /** Water held by a plant or waterlogged solid, independently of its collision. */
+  /** The fluid level of a liquid block: 0 a source, 1-7 flowing, 8 falling. Absent for a block that is no liquid and for test doubles. */
+  readonly liquidLevel?: number;
+  /**
+   * Water held inside a block the body cannot enter: a waterlogged stair, slab or fence. A block with no collision box
+   * that holds water (a water plant, a waterlogged plant) is `liquid` water and a source instead: the body swims there.
+   */
   readonly waterlogged: boolean;
   /**
    * The state carries a `waterlogged` property, so poured water enters this
@@ -68,6 +73,14 @@ export interface BlockTraits {
    * through it, so it is a block to dig, never a free cell.
    */
   readonly entangling?: boolean;
+  /** Water that drags the body up or down whatever it presses: a bubble column (its state has a `drag` property). */
+  readonly current?: boolean;
+  /**
+   * Lava over this block does not pour into it, so it rests on it as on a floor, though the block has no collision: sugar cane and
+   * a structure void (contract check `lava-over-passable`, facts `fire-lava-escape.md` "Lava over sugar cane and a structure void").
+   * False for a block lava enters or one another trait holds lava up with; absent in test doubles.
+   */
+  readonly lavaCannotEnter?: boolean;
   /** Right-clicking this block opens or operates it instead of placing against it. */
   readonly interactive: boolean;
   /** How far a parkour jump can start from this block's top. */
@@ -183,6 +196,14 @@ export function blockLabel(position: BlockPosition): string {
 
 export function blockPosition(position: Position3): BlockPosition {
   return { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+}
+
+/**
+ * The cell that holds a body up: the one half a block under the feet. At the feet's own cell the body would be inside the
+ * support while it sinks 0.08 into it, as a body does over ghost air (`y` cycles N, N-0.08, N-0.23).
+ */
+export function supportCellOf(position: Position3): BlockPosition {
+  return blockPosition({ x: position.x, y: position.y - 0.5, z: position.z });
 }
 
 export function samePosition(left: BlockPosition, right: BlockPosition): boolean {

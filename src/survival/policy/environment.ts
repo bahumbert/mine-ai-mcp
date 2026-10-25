@@ -66,7 +66,7 @@ export function decideBreathResponse(air: number): ResponseDecision<SurfaceRespo
     kind: "respond",
     response: { airBefore: air, maximumTicks: SURFACE_MAXIMUM_TICKS },
     name: "surface",
-    reason: `[BREATH] surface at air ${air}.`,
+    reason: `[BREATH] surface at air ${air} of 20: the bot rises to breathe; work that keeps its head under water here is cut again each time the air runs short, so do it from a spot with air above the head.`,
   };
 }
 

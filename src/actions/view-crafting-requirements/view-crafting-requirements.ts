@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { planCraftingFromInventory, type CraftTarget } from "../../utils/craft-plan.js";
-import { withSimilar } from "../../world/similar-names.js";
+import { unknownItemAnswer } from "../../world/mob-drops.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { markdownCodeBlock } from "../markdown.js";
 import {
@@ -39,7 +39,7 @@ export async function viewCraftingRequirements(
   for (const requested of request.items) {
     const item = bot.registry.itemsByName[requested.itemName];
     if (!item) {
-      unknownItems.push(withSimilar(requested.itemName, Object.keys(bot.registry.itemsByName)));
+      unknownItems.push(unknownItemAnswer(requested.itemName, Object.keys(bot.registry.itemsByName), bot.registry.entitiesByName, bot.version));
       continue;
     }
     targets.push({ id: item.id, name: item.name, count: requested.count });

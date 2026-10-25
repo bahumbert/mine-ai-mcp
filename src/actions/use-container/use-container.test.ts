@@ -1,174 +1,11 @@
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import test, { type TestContext } from "node:test";
-import { Vec3 } from "vec3";
-import { recordContainerObservation } from "../../bot-data/index.js";
-import { temporaryBotData } from "../../test-support/bot-data.js";
-import { botFixture, registry } from "../../test-support/bot.js";
+import test from "node:test";
+import { recordContainerObservation, recordPlacedContainer } from "../../bot-data/index.js";
+import { type ContainerStack, stackText } from "../../test-support/fake-bot/index.js";
+import { CELL, scene } from "../../test-support/use-container-scene.js";
 import { parseUseContainerRequest } from "./contract.js";
-import {
-  formatUseContainerResult,
-  useContainer,
-  type UseContainerDependencies,
-} from "./use-container.js";
-
-type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
-
-interface TestStack {
-  slot: number;
-  name: string;
-  count: number;
-  metadata?: number;
-  nbt?: object | null;
-}
-
-interface TestContainer {
-  readonly window: ContainerWindow;
-  readonly state: {
-    contents: TestStack[];
-    cursor: TestStack | null;
-    closed: boolean;
-    moves: number;
-  };
-}
-
-function testWindow(contents: readonly TestStack[] | number): TestContainer {
-  const initialContents =
-    typeof contents === "number"
-      ? contents === 0
-        ? []
-        : [{ slot: 0, name: "cobblestone", count: contents }]
-      : contents;
-  const state = {
-    contents: initialContents.map((item) => ({ ...item })),
-    cursor: null,
-    closed: false,
-    moves: 0,
-  };
-  const window = {
-    inventoryStart: 27,
-    containerItems: () =>
-      state.contents
-        .filter(({ slot }) => slot < 27)
-        .map((item) => {
-          const registryItem = registry.itemsByName[item.name]!;
-          return { ...registryItem, type: registryItem.id, metadata: 0, nbt: null, ...item };
-        }),
-    items: () =>
-      state.contents
-        .filter(({ slot }) => slot >= 27)
-        .map((item) => {
-          const registryItem = registry.itemsByName[item.name]!;
-          return { ...registryItem, type: registryItem.id, metadata: 0, nbt: null, ...item };
-        }),
-    get selectedItem() {
-      return state.cursor;
-    },
-    deposit: async (itemType: number, _metadata: number | null, count: number) => {
-      const itemName = registry.items[itemType]!.name;
-      const existing = state.contents.find(({ name }) => name === itemName);
-      if (existing) existing.count += count;
-      else {
-        const occupied = new Set(state.contents.map(({ slot }) => slot));
-        const slot = Array.from({ length: 27 }, (_, index) => index).find((index) => !occupied.has(index));
-        if (slot === undefined) throw new Error("container is full");
-        state.contents.push({ slot, name: itemName, count });
-      }
-    },
-    withdraw: async (itemType: number, _metadata: number | null, count: number) => {
-      const itemName = registry.items[itemType]!.name;
-      let remaining = count;
-      for (const stack of state.contents.filter(({ name }) => name === itemName)) {
-        const removed = Math.min(stack.count, remaining);
-        stack.count -= removed;
-        remaining -= removed;
-        if (remaining === 0) break;
-      }
-      state.contents = state.contents.filter(({ count: stackCount }) => stackCount > 0);
-    },
-    firstEmptyContainerSlot: () => {
-      const occupied = new Set(state.contents.map(({ slot }) => slot));
-      return Array.from({ length: 27 }, (_, index) => index).find((index) => !occupied.has(index)) ?? null;
-    },
-    firstEmptyInventorySlot: () => (state.contents.some(({ slot }) => slot === 27) ? null : 27),
-    close: () => {
-      state.closed = true;
-    },
-  } as unknown as ContainerWindow;
-  return { window, state };
-}
-
-function testBot(
-  blockName: string,
-  container: TestContainer,
-  carried: Readonly<Record<string, number>> = { cobblestone: 10 },
-): Bot {
-  const block = { name: blockName, position: new Vec3(1, 64, 1) };
-  const sameItemKind = (left: TestStack, right: TestStack) =>
-    left.name === right.name &&
-    (left.metadata ?? 0) === (right.metadata ?? 0) &&
-    JSON.stringify(left.nbt ?? null) === JSON.stringify(right.nbt ?? null);
-  return botFixture(
-    { username: "StorageBot", position: { x: 0, y: 64, z: 0 } },
-    {
-      inventory: { count: (itemType: number) => carried[registry.items[itemType]!.name] ?? 0 },
-      blockAt: (cell: Vec3) =>
-        cell.y === 65 ? { name: "air", position: cell, shapes: [], boundingBox: "empty" } : block,
-      openContainer: async () => container.window,
-      clickWindow: async (slot: number) => {
-        const slotIndex = container.state.contents.findIndex((item) => item.slot === slot);
-        const slotItem = slotIndex === -1 ? null : container.state.contents[slotIndex]!;
-        if (!container.state.cursor) {
-          if (!slotItem) return;
-          container.state.contents.splice(slotIndex, 1);
-          container.state.cursor = { ...slotItem };
-          return;
-        }
-
-        if (!slotItem) {
-          container.state.contents.push({ ...container.state.cursor, slot });
-          container.state.cursor = null;
-        } else if (sameItemKind(slotItem, container.state.cursor)) {
-          const stackSize = registry.itemsByName[slotItem.name]!.stackSize;
-          const moved = Math.min(stackSize - slotItem.count, container.state.cursor.count);
-          slotItem.count += moved;
-          container.state.cursor.count -= moved;
-          if (container.state.cursor.count === 0) container.state.cursor = null;
-        } else {
-          container.state.contents[slotIndex] = { ...container.state.cursor, slot };
-          container.state.cursor = { ...slotItem };
-        }
-        container.state.moves += 1;
-      },
-    },
-  );
-}
-
-const testDependencies = {
-  navigate: async () => ({ status: "completed", elapsedMs: 0 }),
-  createMovements: () => ({}),
-  now: () => new Date("2026-08-24T00:00:00.000Z"),
-} as unknown as UseContainerDependencies;
-
-/** One container, one bot and one disposable store, with the call the subject is asked to make. */
-function scene(
-  t: TestContext,
-  {
-    block = "chest",
-    contents = 0,
-    carried,
-  }: { block?: string; contents?: readonly TestStack[] | number; carried?: Readonly<Record<string, number>> } = {},
-) {
-  const data = temporaryBotData({ closeAfter: t });
-  const container = testWindow(contents);
-  const bot = testBot(block, container, carried);
-  const use = (
-    request: Parameters<typeof useContainer>[2],
-    options: Parameters<typeof useContainer>[3] = {},
-    dependencies: UseContainerDependencies = testDependencies,
-  ) => useContainer(bot, data, request, options, dependencies);
-  return { data, container, bot, use };
-}
+import { formatUseContainerResult } from "./use-container.js";
 
 test("parses bulk transfers and item ordering into an exhaustive domain union", () => {
   assert.deepEqual(parseUseContainerRequest({ x: 1, y: 64, z: 2 }), {
@@ -240,7 +77,7 @@ test("inspect records the complete slot layout and closes the window", async (t)
     { slot: 2, item: "cobblestone", count: 12 },
     { slot: 8, item: "oak_log", count: 3 },
   ]);
-  assert.equal(container.state.closed, true);
+  assert.equal(container.closed, true);
   assert.deepEqual(data.read("SELECT slot, item_name, item_count FROM observed_container_slots ORDER BY slot"), [
     { slot: 2, item_name: "cobblestone", item_count: 12 },
     { slot: 8, item_name: "oak_log", item_count: 3 },
@@ -256,7 +93,7 @@ test("cancellation propagates from navigation, and from observation with the ope
       { operation: "inspect", x: 1, y: 64, z: 1 },
       { signal: observeStop.signal },
       {
-        ...testDependencies,
+        ...observing.dependencies,
         now: () => {
           observeStop.abort(new Error("observation cancelled"));
           return new Date("2026-08-24T00:00:00.000Z");
@@ -265,7 +102,7 @@ test("cancellation propagates from navigation, and from observation with the ope
     ),
     /observation cancelled/,
   );
-  assert.equal(observing.container.state.closed, true, "an opened container must not be left open");
+  assert.equal(observing.container.closed, true, "an opened container must not be left open");
 
   const routing = scene(t);
   const routeStop = new AbortController();
@@ -274,7 +111,7 @@ test("cancellation propagates from navigation, and from observation with the ope
       { operation: "inspect", x: 10, y: 64, z: 0 },
       { signal: routeStop.signal },
       {
-        ...testDependencies,
+        ...routing.dependencies,
         navigate: async () => {
           routeStop.abort(new Error("action cancelled"));
           throw routeStop.signal.reason;
@@ -286,11 +123,12 @@ test("cancellation propagates from navigation, and from observation with the ope
 });
 
 test("a stop before the container is opened is reported as what was actually observed", async (t) => {
-  const stopped = await scene(t).use(
+  const stopping = scene(t);
+  const stopped = await stopping.use(
     { operation: "inspect", x: 10, y: 64, z: 0 },
     {},
     {
-      ...testDependencies,
+      ...stopping.dependencies,
       navigate: async () => ({ status: "stopped", reason: "no path", elapsedMs: 12 }),
     },
   );
@@ -310,7 +148,7 @@ const depositRows = [
   {
     name: "every requested item is carried",
     carried: { cobblestone: 3, oak_log: 2 },
-    contents: [{ slot: 0, name: "cobblestone", count: 5 }] as TestStack[],
+    contents: [{ slot: 0, name: "cobblestone", count: 5 }],
     status: "succeeded",
     transfers: [
       { status: "succeeded", item: "cobblestone", requested: 3, transferred: 3 },
@@ -324,7 +162,7 @@ const depositRows = [
   {
     name: "only part of one requested item is carried",
     carried: { cobblestone: 2 },
-    contents: [] as TestStack[],
+    contents: [],
     status: "partial",
     transfers: [
       { status: "partial", item: "cobblestone", requested: 3, transferred: 2 },
@@ -368,12 +206,10 @@ test("bulk deposit reports the transfer observed for each requested item", async
   }
 });
 
-test("settles an observed partial deposit after the transfer promise rejects", async (t) => {
-  const { data, container, use } = scene(t, { block: "barrel", contents: 5 });
-  container.window.deposit = async (_itemType: number, _metadata: number | null, _count: number) => {
-    container.state.contents[0]!.count += 2;
-    throw new Error("connection closed");
-  };
+test("settles an observed partial deposit after the transfer fails mid-way", async (t) => {
+  // A barrel full but for room for 2 more cobblestone: the third item has nowhere to go.
+  const full = [...Array.from({ length: 26 }, (_, slot): ContainerStack => ({ slot, name: "dirt", count: 64 })), { slot: 26, name: "cobblestone", count: 62 }];
+  const { data, use, carried } = scene(t, { block: "barrel", contents: full, carried: { cobblestone: 10 } });
   const result = await use({ operation: "deposit", x: 1, y: 64, z: 1, items: [{ itemName: "cobblestone", count: 3 }] });
 
   assert.equal(result.status, "partial");
@@ -381,8 +217,9 @@ test("settles an observed partial deposit after the transfer promise rejects", a
   assert.equal(result.container.transfers[0]?.transferred, 2);
   const transfer = result.container.transfers[0];
   if (!transfer || transfer.status === "succeeded") assert.fail("expected an incomplete transfer");
-  assert.match(transfer.error, /CONTAINER_TRANSFER_FAILED.*connection closed/);
-  assert.equal(data.read("SELECT item_count FROM observed_container_items")[0]?.item_count, 7);
+  assert.match(transfer.error, /CONTAINER_TRANSFER_FAILED.*destination full/);
+  assert.equal(data.read("SELECT item_count FROM observed_container_items WHERE item_name = 'cobblestone'")[0]?.item_count, 64);
+  assert.equal(carried("cobblestone"), 8, "the third item went back to the inventory");
 });
 
 test("bulk withdrawal compacts what remains and reports missing requested items", async (t) => {
@@ -414,9 +251,10 @@ test("bulk withdrawal compacts what remains and reports missing requested items"
       { status: "failed", item: "dirt", transferred: 0 },
     ],
   );
+  // Mineflayer's transfer on a server (contract `chest-open-take-close`): it picks the first stack up, puts the 2 down and puts the rest back, merging into the other stack, so the 4 left over sit in the first slot.
   assert.deepEqual(result.container.contents, [
-    { slot: 0, item: "cobblestone", count: 64 },
-    { slot: 4, item: "cobblestone", count: 4 },
+    { slot: 0, item: "cobblestone", count: 4 },
+    { slot: 4, item: "cobblestone", count: 64 },
     { slot: 5, item: "oak_log", count: 64 },
     { slot: 8, item: "oak_log", count: 6 },
   ]);
@@ -426,6 +264,50 @@ test("bulk withdrawal compacts what remains and reports missing requested items"
   );
 });
 
+/** The stacks the bot carries as these rows read them, by name: `oak_log x3`, a renamed one with its custom name. */
+function inventoryStacks(bot: Bot): string[] {
+  return bot.inventory.items().map((item) => stackText(item)!);
+}
+
+test("a deposit does not merge into a renamed stack of the same item: the plain stack goes to an empty slot and the renamed one keeps its 5", async (t) => {
+  const { container, use, carried } = scene(t, { contents: [{ slot: 0, name: "renamed_first_cobblestone", count: 5 }], carried: { cobblestone: 10 } });
+  const result = await use({ operation: "deposit", x: 1, y: 64, z: 1, items: [{ itemName: "cobblestone", count: 10 }] });
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(container.contents, [{ slot: 0, name: "renamed_first_cobblestone", count: 5 }, { slot: 1, name: "cobblestone", count: 10 }]);
+  assert.equal(carried("cobblestone"), 0);
+});
+
+test("a withdrawal by name takes the plain stacks first, then the renamed one, as separate stacks in the inventory", async (t) => {
+  const { container, bot, use } = scene(t, { contents: [{ slot: 0, name: "renamed_first_cobblestone", count: 5 }, { slot: 1, name: "cobblestone", count: 4 }], carried: {} });
+  const result = await use({ operation: "withdraw", x: 1, y: 64, z: 1, items: [{ itemName: "cobblestone", count: 6 }] });
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(inventoryStacks(bot).sort(), ['cobblestone x2 "first"', "cobblestone x4"]);
+  assert.deepEqual(container.contents, [{ slot: 0, name: "renamed_first_cobblestone", count: 3 }]);
+});
+
+test("a transfer that ends with another player's stack in hand: the close gives it to the inventory, and the next deposit of that item completes", async (t) => {
+  const filler = Array.from({ length: 26 }, (_, slot): ContainerStack => ({ slot: slot + 1, name: "dirt", count: 64 }));
+  const scenery = scene(t, { contents: [{ slot: 0, name: "cobblestone", count: 10 }, ...filler], carried: {} });
+  let received = 0;
+  // The chest is full, and another player puts an oak log stack on slot 0 as soon as our stack was picked up: the 2 left over cannot go back there.
+  scenery.harness.windows.onClickReceived(() => {
+    if (++received === 1) scenery.harness.server.answer(() => scenery.harness.windows.setContainerStacks(CELL, [{ slot: 0, name: "oak_log", count: 3 }, ...filler]));
+  });
+  const first = await scenery.use({ operation: "withdraw", x: 1, y: 64, z: 1, items: [{ itemName: "cobblestone", count: 8 }] });
+
+  assert.equal(first.status, "succeeded", "the 8 moved whatever the hand was left holding");
+  assert.equal(scenery.carried("cobblestone"), 8);
+  assert.equal(scenery.carried("oak_log"), 3, "the stack in hand went to the inventory when the window closed");
+  scenery.container.contents = scenery.container.contents.filter(({ slot }) => slot !== 5); // another player makes room
+  const second = await scenery.use({ operation: "deposit", x: 1, y: 64, z: 1, items: [{ itemName: "oak_log", count: 3 }] });
+
+  assert.equal(second.status, "succeeded");
+  assert.equal(scenery.carried("oak_log"), 0);
+  assert.equal(scenery.container.contents.find(({ name }) => name === "oak_log")?.count, 3);
+});
+
 const organizeRows = [
   {
     name: "fragmented stacks compact into the requested item order",
@@ -433,7 +315,7 @@ const organizeRows = [
       { slot: 0, name: "cobblestone", count: 40 },
       { slot: 3, name: "oak_log", count: 2 },
       { slot: 8, name: "cobblestone", count: 30 },
-    ] as TestStack[],
+    ],
     itemOrder: ["oak_log", "cobblestone"],
     matchedSlots: 3,
     organized: [
@@ -448,28 +330,59 @@ const organizeRows = [
       { slot: 0, name: "cobblestone", count: 12 },
       { slot: 3, name: "cobblestone", count: 5 },
       { slot: 8, name: "cobblestone", count: 47 },
-    ] as TestStack[],
+    ],
     itemOrder: ["cobblestone"],
     matchedSlots: 1,
     organized: [{ slot: 0, item: "cobblestone", count: 64 }],
   },
   {
-    // Two stacks share one item name but the server will never merge them.
+    // Stacks of one item the server will never merge: a custom name, an enchantment, nothing.
     name: "incompatible variants of one item stay in separate stacks",
     contents: [
-      { slot: 3, name: "cobblestone", count: 5, nbt: { value: { custom: "first" } } },
-      { slot: 8, name: "cobblestone", count: 7, nbt: { value: { custom: "second" } } },
-    ] as TestStack[],
+      { slot: 3, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 8, name: "renamed_second_cobblestone", count: 7 },
+      { slot: 10, name: "cobblestone", count: 4 },
+      { slot: 12, name: "enchanted_cobblestone", count: 3 },
+    ],
     itemOrder: ["cobblestone"],
-    matchedSlots: 2,
+    matchedSlots: 4,
     organized: [
       { slot: 0, item: "cobblestone", count: 5 },
       { slot: 1, item: "cobblestone", count: 7 },
+      { slot: 2, item: "cobblestone", count: 4 },
+      { slot: 3, item: "cobblestone", count: 3 },
+    ],
+    server: [
+      { slot: 0, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 1, name: "renamed_second_cobblestone", count: 7 },
+      { slot: 2, name: "cobblestone", count: 4 },
+      { slot: 3, name: "enchanted_cobblestone", count: 3 },
+    ],
+  },
+  {
+    // The planks go first, onto the renamed stack's slot; the renamed stack then wants the plain one's slot, which the client would predict as a merge.
+    name: "a stack moves onto the slot of another variant of its item through a buffer slot, never a click onto it",
+    contents: [
+      { slot: 0, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 1, name: "cobblestone", count: 4 },
+      { slot: 2, name: "oak_planks", count: 3 },
+    ],
+    itemOrder: ["oak_planks", "cobblestone"],
+    matchedSlots: 3,
+    organized: [
+      { slot: 0, item: "oak_planks", count: 3 },
+      { slot: 1, item: "cobblestone", count: 5 },
+      { slot: 2, item: "cobblestone", count: 4 },
+    ],
+    server: [
+      { slot: 0, name: "oak_planks", count: 3 },
+      { slot: 1, name: "renamed_first_cobblestone", count: 5 },
+      { slot: 2, name: "cobblestone", count: 4 },
     ],
   },
   {
     name: "an empty order organizes an empty container",
-    contents: [] as TestStack[],
+    contents: [],
     itemOrder: [],
     matchedSlots: 0,
     organized: [],
@@ -478,7 +391,8 @@ const organizeRows = [
 
 test("organize lays the container out as planned, preserving every stack it moved", async (t) => {
   for (const row of organizeRows) {
-    const result = await scene(t, { contents: row.contents }).use({
+    const scenery = scene(t, { contents: row.contents });
+    const result = await scenery.use({
       operation: "organize",
       x: 1,
       y: 64,
@@ -495,6 +409,8 @@ test("organize lays the container out as planned, preserving every stack it move
     assert.equal(result.container.contentsPreserved, true, row.name);
     assert.equal(result.container.playerInventoryPreserved, true, row.name);
     assert.equal(result.container.cursorEmpty, true, row.name);
+    // The server's own chest, where a variant has its name: a merge the server refused would show here.
+    if ("server" in row) assert.deepEqual(scenery.container.contents, row.server, `${row.name}: the server's layout`);
   }
 });
 
@@ -504,7 +420,7 @@ test("organize rejects an order that does not name the observed items exactly on
 
   assert.equal(result.status, "failed");
   assert.match(result.error, /CONTAINER_ITEM_ORDER_MISMATCH/);
-  assert.equal(container.state.moves, 0);
+  assert.equal(container.moves, 0);
 });
 
 test("a loaded non-container removes stale memory for that exact location", async (t) => {
@@ -525,4 +441,15 @@ test("a loaded non-container removes stale memory for that exact location", asyn
   assert.equal(result.status, "failed");
   assert.match(result.error, /CONTAINER_NOT_PRESENT/);
   assert.equal(data.read("SELECT COUNT(*) AS count FROM observed_containers")[0]?.count, 0);
+});
+
+test("a chest the bot placed and found gone is forgotten as a placed container too", async (t) => {
+  const { data, use } = scene(t, { block: "stone" });
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 1, y: 64, z: 1 } });
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 5, y: 64, z: 5 } });
+
+  const result = await use({ operation: "inspect", x: 1, y: 64, z: 1 });
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(data.read("SELECT container_key FROM placed_containers"), [{ container_key: "overworld|5|64|5" }]);
 });

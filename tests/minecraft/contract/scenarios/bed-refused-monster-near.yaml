@@ -1,0 +1,41 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-bed-refused-monster-near
+tags:
+  - contract
+description: "A night bed with a zombie four blocks away: Mineflayer refuses to sleep without sending a packet, and the use sent anyway is answered by the server with the not-safe action-bar message and no sleep. Contract check tests/minecraft/contract/checks/bed-refused-monster-near.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: bed-refused-monster-near
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 1 -60 0 red_bed[facing=east,occupied=false,part=foot]
+  - setblock 2 -60 0 red_bed[facing=east,occupied=false,part=head]
+  - gamerule doDaylightCycle true
+  - difficulty easy
+  - time set 14000
+entities:
+  - type: zombie
+    pos:
+      - 4.5
+      - -60
+      - 3.5
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

@@ -1288,3 +1288,160 @@ test("a plain stop from one player ends her work and the character's own goals, 
   const stacks = events.flatMap((event) => event.kind === "state" ? [event.stack.map((work) => work.text)] : []);
   assert.deepEqual(stacks.filter((stack) => stack.length > 0 && !stack.includes("collect 16 oak_log")).at(0), ["mine stone"], "Steve's logs ended, Alex's queued order stayed");
 });
+
+test("what a collect_block step mines is wanted: fresh raw_iron is not named as junk when the inventory is full (run 15 N5)", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.dropSources = { ...runtime.dropSources, raw_iron: [{ block: "iron_ore", chance: 1, planted: false }] };
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "raw_iron", count: 40 }, { name: "dirt", count: 128 }] };
+  runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "mine some iron" }, { say: "Full, sorry." });
+  const mine = { step: { skill: "collect_block", block: "iron_ore", count: 5 } };
+  action.reply(mine, mine);
+  await agent.handle(say("Steve", "mine some iron"));
+  await until(() => action.requests.length >= 2);
+  const prompt = JSON.stringify(action.requests[1]);
+  assert.match(prompt, /128 dirt/u);
+  assert.doesNotMatch(prompt, /nothing you are doing needs[^"]*raw_iron/u);
+});
+
+const DIRT = { step: { skill: "collect_block", block: "dirt", count: 2 } };
+
+test("an order whose work call finds the model unavailable three times waits and then runs its step: no bad reply, no \"could not work out\", the requester hears nothing about it", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Got the dirt!" });
+  action.unavailable(3).reply(DIRT, { done: "collected 2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.said, ["On it.", "Got the dirt!"]);
+  assert.equal(action.requests.length, 5, "three calls away, the step, then done");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1);
+  assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /could not work out/u);
+  assert.deepEqual(logs.filter((line) => line.startsWith("work tier failed")), [], "an unavailable model is no bad reply");
+});
+
+test("the own goal waits the same way when the goal call finds the model unavailable", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const { planner, action } = agentFor(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line) });
+  planner.unavailable(2).reply({ objective: "collect 2 dirt" });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await until(() => action.requests.length === 2);
+  assert.equal(planner.requests.length, 3);
+  assert.ok(logs.some((line) => line.startsWith("model unavailable (1 times)")), "the first failure is logged as the model being away");
+  assert.deepEqual(logs.filter((line) => line.startsWith("work loop error")), [], "it is not a work loop error");
+});
+
+test("an order taken while the agent waits for the model starts at once", async (t) => {
+  const runtime = new FakeRuntime();
+  // A long poll: the wait would last seconds, so only the new order can end it in time.
+  const { agent, chat, action } = agentFor(t, runtime, {}, { pollMs: 60_000 });
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Sand coming.", route: "act", request: "collect 3 sand" }, { say: "Sand!" });
+  action.unavailable(1).reply({ done: "sand is here" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => action.requests.length === 1);
+  await sleep(100);
+  assert.equal(action.requests.length, 1, "it waits instead of asking again at once");
+  assert.match(agent.activity, /collect 2 dirt/u);
+  await agent.handle(say("Bob", "get me 3 sand"));
+  await until(() => action.requests.length >= 2, 1_000);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 3 sand/u);
+});
+
+test("a chat line whose call finds the model unavailable once is answered after the wait, and is in the history once", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.unavailable(1).reply({ say: "Hello!", route: "talk", request: "" }, { say: "Still here.", route: "talk", request: "" });
+  await agent.handle(say("Steve", "hello Ayla"));
+  await until(() => runtime.said.length === 1);
+  assert.deepEqual(runtime.said, ["Hello!"]);
+  assert.equal(chat.requests.length, 2, "the failed call and the call that answered");
+  await agent.handle(say("Steve", "you there Ayla"));
+  await until(() => runtime.said.length === 2);
+  const history = chat.requests[2]?.[1]?.content ?? "";
+  assert.equal(history.split("hello Ayla").length - 1, 1);
+});
+
+test("a chat line superseded during the wait is dropped unasked, and the newer line has its stop kept", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner } = journaledAgent(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, restAfterStopSeconds: 60 } });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  const release = chat.hold();
+  chat.unavailable(1).reply({ spoken_to: ["Ayla"], say: "Stopping.", route: "stop", request: "" });
+  runtime.inbox.push(say("Steve", "Ayla, do a dance"));
+  await until(() => chat.requests.length === 1);
+  runtime.inbox.push(say("Steve", "Ayla, stop"));
+  await sleep(40);
+  release();
+  await until(() => runtime.cancelled.length === 1);
+  assert.deepEqual(runtime.said, ["Stopping."]);
+  assert.equal(chat.requests.length, 2, "the dance line was not asked again; the stop line was asked once");
+  assert.equal(agent.activity, "idle");
+});
+
+test("a stop during a slow work call: the stopped order is not narrated and no \"finished\" event is journaled, whatever the call returns", async (t) => {
+  // Backlog 167, BRN-08: the late bad reply of a stopped order ended it again and the requester heard "I could not work it out".
+  const runtime = new FakeRuntime();
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  // The first work call (3 rounds of format repair) answers at once; the first round of the second call is held.
+  const holds = [action.hold(), action.hold(), action.hold(), action.hold()];
+  for (const release of holds.slice(0, 3)) release();
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Stopping.", route: "stop", request: "" });
+  action.reply("nope", "nope", "nope", "nope", "nope", "nope");
+  await agent.handle(say("Steve", "Ayla, get me 2 dirt"));
+  await until(() => action.requests.length === 4);
+  await agent.handle(say("Steve", "Ayla, stop"));
+  holds[3]!();
+  await sleep(150);
+  assert.equal(action.requests.length, 6, "the held call was answered");
+  assert.deepEqual(events.filter((event) => event.kind === "objective" && event.event === "finished"), []);
+  assert.equal(chat.requests.length, 2, "no narration was asked for");
+  assert.deepEqual(runtime.said, ["On it.", "Stopping."]);
+  assert.equal(agent.activity, "idle");
+});
+
+test("progress of an order stopped mid-step is not narrated", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime, { settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
+  chat.hold()();
+  const narration = chat.hold();
+  chat.reply({ say: "Sure.", route: "act", request: "get 2 dirt" }, { say: "Stopping.", route: "stop", request: "" });
+  action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } });
+  await agent.handle(say("Steve", "Ayla, get me 2 dirt"));
+  await until(() => chat.requests.length === 2, 2_000);
+  await agent.handle(say("Steve", "Ayla, stop"));
+  chat.reply({ say: "Digging a bit of dirt for you." });
+  narration();
+  await sleep(100);
+  assert.deepEqual(runtime.said, ["Sure.", "Stopping."], "the progress line of the stopped order was dropped");
+});
+
+test("a model that never answers keeps the order on the stack; the failures are logged at the 1st and the 10th", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { pollMs: 1, log: (line) => logs.push(line) });
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" });
+  action.unavailable(1_000);
+  await agent.handle(say("Steve", "Ayla, get me 2 dirt"));
+  await until(() => logs.some((line) => line.startsWith("model unavailable (10 times)")), 5_000);
+  const counts = logs.filter((line) => line.startsWith("model unavailable")).map((line) => /\((\d+) times\)/u.exec(line)?.[1]);
+  assert.deepEqual(counts, ["1", "10"]);
+  assert.match(agent.activity, /collect 2 dirt/u);
+});
+
+test("two bad replies in a row still end the order with \"could not work out what to do next\"", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Sorry, I am lost." });
+  action.reply("nope", "nope", "nope", "nope", "nope", "nope");
+  await agent.handle(say("Steve", "Ayla, get me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
+  assert.equal(agent.activity, "idle");
+});

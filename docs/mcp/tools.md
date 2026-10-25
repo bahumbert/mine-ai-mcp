@@ -161,7 +161,7 @@ dragon or crystals have been killed.
 ### `view_blocks`
 
 Use `view_blocks` to read blocks without moving. `find` names up to
-eight block kinds and lists, for each, the nearest matches across every loaded
+eight block kinds (block names, or block tags: `logs` is the natural logs) and lists, for each, the nearest matches across every loaded
 chunk with their distance and the blocks above and below; the count found is
 reported whatever the `limit`, which defaults to twelve per name, up to a thousand (`more` says there are
 more: counting every stone loaded once stalled the runtime). `box` reads every cell
@@ -493,7 +493,8 @@ Recovery refuses after five minutes of wall time as a conservative boundary. Min
 ### `collect_block`
 
 Use `collect_block` to mine blocks and pick up their dropped items.
-Important arguments are `block_name`, the requested `count` of drops to gather,
+Important arguments are `block_name` (an exact block name, or a block tag such as `logs`, which means the
+natural logs of the trees; any other tag selects all its members, from the server jar's tags per version), the requested `count` of drops to gather,
 optional specific coordinates `x`, `y`, and `z`, and `scaffold` permission.
 With exact coordinates, omit `count` or set it to `1`. Larger counts are rejected
 before the action starts; omit all three coordinates to collect multiple blocks.
@@ -505,7 +506,9 @@ they are, including blocks the bot placed itself; navigate to the area first
 when a particular deposit matters. `max_distance` keeps the whole run within that
 many blocks (horizontally) of where it started: no farther target, no exploring;
 with none left in range it stops `[NO_TARGET_IN_RANGE]`, naming the nearest
-loaded one beyond the range and its distance. `max_breaks` caps the blocks the run may
+loaded one beyond the range and its distance. A `block_name` that is no block and no tag (an item such as
+`coal`, a misspelling, the singular `log`) fails at once with `[COLLECT_UNKNOWN_BLOCK]`, before any walking or digging:
+it lists the blocks that drop the item, or says to craft or smelt it, or lists the closest names. `max_breaks` caps the blocks the run may
 break (otherwise the drop chance sets the budget: a rare drop may break hundreds). The best carried tool for each block is
 equipped automatically. The response lists every cell broken with its distance
 from where the run started, so the model can see which deposit was mined.
@@ -771,8 +774,9 @@ is checked before the walk rather than after it, so a wrong cell fails in a
 millisecond; a fill named at a flowing cell scoops the source feeding it when
 one is within a few cells. Success proves the bot navigated within reach, the
 bucket in its hand changed, and for a pour the cell holds the liquid; a pour
-also reports how many lava sources became obsidian and how much flowing lava
-became cobblestone. A full bucket's ray stops at a solid face and the liquid
+also reports the blocks the liquid made within ten blocks of it, by name
+(`formed`: obsidian from lava sources, cobblestone from flowing lava, stone
+where lava met water), counting only cells that held liquid. A full bucket's ray stops at a solid face and the liquid
 lands in the cell in front of it, so a pour needs a face the bot can actually
 see from where it stands. To obtain obsidian, ask `collect_block` for it while
 carrying a water bucket — casting is part of mining, not of the bucket.
@@ -869,8 +873,8 @@ Defined in [src/actions/eat-food/contract.ts](../../src/actions/eat-food/contrac
 
 Drop named carried items, optionally walking to a named player before tossing
 them. Each entry accepts `item_name` and an optional `count`; omitting the count
-drops all carried stacks of that item. Worn armor and the off-hand are excluded,
-and the held item requires `allow_equipped`. Results report the observed inventory
+drops all carried stacks of that item; a count smaller than the copies of a tool gives up the most worn copy first. Worn armor and the off-hand are excluded,
+and the held item requires `allow_equipped`. A toss on the ground (no hole, no player) is refused with `[DROP_GROUND_UNAVAILABLE]` while the bot is in the air: it could not walk off and would pick the items up again. Results report the observed inventory
 decrease. Collection and hunting ignore the resulting item entities as targets.
 Set `in_a_hole: true` to create a dry, enclosed disposal pit below pickup height
 beside the bot. Underground, this can excavate an opening into a tunnel wall
@@ -884,7 +888,10 @@ material first; never a falling block or a workstation) and walks a few blocks
 clear of the pit, so a following `collect_block` or other route does not lead
 straight back into it. The result's `holeClosure` reports the block used, how
 many were placed, the bot's final distance from the hole, and any reason the
-hole stayed open; neither step changes the drop's status.
+hole stayed open; neither step changes the drop's status. When a hole drop would bury every
+block that could plug it, up to 2 are kept carried for the plug; that item's
+entry reports them as `keptForPlug`; the plug uses them, and if it could not they stay carried
+for the next drop of that item to bury.
 Defined in [src/actions/drop-item/contract.ts](../../src/actions/drop-item/contract.ts).
 
 ### `equip`
@@ -972,7 +979,8 @@ whispers the message to that one player instead, with at most 233 characters so
 it fits one `/tell` command. The player must be online (matched without regard
 to case); otherwise the call fails with `[PLAYER_NOT_ONLINE]`, nothing is sent,
 and the result's `to` repeats the name asked for (on success, the name as the
-server spells it).
+server spells it). A message holding `§` or a control character (U+0000-U+001F, U+007F) is refused before anything is sent, because the
+server disconnects a client for it and the bot does not reconnect; the refusal tells the model to remove them and send again.
 Success proves the message was sent and the bot observed its own chat echo
 returned by the server (for a whisper, the server's
 `commands.message.display.outgoing` line carrying the same text). It does not use the body: it runs beside any foreground

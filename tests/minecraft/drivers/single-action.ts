@@ -1,12 +1,14 @@
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
+import { arenaActionInput } from "../arena/frame.ts";
 import type { ScenarioContext } from "../scenario.ts";
 
 const requestSchema = z.strictObject({
   action: z.string().trim().min(1),
   input: z.record(z.string(), z.unknown()),
   expect: z.strictObject({
-    status: z.enum(["succeeded", "partial", "failed"]),
+    // "settled": any result the action itself returned (succeeded, partial or failed); the world goals judge the outcome.
+    status: z.enum(["succeeded", "partial", "failed", "settled"]),
     errorContains: z.string().min(1).optional(),
     interruptionContains: z.string().min(1).optional(),
   }).default({ status: "succeeded" }),
@@ -19,14 +21,14 @@ const requestSchema = z.strictObject({
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { action, input, expect } = requestSchema.parse(context.scenario.params);
-  const output = await context.call(action, input);
+  const output = await context.call(action, arenaActionInput(input, context.arena));
   const { result } = output;
   if (("kind" in result && result.kind === "runtime_failure") || result.status === "cancelled") {
     return { status: "failed", detail: output.summary };
   }
   const error = result.status === "succeeded" ? "" : result.error;
   const interruption = expect.interruptionContains;
-  const matches = result.status === expect.status &&
+  const matches = (expect.status === "settled" || result.status === expect.status) &&
     (expect.errorContains === undefined || error.includes(expect.errorContains)) &&
     (interruption === undefined ||
       output.interruptions?.some((reason) => reason.includes(interruption)) === true);

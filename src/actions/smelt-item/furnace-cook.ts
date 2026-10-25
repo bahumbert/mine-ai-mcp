@@ -1,0 +1,283 @@
+// A furnace window's cook: what it holds, the ingots taken while it burns, the wait for it, and the recovery of what is left.
+import type { Bot } from "mineflayer";
+import type { FurnaceProperties } from "./furnace-properties.js";
+import { carriedCount } from "../../world/inventory-count.js";
+import { waitForSignal } from "../../utils/signals.js";
+import { STANDARD_COOK_TICKS } from "../../world/smelting.js";
+
+const COOK_STALL_MS = 15_000;
+const FUEL_START_SETTLEMENT_MS = 1_000;
+/** How long a reopened furnace has to report the fuel still burning in it: ten server ticks. */
+const BURN_REPORT_MS = 500;
+const TICK_MS = 50;
+const HARVEST_STACK = 8;
+const HARVEST_INTERVAL_MS = 30_000;
+export const SLOT_RECOVERY_MS = 2_000;
+
+export type FurnaceWindow = Awaited<ReturnType<Bot["openFurnace"]>>;
+
+/** The clock a cook is timed with: monotonic in production, a fake one in tests. */
+export interface CookClock {
+  readonly now: () => number;
+  readonly pause: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+}
+
+export interface Recovery {
+  readonly input: number;
+  readonly fuel: number;
+  readonly output: { readonly name: string; readonly count: number; readonly inventoryBefore: number } | null;
+  readonly errors: readonly string[];
+}
+
+async function boundedTake<T>(operation: () => Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} did not settle within ${SLOT_RECOVERY_MS} ms.`)), SLOT_RECOVERY_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function hasInventoryRoom(bot: Bot, item: ReturnType<FurnaceWindow["outputItem"]>): boolean {
+  if (!item) return false;
+  if (bot.inventory.items().some((stack) => stack.type === item.type && stack.count < stack.stackSize)) return true;
+  const inventory = bot.inventory as Bot["inventory"] & { emptySlotCount?: () => number };
+  return (inventory.emptySlotCount?.() ?? 1) > 0;
+}
+
+async function takeOutputOnce(bot: Bot, window: FurnaceWindow) {
+  const item = window.outputItem();
+  if (!item) return null;
+  if (!hasInventoryRoom(bot, item)) throw new Error(`No inventory room for furnace output ${item.name} x${item.count}.`);
+  const inventoryBefore = carriedCount(bot, item.name);
+  // Shift-clicking into an existing stack mutates this same Item's count.
+  // Retain the pre-click quantity or a successful transfer looks like 0 removed.
+  const outputBefore = item.count;
+  // Furnace slot 2 is marked as a crafting result by prismarine-windows, so
+  // Furnace.takeOutput uses a cursor pickup followed by another click. A
+  // single shift-click is safe here: cooking itself cannot repeat on click.
+  await bot.clickWindow(item.slot, 0, 1);
+  // While a container is open, Mineflayer's player inventory can lag behind
+  // the window packet even after the server accepted this click. The furnace
+  // output slot is the direct witness for this one-slot transaction.
+  const removed = await waitForSignal(
+    () => Math.max(0, outputBefore - (window.outputItem()?.count ?? 0)),
+    window,
+    "updateSlot",
+    { timeoutMs: SLOT_RECOVERY_MS },
+  );
+  const count = removed ?? 0;
+  return { name: item.name, count, inventoryBefore, confirmed: count > 0 };
+}
+
+async function takeResidualOnce(window: FurnaceWindow, slot: "inputItem" | "fuelItem") {
+  const item = window[slot]();
+  if (!item) return null;
+  if (slot === "inputItem") await window.takeInput();
+  else await window.takeFuel();
+  const remaining = window[slot]()?.count ?? 0;
+  return { name: item.name, count: Math.max(0, item.count - remaining), confirmed: remaining < item.count };
+}
+
+export async function recover(bot: Bot, window: FurnaceWindow): Promise<Recovery> {
+  let input = 0;
+  let fuel = 0;
+  let output: Recovery["output"] = null;
+  const errors: string[] = [];
+  for (const [read, take] of [
+    ["outputItem", "takeOutput"],
+    ["inputItem", "takeInput"],
+    ["fuelItem", "takeFuel"],
+  ] as const) {
+    try {
+      const slotItem = window[read]();
+      if (!slotItem) continue;
+      if (!hasInventoryRoom(bot, slotItem)) {
+        errors.push(`No inventory room for furnace ${read === "outputItem" ? "output" : read === "inputItem" ? "input" : "fuel"} ${slotItem.name} x${slotItem.count}.`);
+        break;
+      }
+      if (take === "takeOutput") {
+        const taken = await boundedTake(() => takeOutputOnce(bot, window), take);
+        if (!taken) continue;
+        output = { name: taken.name, count: taken.count, inventoryBefore: taken.inventoryBefore };
+        if (!taken.confirmed) {
+          errors.push(`Inventory did not confirm furnace output ${taken.name}.`);
+          break;
+        }
+      } else {
+        const taken = await boundedTake(() => takeResidualOnce(window, read), take);
+        if (!taken) continue;
+        if (take === "takeInput") input += taken.count;
+        else fuel += taken.count;
+      }
+    } catch (cause) {
+      errors.push(cause instanceof Error ? cause.message : String(cause));
+      // A timed-out transfer can still be pending inside Mineflayer. Do not
+      // start a second slot mutation against the same window.
+      break;
+    }
+  }
+  return { input, fuel, output, errors };
+}
+
+/**
+ * The items an attempt cooked, from the furnace's input: every item it loaded that neither came back to the inventory
+ * nor stays in the input slot became an output (the item being cooked stays in the slot until done, and comes back).
+ * The window's take deltas can be an ingot behind the server (see `creditMissedIngots`); the carried input is not.
+ */
+export function ingotsFromInput(carriedBefore: number, carriedAfter: number, leftInSlot: number): number {
+  return Math.max(0, carriedBefore - carriedAfter - leftInSlot);
+}
+
+/** Ingots taken out while the furnace still cooks, so the carried count rises as they come. */
+export interface Harvest {
+  readonly taken: () => number;
+  readonly item: () => { readonly name: string; readonly inventoryBefore: number } | null;
+  readonly takeReady: (outputCount: number) => Promise<void>;
+  /** Count ingots a take moved beyond what the window showed when it clicked (see `waitForCook`). */
+  readonly credit: (count: number) => void;
+}
+
+export function midCookHarvest(bot: Bot, window: FurnaceWindow, now: () => number): Harvest {
+  let taken = 0;
+  let item: { name: string; inventoryBefore: number } | null = null;
+  let lastTakeAt = now();
+  let disabled = false;
+  return {
+    taken: () => taken,
+    item: () => item,
+    credit: (count) => {
+      taken += count;
+    },
+    async takeReady(outputCount) {
+      const at = now();
+      if (disabled || outputCount === 0) return;
+      if (outputCount < HARVEST_STACK && at - lastTakeAt < HARVEST_INTERVAL_MS) return;
+      lastTakeAt = at;
+      try {
+        const out = await boundedTake(() => takeOutputOnce(bot, window), "takeOutput");
+        if (!out) return;
+        item ??= { name: out.name, inventoryBefore: out.inventoryBefore };
+        taken += out.count;
+        if (!out.confirmed) disabled = true;
+      } catch {
+        // No room or a transfer that did not settle: leave the output in the furnace; the final
+        // recovery tries once more and reports the reason. No second mutation on a pending window.
+        disabled = true;
+      }
+    },
+  };
+}
+
+export interface FurnaceObservation {
+  readonly output: number;
+  readonly input: number;
+  readonly fuelItems: number;
+  readonly cookProgress: number | null;
+  readonly fuelProgress: number | null;
+}
+
+export type CookVerdict = "completed" | "fuel_starved" | "stalled" | "safety_timeout";
+
+/** The window's own fractions, or the server's counters when the window carries them (they do not lose a packet). */
+export function furnaceObservation(window: FurnaceWindow): FurnaceObservation {
+  const state = window as WithProperties & { progress?: number | null; fuel?: number | null };
+  const said = state.properties?.() ?? null;
+  const fraction = (done: number, total: number) => (total > 0 ? done / total : 0);
+  return {
+    output: window.outputItem()?.count ?? 0,
+    input: window.inputItem()?.count ?? 0,
+    fuelItems: window.fuelItem()?.count ?? 0,
+    cookProgress: said ? fraction(said.cookTicks, said.cookTotalTicks) : typeof state.progress === "number" ? state.progress : null,
+    fuelProgress: said ? fraction(said.litTicks, said.litTotalTicks) : typeof state.fuel === "number" ? state.fuel : null,
+  };
+}
+
+/** A furnace window that tells what the server says it is doing, from the raw packets (see `furnace-properties.ts`). */
+type WithProperties = FurnaceWindow & { readonly properties?: () => FurnaceProperties | null };
+
+/**
+ * How many more items the fuel already burning in the furnace will cook, whole items only: a lit fuel item leaves the
+ * fuel slot at once and burns on, so a resumed attempt that has put its last coal in still has fuel (scenario
+ * busy-smelt-interrupted). A window that has not reported its burn time counts as none.
+ */
+export function burningItems(window: FurnaceWindow, cookTicks = STANDARD_COOK_TICKS): number {
+  const ticks = (window as WithProperties).properties?.()?.litTicks;
+  return typeof ticks === "number" ? Math.floor(ticks / cookTicks) : 0;
+}
+
+/**
+ * Wait until a furnace just opened has reported its properties: the server sends them with the window, a moment after
+ * the window itself. A window without them (a test double) reports at once; one that stays silent is read as not burning.
+ */
+export async function settleBurnReport(window: FurnaceWindow, dependencies: CookClock, signal?: AbortSignal): Promise<void> {
+  const properties = (window as WithProperties).properties;
+  if (properties === undefined) return;
+  const startedAt = dependencies.now();
+  while (properties() === null && dependencies.now() - startedAt < BURN_REPORT_MS) await dependencies.pause(50, signal);
+}
+
+/** Observations in a row that must find the cook over: the input and output slots update in separate packets. */
+const COOK_OVER_OBSERVATIONS = 2;
+
+/**
+ * A mid-cook take shift-clicks the whole output stack, and the window it counts from can be one ingot behind the
+ * server's (live, busy-smelt-interrupted: it showed 2 and the click moved 3; smelt-batch-normal, 16 items: "retrieved
+ * 14/16", on the base too), so the cook never reaches its count and ends `SMELT_STALLED`. The furnace itself settles it:
+ * input seen and now gone and nothing cooking for `COOK_OVER_OBSERVATIONS` observations means every item loaded became
+ * an ingot; those in the output slot are counted, the others left through a take, and what the takes did not count is
+ * credited. Only after a take (there is one to blame) and only for an input this wait saw.
+ */
+function creditMissedIngots(harvest: Harvest | undefined, requested: number, output: number, cookOverFor: number): void {
+  if (!harvest || cookOverFor < COOK_OVER_OBSERVATIONS || harvest.item() === null) return;
+  const missed = requested - harvest.taken() - output;
+  if (missed > 0) harvest.credit(missed);
+}
+
+export async function waitForCook(
+  window: FurnaceWindow,
+  requested: number,
+  dependencies: CookClock,
+  signal?: AbortSignal,
+  observe?: (observation: FurnaceObservation, stalledForMs: number) => void,
+  harvest?: Harvest,
+  cookTicks = STANDARD_COOK_TICKS,
+): Promise<{ readonly verdict: CookVerdict; readonly observation: FurnaceObservation }> {
+  const startedAt = dependencies.now();
+  // Four times the time the recipe says the cook takes, so a lagging server does not end a cook that is going on.
+  const safetyDeadline = startedAt + Math.max(60_000, requested * cookTicks * TICK_MS * 4 + COOK_STALL_MS);
+  let lastAdvanceAt = startedAt;
+  let previous = furnaceObservation(window);
+  let sawInput = false;
+  let cookOverFor = 0;
+  while (true) {
+    signal?.throwIfAborted();
+    const current = furnaceObservation(window);
+    const now = dependencies.now();
+    if (current.input > 0) sawInput = true;
+    cookOverFor = sawInput && current.input === 0 && (current.cookProgress ?? 0) === 0 ? cookOverFor + 1 : 0;
+    creditMissedIngots(harvest, requested, current.output, cookOverFor);
+    if (current.output !== previous.output || current.cookProgress !== previous.cookProgress) lastAdvanceAt = now;
+    const stalledForMs = Math.max(0, now - lastAdvanceAt);
+    observe?.(current, stalledForMs);
+    if ((harvest?.taken() ?? 0) + current.output >= requested && current.input === 0 && (current.cookProgress ?? 0) === 0)
+      return { verdict: "completed", observation: current };
+    if (
+      now - startedAt >= FUEL_START_SETTLEMENT_MS &&
+      current.input > 0 &&
+      current.fuelItems === 0 &&
+      current.fuelProgress === 0 &&
+      (current.cookProgress ?? 0) === 0
+    ) return { verdict: "fuel_starved", observation: current };
+    if (stalledForMs >= COOK_STALL_MS) return { verdict: "stalled", observation: current };
+    if (now >= safetyDeadline) return { verdict: "safety_timeout", observation: current };
+    await harvest?.takeReady(current.output);
+    previous = furnaceObservation(window);
+    await dependencies.pause(100, signal);
+  }
+}

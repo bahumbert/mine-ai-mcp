@@ -11,17 +11,24 @@
  * "the server had not answered yet".
  */
 import type { Bot } from "mineflayer";
-import { waitForSignal } from "../utils/signals.js";
+import { waitForServerAnswer } from "./world-age.js";
 
 /**
- * How long a receipt waits for the count it expects.
+ * The longest a receipt waits for the count it expects, on the wall clock.
  *
- * The slot update is a tick or so behind the witness, so five ticks is enough
- * for it and for a slow tick behind it. It is deliberately short: a receipt
- * that cannot say what the inventory holds should say so quickly rather than
- * hold the model for a second on a number it will report as unknown anyway.
+ * The wait ends on the server's answer, not on a guess of its delay: the count it expects, or the world age moving
+ * on past the send (`SERVER_ANSWER_TICKS`) without it. This bound only covers a server whose clock has stopped, so
+ * it is longer than a server seconds behind needs.
  */
-export const INVENTORY_SETTLE_MS = 250;
+export const INVENTORY_SETTLE_WALL_MS = 5_000;
+
+export interface InventorySettleOptions {
+  /** Wall-clock bound; default `INVENTORY_SETTLE_WALL_MS`. */
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  /** World age when the act went out, so the answer wait counts from the send and not from this call. */
+  readonly sentAtAge?: number;
+}
 
 export interface SettledInventoryCount {
   /** The carried count observed when the wait ended. */
@@ -58,7 +65,7 @@ export async function settleInventoryCount(
   bot: Bot,
   itemName: string,
   expected: number,
-  options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+  options: InventorySettleOptions = {},
 ): Promise<SettledInventoryCount> {
   return settleCount(bot, itemName, (count) => count === expected, options);
 }
@@ -68,7 +75,7 @@ export function settleInventoryMinimum(
   bot: Bot,
   itemName: string,
   minimum: number,
-  options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
+  options: InventorySettleOptions = {},
 ): Promise<SettledInventoryCount> {
   return settleCount(bot, itemName, (count) => count >= minimum, options);
 }
@@ -77,11 +84,17 @@ async function settleCount(
   bot: Bot,
   itemName: string,
   accepts: (count: number) => boolean,
-  options: { readonly timeoutMs?: number; readonly signal?: AbortSignal },
+  options: InventorySettleOptions,
 ): Promise<SettledInventoryCount> {
-  const reached = await waitForSignal(() => accepts(carriedCount(bot, itemName)), bot.inventory, "updateSlot", {
-    timeoutMs: options.timeoutMs ?? INVENTORY_SETTLE_MS,
-    context: { signal: options.signal },
+  const accepted = () => accepts(carriedCount(bot, itemName));
+  // A look every 25 ms rather than a slot listener: the wait also ends on the world age, which has no event.
+  await waitForServerAnswer(bot, options.sentAtAge ?? bot.time?.age, {
+    until: accepted,
+    wallMs: options.timeoutMs ?? INVENTORY_SETTLE_WALL_MS,
+    ...(options.signal && { signal: options.signal }),
+  }).catch((cause: unknown) => {
+    // A cancelled caller still gets the count seen so far; any other failure is a bug that must not hide.
+    if (!options.signal?.aborted) throw cause;
   });
-  return { count: carriedCount(bot, itemName), confirmed: reached === true };
+  return { count: carriedCount(bot, itemName), confirmed: accepted() };
 }

@@ -2,9 +2,10 @@ import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
 import { CombatPerception } from "./observations.js";
 import { Vec3 } from "vec3";
+import { DEFAULT_MINECRAFT_VERSION } from "../../../server/config.js";
+import { type FakeWorld, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import type { HostileContext } from "../../control/combat/context.js";
 import { observeHostileResponse } from "../../control/combat/observation.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
@@ -18,7 +19,7 @@ interface Mob {
   readonly kind?: string;
   /** minecraft-data type, which the policy must not rely on. */
   readonly type?: string;
-  readonly metadata?: readonly unknown[];
+  readonly metadata?: unknown[];
 }
 
 test("waiting for contact is distinct from a response constrained by policy", () => {
@@ -40,31 +41,12 @@ test("waiting for contact is distinct from a response constrained by policy", ()
 const NIGHT_TICKS = 18_000;
 const NOON_TICKS = 6_000;
 
-/** The 1.21.4 enderman metadata layout, as minecraft-data reports it. */
-const ENDERMAN_METADATA_KEYS = [
-  "shared_flags",
-  "air_supply",
-  "custom_name",
-  "custom_name_visible",
-  "silent",
-  "no_gravity",
-  "pose",
-  "ticks_frozen",
-  "living_entity_flags",
-  "health",
-  "effect_particles",
-  "effect_ambience",
-  "arrow_count",
-  "stinger_count",
-  "sleeping_pos",
-  "mob_flags",
-  "carry_state",
-  "creepy",
-  "stared_at",
-];
+const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
+/** The enderman metadata layout of the game's version, as minecraft-data reports it. */
+const ENDERMAN_METADATA_KEYS = registry.entitiesByName.enderman!.metadataKeys!;
 const CREEPY = ENDERMAN_METADATA_KEYS.indexOf("creepy");
 
-function botWith(options: {
+interface SceneOptions {
   readonly health?: number;
   readonly items?: readonly { readonly name: string; readonly count: number }[] | readonly string[];
   readonly mobs?: readonly Mob[];
@@ -73,55 +55,77 @@ function botWith(options: {
   /** Sky light every cell reports, for the daylight-spider rule. */
   readonly skyLight?: number;
   readonly position?: Vec3;
+  /** A stone wall at x=1 between the bot and the mobs further along +x; a low one reaches y=1.5. */
   readonly covered?: boolean | "low_wall";
+  /** No ground: every cell is air. */
   readonly air?: boolean;
-}): Bot {
-  const mobs = options.mobs ?? [];
-  const items = (options.items ?? []).map((item, type) =>
-    typeof item === "string" ? { name: item, type, count: 1 } : { ...item, type },
-  );
-  return {
+}
+
+function botWith(options: SceneOptions): Bot {
+  return sceneWith(options).bot;
+}
+
+/** The bot at the origin on stone, the mobs along +x on its row, and the world to change under them. */
+function sceneWith(options: SceneOptions): { bot: Bot; world: FakeWorld } {
+  const carried: Record<string, number> = {};
+  for (const item of options.items ?? []) {
+    const { name, count } = typeof item === "string" ? { name: item, count: 1 } : item;
+    carried[name] = (carried[name] ?? 0) + count;
+  }
+  const { bot, world } = createFakeBot({
     health: options.health ?? 20,
-    food: 20,
-    game: { gameMode: "survival", dimension: "overworld" },
-    heldItem: null,
-    time: { timeOfDay: options.timeOfDay ?? NIGHT_TICKS },
-    blockAt: () => ({ skyLight: options.skyLight ?? 0, boundingBox: options.air ? "empty" : "block" }),
-    world: {
-      raycast: (from: Vec3, direction: Vec3) => {
-        if (!options.covered) return null;
-        // A wall at x=1, reaching y=1.5: a ray above its top stays clear.
-        if (options.covered === "low_wall" && from.y + direction.y / direction.x >= 1.5) return null;
-        return { position: new Vec3(1, 0, 0) };
-      },
-    },
-    inventory: { items: () => items, slots: new Array(46).fill(null) },
-    registry: {
-      entitiesByName: {
-        ...minecraftData("1.21.4").entitiesByName,
-        enderman: { metadataKeys: ENDERMAN_METADATA_KEYS },
-        piglin: { metadataKeys: ["mob_flags", "baby"] },
-      },
-    },
-    entity: { id: 1, width: 0.6, height: 1.8, position: options.position ?? new Vec3(0, 0, 0) },
+    position: options.position ?? new Vec3(0, 0, 0),
+    groundY: options.air ? null : -1,
+    carried,
+    server: { timeOfDay: options.timeOfDay ?? NIGHT_TICKS },
     entities: Object.fromEntries(
-      mobs.map((mob) => [
+      (options.mobs ?? []).map((mob) => [
         mob.id,
         {
-          id: mob.id,
           name: mob.name,
-          displayName: mob.name,
-          type: mob.type ?? "hostile",
-          kind: "kind" in mob ? mob.kind : "Hostile mobs",
-          isValid: true,
-          height: 2,
-          width: 0.6,
+          ...("kind" in mob && { kind: mob.kind }),
+          ...(mob.type && { type: mob.type }),
           metadata: mob.metadata ?? [],
-          position: new Vec3(mob.x, 0, 0),
+          position: { x: mob.x, y: 0, z: 0 },
         },
       ]),
     ),
-  } as unknown as Bot;
+  });
+  if (options.covered) raiseWall(world, options.covered === "low_wall" ? "low" : "full");
+  if (options.skyLight !== undefined) lightBySky(bot, options.skyLight);
+  return { bot, world };
+}
+
+/** A stone wall across x=1, three wide: full (three high) or low (a block and a bottom slab, top at y=1.5). */
+function raiseWall(world: FakeWorld, height: "full" | "low" | "none"): void {
+  const layers = height === "full" ? ["stone", "stone", "stone"] : height === "low" ? ["stone", "stone_slab", "air"] : ["air", "air", "air"];
+  for (const z of [-1, 0, 1]) layers.forEach((block, y) => world.setCell(new Vec3(1, y, z), block));
+}
+
+/**
+ * Every cell the bot reads reports this sky light. The shared fake's blocks are always unlit (Prismarine's default);
+ * this stays until a contract check measures sky light per cell (asked of the master, plan 2026-10-21-shared-fake-bot M3).
+ */
+function lightBySky(bot: Bot, skyLight: number): void {
+  const read = bot.blockAt.bind(bot);
+  bot.blockAt = (point, extraInfos) => {
+    const block = read(point, extraInfos);
+    if (block) block.skyLight = skyLight;
+    return block;
+  };
+}
+
+/** A mob held in a bow-drawing hand, as the server's equipment packet sets it. */
+function holdBow(bot: Bot, mob: Bot["entity"]): void {
+  mob.setEquipment(0, itemOf(bot.registry, "bow"));
+}
+
+/** A piglin's metadata with the named fields set at their 1.21.4 indices. */
+function piglinMetadata(fields: Readonly<Record<string, unknown>>): unknown[] {
+  const keys = registry.entitiesByName.piglin!.metadataKeys!;
+  const metadata: unknown[] = [];
+  for (const [key, value] of Object.entries(fields)) metadata[keys.indexOf(key)] = value;
+  return metadata;
 }
 
 function context(
@@ -141,7 +145,7 @@ function context(
 }
 
 test("native husks are hostile and defend at melee contact", () => {
-  const husk = minecraftData("1.21.4").entitiesByName.husk!;
+  const husk = registry.entitiesByName.husk!;
   const bot = botWith({ mobs: [{ id: 7, name: "husk", x: 2, kind: husk.category }], items: ["iron_sword"] });
   assert.equal(isThreat(bot, bot.entities[7], context()), true);
   assert.equal(observeHostileResponse(bot).kind, "fight");
@@ -151,7 +155,7 @@ for (const name of ["skeleton", "stray", "bogged"]) {
   test(`${name} bow draw activates defence before a distant first hit`, () => {
     const bot = botWith({ mobs: [{ id: 7, name, x: 13 }], items: ["iron_sword", "shield"] });
     const mob = bot.entities[7]!;
-    Reflect.set(mob, "heldItem", { name: "bow" });
+    holdBow(bot, mob);
     assert.equal(observeHostileResponse(bot).kind, "none");
     Reflect.set(mob.metadata, 8, 1);
     Reflect.set(mob, "headYaw", Math.PI / 2);
@@ -159,7 +163,7 @@ for (const name of ["skeleton", "stray", "bogged"]) {
     assert.equal(observeHostileResponse(bot).kind, "fight");
     assert.equal(observeHostileResponse(bot, context(), { ...DEFAULT_COMBAT_POLICY, engagement: "defend_only" }).kind, "evade");
     const covered = botWith({ covered: true, mobs: [{ id: 7, name, x: 13, metadata: mob.metadata }] });
-    Reflect.set(covered.entities[7]!, "heldItem", { name: "bow" });
+    holdBow(covered, covered.entities[7]!);
     Reflect.set(covered.entities[7]!, "headYaw", Math.PI / 2);
     covered.entities[7]!.pitch = 0;
     assert.equal(observeHostileResponse(covered).kind, "none");
@@ -168,10 +172,8 @@ for (const name of ["skeleton", "stray", "bogged"]) {
 
 test("aimed bow draws bypass both observation radii, without treating other targets as contact", () => {
   const bot = botWith({ mobs: [{ id: 7, name: "zombie", x: 48 }], items: ["iron_sword", "shield"] });
-  Object.setPrototypeOf(bot, new EventEmitter());
-  Reflect.set(bot, "_client", new EventEmitter());
   const mob = bot.entities[7]!;
-  Reflect.set(mob, "heldItem", { name: "bow" });
+  holdBow(bot, mob);
   Reflect.set(mob.metadata, 8, 1);
   Reflect.set(mob, "headYaw", Math.PI / 2);
   mob.pitch = 0;
@@ -241,12 +243,11 @@ test("a melee mob across a ledge cannot turn a journey into a hunt, even after a
 });
 
 test("a jumping cube retains defensive contact before descending into swing reach", () => {
-  const options = { mobs: [{ id: 7, name: "magma_cube", x: 2 }], air: true };
-  const bot = botWith(options);
+  const { bot, world } = sceneWith({ mobs: [{ id: 7, name: "magma_cube", x: 2 }], air: true });
   const cube = bot.entities[7]!;
   cube.position.y = 6;
   assert.equal(observeHostileResponse(bot).kind, "fight", "do not start a journey underneath the airborne attacker");
-  options.air = false;
+  world.setCell(cube.position.offset(0, -1, 0), "stone");
   assert.equal(
     observeHostileResponse(bot).kind,
     "none",
@@ -263,10 +264,9 @@ test("closed cover prevents contact even with a previous attacker or critically 
 });
 
 test("opening cover makes the same nearby hostile eligible immediately", () => {
-  const options = { covered: true, mobs: [{ id: 7, name: "blaze", x: 5 }] };
-  const bot = botWith(options);
+  const { bot, world } = sceneWith({ covered: true, mobs: [{ id: 7, name: "blaze", x: 5 }] });
   assert.deepEqual(observeHostileResponse(bot), { kind: "none" });
-  options.covered = false;
+  raiseWall(world, "none");
   assert.equal(observeHostileResponse(bot).kind, "fight");
 });
 
@@ -800,7 +800,7 @@ for (const health of [20, 10, 6]) {
 }
 
 test("observed aggressive piglin remains subject to contact and exposure", () => {
-  const mob = { id: 7, name: "piglin", x: 3, metadata: [4] };
+  const mob = { id: 7, name: "piglin", x: 3, metadata: piglinMetadata({ mob_flags: 4 }) };
   const bot = botWith({ mobs: [mob] });
   assert.equal(isThreat(bot, bot.entities[7], context()), false);
   assert.equal(shouldAvoidEntity(bot, bot.entities[7], context()), true);
@@ -810,9 +810,9 @@ test("observed aggressive piglin remains subject to contact and exposure", () =>
   assert.equal(observeHostileResponse(bot, context({ attackers: [7] })).kind, "fight");
   assert.equal(observeHostileResponse(botWith({ health: 6, mobs: [mob] })).kind, "hide");
   for (const flags of [undefined, 0, 1, 2, "4"]) {
-    assert.equal(observeHostileResponse(botWith({ mobs: [{ ...mob, metadata: [flags] }] })).kind, "none");
+    assert.equal(observeHostileResponse(botWith({ mobs: [{ ...mob, metadata: piglinMetadata({ mob_flags: flags }) }] })).kind, "none");
   }
-  assert.equal(observeHostileResponse(botWith({ mobs: [{ ...mob, metadata: [0, true] }] })).kind, "none");
+  assert.equal(observeHostileResponse(botWith({ mobs: [{ ...mob, metadata: piglinMetadata({ mob_flags: 0, baby: true }) }] })).kind, "none");
   assert.equal(observeHostileResponse(botWith({ mobs: [{ ...mob, x: 20 }] })).kind, "none");
   assert.equal(observeHostileResponse(botWith({ mobs: [mob], covered: true })).kind, "none");
 });
@@ -820,7 +820,7 @@ test("observed aggressive piglin remains subject to contact and exposure", () =>
 test("wounded unguarded ranged contact seeks shelter, retaining guarded and failed-build escapes", () => {
   for (const name of ["blaze", "skeleton"]) {
     const bot = botWith({ health: 10, items: ["diamond_sword", "cobblestone"], mobs: [{ id: 7, name, x: 10 }] });
-    if (name === "skeleton") Reflect.set(bot.entities[7]!, "heldItem", { name: "bow" });
+    if (name === "skeleton") holdBow(bot, bot.entities[7]!);
     const seen = context({ attackers: [7] });
     assert.equal(observeHostileResponse(bot, seen).kind, "hide", name);
     assert.equal(
@@ -834,7 +834,7 @@ test("wounded unguarded ranged contact seeks shelter, retaining guarded and fail
       "construction refusal retains the escape fallback",
     );
     const guarded = botWith({ health: 10, items: ["diamond_sword", "shield"], mobs: [{ id: 7, name, x: 10 }] });
-    if (name === "skeleton") Reflect.set(guarded.entities[7]!, "heldItem", { name: "bow" });
+    if (name === "skeleton") holdBow(guarded, guarded.entities[7]!);
     assert.equal(observeHostileResponse(guarded, seen).kind, "evade", "a carried shield preserves guarded travel");
   }
 });
@@ -846,7 +846,7 @@ test("an existing burn needs recovery even when a shield can block future ranged
       items: ["shield", "diamond_sword", "cobblestone"],
       mobs: [{ id: 7, name, x: 10 }],
     });
-    if (name === "skeleton") Reflect.set(bot.entities[7]!, "heldItem", { name: "bow" });
+    if (name === "skeleton") holdBow(bot, bot.entities[7]!);
     bot.entity.metadata = [];
     const flags = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags");
     Reflect.set(bot.entity.metadata, flags, 1);

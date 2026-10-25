@@ -1,0 +1,68 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-attack-cooldown-damage
+tags:
+  - contract
+description: "A second axe hit on a mob costs nothing inside its hurt window, then 0.2 + 0.8 * strength^2 of the damage by the gap since the last swing; a swapped item starts the swing over. Contract check tests/minecraft/contract/checks/attack-cooldown-damage.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: attack-cooldown-damage
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - difficulty easy
+  - time set 18000
+entities:
+  - type: zombie
+    pos:
+      - 0.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - -2.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 0.5
+      - -60
+      - -2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+  - type: zombie
+    pos:
+      - 2.5
+      - -60
+      - 2.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: iron_sword
+        count: 1
+      - item: iron_axe
+        count: 1
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

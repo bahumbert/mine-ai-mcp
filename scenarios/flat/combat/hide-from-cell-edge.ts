@@ -16,7 +16,8 @@ export const run: MineAiScenario = async (context) => {
     },
     signal: context.signal,
     recoverTo: 18,
-    maximumMs: 1000,
+    // The whole hide, shaft included, must fit: construction now ends at this budget (reflex-limits T5).
+    maximumMs: 30_000,
   });
   const feet = context.bot.entity.position.floored();
   const shell = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]

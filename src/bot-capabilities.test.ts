@@ -1,21 +1,14 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { Bot } from "mineflayer";
-import { botFixture } from "./test-support/bot.js";
+import { createFakeBot } from "./test-support/fake-bot/index.js";
 import { assertBotPluginsLoaded, loadBotPlugins, requireBotTool } from "./bot-capabilities.js";
 
 function pluginBot(tool?: { equipForBlock: () => Promise<void> }): Bot {
-  return botFixture(
-    {},
-    {
-      _client: new EventEmitter(),
-      loadPlugin() {
-        Object.assign(this, { tool: { equipForBlock: async () => undefined } });
-      },
-      ...(tool && { tool }),
-    },
-  );
+  // `loadPlugin` is Mineflayer's own on the fake: the real tool plugin installs `bot.tool`.
+  const { bot } = createFakeBot();
+  // The Tool plugin's field: Mineflayer's typings leave plugin fields off the bot.
+  return tool ? Object.assign(bot, { tool }) : bot;
 }
 
 test("loads the missing Tool plugin, and reports it at the runtime boundary if it goes missing", () => {

@@ -24,7 +24,9 @@ goal:
   kind: all
   timeout: 45
   goals:
-    - { kind: blockAt, who: Disposer, pos: [-1, -61, 0], block: air }
+    # The burial keeps two cobblestone and plugs both cells above the discards (run 16: it used to leave the hole open).
+    - { kind: blockAt, who: Disposer, pos: [-1, -61, 0], block: cobblestone }
+    - { kind: blockAt, who: Disposer, pos: [-1, -60, 0], block: cobblestone }
     - { kind: blockAt, who: Disposer, pos: [-1, -62, 0], block: air }
     - { kind: blockAt, who: Disposer, pos: [0, -61, 0], block: dirt }
     - { kind: health, who: Disposer, health: 20 }

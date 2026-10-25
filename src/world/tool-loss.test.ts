@@ -1,47 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture, registry } from "../test-support/bot.js";
+import type { Item } from "prismarine-item";
+import { type FakeBot, createFakeBot } from "../test-support/fake-bot/index.js";
 import { WELL_FED, flatWorld, planningStart } from "../test-support/navigation.js";
 import { createMovementCatalogue } from "../navigation/movements/catalogue.js";
 import { createMovementPolicy } from "../navigation/movements/policy.js";
-import windowsLoader from "prismarine-windows";
-import prismarineItem from "prismarine-item";
 import { observeToolTierLoss } from "./tool-loss.js";
 
-function select(bot: ReturnType<typeof botFixture>, guard: ReturnType<typeof observeToolTierLoss>, item: string) {
+function select(bot: FakeBot, guard: ReturnType<typeof observeToolTierLoss>, item: string) {
   guard.select(bot.registry.itemsByName[item]!.id);
 }
 
+/** The server emptying a window slot, as a set_slot with no item does. */
+function clearSlot(bot: FakeBot, slot: number): void {
+  (bot.inventory.updateSlot as (slot: number, item: Item | null) => void).call(bot.inventory, slot, null);
+}
+
 test("stops only when a relevant best harvest capability drops", async () => {
-  const items = [
-    { name: "diamond_pickaxe", count: 1, slot: 36, maxDurability: 1561, durabilityUsed: 1559 },
-    { name: "stone_pickaxe", count: 1, slot: 9, maxDurability: 131, durabilityUsed: 0 },
-    { name: "wooden_axe", count: 1, slot: 10, maxDurability: 59, durabilityUsed: 0 },
-  ];
-  const bot = botFixture({ items });
+  const { bot } = createFakeBot({ slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "stone_pickaxe" }, 10: { name: "wooden_axe" } } });
+  bot.inventory.slots[36]!.durabilityUsed = 1559;
   const guard = observeToolTierLoss(bot);
   select(bot, guard, "diamond_pickaxe");
-  items.splice(2, 1); // unrelated axe loss
-  bot.inventory.emit("updateSlot", 10, null);
+  clearSlot(bot, 10); // unrelated axe loss
   await Promise.resolve();
   assert.equal(guard.loss(), null);
-  items.splice(0, 1); // packet can skip the final one-durability observation
-  bot.inventory.emit("updateSlot", 36, null);
+  clearSlot(bot, 36); // packet can skip the final one-durability observation
   await Promise.resolve();
   assert.equal(guard.signal.aborted, true);
   assert.equal(guard.loss()?.now.item, "stone_pickaxe");
   assert.match(guard.loss()?.reason ?? "", /diamond_pickaxe was lost.*stone pickaxe remains/);
   guard.close();
-  assert.equal(registry.itemsByName.diamond_pickaxe?.maxDurability, 1561);
+  assert.equal(bot.registry.itemsByName.diamond_pickaxe?.maxDurability, 1561);
 });
 
 test("gold replacement does not preserve stone harvest capability", async () => {
-  const items = [{ name: "stone_pickaxe", count: 1, slot: 36 }, { name: "golden_pickaxe", count: 1, slot: 9 }];
-  const bot = botFixture({ items });
+  const { bot } = createFakeBot({ slots: { 36: { name: "stone_pickaxe" }, 9: { name: "golden_pickaxe" } } });
   const guard = observeToolTierLoss(bot);
   select(bot, guard, "stone_pickaxe");
-  items.shift();
-  bot.inventory.emit("updateSlot", 36, null);
+  clearSlot(bot, 36);
   await Promise.resolve();
   assert.equal(guard.loss()?.now.tier, "golden");
   guard.close();
@@ -49,13 +45,10 @@ test("gold replacement does not preserve stone harvest capability", async () => 
 
 test("material downgrade and loss of the last selected tool stop independently of harvest rank", async () => {
   for (const replacement of ["diamond_pickaxe", null] as const) {
-    const items = [{ name: "netherite_pickaxe", count: 1, slot: 36 }];
-    if (replacement) items.push({ name: replacement, count: 1, slot: 9 });
-    const bot = botFixture({ items });
+    const { bot } = createFakeBot({ slots: { 36: { name: "netherite_pickaxe" }, 9: replacement && { name: replacement } } });
     const guard = observeToolTierLoss(bot);
     select(bot, guard, "netherite_pickaxe");
-    items.shift();
-    bot.inventory.emit("updateSlot", 36, null);
+    clearSlot(bot, 36);
     await Promise.resolve();
     assert.equal(guard.signal.aborted, true);
     assert.equal(guard.loss()?.now.item, replacement);
@@ -64,8 +57,7 @@ test("material downgrade and loss of the last selected tool stop independently o
 });
 
 test("a tool considered only by speculative search is not relevant", async () => {
-  const items = [{ name: "diamond_pickaxe", count: 1, slot: 36 }, { name: "diamond_axe", count: 1, slot: 9 }];
-  const bot = botFixture({ items });
+  const { bot } = createFakeBot({ slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "diamond_axe" } } });
   const guard = observeToolTierLoss(bot);
   const axe = bot.registry.itemsByName.diamond_axe!.id;
   const world = flatWorld();
@@ -81,25 +73,18 @@ test("a tool considered only by speculative search is not relevant", async () =>
   )), true, "candidate generation must really consider the unused axe dig");
   // Only the route executor callback for its selected physical effect reaches the guard.
   guard.select(bot.registry.itemsByName.diamond_pickaxe!.id);
-  items.splice(1, 1);
-  bot.inventory.emit("updateSlot", 9, null);
+  clearSlot(bot, 9);
   await Promise.resolve();
   assert.equal(guard.loss(), null);
   guard.close();
 });
 
 test("a selected tool moving through Mineflayer's inventory cursor is not lost", async () => {
-  const bot = botFixture();
-  Reflect.set(bot, "registry", registry);
-  const loadWindows = windowsLoader as unknown as (version: string) => { createWindow: (...args: unknown[]) => import("prismarine-windows").Window };
-  const loadItem = prismarineItem as unknown as (data: typeof registry) => new (type: number, count: number) => import("prismarine-item").Item;
-  const window = loadWindows("1.21.4").createWindow(0, "minecraft:inventory", "Inventory");
-  const Item = loadItem(registry);
-  const diamond = new Item(registry.itemsByName.diamond_pickaxe!.id, 1);
-  window.updateSlot(9, diamond);
-  bot.inventory = window as never;
+  const { bot } = createFakeBot({ slots: { 9: { name: "diamond_pickaxe" } } });
+  const window = bot.inventory;
+  const diamond = window.slots[9]!;
   const guard = observeToolTierLoss(bot);
-  guard.select(registry.itemsByName.diamond_pickaxe!.id);
+  guard.select(bot.registry.itemsByName.diamond_pickaxe!.id);
 
   // Exercise the pinned prismarine-windows implementation: swapSelectedItem
   // emits updateSlot before it assigns selectedItem.

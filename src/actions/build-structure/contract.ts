@@ -45,9 +45,9 @@ export const structureCellSchema = z.strictObject({
 });
 
 export const portalFrameRequestSchema = z.strictObject({
-  x: coordinate("X").describe("X of the interior's lowest corner."),
-  y: coordinate("Y").describe("Y of the interior's lowest row, one above the ground the frame stands on."),
-  z: coordinate("Z").describe("Z of the interior's lowest corner."),
+  x: coordinate("X").describe("Absolute X of the interior's lowest corner."),
+  y: coordinate("Y").describe("Absolute Y of the interior's lowest row, one above the ground the frame stands on."),
+  z: coordinate("Z").describe("Absolute Z of the interior's lowest corner."),
   axis: z.enum(["x", "z"]).default("x").describe("The horizontal axis the frame's width runs along."),
 });
 

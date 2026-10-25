@@ -1,0 +1,36 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-bow-draw-and-release
+tags:
+  - contract
+  - exclusive
+description: "A bow drawn sets the hand-in-use bit; released inside 2 ticks no arrow, from 4 ticks an arrow spawns at the eye and one arrow is spent. Contract check tests/minecraft/contract/checks/bow-draw-and-release.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: bow-draw-and-release
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+    inventory:
+      - item: bow
+        count: 1
+      - item: arrow
+        count: 16
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

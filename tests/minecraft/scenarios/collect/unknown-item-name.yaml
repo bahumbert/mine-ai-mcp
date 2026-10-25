@@ -1,0 +1,35 @@
+template: ../../templates/flat-single-action.yaml
+
+name: unknown-item-name
+tags: [regression]
+description: >-
+  Live 2026-10-19 (ACT-02): collect_block was asked for coal, the item, while the ore stood next to the bot, and
+  explored for a block named coal. A name that is no block and no block tag is refused at once with the blocks
+  that drop the item, before any walking or digging: both ores stay in place and the action ends within 10 s.
+
+geometry:
+  - fill: { block: stone, from: [-6, -60, -6], to: [8, -60, 6] }
+  - fill: { block: stone, from: [2, -59, -1], to: [4, -57, 1] }
+  - setblock: { block: coal_ore, at: [2, -58, 0] }
+  - setblock: { block: deepslate_coal_ore, at: [3, -58, 0] }
+
+players:
+  - name: Actor
+    pos: [0, -59, 0]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+params:
+  action: collect_block
+  input:
+    block_name: coal
+    count: 1
+  expect: { status: failed, errorContains: "[COLLECT_UNKNOWN_BLOCK]" }
+
+goal:
+  kind: all
+  timeout: 10
+  goals:
+    - { kind: blockAt, block: coal_ore, pos: [2, -58, 0] }
+    - { kind: blockAt, block: deepslate_coal_ore, pos: [3, -58, 0] }
+    - { kind: completion }

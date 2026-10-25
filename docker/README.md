@@ -35,7 +35,9 @@ docker compose build
 ```
 
 This builds from your checkout, including uncommitted changes, which is what you
-want while developing. To build from a published commit instead, so a run can be
+want while developing. The build context is an allow-list ([.dockerignore](../.dockerignore)): only `src/`,
+`docker/`, the package manifest and lockfile, the tsconfigs, `README.md` and `LICENSE` reach the image, so a new
+top-level path the image needs must be added there. To build from a published commit instead, so a run can be
 rebuilt from source by anyone, use the beat-the-game Compose file:
 
 ```sh

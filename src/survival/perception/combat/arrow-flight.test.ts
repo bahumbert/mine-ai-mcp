@@ -1,17 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../../test-support/bot.js";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { arrowFlight, trackArrowFlights } from "./arrow-flight.js";
 
 test("flight advances across zero-delta packets and reconciles reflection without reusing launch position", () => {
-  const bot = botFixture();
-  bot._client = new EventEmitter() as Bot["_client"];
-  bot.world.raycast = () => null;
-  const entity = { id: 4, name: "arrow", position: new Vec3(0, 65, 10), velocity: new Vec3(0, 0.15, -1.7) } as unknown as Bot["entity"];
-  bot.entities[4] = entity;
+  const { bot } = createFakeBot({ groundY: null, entities: { 4: { name: "arrow", position: { x: 0, y: 65, z: 10 } } } });
+  const entity = bot.entities[4]!;
+  entity.velocity.set(0, 0.15, -1.7);
   let now = 0;
   const tracker = trackArrowFlights(bot, () => now);
   const secondOwner = trackArrowFlights(bot, () => now);
@@ -49,12 +45,11 @@ test("flight advances across zero-delta packets and reconciles reflection withou
 });
 
 test("terrain stops extrapolation and respawn discards the previous flight", () => {
-  const bot = botFixture();
-  bot._client = new EventEmitter() as Bot["_client"];
-  const entity = { id: 8, name: "arrow", position: new Vec3(0, 65, 10), velocity: new Vec3(0, 0, -1) } as unknown as Bot["entity"];
-  bot.entities[8] = entity;
+  const { bot, world } = createFakeBot({ groundY: null, entities: { 8: { name: "arrow", position: { x: 0, y: 65, z: 10 } } } });
+  const entity = bot.entities[8]!;
+  entity.velocity.set(0, 0, -1);
   using _tracker = trackArrowFlights(bot, () => 0);
-  bot.world.raycast = (() => ({})) as unknown as typeof bot.world.raycast;
+  world.setCell(new Vec3(0, 65, 9), "stone");
   assert.equal(arrowFlight(bot, entity, 100).velocity.norm(), 0);
   bot.emit("respawn");
   assert.equal(arrowFlight(bot, entity, 100).velocity.norm(), 1);

@@ -53,7 +53,9 @@ import {
   type RoutePlan,
   stateMatcher,
 } from "../movements/movement.js";
-import type { MovementPolicy, ScaffoldSelection } from "../movements/policy.js";
+import { ESCAPE_RELAXED_RULES, RelaxedRulesUsed, isShutInByEscapableRefusals, relaxedForEscape } from "./escape-policy.js";
+import type { FailedEdges } from "./failed-edges.js";
+import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movements/policy.js";
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
 import { IncrementalSearch } from "../search/search.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
@@ -61,7 +63,11 @@ import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/inde
 import { navigationFeet } from "../world/block-geometry.js";
 import { overheadPinningCell } from "../world/overhead-pin.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
+import { ArrivalRepeat } from "./arrival-repeat.js";
+import { describeAbort } from "./describe-abort.js";
 import { PlanningStall } from "./planning-stall.js";
+import { searchFinishedEvent } from "./search-events.js";
+import { awaitLanding } from "./landing-wait.js";
 import {
   blockKey,
   blockLabel,
@@ -168,22 +174,6 @@ type SearchAnswer =
   | { readonly kind: "planning_stalled"; readonly failure: NavigationFailure }
   | { readonly kind: "stopped" };
 
-/**
- * What an abort reason says, in words.
- *
- * Callers abort with a string; `AbortSignal.timeout` aborts with a
- * `TimeoutError`; a bare `abort()` aborts with an `AbortError`.
- */
-function describeAbort(reason: unknown): string {
-  if (typeof reason === "string") return reason;
-  if (reason instanceof Error) {
-    if (reason.name === "TimeoutError") return "navigation timeout";
-    if (reason.name === "AbortError") return "cancelled";
-    return reason.message;
-  }
-  return "cancelled";
-}
-
 /** How long a break to free a held body may take: a hand on a leaf is instant, a hand on stone is not. */
 const PIN_RELEASE_DEADLINE_MS = 15_000;
 /** Ticks to wait for the world to show the ceiling gone once the break has completed. */
@@ -192,6 +182,9 @@ const PIN_RELEASE_TICKS = 40;
 const PIN_RELEASE_LIMIT = 3;
 
 /** Preserve both failures when a resource throws while unwinding another error. */
+const FAILED_EDGE_STEP: PolicyDecision = { kind: "prohibited", reason: "this move failed twice at this place a short while ago" };
+const ALLOWED_MOVEMENT: PolicyDecision = { kind: "allowed" };
+
 function describeError(cause: unknown): string {
   if (cause instanceof SuppressedError) {
     return `${describeError(cause.suppressed)}; cleanup failed: ${describeError(cause.error)}`;
@@ -219,6 +212,12 @@ export interface RunContext extends RouteContext {
    * supplies the field or whether the caller opted out.
    */
   readonly stepField: StepFieldProvider | null;
+  /** What this bot's earlier runs failed on, priced as refused by every search here. */
+  readonly failedEdges?: FailedEdges;
+  /** Whether the run was abandoned and its view of the bot withdrawn; its deferred cleanup then leaves shared state alone. */
+  readonly isRevoked?: () => boolean;
+  /** The monotonic clock (ms) the run's no-progress windows read; `performance.now` when absent, moved by tests. */
+  readonly now?: () => number;
 }
 
 export interface NavigationRunDependencies {
@@ -257,7 +256,8 @@ export class NavigationRun {
   /** Whether the world subscription is still installed; the one thing execute itself can leak. */
   #subscribed = false;
   readonly #searchIdentities = new Set<string>();
-  readonly #planningStall = new PlanningStall();
+  readonly #planningStall: PlanningStall;
+  readonly #arrivalRepeat: ArrivalRepeat;
   readonly #movementFailures = new Set<string>();
   #pinReleases = 0;
   /** The movement failure being replanned around, until a new route commits. */
@@ -282,13 +282,19 @@ export class NavigationRun {
   #policy: MovementPolicy;
   /** Whether the bot's own protected regions were opened to this run after a search found no route. */
   #ownRegionsOpened = false;
+  /** The style rules set aside for this run only so that the bot can leave a pocket; the request's own policy is never changed. */
+  #relaxedRules: readonly string[] = [];
+  /** The relaxed rules the committed routes used in fact: the result names what the escape dug, not what it was allowed to. */
+  readonly #relaxedRulesUsed = new RelaxedRulesUsed();
   constructor(dependencies: NavigationRunDependencies) {
     this.context = dependencies.context;
     this.request = dependencies.request;
-    this.#policy = Object.freeze({ ...dependencies.request.policy });
+    this.#policy = this.#snapshotPolicy(dependencies.request.policy);
     this.status = dependencies.status;
     this.release = dependencies.release;
     this.#events = forRun(this.context.telemetry, this.context.runId);
+    this.#planningStall = new PlanningStall(this.context.now);
+    this.#arrivalRepeat = new ArrivalRepeat(this.context.now);
     this.#start = this.context.bot.observe();
     this.#passages = new OpenedPassages(this.context.world, this.#start.dimension);
     this.#visitedFeet.add(blockKey(navigationFeet(this.#start.position, this.#start.stance === "supported")));
@@ -320,6 +326,7 @@ export class NavigationRun {
     const classification = this.context.ledger.classify(change, this.#routeDependencies, Date.now());
     this.#counters[CHANGE_COUNTER[classification]] += 1;
     this.#events.emit({ kind: "world_change", classification, change });
+    this.#arrivalRepeat.worldChanged(change);
     // A conflicting change settles its own expectation in the ledger, and the
     // executor waiting on that expectation sees it there. Only an unrelated
     // change to a block the route depends on needs the executor told directly.
@@ -343,15 +350,9 @@ export class NavigationRun {
     // skip the others, and admission must stay held while a search can still run.
     resources.defer(this.release);
     // The opening of the bot's own regions lasts for this run: its action reuses the policy for other routes and checks.
-    resources.defer(() => this.request.policy.ownRegionEscape?.close());
+    resources.defer(() => (this.context.isRevoked?.() ? undefined : this.request.policy.ownRegionEscape?.close()));
     resources.defer(() => this.status(null));
-    resources.defer(async () => {
-      if (this.#pending) {
-        this.#pending.abandon();
-        await this.#pending.result.catch(() => undefined);
-        this.#pending = null;
-      }
-    });
+    resources.defer(() => this.#abandonPending());
     this.#events.emit({ kind: "run_started" });
     const unsubscribe = this.context.world.subscribe((change) => this.#onWorldChange(change));
     this.#subscribed = true;
@@ -466,6 +467,14 @@ export class NavigationRun {
     }
     return this.#plan(goal, node, observation, reason);
   }
+  /** Stop the plan-ahead search, if any, and wait until it has: one search runs at a time, and none outlives its use. */
+  async #abandonPending(): Promise<void> {
+    const pending = this.#pending;
+    if (!pending) return;
+    pending.abandon();
+    await pending.result.catch(() => undefined);
+    if (this.#pending === pending) this.#pending = null;
+  }
   /** Start the plan-ahead search from where a partial segment will end, stoppable on its own. */
   #startContinuation(goal: ActiveGoal, plan: RoutePlan, observation: NavigationObservation): PendingContinuation {
     const control = new AbortController();
@@ -508,11 +517,13 @@ export class NavigationRun {
    */
   async #navigate(): Promise<NavigationOutcome> {
     let searchReason: SearchReason = "initial";
+    if (this.request.escape) this.#relaxStyleRules();
     for (;;) {
       if (this.context.signal.aborted) return this.#stopped();
       // Observe: one fresh look at the world, and the goal frozen against it.
       const observation = this.context.bot.observe();
-      this.#policy = Object.freeze({ ...this.request.policy });
+      this.context.failedEdges?.noteBotAt(blockPosition(observation.position));
+      this.#policy = this.#snapshotPolicy(this.request.policy);
       const resolved = this.#resolveGoal(observation);
       if (resolved.kind === "invalid") return this.#failed(resolved.failure);
       const { goal, node } = resolved;
@@ -527,7 +538,8 @@ export class NavigationRun {
       if (planningStall) return this.#failed(planningStall);
       if (observation.stance === "airborne") {
         this.status({ kind: "stabilizing", runId: this.context.runId, reason: "airborne" });
-        const stable = await this.context.bot.stabilize(this.context.signal);
+        const stable = await awaitLanding(this.context.bot, this.context.signal, { world: this.context.world });
+        if (stable.kind === "stopped") return this.#stopped();
         if (stable.kind === "failed")
           return this.#failed({
             kind: "movement_failed",
@@ -618,7 +630,7 @@ export class NavigationRun {
     const field = this.context.stepField?.() ?? null;
     const identity =
       `${goal.revision}|${blockKey(node.feet)}|${observation.worldRevision}|${observation.resourceRevision}` +
-      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|field:${field?.fingerprint ?? "none"}`;
+      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|escape:${this.#relaxedRules.length}|field:${field?.fingerprint ?? "none"}`;
     if (this.#searchIdentities.has(identity))
       return {
         kind: "outcome",
@@ -679,11 +691,9 @@ export class NavigationRun {
       return await this.#search(goal, node, reason, signal, field, null);
     } finally {
       try {
-        // An impulse can invalidate the search's start mid-flight. Keep its
-        // supported hold through the existing bounded landing observation,
-        // including cancellation, before another search or owner takes over.
-        if (this.context.bot.observe().stance === "airborne")
-          await this.context.bot.stabilize(new AbortController().signal);
+        // An impulse can invalidate the search's start mid-flight. Keep its hold through the
+        // wall-bounded landing wait, cancel included, before another owner takes over.
+        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, null);
       } finally {
         release();
       }
@@ -752,29 +762,7 @@ export class NavigationRun {
         return { kind: "planning_stalled", failure: stall };
       }
       const update = search.advance();
-      if (update.kind !== "progress")
-        this.#events.emit({
-          kind: "search_finished",
-          searchId,
-          goal: goal.revision,
-          result: update.kind,
-          counts: update.evidence,
-          exhausted:
-            update.kind === "no_path"
-              ? "frontier"
-              : update.kind === "limit"
-                ? update.limit.kind === "radius"
-                  ? "radius"
-                  : "compute_time"
-                : null,
-          limit: update.kind === "limit" ? update.limit : null,
-          interpretation:
-            update.kind === "no_path"
-              ? "The explored frontier is exhausted under these observations and movement permissions; this is not proof that all terrain is unreachable."
-              : update.kind === "limit"
-                ? "The declared search resource was exhausted; geometry outside that search remains untested."
-                : "This is the search result, before physical execution and arrival validation.",
-        });
+      if (update.kind !== "progress") this.#events.emit(searchFinishedEvent(searchId, goal.revision, update));
       this.#counters.searchSlices += 1;
       this.#events.emit({
         kind: "search_slice",
@@ -786,27 +774,12 @@ export class NavigationRun {
       });
       if (update.kind === "cancelled") return { kind: "stopped" };
       // The goal may have moved, or been reached, while the search was thinking.
-      const observation = this.context.bot.observe();
-      // Holding controls cannot prevent an external impulse from moving the
-      // starting body. Plan-ahead deliberately searches from a future endpoint.
-      if (
-        !ahead &&
-        (observation.stance === "airborne" ||
-          !samePosition(node.feet, navigationFeet(observation.position, observation.stance === "supported"))) &&
-        !isSurfaceBobbing(searchStart, observation, this.context.world)
-      ) {
+      const judged = this.#judgeSliceObservation(node, searchStart, ahead);
+      if (judged.kind !== "continue") {
         search.cancel();
-        return { kind: "start_changed" };
+        return judged;
       }
-      const resolved = this.#resolveGoal(observation);
-      if (resolved.kind === "invalid") {
-        search.cancel();
-        return { kind: "goal_invalid", failure: resolved.failure };
-      }
-      if (resolved.goal.isSatisfied(resolved.node, this.context.world)) {
-        search.cancel();
-        return { kind: "arrived", node: resolved.node, observation };
-      }
+      const { observation } = judged;
       if (update.kind === "progress") continue;
       if (update.kind === "stale") return { kind: "stale" };
       if (update.kind === "no_path" || update.kind === "limit") {
@@ -820,12 +793,43 @@ export class NavigationRun {
               : { kind: "search_limit", search: update.evidence, limit: update.limit, ...after },
         };
       }
-      return { kind: "plan", plan: update.plan, latestGoal: resolved.goal };
+      return { kind: "plan", plan: update.plan, latestGoal: judged.latestGoal };
     }
+  }
+  /**
+   * Look at the body and the goal once after a search slice: the start the search assumed may have been knocked away,
+   * the goal may have become invalid, or the live body may already satisfy it.
+   */
+  #judgeSliceObservation(
+    node: PlanningNode,
+    searchStart: NavigationObservation,
+    ahead: PlanAhead | null,
+  ):
+    | Extract<SearchAnswer, { readonly kind: "start_changed" | "goal_invalid" | "arrived" }>
+    | { readonly kind: "continue"; readonly observation: NavigationObservation; readonly latestGoal: ActiveGoal } {
+    const observation = this.context.bot.observe();
+    // Holding controls cannot prevent an external impulse from moving the
+    // starting body. Plan-ahead deliberately searches from a future endpoint.
+    if (
+      !ahead &&
+      (observation.stance === "airborne" ||
+        !samePosition(node.feet, navigationFeet(observation.position, observation.stance === "supported"))) &&
+      !isSurfaceBobbing(searchStart, observation, this.context.world)
+    )
+      return { kind: "start_changed" };
+    const resolved = this.#resolveGoal(observation);
+    if (resolved.kind === "invalid") return { kind: "goal_invalid", failure: resolved.failure };
+    // A plan-ahead search never judges the live body's arrival: the segment is still being walked, and the step that
+    // completes it (or the loop head) judges the goal, in the foreground, where the arrival work may move the body.
+    if (!ahead && resolved.goal.isSatisfied(resolved.node, this.context.world))
+      return { kind: "arrived", node: resolved.node, observation };
+    return { kind: "continue", observation, latestGoal: resolved.goal };
   }
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
     this.#planningStall.committed();
+    this.#arrivalRepeat.reset();
     this.#counters.plans += 1;
+    if (this.#relaxedRules.length > 0) this.#relaxedRulesUsed.note(plan.steps, this.request.policy, this.context.world);
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
@@ -877,7 +881,9 @@ export class NavigationRun {
         });
         const held = await this.#releaseOverheadPin(plan);
         if (held) return held;
-        return this.#movementFailureRepeated(goal, result.step)
+        const repeated = this.#movementFailureRepeated(goal, result.step);
+        if (repeated) this.context.failedEdges?.record(result.step.kind, result.step.from, result.step.to, blockPosition(this.context.bot.observe().position));
+        return repeated
           ? {
               kind: "outcome",
               outcome: this.#failed({
@@ -919,6 +925,7 @@ export class NavigationRun {
   #onStepCompleted(goal: ActiveGoal, plan: RoutePlan, step: PlannedStep, arrival: BlockPosition): StepDecision {
     this.#events.emit({ kind: "step_completed", stepId: step.id, movement: step.kind });
     this.#visitedFeet.add(blockKey(arrival));
+    this.context.failedEdges?.succeeded(step.kind, step.from, step.to);
     const revised = this.#resolveGoal(this.context.bot.observe(), arrival);
     if (revised.kind === "invalid") return "goal_revised";
     if (revised.goal.isSatisfied(revised.node, this.context.world)) return "goal_satisfied";
@@ -1031,6 +1038,8 @@ export class NavigationRun {
   }
 
   async #resolveArrival(node: PlanningNode, observation: NavigationObservation): Promise<ExecutionResult> {
+    // The arrival work may move the body or change the world: no search may still be running from the old stance.
+    await this.#abandonPending();
     const result = this.request.onArrival
       ? await this.request.onArrival({
           goalRevision: this.#goalRevision,
@@ -1041,9 +1050,9 @@ export class NavigationRun {
       : ({ kind: "completed" } as const);
     this.#events.emit({ kind: "goal_arrived", result: result.kind });
     if (this.context.signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
-    return result.kind === "continue"
-      ? { kind: "retry", reason: "arrival_continuation" }
-      : { kind: "outcome", outcome: { kind: "completed", evidence: this.#evidence() } };
+    if (result.kind !== "continue") return { kind: "outcome", outcome: { kind: "completed", evidence: this.#evidence() } };
+    const repeated = this.#arrivalRepeat.note({ goalRevision: this.#goalRevision, feet: node.feet, observation });
+    return repeated ? { kind: "outcome", outcome: this.#failed(repeated) } : { kind: "retry", reason: "arrival_continuation" };
   }
   async #resolveCalculationFailure(
     failure: NavigationCalculationFailure,
@@ -1057,6 +1066,10 @@ export class NavigationRun {
       this.#ownRegionsOpened = true;
       escape.open();
       this.#events.emit({ kind: "own_regions_opened", start: { x: feet.x, y: feet.y, z: feet.z } });
+      return { kind: "retry", reason: "calculation_failure" };
+    }
+    if (failure.kind === "no_path" && this.#relaxedRules.length === 0 && isShutInByEscapableRefusals(failure, this.context.world, this.#policy, feet)) {
+      this.#relaxStyleRules();
       return { kind: "retry", reason: "calculation_failure" };
     }
     if (!this.request.onCalculationFailure) {
@@ -1073,6 +1086,20 @@ export class NavigationRun {
       ? { kind: "retry", reason: "calculation_failure" }
       : { kind: "outcome", outcome: { kind: "completed", evidence: this.#evidence() } };
   }
+  /** The request's policy as one search reads it, with the escape's relaxations applied on top. */
+  #snapshotPolicy(policy: MovementPolicy): MovementPolicy {
+    const failedEdges = this.context.failedEdges;
+    const base = this.#relaxedRules.length > 0 ? relaxedForEscape(policy) : policy;
+    return Object.freeze({
+      ...base,
+      ...(failedEdges && { decideMovement: (kind, from, to) => failedEdges.isFailed(kind, from, to) ? FAILED_EDGE_STEP : (policy.decideMovement?.(kind, from, to) ?? ALLOWED_MOVEMENT) }),
+    });
+  }
+  /** Set the escape's rules aside for the rest of this run, saying so. */
+  #relaxStyleRules(): void {
+    this.#relaxedRules = ESCAPE_RELAXED_RULES;
+    this.#events.emit({ kind: "escape_relaxed", relaxed: this.#relaxedRules });
+  }
   #stopped(): NavigationOutcome {
     return { kind: "stopped", reason: describeAbort(this.context.signal.reason), evidence: this.#evidence() };
   }
@@ -1087,6 +1114,7 @@ export class NavigationRun {
       start: this.#start,
       final: this.context.bot.observe(),
       goalRevision: this.#goalRevision,
+      escapeRelaxed: this.#relaxedRulesUsed.rules,
       ...this.#counters,
       movementAttempts: { ...this.#counters.movementAttempts },
       // Provisional: `execute` measures this again once cleanup has run.

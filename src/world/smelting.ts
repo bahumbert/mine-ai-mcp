@@ -3,6 +3,7 @@
  * `smelting-extract.ts`, see `data/smelting/`) and the fuels a furnace burns.
  */
 import recipes_1_21_4 from "./data/smelting/1.21.4.json" with { type: "json" };
+import { itemTagsOf } from "./item-tags.js";
 import { nearestShipped } from "./shipped-data.js";
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
@@ -35,21 +36,48 @@ export function recipesFor(item: string, version: string): readonly SmeltingReci
   return smeltingData(version)?.recipes.filter((recipe) => recipe.output === item) ?? [];
 }
 
+/** The ticks a furnace takes per item for the ordinary smelting recipes (the recipes' `cookingTicks`; blasting and smoking halve it). */
+export const STANDARD_COOK_TICKS = 200;
+
 /**
- * How many items one of this fuel smelts. The game hard-codes burn times in its Java code (they are not data), so
- * this table is copied from it; 0 means not a fuel.
+ * Burn times in ticks, copied from the game's Java code (`FuelValues`, 1.21.4): no data file holds them, only the item
+ * tags that group the fuels (owner Q1, 2026-10-19: code-only facts named once). By item first, then by item tag; the
+ * tag `non_flammable_wood` (the nether woods) burns nothing whatever its other tags say. An item in neither table
+ * (furniture, wooden tools, banners, ...) is not offered as a fuel.
  */
-export function fuelCapacity(name: string): number {
-  if (name === "coal" || name === "charcoal") return 8;
-  if (name === "coal_block") return 80;
-  if (name === "dried_kelp_block") return 20;
-  if (name === "blaze_rod") return 12;
-  // Nether wood (crimson, warped) does not burn.
-  if (name.startsWith("crimson_") || name.startsWith("warped_")) return 0;
-  if (name.endsWith("_planks") || name.endsWith("_log") || name.endsWith("_wood")) return 1.5;
-  if (name === "stick") return 0.5;
-  return 0;
+const BURN_TICKS_BY_ITEM: Readonly<Record<string, number>> = {
+  lava_bucket: 20_000, coal_block: 16_000, dried_kelp_block: 4_000, blaze_rod: 2_400, coal: 1_600, charcoal: 1_600,
+  stick: 100, bowl: 100, dead_bush: 100, bamboo: 50, scaffolding: 50,
+};
+const BURN_TICKS_BY_TAG: Readonly<Record<string, number>> = {
+  logs_that_burn: 300, bamboo_blocks: 300, planks: 300, wooden_stairs: 300, wooden_slabs: 150, wooden_trapdoors: 300,
+  wooden_pressure_plates: 300, wooden_fences: 300, fence_gates: 300, boats: 1_200, signs: 200, hanging_signs: 800,
+  wooden_doors: 200, wooden_buttons: 100, wool: 100, saplings: 100, wool_carpets: 67,
+};
+const NO_FUEL_TAG = "non_flammable_wood";
+
+/**
+ * How many items one of this fuel smelts when each takes `cookingTicks`; 0 means not a fuel in `version`. A version with
+ * no shipped item tags knows only the fuels named by item.
+ */
+export function fuelCapacity(name: string, version: string, cookingTicks = STANDARD_COOK_TICKS): number {
+  return burnTicks(name, version) / cookingTicks;
 }
 
-/** Fuels with a fixed name, for listing; planks, logs and wood of every kind also burn (1.5 items each). */
-export const NAMED_FUELS = ["coal", "charcoal", "coal_block", "dried_kelp_block", "blaze_rod", "stick"] as const;
+function burnTicks(name: string, version: string): number {
+  const named = BURN_TICKS_BY_ITEM[name];
+  if (named !== undefined) return named;
+  const tags = itemTagsOf(name, version);
+  if (tags.includes(NO_FUEL_TAG)) return 0;
+  return Math.max(0, ...tags.map((tag) => BURN_TICKS_BY_TAG[tag] ?? 0));
+}
+
+/** The ticks the furnace takes to cook one `input` item in `version`, from its recipe; null when no recipe takes it. */
+export function cookingTicksOf(input: string, version: string): number | null {
+  return smeltingData(version)?.recipes.find((recipe) => recipe.inputs.includes(input))?.cookingTicks ?? null;
+}
+
+/** Every item of the registry's names that burns in `version`, with the items it smelts, sorted by name. */
+export function fuelsOf(itemNames: Iterable<string>, version: string): { item: string; itemsSmelted: number }[] {
+  return [...itemNames].sort().map((item) => ({ item, itemsSmelted: fuelCapacity(item, version) })).filter(({ itemsSmelted }) => itemsSmelted > 0);
+}

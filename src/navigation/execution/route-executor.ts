@@ -34,9 +34,18 @@ import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
 import type { OpenedPassages } from "./opened-passages.js";
+import { armNoTickCancel } from "./no-tick-cancel.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
 
 export type StepDecision = "continue" | "goal_satisfied" | "goal_revised";
+
+/** The least time the server gets to confirm an effect, however cheap the plan priced it. */
+const MINIMUM_CONFIRMATION_MS = 5_000;
+
+/** The longest the body can take to dig a break operation from its state now (0 for any other operation, an unloaded block or a bot that cannot tell). */
+function longestDigTime(bot: NavigationBot, operation: PlannedOperation): number {
+  return operation.kind === "break" ? (bot.longestBreakDurationMs?.(operation) ?? 0) : 0;
+}
 
 export type RouteExecutionResult =
   | {
@@ -122,6 +131,8 @@ export class RouteExecutor {
   #state: RouteExecutionState = { kind: "starting_step", stepIndex: 0 };
   #invalidated = false;
   #latestMovementSnapshot: MovementSnapshot | null = null;
+  /** The monotonic time of the last physics tick; the executor starts it so a bot that never ticks reads as silent from the start. */
+  #lastTickAt = performance.now();
   readonly #invalidatedResult: Promise<{ readonly kind: "invalidated" }>;
   readonly #resolveInvalidated: () => void;
 
@@ -143,6 +154,13 @@ export class RouteExecutor {
   async execute(): Promise<RouteExecutionResult> {
     using resources = new DisposableStack();
     resources.defer(this.request.context.bot.subscribePhysicsTick(() => this.#onPhysicsTick()));
+    resources.use(
+      armNoTickCancel({
+        signal: this.request.context.signal,
+        lastTickAt: () => this.#lastTickAt,
+        settle: () => this.#settleMovement({ kind: "cancelled" }),
+      }),
+    );
     try {
       return await this.#executeSteps();
     } catch (cause) {
@@ -377,6 +395,8 @@ export class RouteExecutor {
           ];
     // Each brought block takes a fall and a second swing beyond the dig time.
     const settling = operation.kind === "break" ? operation.brings.length * 3_000 : 0;
+    const { bot } = this.request.context;
+    const plannedMs = step.cost.expectedTicks * 50;
     const opened = operation.kind === "activate" ? this.request.passages.closedAt(position) : null;
     this.#state = { kind: "awaiting_effect", stepIndex, operationIndex, token };
     this.request.phase(step, "confirming");
@@ -385,8 +405,10 @@ export class RouteExecutor {
       token,
       operation,
       targets,
-      // Scale confirmation to the work, including the falling column.
-      deadlineMs: Date.now() + Math.max(5_000, step.cost.expectedTicks * 50 * 2) + settling,
+      // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
+      // it plans, so a body in water over a solid cell is priced as standing, and one that has not landed when its swing
+      // starts digs 25 times slower), and the falling column.
+      deadlineMs: Date.now() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);
@@ -486,6 +508,7 @@ export class RouteExecutor {
   }
 
   #onPhysicsTick(): void {
+    this.#lastTickAt = performance.now();
     // A deadline needs a clock, not traffic. `expire` is otherwise only
     // reachable through `classify`, which requires a world change, so a lost
     // server acknowledgement over a quiet world left the run waiting in

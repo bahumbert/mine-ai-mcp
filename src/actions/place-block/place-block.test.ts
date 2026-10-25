@@ -2,54 +2,24 @@ import { MemoryWorld as GoalTestWorld } from "../../navigation/world/memory-worl
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { botFixture, type FakeStack } from "../../test-support/bot.js";
+import { temporaryBotData } from "../../test-support/bot-data.js";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { parsePlaceBlockRequest } from "./contract.js";
-import { formatPlaceBlockResult, executePlaceBlock, type PlaceBlockDependencies } from "./place-block.js";
+import { formatPlaceBlockResult, executePlaceBlock, beginPlaceBlock, type PlaceBlockDependencies } from "./place-block.js";
+import { cutByReflex, testWorld } from "./place-block-fixtures.test.js";
 
 const goalTestWorld = new GoalTestWorld();
 
-function key(position: Vec3): string {
-  return `${position.x},${position.y},${position.z}`;
+/** Place the block and report it, but leave the slot for the server to redraw later. */
+function placeWithoutSlotUpdate(target: Vec3, putDown: (cell: Vec3) => unknown): PlaceBlockDependencies["placeBlock"] {
+  return async (_bot, placement) => {
+    placement.onSent?.();
+    return { kind: "placed", block: putDown(target) } as never;
+  };
 }
 
-function testWorld(targetName = "air", carried = 2) {
-  const target = new Vec3(2, 64, 0);
-  const blocks = new Map<string, any>([
-    [key(target), { name: targetName, boundingBox: targetName === "air" ? "empty" : "block", position: target }],
-    [key(target.offset(0, -1, 0)), { name: "stone", boundingBox: "block", position: target.offset(0, -1, 0) }],
-  ]);
-  const items: FakeStack[] = carried > 0 ? [{ name: "cobblestone", count: carried }] : [];
-  const bot = botFixture(
-    { items, position: { x: 0, y: 64, z: 0 } },
-    { blockAt: (position: Vec3) => blocks.get(key(position)) ?? { name: "air", boundingBox: "empty", position } },
-  );
-  /** What the server's own broadcast does: change the count, then say so. */
-  const takeOneFromInventory = () => {
-    items[0]!.count -= 1;
-    if (items[0]!.count === 0) items.pop();
-    bot.inventory.emit("updateSlot");
-  };
-  const dependencies: PlaceBlockDependencies = {
-    createMovements: () => ({}) as never,
-    navigate: async () => ({ status: "completed", elapsedMs: 0 }),
-    placeBlock: async (_bot, placement) => {
-      assert.deepEqual(placement.support.position, target.offset(0, -1, 0));
-      assert.deepEqual(placement.face, new Vec3(0, 1, 0));
-      takeOneFromInventory();
-      const placed = { name: "cobblestone", boundingBox: "block", position: target };
-      blocks.set(key(target), placed);
-      return { kind: "placed", block: placed } as never;
-    },
-    placeNearby: async () => {
-      const chosen = new Vec3(1, 64, 0);
-      takeOneFromInventory();
-      const placed = { name: "cobblestone", boundingBox: "block", position: chosen };
-      blocks.set(key(chosen), placed);
-      return { kind: "placed", position: chosen, block: placed as never };
-    },
-  };
-  return { bot, blocks, dependencies, target, takeOneFromInventory };
-}
+const placedContainerKeys = (data: ReturnType<typeof temporaryBotData>) =>
+  data.read("SELECT container_key, block_name, placed_by_bot_id FROM placed_containers ORDER BY container_key");
 
 test("parses one normalized block name and exact absolute target", () => {
   assert.deepEqual(parsePlaceBlockRequest({ block_name: "Minecraft:Cobble Stone", x: 2, y: 64, z: 0 }), {
@@ -158,26 +128,22 @@ test("a reported arrival that still overlaps the target does not send a placemen
   assert.match(result.error ?? "", /body still intersects/);
 });
 
-/** Place the block and report it, but leave the slot for the server to redraw later. */
-function placeWithoutSlotUpdate(target: Vec3, blocks: Map<string, any>): PlaceBlockDependencies["placeBlock"] {
-  return async () => {
-    const placed = { name: "cobblestone", boundingBox: "block", position: target };
-    blocks.set(key(target), placed);
-    return { kind: "placed", block: placed } as never;
-  };
-}
-
 test("waits for the slot update the server sends after the block update", async () => {
-  const { bot, blocks, dependencies, target, takeOneFromInventory } = testWorld();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, putDown, dependencies, target, takeOneFromInventory } = testWorld("air", 2, "cobblestone", clock);
   // The block update resolved `placeBlock`; the slot that loses the block is
   // broadcast two ticks later.
-  setTimeout(takeOneFromInventory, 100);
+  clock.after(100, takeOneFromInventory);
 
-  const result = await executePlaceBlock(
-    bot,
-    { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } },
-    {},
-    { ...dependencies, placeBlock: placeWithoutSlotUpdate(target, blocks) },
+  const result = await clock.settle(
+    executePlaceBlock(
+      bot,
+      { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } },
+      {},
+      { ...dependencies, placeBlock: placeWithoutSlotUpdate(target, putDown) },
+    ),
+    1_000,
   );
 
   assert.equal(result.status, "succeeded");
@@ -188,13 +154,19 @@ test("waits for the slot update the server sends after the block update", async 
 });
 
 test("says so rather than presenting a placement count the server never confirmed", async () => {
-  const { bot, blocks, dependencies, target } = testWorld();
-
-  const result = await executePlaceBlock(
-    bot,
-    { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } },
-    {},
-    { ...dependencies, placeBlock: placeWithoutSlotUpdate(target, blocks) },
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, putDown, dependencies, target } = testWorld("air", 2, "cobblestone", clock);
+  // The answer is "no count", and the server answered: its world age moves 40 ticks (2 s of clock), short of the
+  // 5 s wall bound the settle stops within.
+  const result = await clock.settle(
+    executePlaceBlock(
+      bot,
+      { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } },
+      {},
+      { ...dependencies, placeBlock: placeWithoutSlotUpdate(target, putDown) },
+    ),
+    3_000,
   );
 
   assert.equal(result.status, "succeeded");
@@ -245,4 +217,88 @@ test("refuses placement when the carried block is absent", async () => {
 
   assert.equal(result.status, "failed");
   if (result.status === "failed") assert.match(result.error, /^\[PLACE_ITEM_MISSING\]/);
+});
+
+test("a chest placed by place_block is recorded as placed by the bot, in its dimension", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(placedContainerKeys(data), [
+    { container_key: "overworld|2|64|0", block_name: "chest", placed_by_bot_id: bot.username },
+  ]);
+});
+
+test("a chest put beside the bot, no target given, is recorded where it went", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: null }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    placedContainerKeys(data).map((row) => row.container_key),
+    ["overworld|1|64|0"],
+  );
+});
+
+test("a placed block that is no container records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld();
+
+  await executePlaceBlock(bot, { blockName: "cobblestone", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a chest that was already at the target, or that a reflex put there, is not recorded as ours", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("chest", 2, "chest");
+
+  const result = await executePlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, {}, dependencies, data);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.placement.placed, false);
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a failed placement of a chest records nothing", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+
+  const result = await executePlaceBlock(
+    bot,
+    { blockName: "chest", target: { x: 2, y: 64, z: 0 } },
+    {},
+    { ...dependencies, placeBlock: async () => ({ kind: "failed", error: "no packet answer" }) },
+    data,
+  );
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(placedContainerKeys(data), []);
+});
+
+test("a chest that landed just before the reflex's abort threw is recorded once, when the resume credits it", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const { bot, dependencies } = testWorld("air", 2, "chest");
+  const cutting: PlaceBlockDependencies = {
+    ...dependencies,
+    placeBlock: async (...args) => {
+      await dependencies.placeBlock(...args);
+      throw cutByReflex().reason;
+    },
+  };
+  const run = beginPlaceBlock(bot, { blockName: "chest", target: { x: 2, y: 64, z: 0 } }, cutting, () => {}, data);
+  await assert.rejects(run({ signal: new AbortController().signal }), /HUNGER/);
+  assert.deepEqual(placedContainerKeys(data), [], "nothing is credited while the attempt is cut");
+
+  const result = await run({ signal: new AbortController().signal });
+
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(
+    placedContainerKeys(data).map((row) => row.container_key),
+    ["overworld|2|64|0"],
+  );
 });

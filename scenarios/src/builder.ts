@@ -2,6 +2,7 @@
  * Build one structure with `build_structure` and report the audit,
  * plus where the bot ended up, which is the point of the sealed-box fixture.
  */
+import { scenarioBotData } from "./scenario-bot-data.ts";
 import {
   attachHighlighter,
   createBuildStructureAction,
@@ -38,7 +39,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const params = paramsSchema.parse(context.scenario.params ?? {});
   const { highlighter } = attachHighlighter(bot);
   const runner = new ActionRunner({ highlighter });
-  const build = createBuildStructureAction(bot, context.navigation);
+  const build = createBuildStructureAction(bot, context.navigation, scenarioBotData(context));
   const blocks = boxShell(params.box);
   context.log(`build_structure with ${blocks.length} cells`);
 

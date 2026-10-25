@@ -1,5 +1,7 @@
 import { HORIZONTAL_TICKS_PER_BLOCK, exactBlockGoal } from "../goals/index.js";
 import { IncrementalSearch } from "../search/search.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { blockKey } from "../world/world.js";
 import { type GeneratedMovement, type GenerationContext, createMovementCatalogue } from "./catalogue.js";
@@ -944,4 +946,26 @@ test("a cobweb in the next cell is planned as a block to break, never walked thr
     assert.ok(movement.cost >= 14, "priced at the webs' break time");
   }
   assert.equal(generateFrom(world, ORIGIN, { policy: { allowDigging: false } }).filter(to(1, 63, 0)).length, 0, "no digging, no way through");
+});
+
+test("a seagrass shallow is waded only when swimming is allowed", () => {
+  const { bot: registryBot } = createFakeBot();
+  const world = new MemoryWorld();
+  for (let x = -1; x <= 2; x += 1)
+    for (let z = -1; z <= 1; z += 1) {
+      world.load({ x, y: 0, z }, { stateId: 1 });
+      for (let y = 2; y <= 4; y += 1) world.load({ x, y, z }, { stateId: 0 });
+      if (x >= 1) loadNamedBlock(world, registryBot, { x, y: 1, z }, "seagrass");
+      else world.load({ x, y: 1, z }, { stateId: 0 });
+    }
+  const wadesEast = (allowSwimming: boolean) => createMovementCatalogue()
+    .generate(
+      planningStart({ x: 0, y: 1, z: 0 }),
+      { world, policy: { ...createMovementPolicy({ allowDigging: false, allowPlacing: false }), allowSwimming }, player: WELL_FED },
+      { submergedAtEyes: false, onGround: true, aquaAffinity: false, effects: {} },
+    )
+    .toArray()
+    .some((m) => m.to.x === 1 && m.to.y === 1 && m.to.z === 0);
+  assert.equal(wadesEast(true), true);
+  assert.equal(wadesEast(false), false);
 });

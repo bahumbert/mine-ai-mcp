@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProtectedRegionStore } from "../../bot-data/protected-regions.js";
-import { botFixture } from "../../test-support/bot.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { createUnprotectRegionAction, parseUnprotectRegionRequest } from "../unprotect-region/index.js";
 import { createProtectRegionAction, parseProtectRegionRequest } from "./index.js";
 
@@ -27,7 +27,7 @@ test("a region is given by two corners or by a centre and radius, never both or 
 });
 
 test("protecting stores the region for this bot by default, again returns it, and unprotecting removes it", async (t) => {
-  const bot = botFixture({ username: "Ayla" });
+  const { bot } = createFakeBot({ username: "Ayla" });
   const regions = new ProtectedRegionStore(temporaryBotData({ closeAfter: t }));
   const protect = createProtectRegionAction(bot, regions);
   const unprotect = createUnprotectRegionAction(regions);

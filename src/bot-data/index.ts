@@ -5,6 +5,7 @@ export * from "./container-observations.js";
 export * from "./event-log.js";
 export * from "./last-death.js";
 export * from "./nearest-frontier.js";
+export * from "./observed-write.js";
 export * from "./minecraft-knowledge.js";
 export * from "./minecraft-identity.js";
 export * from "./sql-bot-data.js";

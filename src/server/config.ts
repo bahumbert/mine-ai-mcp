@@ -12,6 +12,8 @@ const BOT_DATA_PERSISTENCE_MODES = ["persistent", "temporary"] as const satisfie
 const BOT_DATA_SCOPE_KINDS = ["bot", "shared"] as const satisfies readonly BotDataScopeKind[];
 
 export const DEFAULT_DATA_ROOT = path.join(os.homedir(), ".mine-ai", "bot-data");
+/** The Minecraft version the runtime speaks unless `--version` says otherwise; test fakes default to it too. */
+export const DEFAULT_MINECRAFT_VERSION = "1.21.4";
 
 export interface HostOptions {
   readonly incidentRetention: IncidentRetention;
@@ -46,7 +48,7 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
       "minecraft-port": { type: "string", default: "25566" },
       username: { type: "string", default: "MineAI" },
       auth: { type: "string", default: "offline" },
-      version: { type: "string", default: "1.21.4" },
+      version: { type: "string", default: DEFAULT_MINECRAFT_VERSION },
       "connect-timeout-ms": { type: "string", default: "45000" },
       "debug-execute-javascript": { type: "boolean", default: false },
       "neoforge-components": { type: "string" },

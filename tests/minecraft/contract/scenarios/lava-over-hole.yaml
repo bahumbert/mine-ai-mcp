@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-lava-over-hole
+tags:
+  - contract
+description: Flowing lava with an open cell under it pours down and does not spread sideways. A lava source on a floor fills
+  the cell beside it with a flowing level 2; with a floor under that cell it fills its open neighbour with a level 4, with
+  air under it the lava pours into the air and the open neighbour stays empty. Contract check
+  tests/minecraft/contract/checks/lava-over-hole.ts, also run on the fake bot (bot-contract.test.ts); setup from
+  setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: lava-over-hole
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 3 -60 -3 stone
+  - setblock 5 -60 -3 stone
+  - setblock 4 -60 -4 stone
+  - setblock 4 -60 -2 stone
+  - setblock 2 -59 -3 stone
+  - setblock 6 -59 -3 stone
+  - setblock 3 -59 -4 stone
+  - setblock 3 -59 -2 stone
+  - setblock 4 -59 -4 stone
+  - setblock 4 -59 -2 stone
+  - setblock 5 -59 -4 stone
+  - setblock 5 -59 -2 stone
+  - setblock 4 -60 -3 stone
+  - setblock 3 -60 3 stone
+  - setblock 5 -60 3 stone
+  - setblock 4 -60 2 stone
+  - setblock 4 -60 4 stone
+  - setblock 2 -59 3 stone
+  - setblock 6 -59 3 stone
+  - setblock 3 -59 2 stone
+  - setblock 3 -59 4 stone
+  - setblock 4 -59 2 stone
+  - setblock 4 -59 4 stone
+  - setblock 5 -59 2 stone
+  - setblock 5 -59 4 stone
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

@@ -4,7 +4,7 @@ import type { ActionOutput } from "../action.js";
 
 export const SEND_MESSAGE = "send_message" as const;
 export const SEND_MESSAGE_DESCRIPTION =
-  "Send one public chat message, or with `to` a private whisper to one player online, and confirm that the connected bot observed the server's echo. Commands and multiline messages are not accepted.";
+  "Send one public chat message, or with `to` a private whisper to one player online, and confirm that the connected bot observed the server's echo. Commands, multiline messages, `§` and control characters are not accepted (the server would disconnect the bot).";
 
 /** Minecraft usernames: letters, digits and underscores, 1 to 16 characters (also the `/tell` target). */
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,16}$/u;
@@ -14,12 +14,24 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,16}$/u;
  */
 export const MAX_WHISPER_LENGTH = 256 - "/tell ".length - 16 - 1;
 
+/** The server disconnects a client for `§` and for U+0000-U+001F or U+007F in chat (no reconnect follows). */
+const CHAT_REFUSED_CHARACTERS = /[§\u0000-\u001f\u007f]/u;
+
+/** False when the text holds a character the server disconnects a client for: §, U+0000-U+001F or U+007F. */
+export function isChatTextAccepted(text: string): boolean {
+  return !CHAT_REFUSED_CHARACTERS.test(text);
+}
+
 const publicMessageSchema = z
   .string()
   .trim()
   .min(1)
   .max(256)
   .regex(/^[^\r\n]*$/u, "Message must contain exactly one line.")
+  .refine(
+    isChatTextAccepted,
+    "Message holds characters the server refuses (§ or control characters); remove them and send again.",
+  )
   .refine((message) => !message.startsWith("/"), "Message must be public chat, not a command.")
   .describe("One public chat message, from 1 to 256 characters. Commands and line breaks are rejected.");
 

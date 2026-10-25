@@ -1,0 +1,59 @@
+template: ../../templates/flat-single-action.yaml
+
+name: breath-seagrass-head
+tags: [regression]
+description: >-
+  Live run 16 (2026-10-19): Lena drowned with her feet and head in tall seagrass under a dirt roof, an air cell one block
+  away. The breath reflex read the seagrass at her head as air, found "no way" (the head already breathing) and only
+  jumped in place until she drowned. A bot idles in a sealed bedrock water tunnel with tall seagrass at its feet and
+  head, bedrock over its head, and the only air two cells east, above the tunnel. No action runs, so only the breath
+  reflex can save it: it must swim to that pocket (the goal checks it stands under it) and breathe.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -6 40 -50 6 air"
+
+geometry:
+  # Bedrock cannot be dug: the reflex cannot dig up, and nothing else breaks the seal.
+  - fill: { block: bedrock, from: [-10, -63, -4], to: [38, -55, 4] }
+  # The water tunnel: two high.
+  - fill: { block: water, from: [-9, -60, 0], to: [36, -59, 0] }
+  # The air pocket two cells east of the start, one cell above the tunnel.
+  - fill: { block: air, from: [-1, -58, 0], to: [0, -58, 0] }
+
+# The start column and its neighbours: tall seagrass, lower half at the feet, upper half at the head (Lena's cells).
+setup:
+  - "fill -4 -60 0 -2 -60 0 minecraft:tall_seagrass[half=lower]"
+  - "fill -4 -59 0 -2 -59 0 minecraft:tall_seagrass[half=upper]"
+
+players:
+  - name: Actor
+    pos: [-2.5, -60, 0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/idle-then-breathe.ts
+
+params:
+  idleSeconds: 40
+  minimumAirTicks: 200
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: reach, who: Actor, pos: [-0.5, -59, 0.5], radius: 1.6 }
+    - { kind: health, who: Actor, health: 14 }
+    - { kind: completion, who: Actor }

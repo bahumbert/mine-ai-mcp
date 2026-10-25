@@ -289,3 +289,74 @@ test("close is idempotent and rejects later SQL work", (t) => {
   assert.throws(() => data.read("SELECT 1"), /SqlBotData is closed/);
   assert.throws(() => data.transaction(() => undefined), /SqlBotData is closed/);
 });
+
+/** One integer connection setting of the store's own connection. */
+function pragma(data: SqlBotData, name: string): number {
+  return data.withReadOnlyDatabase((database) => Number((database.prepare(`PRAGMA ${name}`).get() as Record<string, number>)[name]));
+}
+
+test("a persistent store leaves checkpoints to the worker", (t) => {
+  const data = persistentBotData(t).open("worker-checkpoints");
+  assert.equal(pragma(data, "wal_autocheckpoint"), 0);
+  assert.equal(pragma(data, "journal_size_limit"), 64 * 1024 * 1024);
+});
+
+test("a temporary store starts no checkpointer", (t) => {
+  const started: string[] = [];
+  const data = SqlBotData.create({
+    storage: { kind: "temporary" },
+    identity: { worldId: "memory-world", scope: { kind: "shared" } },
+    startWalCheckpointer: (file) => {
+      started.push(file);
+      return { [Symbol.dispose]() {} };
+    },
+  });
+  t.after(() => data.close());
+  assert.deepEqual(started, []);
+  assert.equal(pragma(data, "wal_autocheckpoint"), 1000);
+});
+
+test("a checkpointer that falls back restores automatic checkpoints and says so once", (t) => {
+  const storage = persistentBotData(t);
+  const lines: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  });
+  let fellBack: (cause: string) => void = () => assert.fail("fellBack was not given");
+  const disposed: string[] = [];
+  const data = SqlBotData.create({
+    storage: { kind: "persistent", root: storage.root },
+    identity: { worldId: "fall-back", scope: { kind: "shared" } },
+    startWalCheckpointer: (_file, options) => {
+      fellBack = options.fellBack;
+      return { [Symbol.dispose]: () => void disposed.push("checkpointer") };
+    },
+  });
+  storage.alsoClose(() => data.close());
+  assert.equal(pragma(data, "wal_autocheckpoint"), 0);
+
+  fellBack("worker exited with code 1");
+  fellBack("worker exited with code 1");
+
+  assert.equal(pragma(data, "wal_autocheckpoint"), 1000);
+  const notices = lines.filter((line) => line.includes("WAL checkpointer stopped"));
+  assert.deepEqual(notices, ["[minecraft-bot-data] WAL checkpointer stopped (worker exited with code 1); automatic checkpoints restored\n"]);
+});
+
+test("closing a store disposes its checkpointer once and a later write from a new connection works", (t) => {
+  const storage = persistentBotData(t);
+  const order: string[] = [];
+  const data = SqlBotData.create({
+    storage: { kind: "persistent", root: storage.root },
+    identity: { worldId: "close-order", scope: { kind: "shared" } },
+    startWalCheckpointer: () => ({ [Symbol.dispose]: () => void order.push("disposed") }),
+  });
+  const file = persistentFile(data);
+  data.close();
+  data.close();
+  assert.deepEqual(order, ["disposed"]);
+  const later = new DatabaseSync(file);
+  later.exec("INSERT INTO notes (bot_id, note, context, remembered_at, dimension, x, y, z) VALUES ('b', 'late', '', '2026-10-20T00:00:00Z', 'overworld', 0, 0, 0)");
+  later.close();
+});

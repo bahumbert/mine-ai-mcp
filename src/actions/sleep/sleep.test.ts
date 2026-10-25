@@ -2,75 +2,51 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { Vec3 } from "vec3";
-import minecraftData from "minecraft-data";
-import { botFixture, registry } from "../../test-support/bot.js";
-import { createRequire } from "node:module";
+import { type FakeBotOptions, type FakeCell, type FakeHarness, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { parseSleepRequest, sleepOutcomes } from "./contract.js";
-import { executeSleep, formatSleepResult } from "./sleep.js";
+import { beginSleep, executeSleep, formatSleepResult } from "./sleep.js";
 
-const loadChunk = createRequire(import.meta.url)("prismarine-chunk") as typeof import("prismarine-chunk").default;
+const NIGHT = 14_000;
+const DAY = 6_000;
+/** The bed's head lies one block from its foot toward the way it faces (`bed.js` `parseBedMetadata`). */
+const HEAD_OFFSETS = { east: new Vec3(1, 0, 0), west: new Vec3(-1, 0, 0), north: new Vec3(0, 0, -1), south: new Vec3(0, 0, 1) };
+type Facing = keyof typeof HEAD_OFFSETS;
 
-function mockBed(name: string, position: Vec3, occupied = false) {
-  return {
-    name,
-    boundingBox: "block",
-    position,
-    getProperties: () => ({ occupied }),
-  };
+/** Both halves of a bed as the game stores them: the foot at `foot`, the head one block toward `facing`. */
+function bedCells(name: string, foot: Vec3, { facing = "east", occupied = false }: { facing?: Facing; occupied?: boolean } = {}): Record<string, FakeCell> {
+  const half = (part: string, at: Vec3): [string, FakeCell] => [at.toArray().join(","), { name, properties: { facing, occupied: String(occupied), part } }];
+  return Object.fromEntries([half("foot", foot), half("head", foot.plus(HEAD_OFFSETS[facing]))]);
 }
 
-function mockBot(overrides: Record<string, any> = {}) {
-  const Chunk = loadChunk("1.21.4");
-  const columns = new Map<string, { chunkX: number; chunkZ: number; column: InstanceType<typeof Chunk> }>();
-  for (const position of (overrides.beds ?? []) as Vec3[]) {
-    const chunkX = Math.floor(position.x / 16);
-    const chunkZ = Math.floor(position.z / 16);
-    const key = `${chunkX},${chunkZ}`;
-    const loaded = columns.get(key) ?? { chunkX, chunkZ, column: new Chunk({ x: chunkX, z: chunkZ }) };
-    loaded.column.setBlockStateId(
-      position.offset(-chunkX * 16, 0, -chunkZ * 16),
-      registry.blocksByName.white_bed!.minStateId,
-    );
-    columns.set(key, loaded);
-  }
-  const bot: any = botFixture(
-    { username: "sleeper", position: { x: 0, y: 64, z: 0 }, time: { timeOfDay: 14000 } },
-    {
-      world: { getColumns: () => [...columns.values()] },
-      isSleeping: false,
-      activateBlock: async () => {},
-      sleep: async () => {
-        bot.isSleeping = true;
-        setTimeout(() => {
-          bot.isSleeping = false;
-          bot.time.timeOfDay = 0; // Morning
-          bot.emit("wake");
-        }, 20);
-      },
-      ...overrides,
-    },
-  );
-  return bot;
+/** Put a bed in the world after the start (a bed placed, taken, or occupied by another player). */
+function setBed(harness: FakeHarness, name: string, foot: Vec3, options: { facing?: Facing; occupied?: boolean } = {}): void {
+  for (const [key, cell] of Object.entries(bedCells(name, foot, options))) harness.world.setCell(new Vec3(...key.split(",").map(Number) as [number, number, number]), cell);
+}
+
+/** A bot at night on the fake's mocked clock, standing at the origin of the old tests. */
+function sleeper(options: FakeBotOptions = {}): FakeHarness {
+  const clock = options.clock ?? createFakeClock({ mode: "mocked" });
+  return createFakeBot({ position: { x: 0, y: 64, z: 0 }, ...options, clock, server: { timeOfDay: NIGHT, ...options.server } });
 }
 
 const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
 
+/** Bed blocks written to the server by a `block_place`: how many times the bot used a block. */
+const blockUses = (harness: FakeHarness): number => harness.server.packets.filter((packet) => packet.name === "block_place").length;
+
 test("finds the bed in the diagonal section missed during the run 12 underground return", async () => {
   const bedPos = new Vec3(80, 66, 135);
-  const bot = mockBot({
-    entity: { position: new Vec3(71.51, 38, 144.49) },
-    beds: [bedPos],
-    blockAt: (position: Vec3) => (position.equals(bedPos) ? mockBed("white_bed", bedPos) : null),
-  });
+  const h = sleeper({ position: { x: 71.51, y: 38, z: 144.49 }, cells: bedCells("white_bed", bedPos) });
+  using _installed = h.clock.install();
   const navigation = {
     ...fakeNavigation,
     navigate: async () => {
-      bot.entity.position = bedPos.offset(-1, 0, 0);
+      h.bot.entity.position = bedPos.offset(-1, 0, 0);
       return { status: "completed", elapsedMs: 0 };
     },
   } as NavigationRuntime;
 
-  const result = await executeSleep(bot, navigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, navigation, {}), 60_000);
   assert.equal(result.status, "succeeded", JSON.stringify(result));
   assert.deepEqual(result.sleep?.bedPosition, { x: 80, y: 66, z: 135 });
 });
@@ -82,8 +58,9 @@ test("parses sleep requests with zero arguments and rejects unknown keys", () =>
 });
 
 test("refuses to sleep in the Nether or the End to avoid explosions", async () => {
-  const bot = mockBot({ game: { dimension: "the_nether" } });
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const h = sleeper({ dimension: "the_nether" });
+  using _installed = h.clock.install();
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 1_000);
 
   assert.equal(result.status, "failed");
   if (result.status === "failed") {
@@ -92,8 +69,10 @@ test("refuses to sleep in the Nether or the End to avoid explosions", async () =
 });
 
 test("reports immediately if bot is already sleeping", async () => {
-  const bot = mockBot({ isSleeping: true });
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const h = sleeper();
+  using _installed = h.clock.install();
+  h.bot.isSleeping = true;
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 1_000);
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.sleep?.asleep, true);
@@ -101,11 +80,9 @@ test("reports immediately if bot is already sleeping", async () => {
 });
 
 test("refuses if no bed is nearby and none is in inventory, advising wool and wood", async () => {
-  const bot = mockBot({
-    beds: [],
-    inventory: { items: () => [] },
-  });
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const h = sleeper();
+  using _installed = h.clock.install();
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 10_000);
 
   assert.equal(result.status, "failed");
   if (result.status === "failed") {
@@ -114,23 +91,14 @@ test("refuses if no bed is nearby and none is in inventory, advising wool and wo
 });
 
 test("skips occupied beds and chooses an unoccupied one", async () => {
-  const occupiedBedPos = new Vec3(2, 64, 0);
-  const freeBedPos = new Vec3(3, 64, 0);
-  const bot = mockBot({
-    time: { timeOfDay: 15000 },
-    beds: [occupiedBedPos, freeBedPos],
-    blockAt: (pos: Vec3) => {
-      if (pos.equals(occupiedBedPos)) {
-        return mockBed("red_bed", occupiedBedPos, true);
-      }
-      if (pos.equals(freeBedPos)) {
-        return mockBed("blue_bed", freeBedPos);
-      }
-      return { name: "air", boundingBox: "empty", position: pos };
-    },
+  // The taken bed lies west of the free one, so the nearest-first scan meets its halves, then the free bed's foot at 3,64,0.
+  const h = sleeper({
+    server: { timeOfDay: 15_000 },
+    cells: { ...bedCells("red_bed", new Vec3(2, 64, 0), { facing: "west", occupied: true }), ...bedCells("blue_bed", new Vec3(3, 64, 0)) },
   });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 60_000);
 
   assert.equal(result.status, "succeeded");
   assert.deepEqual(result.sleep?.bedPosition, { x: 3, y: 64, z: 0 });
@@ -139,23 +107,13 @@ test("skips occupied beds and chooses an unoccupied one", async () => {
 
 test("sets respawn point during daytime when night sleep is unavailable", async () => {
   const bedPos = new Vec3(2, 64, 0);
-  let activated = false;
-  const bot = mockBot({
-    time: { timeOfDay: 6000 }, // Midday
-    beds: [bedPos],
-    blockAt: (pos: Vec3) => {
-      if (pos.equals(bedPos)) return mockBed("white_bed", bedPos);
-      return { name: "air", boundingBox: "empty", position: pos };
-    },
-    activateBlock: async () => {
-      activated = true;
-    },
-  });
+  const h = sleeper({ server: { timeOfDay: DAY }, cells: bedCells("white_bed", bedPos) });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 10_000);
 
   assert.equal(result.status, "succeeded");
-  assert.equal(activated, true);
+  assert.equal(blockUses(h), 1, "the bed was used: the server's block_place");
   assert.equal(result.sleep?.respawnSet, true);
   assert.equal(result.sleep?.morning, false);
   assert.equal(result.sleep?.asleep, false);
@@ -175,16 +133,10 @@ test("sets respawn point during daytime when night sleep is unavailable", async 
 });
 
 test("does not warn when another bed remains in inventory", async () => {
-  const bedPos = new Vec3(2, 64, 0);
-  const bot = mockBot({
-    time: { timeOfDay: 6000 },
-    inventory: { items: () => [{ name: "cyan_bed", count: 1 }] },
-    beds: [bedPos],
-    blockAt: (pos: Vec3) =>
-      pos.equals(bedPos) ? mockBed("white_bed", bedPos) : { name: "air", boundingBox: "empty", position: pos },
-  });
+  const h = sleeper({ server: { timeOfDay: DAY }, carried: { cyan_bed: 1 }, cells: bedCells("white_bed", new Vec3(2, 64, 0)) });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 10_000);
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.sleep?.warning, undefined);
@@ -192,18 +144,14 @@ test("does not warn when another bed remains in inventory", async () => {
 });
 
 test("does not claim a daytime respawn point when activation is rejected", async () => {
-  const bedPos = new Vec3(2, 64, 0);
-  const bot = mockBot({
-    time: { timeOfDay: 6000 },
-    beds: [bedPos],
-    blockAt: (pos: Vec3) =>
-      pos.equals(bedPos) ? mockBed("white_bed", bedPos) : { name: "air", boundingBox: "empty", position: pos },
-    activateBlock: async () => {
-      throw new Error("server refused interaction");
-    },
+  const h = sleeper({
+    server: { timeOfDay: DAY },
+    cells: bedCells("white_bed", new Vec3(2, 64, 0)),
+    overrides: { activateBlock: async () => { throw new Error("server refused interaction"); } },
   });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 10_000);
 
   assert.equal(result.status, "failed");
   assert.equal(result.sleep?.respawnSet, false);
@@ -213,25 +161,19 @@ test("does not claim a daytime respawn point when activation is rejected", async
 });
 
 test("sleeps through the night and wakes up in the morning", async () => {
-  const bedPos = new Vec3(2, 64, 0);
-  const metadataKeys = ["pose", "sleeping_pos"];
-  const bot = mockBot({
-    time: { timeOfDay: 15000 }, // Nighttime
-    registry: { ...minecraftData("1.21.4"), entitiesByName: { player: { metadataKeys } } },
-    players: {
-      sleeper: { entity: { metadata: [] } },
-      Alice: { entity: { metadata: [2, null] } },
-      Bob: { entity: { metadata: [0, null] } },
-      Carol: { entity: null },
-    },
-    beds: [bedPos],
-    blockAt: (pos: Vec3) => {
-      if (pos.equals(bedPos)) return mockBed("red_bed", bedPos);
-      return { name: "air", boundingBox: "empty", position: pos };
-    },
+  const h = sleeper({
+    server: { timeOfDay: 15_000 },
+    // Bob is awake, so the server keeps the night: the morning comes by an operator's time set at the test's tick.
+    players: { Alice: { sleeping: true }, Bob: { sleeping: false }, Carol: {} },
+    cells: bedCells("red_bed", new Vec3(2, 64, 0)),
   });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const execution = executeSleep(h.bot, fakeNavigation, {});
+  await h.clock.advance(2_000);
+  assert.equal(h.bot.isSleeping, true);
+  h.server.setDayTime(24_000);
+  const result = await h.clock.settle(execution, 30_000);
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.sleep?.morning, true);
@@ -250,57 +192,36 @@ test("sleeps through the night and wakes up in the morning", async () => {
 });
 
 test("keeps waiting for morning if the bot leaves bed early", async () => {
-  const bedPos = new Vec3(2, 64, 0);
   const controller = new AbortController();
-  const bot = mockBot({
-    time: { timeOfDay: 15000 },
-    beds: [bedPos],
-    blockAt: (pos: Vec3) =>
-      pos.equals(bedPos) ? mockBed("red_bed", bedPos) : { name: "air", boundingBox: "empty", position: pos },
-    sleep: async () => {
-      bot.isSleeping = true;
-      setTimeout(() => {
-        bot.isSleeping = false;
-        bot.emit("wake");
-      }, 5);
-    },
-  });
+  const h = sleeper({ server: { timeOfDay: 15_000 }, cells: bedCells("red_bed", new Vec3(2, 64, 0)) });
+  using _installed = h.clock.install();
 
   let settled = false;
-  const execution = executeSleep(bot, fakeNavigation, {}, controller.signal).finally(() => {
+  const execution = executeSleep(h.bot, fakeNavigation, {}, controller.signal).finally(() => {
     settled = true;
   });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await h.clock.advance(2_000);
+  assert.equal(h.bot.isSleeping, true);
+  await h.bot.wake();
+  await h.clock.advance(2_000);
 
+  assert.equal(h.bot.isSleeping, false);
   assert.equal(settled, false);
   controller.abort();
   await assert.rejects(execution, { name: "AbortError" });
 });
 
 test("reports an observed nearby hostile instead of Mineflayer's generic sleep timeout", async () => {
-  const bedPos = new Vec3(2, 64, 0);
-  let sleepCalled = false;
-  const bot = mockBot({
-    beds: [bedPos],
-    blockAt: (pos: Vec3) =>
-      pos.equals(bedPos) ? mockBed("white_bed", bedPos) : { name: "air", boundingBox: "empty", position: pos },
-    entities: {
-      17: {
-        type: "hostile",
-        name: "zombie",
-        position: new Vec3(4.5, 64, 1),
-      },
-    },
-    sleep: async () => {
-      sleepCalled = true;
-      throw new Error("bot is not sleeping");
-    },
+  const h = sleeper({
+    cells: bedCells("white_bed", new Vec3(2, 64, 0)),
+    entities: { 17: { name: "zombie", position: new Vec3(4.5, 64, 1) } },
   });
+  using _installed = h.clock.install();
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 10_000);
 
   assert.equal(result.status, "failed");
-  assert.equal(sleepCalled, false);
+  assert.equal(blockUses(h), 0, "no sleep was tried");
   if (result.status === "failed") {
     assert.match(result.error, /^\[BED_HOSTILES_NEARBY\]/);
     assert.match(result.error, /zombie \(2\.69 blocks\)/);
@@ -310,32 +231,32 @@ test("reports an observed nearby hostile instead of Mineflayer's generic sleep t
   assert.match(formatSleepResult(result), /`4, 64, 1`/);
 });
 
-test("places a carried bed and sleeps in it when no bed is around", async () => {
-  let placedPos: Vec3 | null = null;
-  let bedPlaced = false;
-  const bot = mockBot({
-    time: { timeOfDay: 15000 },
-    beds: [],
-    inventory: {
-      items: () => (bedPlaced ? [] : [{ name: "cyan_bed", count: 1 }]),
-    },
-    blockAt: (pos: Vec3) => {
-      const offset = placedPos ? pos.minus(placedPos) : null;
-      if (offset && offset.y === 0 && Math.abs(offset.x) + Math.abs(offset.z) <= 1) {
-        return { name: "cyan_bed", boundingBox: "block", position: pos };
-      }
-      if (pos.y === 63) {
-        return { name: "stone", boundingBox: "block", position: pos };
-      }
-      return { name: "air", boundingBox: "empty", position: pos };
-    },
-    _placeBlockWithOptions: async (support: any) => {
-      placedPos = support.position.offset(0, 1, 0);
-      bedPlaced = true;
-    },
+/** A bot carrying one bed that places it on the stone at y 63; `placements` counts how many beds were put down. */
+function bedPlacingBot(clock = createFakeClock({ mode: "mocked" }), walksOff = true) {
+  const state = { placedAt: null as Vec3 | null, facing: "east" as Facing, placements: 0 };
+  // The bot ends up eight blocks from the bed it places (placement walked it off), so every sleep has a route to take.
+  const h = sleeper({ clock, server: { timeOfDay: 15_000, startAge: 24_000 }, carried: { cyan_bed: 1 } });
+  // The fake server puts the bed whole, facing as she looks, and takes it from the stack (contract check `place-block-with-options`);
+  // the test notes where and how, once the server has answered the click, and walks the bot off.
+  h.server.onPacket("block_place", (data) => {
+    const { location } = data as { location: Vec3 };
+    // The use of a bed (to sleep in it) is a `block_place` too; only a click on any other block places the carried bed.
+    if (h.bot.isABed(h.bot.blockAt(location)!)) return;
+    h.server.answer(() => {
+      state.placedAt = location.offset(0, 1, 0);
+      state.placements += 1;
+      state.facing = h.bot.blockAt(state.placedAt)!.getProperties().facing as Facing;
+      if (walksOff) h.bot.entity.position = state.placedAt.offset(8, 0, 0);
+    });
   });
+  return { h, state };
+}
 
-  const result = await executeSleep(bot, fakeNavigation, {});
+test("places a carried bed and sleeps in it when no bed is around", async () => {
+  const { h } = bedPlacingBot(undefined, false);
+  using _installed = h.clock.install();
+
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 60_000);
 
   assert.equal(result.status, "succeeded");
   assert.equal(result.sleep?.placedBed, true);
@@ -343,4 +264,186 @@ test("places a carried bed and sleeps in it when no bed is around", async () => 
   assert.match(result.sleep?.warning ?? "", /No bed remains in inventory/);
   assert.match(result.sleep?.warning ?? "", /cyan_bed/);
   assert.match(result.sleep?.warning ?? "", /collect_block/);
+});
+
+/** A navigation that walks to the placed bed; given an owner, its first route is the one a reflex aborts. */
+function walkToPlacedBed(h: FakeHarness, state: { placedAt: Vec3 | null }, owner?: AbortController): NavigationRuntime {
+  let routes = 0;
+  return {
+    navigate: async () => {
+      routes += 1;
+      if (owner && routes === 1) { owner.abort(new Error("hunger reflex")); throw owner.signal.reason; }
+      h.bot.entity.position = state.placedAt!.offset(-1, 0, 0);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  } as unknown as NavigationRuntime;
+}
+
+/** One request's attempts: `begin` once, then an executor call per attempt with its own signal, each run on the clock. */
+function sleepAttempts(h: FakeHarness, navigation: NavigationRuntime) {
+  const run = beginSleep(h.bot, navigation, {}, () => {});
+  return (signal?: AbortSignal) => h.clock.settle(run({ signal }), 60_000);
+}
+
+test("a sleep cut off on the way to the bed it placed sleeps in that bed next time, without placing another", async () => {
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install();
+  const owner = new AbortController();
+  const attempt = sleepAttempts(h, walkToPlacedBed(h, state, owner));
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(state.placements, 1);
+  assert.equal(result.sleep?.placedBed, true);
+  assert.equal(result.sleep?.morning, true);
+});
+
+test("a bed placed just before the abort is found again by the next attempt, not replaced from an empty inventory", async () => {
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install();
+  const owner = new AbortController();
+  const place = (h.bot as unknown as { _placeBlockWithOptions: (...args: unknown[]) => Promise<void> })._placeBlockWithOptions;
+  let placeCalls = 0;
+  Object.assign(h.bot, {
+    _placeBlockWithOptions: async (...args: unknown[]) => {
+      placeCalls += 1;
+      await place(...args);
+      owner.abort(new Error("fall reflex"));
+      throw owner.signal.reason;
+    },
+  });
+  const attempt = sleepAttempts(h, walkToPlacedBed(h, state));
+
+  await assert.rejects(attempt(owner.signal), /fall reflex/);
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(placeCalls, 1);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.sleep?.placedBed, true);
+});
+
+test("a bed that was taken between attempts is reported missing, and no second bed is placed", async () => {
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install(); // the placement was sent a moment ago: "gone" is the answer once the world age moved 40 ticks
+  const owner = new AbortController();
+  const navigation = walkToPlacedBed(h, state, owner);
+  const attempt = sleepAttempts(h, navigation);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  for (const cell of [state.placedAt!, state.placedAt!.plus(HEAD_OFFSETS[state.facing])]) h.world.setCell(cell, "air");
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  assert.equal(state.placements, 1);
+  if (result.status === "failed") assert.equal(result.error, sleepOutcomes.noBedFound);
+});
+
+test("a second call after a sleep that finished returns its success without sleeping again", async () => {
+  const h = sleeper({ server: { timeOfDay: 15_000 }, cells: bedCells("red_bed", new Vec3(2, 64, 0)) });
+  using _installed = h.clock.install();
+  let sleeps = 0;
+  const sleep = h.bot.sleep;
+  h.bot.sleep = async (...args: Parameters<typeof sleep>) => { sleeps += 1; await sleep(...args); };
+  const attempt = sleepAttempts(h, fakeNavigation);
+
+  const first = await attempt();
+  const second = await attempt();
+
+  assert.equal(first.status, "succeeded");
+  assert.deepEqual(second, first);
+  assert.equal(sleeps, 1);
+});
+
+test("a bed another player now occupies is not ours: the free bed found instead is not reported as placed", async () => {
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install();
+  const owner = new AbortController();
+  let walksTo: Vec3 | null = null; // where a route ends; the first route is the one the reflex aborts
+  let routes = 0;
+  const navigation = {
+    navigate: async () => {
+      routes += 1;
+      if (routes === 1) { owner.abort(new Error("hunger reflex")); throw owner.signal.reason; }
+      h.bot.entity.position = walksTo!.offset(-1, 0, 0);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  } as unknown as NavigationRuntime;
+  const attempt = sleepAttempts(h, navigation);
+
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  // Our bed is taken by someone else; another free bed stands nearby.
+  setBed(h, "cyan_bed", state.placedAt!, { facing: state.facing, occupied: true });
+  const otherBed = state.placedAt!.offset(4, 0, 0);
+  // Its head lies away from the bot (which stands east of both beds), so the scan meets the foot first: the position asserted below.
+  setBed(h, "cyan_bed", otherBed, { facing: "west" });
+  walksTo = otherBed;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(state.placements, 1);
+  assert.deepEqual(result.sleep?.bedPosition, { x: otherBed.x, y: otherBed.y, z: otherBed.z });
+  assert.equal(result.sleep?.placedBed, false, "the bed slept in is not the one this request put down");
+});
+
+test("a bed a reflex set down in the footprint before the send is not ours", async () => {
+  // Where the request's bed would go: learned from a complete run on an identical world.
+  const dry = bedPlacingBot();
+  {
+    using _dryInstalled = dry.h.clock.install();
+    await dry.h.clock.settle(executeSleep(dry.h.bot, walkToPlacedBed(dry.h, dry.state), {}), 60_000);
+  }
+  const footprint = dry.state.placedAt!;
+  const footprintFacing = dry.state.facing;
+
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install();
+  const owner = new AbortController();
+  h.bot.look = async () => {
+    owner.abort(new Error("hunger reflex")); // during the look: nothing was sent
+    owner.signal.throwIfAborted();
+  };
+  const attempt = sleepAttempts(h, walkToPlacedBed(h, state));
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  assert.equal(state.placements, 0);
+
+  // The reflex sets a bed down in that very footprint (the world now shows one), and the resume goes to sleep.
+  state.placedAt = footprint;
+  setBed(h, "cyan_bed", footprint, { facing: footprintFacing });
+  h.bot.look = async () => undefined;
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(state.placements, 0, "the free bed found is used; this request placed none");
+  assert.equal(result.sleep?.placedBed, false, "the reflex's bed is not reported as the one this request put down");
+});
+
+test("the bed this request placed, in a chunk that is no longer loaded, fails naming the cell and places no second bed", async () => {
+  const { h, state } = bedPlacingBot();
+  using _installed = h.clock.install();
+  const owner = new AbortController();
+  const attempt = sleepAttempts(h, walkToPlacedBed(h, state, owner));
+  await assert.rejects(attempt(owner.signal), /hunger reflex/);
+  const placedAt = state.placedAt!;
+  for (const cell of [placedAt, placedAt.plus(HEAD_OFFSETS[state.facing])]) h.world.setCell(cell, "void");
+
+  const result = await attempt(new AbortController().signal);
+
+  assert.equal(result.status, "failed");
+  if (result.status === "failed") assert.match(result.error, /BED_NOT_LOADED.*go back near it/su);
+  assert.equal(state.placements, 1);
+});
+
+test("two sleep requests on two bots keep their own beds", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const requests = [bedPlacingBot(clock), bedPlacingBot(clock)];
+  const owners = requests.map(() => new AbortController());
+  const attempts = requests.map(({ h, state }, index) => sleepAttempts(h, walkToPlacedBed(h, state, owners[index])));
+  await Promise.all(attempts.map((attempt, index) => assert.rejects(attempt(owners[index]!.signal), /hunger reflex/)));
+
+  const results = await Promise.all(attempts.map((attempt) => attempt(new AbortController().signal)));
+
+  assert.deepEqual(results.map((result) => result.status), ["succeeded", "succeeded"]);
+  assert.deepEqual(requests.map(({ state }) => state.placements), [1, 1]);
+  assert.deepEqual(results.map((result) => result.sleep?.placedBed), [true, true]);
 });

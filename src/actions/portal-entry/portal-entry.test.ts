@@ -1,22 +1,17 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import minecraftData from "minecraft-data";
+import { CarriedCounts } from "../../test-support/carried-counts.js";
+import { type FakeHarness, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { parseNavigateRequest } from "../navigate/contract.js";
 import { parseEndPortalRequest, parseNetherPortalRequest } from "./contract.js";
 import { personalRespawnObservation, recordPersonalRespawn } from "./respawn-knowledge.js";
 import { portalSupplyWarning } from "./portal-policy.js";
 import { beginPortalEntry, endRespawnProblem, enterPortalAction } from "./portal-entry.js";
 
-function botFixture() {
-  const bot = Object.assign(new EventEmitter(), {
-    registry: { foodsByName: { bread: {} } },
-    inventory: { items: () => [] as Array<{ name: string; count: number }> },
-    blockAt: () => null,
-  }) as unknown as Bot;
-  return bot;
+/** Rewrite how many of `name` the harness's window carries, as the server's slot updates would. */
+function carry(harness: FakeHarness, name: string, total: number): void {
+  new CarriedCounts(harness.inventory, harness.bot.registry).set(harness.bot.registry.itemsByName[name]!.id, total);
 }
 
 test("portal inputs live only on their dedicated actions", () => {
@@ -30,22 +25,30 @@ test("portal inputs live only on their dedicated actions", () => {
   assert.equal(parseEndPortalRequest({ x: 1, y: 64, z: 1, respawn_within: 32, allow_distant_respawn: true }).respawnWithin, 32);
 });
 
-function crossingBot() {
+/**
+ * A bot in open air beside an End portal block at 0,64,0, carrying nothing. `controls` records every control the code
+ * sets; `deathListeners` is the harness's own count of `death` listeners (its digging and physics each keep one), the
+ * baseline a released request returns to.
+ */
+function crossingBot(options: Parameters<typeof createFakeBot>[0] = {}) {
   const controls = new Map<string, boolean>();
-  const bot = Object.assign(botFixture(), {
-    health: 20,
-    game: { dimension: "overworld" },
-    entity: { position: new Vec3(-2.5, 65, 0.5), onGround: true, yaw: 0 },
-    registry: { foodsByName: {}, itemsByName: {} },
-    inventory: { items: () => [], count: () => 0 },
-    blockAt: (cell: Vec3) => ({ name: cell.equals(new Vec3(0, 64, 0)) ? "end_portal" : "air" }),
-    setControlState: (name: string, value: boolean) => controls.set(name, value),
-  }) as unknown as Bot;
-  return { bot, controls };
+  const harness = createFakeBot({
+    position: new Vec3(-2.5, 65, 0.5),
+    groundY: null,
+    cells: { "0,64,0": "end_portal" },
+    ...options,
+  });
+  const { bot } = harness;
+  const setControlState = bot.setControlState;
+  bot.setControlState = (name, value) => {
+    controls.set(name, value);
+    setControlState(name, value);
+  };
+  return { bot, controls, harness, deathListeners: bot.listenerCount("death") };
 }
 
 test("portal action accepts only a server-positioned destination and releases observation with its lifetime", async () => {
-  const { bot } = crossingBot();
+  const { bot, deathListeners } = crossingBot();
   const lifetime = new AbortController();
   const result = await enterPortalAction(
     bot,
@@ -68,11 +71,11 @@ test("portal action accepts only a server-positioned destination and releases ob
   assert.equal(bot.listenerCount("forcedMove"), 1);
   lifetime.abort();
   assert.equal(bot.listenerCount("forcedMove"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(bot.listenerCount("death"), deathListeners);
 });
 
 test("portal action preserves caller cancellation and lifetime cleanup", async () => {
-  const { bot } = crossingBot();
+  const { bot, deathListeners } = crossingBot();
   const caller = new AbortController();
   const lifetime = new AbortController();
   const pending = enterPortalAction(
@@ -89,18 +92,14 @@ test("portal action preserves caller cancellation and lifetime cleanup", async (
   await assert.rejects(pending, /operator cancelled/);
   lifetime.abort();
   assert.equal(bot.listenerCount("forcedMove"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(bot.listenerCount("death"), deathListeners);
 });
 
 test("a portal approach settles tool loss before issuing entry and retains navigation resource evidence", async () => {
-  const { bot, controls } = crossingBot();
-  bot.registry = minecraftData("1.21.4") as never;
-  const items = [
-    { name: "diamond_pickaxe", count: 1, slot: 36 },
-    { name: "stone_pickaxe", count: 1, slot: 9 },
-  ];
-  const inventory = Object.assign(new EventEmitter(), { items: () => items, count: () => 0 });
-  bot.inventory = inventory as never;
+  const { bot, controls, harness } = crossingBot({ slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "stone_pickaxe" } } });
+  const { inventory } = harness;
+  // The window's own listeners (the harness follows the held stack through it): the count a released request leaves.
+  const updateSlotListeners = inventory.listenerCount("updateSlot");
   const lifetime = new AbortController();
   try {
     const result = await enterPortalAction(bot,
@@ -108,8 +107,7 @@ test("a portal approach settles tool loss before issuing entry and retains navig
         createMovements: () => ({}) as never,
         navigate: async ({ onToolSelected, stopSignal }) => {
           onToolSelected?.(bot.registry.itemsByName.diamond_pickaxe!.id);
-          items.shift();
-          inventory.emit("updateSlot", 36, null);
+          carry(harness, "diamond_pickaxe", 0);
           await Promise.resolve();
           assert.equal(stopSignal?.aborted, true);
           return { status: "stopped", reason: "tool loss", elapsedMs: 1 };
@@ -121,7 +119,7 @@ test("a portal approach settles tool loss before issuing entry and retains navig
     assert.ok(result.navigation.scaffolding.some((stock) => stock.item === "end_stone"));
     assert.deepEqual(result.navigation.bucketDrops, { count: 0, waterRecovered: 0 });
   } finally { lifetime.abort(); }
-  assert.equal(inventory.listenerCount("updateSlot"), 0);
+  assert.equal(inventory.listenerCount("updateSlot"), updateSlotListeners);
 });
 
 test("an immediate return while still inside the arrival portal settles truthfully instead of waiting forever", async () => {
@@ -199,13 +197,13 @@ test("death makes a resumed portal request terminal instead of routing again or 
 });
 
 test("End guard refuses unknown, distant, and visibly missing bed evidence while allowing the explicit override", () => {
-  const bot = botFixture();
+  const { bot, world } = createFakeBot();
   const request = parseEndPortalRequest({ x: 0, y: 64, z: 0 });
   assert.match(endRespawnProblem(bot, request, "the_end")!, /RESPAWN_UNKNOWN/);
   recordPersonalRespawn(bot, { x: 200, y: 64, z: 0 });
-  bot.blockAt = () => ({ name: "red_bed" }) as never;
+  world.setCell(new Vec3(200, 64, 0), "red_bed");
   assert.match(endRespawnProblem(bot, request, "the_end")!, /RESPAWN_DISTANT.*200\.00/);
-  bot.blockAt = () => ({ name: "air" }) as never;
+  world.setCell(new Vec3(200, 64, 0), "air");
   assert.match(endRespawnProblem(bot, request, "the_end")!, /RESPAWN_STALE/);
   const override = parseEndPortalRequest({ x: 0, y: 64, z: 0, allow_distant_respawn: true });
   assert.equal(endRespawnProblem(bot, override, "the_end"), null);
@@ -213,17 +211,16 @@ test("End guard refuses unknown, distant, and visibly missing bed evidence while
 });
 
 test("supply thresholds count usable items and exempt return", () => {
-  const bot = botFixture();
-  const stock = [{ name: "bread", count: 16 }, { name: "arrow", count: 32 }];
-  bot.inventory.items = () => stock as never;
+  const harness = createFakeBot({ carried: { bread: 16, arrow: 32 } });
+  const { bot } = harness;
   assert.equal(portalSupplyWarning(bot, "the_end"), null);
-  stock[0]!.count = 15;
+  carry(harness, "bread", 15);
   assert.match(portalSupplyWarning(bot, "the_nether")!, /15\/16/);
   assert.equal(portalSupplyWarning(bot, "overworld"), null);
 });
 
 test("personal respawn knowledge is confirmed separately from world spawn and invalidated by spawnReset", () => {
-  const bot = botFixture();
+  const { bot } = createFakeBot();
   bot.spawnPoint = new Vec3(0, 64, 0);
   assert.equal(personalRespawnObservation(bot), null);
   recordPersonalRespawn(bot, { x: 100, y: 65, z: 100 });

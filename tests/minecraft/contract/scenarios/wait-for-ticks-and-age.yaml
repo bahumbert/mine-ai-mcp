@@ -1,0 +1,31 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-wait-for-ticks-and-age
+tags:
+  - contract
+description: waitForTicks(40) takes 2 s of wall clock (client ticks), while the server's age moves about 40. Contract
+  check tests/minecraft/contract/checks/wait-for-ticks-and-age.ts, also run on the fake bot (bot-contract.test.ts);
+  setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: wait-for-ticks-and-age
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

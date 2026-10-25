@@ -12,6 +12,7 @@ import {
 } from "@aibengineering/mine-ai-mcp";
 
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { scenarioBotData } from "../../src/scenario-bot-data.ts";
 
 const paramsSchema = z.strictObject({
   table: z.tuple([z.number().int(), z.number().int(), z.number().int()]),
@@ -51,7 +52,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const collect = createCollectBlockAction(bot, context.navigation);
   const craft = createCraftItemAction(bot, context.navigation);
   const navigate = createNavigateAction(bot, context.navigation);
-  const place = createPlaceBlockAction(bot, context.navigation);
+  const place = createPlaceBlockAction(bot, context.navigation, scenarioBotData(context));
   const smelt = createSmeltItemAction(bot, context.navigation);
   const stages: string[] = [];
 

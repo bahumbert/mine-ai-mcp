@@ -8,7 +8,7 @@ const NOW = Date.parse("2026-10-03T12:00:00Z");
 const minutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
 
 const snapshot = (overrides: Partial<BotSnapshot> = {}): BotSnapshot => ({
-  position: { x: 0, y: 64, z: 0 }, health: 20, food: 20, inventory: [], foods: [], mobs: [], players: [], policy: null, ...overrides,
+  position: { x: 0, y: 64, z: 0 }, dimension: "minecraft:overworld", health: 20, food: 20, inventory: [], foods: [], mobs: [], players: [], policy: null, ...overrides,
 });
 
 const farm = (overrides: Partial<KnownFarm> = {}): KnownFarm => ({

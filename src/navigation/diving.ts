@@ -1,15 +1,20 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { airSupplyTicks } from "../world/air-supply.js";
+import { botEyesInWater } from "../world/eyes-in-water.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
+import { timeoutSignal } from "../utils/wall-timers.js";
+import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
-import type { Navigate, NavigateOptions } from "./navigate.js";
+import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
-import type { WorldView } from "./world/world.js";
+import type { BlockPosition, WorldView } from "./world/world.js";
 import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
+/** Why a return to air ended on a death or a respawn: the stop's own message would tell a dead bot to go and breathe. */
+const RETURN_DIED = "died during the return to air";
 interface DiveSession {
   readonly cancelled: AbortController;
   owned: boolean;
@@ -18,11 +23,26 @@ interface DiveSession {
   completedWork: number;
   /** The air metadata stayed absent through a submerged observation: the server sends it when it changes, so it is full. */
   unchangedAir: boolean;
+  /** The last cell passed with the head in air: where a run that ends under water swims back to. */
+  lastBreathable: Vec3 | null;
+  /** The run ended with its goal reached: the body is where it was asked to be, whatever the water. */
+  completed: boolean;
 }
 
 const FULL_AIR_TICKS = 300;
 /** How long a submerged bot with no air metadata is watched before the air is taken as unchanged. */
 const AIR_OBSERVATION_TICKS = 40;
+
+/** Minecraft refills a breathing body's air by 4 a tick (`LivingEntity.increaseAirSupply`). */
+const AIR_REFILL_PER_TICK = 4;
+/** Longest wall-clock wait for full air at a breathing stop, whatever the server's clock does. */
+const BREATHING_STOP_WALL_MS = 15_000;
+const FULL_AIR_NOT_OBSERVED = "Full air was not observed at the breathing stop: the server's clock passed the refill time, or 15 s went by, without it";
+
+/** Longest wall-clock wait for the swim back, whatever the air says. */
+const SWIM_BACK_TIMEOUT_MS = 15_000;
+/** One physics tick, for turning the air left into a wall-clock bound. */
+const TICK_MS = 50;
 
 /** Scoped declaration shared with survival; never a switch that removes the reflex. */
 export class Diving {
@@ -40,7 +60,7 @@ export class Diving {
   backstop(): number | null {
     const session = this.#session;
     if (!session?.owned) return null;
-    if (this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "air") return DIVE_BACKSTOP_TICKS;
+    if (!botEyesInWater(this.bot)) return DIVE_BACKSTOP_TICKS;
     const feet = this.bot.entity.position.floored();
     const ascent = swimAscent(this.#read, feet);
     if (!ascent) return 300; // The admission premise disappeared: request immediate rescue.
@@ -50,8 +70,7 @@ export class Diving {
   committed(plan: Pick<RoutePlan, "steps">): void {
     const session = this.#session;
     if (!session) return;
-    if (plan.steps.some(({ to }) => this.world.blockAt(to.x, to.y + 1, to.z).kind === "loaded" &&
-      this.bot.blockAt(new Vec3(to.x, to.y + 1, to.z))?.name === "water" && swimAscent(this.#read, to))) {
+    if (plan.steps.some(({ to }) => botEyesInWater(this.bot, new Vec3(to.x + 0.5, to.y, to.z + 0.5)) && swimAscent(this.#read, to))) {
       session.owned = true;
     }
   }
@@ -60,7 +79,7 @@ export class Diving {
   beforeWork(ticks: number): string | null {
     const session = this.#session;
     const feet = this.bot.entity.position.floored();
-    if (this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name !== "water") return null;
+    if (!botEyesInWater(this.bot)) return null;
     const surface = openWaterSurface(this.#read, feet);
     const air = airSupplyTicks(this.bot);
     if (!session?.owned || !surface || air === null || !this.bot.entity.onGround)
@@ -76,7 +95,7 @@ export class Diving {
   async run(options: NavigateOptions, navigate: Navigate) {
     if (this.#session) throw new Error("Navigation already owns a dive session.");
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled: new AbortController(), completedWork: 0, unchangedAir: false };
+      cancelled: new AbortController(), completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false };
     this.#session = session;
     const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
@@ -85,45 +104,21 @@ export class Diving {
     let previousStop = "";
     let repeatedStops = 0;
     const tick = () => {
+      if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
       if (!session.owned || session.returning || session.stop.signal.aborted) return;
       const feet = this.bot.entity.position.floored();
       const ascent = swimAscent(this.#read, feet);
       const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
       // With a lost corridor the survival backstop must take over; do not call it a planned return.
       if (!ascent) return;
-      if (this.bot.blockAt(feet.offset(0, 1, 0))?.name === "water" &&
+      if (botEyesInWater(this.bot) &&
         (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
         session.stop.abort(BREATHING_STOP);
     };
     this.bot.on("physicsTick", tick);
+    if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
     try {
-      // Servers omit unchanged default air metadata on login. Observe the first
-      // shallow head immersion before admitting any dive; never invent full air.
-      // This stays within one block of an already verified breathable surface.
-      const initialSurface = openWaterSurface(this.#read, this.bot.entity.position.floored());
-      if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface &&
-        this.bot.entity.position.y >= initialSurface.y - 0.5) {
-        try {
-          for (let ticks = 0; ticks < 80 && airSupplyTicks(this.bot) === null; ticks++) {
-            options.signal?.throwIfAborted();
-            if (options.stopSignal?.aborted) break;
-            this.bot.setControlState("jump", this.bot.entity.position.y < initialSurface.y - 0.8);
-            await waitForPhysicsTicks(this.bot, 1, lifetime);
-          }
-        } finally { this.bot.setControlState("jump", false); }
-      }
-      // Roofed, there is no surface to breathe at to make the server report the air (live 2026-10-10: a bot stuck on
-      // the sea floor under an overhang never got a dive budget, so no route out). The server sends the air whenever
-      // it changes, so a head kept under water for a moment with none sent means it is not running down.
-      if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface === null) {
-        for (let ticks = 0; ticks < AIR_OBSERVATION_TICKS && airSupplyTicks(this.bot) === null &&
-          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water"; ticks++) {
-          options.signal?.throwIfAborted();
-          await waitForPhysicsTicks(this.bot, 1, lifetime);
-        }
-        session.unchangedAir = airSupplyTicks(this.bot) === null &&
-          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
-      }
+      await this.#observeAir(options, session, lifetime);
       for (;;) {
         options.signal?.throwIfAborted();
         if (options.stopSignal?.aborted) return { status: "stopped" as const,
@@ -132,7 +127,7 @@ export class Diving {
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
         session.owned = session.owned || (options.movements.allowSwimming && air !== null && swimAscent(this.#read, origin.floored()) !== null &&
-          this.bot.blockAt(origin.offset(0, 1.62, 0))?.name === "water");
+          botEyesInWater(this.bot, origin));
         const movements: MovementPolicy = { ...options.movements,
           get scaffold() { return options.movements.scaffold; },
           ...(air !== null && options.movements.allowSwimming ? { dive: { origin, airTicks: air } } : {}),
@@ -143,9 +138,9 @@ export class Diving {
         });
         const continuingDive = session.stop.signal.aborted;
         const returnToProcess = options.onArrival !== undefined && session.owned &&
-          this.bot.blockAt(this.bot.entity.position.offset(0, 1.62, 0))?.name === "water";
+          botEyesInWater(this.bot);
         if ((!continuingDive && !returnToProcess) || session.cancelled.signal.aborted || options.signal?.aborted ||
-          (options.stopSignal?.aborted && !returnToProcess)) return result;
+          (options.stopSignal?.aborted && !returnToProcess)) return this.#finished(session, result);
         const surface = swimAscent(this.#read, this.bot.entity.position.floored())?.surface;
         if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: Date.now() - started };
         const progress = `${this.bot.entity.position.floored()}:${session.completedWork}`;
@@ -157,23 +152,14 @@ export class Diving {
         // A process's quantity signal ends its route, but still owes a safe
         // handoff. Action cancellation and defensive takeover always win.
         const returnStop = returnToProcess ? session.cancelled.signal : options.stopSignal;
-        const returned = await navigate({ movements, goal: exactBlockGoal(surface), signal: options.signal,
-          stopSignal: returnStop, timeoutMs: 15_000 });
-        if (returned.status !== "completed") return returned;
-        for (let ticks = 0; (airSupplyTicks(this.bot) ?? 0) < 300 && ticks < 100; ticks++) {
-          options.signal?.throwIfAborted();
-          if (returnStop?.aborted) return { status: "stopped" as const, reason: "Request stopped while breathing", elapsedMs: Date.now() - started };
-          this.bot.setControlState("jump", true);
-          await waitForPhysicsTicks(this.bot, 1, lifetime);
-        }
-        this.bot.setControlState("jump", false);
-        if (airSupplyTicks(this.bot) !== 300) return { status: "stopped" as const, reason: "Full air was not observed at the breathing stop", elapsedMs: Date.now() - started };
+        const unbreathed = await this.#breatheAtSurface(session, options, navigate, surface, lifetime, returnStop);
+        if (unbreathed) return { ...unbreathed, elapsedMs: Date.now() - started };
         session.returning = false;
         session.stop = new AbortController();
         this.report("resumed");
         // A mining process may revise targets between navigation transactions.
         // Return its body with air, rather than exposing low air to the ordinary reflex in that gap.
-        if (!continuingDive) return result;
+        if (!continuingDive) return this.#finished(session, result);
       }
     } catch (error) {
       options.signal?.throwIfAborted();
@@ -183,8 +169,133 @@ export class Diving {
     } finally {
       this.bot.off("physicsTick", tick);
       if (session.returning) this.bot.setControlState("jump", false);
+      await this.#swimBackToAir(session, options, navigate);
       this.#session = null;
       if (session.owned) this.report("released");
     }
   }
+
+  /** The breathing stop's swim to `surface` and wait for full air; why it ended without full air, or null. */
+  async #breatheAtSurface(session: DiveSession, options: NavigateOptions, navigate: Navigate, surface: BlockPosition,
+    lifetime: AbortSignal, returnStop: AbortSignal | undefined): Promise<Omit<Extract<NavigationResult, { status: "stopped" }>, "elapsedMs"> | null> {
+    const returned = await this.#returnToAir(session, options, navigate, exactBlockGoal(surface), 15_000, returnStop);
+    // The route's own failure fields are kept (the pinned watch reads `routeFailed`). A cancel, a takeover or a death keeps
+    // its own reason; a return that found no way says so and what the model can do next.
+    if (returned.status !== "completed") return session.cancelled.signal.aborted || returnStop?.aborted || returned.reason === RETURN_DIED
+      ? returned : { ...returned, reason: `${BREATHING_STOP}: the swim back to air did not get there (${returned.reason}); breathe at the surface before trying this way again` };
+    const breath = await waitForFullAir(this.bot, lifetime, returnStop);
+    return breath === "full" ? null : { status: "stopped", reason: breath === "stopped" ? "Request stopped while breathing" : FULL_AIR_NOT_OBSERVED };
+  }
+
+  /** The air the server has not reported yet, observed before the first route is planned. */
+  async #observeAir(options: NavigateOptions, session: DiveSession, lifetime: AbortSignal): Promise<void> {
+    // Servers omit unchanged default air metadata on login. Observe the first
+    // shallow head immersion before admitting any dive; never invent full air.
+    // This stays within one block of an already verified breathable surface.
+    const initialSurface = openWaterSurface(this.#read, this.bot.entity.position.floored());
+    if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface &&
+      this.bot.entity.position.y >= initialSurface.y - 0.5) {
+      try {
+        for (let ticks = 0; ticks < 80 && airSupplyTicks(this.bot) === null; ticks++) {
+          options.signal?.throwIfAborted();
+          if (options.stopSignal?.aborted) break;
+          this.bot.setControlState("jump", this.bot.entity.position.y < initialSurface.y - 0.8);
+          await waitForPhysicsTicks(this.bot, 1, lifetime);
+        }
+      } finally { this.bot.setControlState("jump", false); }
+    }
+    // Roofed, there is no surface to breathe at to make the server report the air (live 2026-10-10: a bot stuck on
+    // the sea floor under an overhang never got a dive budget, so no route out). The server sends the air whenever
+    // it changes, so a head kept under water for a moment with none sent means it is not running down.
+    if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface === null) {
+      for (let ticks = 0; ticks < AIR_OBSERVATION_TICKS && airSupplyTicks(this.bot) === null &&
+        botEyesInWater(this.bot); ticks++) {
+        options.signal?.throwIfAborted();
+        await waitForPhysicsTicks(this.bot, 1, lifetime);
+      }
+      session.unchangedAir = airSupplyTicks(this.bot) === null &&
+        botEyesInWater(this.bot);
+    }
+  }
+
+  #headInAir(): boolean {
+    return !botEyesInWater(this.bot);
+  }
+
+  /** Notes whether the run's last route reached its goal (see {@link DiveSession.completed}); returns the result. */
+  #finished<Result extends { readonly status: string }>(session: DiveSession, result: Result): Result {
+    session.completed = result.status === "completed";
+    return result;
+  }
+
+  /**
+   * A run that did not reach its goal (failed, stopped, cancelled) with the dive owned and the head under water leaves the
+   * body where the route left it: in a roofed tunnel that is a drowning (run 15, Sana, five blocks in). Swim back along
+   * the way to the last cell passed with the head in air, bounded by the air left and the wall clock. A run that reached
+   * its goal under water stays there (a swim back would undo the arrival and a retry repeat it). A takeover cancel is the
+   * breath reflex taking the body, the action's own cancel ends the swim back at once, and a death or respawn ends it:
+   * none is fought.
+   */
+  async #swimBackToAir(session: DiveSession, options: NavigateOptions, navigate: Navigate): Promise<void> {
+    const target = session.lastBreathable;
+    if (session.completed || !session.owned || target === null || session.cancelled.signal.aborted || options.signal?.aborted ||
+      (this.bot.health ?? 20) <= 0) return;
+    if (!botEyesInWater(this.bot)) return;
+    const air = airSupplyTicks(this.bot);
+    const budgetMs = air === null ? SWIM_BACK_TIMEOUT_MS : Math.min(SWIM_BACK_TIMEOUT_MS, Math.max(2_000, air * TICK_MS));
+    try {
+      await this.#returnToAir(session, options, navigate, exactBlockGoal(target), budgetMs,
+        AbortSignal.any([timeoutSignal(budgetMs), ...(options.signal ? [options.signal] : [])]));
+    } catch {
+      // The route back failed: the body stays where it is for the breath reflex, which owns the last resort.
+    }
+  }
+
+  /**
+   * A swim to air from where the body is: admitted while each cell's way up fits the air left, with no reserve (the
+   * dive's own admission refuses every cell once the air is at most the way up plus the reserve, which is when a stop
+   * fires: T5 probe 2026-10-21). A death or a respawn ends it.
+   */
+  async #returnToAir(session: DiveSession, options: NavigateOptions, navigate: Navigate, goal: NavigateOptions["goal"],
+    timeoutMs: number, stopSignal: AbortSignal | undefined): ReturnType<Navigate> {
+    const ended = new AbortController();
+    const onEnd = () => ended.abort(RETURN_DIED);
+    this.bot.once("death", onEnd);
+    this.bot.once("respawn", onEnd);
+    try {
+      // Air not reported here was never seen running down (the swim back's rule before T6): taken as full.
+      const air = airSupplyTicks(this.bot) ?? FULL_AIR_TICKS;
+      const dive = options.movements.allowSwimming ? { dive: { origin: this.bot.entity.position.clone(), airTicks: air, toAir: true } } : {};
+      return await navigate({ movements: { ...options.movements, ...dive }, goal, signal: options.signal, timeoutMs,
+        stopSignal: AbortSignal.any([ended.signal, ...(stopSignal ? [stopSignal] : [])]) });
+    } finally {
+      this.bot.off("death", onEnd);
+      this.bot.off("respawn", onEnd);
+    }
+  }
+}
+
+/**
+ * Holds jump at a breathing stop until the server reports full air, or its world age moved the refill time and an
+ * answer's margin, or the wall clock ran out (NAVP-13, run 15: a server 2.5-4.6 s behind refilled the air after the 100
+ * client ticks the stop used to count). "stopped": the return was stopped by its own stop signal; the run's lifetime
+ * ending rethrows.
+ */
+async function waitForFullAir(bot: Bot, lifetime: AbortSignal, returnStop: AbortSignal | undefined): Promise<"full" | "short" | "stopped"> {
+  const air = airSupplyTicks(bot) ?? 0;
+  bot.setControlState("jump", true);
+  try {
+    await waitForWorldAge(bot, Math.ceil((FULL_AIR_TICKS - air) / AIR_REFILL_PER_TICK) + SERVER_ANSWER_TICKS, {
+      wallMs: BREATHING_STOP_WALL_MS,
+      until: () => airSupplyTicks(bot) === FULL_AIR_TICKS,
+      signal: AbortSignal.any([lifetime, ...(returnStop ? [returnStop] : [])]),
+    });
+  } catch (cause) {
+    lifetime.throwIfAborted();
+    if (returnStop?.aborted) return "stopped";
+    throw cause;
+  } finally {
+    bot.setControlState("jump", false);
+  }
+  return airSupplyTicks(bot) === FULL_AIR_TICKS ? "full" : "short";
 }

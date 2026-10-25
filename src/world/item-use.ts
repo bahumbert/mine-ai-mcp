@@ -15,6 +15,7 @@ import type { Bot } from "mineflayer";
 import { asVec3, type Position3 } from "../utils/index.js";
 import type { InventoryItem, WorldBlock } from "./placement.js";
 import { carriedCount } from "./inventory-count.js";
+import { waitForWorldAge, type WorldAgeOptions } from "./world-age.js";
 
 /** A cell that should read as `matches` once the use has taken effect. */
 export interface ExpectedCell {
@@ -35,10 +36,14 @@ export interface ItemUse {
   readonly expectedInventoryGain?: { readonly item: string; readonly count: number };
   /** How many ticks to wait for the change before reporting failure. */
   readonly timeoutTicks?: number;
+  /** Wait on the server's world age (and the wall clock) instead of client ticks: a server far behind still gets its time. */
+  readonly serverWait?: { readonly ticks: number } & Pick<WorldAgeOptions, "wallMs" | "now" | "sleep">;
+  /** Called right before the use packet is sent: an abort after it may still leave the world changed. */
+  readonly onSent?: () => void;
   readonly signal?: AbortSignal;
 }
 
-export type ItemUseResult = { kind: "used" } | { kind: "failed"; error: string; /** Set when the use went out and the wait ended with the expected change not seen (not a thrown error): how many ticks the server clock (`bot.time.age`) advanced since the use, 0 when unknown. */ serverTicksWaited?: number };
+export type ItemUseResult = { kind: "used" } | { kind: "failed"; error: string; /** Set when the use went out and the wait ended with the expected change not seen (not a thrown error): how many ticks the server clock (`bot.time.age`) advanced since the use, 0 when unknown. */ serverTicksWaited?: number; /** Set when a server wait ended on the wall clock with the world age not moved far enough: the server's answer is unknown. */ timedOut?: true };
 
 const DEFAULT_TIMEOUT_TICKS = 40;
 
@@ -71,6 +76,7 @@ function observed(bot: Bot, use: ItemUse): string {
 export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> {
   const timeoutTicks = use.timeoutTicks ?? DEFAULT_TIMEOUT_TICKS;
   const gain = use.expectedInventoryGain;
+  let timedOut = false;
   const inventoryBefore = gain ? carriedCount(bot, gain.item) : 0;
   try {
     use.signal?.throwIfAborted();
@@ -78,19 +84,28 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
     use.signal?.throwIfAborted();
     await bot.lookAt(asVec3(use.lookAt), true);
     use.signal?.throwIfAborted();
+    use.onSent?.();
     if (use.on) await bot.activateBlock(use.on.block, asVec3(use.on.face));
     else bot.activateItem();
     const ageAtUse = bot.time?.age;
-    for (let tick = 0; tick < timeoutTicks; tick += 1) {
-      await bot.waitForTicks(1);
-      use.signal?.throwIfAborted();
-      const inventorySettled = !gain || carriedCount(bot, gain.item) >= inventoryBefore + gain.count;
-      if (cellsSettled(bot, use) && handSettled(bot, use) && inventorySettled) return { kind: "used" };
+    const settled = () => cellsSettled(bot, use) && handSettled(bot, use) && (!gain || carriedCount(bot, gain.item) >= inventoryBefore + gain.count);
+    if (use.serverWait) {
+      const { ticks, ...clock } = use.serverWait;
+      const ended = await waitForWorldAge(bot, ticks, { ...clock, until: settled, ...(use.signal && { signal: use.signal }) });
+      if (ended === "until") return { kind: "used" };
+      timedOut = ended === "timeout";
+    } else {
+      for (let tick = 0; tick < timeoutTicks; tick += 1) {
+        await bot.waitForTicks(1);
+        use.signal?.throwIfAborted();
+        if (settled()) return { kind: "used" };
+      }
     }
     return {
       kind: "failed",
+      ...(timedOut && { timedOut: true as const }),
       serverTicksWaited: ageAtUse === undefined || bot.time?.age === undefined ? 0 : bot.time.age - ageAtUse,
-      error: `The use of ${use.item.name} was not confirmed within ${timeoutTicks} ticks; observed ${[
+      error: `The use of ${use.item.name} was not confirmed within ${use.serverWait ? `${use.serverWait.ticks} server ticks` : `${timeoutTicks} ticks`}; observed ${[
         observed(bot, use),
         ...(gain
           ? [

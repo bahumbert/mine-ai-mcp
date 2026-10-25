@@ -1,9 +1,8 @@
-import minecraftData from "minecraft-data";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSetSurvivalPolicyAction } from "../../actions/set-survival-policy/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { permitsHide, responsePolicyChanged } from "../policy/combat/permissions.js";
@@ -20,17 +19,10 @@ import { survivalResources } from "./resources.js";
 import { SurvivalPolicyState } from "./survival-policy.js";
 import { createMovements } from "../../navigation/runtime.js";
 
-function fixture(now: () => number = Date.now) {
-  const items: { name: string; count: number }[] = [];
-  const bot = botFixture(
-    { items },
-    {
-      health: 9,
-      food: 15,
-      game: { gameMode: "survival" },
-      registry: minecraftData("1.21.4"),
-    },
-  );
+function fixture(now: () => number = Date.now, carried: Readonly<Record<string, number>> = {}) {
+  const { bot, inventory } = createFakeBot({ health: 9, food: 15, carried });
+  /** The first hotbar slot now holds `count` of `name`, as the server's slot update sets it. */
+  const stock = (name: string, count: number) => inventory.updateSlot(36, itemOf(bot.registry, name, count));
   const policy = new SurvivalPolicyState(bot, now);
   const set = (changes: PolicyChanges, lifetime: PolicyLifetime = { kind: "session" }, reason = "test") =>
     policy.edit({
@@ -40,7 +32,7 @@ function fixture(now: () => number = Date.now) {
       lifetime,
       reason,
     });
-  return { bot, items, policy, set };
+  return { bot, stock, policy, set };
 }
 
 test("arrow hunting preserves policy edits and releases on cancellation without enabling prohibited bows", async () => {
@@ -114,13 +106,8 @@ test("the public policy edit exposes every group and reconciles the consumers of
 });
 
 test("scaffold preference is a validated array override, and clear restores the default", async () => {
-  const { bot, policy, set } = fixture();
+  const { bot, policy, set } = fixture(Date.now, { end_stone: 64, cobbled_deepslate: 1 });
   const registry = bot.registry;
-  const carried = [
-    { type: registry.itemsByName.end_stone.id, name: "end_stone", count: 64 },
-    { type: registry.itemsByName.cobbled_deepslate.id, name: "cobbled_deepslate", count: 1 },
-  ];
-  Reflect.set(bot.inventory, "items", () => carried);
   await set({ navigation: { scaffold_blocks: ["cobbled_deepslate", "end_stone"] } });
   assert.deepEqual(policy.effective.navigation.scaffold_blocks, ["cobbled_deepslate", "end_stone"]);
   assert.equal(createMovements(bot).scaffold?.itemType, registry.itemsByName.cobbled_deepslate.id);
@@ -154,16 +141,10 @@ test("scaffold preference is a validated array override, and clear restores the 
 });
 
 test("scaffold policy is isolated per bot, immutable outside edits, and skips unsafe preferred blocks", async () => {
-  const first = fixture();
-  const second = fixture();
+  const carried = { sand: 64, cactus: 64, end_stone: 64 };
+  const first = fixture(Date.now, carried);
+  const second = fixture(Date.now, carried);
   const registry = first.bot.registry;
-  const carried = ["sand", "cactus", "end_stone"].map((name) => ({
-    type: registry.itemsByName[name]!.id,
-    name,
-    count: 64,
-  }));
-  Reflect.set(first.bot.inventory, "items", () => carried);
-  Reflect.set(second.bot.inventory, "items", () => carried);
   await second.set({ navigation: { scaffold_blocks: [] } });
   const requested = ["sand", "cactus", "end_stone"];
   await first.set({ navigation: { scaffold_blocks: requested } });
@@ -389,16 +370,16 @@ test("a timed override ends on its own and the change names it", async () => {
 });
 
 test("carried-item expiration uses observed stock and rejects already-satisfied lifetimes", async () => {
-  const { policy, items, set } = fixture();
+  const { policy, stock, set } = fixture();
   const lifetime = {
     kind: "until" as const,
     condition: { kind: "carried_item_at_least" as const, item: "arrow", count: 16 },
   };
   await set({ combat: { bow: false } }, lifetime);
-  items.push({ name: "arrow", count: 15 });
+  stock("arrow", 15);
   await policy.refresh();
   assert.equal(policy.combat.bow, false);
-  items[0]!.count = 16;
+  stock("arrow", 16);
   await policy.refresh();
   assert.equal(policy.combat.bow, true);
   await assert.rejects(set({ combat: { bow: false } }, lifetime), /CONDITION_SATISFIED/);

@@ -12,6 +12,7 @@ import {
   type StorageOperation,
   type StoragePhase,
 } from "./storage-diagnostics.js";
+import { startWalCheckpointer, WAL_JOURNAL_SIZE_LIMIT_BYTES } from "./wal-checkpointer.js";
 
 export { BOT_DATA_SCHEMA };
 export const SQL_BOT_DATA_SCHEMA_VERSION = 1;
@@ -51,6 +52,8 @@ export type SqlBotDataLocation =
 export interface SqlBotDataOptions {
   readonly storage: BotDataStorage;
   readonly identity: BotDataIdentity;
+  /** Replaces the checkpoint worker, for tests that need to see it started, fall back or be disposed. */
+  readonly startWalCheckpointer?: typeof startWalCheckpointer;
 }
 
 /** Owns the SQLite representation and connection for one bot-data identity. */
@@ -62,8 +65,13 @@ export class SqlBotData {
   private readonly connection;
   private lockFailures = 0;
   private lastLockFailure: StorageLockFailure | null = null;
+  private walCheckpointer: Disposable | null = null;
 
-  private constructor(location: SqlBotDataLocation, metadata: ReadonlyMap<string, string>) {
+  private constructor(
+    location: SqlBotDataLocation,
+    metadata: ReadonlyMap<string, string>,
+    startCheckpointer: typeof startWalCheckpointer,
+  ) {
     this.location = location;
     this.connection = storageConnection(location.kind === "persistent" ? location.file : ":memory:");
 
@@ -93,6 +101,9 @@ export class SqlBotData {
       closeSqlDatabase(database);
       throw error;
     }
+    if (location.kind === "persistent") {
+      this.walCheckpointer = startCheckpointer(location.file, { fellBack: (cause) => this.restoreAutomaticCheckpoints(cause) });
+    }
     // Cross-process contention cannot be attributed from the victim's SQLite error alone.
     // Lifecycle records let operators correlate other runtime connections to this exact file.
     if (location.kind === "persistent")
@@ -106,7 +117,7 @@ export class SqlBotData {
     const identity = resolveBotDataIdentity(options.identity);
     const metadata = metadataFor(identity.worldId, identity.scope);
     const location = resolveSqlBotDataLocation(options.storage, identity);
-    return new SqlBotData(location, metadata);
+    return new SqlBotData(location, metadata, options.startWalCheckpointer ?? startWalCheckpointer);
   }
 
   /** Runs a trusted, synchronous read on the host thread. */
@@ -167,6 +178,8 @@ export class SqlBotData {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.walCheckpointer?.[Symbol.dispose]();
+    this.walCheckpointer = null;
     closeSqlDatabase(this.database);
     if (this.location.kind === "persistent")
       process.stderr.write(
@@ -176,6 +189,15 @@ export class SqlBotData {
 
   [Symbol.dispose](): void {
     this.close();
+  }
+
+  /** The checkpoint worker died: SQLite checkpoints inside commits again (stalls are back, the WAL stays bounded). */
+  private restoreAutomaticCheckpoints(cause: string): void {
+    if (this.closed || this.walCheckpointer === null) return;
+    this.walCheckpointer = null;
+    this.database.exec("PRAGMA wal_autocheckpoint = 1000");
+    process.stderr.write(`[minecraft-bot-data] WAL checkpointer stopped (${cause}); automatic checkpoints restored
+`);
   }
 
   private assertOpen(): void {
@@ -300,7 +322,12 @@ function identitySegment(fallback: string, identity: string): string {
 function configureDatabase(database: DatabaseSync, location: SqlBotDataLocation["kind"]): void {
   // Journal initialization can also meet a reader's transient lock during restart.
   database.exec("PRAGMA busy_timeout = 5000");
-  if (location === "persistent") database.exec("PRAGMA journal_mode = WAL");
+  if (location === "persistent") {
+    database.exec("PRAGMA journal_mode = WAL");
+    // A worker thread checkpoints (wal-checkpointer.ts): SQLite's own checkpoint would run inside this connection's COMMIT.
+    database.exec("PRAGMA wal_autocheckpoint = 0");
+    database.exec(`PRAGMA journal_size_limit = ${WAL_JOURNAL_SIZE_LIMIT_BYTES}`);
+  }
   database.exec("PRAGMA synchronous = NORMAL");
   database.exec("PRAGMA foreign_keys = ON");
 }

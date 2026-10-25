@@ -42,7 +42,12 @@ export class ModelQueue {
   private readonly history: { at: number; inFlight: number }[] = [];
   private readonly starts: { id: string; at: number }[] = [];
   private readonly freed: (() => void)[] = [];
+  /** Calls asked and not finished (running + held). */
   private count = 0;
+  /** Calls that own a slot. */
+  private running = 0;
+  /** Calls waiting for a slot, first asked first. */
+  private readonly held: (() => void)[] = [];
   private lastWrite = Number.NEGATIVE_INFINITY;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private writeFailed = false;
@@ -55,14 +60,24 @@ export class ModelQueue {
     this.now = options.now ?? Date.now;
   }
 
-  /** The same model, every call counted for the agent while it runs. */
+  /**
+   * The same model, every call counted for the agent from the moment it is asked. With known slots a call takes one
+   * before `model.complete` runs, so the model client's own timeout times inference, not the line, and gives it back
+   * when the call ends or fails; beyond the slots it waits here, first asked first served, until its signal aborts.
+   */
   track(model: ChatModel, agentId: string): ChatModel {
     return {
       name: model.name,
       complete: async (turns: readonly ChatTurn[], signal: AbortSignal): Promise<ChatReply> => {
         this.change(agentId, 1);
         try {
-          return await model.complete(turns, signal);
+          const held = this.takeSlot(signal);
+          if (held !== null) await held;
+          try {
+            return await model.complete(turns, signal);
+          } finally {
+            this.giveSlotBack();
+          }
         } finally {
           this.change(agentId, -1);
         }
@@ -70,13 +85,14 @@ export class ModelQueue {
     };
   }
 
+  /** Calls asked and not finished: running plus held. */
   inFlight(): number {
     return this.count;
   }
 
-  /** Calls beyond the slots: the model server holds them until a slot frees. */
+  /** Calls held here for a slot. */
   waiting(): number {
-    return this.slots === null ? 0 : Math.max(0, this.count - this.slots);
+    return this.held.length;
   }
 
   free(): boolean {
@@ -120,6 +136,36 @@ export class ModelQueue {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.write();
+  }
+
+  /** Null when the call owns a slot already (slots unknown or one free: the model is asked in the same tick); else resolves once it does, rejects with `signal.reason`. */
+  private takeSlot(signal: AbortSignal): Promise<void> | null {
+    if (this.slots === null) return null;
+    if (this.running < this.slots && this.held.length === 0) {
+      this.running += 1;
+      return null;
+    }
+    signal.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        this.held.splice(this.held.indexOf(waiter), 1);
+        reject(signal.reason);
+      };
+      // The slot is handed over still counted as running, so a woken call never races a new one for it.
+      const waiter = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.held.push(waiter);
+    });
+  }
+
+  private giveSlotBack(): void {
+    if (this.slots === null) return;
+    const next = this.held.shift();
+    if (next === undefined) this.running -= 1;
+    else next();
   }
 
   private change(agentId: string, by: 1 | -1): void {

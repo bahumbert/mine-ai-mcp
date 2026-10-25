@@ -33,7 +33,7 @@ export const run: MineAiScenario = async (context) => {
   assert.equal(bot.blockAt(new Vec3(1, -58, 0))?.name, "air");
   const opened = await runner.run(use, { x: 1, y: -59, z: 0 }, signal);
   assert.equal(opened.result.status, "succeeded", JSON.stringify(opened));
-  const placed = await runner.run(createPlaceBlockAction(bot, navigation), { block_name: "chest" }, signal);
+  const placed = await runner.run(createPlaceBlockAction(bot, navigation, data), { block_name: "chest" }, signal);
   assert.equal(placed.result.status, "succeeded", JSON.stringify(placed));
   assert.ok("placement" in placed.result);
   const position = placed.result.placement.target;

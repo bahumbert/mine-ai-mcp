@@ -2,6 +2,12 @@ import { createServer } from "node:http";
 import { reportRuntimeLiveness } from "../server/runtime-liveness.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 
+/** A child-side wait: `--<name>=<ms>` on the command line, else its default; the supervisor tests pass short ones. */
+const waitMs = (name: string, fallback: number): number =>
+  Number(process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback);
+const slowMs = waitMs("slow-ms", 6000);
+const pauseMs = waitMs("pause-ms", 7000);
+
 reportRuntimeLiveness();
 process.once("disconnect", () => process.exit(0));
 const server = createServer(async (request, response) => {
@@ -28,12 +34,12 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (request.url === "/slow") {
-    setTimeout(() => response.end("finished"), 6000);
+    setTimeout(() => response.end("finished"), slowMs);
     return;
   }
   if (request.url === "/pause") {
     response.end("accepted");
-    setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 7000), 100);
+    setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pauseMs), 100);
     return;
   }
   if (request.url === "/crash") {

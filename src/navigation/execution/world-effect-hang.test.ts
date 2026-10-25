@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld } from "../../test-support/navigation.js";
 import { airMatcher, stateMatcher } from "../movements/movement.js";
 import { ExpectedMutationLedger } from "./mutations.js";
@@ -19,6 +20,9 @@ test("a world effect whose completion never settles still returns after its canc
   const bot = new FakeNavigationBot();
   bot.startEffect = () => ({ issued: true, completion: new Promise(() => {}), cancel: () => {} });
   const abort = new AbortController();
+  // The effect's deadline and its drain read the global timers: the clock moves them.
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   try {
     const pending = executeWorldEffect({
       bot, ledger, signal: abort.signal,
@@ -27,10 +31,13 @@ test("a world effect whose completion never settles still returns after its canc
       targets: [{ position, before: stateMatcher(1), after: airMatcher }],
       deadlineMs: Date.now() + 60_000,
     });
-    setTimeout(() => abort.abort(), 20);
-    const settled = await Promise.race([pending, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
-    assert.notEqual(settled, "hung");
-    assert.equal((settled as { result: { kind: string } }).result.kind, "cancelled");
+    let settled: Awaited<typeof pending> | undefined;
+    void pending.then((outcome) => (settled = outcome));
+    clock.after(20, () => abort.abort());
+    // Past the 20 ms cancel and the drain (EFFECT_DRAIN_MS) the effect has to be over, 3 s of clock in all.
+    await clock.advance(3_000);
+    assert.notEqual(settled, undefined, "the effect still waits for its completion 3 s after the cancel");
+    assert.equal(settled!.result.kind, "cancelled");
     assert.equal(ledger.activeCount, 0);
   } finally { unsubscribe(); }
 });

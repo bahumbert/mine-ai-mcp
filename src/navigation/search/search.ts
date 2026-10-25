@@ -28,9 +28,13 @@ import type { ResolvedGoal } from "../goals/goal.js";
 import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
+import { lavaWatchCells } from "../world/lava-watch.js";
 import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
+import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
+import { endsStrandedUnderWater } from "./stranded-segment.js";
+import { countStartRefusals } from "./start-refusals.js";
 import { NodeStore } from "./node-store.js";
 import { OpenSet } from "./open-set.js";
 
@@ -199,30 +203,6 @@ interface SearchOptions {
   readonly now?: () => number;
 }
 
-/**
- * Where the bot will be standing when it swings, not where it is now.
- *
- * Digging underwater without Aqua Affinity is five times slower and digging
- * mid-air is five times slower again, and the estimator already models both.
- * Hardcoding "dry and grounded" at every call site made the planner price an
- * underwater excavation as if it were on land, so it chose routes it then had
- * to pay far more for.
- */
-function digContextAt(options: SearchOptions, state: PlanningState) {
-  const { x, y, z } = state.node.feet;
-  const head = state.overlay.blockAt(options.context.world, x, y + 1, z);
-  const below = state.overlay.blockAt(options.context.world, x, y - 1, z);
-  return {
-    submergedAtEyes: head.kind === "loaded" && head.traits.liquid === "water",
-    onGround: below.kind === "loaded" && !below.traits.empty && below.traits.liquid === null,
-    // Mining Fatigue is the dangerous direction: it makes a dig slower than
-    // the route priced it, so confirmation windows and progress checks fire on
-    // a movement that was always going to take longer.
-    aquaAffinity: options.context.player.aquaAffinity,
-    effects: options.context.player.effects,
-  };
-}
-
 /** The nodes from the first step out of the root to `node`, in walking order. */
 function routeNodes(store: NodeStore, node: number): readonly number[] {
   const nodes: number[] = [];
@@ -243,7 +223,7 @@ function reconstructStep(options: SearchOptions, store: NodeStore, node: number)
   const state = store.state[parent]!;
   const key = store.key[node]!;
   const remaining = store.remaining[node]!;
-  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options, state));
+  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state));
   for (let index = 0; index < movements.length; index += 1) {
     if (movements.remainingScaffolds[index] !== remaining) continue;
     if (packKey(movements.toX[index]!, movements.toY[index]!, movements.toZ[index]!) !== key) continue;
@@ -282,6 +262,8 @@ function buildPlan(
       }
     }
   }
+  // Lava that flows in beside a route cell makes the route unsafe: its neighbours are dependencies too.
+  for (const step of steps) for (const cell of lavaWatchCells(options.context.world, step.to)) dependencies.add(blockKey(cell));
   const endState = store.state[endpoint]!;
   return Object.freeze({
     id: `${options.id}:route:${visited}`,
@@ -327,7 +309,10 @@ function attemptSegment(
   // end during a detour's initial retreat, where the next search cheaply walks
   // straight back and repeats the same detour forever.
   const plan = buildPlan(options, store, selection.node, visited, false);
-  return plan ? { kind: "segment", plan } : { kind: "stale" };
+  if (!plan) return { kind: "stale" };
+  // Out of one breath of air at its end, under a roof: the search goes on (or fails) rather than commit the dive.
+  if (!plan.complete && endsStrandedUnderWater(options.context.world, options.context.policy, plan)) return { kind: "none" };
+  return { kind: "segment", plan };
 }
 
 /**
@@ -354,6 +339,8 @@ export class IncrementalSearch {
   /** The cheapest goal-satisfying node generated so far, offered first when a partial route is cut. */
   #bestGoal = NO_NODE;
   #visited = 0;
+  /** The largest Chebyshev distance of a visited node's feet cell from the root's (0 while only the root was visited). */
+  #farthestVisited = 0;
   #generated = 1;
   #slices = 0;
   #computeMs = 0;
@@ -361,6 +348,8 @@ export class IncrementalSearch {
   #cancelled = false;
   /** Set the first time a timeout finds nothing worth walking, so that checkpoint is reported once. */
   #unavailablePartialRouteReported = false;
+  /** Selected nodes `attemptSegment` refused, with what selected them: the refusal is read from the node, so it stays until the search ends. */
+  readonly #refused = new Map<number, ProgressSelection["selectedBy"]>();
   /** When the current slice began, and the checkpoint it will report if a timeout found no candidate. */
   #slice: { began: number; checkpoint: PartialRouteCheckpoint | undefined } = { began: 0, checkpoint: undefined };
 
@@ -415,6 +404,7 @@ export class IncrementalSearch {
       // the scaffold frontier has dominated, is skipped rather than deleted.
       if (store.finish[current] === null && !this.#arrivals.isLive(current)) continue;
       this.#visited += 1;
+      this.#noteFarthest(current);
       expanded += 1;
       this.#noteClosest(current);
       if (
@@ -456,7 +446,7 @@ export class IncrementalSearch {
     const maximumRadius = this.#options.limits?.maximumRadius;
     if (maximumRadius !== undefined && this.#outsideRadius !== null) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "stale") return { kind: "stale", evidence: this.#evidence() };
       if (attempt.kind === "segment")
         return {
@@ -476,10 +466,11 @@ export class IncrementalSearch {
         evidence: this.#evidence(),
       };
     }
+    const { world, policy } = this.#options.context;
     return {
       kind: "no_path",
       closest: this.#closestEvidence(),
-      evidence: this.#evidence(),
+      evidence: { ...this.#evidence(), startRefusals: countStartRefusals(world, policy, this.#store.feet(this.#root)) },
       checkpoint: this.#slice.checkpoint,
     };
   }
@@ -495,7 +486,7 @@ export class IncrementalSearch {
     const primary = limits.primaryTimeoutMs;
     if (this.#candidates.hasTravelled && primary !== undefined && spent >= primary) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "segment") {
         return this.#finish(() => ({
           kind: "segment_ready",
@@ -513,7 +504,7 @@ export class IncrementalSearch {
     const failure = limits.failureTimeoutMs;
     if (failure !== undefined && spent >= failure) {
       const selection = this.#candidates.select(this.#bestGoal, this.#closest);
-      const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+      const attempt = this.#attemptSelected(selection);
       if (attempt.kind === "stale") return this.#finish(() => ({ kind: "stale", evidence: this.#evidence() }));
       const checkpoint = this.#partialRouteCheckpoint(
         failure,
@@ -536,6 +527,18 @@ export class IncrementalSearch {
       }));
     }
     return undefined;
+  }
+
+  /**
+   * `attemptSegment` for the selection, remembering a refusal. Past the primary budget the limit check asks for every
+   * expanded node, usually about the same selected node, and a refusal costs a plan build plus a swim search; a
+   * `segment` or `stale` answer ends the slice or the search, so only `none` is kept.
+   */
+  #attemptSelected(selection: ProgressSelection): SegmentAttempt {
+    if (this.#refused.get(selection.node) === selection.selectedBy) return { kind: "none" };
+    const attempt = attemptSegment(this.#options, this.#store, selection, this.#visited);
+    if (attempt.kind === "none") this.#refused.set(selection.node, selection.selectedBy);
+    return attempt;
   }
 
   #noteClosest(current: number): void {
@@ -568,7 +571,7 @@ export class IncrementalSearch {
     const store = this.#store;
     const state = store.state[current]!;
     const depth = store.depth[current]! + 1;
-    const digContext = digContextAt(this.#options, state);
+    const digContext = digContextAt(this.#options.context, state);
     const finish = this.#goal.finish?.(state, context, digContext);
     if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z)) {
       const cost = store.cost[current]! + finish.cost;
@@ -620,7 +623,16 @@ export class IncrementalSearch {
   }
 
   #evidence(): SearchEvidence {
-    return { queued: this.#open.size, visited: this.#visited, generated: this.#generated, slices: this.#slices, computeMs: this.#computeMs };
+    return {
+      queued: this.#open.size, visited: this.#visited, farthestVisited: this.#farthestVisited, generated: this.#generated,
+      slices: this.#slices, computeMs: this.#computeMs,
+    };
+  }
+
+  #noteFarthest(node: number): void {
+    const root = this.#store.feet(this.#root);
+    const feet = this.#store.feet(node);
+    this.#farthestVisited = Math.max(this.#farthestVisited, Math.abs(feet.x - root.x), Math.abs(feet.y - root.y), Math.abs(feet.z - root.z));
   }
 
   #nodeEvidence(node: number) {

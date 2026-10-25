@@ -218,6 +218,18 @@ CREATE TABLE IF NOT EXISTS observed_containers (
   UNIQUE (dimension, block_x, block_y, block_z)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS placed_containers (
+  container_key TEXT PRIMARY KEY,
+  dimension TEXT NOT NULL,
+  block_x INTEGER NOT NULL,
+  block_y INTEGER NOT NULL,
+  block_z INTEGER NOT NULL,
+  block_name TEXT NOT NULL,
+  placed_by_bot_id TEXT NOT NULL,
+  placed_at TEXT NOT NULL,
+  CHECK (container_key = dimension || '|' || block_x || '|' || block_y || '|' || block_z)
+) STRICT, WITHOUT ROWID;
+
 DROP VIEW IF EXISTS observed_container_slots;
 DROP VIEW IF EXISTS observed_container_items;
 
@@ -463,7 +475,16 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'observed_containers', 'contents_json', 'Complete last-observed occupied slots as a JSON array of slot, item, and count objects; omitted slots are empty.'),
   ('main', 'observed_containers', 'observed_by_bot_id', 'Bot that opened the container and supplied this observation.'),
   ('main', 'observed_containers', 'observed_at', 'UTC timestamp when these complete contents were observed.'),
-  ('main', 'observed_container_items', NULL, 'One query-friendly total row per item name in the last-observed contents of each container.'),
+  ('main', 'placed_containers', NULL, 'Containers this bot placed itself (place_block, build_structure, raw_action place), forgotten when the block is found gone; a container that is only observed is not listed.'),
+  ('main', 'placed_containers', 'container_key', 'Stable world-relative key formatted as dimension|block_x|block_y|block_z; joins observed_containers.container_key.'),
+  ('main', 'placed_containers', 'dimension', 'Mineflayer dimension containing the container.'),
+  ('main', 'placed_containers', 'block_x', 'Container block X coordinate.'),
+  ('main', 'placed_containers', 'block_y', 'Container block Y coordinate.'),
+  ('main', 'placed_containers', 'block_z', 'Container block Z coordinate.'),
+  ('main', 'placed_containers', 'block_name', 'Minecraft block name the bot saw at this location when it placed it.'),
+  ('main', 'placed_containers', 'placed_by_bot_id', 'Bot whose placement put the container here.'),
+  ('main', 'placed_containers', 'placed_at', 'UTC timestamp of the confirmed placement.'),
+  ('main', 'observed_container_items', NULL,'One query-friendly total row per item name in the last-observed contents of each container.'),
   ('main', 'observed_container_items', 'container_key', 'Parent observed_containers location key.'),
   ('main', 'observed_container_items', 'dimension', 'Mineflayer dimension containing the container.'),
   ('main', 'observed_container_items', 'block_x', 'Container block X coordinate.'),

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { craftingBot } from "../../test-support/crafting.js";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import {
   createCraftItemAction,
   formatCraftItemResult,
@@ -105,6 +106,14 @@ test("an unknown name is answered with the registry names close to it", async ()
   assert.deepEqual(craftCalls, []);
 });
 
+test("an unknown item that is a mob is answered with what the mob drops", async () => {
+  const { bot, craftCalls } = craftingBot({}, false);
+  const result = await craftItem(bot, navigation, { items: [{ itemName: "cow", count: 1 }] }, {});
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /cow is a mob, not an item: it drops beef, leather \(get_items beef hunts it\)/u);
+  assert.deepEqual(craftCalls, []);
+});
+
 test("an item made in a furnace is refused with what it is smelted from", async () => {
   // Live 2026-10-10: Mira sent "craft cooked_beef" 18 times over six objectives, told only "no crafting recipe".
   const { bot, craftCalls } = craftingBot({ beef: 3 }, false);
@@ -188,7 +197,9 @@ test("temporary crafting requires a carried table even with a nearby table and b
 });
 
 test("a native crafting failure claims no output and still asks for the inventory window to close", async () => {
-  const { bot } = craftingBot({ oak_log: 1 });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot } = craftingBot({ oak_log: 1 }, false, [], { clock });
   const closed: unknown[] = [];
   Object.assign(bot, {
     closeWindow: (window: unknown) => {
@@ -199,7 +210,9 @@ test("a native crafting failure claims no output and still asks for the inventor
     },
   });
 
-  const result = await craftItem(bot, navigation, { items: [{ itemName: "crafting_table", count: 1 }] }, {});
+  // "The server answered": the count that never comes is settled once the clock moves the world age 40 ticks past the
+  // send (2 s), well inside the wall bound.
+  const result = await clock.settle(craftItem(bot, navigation, { items: [{ itemName: "crafting_table", count: 1 }] }, {}), 2_000);
 
   assert.equal(result.status, "failed");
   assert.match(
@@ -214,7 +227,7 @@ test("a native crafting failure claims no output and still asks for the inventor
   // Live 2026-10-07 (NeoForge): carried modded items hid the crafting result; the failure names them.
   const listed = bot.inventory.items.bind(bot.inventory);
   Object.assign(bot.inventory, { items: () => [...listed(), { name: "unknown", count: 3 }] });
-  const modded = await craftItem(bot, navigation, { items: [{ itemName: "crafting_table", count: 1 }] }, {});
+  const modded = await clock.settle(craftItem(bot, navigation, { items: [{ itemName: "crafting_table", count: 1 }] }, {}), 2_000);
   assert.match("error" in modded ? modded.error : "", /carries 3 item\(s\) this client cannot read \(named "unknown"\), a known cause of this: drop them \(drop_item unknown\), then craft again\.$/u);
 });
 

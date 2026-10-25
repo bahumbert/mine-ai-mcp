@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { BreakBlockInPlace } from "../../navigation/execution/in-place-break.js";
 import type { MovementPolicy } from "../../navigation/movements/policy.js";
-import { preferredScaffoldItem } from "../../navigation/mineflayer/movement-policy.js";
+import { fallbackScaffoldItem, preferredScaffoldItem } from "../../navigation/mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import type { BlockPosition } from "../../navigation/world/world.js";
 import { waitForSignal } from "../../utils/signals.js";
@@ -12,6 +12,7 @@ import { type InventoryItem, type placeSolidBlockInto } from "../../world/placem
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
+import { sealedPitGuarding } from "../../world/sealed-pits.js";
 
 const SIDES = [
   [1, 0],
@@ -70,6 +71,11 @@ function inProtectedRegion(bot: Bot, bottom: Vec3): boolean {
 /** How near a dropped item may lie to a pit's cells before the pit counts as already holding discards. */
 const PIT_ITEM_REACH = 1.5;
 
+/** A pit whose cells open a guard cell of a sealed pit digs toward the items buried there (run 16: Dirk's pits, one dug from inside the last). */
+function opensSealedPit(bot: Bot, bottom: Vec3): boolean {
+  return openingCells(bottom).some((cell) => sealedPitGuarding(bot, cell.x, cell.y, cell.z) !== null);
+}
+
 /** Digging into a pit that holds items hands them back to the bot (live 2026-10-10 run 8: buried items came back). */
 function holdsDroppedItem(bot: Bot, bottom: Vec3): boolean {
   const centre = bottom.offset(0.5, 0.5, 0.5);
@@ -92,6 +98,7 @@ function pitBeside(bot: Bot, feet: Vec3, position: Vec3): Vec3 | null {
   return (
     candidates.find((cell) => {
       if (!enclosed(bot, cell) || !dryOpening(bot, cell) || inProtectedRegion(bot, cell) || holdsDroppedItem(bot, cell)) return false;
+      if (opensSealedPit(bot, cell)) return false;
       return openingCells(cell).every((position) => {
         if (air(bot, position)) return true;
         const block = bot.blockAt(position);
@@ -124,10 +131,61 @@ function nearestPitStance(bot: Bot): Vec3 | null {
   return best?.stance ?? null;
 }
 
+/** The pit a request chose, kept across its attempts so one cut short is dug on instead of a second pit started. */
+export interface PitMemory {
+  bottom: Vec3 | null;
+}
+
+/** The pit's bottom cell for a fresh request: beside the feet when one fits, else beside the nearest fit stance. */
+async function choosePit(
+  bot: Bot,
+  context: ActionContext,
+  moveTo?: (stance: Vec3) => Promise<string | undefined>,
+): Promise<Vec3> {
+  const feet = bot.entity.position.floored();
+  const beside =
+    bot.entity.onGround && wall(bot, feet.offset(0, -1, 0)) ? pitBeside(bot, feet, bot.entity.position) : null;
+  if (beside) return beside;
+  const stance = moveTo ? nearestPitStance(bot) : null;
+  if (!stance)
+    throw new DisposalHoleError(
+      `[DROP_HOLE_UNAVAILABLE] No place within ${HOLE_SEARCH_RADIUS} blocks has dry, enclosed ground that can be excavated into a disposal pit outside protected regions.`,
+    );
+  const failure = await moveTo!(stance);
+  context.signal?.throwIfAborted();
+  if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk to a place for the pit: ${failure}`);
+  const arrived = pitBeside(bot, bot.entity.position.floored(), bot.entity.position);
+  if (!arrived) throw new DisposalHoleError("[DROP_HOLE_CHANGED] The place chosen for the pit no longer fits on arrival.");
+  return arrived;
+}
+
+/**
+ * Walk back beside a pit an earlier attempt chose (a reflex may have moved the body) without judging it again: half
+ * dug, it holds the items the digging dropped and no longer passes `pitBeside`.
+ */
+async function returnToPit(
+  bot: Bot,
+  bottom: Vec3,
+  context: ActionContext,
+  moveTo?: (stance: Vec3) => Promise<string | undefined>,
+): Promise<Vec3> {
+  const stances = SIDES.map(([dx, dz]) => bottom.offset(-dx, 2, -dz)).filter((stance) => standable(bot, stance));
+  const here = bot.entity.position.floored();
+  if (stances.some((stance) => stance.equals(here)) && bot.entity.onGround) return bottom;
+  const nearest = stances.sort((a, b) => a.distanceTo(here) - b.distanceTo(here))[0];
+  if (!nearest || !moveTo) throw new DisposalHoleError("[DROP_HOLE_CHANGED] No standable place beside the pit remains.");
+  const failure = await moveTo(nearest);
+  context.signal?.throwIfAborted();
+  if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk back to the pit: ${failure}`);
+  return bottom;
+}
+
 /**
  * Make an enclosed pit beside the body, clearing a tunnel wall above it when needed. When none of the four cells
  * beside the feet fits (or the bot is not on dry ground), the nearest stance within `HOLE_SEARCH_RADIUS` blocks that
  * has one is walked to through `moveTo` (which returns a failure reason, or nothing), and the pit is dug there.
+ * With a `pit` memory the chosen pit is recorded before the digging starts and, when the memory already holds one,
+ * that pit is walked back to and dug on.
  */
 export async function prepareDisposalHole(
   bot: Bot,
@@ -135,22 +193,10 @@ export async function prepareDisposalHole(
   breakInPlace: BreakBlockInPlace,
   context: ActionContext,
   moveTo?: (stance: Vec3) => Promise<string | undefined>,
+  pit?: PitMemory,
 ): Promise<Vec3> {
-  const feet = bot.entity.position.floored();
-  let bottom =
-    bot.entity.onGround && wall(bot, feet.offset(0, -1, 0)) ? pitBeside(bot, feet, bot.entity.position) : null;
-  if (!bottom) {
-    const stance = moveTo ? nearestPitStance(bot) : null;
-    if (!stance)
-      throw new DisposalHoleError(
-        `[DROP_HOLE_UNAVAILABLE] No place within ${HOLE_SEARCH_RADIUS} blocks has dry, enclosed ground that can be excavated into a disposal pit outside protected regions.`,
-      );
-    const failure = await moveTo!(stance);
-    context.signal?.throwIfAborted();
-    if (failure) throw new DisposalHoleError(`[DROP_HOLE_UNAVAILABLE] Could not walk to a place for the pit: ${failure}`);
-    bottom = pitBeside(bot, bot.entity.position.floored(), bot.entity.position);
-    if (!bottom) throw new DisposalHoleError("[DROP_HOLE_CHANGED] The place chosen for the pit no longer fits on arrival.");
-  }
+  const bottom = pit?.bottom ? await returnToPit(bot, pit.bottom, context, moveTo) : await choosePit(bot, context, moveTo);
+  if (pit) pit.bottom = bottom;
   const opening = openingCells;
   for (const position of opening(bottom)) {
     context.signal?.throwIfAborted();
@@ -186,6 +232,32 @@ export function snapshotDroppedCounts(bot: Bot): ReadonlyMap<number, number> {
   return counts;
 }
 
+/** What lies at the pit's bottom now: dropped counts per item name, and the entities whose stack grew over the baseline. */
+function observeBottom(bot: Bot, bottom: BlockPosition, baseline: ReadonlyMap<number, number>) {
+  const counts = new Map<string, number>();
+  const grown: number[] = [];
+  for (const entity of Object.values(bot.entities)) {
+    const p = entity.position;
+    if (Math.floor(p.x) !== bottom.x || Math.floor(p.z) !== bottom.z || p.y < bottom.y || p.y > bottom.y + 0.3) continue;
+    try {
+      const item = entity.getDroppedItem();
+      if (!item) continue;
+      const added = Math.max(0, item.count - (baseline.get(entity.id) ?? 0));
+      counts.set(item.name, (counts.get(item.name) ?? 0) + added);
+      if (added > 0) grown.push(entity.id);
+    } catch {
+      // Wait for the dropped stack's metadata before counting it.
+    }
+  }
+  return { counts, grown };
+}
+
+/** What `observeHoleDrops` saw: whether every tossed stack lay at the bottom, and the entities that grew (to be claimed). */
+export interface HoleDropObservation {
+  readonly landed: boolean;
+  readonly entityIds: readonly number[];
+}
+
 /** Inventory loss alone does not show that the toss landed below pickup height. */
 export async function observeHoleDrops(
   bot: Bot,
@@ -194,49 +266,58 @@ export async function observeHoleDrops(
   dropped: readonly DroppedItem[],
   context: ActionContext,
   settleMs = 1_500,
-): Promise<boolean> {
+): Promise<HoleDropObservation> {
   const expected = new Map<string, number>();
   for (const entry of dropped)
     if (entry.dropped > 0) expected.set(entry.item, (expected.get(entry.item) ?? 0) + entry.dropped);
-  return (
-    (await waitForSignal(
-      () => {
-        const observed = new Map<string, number>();
-        for (const entity of Object.values(bot.entities)) {
-          const p = entity.position;
-          if (Math.floor(p.x) !== bottom.x || Math.floor(p.z) !== bottom.z || p.y < bottom.y || p.y > bottom.y + 0.3)
-            continue;
-          try {
-            const item = entity.getDroppedItem();
-            if (item)
-              observed.set(
-                item.name,
-                (observed.get(item.name) ?? 0) + Math.max(0, item.count - (baseline.get(entity.id) ?? 0)),
-              );
-          } catch {
-            // Wait for the dropped stack's metadata before counting it.
-          }
-        }
-        return [...expected].every(([name, count]) => (observed.get(name) ?? 0) >= count);
-      },
-      bot,
-      ["physicsTick", "entityMoved", "entityUpdate", "itemDrop"],
-      {
-        // Falling from hand height to this two-deep floor takes under a second.
-        // The default allows 1.5 seconds for fall and server observation, then reports failure.
-        timeoutMs: settleMs,
-        context,
-      },
-    )) === true
-  );
+  const landed = () => [...expected].every(([name, count]) => (observeBottom(bot, bottom, baseline).counts.get(name) ?? 0) >= count);
+  const seen = await waitForSignal(landed, bot, ["physicsTick", "entityMoved", "entityUpdate", "itemDrop"], {
+    // Falling from hand height to this two-deep floor takes under a second.
+    // The default allows 1.5 seconds for fall and server observation, then reports failure.
+    timeoutMs: settleMs,
+    context,
+  });
+  return { landed: seen === true, entityIds: observeBottom(bot, bottom, baseline).grown };
+}
+
+/** How many of the two cells above the discards hold a block now: the plug, however many attempts placed it. */
+export function pluggedCellCount(bot: Bot, bottom: Vec3): number {
+  return [bottom.offset(0, 1, 0), bottom.offset(0, 2, 0)].filter((cell) => !air(bot, cell)).length;
 }
 
 /** What `sealDisposalHole` reports; the caller adds how far it then stepped back. */
 export type DisposalHoleSeal = Pick<HoleClosure, "item" | "placed"> & { readonly error?: string };
 
-/** Use the first carried, physically safe block admitted by the live scaffold policy. */
-function plugMaterial(bot: Bot): InventoryItem | null {
-  return preferredScaffoldItem(bot);
+/**
+ * The block that plugs the next cell: the one the burial kept back while it is still carried, else the first carried,
+ * physically safe block admitted by the live scaffold policy, else a common-stock block (planks, stones, dirt).
+ */
+function plugMaterial(bot: Bot, plugItem?: string): InventoryItem | null {
+  const kept = plugItem === undefined ? undefined : bot.inventory.items().find((item) => item.name === plugItem);
+  return kept ?? preferredScaffoldItem(bot) ?? fallbackScaffoldItem(bot);
+}
+
+/** How long a plug cell waits for a falling stack to clear it: a server seconds behind (run 16) lets the stack fall late. */
+const PLUG_CLEAR_WAIT_MS = 2_000;
+
+export interface SealOptions {
+  /** The block the burial kept back for this plug (`planPlugKeep`). */
+  readonly plugItem?: string;
+  /** Overrides `PLUG_CLEAR_WAIT_MS`. */
+  readonly clearWaitMs?: number;
+}
+
+/**
+ * Wait until no dropped item lies in the cell, at most `waitMs` of wall clock, then let the caller place anyway: a stack
+ * still inside a cell when the block goes in is pushed out of it, upward when the cell below is the other plug.
+ */
+async function waitForStackToLeave(bot: Bot, cell: Vec3, context: ActionContext, waitMs: number): Promise<void> {
+  const clear = () =>
+    Object.values(bot.entities ?? {}).every((entity) => {
+      const p = entity.position;
+      return droppedItemName(entity) === null || Math.floor(p.x) !== cell.x || Math.floor(p.y) !== cell.y || Math.floor(p.z) !== cell.z;
+    });
+  await waitForSignal(clear, bot, ["physicsTick", "entityMoved", "entityGone"], { timeoutMs: waitMs, context });
 }
 
 /**
@@ -253,13 +334,17 @@ export async function sealDisposalHole(
   bottom: Vec3,
   place: typeof placeSolidBlockInto,
   context: ActionContext,
+  options: SealOptions = {},
 ): Promise<DisposalHoleSeal> {
   let item: string | null = null;
   let placed = 0;
   for (const cell of [bottom.offset(0, 1, 0), bottom.offset(0, 2, 0)]) {
     context.signal?.throwIfAborted();
     if (!air(bot, cell)) continue;
-    const material = plugMaterial(bot);
+    await waitForStackToLeave(bot, cell, context, options.clearWaitMs ?? PLUG_CLEAR_WAIT_MS);
+    context.signal?.throwIfAborted();
+    if (!air(bot, cell)) continue;
+    const material = plugMaterial(bot, options.plugItem);
     if (!material)
       return {
         item,

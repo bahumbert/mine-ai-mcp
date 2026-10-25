@@ -2,9 +2,10 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
-import { defineAction, type ActionContext } from "../action.js";
+import type { ObserveRequest } from "../../session/request.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { tendCheckpointSchema } from "../checkpoint-schemas.js";
-import { watchForStall } from "../stall-watch.js";
+import { watchForStall, type StallClock } from "../stall-watch.js";
 import {
   parseTendCropsRequest,
   TEND_CROPS,
@@ -18,8 +19,8 @@ import {
   type TendCropsResult,
   type TendEvidence,
 } from "./contract.js";
-import { cropFacts, mineflayerFarmBody } from "./farm-body.js";
-import { tendPlot, type CropFacts, type FarmBody, type TendProgress } from "./tend-plot.js";
+import { plotFacts, dropLedger, mineflayerFarmBody } from "./farm-body.js";
+import { beginTendPlot, type PlotFacts, type FarmBody, type TendProgress } from "./tend-plot.js";
 
 /**
  * Settle a run: succeeded when no cell was left for a reason that needs the caller (cells still growing, and water,
@@ -34,16 +35,26 @@ export function settleTend(evidence: TendEvidence, stop: string | null, refused:
   return { status: worked ? "partial" : "failed", error: stop ?? tendCropsOutcomes.incomplete(left), tended: evidence };
 }
 
-/** Farm the plot with this body, stopping when no cell has changed for the stall window. */
-export async function tendCrops(
+/** The stall watch of one attempt: how long nothing may change, and (for a test) how often it looks and by which clock. */
+export interface TendStallSettings {
+  readonly stallMs: number;
+  readonly sampleMs?: number;
+  readonly clock?: StallClock;
+}
+
+/**
+ * Take the request: the plot's counts and baselines are made once here, and the executor it returns runs one attempt
+ * each time the runner calls it (again after a reflex): a fresh farm body for the attempt's signal and a fresh stall
+ * watch, whose window starts when the attempt does.
+ */
+export function beginTendCrops(
   bot: Bot,
   request: TendCropsRequest,
-  body: FarmBody,
-  crops: CropFacts,
-  context: ActionContext,
-  stallMs = TEND_STALL_MS,
-): Promise<TendCropsResult> {
-  context.signal?.throwIfAborted();
+  facts: PlotFacts,
+  bodyFor: (signal?: AbortSignal) => FarmBody,
+  observe: ObserveRequest = () => {},
+  stall: TendStallSettings = { stallMs: TEND_STALL_MS },
+): RequestExecution<TendCropsResult> {
   const plotState = () => {
     const parts: string[] = [];
     for (let x = request.min.x; x <= request.max.x; x += 1) for (let z = request.min.z; z <= request.max.z; z += 1) {
@@ -51,27 +62,43 @@ export async function tendCrops(
     }
     return parts.join(",");
   };
-  const stall = watchForStall({
-    work: plotState,
-    position: () => bot.entity.position,
-    stallMs,
-    describe: ({ seconds, walked }) => tendCropsOutcomes.stalled(seconds, walked),
-  });
   const cells = (request.max.x - request.min.x + 1) * (request.max.z - request.min.z + 1);
   let progress: TendProgress = { phase: "clearing", harvested: 0, cleared: 0, tilled: 0, planted: 0 };
-  context.observeProgress?.(() => ({
+  observe(() => ({
     baseline: { cells },
     checkpoint: { cells, ...progress },
     completion: { kind: "current", observed: false, owes: "Every cell of the plot harvested, tilled and planted, or reported skipped." },
   }));
-  try {
-    const outcome = await tendPlot(request, body, crops, stall.reason, (next) => {
-      progress = next;
+  const plot = beginTendPlot(request, bodyFor(), facts, (next) => {
+    progress = next;
+  });
+  return async (context) => {
+    context.signal?.throwIfAborted();
+    const watch = watchForStall({
+      work: plotState,
+      position: () => bot.entity.position,
+      ...stall,
+      describe: ({ seconds, walked }) => tendCropsOutcomes.stalled(seconds, walked),
     });
-    return settleTend(outcome.evidence, outcome.stop, outcome.refused);
-  } finally {
-    stall.close();
-  }
+    try {
+      const outcome = await plot.attempt(bodyFor(context.signal), watch.reason);
+      return settleTend(outcome.evidence, outcome.stop, outcome.refused);
+    } finally {
+      watch.close();
+    }
+  };
+}
+
+/** Farm the plot with this body, stopping when no cell has changed for the stall window. */
+export function tendCrops(
+  bot: Bot,
+  request: TendCropsRequest,
+  body: FarmBody,
+  facts: PlotFacts,
+  context: ActionContext,
+  stallMs = TEND_STALL_MS,
+): Promise<TendCropsResult> {
+  return beginTendCrops(bot, request, facts, () => body, context.observeProgress, { stallMs })(context);
 }
 
 export function formatTendCropsResult(result: TendCropsResult): string {
@@ -94,10 +121,12 @@ export function createTendCropsAction(bot: Bot, navigation: NavigationRuntime) {
     inputSchema: tendCropsInputSchema,
     resultSchema: tendCropsResultSchema,
     formatResult: formatTendCropsResult,
-    execution: { kind: "task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
+    execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(bot, navigation, signal) },
     annotations: tendCropsAnnotations,
     parse: parseTendCropsRequest,
-    execute: (request, context) =>
-      tendCrops(bot, request, mineflayerFarmBody(bot, navigation, request, context.signal), cropFacts(bot), context),
+    begin: (request, _lifetime, observe) => {
+      const drops = dropLedger(bot);
+      return beginTendCrops(bot, request, plotFacts(bot), (signal) => mineflayerFarmBody(bot, navigation, request, signal, drops), observe);
+    },
   });
 }

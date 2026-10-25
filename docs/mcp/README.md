@@ -95,6 +95,14 @@ without depending on the bot's event loop. It remains available after failure.
 Host incident retention uses the same five-day / 64 MiB defaults as runtime
 incidents. The receipt reports a write failure if the artifact cannot be saved.
 
+A promise rejection nobody handled, in the runtime or in the supervising host,
+does not end that process. It is written to stderr (the first of each distinct
+message in full, then a count at most once a minute) and the host saves an
+incident with the trigger `process_fault` in the same directory, naming the
+request the runtime was serving. If the host cannot start the runtime again
+after a failure, `/health` and later MCP calls report `RUNTIME_RESTART_FAILED`
+with the cause; restart the host.
+
 After storage initialization, a conflicting SQLite writer produces an immediate
 database error. Runtime writes do not wait synchronously for a lock and block
 physics or heartbeats; startup retains its existing transient-lock allowance.

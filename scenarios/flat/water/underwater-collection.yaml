@@ -1,12 +1,12 @@
 name: underwater-collection
-description: Production underwater navigation and survival qualification (underwater-collection).
+description: A collect of sand lying under water is refused by the never-mine-under-water rule, and no sand is mined.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
   - fill: { block: stone, from: [-5, -61, -5], to: [9, -58, 5] }
-  - fill: { block: water, from: [-4, -60, -4], to: [8, -58, 4] }
+  - fill: { block: water, from: [-4, -60, -4], to: [8, -58, 3] }
   - fill: { block: sand, from: [1, -61, 0], to: [1, -61, 0] }
 players:
   - name: Diver
@@ -18,6 +18,9 @@ client:
   args: ["../../src/client-host.ts", "./underwater.ts"]
 params:
   collect: 1
+  # Never mine under water (owner 2026-10-02): the sand under the pond is refused, and none is mined.
+  reject: true
+  refusal: ["[NO_REACHABLE_MATCHING_TARGETS]", "never mines under water"]
 
 goal:
   kind: all

@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { CombatDecision } from "../survival/control/combat/contract.js";
-import { SurvivalPolicyState } from "../survival/state/survival-policy.js";
 
 import type { Bot } from "mineflayer";
 import os from "node:os";
@@ -13,78 +11,57 @@ import { Vec3 } from "vec3";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
+import { engagingCombat } from "../test-support/combat.js";
+import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
-const combatController = {
-  resourceRefusal: () => null,
-  policy: new SurvivalPolicyState(runtimeBot()),
-  engage: async (targetId: number) => ({
-    kind: "target_lost" as const,
-    targetId,
-    attacks: 0,
-    stylesUsed: [],
-    weaponsUsed: [],
-    shieldRaisedSwings: 0,
-    projectileGuards: 0,
-    explosions: 0,
-  }),
-  stop: async () => undefined,
-  runEnd: async () => {
-    throw new Error("Unexpected End combat");
-  },
-  endDanger: () => false,
-  activePosition: () => null,
-  execution: () => null,
-  onDecision: () => () => {},
-  finish: async () => ({
-    observedAt: 1,
-    kind: "safe" as const,
-    basis: "clear" as const,
-    position: { x: 0, y: 64, z: 0 },
-  }),
-  canRecover: () => false,
-  activeEngagement: () => null,
-};
+/** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
+const idleListeners = new WeakMap<Bot, (event: string) => number>();
 
+/** Listeners on `event` beyond the idle bot's own: what the runtime attached and has not removed. */
+function added(bot: Bot & Listened, event: string): number {
+  return idleListeners.get(bot)?.(event) ?? bot.listenerCount(event);
+}
+
+const combatController = engagingCombat(runtimeBot(), async (targetId) => ({
+  kind: "target_lost" as const,
+  targetId,
+  attacks: 0,
+  stylesUsed: [],
+  weaponsUsed: [],
+  shieldRaisedSwings: 0,
+  projectileGuards: 0,
+  explosions: 0,
+}));
+
+/**
+ * The runtime's bot on the shared fake, `controlStates` recording each jump it sets; `rejectedListener` makes adding a
+ * listener for that event throw.
+ */
 function runtimeBot(controlStates: boolean[] = [], rejectedListener?: string): Bot {
-  const inventory = Object.assign(new EventEmitter(), { items: () => [], slots: new Array(46).fill(null) });
-  const botEvents = new EventEmitter();
-  const bot = Object.assign(botEvents, {
-    username: "RuntimeBot",
-    _client: new EventEmitter(),
-    getControlState: () => false,
-    game: { dimension: "overworld" },
-    entity: { id: 5, position: new Vec3(0, 64, 0), yaw: 0, pitch: 0, isInWater: false },
-    health: 20,
-    food: 20,
-    inventory,
-    entities: {},
-    blockAt: () => null,
-    setControlState: (control: string, state: boolean) => {
-      if (control === "jump") controlStates.push(state);
-    },
-    world: {
-      getColumns: () => [],
-      getColumn: () => undefined,
-    },
-    registry: {
-      version: { minecraftVersion: "test" },
-      entitiesByName: { player: { metadataKeys: ["shared_flags"] } },
-      blocksByStateId: {},
-      biomes: {},
-      foodsByName: {},
-    },
-  }) as unknown as Bot;
+  return runtimeHarness(controlStates, rejectedListener).bot;
+}
+function runtimeHarness(controlStates: boolean[] = [], rejectedListener?: string): FakeHarness {
+  // No column loaded: the frontier observes none.
+  const harness = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0), loadedColumns: [] });
+  const { bot } = harness;
+  bot.setMaxListeners(40); // as the runtime host allows its observers (`runtime-host.ts`)
+  const setControlState = bot.setControlState;
+  bot.setControlState = (control, state) => {
+    if (control === "jump") controlStates.push(state);
+    setControlState(control, state);
+  };
+  idleListeners.set(bot, listenersAddedSince(bot));
   if (rejectedListener) {
-    const addListener = botEvents.on.bind(botEvents);
-    const rejectSelectedListener: EventEmitter["on"] = (eventName, listener) => {
+    const addListener = bot.on.bind(bot);
+    const rejectSelectedListener: typeof bot.on = (eventName, listener) => {
       if (eventName === rejectedListener) throw new Error(`Listener registration failed for ${rejectedListener}.`);
       return addListener(eventName, listener);
     };
-    botEvents.on = rejectSelectedListener;
+    bot.on = rejectSelectedListener;
   }
   bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
-  return bot;
+  return harness;
 }
 
 test("completed combat decisions are retained without a physics sample and unsubscribe on close", async (t) => {
@@ -242,14 +219,14 @@ test("Mineflayer end captures the foreground request and still fails a nonsettli
   } finally {
     await runtime.close();
   }
-  assert.equal(bot.listenerCount("end"), 0);
+  assert.equal(added(bot, "end"), 0);
 });
 
 test("an artifact write failure remains evidence and does not turn successful gameplay into failure", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-runtime-write-test-"));
   const occupied = path.join(directory, "occupied");
   await writeFile(occupied, "not a directory");
-  const bot = runtimeBot();
+  const { bot, combat: scene } = runtimeHarness();
   const runtime = await createMinecraftRuntime(bot, {
     incidents: { directory: occupied },
     createCombatController: () => combatController,
@@ -276,15 +253,7 @@ test("an artifact write failure remains evidence and does not turn successful ga
       ...query,
       execution: { kind: "task" },
       execute: async (request, context) => {
-        bot._client.emit("damage_event", {
-          entityId: 5,
-          sourceTypeId: 2,
-          sourceCauseId: 0,
-          sourceDirectId: 0,
-          sourcePosition: null,
-        });
-        bot.health = 18;
-        bot.emit("health");
+        scene.hurtBot(2, null);
         return query.execute(request, context);
       },
     },
@@ -318,21 +287,25 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
     createCombatController: () => combatController,
   });
 
-  assert.equal(bot.listenerCount("chunkColumnLoad"), 2);
-  assert.equal(bot.listenerCount("chunkColumnUnload"), 1);
+  assert.equal(added(bot, "chunkColumnLoad"), 2);
+  assert.equal(added(bot, "chunkColumnUnload"), 1);
   assert.equal(
-    bot.listenerCount("blockUpdate"),
+    added(bot, "blockUpdate"),
     2,
     "frontier observation and advancing lava both observe world changes",
   );
   assert.equal(
-    bot.listenerCount("physicsTick"),
+    added(bot, "physicsTick"),
     10,
     "the runtime owns shared perception, bow timing, footing, survival observation, one reflex loop, idle water, Nether vine physics, End gaze and action progress",
   );
-  assert.equal(bot.listenerCount("chat"), 1);
-  assert.equal(bot.listenerCount("whisper"), 1);
-  assert.equal(bot.listenerCount("death"), 8);
+  assert.equal(added(bot, "chat"), 1);
+  assert.equal(added(bot, "whisper"), 1);
+  assert.equal(
+    added(bot, "death"),
+    11,
+    "eight owners, the server-seat watch and the vehicle watch (they forget their seat at a death too) and the body-tick pacer the reflex loop ticks through",
+  );
   assert.deepEqual(
     runtime.actions.map((action) => action.name),
     [
@@ -457,18 +430,19 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
   assert.equal(runtime.close(), close);
   assert.equal(runtime[Symbol.asyncDispose](), close);
   await close;
-  assert.equal(bot.listenerCount("chunkColumnLoad"), 0);
-  assert.equal(bot.listenerCount("chunkColumnUnload"), 0);
-  assert.equal(bot.listenerCount("blockUpdate"), 0);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
-  assert.equal(bot.listenerCount("chat"), 0);
-  assert.equal(bot.listenerCount("whisper"), 0);
-  assert.equal(bot.listenerCount("death"), 0);
+  assert.equal(added(bot, "chunkColumnLoad"), 0);
+  assert.equal(added(bot, "chunkColumnUnload"), 0);
+  assert.equal(added(bot, "blockUpdate"), 0);
+  assert.equal(added(bot, "physicsTick"), 0);
+  assert.equal(added(bot, "chat"), 0);
+  assert.equal(added(bot, "whisper"), 0);
+  assert.equal(added(bot, "death"), 0);
   assert.deepEqual(controlStates, [true, false]);
 });
 
 test("runtime creation settles every acquired attachment before rejecting", async () => {
   const bot = runtimeBot([], "physicsTick");
+  const slotListeners = bot.inventory.listenerCount("updateSlot");
 
   await assert.rejects(
     createMinecraftRuntime(bot, {
@@ -493,9 +467,9 @@ test("runtime creation settles every acquired attachment before rejecting", asyn
     "death",
     "spawn",
   ] as const) {
-    assert.equal(bot.listenerCount(eventName), 0, eventName);
+    assert.equal(added(bot, eventName), 0, eventName);
   }
-  assert.equal(bot.inventory.listenerCount("updateSlot"), 0);
+  assert.equal(bot.inventory.listenerCount("updateSlot"), slotListeners);
 });
 
 test("death cancels the foreground action, records one event, and permits work after respawn", async (t) => {

@@ -1,8 +1,9 @@
 import { createRequire } from "node:module";
-import { setTimeout as sleep } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
+import { sleepMs } from "../utils/wall-timers.js";
+import { sameItemVariant } from "./item-variant.js";
 
 export type CraftExecution =
   | { readonly kind: "completed"; readonly completedSteps: number }
@@ -38,7 +39,7 @@ function requireApplicationRoom(bot: Bot, recipe: CraftApplication["recipe"]): v
     const item = new Item(output.id, output.count, output.metadata ?? 0);
     let remaining = output.count;
     for (const stack of stacks) {
-      if (stack.count === 0 || !Item.equal(stack.item, item, false, true)) continue;
+      if (stack.count === 0 || !sameItemVariant(stack.item, item)) continue;
       const stored = Math.min(remaining, Math.max(0, stack.item.stackSize - stack.count));
       stack.count += stored;
       remaining -= stored;
@@ -76,17 +77,21 @@ async function craftOnce(
   } catch (cause) {
     if (!/did not update crafting result/u.test(String(cause))) throw cause;
     bot.closeWindow(bot.currentWindow ?? bot.inventory);
-    await sleep(UNSEEN_RESULT_SETTLE_MS);
+    await sleepMs(UNSEEN_RESULT_SETTLE_MS);
     if (bot.inventory.count(output.id, null) < before + output.count) throw cause;
   }
 }
 
-/** Execute one native recipe application at a time and close the inventory afterward. */
+/**
+ * Execute one native recipe application at a time and close the inventory afterward. `onCrafted` hears each
+ * application's output the moment its craft call resolves, so a caller that is aborted later still knows what it made.
+ */
 export async function executeCraftPlan(
   bot: Bot,
   applications: readonly CraftApplication[],
   craftingTable: NonNullable<Parameters<Bot["craft"]>[2]> | null,
   signal?: AbortSignal,
+  onCrafted?: (output: { readonly id: number; readonly count: number }) => void,
 ): Promise<CraftExecution> {
   let completedSteps = 0;
   if (bot.currentWindow) bot.closeWindow(bot.currentWindow);
@@ -97,6 +102,7 @@ export async function executeCraftPlan(
         signal?.throwIfAborted();
         requireApplicationRoom(bot, application.recipe);
         await craftOnce(bot, application.recipe, craftingTable);
+        onCrafted?.(application.recipe.result as { readonly id: number; readonly count: number });
       }
       completedSteps += 1;
     }

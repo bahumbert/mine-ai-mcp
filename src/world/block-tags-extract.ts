@@ -9,7 +9,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { readZipEntries } from "./smelting-extract.js";
 
-const BLOCK_TAGS = /^data\/minecraft\/tags\/block\/(.+)\.json$/u;
+/** The two kinds of tag the jar holds, each in its own folder (`data/minecraft/tags/<kind>/`). */
+export type TagKind = "block" | "item";
+
+const tagFile = (kind: TagKind) => new RegExp(`^data/minecraft/tags/${kind}/(.+)\\.json$`, "u");
 
 /** A tag entry: a block id, a `#tag` reference, or either as an optional `{ id, required }`. */
 type TagValue = string | { readonly id: string; readonly required?: boolean };
@@ -18,12 +21,13 @@ function shortId(id: string): string {
   return id.startsWith("minecraft:") ? id.slice("minecraft:".length) : id;
 }
 
-/** Every block tag, by tag name (`logs`, `mineable/axe`), each resolved to its sorted block ids; tags sorted by name. */
-export function extractBlockTags(jar: Uint8Array): Record<string, string[]> {
+/** Every tag of one kind, by tag name (`logs`, `mineable/axe`), each resolved to its sorted ids; tags sorted by name. */
+export function extractTags(jar: Uint8Array, kind: TagKind): Record<string, string[]> {
   const entries = readZipEntries(jar);
+  const file = tagFile(kind);
   const raw = new Map<string, readonly TagValue[]>();
   for (const name of entries.keys()) {
-    const tag = BLOCK_TAGS.exec(name)?.[1];
+    const tag = file.exec(name)?.[1];
     if (tag !== undefined) raw.set(tag, (JSON.parse(entries.get(name)!()) as { values?: readonly TagValue[] }).values ?? []);
   }
   const resolved = new Map<string, ReadonlySet<string>>();
@@ -45,6 +49,9 @@ export function extractBlockTags(jar: Uint8Array): Record<string, string[]> {
   };
   return Object.fromEntries([...raw.keys()].sort().map((tag) => [tag, [...resolve(tag, new Set())].sort()]));
 }
+
+/** Every block tag, by tag name, each resolved to its sorted block ids. */
+export const extractBlockTags = (jar: Uint8Array): Record<string, string[]> => extractTags(jar, "block");
 
 if (import.meta.main) {
   const [jar, version] = process.argv.slice(2);

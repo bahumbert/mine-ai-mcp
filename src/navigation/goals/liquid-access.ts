@@ -5,7 +5,7 @@ import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 import { USE_RAY_REACH } from "../../world/liquid.js";
 import { prepareExcavation, type Dig } from "../movements/excavation.js";
 import { stationaryExcavation } from "../movements/stationary-excavation.js";
-import { isDry, isHeadPassable, isPassable, isStandableTop, navigationFeet } from "../world/block-geometry.js";
+import { navigationFeet, standsOnDryGround } from "../world/block-geometry.js";
 import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { blockLabel, samePosition, type BlockPosition, type Position3, type WorldView } from "../world/world.js";
 
@@ -13,19 +13,7 @@ type Liquid = "water" | "lava";
 const SOURCE_SHAPE = [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }];
 
 function dryFooting(world: WorldView, position: Position3): boolean {
-  const feet = navigationFeet(position, true);
-  const below = world.blockAt(feet.x, feet.y - 1, feet.z);
-  const body = world.blockAt(feet.x, feet.y, feet.z);
-  const head = world.blockAt(feet.x, feet.y + 1, feet.z);
-  return (
-    isStandableTop(below) &&
-    below.kind === "loaded" &&
-    !below.traits.damaging &&
-    isDry(body) &&
-    isPassable(body) &&
-    isDry(head) &&
-    isHeadPassable(head)
-  );
+  return standsOnDryGround((x, y, z) => world.blockAt(x, y, z), navigationFeet(position, true));
 }
 
 function sourceRay(world: WorldView, position: Position3, source: BlockPosition, liquid: Liquid, eyeHeight: number) {

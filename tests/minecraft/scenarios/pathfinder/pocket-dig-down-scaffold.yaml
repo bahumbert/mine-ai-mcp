@@ -1,0 +1,67 @@
+template: ../../templates/flat-single-action.yaml
+
+name: pocket-dig-down-scaffold
+tags: [regression]
+description: >-
+  Run 15 P2, Dirk stood pinned for hours although his persona's rules were meant to be set aside for one leg: he carried
+  cobblestone, so the first search pillared up one cell and visited two nodes, and "never left the start" counted one.
+  Like pocket-dig-down-with-style-override, but the pocket is three cells high (the cell above the start is a pillar
+  cell) and the bot carries cobblestone beside its pickaxe: navigate to the cell below must still set the override aside,
+  dig down and arrive one block lower and aside.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [-5, -63, -5], to: [5, -50, 5] }
+  # Source water two blocks east, west, north and south of the pocket, behind a wall of stone, up to the pocket's top cell,
+  # and over the stone above it: every side and upward dig opens into water, and only the dig straight down is free.
+  - fill: { block: water, from: [-2, -57, -1], to: [-2, -55, 1] }
+  - fill: { block: water, from: [2, -56, -1], to: [2, -55, 1] }
+  - fill: { block: water, from: [-1, -57, -2], to: [1, -55, -2] }
+  - fill: { block: water, from: [-1, -57, 2], to: [1, -55, 2] }
+  - fill: { block: water, from: [-1, -53, -1], to: [1, -53, 1] }
+  # The pocket itself, three cells high, and a side cell the pocket cannot reach over a cave cell, as in Dirk's cell.
+  - fill: { block: air, from: [0, -57, 0], to: [0, -55, 0] }
+  - fill: { block: air, from: [1, -58, 0], to: [1, -57, 0] }
+
+players:
+  - name: Pinned
+    pos: [0.5, -57, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+      - { item: cobblestone, count: 16 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/styled-navigate.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Pinned,gamemode=!spectator]"
+
+params:
+  noDigStraightDown: true
+  target: [1, -58, 0]
+  range: 0
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: reach
+      who: Pinned
+      pos: [1.5, -58, 0.5]
+      radius: 1.0
+    - { kind: health, who: Pinned, health: 20 }
+    - { kind: completion, who: Pinned }

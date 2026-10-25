@@ -62,7 +62,7 @@ export async function buildProtection(
     const changedAfterClearing = mayContinue();
     if (changedAfterClearing) return blocked(changedAfterClearing);
     const current = bot.blockAt(cell);
-    if (!isReplaceableForPlacement(current))
+    if (!isReplaceableForPlacement(current, bot.version))
       return blocked(
         `Protection cell ${cell} contains ${current?.name ?? "unobserved terrain"}, which cannot be replaced by placement.`,
       );

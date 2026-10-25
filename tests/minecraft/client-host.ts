@@ -4,6 +4,7 @@ import { mkdtempDisposable } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 import { runNodeClient, type ClientCompletion, type NodeClientSession } from "mine-labs/client";
 import {
   createMinecraftRuntime,
@@ -16,20 +17,38 @@ import {
 import { createScenarioBot, prepareScenarioBot, closeScenarioBot } from "./scenario-bot.ts";
 import { openScenarioHighlighter } from "./scenario-highlighter.ts";
 import type { ScenarioContext, ScenarioRun, ScenarioCall } from "./scenario.ts";
+import { WITHOUT_RUNTIME_FLAG, parseClientHostArgs } from "./client-host-args.ts";
+import { arenaFrame, decodeArena, type ArenaFrame } from "./arena/frame.ts";
+import { clientBootedLine } from "./client-boot-marker.ts";
 
-const [driverFile, ...extraArgs] = process.argv.slice(2);
-if (!driverFile || extraArgs.length > 0) {
-  throw new Error("Usage: client-host.ts <driver module>");
-}
+const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
-await runNodeClient((session) => runScenario(driverFile, session));
+// Started before init: a host booted ahead of its trial has its driver loaded when the trial's values arrive. A load
+// failure is kept and thrown inside the session, where it becomes the failed completion the trial reads.
+const driverLoading = loadDriver(driverFile).then(
+  (driver) => ({ driver }),
+  (cause: unknown) => ({ cause }),
+);
 
-async function runScenario(file: string, session: NodeClientSession): Promise<void> {
-  const driver = await loadDriver(file);
+// The daemon times a host's boot from this line (client boot ahead, T7h-b); it comes whether the driver loaded or failed, a failure
+// being the trial's to report once init arrives.
+void driverLoading.then(() => process.stdout.write(clientBootedLine()));
+
+await runNodeClient((session) => runScenario(withRuntime, session));
+
+async function runScenario(withRuntime: boolean, session: NodeClientSession): Promise<void> {
+  // A host booted before its trial gets the lane's environment in init, over the one it was spawned with (the later
+  // value wins); started the old way init carries none and the environment is the process's own.
+  Object.assign(process.env, session.env);
+  const loaded = await driverLoading;
+  if ("cause" in loaded) throw loaded.cause;
+  const { driver } = loaded;
+  // Read before the bot exists: a malformed lane offset must fail the client, never run it at offset zero inside a lane.
+  const arena = arenaFrame(decodeArena(process.env));
   const bot = createScenarioBot(session);
   try {
     await prepareScenarioBot(bot, session);
-    const completion = await runWithRuntime(driver, bot, session);
+    const completion = withRuntime ? await runWithRuntime(driver, bot, session, arena) : await runWithoutRuntime(driver, bot, session, arena);
     session.signal.throwIfAborted();
     if (completion.status === "failed") session.log(`scenario driver failed: ${completion.detail}`);
     session.finish(completion);
@@ -41,7 +60,7 @@ async function runScenario(file: string, session: NodeClientSession): Promise<vo
 }
 
 /** The runtime is disposed before this promise resolves and completion is reported. */
-async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession): Promise<ClientCompletion> {
+async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession, arena: ArenaFrame): Promise<ClientCompletion> {
   const retainEvidence = process.env.MINE_AI_SCENARIO_EVIDENCE === "1";
   const artifacts = retainEvidence ? process.env.MINE_LABS_ARTIFACTS_DIR : undefined;
   if (retainEvidence && !artifacts) throw new Error("Retaining scenario evidence requires MINE_LABS_ARTIFACTS_DIR.");
@@ -53,15 +72,51 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
   await using overlay = await openScenarioHighlighter(bot, session);
   await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter });
   overlay?.follow(runtime.navigation);
-  const context: ScenarioContext = {
+  const context = scenarioContextOf(bot, session, arena, (action, input) => callScenarioAction(runtime, session, action, input));
+  return await runTimedDriver(driver, context, session);
+}
+
+/** The driver on the bare bot, no runtime created (`--without-runtime`): `call` refuses, everything else is the same. */
+async function runWithoutRuntime(driver: ScenarioRun, bot: Bot, session: NodeClientSession, arena: ArenaFrame): Promise<ClientCompletion> {
+  const context = scenarioContextOf(bot, session, arena, async (action) => {
+    throw new Error(`'${action}' cannot run: this scenario's client runs ${WITHOUT_RUNTIME_FLAG}`);
+  });
+  return await runTimedDriver(driver, context, session);
+}
+
+/** What a driver receives: the scenario, its lane, the bot and its client-side controls, and `call` for actions. */
+function scenarioContextOf(bot: Bot, session: NodeClientSession, arena: ArenaFrame, call: ScenarioContext["call"]): ScenarioContext {
+  let windowsOpened = 0;
+  bot.on("windowOpen", () => {
+    windowsOpened += 1;
+  });
+  return {
     scenario: session.scenario,
+    arena,
+    bot,
     waitForTicks: async (ticks) => {
       await bot.waitForTicks(ticks);
       session.signal.throwIfAborted();
     },
-    call: (action, input) => callScenarioAction(runtime, session, action, input),
+    physics: {
+      pause: () => {
+        bot.physicsEnabled = false;
+      },
+      resume: () => {
+        bot.physicsEnabled = true;
+      },
+    },
+    client: {
+      setCell: async ([x, y, z], stateId) => bot.world.setBlockStateId(new Vec3(x, y, z), stateId),
+      body: () => ({ ...bot.entity.position, onGround: bot.entity.onGround }),
+      windowsOpened: () => windowsOpened,
+    },
+    call,
   };
+}
 
+/** Report prepared, wait for the start, then time the driver's run (preparation is outside the trial budget). */
+async function runTimedDriver(driver: ScenarioRun, context: ScenarioContext, session: NodeClientSession): Promise<ClientCompletion> {
   session.signal.throwIfAborted();
   session.prepared();
   await session.start;
@@ -140,6 +195,8 @@ function runtimeOptions(session: NodeClientSession, artifacts: string | undefine
       identity: { worldId, scope: { kind: "bot", botId: session.username } },
     },
     onDisconnect: (reason) => session.log(`runtime disconnected: ${reason}`),
+    // A scenario that shows the pinned watch shortens its ten minutes to seconds.
+    ...(typeof session.scenario.params?.pinnedWindowMs === "number" && { pinned: { windowMs: session.scenario.params.pinnedWindowMs } }),
   };
 }
 

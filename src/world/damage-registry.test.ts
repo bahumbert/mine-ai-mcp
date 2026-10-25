@@ -1,11 +1,10 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { damageSourceName, observeDamageRegistry } from "./damage-registry.js";
 
 test("damage IDs follow the server registry, reject unrelated packets and detach on connection end", () => {
-  const bot = Object.assign(new EventEmitter(), { _client: new EventEmitter() }) as unknown as Bot;
+  const { bot } = createFakeBot();
   observeDamageRegistry(bot);
   observeDamageRegistry(bot);
   assert.equal(bot._client.listenerCount("registry_data"), 1);

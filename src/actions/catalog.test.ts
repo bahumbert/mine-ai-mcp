@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../test-support/bot.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
 import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import { createActions, type ActionCatalogOptions } from "./index.js";
@@ -19,15 +19,15 @@ const PUBLISHED: ReadonlyArray<
   ["destroy_end_crystal", "resumable_task", false, true],
   ["attack_dragon_perch", "resumable_task", false, true],
   ["shoot_dragon", "resumable_task", false, true],
-  ["build_structure", "task", false, true],
-  ["tend_crops", "task", false, true],
+  ["build_structure", "resumable_task", false, true],
+  ["tend_crops", "resumable_task", false, true],
   ["cancel_foreground_action", "control", false, true],
   ["collect_block", "resumable_task", false, true],
-  ["craft_item", "task", false, true],
-  ["drop_item", "task", false, true],
+  ["craft_item", "resumable_task", false, true],
+  ["drop_item", "resumable_task", false, true],
   ["barter", "resumable_task", false, true],
-  ["eat_food", "task", false, true],
-  ["equip", "task", false, false],
+  ["eat_food", "resumable_task", false, true],
+  ["equip", "resumable_task", false, false],
   ["explore_frontier", "resumable_task", false, false],
   ["collect_mob_drop", "resumable_task", false, true],
   ["activate_portal", "resumable_task", false, true],
@@ -40,17 +40,17 @@ const PUBLISHED: ReadonlyArray<
   ["note_delete", "task", false, true],
   ["protect_region", "concurrent", false, false],
   ["unprotect_region", "concurrent", false, false],
-  ["place_block", "task", false, true],
+  ["place_block", "resumable_task", false, true],
   ["prepare_dragon_perch", "resumable_task", false, true],
   ["pick_up_items", "resumable_task", false, false],
   ["raw_action", "task", false, true],
   ["query_bot_data", "information", true, null],
   ["read_recent_events", "information", true, false],
   ["send_message", "concurrent", false, false],
-  ["sleep", "task", false, null],
-  ["smelt_item", "task", false, true],
-  ["use_bucket", "task", false, true],
-  ["use_container", "task", false, true],
+  ["sleep", "resumable_task", false, null],
+  ["smelt_item", "resumable_task", false, true],
+  ["use_bucket", "resumable_task", false, true],
+  ["use_container", "resumable_task", false, true],
   ["view_blocks", "information", true, null],
   ["view_crafting_requirements", "information", true, false],
   ["view_smelting_recipes", "information", true, false],
@@ -69,7 +69,7 @@ function published(t: { after(fn: () => void): void }, options: ActionCatalogOpt
   const botData = temporaryBotData({ closeAfter: t });
   return createActions(
     {
-      bot: botFixture(),
+      bot: createFakeBot().bot,
       botData,
       protectedRegions: new ProtectedRegionStore(botData),
       budgets: {} as never,

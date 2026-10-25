@@ -5,7 +5,7 @@ import { registryNameSchema } from "../registry-name.js";
 
 export const TEND_CROPS = "tend_crops" as const;
 export const TEND_CROPS_DESCRIPTION =
-  "Farm a rectangle of soil the way a player does, cell by cell, walking into reach: harvest ripe crops (ripe by the game's loot tables) and pick up what they drop, break short grass and flowers standing on the soil, till soil with the best carried hoe, and plant empty farmland with `plant`, or, without it, a cell harvested in this call with that crop's own seed when carried. Unripe crops are left growing. Water, leveling and fences are the caller's: a cell that is not soil is reported, not changed. Its own routes never dig farmland or crops. Reports what each cell became, the cells skipped and why, and the plot afterwards: crops by age, empty and dry farmland, water. A run where no cell changes for 180 s stops and says so.";
+  "Farm a rectangle of soil the way a player does, cell by cell, walking into reach: harvest ripe crops (ripe by the game's loot tables) and pick up what they drop, break the ground cover standing on the soil (grass, ferns, flowers, snow layers; a torch, a sapling or any other block is left and reported `occupied by <name>`), till soil with the best carried hoe, and plant empty farmland with `plant`, or, without it, a cell harvested in this call with that crop's own seed when carried. Unripe crops are left growing. Water, leveling and fences are the caller's: a cell that is not soil is reported, not changed. Its own routes never dig farmland or crops. Reports what each cell became, the cells skipped and why, and the plot afterwards: crops by age, empty and dry farmland, water. A run where no cell changes for 180 s stops and says so.";
 
 /** At most 16 x 16 cells per call, like `build_structure`'s 256. */
 export const MAX_TEND_SIDE = 16;
@@ -92,8 +92,6 @@ export const tendCropsAnnotations = {
 export const tendCropsOutcomes = {
   tooLarge: (width: number, depth: number) =>
     `[TEND_TOO_LARGE] The plot is ${width} x ${depth}; at most ${MAX_TEND_SIDE} x ${MAX_TEND_SIDE} cells per call.`,
-  noHoe: (cells: number) => `[TEND_NO_HOE] ${cells} cell${cells === 1 ? "" : "s"} need tilling and no hoe is carried.`,
-  plantMissing: (item: string) => `[TEND_PLANT_MISSING] No ${item} is carried to plant.`,
   stalled: (seconds: number, walked: number) =>
     `[TEND_STALLED] No cell changed for ${seconds} s (walked ${walked} blocks meanwhile).`,
   incomplete: (skipped: number) =>

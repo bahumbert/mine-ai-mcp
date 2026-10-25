@@ -2,7 +2,7 @@ import { saveWaterLanding } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { SupportedPositionController } from "../execution/supported-position-controller.js";
-import { holdWaterPosition } from "../steering/hold-water-position.js";
+import { holdWaterPosition, landOnStanceFloor } from "../steering/hold-water-position.js";
 import { holdSwimDepth } from "../world/swimming.js";
 import { horizontalControlsToward } from "../steering/local-steering.js";
 /**
@@ -17,10 +17,9 @@ import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
 import { appendFileSync } from "node:fs";
 import { Vec3 } from "vec3";
-import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { occupiedCell, placeWithoutLooking, type WorldBlock } from "../../world/placement.js";
 import { AIR_COAST_TICKS, COAST_TICKS, PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
-import type { EffectHandle, MovementPreparation, NavigationBot } from "../bot.js";
+import type { EffectHandle, MovementPreparation, NavigationBot, CellResync } from "../bot.js";
 import {
   createMovementController,
   recenterControls,
@@ -31,7 +30,7 @@ import {
   type MovementSnapshot,
 } from "../execution/movement-controller.js";
 import type { AttemptToken } from "../execution/mutations.js";
-import { DIG_REACH } from "../movements/excavation.js";
+import { OPEN_WATER_RISE } from "../execution/water-movement-controller.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
 import {
   centerOnCell,
@@ -51,7 +50,11 @@ import {
   type Position3,
   type WorldView,
 } from "../world/world.js";
-import { CLIMBABLES, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
+import { longestBreakDurationMs } from "./break-duration.js";
+import { putAwayHeldTool, visibleDigAim } from "./dig-preparation.js";
+import { requestCellResync } from "./cell-resync.js";
+import { type ServerChangeWatch, watchServerChange } from "./server-block-changes.js";
+import { CLIMBABLES, isSwimWater, liveBlockReader, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
 
 const NETHER_VINES = new Set(["weeping_vines", "weeping_vines_plant", "twisting_vines", "twisting_vines_plant"]);
 // Prismarine applies gravity and drag after assigning its 0.2 climb impulse;
@@ -69,6 +72,9 @@ function traceDig(record: Record<string, unknown>): void {
     // A trace that cannot be written is not a navigation failure.
   }
 }
+
+/** What an effect that did not happen says. */
+type EffectFailure = { readonly kind: "failed"; readonly observation: string };
 
 export interface MineflayerBotSurface {
   readonly entity: {
@@ -97,6 +103,14 @@ export interface MineflayerBotSurface {
   /** Undefined until the bot has spawned. */
   readonly food?: number;
   setControlState(control: "forward" | "back" | "left" | "right" | "jump" | "sprint" | "sneak", state: boolean): void;
+  /** Holds a water stance counted on the connected bot itself, the bot `runtime.steering` asks (review 2026-10-19 #2). */
+  holdWaterStance(
+    signal: AbortSignal | undefined,
+    setControl: NonNullable<Parameters<typeof holdWaterPosition>[2]>,
+    stance?: BlockPosition,
+  ): () => void;
+  /** Wait, bounded, for a body held over `stance`'s solid floor to land on it; see `landOnStanceFloor`. Optional so fakes need no change. */
+  landOnStanceFloor?(stance: BlockPosition, signal: AbortSignal): Promise<boolean>;
   getControlState?(control: "jump" | "sneak"): boolean;
   waitForTicks(ticks: number): Promise<void>;
   lookAt(position: Position3, force?: boolean): Promise<void>;
@@ -123,10 +137,16 @@ export interface MineflayerBotSurface {
   look?(yaw: number, pitch: number, force?: boolean): Promise<void>;
   bucketDrop?(target: BlockPosition, signal: AbortSignal): Promise<boolean>;
   stopDigging(): void;
+  /** The longest the body can take to dig the block at `position` with the item type `toolType`; see `longestBreakDurationMs`. Optional so fakes need no change. */
+  longestBreakDurationMs?(position: Position3, toolType: number | null): number | null;
   /** Place against a face. The port has already aimed; the surface must not re-aim. */
   placementObstacle(position: Position3): string | null;
   placeBlock(support: unknown, face: Position3): Promise<void>;
   activateBlock(block: unknown): Promise<void>;
+  /** Ask the server to send `cell` again; see `cell-resync.ts`. Optional so fakes need no change. */
+  requestCellResync?(cell: Position3, signal: AbortSignal): Promise<CellResync>;
+  /** Listen for the server's own packet about `cell`: a break is done when the server says so, not when the dig timer ends. Optional so fakes need no change (their dig is the answer). */
+  watchServerChange?(cell: Position3): ServerChangeWatch;
   combatResourceReceipt?(): void;
   on(event: "physicsTick", listener: () => void): void;
   off(event: "physicsTick", listener: () => void): void;
@@ -166,6 +186,9 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
       return bot.food;
     },
     setControlState: (control, state) => bot.setControlState(control, state),
+    holdWaterStance: (signal, setControl, stance) =>
+      holdWaterPosition(bot, signal, setControl, stance && { stance, read: liveBlockReader(bot) }),
+    landOnStanceFloor: (stance, signal) => landOnStanceFloor(bot, { stance, read: liveBlockReader(bot) }, signal),
     bucketDrop: async (target, signal) => {
       const result = await saveWaterLanding(bot, { target, signal, permitted: () => readNavigationPolicy(bot).bucket_drops });
       const at = bot.entity.position;
@@ -177,33 +200,17 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     lookAt: (position, force) => bot.lookAt(new Vec3(position.x, position.y, position.z), force),
     look: (yaw, pitch, force) => bot.look(yaw, pitch, force),
     equip: (value, destination) => bot.equip(item(value), destination),
-    putAwayHeldTool: async () => {
-      const wears = (type: number) => (bot.registry.items[type]?.maxDurability ?? 0) > 0;
-      const held = bot.heldItem;
-      if (!held || !wears(held.type)) return;
-      // Something that does not wear out in hand, else an empty hand.
-      const plain = bot.inventory.items().find((candidate) => !wears(candidate.type));
-      if (plain) await bot.equip(plain, "hand");
-      else await bot.unequip("hand");
-    },
+    putAwayHeldTool: () => putAwayHeldTool(bot),
     blockAt: (position) => bot.blockAt(new Vec3(position.x, position.y, position.z)),
     dig: (target, forceLook) => bot.dig(block(target), forceLook ?? false),
-    visibleDigAim: (position) => {
-      const eyeHeight = (bot.entity as { readonly eyeHeight?: number }).eyeHeight ?? STANDING_EYE_HEIGHT;
-      const target = bot.blockAt(new Vec3(position.x, position.y, position.z));
-      if (!target) return null;
-      return visibleBlockAim(
-        bot.world,
-        bot.entity.position.offset(0, eyeHeight, 0),
-        position,
-        DIG_REACH,
-        observeMineflayerBlock(target).collisionShapes,
-      );
-    },
+    visibleDigAim: (position) => visibleDigAim(bot, position),
     stopDigging: () => bot.stopDigging(),
+    longestBreakDurationMs: (position, toolType) => longestBreakDurationMs(bot, position, toolType),
     placementObstacle: (position) => occupiedCell(bot, position),
     placeBlock: (support, face) => placeWithoutLooking(bot, support as WorldBlock, new Vec3(face.x, face.y, face.z)),
     activateBlock: (target) => bot.activateBlock(block(target)),
+    requestCellResync: (cell, signal) => requestCellResync(bot, new Vec3(cell.x, cell.y, cell.z), signal),
+    watchServerChange: (cell) => watchServerChange(bot, cell),
     combatResourceReceipt: () => recordCombatResourceReceipt(bot, { kind: "scaffold_placed" }),
     on: (event, listener) => {
       bot.on(event, listener);
@@ -323,7 +330,7 @@ export class MineflayerBot implements NavigationBot {
     if (!ceiling) return 0;
     // Retain the two-block passage's 0.2 clearance for upward momentum after
     // releasing jump. A full ceiling therefore requires swimming at feet level.
-    return observeMineflayerBlock(ceiling).collisionShapes.reduce((rise, box) => Math.min(rise, box.minY), 0.6);
+    return observeMineflayerBlock(ceiling).collisionShapes.reduce((rise, box) => Math.min(rise, box.minY), OPEN_WATER_RISE);
   }
 
   #stepUpHeadBonkClear(step: PlannedStep): boolean {
@@ -514,7 +521,7 @@ export class MineflayerBot implements NavigationBot {
       const completed = await this.bot.bucketDrop?.(step.to, signal);
       return completed ? { kind: "completed", arrival: step.to } : { kind: "failed", observation: "The planned bucket drop did not confirm landing and water recovery." };
     }
-    if (this.ownsDive() && (this.bot.blockAt({ ...step.to, y: step.to.y + 1 }) as MineflayerBlock | null)?.name === "water") {
+    if (this.ownsDive() && isSwimWater(this.bot.blockAt({ ...step.to, y: step.to.y + 1 }) as MineflayerBlock | null)) {
       const support = this.bot.blockAt({ ...step.to, y: step.to.y - 1 }) as MineflayerBlock | null;
       execution = { ...execution, swimDepth: step.to.y + (support?.boundingBox === "block" ? 0 : 0.2),
         swimGrounded: support?.boundingBox === "block" };
@@ -685,6 +692,213 @@ export class MineflayerBot implements NavigationBot {
     return null;
   }
 
+  longestBreakDurationMs(operation: Extract<PlannedOperation, { kind: "break" }>): number | null {
+    return this.bot.longestBreakDurationMs?.(operation.position, operation.toolType) ?? null;
+  }
+  /** The break half of `startEffect`: aim, dig, and wait for the server to say the block is gone. Null on success. */
+  async #breakEffect(operation: Extract<PlannedOperation, { kind: "break" }>, signal: AbortSignal, markIssued: () => void): Promise<EffectFailure | null> {
+    const feet = navigationFeet(this.bot.entity.position, this.bot.entity.onGround);
+    const directlyBelowFeet =
+      operation.position.x === feet.x && operation.position.y === feet.y - 1 && operation.position.z === feet.z;
+    // Baritone centres before downward excavation, but begins digging
+    // after its centring window even if the exact tolerance was not met.
+    // The observed landing, not this steering hint, decides success.
+    const body = blockPosition(this.bot.entity.position);
+    const directlyAboveHead =
+      operation.position.x === body.x && operation.position.z === body.z && operation.position.y > body.y;
+    if (directlyBelowFeet) await this.centerOnCell(feet, signal);
+    const block = this.bot.blockAt(new Vec3(operation.position.x, operation.position.y, operation.position.z));
+    if (!block) return { kind: "failed", observation: "Break target was not loaded." } as const;
+    if (operation.toolType !== null) {
+      const item = this.bot.inventory.items().find((candidate) => candidate.type === operation.toolType);
+      // The route was priced at tool speed. Hand-digging it instead is
+      // several times slower, so the confirmation window elapses and the
+      // failure is reported as a timeout — blaming the clock for an
+      // inventory fact. Say what is actually missing.
+      if (!item)
+        return {
+          kind: "failed",
+          observation: `The route planned to break with ${this.bot.itemName?.(operation.toolType) ?? `item type ${operation.toolType}`}, which is not in the inventory.`,
+        } as const;
+      await this.bot.equip(item, "hand");
+    } else {
+      // No tool helps: dig by hand rather than wear out whatever tool the last dig left in it.
+      await this.bot.putAwayHeldTool?.().catch(() => {});
+    }
+    signal.throwIfAborted();
+    this.selectedTool()?.(operation.toolType);
+    markIssued();
+    // Read before the hold so the dig aims where the route left the head.
+    const yaw = this.bot.entity.yaw;
+    const digStartedAt = Date.now();
+    const inWater = this.bot.entity.isInWater;
+    const releaseStance = this.bot.holdWaterStance(
+      signal,
+      (control, active) => this.#control(control, active),
+      operation.stance,
+    );
+    const serverWatch = this.bot.watchServerChange?.(operation.position);
+    let airborne = !this.bot.entity.onGround;
+    try {
+      // The planner priced a dig from a stance over a solid floor as standing (`digContextAt`), and Minecraft digs
+      // x5 slower off the ground: the hold lets the body sink onto that floor, and the swing waits for it, bounded.
+      if (operation.stance) await this.bot.landOnStanceFloor?.(operation.stance, signal);
+      airborne = !this.bot.entity.onGround;
+      const swing = async (target: unknown) => {
+        if (
+          (directlyBelowFeet || directlyAboveHead) &&
+          (await this.#aimVertical(directlyBelowFeet ? -Math.PI / 2 : Math.PI / 2, yaw))
+        ) {
+          await this.bot.dig(target, "ignore");
+          return null;
+        }
+        let aim = this.bot.visibleDigAim(operation.position);
+        // Search judges reach and sight from the centre of the stance
+        // cell, and the body can stop at its corner: a dig planned at the
+        // edge of reach is then out of view from where the bot stands.
+        // Stand where the plan assumed before reporting the face hidden.
+        if (aim === null && !directlyAboveHead && (await this.centerOnCell(feet, signal)))
+          aim = this.bot.visibleDigAim(operation.position);
+        if (aim === null) {
+          const { x, y, z } = this.bot.entity.position;
+          return {
+            kind: "failed",
+            observation:
+              `No face of the block at ${blockLabel(operation.position)} is in view from ` +
+              `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}.`,
+          } as const;
+        }
+        await this.bot.lookAt(new Vec3(aim.x, aim.y, aim.z), true);
+        await this.bot.dig(target, "ignore");
+        return null;
+      };
+      const first = await swing(block);
+      if (first) return first;
+      const dropped = await this.#awaitServerBreak(serverWatch, operation.position, signal);
+      if (dropped) return dropped;
+      // The falling column above lands in the cell once the block is
+      // gone. Baritone's `pauseMiningForFallingBlocks` waits for the
+      // entities and breaks what they leave. Moving on before they land
+      // walked the sand-curtain bot through the cell as the sand fell in
+      // behind it, and a tick slower would have buried it.
+      for (let landed = 0; landed < operation.brings.length; landed += 1) {
+        const refilled = await this.#awaitRefill(operation.position, signal);
+        if (refilled === null) break;
+        const again = await swing(refilled.block);
+        if (again) return again;
+      }
+    } finally {
+      serverWatch?.dispose();
+      releaseStance();
+      traceDig({
+        position: operation.position,
+        belowFeet: directlyBelowFeet,
+        airborne,
+        inWater,
+        toolType: operation.toolType,
+        elapsedMs: Date.now() - digStartedAt,
+      });
+    }
+    return null;
+  }
+  /** The placement half of `startEffect`. Null on success. */
+  async #placeEffect(operation: Extract<PlannedOperation, { kind: "place" }>, signal: AbortSignal, markIssued: () => void): Promise<EffectFailure | null> {
+    const item = this.bot.inventory.items().find((candidate) => candidate.type === operation.placement.itemType);
+    const support = this.bot.blockAt(
+      new Vec3(operation.placement.support.x, operation.placement.support.y, operation.placement.support.z),
+    );
+    if (!item) return { kind: "failed", observation: "The planned placement item was unavailable." } as const;
+    if (!support)
+      return { kind: "failed", observation: "The planned placement support was unavailable." } as const;
+    await this.bot.equip(item, "hand");
+    signal.throwIfAborted();
+    const feet = navigationFeet(this.bot.entity.position, this.bot.entity.onGround);
+    const pillar =
+      feet.x === operation.placement.position.x &&
+      feet.y === operation.placement.position.y &&
+      feet.z === operation.placement.position.z;
+    const placementTarget = new Vec3(
+      operation.placement.support.x + 0.5 + operation.placement.face.x * 0.5,
+      operation.placement.support.y + 0.5 + operation.placement.face.y * 0.5,
+      operation.placement.support.z + 0.5 + operation.placement.face.z * 0.5,
+    );
+    if (pillar) {
+      if (!(await this.centerOnCell(operation.placement.position, signal)))
+        return { kind: "failed", observation: "The bot could not center over its pillar cell." } as const;
+      const failed = await this.#jumpAndPlace(operation, support, placementTarget, signal, markIssued);
+      if (failed) return failed;
+    } else {
+      const adjacentFeetPlacement =
+        feet.y === operation.placement.position.y &&
+        (feet.x !== operation.placement.position.x || feet.z !== operation.placement.position.z);
+      if (adjacentFeetPlacement && !(await this.#moveClearOfCell(operation.placement.position, signal)))
+        return {
+          kind: "failed",
+          observation: "The bot could not move clear of the adjacent placement cell.",
+        } as const;
+      await this.bot.lookAt(placementTarget, true);
+      const obstacle = this.bot.placementObstacle(operation.placement.position);
+      if (obstacle) return { kind: "failed", observation: obstacle } as const;
+      markIssued();
+      await this.bot.placeBlock(
+        support,
+        new Vec3(operation.placement.face.x, operation.placement.face.y, operation.placement.face.z),
+      );
+    }
+    return null;
+  }
+  /** Place beneath the feet: crouch, jump, and put the block under the body at the top of the rise. Null on success. */
+  async #jumpAndPlace(
+    operation: Extract<PlannedOperation, { kind: "place" }>,
+    support: unknown,
+    placementTarget: Vec3,
+    signal: AbortSignal,
+    markIssued: () => void,
+  ): Promise<EffectFailure | null> {
+    let roseAbovePlacement = false;
+    let highestY = this.bot.entity.position.y;
+    this.#control("sneak", true);
+    try {
+      await this.bot.waitForTicks(1);
+      // The support's top face is directly beneath the feet, so its
+      // yaw is as meaningless as a straight-down dig's.
+      if (!(await this.#aimVertical(-Math.PI / 2))) await this.bot.lookAt(placementTarget, true);
+      this.#control("jump", true);
+      for (let tick = 0; tick < 20; tick += 1) {
+        signal.throwIfAborted();
+        await this.bot.waitForTicks(1);
+        highestY = Math.max(highestY, this.bot.entity.position.y);
+        if (this.bot.entity.position.y > operation.placement.position.y + 1.1) {
+          roseAbovePlacement = true;
+          break;
+        }
+      }
+      if (!roseAbovePlacement)
+        return {
+          kind: "failed",
+          observation: `The bot did not rise far enough to place beneath itself; peak y=${highestY.toFixed(2)}.`,
+        } as const;
+      const obstacle = this.bot.placementObstacle(operation.placement.position);
+      if (obstacle) return { kind: "failed", observation: obstacle } as const;
+      markIssued();
+      await this.bot.placeBlock(
+        support,
+        new Vec3(operation.placement.face.x, operation.placement.face.y, operation.placement.face.z),
+      );
+    } finally {
+      this.#control("jump", false);
+      this.#control("sneak", false);
+    }
+    return null;
+  }
+  /** The activation half of `startEffect`. Null on success. */
+  async #activateEffect(operation: Extract<PlannedOperation, { kind: "activate" }>, markIssued: () => void): Promise<EffectFailure | null> {
+    const block = this.bot.blockAt(new Vec3(operation.position.x, operation.position.y, operation.position.z));
+    if (!block) return { kind: "failed", observation: "Activation target was not loaded." } as const;
+    markIssued();
+    await this.bot.activateBlock(block);
+    return null;
+  }
   startEffect(
     operation: Exclude<PlannedOperation, { kind: "move" }>,
     _token: AttemptToken,
@@ -692,183 +906,19 @@ export class MineflayerBot implements NavigationBot {
   ): EffectHandle {
     let issued = false;
     let cancelled = false;
+    const markIssued = () => {
+      issued = true;
+    };
     const completion = (async () => {
       try {
         signal.throwIfAborted();
-        if (operation.kind === "break") {
-          const feet = navigationFeet(this.bot.entity.position, this.bot.entity.onGround);
-          const directlyBelowFeet =
-            operation.position.x === feet.x && operation.position.y === feet.y - 1 && operation.position.z === feet.z;
-          // Baritone centres before downward excavation, but begins digging
-          // after its centring window even if the exact tolerance was not met.
-          // The observed landing, not this steering hint, decides success.
-          const body = blockPosition(this.bot.entity.position);
-          const directlyAboveHead =
-            operation.position.x === body.x && operation.position.z === body.z && operation.position.y > body.y;
-          if (directlyBelowFeet) await this.centerOnCell(feet, signal);
-          const block = this.bot.blockAt(new Vec3(operation.position.x, operation.position.y, operation.position.z));
-          if (!block) return { kind: "failed", observation: "Break target was not loaded." } as const;
-          if (operation.toolType !== null) {
-            const item = this.bot.inventory.items().find((candidate) => candidate.type === operation.toolType);
-            // The route was priced at tool speed. Hand-digging it instead is
-            // several times slower, so the confirmation window elapses and the
-            // failure is reported as a timeout — blaming the clock for an
-            // inventory fact. Say what is actually missing.
-            if (!item)
-              return {
-                kind: "failed",
-                observation: `The route planned to break with ${this.bot.itemName?.(operation.toolType) ?? `item type ${operation.toolType}`}, which is not in the inventory.`,
-              } as const;
-            await this.bot.equip(item, "hand");
-          } else {
-            // No tool helps: dig by hand rather than wear out whatever tool the last dig left in it.
-            await this.bot.putAwayHeldTool?.().catch(() => {});
-          }
-          signal.throwIfAborted();
-          this.selectedTool()?.(operation.toolType);
-          issued = true;
-          // Read before the hold so the dig aims where the route left the head.
-          const yaw = this.bot.entity.yaw;
-          const digStartedAt = Date.now();
-          const airborne = !this.bot.entity.onGround;
-          const inWater = this.bot.entity.isInWater;
-          const releaseStance = holdWaterPosition(this.bot, signal, (control, active) =>
-            this.#control(control, active),
-          );
-          try {
-            const swing = async (target: unknown) => {
-              if (
-                (directlyBelowFeet || directlyAboveHead) &&
-                (await this.#aimVertical(directlyBelowFeet ? -Math.PI / 2 : Math.PI / 2, yaw))
-              ) {
-                await this.bot.dig(target, "ignore");
-                return null;
-              }
-              let aim = this.bot.visibleDigAim(operation.position);
-              // Search judges reach and sight from the centre of the stance
-              // cell, and the body can stop at its corner: a dig planned at the
-              // edge of reach is then out of view from where the bot stands.
-              // Stand where the plan assumed before reporting the face hidden.
-              if (aim === null && !directlyAboveHead && (await this.centerOnCell(feet, signal)))
-                aim = this.bot.visibleDigAim(operation.position);
-              if (aim === null) {
-                const { x, y, z } = this.bot.entity.position;
-                return {
-                  kind: "failed",
-                  observation:
-                    `No face of the block at ${blockLabel(operation.position)} is in view from ` +
-                    `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}.`,
-                } as const;
-              }
-              await this.bot.lookAt(new Vec3(aim.x, aim.y, aim.z), true);
-              await this.bot.dig(target, "ignore");
-              return null;
-            };
-            const first = await swing(block);
-            if (first) return first;
-            // The falling column above lands in the cell once the block is
-            // gone. Baritone's `pauseMiningForFallingBlocks` waits for the
-            // entities and breaks what they leave. Moving on before they land
-            // walked the sand-curtain bot through the cell as the sand fell in
-            // behind it, and a tick slower would have buried it.
-            for (let landed = 0; landed < operation.brings.length; landed += 1) {
-              const refilled = await this.#awaitRefill(operation.position, signal);
-              if (refilled === null) break;
-              const again = await swing(refilled.block);
-              if (again) return again;
-            }
-          } finally {
-            releaseStance();
-            traceDig({
-              position: operation.position,
-              belowFeet: directlyBelowFeet,
-              airborne,
-              inWater,
-              toolType: operation.toolType,
-              elapsedMs: Date.now() - digStartedAt,
-            });
-          }
-        } else if (operation.kind === "place") {
-          const item = this.bot.inventory.items().find((candidate) => candidate.type === operation.placement.itemType);
-          const support = this.bot.blockAt(
-            new Vec3(operation.placement.support.x, operation.placement.support.y, operation.placement.support.z),
-          );
-          if (!item) return { kind: "failed", observation: "The planned placement item was unavailable." } as const;
-          if (!support)
-            return { kind: "failed", observation: "The planned placement support was unavailable." } as const;
-          await this.bot.equip(item, "hand");
-          signal.throwIfAborted();
-          const feet = navigationFeet(this.bot.entity.position, this.bot.entity.onGround);
-          const pillar =
-            feet.x === operation.placement.position.x &&
-            feet.y === operation.placement.position.y &&
-            feet.z === operation.placement.position.z;
-          const placementTarget = new Vec3(
-            operation.placement.support.x + 0.5 + operation.placement.face.x * 0.5,
-            operation.placement.support.y + 0.5 + operation.placement.face.y * 0.5,
-            operation.placement.support.z + 0.5 + operation.placement.face.z * 0.5,
-          );
-          if (pillar) {
-            if (!(await this.centerOnCell(operation.placement.position, signal)))
-              return { kind: "failed", observation: "The bot could not center over its pillar cell." } as const;
-            let roseAbovePlacement = false;
-            let highestY = this.bot.entity.position.y;
-            this.#control("sneak", true);
-            try {
-              await this.bot.waitForTicks(1);
-              // The support's top face is directly beneath the feet, so its
-              // yaw is as meaningless as a straight-down dig's.
-              if (!(await this.#aimVertical(-Math.PI / 2))) await this.bot.lookAt(placementTarget, true);
-              this.#control("jump", true);
-              for (let tick = 0; tick < 20; tick += 1) {
-                signal.throwIfAborted();
-                await this.bot.waitForTicks(1);
-                highestY = Math.max(highestY, this.bot.entity.position.y);
-                if (this.bot.entity.position.y > operation.placement.position.y + 1.1) {
-                  roseAbovePlacement = true;
-                  break;
-                }
-              }
-              if (!roseAbovePlacement)
-                return {
-                  kind: "failed",
-                  observation: `The bot did not rise far enough to place beneath itself; peak y=${highestY.toFixed(2)}.`,
-                } as const;
-              const obstacle = this.bot.placementObstacle(operation.placement.position);
-              if (obstacle) return { kind: "failed", observation: obstacle } as const;
-              issued = true;
-              await this.bot.placeBlock(
-                support,
-                new Vec3(operation.placement.face.x, operation.placement.face.y, operation.placement.face.z),
-              );
-            } finally {
-              this.#control("jump", false);
-              this.#control("sneak", false);
-            }
-          } else {
-            const adjacentFeetPlacement =
-              feet.y === operation.placement.position.y &&
-              (feet.x !== operation.placement.position.x || feet.z !== operation.placement.position.z);
-            if (adjacentFeetPlacement && !(await this.#moveClearOfCell(operation.placement.position, signal)))
-              return {
-                kind: "failed",
-                observation: "The bot could not move clear of the adjacent placement cell.",
-              } as const;
-            await this.bot.lookAt(placementTarget, true);
-            const obstacle = this.bot.placementObstacle(operation.placement.position);
-            if (obstacle) return { kind: "failed", observation: obstacle } as const;
-            issued = true;
-            await this.bot.placeBlock(
-              support,
-              new Vec3(operation.placement.face.x, operation.placement.face.y, operation.placement.face.z),
-            );
-          }
-        } else {
-          const block = this.bot.blockAt(new Vec3(operation.position.x, operation.position.y, operation.position.z));
-          if (!block) return { kind: "failed", observation: "Activation target was not loaded." } as const;
-          issued = true;
-          await this.bot.activateBlock(block);
-        }
+        const failed =
+          operation.kind === "break"
+            ? await this.#breakEffect(operation, signal, markIssued)
+            : operation.kind === "place"
+              ? await this.#placeEffect(operation, signal, markIssued)
+              : await this.#activateEffect(operation, markIssued);
+        if (failed) return failed;
         if (!cancelled && operation.kind === "place") this.bot.combatResourceReceipt?.();
         return cancelled
           ? ({ kind: "failed", observation: "Completion arrived after cancellation." } as const)
@@ -887,6 +937,23 @@ export class MineflayerBot implements NavigationBot {
         if (operation.kind === "break" && issued) this.bot.stopDigging();
       },
     };
+  }
+  /**
+   * A break is done when the server says so: Mineflayer wrote air into the client world itself when its dig timer ended, and
+   * a dig the server dropped leaves the block there (ghost air). Null when the server answered, or there is no server to ask.
+   */
+  async #awaitServerBreak(watch: ServerChangeWatch | undefined, position: BlockPosition, signal: AbortSignal) {
+    if (!watch || (await watch.answer(signal))) return null;
+    const resync = await this.requestCellResync(position, signal);
+    return {
+      kind: "failed",
+      observation:
+        `The server did not confirm breaking the block at ${blockLabel(position)} (no packet for that cell arrived in time); ` +
+        `the bot ${resync === "unavailable" ? "could not ask it" : "asked it"} to resend the cell. Give the order again.`,
+    } as const;
+  }
+  async requestCellResync(cell: Position3, signal: AbortSignal): Promise<CellResync> {
+    return (await this.bot.requestCellResync?.(cell, signal)) ?? "unavailable";
   }
   async stabilize(signal: AbortSignal) {
     for (let tick = 0; tick < 20; tick += 1) {

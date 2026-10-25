@@ -1,0 +1,33 @@
+template: ../../templates/flat-single-action.yaml
+
+name: place-block-slow-server
+tags: [regression]
+description: >-
+  Resume credit (spec 2026-10-19, S1): "the server answered" is an answer packet or the world age, never a fixed
+  250 ms or five client ticks. At two ticks per second the block update and the slot update reach the client far
+  later than the old settle deadline; place_block of a carried cobblestone into a cell in reach must still succeed,
+  with the block in the world and one cobblestone fewer.
+
+setup: ["tick rate 2"]
+
+geometry:
+  - fill: { block: stone, from: [-6, -60, -6], to: [8, -60, 6] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: cobblestone, count: 2 }
+
+params:
+  action: place_block
+  expect: { status: succeeded }
+  input: { block_name: cobblestone, x: 2, y: -59, z: 0 }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: blocksAt, block: cobblestone, positions: [[2, -59, 0]] }
+    - { kind: hasItem, who: Actor, item: cobblestone, count: 1 }

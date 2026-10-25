@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { persistentBotData, temporaryBotData } from "../../test-support/bot-data.js";
 import { createNoteReadAction, parseNoteReadRequest } from "../note-read/index.js";
 import { createNoteSaveAction, parseNoteSaveRequest } from "./index.js";
 
-function noteBot(username = "NoteBot", age: number | null = 24000) {
-  return botFixture({ username, position: { x: 12.5, y: 64, z: -3.25 } }, { time: { age } });
+function noteBot(username = "NoteBot", timePacketYet = true) {
+  return createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 }, server: { startAge: 24000, timePacketYet } });
+}
+
+/** A bot that has not had its first time packet: `bot.time.age` is null (`time.js`). */
+function noteBotBeforeFirstTimePacket(username: string) {
+  return noteBot(username, false);
 }
 
 const request = { note: "Bring a bucket", context: "Found lava while looking for iron." };
@@ -36,7 +41,7 @@ test("notes persist across reopen, snapshot location and time, and read newest f
   {
     const first = await (async () => {
       using data = storage.open("notes-test");
-      const bot = noteBot();
+      const { bot, clock } = noteBot();
       const save = createNoteSaveAction(bot, data);
       const read = createNoteReadAction(data, bot.username);
       assert.equal(save.annotations?.readOnlyHint, false);
@@ -62,10 +67,10 @@ test("notes persist across reopen, snapshot location and time, and read newest f
 
       bot.entity.position.x = 100;
       bot.game.dimension = "the_nether";
-      bot.time.age = 24040;
+      await clock.advance(2_000);
       // Identical text appends; it does not silently overwrite the original context/location.
       await save.execute(request, {});
-      await createNoteSaveAction(noteBot("OtherBot"), data).execute(request, {});
+      await createNoteSaveAction(noteBot("OtherBot").bot, data).execute(request, {});
       return saved.note;
     })();
 
@@ -100,7 +105,7 @@ test("notes persist across reopen, snapshot location and time, and read newest f
 
 test("an unavailable world clock stays unknown and a cancelled save writes nothing", async () => {
   using data = temporaryBotData({ botId: "NoteBot" });
-  const save = createNoteSaveAction(noteBot("NoteBot", null), data);
+  const save = createNoteSaveAction(noteBotBeforeFirstTimePacket("NoteBot").bot, data);
   const saved = await save.execute(request, {});
   assert.equal(saved.note.worldAgeTicks, null);
   await assert.rejects(save.execute(request, { signal: AbortSignal.abort() }));

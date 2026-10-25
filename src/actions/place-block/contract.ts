@@ -85,5 +85,7 @@ export const placeBlockOutcomes = {
   targetOccupied: (blockName: string) =>
     `[PLACE_TARGET_OCCUPIED] The target cell contains ${blockName}, which this action will not remove.`,
   noSupport: "[PLACE_NO_SUPPORT] No adjacent solid block can support placement into the target cell.",
+  placementNotLoaded: (cell: { x: number; y: number; z: number }) =>
+    `[PLACE_CELL_NOT_LOADED] The block this request placed at (${cell.x}, ${cell.y}, ${cell.z}) is in a chunk that is not loaded, so it cannot be checked: go back near it (navigate to ${cell.x}, ${cell.y}, ${cell.z}), then call place_block again.`,
   failed: (reason: string) => `[PLACE_FAILED] Mineflayer could not place the requested block: ${reason}`,
 } as const;

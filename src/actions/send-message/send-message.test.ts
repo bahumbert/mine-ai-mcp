@@ -2,15 +2,16 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ActionRunner } from "../../session/action-runner.js";
-import { botFixture } from "../../test-support/bot.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import {
   createSendMessageAction,
+  isChatTextAccepted,
   formatSendMessageResult,
   parseSendMessageRequest,
 } from "./index.js";
 
 function chatBot(send: (bot: Bot, message: string) => void): Bot {
-  const bot = botFixture({ username: "MineAI" });
+  const { bot } = createFakeBot({ username: "MineAI" });
   bot.chat = (message) => send(bot, message);
   return bot;
 }
@@ -78,11 +79,11 @@ function whisperEcho(target: string, text: string) {
 
 /** The server's line reaching the client: Mineflayer's `message` event, whose payload is all the action reads. */
 function emitMessage(bot: Bot, line: ReturnType<typeof whisperEcho>) {
-  (bot as unknown as { emit(event: string, ...args: unknown[]): boolean }).emit("message", line);
+  bot.emit("message", line as never, "chat");
 }
 
 function whisperBot(players: string[], echo: (bot: Bot, to: string, message: string) => void = (bot, to, message) => emitMessage(bot, whisperEcho(to, message))) {
-  const bot = botFixture({ username: "MineAI", players: Object.fromEntries(players.map((name) => [name, { username: name }])) });
+  const { bot } = createFakeBot({ username: "MineAI", players: Object.fromEntries(players.map((name) => [name, { username: name }])) });
   const whispered: [string, string][] = [];
   const publicLines: string[] = [];
   bot.chat = (message) => publicLines.push(message);
@@ -145,4 +146,38 @@ test("a cancelled whisper releases its echo listener", async () => {
   controller.abort(new Error("stop waiting"));
   assert.equal((await pending).result.status, "cancelled");
   assert.equal(bot.listenerCount("message"), 0);
+});
+
+test("refuses § and control characters before anything is sent, in public chat and in a whisper", async () => {
+  for (const message of ["a§b", "bell\u0007", "del\u007f", "tab\there", "\u0007hi", "hi\u0000", "§"]) {
+    assert.throws(() => parseSendMessageRequest({ message }), /Message holds characters the server refuses/, JSON.stringify(message));
+    assert.throws(() => parseSendMessageRequest({ message, to: "Alex" }), /Message holds characters the server refuses/, JSON.stringify(message));
+  }
+  const { bot, whispered, publicLines } = whisperBot(["Alex"]);
+  const action = createSendMessageAction(bot);
+  for (const input of [{ message: "a§b" }, { message: "a§b", to: "Alex" }]) {
+    const { result } = await new ActionRunner().run(action, input);
+    assert.equal(result.status, "failed");
+    assert.match("error" in result ? result.error : "", /^\[INVALID_ARGUMENTS\].*remove them and send again/s);
+  }
+  assert.deepEqual([publicLines, whispered], [[], []]);
+});
+
+test("the refusal for § and control characters tells the model to remove them and send again", () => {
+  assert.throws(() => parseSendMessageRequest({ message: "a§b" }), /remove them and send again/);
+});
+
+test("accepts accented letters and emoji", () => {
+  assert.deepEqual(parseSendMessageRequest({ message: "été 🙂" }), { message: "été 🙂" });
+  assert.deepEqual(parseSendMessageRequest({ message: "café", to: "Alex" }), { message: "café", to: "Alex" });
+});
+
+test("isChatTextAccepted refuses the characters the server disconnects a client for, not the length", () => {
+  assert.equal(isChatTextAccepted("plain text"), true);
+  assert.equal(isChatTextAccepted("a§b"), false);
+  assert.equal(isChatTextAccepted("a\u001fb"), false);
+  assert.equal(isChatTextAccepted("a\u007fb"), false);
+  assert.equal(isChatTextAccepted("x".repeat(256)), true);
+  assert.throws(() => parseSendMessageRequest({ message: `${"x".repeat(255)}§` }), /server refuses/);
+  assert.throws(() => parseSendMessageRequest({ message: `${"x".repeat(256)}§` }));
 });
