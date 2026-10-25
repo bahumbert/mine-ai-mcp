@@ -3,13 +3,18 @@
 // so a plain deposit lands on a renamed stack, the server swaps the two (contract check `variant-transfer-clicks`) and the cursor keeps a stack.
 import type { Bot } from "mineflayer";
 import { isPlainItem, itemVariantKey } from "../../world/item-variant.js";
-import { type ClickWaitTiming, watchClickAnswer } from "./window-answer.js";
+import { type ClickAnswerWatch, type ClickWaitTiming, ClickAnswerTimeout, watchClickAnswer } from "./window-answer.js";
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
 type WindowStack = NonNullable<ContainerWindow["slots"][number]>;
 type Operation = "deposit" | "withdraw";
 
-/** Longest one `transferByVariant` call takes on the monotonic wall clock: 27 stacks, each with the 40 ticks (2 s) of quiet a right prediction needs, and slack for a lagging server. */
+/**
+ * Longest a `transferByVariant` call goes on the monotonic wall clock without a source stack settling: the bound renews at each
+ * answer, so a 27-stack transfer on a slow server (each stack waits 40 ticks) goes on while the stacks keep settling, and a
+ * stall inside one stack's wait is bounded by the click's own `CLICK_STALL_MS` and `CLICK_WALL_MS`. It is a guard against a hang
+ * (clicks that take long to write, rounds of recovery), not the transfer's total time: the caller's abort ends a transfer sooner.
+ */
 const TRANSFER_WALL_MS = 90_000;
 /** Times a stack the server left in hand after its answer is put back before the transfer gives up on it. */
 const CURSOR_RECOVERY_ROUNDS = 3;
@@ -52,7 +57,8 @@ export function planPlacement(held: number, stackSize: number, destCount: number
 
 class VariantTransfer {
   private readonly now: () => number;
-  private readonly deadline: number;
+  /** The wall time after which the next click is refused; pushed on by every settled answer. */
+  private deadline: number;
   private readonly wallMs: number;
   private held: Held | null = null;
   private readonly sourceStart: number;
@@ -84,8 +90,17 @@ class VariantTransfer {
       if (stop) throw stop;
       const source = this.nextSource(itemType);
       if (source === null) throw new Error(this.missingSourceMessage(itemType, count - remaining));
-      remaining -= await this.moveFromSource(source, remaining);
+      remaining -= await this.moveFromSource(source, remaining).catch((cause: unknown) => {
+        if (!(cause instanceof ClickAnswerTimeout)) throw cause;
+        throw new ClickAnswerTimeout(cause.slot, cause.waited, cause.age, count - remaining, count, { cause });
+      });
     }
+  }
+
+  /** Wait for the server's answer to the clicks sent since the watch began; the transfer's deadline starts over once it came. */
+  private async settleAnswer(answer: ClickAnswerWatch, slot: number): Promise<void> {
+    await answer.settle(slot, this.options.signal);
+    this.deadline = this.now() + this.wallMs;
   }
 
   /** Why the next click must not be sent, if it must not: the window is no longer the open one, an abort, or the call's wall bound (a rescue click ignores the last two). */
@@ -133,7 +148,7 @@ class VariantTransfer {
       await this.click(sourceSlot, 0);
       this.held.count = source.count;
       await this.placeAndReturn(sourceSlot, wanted);
-      await answer.settle(sourceSlot, this.options.signal);
+      await this.settleAnswer(answer, sourceSlot);
     } finally {
       answer.stop();
     }
@@ -264,7 +279,7 @@ class VariantTransfer {
       const answer = watchClickAnswer(this.bot, this.window, this.options.timing);
       try {
         await this.putBack(sourceSlot, true);
-        await answer.settle(sourceSlot, this.options.signal);
+        await this.settleAnswer(answer, sourceSlot);
       } finally {
         answer.stop();
       }

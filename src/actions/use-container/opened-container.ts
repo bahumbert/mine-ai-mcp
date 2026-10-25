@@ -56,7 +56,7 @@ export class OpenedContainer implements Disposable {
   /**
    * Left-click a slot. A click that lands a stack on another stack of its item is a merge in Mineflayer's prediction and
    * may be a swap on the server (two variants: contract check click-window-onto-variant), and `clickWindow` resolves when the
-   * packet is written, not when the server answers: the next read of the cursor waits for the server's correction or quiet.
+   * packet is written, not when the server answers: the next read of the cursor waits for the world age to move 40 ticks (the server's answer, or its quiet), whatever packets come.
    */
   async clickStack(slot: number, signal?: AbortSignal): Promise<void> {
     const landsOnItsKind = this.window.selectedItem !== null && this.window.slots[slot]?.type === this.window.selectedItem.type;

@@ -1,21 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type ContainerStack, createFakeBot, stackText } from "../../test-support/fake-bot/index.js";
+import { type ContainerStack, type FakeBotOptions, createFakeBot, stackText } from "../../test-support/fake-bot/index.js";
+import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
 import { planPlacement, transferByVariant, type VariantTransferOptions } from "./variant-transfer.js";
 
 const CELL = "1,64,1";
 /** The 27 chest slots, then the player's 27 main slots (27-53) and 9 hotbar slots (54-62) in the window's numbering. */
 const CHEST_SLOTS = 27;
 const FIRST_PLAYER_SLOT = 27;
-/** Ticks the world age moves before "the server sent nothing" is its answer. */
-const QUIET_TICKS = 40;
-/** Long enough for a call on the fake clock, which only moves while a test lets it. */
-const CALL_MS = 120_000;
+/** Long enough for a call on the fake clock, which only moves while a test lets it (27 stacks at 8 ticks a second take 135 s). */
+const CALL_MS = 300_000;
 
 /** The bot beside a chest at CELL holding `stacks` (item or `ITEM_VARIANTS` names, by slot), carrying `carried`, with the chest open. */
-async function openChest(stacks: readonly ContainerStack[], carried: Readonly<Record<string, number>> = {}) {
-  const harness = createFakeBot({ position: new Vec3(0, 64, 0), cells: { [CELL]: "chest" }, carried, containers: { [CELL]: {} } });
+async function openChest(stacks: readonly ContainerStack[], carried: Readonly<Record<string, number>> = {}, serverOptions: FakeBotOptions["server"] = {}) {
+  const harness = createFakeBot({ position: new Vec3(0, 64, 0), cells: { [CELL]: "chest" }, carried, containers: { [CELL]: {} }, server: serverOptions });
   const { bot, clock, windows, server } = harness;
   windows.setContainerStacks(CELL, stacks);
   const window = await clock.settle(bot.openContainer(bot.blockAt(new Vec3(1, 64, 1))!), 5_000);
@@ -164,20 +163,37 @@ test("a correct click the server sends nothing back for completes once the world
   const sentAt = scene.age();
   await scene.transfer("withdraw", "cobblestone", 128);
   const waited = scene.age() - sentAt;
-  assert.ok(waited >= 2 * QUIET_TICKS && waited < 2 * QUIET_TICKS + 20, `${waited} ticks for two source stacks: one wait each`);
+  assert.ok(waited >= 2 * SERVER_ANSWER_TICKS && waited < 2 * SERVER_ANSWER_TICKS + 20, `${waited} ticks for two source stacks: one wait each`);
 });
 
-test("a server whose world age stands still fails the transfer on the wall clock naming the click it never answered, with the cursor empty", async () => {
-  const scene = await openChest(slotted(["cobblestone x64"]));
-  scene.server.stop();
-  await assert.rejects(scene.transfer("withdraw", "cobblestone", 64), /did not answer the click on slot 0 within \d+ ms.*Reopen/s);
-  assert.equal(scene.cursor(), null, "the stack was placed before the wait");
-});
-
-test("a call that takes longer than its bound fails with the cause, the stack in hand put back", async () => {
-  const scene = await openChest(slotted(["cobblestone x64", "cobblestone x64", "cobblestone x64"]));
-  await assert.rejects(scene.transfer("withdraw", "cobblestone", 192, { wallMs: 3_000 }), new RegExp(`took longer than 3000 ms`));
+test("a transfer in which no source stack settles within its bound fails with the cause, the stack in hand put back", async () => {
+  // Each click the server receives costs 2 s of wall time on the transfer's clock (a blocked event loop): the stack of 63 never settles inside 3 s.
+  const scene = await openChest([], { cobblestone: 64 });
+  let received = 0;
+  scene.windows.onClickReceived(() => void (received += 1));
+  const slowClock = { now: () => scene.clock.now() + received * 2_000, sleep: scene.clock.sleep };
+  await assert.rejects(scene.transfer("deposit", "cobblestone", 63, { wallMs: 3_000, timing: slowClock }), /took longer than 3000 ms/);
   assert.equal(scene.cursor(), null);
+});
+
+test("a transfer of 27 stacks on a server at 8 ticks a second finishes: the bound renews at each settled stack", async () => {
+  const scene = await openChest(slotted(Array.from({ length: CHEST_SLOTS }, () => "cobblestone x64")), {}, { ticksPerSecond: 8 });
+  const startedAt = scene.clock.now();
+  await scene.transfer("withdraw", "cobblestone", 27 * 64);
+  assert.ok(scene.clock.now() - startedAt > 90_000, `took ${scene.clock.now() - startedAt} ms: longer than the 90 s a fixed bound allowed`);
+  assert.deepEqual(scene.chest(), []);
+  assert.equal(Object.keys(scene.player()).length, CHEST_SLOTS);
+  assert.equal(scene.cursor(), null);
+});
+
+test("a server that stops after the 10th stack fails the transfer at the click's stall bound, naming what moved so far", async () => {
+  const scene = await openChest(slotted(Array.from({ length: 12 }, () => "cobblestone x64")));
+  let received = 0;
+  // A stack of 64 onto an empty slot is two clicks: the stop falls with the 11th stack's pick-up.
+  scene.windows.onClickReceived(() => void (++received === 21 && scene.server.stop()));
+  await assert.rejects(scene.transfer("withdraw", "cobblestone", 12 * 64), /did not answer the click on slot 10: the world age did not move for 5 s.*640 of 768 were moved before this stack.*Reopen/s);
+  assert.equal(scene.cursor(), null, "the stack was placed before the wait");
+  assert.ok(scene.clock.now() < 100_000);
 });
 
 test("63 of a stack of 64 into an empty slot takes the half-pickup path's clicks and one wait", async () => {
@@ -186,7 +202,7 @@ test("63 of a stack of 64 into an empty slot takes the half-pickup path's clicks
   await scene.transfer("deposit", "cobblestone", 63);
   // pick-up, left onto the destination, right to take the larger half, 31 single rights, the one left over back
   assert.equal(scene.clicks(), 1 + 1 + 1 + 31 + 1);
-  assert.ok(scene.age() - sentAt < 2 * QUIET_TICKS, "one wait for the stack");
+  assert.ok(scene.age() - sentAt < 2 * SERVER_ANSWER_TICKS, "one wait for the stack");
   assert.deepEqual(scene.chest(), ["0: cobblestone x63"]);
   assert.deepEqual(scene.player(), { 54: "cobblestone x1" });
 });

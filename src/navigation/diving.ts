@@ -4,7 +4,7 @@ import { airSupplyTicks } from "../world/air-supply.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
 import { timeoutSignal } from "../utils/wall-timers.js";
-import { waitForWorldAge } from "../world/world-age.js";
+import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
@@ -35,8 +35,6 @@ const AIR_OBSERVATION_TICKS = 40;
 
 /** Minecraft refills a breathing body's air by 4 a tick (`LivingEntity.increaseAirSupply`). */
 const AIR_REFILL_PER_TICK = 4;
-/** World ticks past the refill time a server answer may take (session rules: "a wait is not a server answer"). */
-const SERVER_ANSWER_TICKS = 40;
 /** Longest wall-clock wait for full air at a breathing stop, whatever the server's clock does. */
 const BREATHING_STOP_WALL_MS = 15_000;
 const FULL_AIR_NOT_OBSERVED = "Full air was not observed at the breathing stop: the server's clock passed the refill time, or 15 s went by, without it";

@@ -141,3 +141,47 @@ test("a bot without a world age waits on the wall clock only", async () => {
   const wait = await clock.settle(waitForServerAnswer(bot, 0, { wallMs: 1_000, until: () => false, ...timing }), 1_050);
   assert.equal(wait, "timeout");
 });
+
+// `stallMs`: the wait times out when the age stands still that long, not when 40 ticks take long.
+test("a server at 8 ticks a second moves 40 ticks in about 5 s: no timeout under a 5 s stall bound", async () => {
+  // Both cadences hold: a time packet every second (8 ticks) or one per 20 ticks (every 2.5 s) moves the age inside the stall bound.
+  const { bot, clock, timing } = worldBot(1_000, { server: { startAge: 1_000, ticksPerSecond: 8 } });
+  const pending = waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing });
+  const wait = watch(pending);
+
+  await clock.advance(4_000);
+  assert.equal(wait.over, false, "40 ticks at 8 a second take 5 s");
+
+  assert.equal(await clock.settle(pending, 6_000), "moved");
+  assert.ok(clock.now() >= 4_000 && clock.now() <= 8_000, `moved after ${clock.now()} ms`);
+});
+
+for (const { stopMs, outcome } of [{ stopMs: 3_000, outcome: "moved" }, { stopMs: 6_000, outcome: "stalled" }] as const) {
+  test(`a server stopped ${stopMs / 1_000} s inside the wait with a 5 s stall bound ends ${outcome}, long before the 15 s wall bound`, async () => {
+    const { bot, clock, server, timing } = worldBot();
+    clock.after(1_000, () => server.stop());
+    clock.after(1_000 + stopMs, () => server.resume());
+
+    assert.equal(await clock.settle(waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing }), 15_000), outcome);
+    assert.ok(clock.now() < 10_000, `ended at ${clock.now()} ms`);
+  });
+}
+
+test("an age that moves under the stall bound but too slowly for the asked ticks ends at the outer wall bound", async () => {
+  // A time object the test moves by hand: the age creeps one tick every 2 s, never standing still for the 5 s stall bound.
+  const time = { age: 1_000 };
+  const { bot, clock, timing } = worldBot(1_000, { overrides: { time } as FakeBotOptions["overrides"] });
+  const creep = () => {
+    time.age += 1;
+    clock.after(2_000, creep);
+  };
+  clock.after(2_000, creep);
+
+  assert.equal(await clock.settle(waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing }), 16_000), "timeout");
+  assert.ok(clock.now() >= 15_000, `ended at ${clock.now()} ms`);
+});
+
+test("a stall bound counts from the first age a bot hears when it had none", async () => {
+  const { bot, clock, timing } = worldBot(1_000, { server: { startAge: 1_000, timePacketYet: false } });
+  assert.equal(await clock.settle(waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing }), 15_000), "moved");
+});

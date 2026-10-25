@@ -7,7 +7,7 @@
  * listens here, never to `blockUpdate`.
  */
 import type { Bot } from "mineflayer";
-import { waitForWorldAge, type WorldAgeOptions } from "../../world/world-age.js";
+import { SERVER_ANSWER_TICKS, waitForWorldAge, type WorldAgeOptions } from "../../world/world-age.js";
 import type { Position3 } from "../world/world.js";
 
 /** A cell the server named, or a whole column it sent again (every cell of the column is then the server's answer). */
@@ -77,8 +77,6 @@ export function subscribeServerBlockChanges(
   };
 }
 
-/** The server's clock moving this far past a request without a packet for the cell means none is coming. */
-export const SERVER_ANSWER_TICKS = 40;
 /** The same bound on the monotonic wall clock, for a server whose clock has stopped. */
 export const SERVER_ANSWER_WALL_MS = 2_000;
 

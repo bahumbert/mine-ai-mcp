@@ -8,11 +8,17 @@
  */
 import type { Bot } from "mineflayer";
 
-export type WorldAgeWait = "moved" | "until" | "timeout";
+/** `stalled`: the world age stood still for `stallMs`; `timeout`: `wallMs` passed. */
+export type WorldAgeWait = "moved" | "until" | "timeout" | "stalled";
 
 export interface WorldAgeOptions {
   /** Longest wait on the monotonic wall clock, whatever the server clock does. */
   readonly wallMs: number;
+  /**
+   * Longest time the world age may stand still: the bound renews at each move of the age, so a slow server that
+   * keeps moving is waited for up to `wallMs`, and a stopped one is given up on after this long. Absent: only `wallMs`.
+   */
+  readonly stallMs?: number;
   readonly signal?: AbortSignal;
   /** The change waited for; checked at every look. */
   readonly until?: () => boolean;
@@ -40,7 +46,7 @@ function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Resolve when `until` is true, the world age moved `ticks` past its value now, or `wallMs` passed. */
+/** Resolve when `until` is true, the world age moved `ticks` past its value now, the age stood still for `stallMs`, or `wallMs` passed. */
 export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, options: WorldAgeOptions): Promise<WorldAgeWait> {
   const now = options.now ?? (() => performance.now());
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
@@ -48,14 +54,19 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
   const startedAt = now();
   // A bot that has heard no time packet yet has a null age (`time.js`): the first age it hears is the one to move from.
   let ageAtStart = bot.time?.age ?? undefined;
+  let lastAge = ageAtStart;
+  let lastMoveAt = startedAt;
   for (;;) {
     options.signal?.throwIfAborted();
     if (options.until?.() === true) return "until";
     const age = bot.time?.age ?? undefined;
     ageAtStart ??= age;
     if (ageAtStart !== undefined && age !== undefined && age - ageAtStart >= ticks) return "moved";
+    if (age !== lastAge) [lastAge, lastMoveAt] = [age, now()];
     if (now() - startedAt >= options.wallMs) return "timeout";
-    await sleep(Math.min(pollMs, Math.max(1, options.wallMs - (now() - startedAt))));
+    if (options.stallMs !== undefined && now() - lastMoveAt >= options.stallMs) return "stalled";
+    const untilBound = Math.min(options.wallMs - (now() - startedAt), options.stallMs === undefined ? Infinity : options.stallMs - (now() - lastMoveAt));
+    await sleep(Math.min(pollMs, Math.max(1, untilBound)));
   }
 }
 
@@ -63,14 +74,14 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
 export const SERVER_ANSWER_TICKS = 40;
 
 /**
- * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, or `wallMs` passed.
+ * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, it stood still for `stallMs`, or `wallMs` passed.
  * `sentAtAge` is the age when the request went out (undefined: the age now), so a caller that looked away for a while
  * does not wait the 40 ticks again.
  */
 export function waitForServerAnswer(
   bot: Pick<Bot, "time">,
   sentAtAge: number | undefined,
-  options: Omit<WorldAgeOptions, "until"> & { readonly until: () => boolean },
+  options: WorldAgeOptions,
 ): Promise<WorldAgeWait> {
   const ageNow = bot.time?.age;
   const ticksLeft = sentAtAge === undefined || ageNow === undefined ? SERVER_ANSWER_TICKS : sentAtAge + SERVER_ANSWER_TICKS - ageNow;

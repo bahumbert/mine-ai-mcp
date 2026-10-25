@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, stackText } from "../../test-support/fake-bot/index.js";
-import { CLICK_ANSWER_WALL_MS } from "./window-answer.js";
+import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
+import { CLICK_WALL_MS } from "./window-answer.js";
 import { OpenedContainer } from "./opened-container.js";
 
 const CELL = "1,64,1";
-/** Ticks the world age moves before "the server sent nothing" is its answer (`SERVER_ANSWER_TICKS`). */
-const QUIET_TICKS = 40;
 
 /** The bot beside a chest at CELL holding `stacks` (names of items or of `ITEM_VARIANTS`, by slot); the waits under test read the harness clock. */
 function chest(stacks: readonly { slot: number; name: string; count: number }[]) {
@@ -27,18 +26,18 @@ test("a click that puts a stack on another stack of its variant ends when the wo
   const container = await open();
   await container.clickStack(0);
   const sentAt = age();
-  await clock.settle(container.clickStack(1), CLICK_ANSWER_WALL_MS * 2);
-  assert.ok(age() - sentAt >= QUIET_TICKS, `waited ${age() - sentAt} ticks`);
+  await clock.settle(container.clickStack(1), CLICK_WALL_MS * 2);
+  assert.ok(age() - sentAt >= SERVER_ANSWER_TICKS, `waited ${age() - sentAt} ticks`);
   assert.deepEqual([cursor(), slot(0), slot(1)], [null, null, 'cobblestone x12 "first"']);
 });
 
-test("a click onto a stack of another variant ends at the server's correction, and the cursor it sends is the one the bot reads", async () => {
+test("a click onto a stack of another variant waits the 40 ticks too, and the cursor the server sends is the one the bot reads", async () => {
   const { clock, age, cursor, slot, open } = chest([{ slot: 0, name: "renamed_first_cobblestone", count: 5 }, { slot: 1, name: "cobblestone", count: 4 }]);
   const container = await open();
   await container.clickStack(0);
   const sentAt = age();
-  await clock.settle(container.clickStack(1), CLICK_ANSWER_WALL_MS * 2);
-  assert.ok(age() - sentAt < QUIET_TICKS, `the correction ended the wait after ${age() - sentAt} ticks`);
+  await clock.settle(container.clickStack(1), CLICK_WALL_MS * 2);
+  assert.ok(age() - sentAt >= SERVER_ANSWER_TICKS, `the correction ended the wait after ${age() - sentAt} ticks: the answer is the world age, not the first packet`);
   assert.deepEqual([cursor(), slot(0), slot(1)], ["cobblestone x4", null, 'cobblestone x5 "first"'], "Mineflayer drops set_cursor_item: the container applies it, so the cursor reads the server's plain stack");
 });
 
@@ -47,9 +46,9 @@ test("a click on an empty slot or on a stack of another item waits for nothing",
   const container = await open();
   await container.clickStack(0);
   const sentAt = age();
-  await clock.settle(container.clickStack(1), CLICK_ANSWER_WALL_MS);
-  await clock.settle(container.clickStack(2), CLICK_ANSWER_WALL_MS);
-  assert.ok(age() - sentAt < QUIET_TICKS, `waited ${age() - sentAt} ticks`);
+  await clock.settle(container.clickStack(1), CLICK_WALL_MS);
+  await clock.settle(container.clickStack(2), CLICK_WALL_MS);
+  assert.ok(age() - sentAt < SERVER_ANSWER_TICKS, `waited ${age() - sentAt} ticks`);
 });
 
 test("a server whose world age stands still fails the click on the wall clock, naming the slot and what to do", async () => {
@@ -57,7 +56,7 @@ test("a server whose world age stands still fails the click on the wall clock, n
   const container = await open();
   await container.clickStack(0);
   server.stop();
-  await assert.rejects(clock.settle(container.clickStack(1), CLICK_ANSWER_WALL_MS * 2), /did not answer the click on slot 1 within \d+ ms.*Reopen/s);
+  await assert.rejects(clock.settle(container.clickStack(1), CLICK_WALL_MS * 2), /did not answer the click on slot 1: the world age did not move for 5 s.*Reopen/s);
 });
 
 test("an aborted wait stops listening for the server's packets", async () => {
