@@ -29,9 +29,9 @@ import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
 import { lavaWatchCells } from "../world/lava-watch.js";
-import { blockKey, packKey, type WorldView } from "../world/world.js";
-import { solidFloorUnder } from "../world/swimming.js";
+import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
+import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
 import { endsStrandedUnderWater } from "./stranded-segment.js";
 import { countStartRefusals } from "./start-refusals.js";
@@ -203,30 +203,6 @@ interface SearchOptions {
   readonly now?: () => number;
 }
 
-/**
- * Where the bot will be standing when it swings, not where it is now.
- *
- * Digging underwater without Aqua Affinity is five times slower and digging
- * mid-air is five times slower again, and the estimator already models both.
- * Hardcoding "dry and grounded" at every call site made the planner price an
- * underwater excavation as if it were on land, so it chose routes it then had
- * to pay far more for.
- */
-function digContextAt(options: SearchOptions, state: PlanningState) {
-  const { x, y, z } = state.node.feet;
-  const read: WorldView["blockAt"] = (atX, atY, atZ) => state.overlay.blockAt(options.context.world, atX, atY, atZ);
-  const head = read(x, y + 1, z);
-  return {
-    submergedAtEyes: head.kind === "loaded" && head.traits.liquid === "water",
-    onGround: solidFloorUnder(read, state.node.feet),
-    // Mining Fatigue is the dangerous direction: it makes a dig slower than
-    // the route priced it, so confirmation windows and progress checks fire on
-    // a movement that was always going to take longer.
-    aquaAffinity: options.context.player.aquaAffinity,
-    effects: options.context.player.effects,
-  };
-}
-
 /** The nodes from the first step out of the root to `node`, in walking order. */
 function routeNodes(store: NodeStore, node: number): readonly number[] {
   const nodes: number[] = [];
@@ -247,7 +223,7 @@ function reconstructStep(options: SearchOptions, store: NodeStore, node: number)
   const state = store.state[parent]!;
   const key = store.key[node]!;
   const remaining = store.remaining[node]!;
-  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options, state));
+  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state));
   for (let index = 0; index < movements.length; index += 1) {
     if (movements.remainingScaffolds[index] !== remaining) continue;
     if (packKey(movements.toX[index]!, movements.toY[index]!, movements.toZ[index]!) !== key) continue;
@@ -595,7 +571,7 @@ export class IncrementalSearch {
     const store = this.#store;
     const state = store.state[current]!;
     const depth = store.depth[current]! + 1;
-    const digContext = digContextAt(this.#options, state);
+    const digContext = digContextAt(this.#options.context, state);
     const finish = this.#goal.finish?.(state, context, digContext);
     if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z)) {
       const cost = store.cost[current]! + finish.cost;

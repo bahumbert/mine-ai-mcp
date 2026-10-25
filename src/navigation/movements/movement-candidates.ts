@@ -16,14 +16,13 @@
  */
 import {
   hasUnstableFallingSupport,
-  isHeadPassable,
-  isPassable,
   isSafeSupport,
   isSolid,
 } from "../world/block-geometry.js";
 import type { BlockObservation } from "../world/world.js";
 import { SWIM_DOWN_TICKS, SWIM_UP_TICKS, SWIM_HORIZONTAL_TICKS } from "../world/swimming.js";
 import { type BlockPosition, blockLabel } from "../world/world.js";
+import { arrivals } from "./arrival-cells.js";
 import type { GeneratedMovement, MovementGenerationContext, PlanningState } from "./catalogue.js";
 import { type Dig, confirmDigs, prepareExcavationDigs, releasesLava } from "./excavation.js";
 import {
@@ -638,33 +637,6 @@ function stepHazard(context: MovementGenerationContext, x: number, y: number, z:
   if (penalty === null) return null;
   if (hasUnstableFallingSupport(context.view.blockAt, x, y - 1, z)) return null;
   return context.stepField ? penalty + context.stepField.costAt(x, y, z) : penalty;
-}
-
-/**
- * Where a movement that carries past its destination may end up.
- *
- * A drop or a sprint jump lands with momentum. Observed: a four-block parkour
- * span landed at x 13.19 on ground when the plan named 12.5, and the run
- * reported a movement failure for what was a clean landing one block along.
- * The cell one further in the direction of travel is a valid arrival when the
- * bot could stand there.
- */
-function arrivals(
-  context: MovementGenerationContext,
-  destination: BlockPosition,
-  dx: number,
-  dz: number,
-): readonly BlockPosition[] {
-  const x = destination.x + dx;
-  const z = destination.z + dz;
-  const y = destination.y;
-  const cells = context.cells;
-  const clear =
-    isPassable(cells.look(x, y, z)) &&
-    isHeadPassable(cells.look(x, y + 1, z)) &&
-    isSafeSupport(cells.look(x, y - 1, z)) &&
-    !hasUnstableFallingSupport(context.view.blockAt, x, y - 1, z);
-  return clear ? [destination, { x, y, z }] : [destination];
 }
 
 /** Whether a dig earlier in the list clears the same cell as the one at `index`: the cell is dug once, so it is charged once. */
