@@ -103,3 +103,19 @@ test("the test beside a changed file runs only inside the suite's test paths", (
     "src/b.test.ts",
   ]);
 });
+
+test("config changes and source changes together typecheck the union, each once, a source change keeping its own reason", () => {
+  const configs = new Map([["scenarios/", "tests/tsconfig.json changed (scenarios/tsconfig.json extends it)"], ["tests/", "tests/tsconfig.json changed"]]);
+  const plan = typecheckPlan(["src/a.ts", "tests/x.ts"], new Map([["brain/", "brain/b.ts"]]), configs);
+  expect(plan).toEqual([
+    { script: "typecheck", reason: "changed" },
+    { script: "typecheck:scenarios", reason: "tests/tsconfig.json changed (scenarios/tsconfig.json extends it)" },
+    { script: "typecheck:tests", reason: "changed" },
+    { script: "typecheck:brain", reason: "brain/b.ts imports a changed file" },
+  ]);
+});
+
+test("a config-only change typechecks the projects it selects with no source file", () => {
+  const plan = typecheckPlan([], new Map(), new Map([["tests/", "bun.lock changed"]]));
+  expect(plan).toEqual([{ script: "typecheck:tests", reason: "bun.lock changed" }]);
+});

@@ -18,6 +18,7 @@ import {
   type ReverseGraph,
   type TestsReached,
 } from "./import-graph.js";
+import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
 
 const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
   { dir: "src/", typecheck: "typecheck", tests: "./src" },
@@ -99,10 +100,23 @@ function inProject(file: string): boolean {
   return PROJECTS.some((project) => file.startsWith(project.dir));
 }
 
-/** Changed `.ts`/`.tsx`/`.json` paths since `base` plus untracked ones, deleted paths included (a rename gives its old path too). */
+/** Every path changed since `base` plus untracked ones, deleted paths included (a rename gives its old path too). */
 function changedPaths(base: string): string[] {
-  const paths = [...git("diff", "--name-only", "--no-renames", base), ...git("ls-files", "--others", "--exclude-standard")];
-  return [...new Set(paths)].filter((file) => /\.(ts|tsx|json)$/u.test(file) && inProject(file));
+  return [...new Set([...git("diff", "--name-only", "--no-renames", base), ...git("ls-files", "--others", "--exclude-standard")])];
+}
+
+/** The changed `.ts`/`.tsx`/`.json` paths inside the projects. */
+function projectPaths(paths: readonly string[]): string[] {
+  return paths.filter((file) => /\.(ts|tsx|json)$/u.test(file) && inProject(file));
+}
+
+/** The typechecks the changed configs select; the tsconfig files are read only when a changed one can pull in others. */
+function configSelection(changedRaw: readonly string[], projectDirs: readonly string[]): ReturnType<typeof configTypechecks> {
+  if (!changedRaw.some((file) => TSCONFIG_FILE.test(file))) return configTypechecks(changedRaw, new Map(), projectDirs);
+  const files = git("ls-files", "--cached", "--others", "--exclude-standard").filter((file) => TSCONFIG_FILE.test(file) && existsSync(file));
+  const { extendsOf, unparsed } = tsconfigExtends(new Map(files.map((file) => [file, readFileSync(file, "utf8")] as const)));
+  for (const file of unparsed) console.log(`check: cannot parse ${file}: the configs extending it are not followed`);
+  return configTypechecks(changedRaw, extendsOf, projectDirs);
 }
 
 /** The reverse import graph of every tracked or untracked source of the projects; `deleted` stay resolvable. */
@@ -125,6 +139,14 @@ export function siblingTests(changedSources: readonly string[], testRoots: reado
     .filter((file) => testRoots.some((root) => file.startsWith(root)));
 }
 
+/** `repositoryGraph` for the changed files, with the time it took. */
+function timedRepositoryGraph(changedAll: readonly string[]): ReverseGraph {
+  const startedAt = performance.now();
+  const graph = repositoryGraph(changedAll.filter((file) => !existsSync(file)));
+  console.log(`check: import graph built in ${((performance.now() - startedAt) / 1000).toFixed(1)} s`);
+  return graph;
+}
+
 /** The tests loading the changed files through importers, printed with their origin; empty at depth 0. */
 function importerTests(changed: readonly string[], graph: ReverseGraph, depth: number, testRoots: readonly string[]): string[] {
   if (depth === 0) return [];
@@ -134,12 +156,19 @@ function importerTests(changed: readonly string[], graph: ReverseGraph, depth: n
 }
 
 /**
- * The typecheck scripts to run, in project order: the projects holding a changed `.ts` file, then those importing a
- * changed file (`importing`: project dir -> one importer; owner 2026-10-21 Q1: a `src/` change can break `tests/` types).
+ * The typecheck scripts to run, in project order: the projects holding a changed `.ts` file, then those a changed config
+ * selects (`configs`: project dir -> reason, from `configTypechecks`), then those importing a changed file
+ * (`importing`: project dir -> one importer; owner 2026-10-21 Q1: a `src/` change can break `tests/` types).
  */
-export function typecheckPlan(changedSources: readonly string[], importing: ReadonlyMap<string, string>): { script: string; reason: string }[] {
+export function typecheckPlan(
+  changedSources: readonly string[],
+  importing: ReadonlyMap<string, string>,
+  configs: ReadonlyMap<string, string> = new Map(),
+): { script: string; reason: string }[] {
   return PROJECTS.flatMap((project) => {
     if (changedSources.some((file) => file.startsWith(project.dir))) return [{ script: project.typecheck, reason: "changed" }];
+    const configReason = configs.get(project.dir);
+    if (configReason !== undefined) return [{ script: project.typecheck, reason: configReason }];
     const importer = importing.get(project.dir);
     return importer === undefined ? [] : [{ script: project.typecheck, reason: `${importer} imports a changed file` }];
   });
@@ -172,26 +201,30 @@ function main(): never {
   if (process.argv[2] === "--all") runAll(process.argv.slice(3));
   const args = parsedArgsOrExit();
   const base = args.base === undefined ? "HEAD" : git("merge-base", "HEAD", args.base)[0] ?? "HEAD";
-  const changedAll = changedPaths(base);
+  const changedRaw = changedPaths(base);
+  const changedAll = projectPaths(changedRaw);
   const changed = changedAll.filter((file) => /\.(ts|tsx)$/u.test(file) && existsSync(file));
-  if (changedAll.length === 0) {
+  const present = PROJECTS.filter((project) => existsSync(project.dir)).map((project) => project.dir);
+  const config = configSelection(changedRaw, present);
+  if (changedAll.length === 0 && config.reasons.size === 0) {
     console.log("check: no changed TypeScript file");
     process.exit(0);
   }
-  const startedAt = performance.now();
-  const graph = repositoryGraph(changedAll.filter((file) => !existsSync(file)));
-  console.log(`check: import graph built in ${((performance.now() - startedAt) / 1000).toFixed(1)} s`);
+  if (config.pointer !== undefined) console.log(config.pointer);
+  const graph = changedAll.length === 0 ? undefined : timedRepositoryGraph(changedAll);
   const testRoots = suiteTestRoots();
-  const tests = [...new Set([...siblingTests(changed, testRoots), ...importerTests(changedAll, graph, args.depth, testRoots)])].filter(existsSync);
-  const typechecks = typecheckPlan(changed, projectsImporting(changedAll, graph, PROJECTS.map((project) => project.dir)));
+  const importerTestFiles = graph === undefined ? [] : importerTests(changedAll, graph, args.depth, testRoots);
+  const tests = [...new Set([...siblingTests(changed, testRoots), ...importerTestFiles])].filter(existsSync);
+  const importing = graph === undefined ? new Map<string, string>() : projectsImporting(changedAll, graph, PROJECTS.map((project) => project.dir));
+  const typechecks = typecheckPlan(changed, importing, config.reasons);
   let ok = true;
   for (const typecheck of typechecks) {
     if (typecheck.reason !== "changed") console.log(`check: ${typecheck.script}: ${typecheck.reason}`);
     ok = run(["bun", "run", "--silent", typecheck.script]) && ok;
   }
   if (tests.length > 0) ok = run(["bun", "test", ...tests.map((file) => `./${file}`)]) && ok;
-  else console.log("check: no test file next to or importing the changed files (bun run test for everything)");
-  console.log(`check: ${changedAll.length} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
+  else if (config.pointer === undefined) console.log("check: no test file next to or importing the changed files (bun run test for everything)");
+  console.log(`check: ${new Set([...changedAll, ...configFiles(changedRaw)]).size} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
   process.exit(ok ? 0 : 1);
 }
 
