@@ -110,6 +110,20 @@ export function ledgerMb(sample: AdmissionSample, tally: AdmissionTally, config:
   return sample.memAvailableMb - serversStillGrowing - (sample.youngClientsMb ?? sample.youngClients * config.clientMemMb) - tally.reservedMb;
 }
 
+/**
+ * What the ledger keeps free beyond `serverMemMarginMb` after an admission that reserves `reserveMb`: negative when the admission would take it
+ * under the margin. The one rule of every path (a lane on a running server, an idle server's growth, a new server, a client booted ahead):
+ * the margin is the reserve that other daemons and a live run sharing the machine draw on, and this ledger does not see them.
+ */
+export function roomAfterAdmissionMb(ledger: number, reserveMb: number, config: Pick<ScenarioServerConfig, "serverMemMarginMb">): number {
+  return ledger - reserveMb - config.serverMemMarginMb;
+}
+
+/** The refusal text of a ledger that cannot cover `reserveMb` (`what`) and the margin. */
+export function marginRefusalDetail(ledger: number, reserveMb: number, what: string, config: Pick<ScenarioServerConfig, "serverMemMarginMb">): string {
+  return `memory ledger ${ledger} MB does not cover ${what} (${reserveMb} MB) and the server margin (${config.serverMemMarginMb} MB)`;
+}
+
 function serverRefusal(reading: ServerReading | undefined, id: string, state: AdmissionState, config: ScenarioServerConfig): string | null {
   if (!reading) return `${id} is not in the sample`;
   if (reading.status === "sick") return `${id} is sick (a trial did not settle in time)`;
@@ -172,15 +186,17 @@ export function decideAdmission(input: {
   const running = sample.ownTrials + tally.trials;
   const clientMb = request.clientReserveMb ?? config.clientMemMb;
   const available = ledgerMb(sample, tally, config);
-  if (available < clientMb) {
-    return refusal("memory", `memory ledger ${available} MB does not cover a client (${clientMb} MB)`);
+  if (roomAfterAdmissionMb(available, clientMb, config) < 0) {
+    return refusal("memory", marginRefusalDetail(available, clientMb, "a client", config));
   }
   const cpuRefusal = cpuRefusalFor(sample, request, running, config);
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
+  // A new server's reserve holds the margin (the tally of the pass keeps it from the next admission); the other reserves leave it free outside.
   const needed = clientMb + request.newServerHeapMb + config.serverMemMarginMb;
   // A spread start is the key's servers starting together, not the next server of a sample: only the ledger holds it.
-  if (request.spreadToNewServer && available >= needed) return { admit: true, server: "new", reserveMb: needed, spread: true };
+  const newServerFits = roomAfterAdmissionMb(available, clientMb + request.newServerHeapMb, config) >= 0;
+  if (request.spreadToNewServer && newServerFits) return { admit: true, server: "new", reserveMb: needed, spread: true };
   const refusals: string[] = [];
   /** Idle candidates the ledger cannot afford the growth of: a memory refusal, not a server one. */
   const unaffordable: string[] = [];
@@ -196,8 +212,8 @@ export function decideAdmission(input: {
       continue;
     }
     const reserveMb = reserveOn(reading, clientMb, config);
-    if (available < reserveMb) {
-      unaffordable.push(`${id} is idle: its client and the ${reserveMb - clientMb} MB it grows by need ${reserveMb} MB, the ledger has ${available} MB`);
+    if (roomAfterAdmissionMb(available, reserveMb, config) < 0) {
+      unaffordable.push(marginRefusalDetail(available, reserveMb, `${id}'s client and the ${reserveMb - clientMb} MB it grows by (idle server)`, config));
       continue;
     }
     const wait = reading.shared ? queueWaitMs(request.queues?.get(id), config) : 0;
@@ -212,9 +228,9 @@ export function decideAdmission(input: {
     if (unaffordable.length > 0 && refusals.length === 0) return refusal("memory", unaffordable.join("; "), true);
     return refusal("new-server-per-sample", [...refusals, ...unaffordable, "a new server starts at most once per sample"].join("; "));
   }
-  if (available < needed && queueFull.length > 0) return shortestQueue(queueFull);
-  if (available < needed) {
-    const detail = `memory ledger ${available} MB does not cover a new server (${needed} MB)`;
+  if (!newServerFits && queueFull.length > 0) return shortestQueue(queueFull);
+  if (!newServerFits) {
+    const detail = marginRefusalDetail(available, clientMb + request.newServerHeapMb, "a client and a new server", config);
     return refusal(refusals.length ? "server" : "memory", [...refusals, ...unaffordable, detail].join("; "), true);
   }
   return { admit: true, server: "new", reserveMb: needed };
@@ -256,7 +272,7 @@ export function advanceAdmissionState(
   const servers = Object.fromEntries(
     sample.servers.map(server => [server.id, nextBackoff(state.servers[server.id], server.msptP95, config)]));
   const cpuBreached = sample.cpuBusy !== null && sample.cpuBusy >= config.cpuAdmit;
-  const memoryFull = ledgerMb(sample, EMPTY_TALLY, config) < config.clientMemMb;
+  const memoryFull = roomAfterAdmissionMb(ledgerMb(sample, EMPTY_TALLY, config), config.clientMemMb, config) < 0;
   const serverLagging = sample.servers.some(server => server.shared && server.msptP95 !== null && server.msptP95 >= config.msptAdmitMs);
   const serverBackedOff = Object.values(servers).some(backoff => backoff.backedOff);
   const breached = cpuBreached || memoryFull || serverLagging || serverBackedOff;

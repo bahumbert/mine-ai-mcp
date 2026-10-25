@@ -1,4 +1,5 @@
-// When a scenario client may be booted before its trial: never beside a timing trial, never into a busy machine, and a spare only if the ledger holds it.
+// When a scenario client may be booted before its trial: never beside a timing trial, never into a busy machine, and a spare only if the ledger holds it and the server margin after it.
+import { marginRefusalDetail, roomAfterAdmissionMb } from "./admission.ts";
 import type { ScenarioServerConfig } from "./config.ts";
 
 export interface ClientAheadGate {
@@ -15,13 +16,13 @@ export interface ClientAheadGate {
 }
 
 /** Why a client may not boot now, or null. Foreign load alone does not hold a trial back, but it does hold the boots we add to it. */
-export function clientAheadRefusal(gate: ClientAheadGate, config: Pick<ScenarioServerConfig, "cpuAdmit" | "clientMemMb" | "clientBootedMemMb">): string | null {
+export function clientAheadRefusal(gate: ClientAheadGate, config: Pick<ScenarioServerConfig, "cpuAdmit" | "clientMemMb" | "clientBootedMemMb" | "serverMemMarginMb">): string | null {
   if (gate.forTimingTrial) return "a timing trial gets no client ahead: its machine stays calm";
   if (gate.timingBusy) return "a timing trial runs or waits for a calm machine: no client boots beside it";
   if (gate.cpuBusy !== null && gate.cpuBusy >= config.cpuAdmit) return `cpu ${Math.round(gate.cpuBusy * 100)}% busy, the bound is ${Math.round(config.cpuAdmit * 100)}%: a boot would add to it`;
-  // After the boot the next trial must still find a whole client free, as it would without the boot.
-  if (!gate.forAdmittedTrial && gate.ledgerMb - config.clientBootedMemMb < config.clientMemMb) {
-    return `memory ledger ${gate.ledgerMb} MB does not hold a booted client (${config.clientBootedMemMb} MB) and a whole one (${config.clientMemMb} MB)`;
+  // After the boot the next trial must still find a whole client and the server margin free, as it would without the boot.
+  if (!gate.forAdmittedTrial && roomAfterAdmissionMb(gate.ledgerMb, config.clientBootedMemMb + config.clientMemMb, config) < 0) {
+    return marginRefusalDetail(gate.ledgerMb, config.clientBootedMemMb + config.clientMemMb, "a booted client and a whole one", config);
   }
   return null;
 }

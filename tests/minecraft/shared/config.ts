@@ -36,6 +36,7 @@ export interface ScenarioServerConfig {
   readonly clientBootFailureLimit: number;
   /** A client counts as young (memory still growing) for this long after its admission. */
   readonly clientRampMs: number;
+  /** What the memory ledger keeps free after every admission (a lane, an idle server's growth, a new server, a client booted ahead): the reserve that other daemons and a live run sharing the machine draw on. */
   readonly serverMemMarginMb: number;
   /** What a java server needs above its heap (metaspace, threads, buffers). */
   readonly serverOverheadMb: number;

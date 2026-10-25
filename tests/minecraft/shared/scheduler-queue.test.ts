@@ -63,8 +63,8 @@ test("the queue empties as trials are arranged and restored", async () => {
 
 test("a new server refused for memory: the trial goes to the shortest queue instead of waiting, and no server starts", async () => {
   const rig = new SchedulerRig({ MINE_AI_SCENARIO_MAX_PLAYERS: "30" });
-  // 1000 MB of ledger are left when the 7th trial is asked: a client fits (250), a new server (4346) does not.
-  await warmServer(rig, { memAvailableMb: 3_584 + 250 + 6 * 250 + 1_000 });
+  // 2000 MB of ledger are left when the 7th trial is asked: a client and the server margin fit (250 + 1024), a new server (4346) does not.
+  await warmServer(rig, { memAvailableMb: 3_584 + 250 + 6 * 250 + 2_000 });
   closedGate(rig);
   rig.submit(lanes(9));
   await rig.settle();

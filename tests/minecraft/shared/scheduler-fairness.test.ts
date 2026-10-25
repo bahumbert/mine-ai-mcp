@@ -81,7 +81,9 @@ test("the room hold never deadlocks: with none of ours running the later trials 
   rig.running[0]!.finish();
   await warm.finished;
   const needsServer = rig.submit(named("new", 1, "other-key"));
-  const TIGHT = 1_200;
+  // The young client of "warm0" is in the ledger; over it the warm server's growth, a client and the server margin fit (half a client to spare), a new server does not.
+  const { clientMemMb, sharedHeapMb, serverOverheadMb, serverMemMarginMb } = rig.config;
+  const TIGHT = clientMemMb + (sharedHeapMb + serverOverheadMb - 3_000) + clientMemMb + serverMemMarginMb + clientMemMb / 2;
   for (let sample = 0; sample < 4; sample++) {
     rig.clock += 5_000;
     rig.sample({ memAvailableMb: TIGHT });

@@ -1,11 +1,14 @@
 // The scheduler boots a submission's scenario clients ahead of their trials (T7h-b): when, how many, what the ledger holds for them, and what becomes of them.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { loadScenarioServerConfig } from "./config.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 import { lanePlacement, ownPlacement, SchedulerRig } from "./scheduler-rig.ts";
 import { ScriptedClients, type ClientScript } from "./scripted-clients.ts";
 
 const OPTIONS = { timeout: 30_000 };
+const SERVER_MARGIN_MB = loadScenarioServerConfig({}).serverMemMarginMb;
+const WARM_RESIDENT_MB = 3_000;
 const lanes = (...names: string[]) => names.map(name => ({ name, placement: lanePlacement("k") }));
 const OUR_HOST_ENTRY = fixtureScenario(60).client.args[0]!;
 
@@ -270,9 +273,14 @@ test("a trial that takes a client booted ahead reserves only the difference to a
       const handle = rig.submit(lanes("a", "b"), { maxLanes: 1 });
       rig.sample();
       await rig.settle();
+      // `a`'s server is a warm one (3000 MB resident): when `a` settles it goes idle, its growth leaves the ledger and `b` reserves it again with
+      // its client and the margin. The live ledger sits half way between that line for the difference and for a whole client.
+      rig.pool.setHealth(rig.serverOf("a"), { msptP95: 5, residentMb: WARM_RESIDENT_MB });
+      rig.sample();
       const taken = 28_000 - rig.scheduler.sampleReport()!.ledgerMb;
-      const room = rig.config.clientMemMb - 50;
-      assert.ok(room >= rig.config.clientMemMb - rig.config.clientBootedMemMb, "the room is under a whole client and over the difference");
+      const { serverMemMarginMb, clientMemMb, clientBootedMemMb } = rig.config;
+      const difference = clientMemMb - clientBootedMemMb;
+      const room = difference + serverMemMarginMb + (clientMemMb - difference) / 2;
       rig.sample({ memAvailableMb: taken + room });
       rig.finishNamed("a");
       await rig.settle();
@@ -288,7 +296,7 @@ test("a trial that takes a client booted ahead reserves only the difference to a
 
 test("a client is booted for a queued trial only when the ledger holds its booted size and still a whole client for the next trial", OPTIONS, async () => {
   const spawned: Record<string, number> = {};
-  for (const [label, ledger] of [["room", 800], ["tight", 600]] as const) {
+  for (const [label, ledger] of [["room", 800 + SERVER_MARGIN_MB], ["tight", 600 + SERVER_MARGIN_MB]] as const) {
     const { rig, clients } = await rigWithLedger(ledger, true);
     try {
       const before = clients.spawned.length;
@@ -299,7 +307,7 @@ test("a client is booted for a queued trial only when the ledger holds its boote
       await clients.stopAll();
     }
   }
-  assert.deepEqual(spawned, { room: 2, tight: 1 }, "b is admitted and boots its own; c's boots only if 250 + 125 MB are left after b's whole client");
+  assert.deepEqual(spawned, { room: 2, tight: 1 }, "b is admitted and boots its own; c's boots only if 250 + 125 MB and the server margin are left after b's whole client");
 });
 
 test("the ledger the daemon logs holds the booted size of a client waiting for a queued trial, and nothing extra for one booted for an admitted trial", OPTIONS, async () => {

@@ -5,7 +5,7 @@ import { loadScenarioServerConfig } from "./config.ts";
 
 const config = loadScenarioServerConfig({});
 const open: ClientAheadGate = { forTimingTrial: false, timingBusy: false, cpuBusy: 0.3, ledgerMb: 10_000, forAdmittedTrial: false };
-const LEDGER_LINE = config.clientBootedMemMb + config.clientMemMb;
+const LEDGER_LINE = config.clientBootedMemMb + config.clientMemMb + config.serverMemMarginMb;
 
 const CASES: readonly { readonly name: string; readonly gate: Partial<ClientAheadGate>; readonly refusal: RegExp | null }[] = [
   { name: "nothing holds it", gate: {}, refusal: null },
@@ -14,8 +14,9 @@ const CASES: readonly { readonly name: string; readonly gate: Partial<ClientAhea
   { name: "a timing trial runs or waits for calm", gate: { timingBusy: true }, refusal: /no client boots beside it/u },
   { name: "just under the cpu bound", gate: { cpuBusy: config.cpuAdmit - 0.01 }, refusal: null },
   { name: "at the cpu bound", gate: { cpuBusy: config.cpuAdmit }, refusal: /cpu 85% busy/u },
-  { name: "the ledger holds the booted size and a whole client after it", gate: { ledgerMb: LEDGER_LINE }, refusal: null },
-  { name: "one MB short of that", gate: { ledgerMb: LEDGER_LINE - 1 }, refusal: /does not hold a booted client/u },
+  { name: "the ledger holds the booted size, a whole client and the margin after it", gate: { ledgerMb: LEDGER_LINE }, refusal: null },
+  { name: "one MB short of that", gate: { ledgerMb: LEDGER_LINE - 1 }, refusal: /does not cover a booted client and a whole one.*margin \(1024 MB\)/u },
+  { name: "a full ledger less the margin boots no spare", gate: { ledgerMb: config.serverMemMarginMb }, refusal: /margin/u },
   { name: "a client for an admitted trial needs no room of its own", gate: { ledgerMb: 0, forAdmittedTrial: true }, refusal: null },
 ];
 

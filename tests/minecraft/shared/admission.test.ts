@@ -17,6 +17,7 @@ import {
 import { loadScenarioServerConfig } from "./config.ts";
 
 const config = loadScenarioServerConfig({});
+const MARGIN_MB = config.serverMemMarginMb;
 
 function server(overrides: Partial<ServerReading> = {}): ServerReading {
   return { id: "s1", key: "k", status: "ready", shared: true, busy: true, msptP95: 5, heapMb: 3_072, residentMb: 1_500, ...overrides };
@@ -49,11 +50,13 @@ test("memory alone breached: the ledger cannot cover one more client", () => {
 });
 
 test("the ledger subtracts what servers still have to grow into and the clients still growing", () => {
-  // 1500 resident of 3584 leaves 2084 still to come, plus the 2 young clients: exactly one more client fits at the line
+  // 1500 resident of 3584 leaves 2084 still to come, plus the 2 young clients: exactly one more client and the margin fit at the line
   const base = sample({ youngClients: 2 });
-  const line = 2_084 + 3 * config.clientMemMb;
+  const line = 2_084 + 3 * config.clientMemMb + MARGIN_MB;
   assert.equal(ask({ ...base, memAvailableMb: line }).admit, true);
-  assert.equal(refusedBound(ask({ ...base, memAvailableMb: line - 1 })), "memory");
+  const short = ask({ ...base, memAvailableMb: line - 1 });
+  assert.equal(refusedBound(short), "memory");
+  assert.match(refusalDetail(short), /server margin \(1024 MB\)/u);
 });
 
 // A 2048 MB heap with 512 MB of overhead and 900 MB resident has 1660 MB still to come when it works.
@@ -72,6 +75,16 @@ test("the ledger reserves growth only for busy servers: starting, working or hol
   assert.equal(ledgerWith(), 10_000, "a server that died is no longer in the sample");
 });
 
+// Every admission keeps the server margin free (review 2026-10-25 #4): the margin is the reserve that other daemons and a live run sharing the machine draw on.
+const refusalDetail = (decision: AdmissionDecision) => (decision.admit ? "" : decision.detail);
+
+test("a ledger under a client plus the margin counts as memory full: the target stays and the sample is a breach", () => {
+  const underMargin = sample({ memAvailableMb: GROWTH_MB + config.clientMemMb + MARGIN_MB - 1, ownTrials: 7, servers: [warm({ busy: true })] });
+  assert.equal(advanceAdmissionState(initialAdmissionState(config), underMargin, true, config).event, "memory full");
+  const atMargin = { ...underMargin, memAvailableMb: underMargin.memAvailableMb + 1 };
+  assert.notEqual(advanceAdmissionState(initialAdmissionState(config), atMargin, true, config).event, "memory full");
+});
+
 test("a trial reserves its client and, on an idle server, the growth it wakes (a single server the same way); on a busy server only the client", () => {
   const reserve = (candidate: ServerReading) => ask(sample({ memAvailableMb: 10_000, ownTrials: 0, servers: [candidate] }));
   assert.deepEqual(reserve(warm({ busy: false })), { admit: true, server: "s1", reserveMb: config.clientMemMb + GROWTH_MB });
@@ -79,20 +92,20 @@ test("a trial reserves its client and, on an idle server, the growth it wakes (a
   assert.deepEqual(reserve(warm({ shared: false, busy: false })), { admit: true, server: "s1", reserveMb: config.clientMemMb + GROWTH_MB });
 });
 
-test("an idle warm server is refused for memory when the ledger covers its client but not the growth the trial wakes", () => {
-  const line = config.clientMemMb + GROWTH_MB;
+test("an idle warm server is refused for memory when the ledger covers its client but not the growth the trial wakes and the margin after it", () => {
+  const line = config.clientMemMb + GROWTH_MB + MARGIN_MB;
   const idle = (memAvailableMb: number, tally: AdmissionTally = EMPTY_TALLY) =>
     ask(sample({ memAvailableMb, ownTrials: 1, servers: [warm({ busy: false })] }), initialAdmissionState(config), tally);
   assert.equal(idle(line).admit, true);
   const short = idle(line - 1);
   assert.equal(refusedBound(short), "memory");
-  assert.match(short.admit ? "" : short.detail, /s1.*1660/u);
+  assert.match(refusalDetail(short), /s1's client and the 1660 MB it grows by.*margin \(1024 MB\)/u);
   assert.equal(refusedBound(idle(line - 1, { trials: 1, newServers: 1, reservedMb: 0 })), "memory", "still a memory refusal once the sample's one new server has started");
 });
 
 test("a busy candidate takes the trial when the idle one cannot be afforded", () => {
   const both = sample({
-    memAvailableMb: 3_000, ownTrials: 1,
+    memAvailableMb: 3_000 + MARGIN_MB, ownTrials: 1,
     servers: [warm({ id: "idle", busy: false }), warm({ id: "busy", busy: true })],
   });
   // the busy one reserves 1660 in the ledger (1340 left, one client fits); the idle one would need 250 + 1660 more
@@ -116,7 +129,7 @@ test("target alone breached: running trials reach the concurrency target", () =>
 
 test("candidate server over MSPT_ADMIT: refused naming the server tick time, a new server is the way out when memory allows", () => {
   const lagging = sample({ servers: [server({ msptP95: 26 })], memAvailableMb: 7_000 });
-  const withoutRoom = ask({ ...lagging, memAvailableMb: 3_000 });
+  const withoutRoom = ask({ ...lagging, memAvailableMb: 3_000 + MARGIN_MB });
   assert.equal(refusedBound(withoutRoom), "server");
   assert.match(withoutRoom.admit ? "" : withoutRoom.detail, /s1.*26.*25/u);
   assert.deepEqual(ask(lagging), { admit: true, server: "new", reserveMb: config.clientMemMb + config.sharedHeapMb + config.serverMemMarginMb });
@@ -134,7 +147,7 @@ test("a server still starting counts as a candidate with an unknown tick time", 
 });
 
 test("a sick server takes nothing", () => {
-  assert.equal(refusedBound(ask(sample({ servers: [server({ status: "sick" })], memAvailableMb: 3_000 }))), "server");
+  assert.equal(refusedBound(ask(sample({ servers: [server({ status: "sick" })], memAvailableMb: 3_000 + MARGIN_MB }))), "server");
 });
 
 test("a new server needs the ledger to cover the client, its heap and the margin", () => {
@@ -152,8 +165,8 @@ test("at most one new server per sample", () => {
 });
 
 test("what this sample already admitted is subtracted from the ledger", () => {
-  assert.equal(ask(sample({ memAvailableMb: 3_000, ownTrials: 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 0 }).admit, true);
-  assert.equal(refusedBound(ask(sample({ memAvailableMb: 3_000, ownTrials: 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 1_000 })), "memory");
+  assert.equal(ask(sample({ memAvailableMb: 3_000 + MARGIN_MB, ownTrials: 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 0 }).admit, true);
+  assert.equal(refusedBound(ask(sample({ memAvailableMb: 3_000 + MARGIN_MB, ownTrials: 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 1_000 })), "memory");
 });
 
 test("no own trial running and the machine at 100% cpu from others: one is admitted, the second of the sample is not", () => {
@@ -216,7 +229,7 @@ test("a good sample between two bad ones resets the over-stop streak", () => {
 test("a trial that hit its wall bound backs its server off at once", () => {
   const state = noteWallBoundHit(initialAdmissionState(config), "s1");
   assert.equal(state.servers.s1?.backedOff, true);
-  assert.equal(refusedBound(ask(sample({ memAvailableMb: 3_000 }), state)), "server");
+  assert.equal(refusedBound(ask(sample({ memAvailableMb: 3_000 + MARGIN_MB }), state)), "server");
 });
 
 test("a machine breach with trials running halves the target down to the floor of 1", () => {
@@ -374,7 +387,7 @@ test("CPU_CALM is under CPU_ADMIT and is read from MINE_AI_SCENARIO_CPU_CALM", (
 
 test("a refusal for lack of room for a new server says so, one for any other bound does not", () => {
   const request = { candidates: [], newServerHeapMb: config.sharedHeapMb };
-  const noRoom = ask(sample({ servers: [], memAvailableMb: 3_000 }), initialAdmissionState(config), EMPTY_TALLY, request);
+  const noRoom = ask(sample({ servers: [], memAvailableMb: 3_000 + MARGIN_MB }), initialAdmissionState(config), EMPTY_TALLY, request);
   assert.equal(!noRoom.admit && noRoom.waitsForServerRoom, true);
   const cpu = ask(sample({ cpuBusy: 0.9 }));
   assert.equal(!cpu.admit && cpu.waitsForServerRoom, false);
@@ -457,7 +470,7 @@ test("a measured hold of 300 ms takes 16 in the queue, 2 s takes 2", () => {
 });
 
 test("a new server refused for memory: the trial goes to the candidate with the shortest queue instead of waiting", () => {
-  const poor = twoServers({ memAvailableMb: 5_000 });
+  const poor = twoServers({ memAvailableMb: 5_000 + MARGIN_MB });
   const request = asking(["s1", "s2"], queued({ s1: [9], s2: [7] }));
   assert.deepEqual(ask(poor, initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s2", reserveMb: config.clientMemMb });
   const tied = asking(["s1", "s2"], queued({ s1: [7], s2: [7] }));
@@ -465,7 +478,7 @@ test("a new server refused for memory: the trial goes to the candidate with the 
 });
 
 test("a server of the key that is also lagging or backed off is not a queue-fallback candidate", () => {
-  const lagging = twoServers({ servers: [server({ msptP95: 30 }), server({ id: "s2" })], memAvailableMb: 5_000 });
+  const lagging = twoServers({ servers: [server({ msptP95: 30 }), server({ id: "s2" })], memAvailableMb: 5_000 + MARGIN_MB });
   const request = asking(["s1", "s2"], queued({ s1: [0], s2: [9] }));
   assert.deepEqual(ask(lagging, initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s2", reserveMb: config.clientMemMb },
     "s1 has the shorter queue but its tick time refuses it");
@@ -484,9 +497,9 @@ test("with no queue-full candidate the one-server-per-sample refusal stands, and
 
 test("a server without a queue entry counts as empty, and a queue-full server still takes the trial when nothing else can", () => {
   const request = asking(["s1"], queued({ s1: [6] }));
-  const decision = ask(sample({ memAvailableMb: 3_000, servers: [server({ shared: true })] }), initialAdmissionState(config), EMPTY_TALLY, { ...request, queues: undefined });
+  const decision = ask(sample({ memAvailableMb: 3_000 + MARGIN_MB, servers: [server({ shared: true })] }), initialAdmissionState(config), EMPTY_TALLY, { ...request, queues: undefined });
   assert.equal(decision.admit, true, "no queue information: no queue bound");
-  const noServerFits = ask(sample({ memAvailableMb: 3_000 }), initialAdmissionState(config), EMPTY_TALLY, { ...request, candidates: ["s1", "s3"] });
+  const noServerFits = ask(sample({ memAvailableMb: 3_000 + MARGIN_MB }), initialAdmissionState(config), EMPTY_TALLY, { ...request, candidates: ["s1", "s3"] });
   assert.equal(noServerFits.admit, true, "s1 queue-full, s3 not in the sample: the queue-full server still takes it");
 });
 
@@ -513,7 +526,7 @@ test("a trial whose client was booted ahead reserves the difference to a logged-
   const request: AdmissionRequest = { candidates: ["s1"], newServerHeapMb: config.sharedHeapMb, clientReserveMb: difference };
   assert.deepEqual(ask(sample(), initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "s1", reserveMb: difference });
   // The memory line moves down by the booted size: the ledger needs the difference, not the whole client.
-  const line = 2_084 + difference;
+  const line = 2_084 + difference + MARGIN_MB;
   assert.equal(ask(sample({ memAvailableMb: line }), initialAdmissionState(config), EMPTY_TALLY, request).admit, true);
   assert.equal(refusedBound(ask(sample({ memAvailableMb: line - 1 }), initialAdmissionState(config), EMPTY_TALLY, request)), "memory");
 });
