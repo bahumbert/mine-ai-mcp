@@ -9,7 +9,7 @@ import type { IncidentReference } from "../bot-data/incident-log.js";
 import type { NavigationEvent } from "../navigation/index.js";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
 import { CombatProgress } from "../survival/control/combat/progress.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { createFakeBot, listenerCounts } from "../test-support/fake-bot/index.js";
 import { observeDamageRegistry } from "../world/damage-registry.js";
 import { observeIncidents } from "./incident-observer.js";
 
@@ -266,11 +266,4 @@ test("a reflex that hit its limit is captured with the reflex and the limit", as
 function playerMetadata(bot: Bot, flags: Readonly<Record<string, number>>): object[] {
   const keys = bot.registry.entitiesByName.player?.metadataKeys ?? [];
   return Object.assign([], Object.fromEntries(Object.entries(flags).map(([key, value]) => [keys.indexOf(key), value])));
-}
-
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
-/** How many listeners each event has: what an observer that detaches everything leaves unchanged. */
-function listenerCounts(emitter: Listened): Record<string, number> {
-  return Object.fromEntries(emitter.eventNames().map((name) => [String(name), emitter.listenerCount(name)]));
 }

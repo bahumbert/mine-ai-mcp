@@ -1,7 +1,6 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type FakeEntitySpec, createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, entityBodyOf } from "../../../test-support/fake-bot/index.js";
 import { CombatPerception } from "./observations.js";
 
 /** A blaze's small fireball from 40 blocks (1 block a tick) lands after 41 server ticks (2050 ms: the flight rounds up, the aim point is 0.85 of the shooter and 0.7 of the bot); a killed creature leaves the client after its 945 ms death animation. */
@@ -11,11 +10,6 @@ const DEATH_REMOVAL_MS = 1_000;
 const SECOND_HURT_AFTER_MS = 500;
 /** What the blaze's fireball costs the bot once it lands (the amount the harness passes on as final). */
 const SMALL_FIREBALL_HIT = 3.5;
-
-/** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
-function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
-  return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
-}
 
 test("only an observed blaze charge transition offers a first-shot window, spent even behind terrain", () => {
   const metadata: unknown[] = [];
@@ -42,7 +36,7 @@ test("only an observed blaze charge transition offers a first-shot window, spent
   assert.equal(observe(), 0, "switching to melee does not clear the native flag");
   enemy.position.z = -8;
   assert.equal(observe(), 0);
-  bot.entities[2] = bodyOf(2, { name: "blaze", position: enemy.position, metadata: [...metadata] });
+  bot.entities[2] = entityBodyOf(2, { name: "blaze", position: enemy.position, metadata: [...metadata] });
   assert.equal(observe(), null, "entity-id reuse cannot inherit another body's observed charge start");
 });
 

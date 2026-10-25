@@ -5,13 +5,10 @@ import type { Bot } from "mineflayer";
 import { plugin as toolPlugin } from "mineflayer-tool";
 import { scenarioDefinitionSchema } from "mine-labs";
 import { Vec3 } from "vec3";
-import { createFakeBot, itemOf } from "../../src/test-support/fake-bot/index.ts";
+import { createFakeBot, itemOf, listenersAddedSince } from "../../src/test-support/fake-bot/index.ts";
 import { prepareScenarioBot } from "./scenario-bot.ts";
 
 const FEET = new Vec3(0, 0, 0);
-
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
 
 /** The scenario's player at the origin, its column `"void"` until `terrain` loads it; `added` counts listeners beyond the idle bot's. */
 async function fixture(terrain: "loaded" | "absent" = "loaded", options: { readonly mainhand?: string } = {}) {
@@ -19,9 +16,7 @@ async function fixture(terrain: "loaded" | "absent" = "loaded", options: { reado
   // The tool plugin as the host loads it, which loads its pathfinder a tick later (`await delay(0)`): that plugin keeps a physics listener for good, so it is the idle bot's.
   bot.loadPlugin(toolPlugin);
   await delay(0);
-  const listened: Listened = bot;
-  const idle = new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)]));
-  const added = (event: string) => listened.listenerCount(event) - (idle.get(event) ?? 0);
+  const added = listenersAddedSince(bot);
   const controller = new AbortController();
   const ready = Promise.withResolvers<void>();
   const arranged = Promise.withResolvers<void>();

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createRequire } from "node:module";
 import type { WindowsExports } from "prismarine-windows";
 import { temporaryBotData } from "../test-support/bot-data.js";
-import { createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, itemOf, listenerCounts } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
 import { observeBotStatus } from "./bot-status.js";
 
@@ -15,13 +15,6 @@ const loadWindows = require("prismarine-windows") as (version: string) => Window
 function fixture() {
   const clock = createFakeClock({ mode: "mocked", startMs: Date.parse("2026-10-21T00:00:00.000Z") });
   return createFakeBot({ username: "StreamBot", clock });
-}
-
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
-/** How many listeners each event has: what an observer that detaches everything leaves unchanged. */
-function listenerCounts(emitter: Listened): Record<string, number> {
-  return Object.fromEntries(emitter.eventNames().map((name) => [String(name), emitter.listenerCount(name)]));
 }
 
 test("SQL follows pickups, held equipment, open-container transfers and empty inventory without tool calls", async t => {

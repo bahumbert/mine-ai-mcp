@@ -12,18 +12,15 @@ import { readRecentEventsResultSchema } from "../actions/read-recent-events/cont
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
-import { type FakeHarness, createFakeBot } from "../test-support/fake-bot/index.js";
+import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
-
-/** Each runtime bot's listener counts before the runtime attached: the shared fake listens to some events itself. */
-const idleListeners = new WeakMap<Bot, ReadonlyMap<string | symbol, number>>();
+/** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
+const idleListeners = new WeakMap<Bot, (event: string) => number>();
 
 /** Listeners on `event` beyond the idle bot's own: what the runtime attached and has not removed. */
 function added(bot: Bot & Listened, event: string): number {
-  return bot.listenerCount(event) - (idleListeners.get(bot)?.get(event) ?? 0);
+  return idleListeners.get(bot)?.(event) ?? bot.listenerCount(event);
 }
 
 const combatController = engagingCombat(runtimeBot(), async (targetId) => ({
@@ -54,8 +51,7 @@ function runtimeHarness(controlStates: boolean[] = [], rejectedListener?: string
     if (control === "jump") controlStates.push(state);
     setControlState(control, state);
   };
-  const listened: Listened = bot;
-  idleListeners.set(bot, new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)])));
+  idleListeners.set(bot, listenersAddedSince(bot));
   if (rejectedListener) {
     const addListener = bot.on.bind(bot);
     const rejectSelectedListener: typeof bot.on = (eventName, listener) => {

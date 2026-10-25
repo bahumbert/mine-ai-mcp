@@ -1,9 +1,8 @@
-import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { TestEndCombat as EndCombat, engagingCombat, unexpectedEngage } from "../../../test-support/combat.js";
-import { type FakeBotOptions, type FakeEntitySpec, createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, entityBodyOf, itemOf } from "../../../test-support/fake-bot/index.js";
 import type { CombatController } from "../../control/combat/contract.js";
 import { CrystalObservation } from "./crystal.js";
 
@@ -11,11 +10,6 @@ import { createDestroyEndCrystalAction } from "../../../actions/destroy-end-crys
 import type { NavigationRuntime } from "../../../navigation/index.js";
 import { ActionRunner } from "../../../session/action-runner.js";
 import type { FootingRecovery } from "../../responses/footing.js";
-
-/** A drop made as a body of its own, for a pickup the test announces by hand (`playerCollect`): a drop spawned on the server near the bot would be picked up by the fake's own answer. */
-function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
-  return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
-}
 
 /** The selected crystal #42 above the bot; the scene's blocks and carried items are the test's. */
 function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> = {}) {
@@ -268,10 +262,10 @@ test("melee construction counts bot placements and recovered matching drops, not
     scaffoldRecovered: 0,
   });
   const cobblestone = () => itemOf(f.bot.registry, "cobblestone", 1);
-  const farDrop = bodyOf(70, { name: "item", position: new Vec3(20, 64, 0), getDroppedItem: cobblestone });
+  const farDrop = entityBodyOf(70, { name: "item", position: new Vec3(20, 64, 0), getDroppedItem: cobblestone });
   f.bot.emit("playerCollect", f.bot.entity, farDrop);
   assert.equal(observation.scaffoldRecovered, 0, "an unrelated pickup cannot recover the route scaffold");
-  const routeDrop = bodyOf(71, { name: "item", position: air.position.offset(0.5, 0, 0.5), getDroppedItem: cobblestone });
+  const routeDrop = entityBodyOf(71, { name: "item", position: air.position.offset(0.5, 0, 0.5), getDroppedItem: cobblestone });
   f.bot.emit("playerCollect", f.bot.entity, routeDrop);
   assert.equal(observation.scaffoldRecovered, 1);
 });

@@ -4,19 +4,12 @@ import test from "node:test";
 import type { ScenarioDefinition } from "mine-labs/client";
 import { Vec3 } from "vec3";
 
-import { createFakeBot, itemOf } from "../../src/test-support/fake-bot/index.ts";
+import { createFakeBot, itemOf, listenerCounts } from "../../src/test-support/fake-bot/index.ts";
 import { observeScenarioPlayerPreparation } from "./player-preparation.ts";
 
 /** The scenario's player on the shared fake: standing on the superflat floor at y -59. */
 function scenarioBot(username = "CraftBot", carried: Readonly<Record<string, number>> = {}) {
   return createFakeBot({ username, position: { x: 0, y: -59, z: 0 }, carried });
-}
-
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
-/** How many listeners each event has: what an observation that detaches everything leaves unchanged. */
-function listenerCounts(emitter: Listened): Record<string, number> {
-  return Object.fromEntries(emitter.eventNames().map((name) => [String(name), emitter.listenerCount(name)]));
 }
 
 test("player readiness waits for the declared equipment to reach its actual slot", async () => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
-import { type FakeEntitySpec, createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, entityBodyOf } from "../../../test-support/fake-bot/index.js";
 import { PerchObservation } from "./perch.js";
 import { PerchPreparation } from "./perch-preparation.js";
 
@@ -17,18 +17,13 @@ function preparationWorld(bot: Bot): NavigationRuntime["world"] {
   return { blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!) } as NavigationRuntime["world"];
 }
 
-/** A new body the server announces under `id`: the same kind as an earlier one, a different object. */
-function bodyOf(id: number, spec: FakeEntitySpec): Bot["entity"] {
-  return createFakeBot({ entities: { [id]: spec } }).bot.entities[id]!;
-}
-
 /** An ender dragon #42 at `position` with its phase and health at their metadata indices, as a new body each call. */
 function dragonAt(bot: Bot, position: Vec3, phase: number | undefined, health: number): void {
   const keys = bot.registry.entitiesByName.ender_dragon!.metadataKeys!;
   const metadata: unknown[] = [];
   metadata[keys.indexOf("phase")] = phase;
   metadata[keys.indexOf("health")] = health;
-  bot.entities[42] = bodyOf(42, { name: "ender_dragon", position, metadata });
+  bot.entities[42] = entityBodyOf(42, { name: "ender_dragon", position, metadata });
 }
 
 test("takeoff and cooldown observed during suspension cannot start a second perch", async () => {

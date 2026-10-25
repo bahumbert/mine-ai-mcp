@@ -5,19 +5,14 @@ import { readRecentEvents } from "../actions/read-recent-events/read-recent-even
 import { botEventInputSchema, readLastDeath, readNotificationSummary, SqlBotData } from "../bot-data/index.js";
 import { closeSqlDatabase } from "../bot-data/sql-bot-data.js";
 import { persistentBotData } from "../test-support/bot-data.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
 import { observePlayerEvents } from "./player-events.js";
-
-/** An emitter as a listener count reads it: Node's, or Mineflayer's typed one. */
-type Listened = { eventNames(): Array<string | symbol>; listenerCount(event: string | symbol): number };
 
 /** A bot at (12.5, 64, -3.25); `added(event)` counts the listeners on `event` beyond the idle bot's own. */
 function playerBot(username = "MineAI") {
   const { bot } = createFakeBot({ username, position: { x: 12.5, y: 64, z: -3.25 } });
-  const listened: Listened = bot;
-  const idle = new Map(listened.eventNames().map((event) => [event, listened.listenerCount(event)]));
-  return { bot, added: (event: string) => listened.listenerCount(event) - (idle.get(event) ?? 0) };
+  return { bot, added: listenersAddedSince(bot) };
 }
 
 test("records incoming and outgoing player messages while notifying only for incoming ones", (t) => {
