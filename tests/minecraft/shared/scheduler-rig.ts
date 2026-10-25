@@ -85,6 +85,13 @@ export class SchedulerRig {
     });
   }
 
+  /** Holds every trial before its arrangement until the returned function opens the gate: they count in their server's mutex queue meanwhile. */
+  holdArrangements(): () => void {
+    let open!: () => void;
+    this.arrangeGate = new Promise<void>(resolve => { open = resolve; });
+    return open;
+  }
+
   /** One admission sample, by default of an idle, roomy machine. */
   sample(overrides: { cpuBusy?: number | null; ownCpu?: number | null; memAvailableMb?: number } = {}): void {
     this.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 28_000, threads: 24, ...overrides }, this.clock);

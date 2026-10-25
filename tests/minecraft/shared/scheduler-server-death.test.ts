@@ -29,8 +29,7 @@ test("a trial running on a server whose java died is told, and ends red naming t
 
 test("a trial still waiting for the arrangement turn of a server whose java died goes back to the queue once and runs on another server; the one arranging ends red", async () => {
   const rig = new SchedulerRig();
-  let open!: () => void;
-  rig.arrangeGate = new Promise<void>(resolve => { open = resolve; });
+  const open = rig.holdArrangements();
   rig.submit([{ name: "a", placement: lanePlacement("k") }, { name: "b", placement: lanePlacement("k") }]);
   rig.sample();
   await rig.settle();

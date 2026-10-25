@@ -24,13 +24,6 @@ async function withAhead(env: Record<string, string>, plan: readonly ClientScrip
   }
 }
 
-/** Holds every trial before its arrangement (so before it asks for its client) until the returned function is called. */
-function holdArrangements(rig: SchedulerRig): () => void {
-  let open!: () => void;
-  rig.arrangeGate = new Promise<void>(resolve => { open = resolve; });
-  return open;
-}
-
 async function booted(rig: SchedulerRig, submission: number, count: number): Promise<void> {
   await rig.until(() => rig.ahead!.counts(submission).booted >= count, `${count} clients booted`);
 }
@@ -50,7 +43,7 @@ test("the trials a pass admits boot their clients in that pass, and each takes i
 }));
 
 test("the next trial a --lanes cap lets start gets its client booted too, and a trial admitted later takes it instead of booting its own", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
-  const openGate = holdArrangements(rig);
+  const openGate = rig.holdArrangements();
   rig.submit(lanes("a", "b", "c", "d"), { maxLanes: 1 });
   rig.sample();
   assert.equal(clients.spawned.length, 2, "a's own and b's, the next one the cap of 1 lets start: c and d wait");
@@ -167,7 +160,7 @@ test("a machine over the cpu bound boots no client ahead, and a trial still star
 }));
 
 test("a tuple that failed to boot twice fails its submission's queued and admitted trials with the boot's stderr, and nothing is respawned", OPTIONS, () => withAhead({}, ["crashes", "crashes", "crashes"], async (rig, clients) => {
-  const openGate = holdArrangements(rig);
+  const openGate = rig.holdArrangements();
   const handle = rig.submit(lanes("a", "b", "c"), { maxLanes: 1 });
   rig.sample();
   const client = fixtureScenario(60).client;
@@ -185,7 +178,7 @@ test("a tuple that failed to boot twice fails its submission's queued and admitt
 }));
 
 test("one failed boot does not fail a trial: it takes another client its submission booted, and the next trial gets one booted for it in turn", OPTIONS, () => withAhead({}, ["crashes"], async (rig, clients) => {
-  const openGate = holdArrangements(rig);
+  const openGate = rig.holdArrangements();
   const handle = rig.submit(lanes("a", "b"), { maxLanes: 1 });
   rig.sample();
   await rig.until(() => rig.logs.some(text => text.startsWith("client boot failed")), "a's client lost");
@@ -203,7 +196,7 @@ test("one failed boot does not fail a trial: it takes another client its submiss
 }));
 
 test("a cancelled submission kills the clients it booted and had not handed over, and the next submission runs from there", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
-  const openGate = holdArrangements(rig);
+  const openGate = rig.holdArrangements();
   const handle = rig.submit(lanes("a", "b", "c", "d"), { maxLanes: 1 });
   rig.sample();
   await booted(rig, 1, 2);
@@ -354,7 +347,7 @@ test("the boots of one pass are counted against the cpu bound: a machine near it
 // A trial whose server died.
 
 test("a trial waiting for the arrangement turn of a server that died, sent back to the queue with no room for a new server, returns the client booted for it to the submission's spares", OPTIONS, () => withAhead({}, [], async (rig, clients) => {
-  holdArrangements(rig);
+  rig.holdArrangements();
   rig.submit(lanes("a", "b"));
   rig.sample();
   await booted(rig, 1, 2);

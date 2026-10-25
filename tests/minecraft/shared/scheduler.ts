@@ -1,69 +1,23 @@
 // The queue of trials and the loop that admits them: each sample, and each time a trial settles, the first admissible trial starts.
-import { join } from "node:path";
-import type { ClientCommandSpec, Scenario } from "mine-labs";
 import {
   advanceAdmissionState, decideAdmission, EMPTY_TALLY, initialAdmissionState, ledgerMb, noteWallBoundHit,
   type AdmissionDecision, type AdmissionRequest, type AdmissionSample, type AdmissionState, type AdmissionTally,
 } from "./admission.ts";
 import type { Lane } from "../arena/lanes.ts";
-import { renameBodyOnOwnServer } from "../arena/own-body.ts";
-import { shiftScenario } from "../arena/shift-scenario.ts";
 import { spreadThreshold } from "./config.ts";
-import { clientAheadRefusal } from "./client-ahead-gate.ts";
-import { clientTupleOf } from "./client-ahead.ts";
-import { trialLine, type SampleReport } from "./daemon-lines.ts";
+import type { SampleReport } from "./daemon-lines.ts";
 import { isTimingTrial, reservePlacement, runsOurClientHost, type Placement } from "./placement.ts";
-import type { ManagedServer, MutexQueueMarks } from "./pool.ts";
-import { fileRunIo, type RunIo } from "./run-io.ts";
+import type { MutexQueueMarks } from "./pool.ts";
+import { bootClientsForQueuedTrials, clientReserveMb, keepClientsFor, type AheadPass } from "./scheduler-ahead.ts";
+import type { Admitted, QueuedTrial, Submission } from "./scheduler-records.ts";
+import { runAdmittedTrial, type TrialHost } from "./scheduler-trial.ts";
 import type {
   MachineReading, SchedulerDeps, SubmissionEntry, SubmissionHandle, SubmissionSpec, SubmissionSummary,
 } from "./scheduler-types.ts";
-import { awaitDeathOrCancel, blameDeadServer, deathConfirmBoundMs } from "./server-death.ts";
 import { serverSpecFor } from "./server-spec.ts";
-import { executeTrial, type TrialEnd } from "./trial.ts";
+import { countStartableTrialsPerKey, turnOrder } from "./trial-turns.ts";
 
 export type { MachineReading, SchedulerDeps, SubmissionEntry, SubmissionEvent, SubmissionHandle, SubmissionSpec, SubmissionSummary } from "./scheduler-types.ts";
-
-/** Where a trial stands from admission on: what the daemon's trial line and the server's mutex queue need. */
-interface Admitted {
-  readonly at: number;
-  /** The trial's place in its server's arrangement queue; null on a server of its own. */
-  readonly queue: MutexQueueMarks | null;
-  /** Which player body a server of its own gives this scenario (0 for the first). */
-  readonly body: number;
-  /** What the trial's client reserved in the ledger at admission. */
-  readonly clientMb: number;
-}
-
-interface QueuedTrial {
-  readonly sequence: number;
-  /** The client command to boot ahead for this trial (our client host only: the others never say they booted); null: none. */
-  readonly aheadClient: ClientCommandSpec | null;
-  /** Clients it needs: one per player. */
-  readonly players: number;
-  readonly queuedAt: number;
-  /** The bound that held this trial at its last turn, for the sample's count of held trials; null when it was not held. */
-  heldBy: string | null;
-  readonly submission: Submission;
-  readonly entry: SubmissionEntry;
-  refusal: string | null;
-  /** Samples in a row this trial was refused for want of room for a new server. */
-  roomSamples: number;
-  /** A timing trial whose last refusal was the cpu bound: it holds the other trials to CPU_CALM so the load drains. */
-  waitingForCalm: boolean;
-  /** Its server failed to start once and it went back to the queue: a second failure is its error. */
-  sentBack: boolean;
-}
-
-interface Submission {
-  readonly id: number;
-  readonly spec: SubmissionSpec;
-  readonly abort: AbortController;
-  readonly summary: { runs: number; passed: number; failed: number; cancelled: number };
-  readonly done: PromiseWithResolvers<SubmissionSummary>;
-  running: number;
-  queued: number;
-}
 
 /** The line a submitter waits for before it starts the load a hold batch runs under (`scenario-repeat.sh --load`). */
 export const HOLD_STARTED_TEXT = "hold: this batch runs alone now";
@@ -72,10 +26,6 @@ export const HOLD_STARTED_TEXT = "hold: this batch runs alone now";
 function ownStartReason(placement: Placement): string | undefined {
   if (placement.kind !== "own") return undefined;
   return placement.reusable ? "own, no idle server of its key" : "own, not reusable";
-}
-
-function slug(name: string): string {
-  return name.replace(/[^A-Za-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 60);
 }
 
 export class Scheduler {
@@ -105,6 +55,13 @@ export class Scheduler {
   #lastServed = 0;
   #nextSubmission = 1;
   #sequence = 0;
+
+  readonly #host: TrialHost = {
+    sendBack: (queued, admitted, why) => this.#sendBack(queued, admitted, why),
+    unadmit: (queued, admitted) => this.#unadmit(queued, admitted),
+    hitWallBound: serverId => { this.#admission = noteWallBoundHit(this.#admission, serverId); },
+    settled: submission => { this.#finishIfDone(submission); this.#pump(false); },
+  };
 
   constructor(private readonly deps: SchedulerDeps) {
     this.#admission = initialAdmissionState(deps.config);
@@ -224,8 +181,8 @@ export class Scheduler {
     let starved: QueuedTrial | null = null;
     const held: Record<string, number> = {};
     let refusedForTarget = 0;
-    this.#startableOfKey = this.#countStartableTrialsPerKey();
-    for (const queued of this.#turnOrder()) {
+    this.#startableOfKey = countStartableTrialsPerKey(this.#queue);
+    for (const queued of turnOrder(this.#queue, this.#lastServed)) {
       if (starved && this.#running > 0) {
         queued.refusal = `waits behind ${starved.entry.name}, which has waited ${starved.roomSamples} samples for room to start a server`;
         queued.heldBy = "starved";
@@ -261,86 +218,23 @@ export class Scheduler {
     }
   }
 
-  /** Why no client may boot now for this trial, or null (`forAdmittedTrial`: its own reserve holds the client). */
-  #clientAheadRefusal(queued: QueuedTrial, forAdmittedTrial: boolean): string | null {
-    const sample = this.#liveSample()!;
-    return clientAheadRefusal({
-      forTimingTrial: this.#isTiming(queued.submission, queued.entry), timingBusy: this.#timingRunning + this.#timingWaitingForCalm > 0,
-      cpuBusy: this.#cpuWithBootsOfThisPass(sample), ledgerMb: ledgerMb(sample, this.#tally, this.deps.config), forAdmittedTrial,
-    }, this.deps.config);
+  /** What a client-booting step needs of this pass, or null when no client is booted ahead. */
+  #aheadPass(): AheadPass | null {
+    const ahead = this.deps.clientsAhead;
+    if (!ahead) return null;
+    return {
+      ahead, config: this.deps.config, sample: this.#liveSample()!, tally: this.#tally, bootsThisPass: this.#bootsThisPass,
+      timingBusy: this.#timingRunning + this.#timingWaitingForCalm > 0, isTiming: (submission, entry) => this.#isTiming(submission, entry),
+    };
   }
 
-  /** The busy cpu plus what the clients booted in this pass will add: their boots are not in the last sample, and a pass must not boot a whole cap of them into a machine at the bound. */
-  #cpuWithBootsOfThisPass(sample: AdmissionSample): number | null {
-    if (sample.cpuBusy === null) return null;
-    const { clientBootCpuSeconds, sampleEveryMs } = this.deps.config;
-    return sample.cpuBusy + this.#bootsThisPass * clientBootCpuSeconds / (sample.threads * sampleEveryMs / 1_000);
-  }
-
-  /** Boots clients for the queued trials that can start soon, in turn order, one per player, up to the caps and while the ledger holds them: they are joined to their trials when these start. */
   #bootClientsForQueuedTrials(): void {
-    const ahead = this.deps.clientsAhead;
-    if (!ahead) return;
-    const wanted = new Map<string, number>();
-    const considered = new Map<Submission, number>();
-    for (const queued of this.#turnOrder()) {
-      const { aheadClient: client, submission } = queued;
-      if (!client || this.#isTiming(submission, queued.entry) || queued.heldBy === "hold") continue;
-      // Past a `--lanes N` cap only the next wave of N can start soon: the rest would idle at their booted size.
-      const seen = (considered.get(submission) ?? 0) + 1;
-      considered.set(submission, seen);
-      if (submission.spec.maxLanes !== null && seen > submission.spec.maxLanes) continue;
-      const key = `${submission.id}|${clientTupleOf(client)}`;
-      const want = (wanted.get(key) ?? 0) + queued.players;
-      wanted.set(key, want);
-      while (ahead.unclaimedCount(submission.id, client) < want) {
-        if (ahead.isFull(submission.id) || this.#clientAheadRefusal(queued, false) || ahead.spawn(submission.id, client) !== null) break;
-        this.#bootsThisPass += 1;
-        // The client holds its booted size until it is in MemAvailable; this pass's later decisions must see it.
-        this.#tally = { ...this.#tally, reservedMb: this.#tally.reservedMb + this.deps.config.clientBootedMemMb };
-      }
-    }
-  }
-
-  /** The admitted trial keeps the clients booted for it, and boots the missing ones now: its reserve (one client's worth, as for any player count) covers them. */
-  #keepClientsFor(queued: QueuedTrial): void {
-    const ahead = this.deps.clientsAhead;
-    const { aheadClient: client, submission } = queued;
-    if (!ahead || !client) return;
-    let kept = ahead.claim(submission.id, queued.sequence, client, queued.players);
-    while (kept < queued.players && !this.#clientAheadRefusal(queued, true)
-      && ahead.spawn(submission.id, client, { trial: queued.sequence, covered: true }) === null) {
-      kept += 1;
-      this.#bootsThisPass += 1;
-    }
-  }
-
-  /** What the trial's client reserves at admission: the difference to a logged-in client when one booted ahead waits for it, else a whole client. */
-  #clientReserveMb(queued: QueuedTrial): number {
-    const { clientMemMb, clientBootedMemMb } = this.deps.config;
-    const { aheadClient: client, submission } = queued;
-    return client && this.deps.clientsAhead && this.deps.clientsAhead.unclaimedCount(submission.id, client) > 0 ? clientMemMb - clientBootedMemMb : clientMemMb;
-  }
-
-  /** The queue interleaved by submission, each taking a turn, the first turn going to the submission after the last one served. */
-  #turnOrder(): QueuedTrial[] {
-    const bySubmission = new Map<number, QueuedTrial[]>();
-    for (const queued of this.#queue) {
-      const own = bySubmission.get(queued.submission.id) ?? [];
-      own.push(queued);
-      bySubmission.set(queued.submission.id, own);
-    }
-    const ids = [...bySubmission.keys()].sort((first, second) => first - second);
-    const next = ids.findIndex(id => id > this.#lastServed);
-    const turn = next < 0 ? ids : [...ids.slice(next), ...ids.slice(0, next)];
-    const order: QueuedTrial[] = [];
-    for (let round = 0; order.length < this.#queue.length; round++) {
-      for (const id of turn) {
-        const queued = bySubmission.get(id)![round];
-        if (queued) order.push(queued);
-      }
-    }
-    return order;
+    const pass = this.#aheadPass();
+    if (!pass) return;
+    const booted = bootClientsForQueuedTrials(pass, turnOrder(this.#queue, this.#lastServed));
+    this.#bootsThisPass += booted;
+    // The client holds its booted size until it is in MemAvailable; this pass's later decisions must see it.
+    this.#tally = { ...this.#tally, reservedMb: this.#tally.reservedMb + booted * this.deps.config.clientBootedMemMb };
   }
 
   /** Null when the trial started; otherwise the reason it waits. */
@@ -352,7 +246,7 @@ export class Scheduler {
     if (cap !== null && submission.running >= cap) return this.#refusedNotForRoom(queued, `--lanes ${cap} reached for this submission`, "lanes");
     const decision = decideAdmission({
       sample: this.#liveSample()!, state: this.#admission, tally: this.#tally, config: this.deps.config,
-      request: this.#requestFor(entry.placement, this.#isTiming(submission, entry), this.#clientReserveMb(queued)),
+      request: this.#requestFor(entry.placement, this.#isTiming(submission, entry), clientReserveMb(this.deps.config, this.deps.clientsAhead, queued)),
     });
     const timing = this.#isTiming(submission, entry);
     this.#setWaitingForCalm(queued, timing && !decision.admit && decision.bound === "cpu");
@@ -384,10 +278,10 @@ export class Scheduler {
     return !submission.spec.hold && isTimingTrial(entry.placement, submission.spec.lock);
   }
 
-  #requestFor(placement: Placement, timing: boolean, clientReserveMb: number): AdmissionRequest {
+  #requestFor(placement: Placement, timing: boolean, reserveMb: number): AdmissionRequest {
     const { pool, config } = this.deps;
     // A timing trial waiting for a calm machine counts as one running: the others start only under CPU_CALM until it has started.
-    const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm, clientReserveMb };
+    const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm, clientReserveMb: reserveMb };
     if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
     const candidates = pool.sharedCandidates(placement.key);
     return { ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb, spreadToNewServer: this.#mayStartKeyServers && this.#keyWantsMoreServers(placement.key) };
@@ -399,22 +293,6 @@ export class Scheduler {
     if (config.serversPerKey === 1) return false;
     const servers = pool.sharedServerCount(key);
     return servers > 0 && servers < config.serversPerKey && (this.#startableOfKey.get(key) ?? 0) >= spreadThreshold(config);
-  }
-
-  /** Queued trials per pool key, each submission's `--lanes N` cap taken off: the trials past it cannot start, so they are no demand for a server. */
-  #countStartableTrialsPerKey(): Map<string, number> {
-    const counts = new Map<string, number>();
-    const room = new Map<Submission, number>();
-    for (const queued of this.#queue) {
-      const { submission } = queued;
-      const cap = submission.spec.maxLanes;
-      const left = room.get(submission) ?? (cap === null ? Infinity : Math.max(0, cap - submission.running));
-      if (left <= 0) continue;
-      room.set(submission, left - 1);
-      const key = queued.entry.placement.key;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return counts;
   }
 
   /**
@@ -453,8 +331,9 @@ export class Scheduler {
     } else {
       body = pool.noteSingleTrialStarted(managed.id);
     }
-    const clientMb = this.#clientReserveMb(queued);
-    this.#keepClientsFor(queued);
+    const clientMb = clientReserveMb(this.deps.config, this.deps.clientsAhead, queued);
+    const pass = this.#aheadPass();
+    if (pass) this.#bootsThisPass += keepClientsFor(pass, queued);
     this.#tally = {
       trials: this.#tally.trials + 1, newServers: this.#tally.newServers + (decision.server === "new" ? 1 : 0),
       reservedMb: this.#tally.reservedMb + clientMb,
@@ -466,39 +345,8 @@ export class Scheduler {
     submission.running += 1;
     submission.queued -= 1;
     this.#queue.splice(this.#queue.indexOf(queued), 1);
-    void this.#run(queued, managed, lane, { at: now, queue, body, clientMb });
+    void runAdmittedTrial({ deps: this.deps, host: this.#host }, { queued, managed, lane, admitted: { at: now, queue, body, clientMb } });
     return null;
-  }
-
-  async #run(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted): Promise<void> {
-    const { entry, submission } = queued;
-    const runDir = join(submission.spec.outDir, "runs", `${new Date().toISOString().replaceAll(/[:.]/gu, "-")}-t${String(queued.sequence).padStart(5, "0")}-${slug(entry.name)}`);
-    const io = this.deps.runIo ?? fileRunIo;
-    let end: TrialEnd;
-    const wait = { serverMs: 0 };
-    let ran = false;
-    try {
-      end = await this.#execute(queued, managed, lane, admitted, runDir, io, wait);
-      ran = true;
-    } catch (error) {
-      if (error instanceof ServerStartFailed && this.#sendBack(queued, admitted, "its server failed to start")) return;
-      const detail = error instanceof Error ? error.message : String(error);
-      end = {
-        result: { scenario: entry.name, outcome: "error", elapsedMs: 0, goal: { state: "pending", detail }, goalText: "", error: detail },
-        lane: error instanceof FreshBodyRefused ? "quarantined" : "free", serverSick: false, hitWallBound: false, restored: false, mutexWaitMs: 0, arranged: false,
-      };
-    }
-    // Mine Labs returns a failed arrangement as an error result, so a lane trial's queue marks say "arranged" too: only the end knows whether it ran.
-    const unrun = !end.arranged;
-    // A trial on a dead java fails its RCON commands at once, 5-10 s before the sampler confirms the death: it is not settled red before then.
-    // An end the scheduler made itself (a failed start, a body refused) has nothing of a dead java in it.
-    if (ran && unrun && !managed.died.aborted && end.result.outcome !== "pass" && !submission.abort.signal.aborted) {
-      const boundMs = deathConfirmBoundMs(this.deps.config);
-      this.deps.log(`${entry.name}: failed before its arrangement, waiting up to ${boundMs} ms for the death of server ${managed.id} to be confirmed`);
-      await awaitDeathOrCancel(AbortSignal.any([managed.died, submission.abort.signal]), boundMs);
-    }
-    if (unrun && managed.died.aborted && this.#sendBack(queued, admitted, "its server died before its arrangement")) return;
-    this.#settle(queued, managed, lane, admitted, wait.serverMs, blameDeadServer(managed, queued.submission, end), runDir);
   }
 
   /** A server that failed to start or died before this trial's arrangement never ran it: it goes back to the queue once, to be placed on another server; a second failure stays its error. Returns false when it stays one. */
@@ -533,67 +381,4 @@ export class Scheduler {
     this.#tally = { ...this.#tally, trials: this.#tally.trials - 1 };
     submission.running -= 1;
   }
-
-  /** The scenario this trial runs: shifted into its lane, or on a server of its own under the body that server is up to. */
-  #scenarioFor(entry: SubmissionEntry, lane: Lane | null, body: number): Scenario {
-    if (lane) {
-      const shifted = (this.deps.shift ?? shiftScenario)(entry.placement.kind === "lane" ? entry.placement.scenario : entry.scenario, lane);
-      if (!shifted.ok) throw new Error(`the scenario could not be shifted to lane ${lane.index}: ${shifted.reason}`);
-      return shifted.scenario;
-    }
-    const renamed = renameBodyOnOwnServer(entry.scenario, body);
-    if (!renamed.ok) throw new FreshBodyRefused(`the scenario could not be given a fresh body (${body}) on its reused server: ${renamed.reason}`);
-    return renamed.scenario;
-  }
-
-  async #execute(
-    queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted, runDir: string, io: RunIo, wait: { serverMs: number },
-  ): Promise<TrialEnd> {
-    const { entry, submission } = queued;
-    const waitedFrom = this.deps.now();
-    const server = await managed.ready.catch((error: unknown) => {
-      throw new ServerStartFailed(`server failed to start: ${error instanceof Error ? error.message : String(error)}`);
-    }).finally(() => { wait.serverMs = this.deps.now() - waitedFrom; });
-    const scenario = this.#scenarioFor(entry, lane, admitted.body);
-    const run = await io.open(runDir);
-    try {
-      const end = await executeTrial({ runTrial: this.deps.runTrial, config: this.deps.config }, {
-        name: entry.name, scenario, lane, server, mutex: managed.mutex, runDir, log: run.log, queue: admitted.queue ?? undefined,
-        signal: AbortSignal.any([submission.abort.signal, managed.died]), reuseServer: lane !== null || (entry.placement.kind === "own" && entry.placement.reusable),
-        clientProvider: this.deps.clientsAhead?.providerFor(submission.id, queued.sequence, run.log),
-      });
-      await io.writeResult(runDir, end.result);
-      return end;
-    } finally {
-      await run.close();
-    }
-  }
-
-  #settle(queued: QueuedTrial, managed: ManagedServer, lane: Lane | null, admitted: Admitted, serverWaitMs: number, end: TrialEnd, runDir: string): void {
-    const { submission, entry } = queued;
-    const now = this.deps.now();
-    this.deps.log(trialLine({
-      name: entry.name, lane: lane?.index ?? null, serverId: managed.id, queueMs: admitted.at - queued.queuedAt, serverWaitMs,
-      phases: end.phases, holdMs: now - admitted.at,
-    }));
-    this.deps.pool.finishTrial(managed.id, lane, end, now, { reusable: entry.placement.kind === "own" && entry.placement.reusable });
-    if (end.hitWallBound) this.#admission = noteWallBoundHit(this.#admission, managed.id);
-    this.#unadmit(queued, admitted);
-    const { result } = end;
-    submission.summary.runs += 1;
-    if (result.outcome === "pass") submission.summary.passed += 1;
-    else if (result.outcome === "cancelled") submission.summary.cancelled += 1;
-    else submission.summary.failed += 1;
-    submission.spec.emit({
-      type: "result", name: entry.name, outcome: result.outcome, elapsedMs: result.elapsedMs, detail: result.goal.detail, error: result.error, runDir,
-    });
-    this.#finishIfDone(submission);
-    this.#pump(false);
-  }
 }
-
-/** The next scenario on a reused server of its own cannot have a fresh body: its end keeps that server from being reused, or every later scenario of the key would fail the same way. */
-class FreshBodyRefused extends Error {}
-
-/** The server did not start: the trial never touched it, so it can be placed on another one. */
-class ServerStartFailed extends Error {}
