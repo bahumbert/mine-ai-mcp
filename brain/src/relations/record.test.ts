@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { describeRelation, forgetOldSaid, newRelation, parseRelationNote, relationNote, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
 import { agreeTrade, creditTrade, failTrade, markGave, settleTrade } from "./trade.ts";
-import type { ItemCount, TradeSettings } from "./types.ts";
+import type { GiveProgress, ItemCount, Trade, TradeSettings } from "./types.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
@@ -107,6 +107,25 @@ test("describeRelation for a full record", () => {
   assert.match(text, /you gave 5 bread 19 min ago, Theo owes 5 iron_ingot/u);
   assert.match(text, /Theo said 20 min ago they have iron_ingot/u);
   assert.match(text, /they need white_wool/u);
+});
+
+test("S1/S4: the Open line is true for nothing given, part given, a failed give with the partner away and a dropped give", () => {
+  const agreedFirstMe = deal("me");
+  const theyGave = creditTrade(deal("them"), ingots, t0 + MIN).trade;
+  const given3 = [{ item: "bread", count: 3 }];
+  const progress = (over: Partial<GiveProgress>) => () => ({ given: [], waits: null, nearWithin: 6, ...over });
+  const rows: { name: string; trade: Trade; progress?: () => GiveProgress; line: string }[] = [
+    { name: "nothing given", trade: agreedFirstMe, progress: progress({}), line: "agreed 2 min ago: you give 5 bread, Theo gives 5 iron_ingot, you first; nothing handed over yet: you have not given your 5 bread and have not received their 5 iron_ingot" },
+    { name: "no progress known", trade: agreedFirstMe, line: "agreed 2 min ago: you give 5 bread, Theo gives 5 iron_ingot, you first; nothing handed over yet: you have not given your 5 bread and have not received their 5 iron_ingot" },
+    { name: "part given in a hand-off", trade: agreedFirstMe, progress: progress({ given: given3 }), line: "agreed 2 min ago: you give 5 bread, Theo gives 5 iron_ingot, you first; you gave 3 bread of your 5 bread, 2 bread still to give; you have not received their 5 iron_ingot" },
+    { name: "part given by give_item, handed over for me", trade: theyGave, progress: progress({ given: given3 }), line: "Theo gave 5 iron_ingot; you gave 3 bread of your 5 bread, 2 bread still to give (it is handed over for you)" },
+    { name: "give failed, partner away", trade: theyGave, progress: progress({ waits: "partner_away" }), line: "Theo gave 5 iron_ingot; you have not given your 5 bread yet (the hand-over failed; it is tried again when Theo is within 6 blocks)" },
+    { name: "give dropped, waiting", trade: theyGave, progress: progress({ waits: "retake" }), line: "Theo gave 5 iron_ingot; you have not given your 5 bread yet (the hand-over was interrupted; it is tried again shortly)" },
+  ];
+  for (const row of rows) {
+    const text = describeRelation(withTrade(fresh(), row.trade), "Theo", t0 + 2 * MIN, row.progress);
+    assert.ok(text.endsWith(`Open: ${row.line}.`), `${row.name}: ${text}`);
+  }
 });
 
 test("relation note round trip and a bad note", () => {

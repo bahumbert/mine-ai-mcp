@@ -96,7 +96,7 @@ export class AgentRelations {
   /** What the conversation controller asks of the records. */
   forConversations(): ConversationRelations {
     return {
-      blocksFor: (names) => names.map((name) => ({ name, block: this.book.summaries([name])[0] ?? "" })),
+      blocksFor: (names) => names.map((name) => ({ name, block: this.book.summaries([name], (id) => this.trades.giveProgress(id))[0] ?? "" })),
       openingLines: (names) => openingRelationLines(names.map((partner) => ({ partner, relation: this.book.get(partner) })), this.deps.lacks(), Date.now()),
       ended: (partners) => void this.trades.onConversationEnded(partners).catch((error: unknown) => this.deps.log(`could not note a conversation's judgments: ${String(error)}`)),
     };
@@ -104,7 +104,7 @@ export class AgentRelations {
 
   /** The records of those the character has dealt with, for the goal tier. */
   lines(partners: readonly string[]): string[] {
-    return this.book.summaries(partners.filter((partner) => this.book.get(partner) !== null));
+    return this.book.summaries(partners.filter((partner) => this.book.get(partner) !== null), (id) => this.trades.giveProgress(id));
   }
 
   /**

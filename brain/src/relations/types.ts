@@ -66,6 +66,14 @@ export interface Relation {
   readonly lastDealt: number;
 }
 
+/** What of my side is already given, and why a due give waits (null: it is not waiting). */
+export interface GiveProgress {
+  readonly given: readonly ItemCount[];
+  readonly waits: "partner_away" | "retake" | null;
+  /** The opening distance a failed give waits for (`persona.settings.conversation.openingDistance`). */
+  readonly nearWithin: number;
+}
+
 /** Trade times are set in minutes. */
 export const MINUTE_MS = 60_000;
 

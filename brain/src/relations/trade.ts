@@ -37,6 +37,15 @@ export function repeatOfDone(trades: readonly Trade[], speaker: string, terms: T
   return trades.find((t) => t.state === "done" && t.partner.toLowerCase() === speaker.toLowerCase() && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && sameDealTerms(t, terms));
 }
 
+/** The newest trade the filter keeps; on equal `createdAt` the later one in the list wins. */
+export function newestTrade(trades: readonly Trade[], match: (t: Trade) => boolean): Trade | null {
+  let newest: Trade | null = null;
+  for (const t of trades) {
+    if (match(t) && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
+  }
+  return newest;
+}
+
 export function proposeTrade(a: DealArgs): Trade {
   return newTrade(a, "proposed");
 }

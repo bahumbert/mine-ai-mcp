@@ -241,6 +241,40 @@ test("a give stopped after an earlier failure is retaken only once the partner i
   assert.equal(theirTrade(h).state, "agreed", "the stop is no failure: the trade stays due");
 });
 
+test("S1: after part of a hand-off was taken the trade line says what was given and what is left", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  await h.c.tookInHandoff(theirTrade(h).id, bread(3));
+  assert.ok(h.c.block(["Theo"], []).includes("you gave 3 bread of your 5 bread, 2 bread still to give"), h.c.block(["Theo"], []));
+});
+
+test("S4: a give that failed with the partner away says it is tried again when they are near", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  await h.c.tick(snapshot(), new Set(), signal);
+  await h.c.tick(snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  await h.c.handoffEnded(theirTrade(h).id, "failed", "cannot reach Theo");
+  await h.c.tick(snapshot({ theo: { x: 20, y: 64, z: 0 } }), new Set(), signal);
+  assert.ok(h.c.block(["Theo"], []).includes("tried again when Theo is within"), h.c.block(["Theo"], []));
+});
+
+test("S4: a refused give with the partner away says it waits for the partner within 30 s, a dropped one with no failure says interrupted", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  await h.c.tick(snapshot(), new Set(), signal);
+  await h.c.tick(snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "not_taken", "left at the feet");
+  await h.c.tick(snapshot({ theo: { x: 20, y: 64, z: 0 } }), new Set(), signal);
+  assert.ok(h.c.block(["Theo"], []).includes("tried again when Theo is within"), h.c.block(["Theo"], []));
+  const other = harness();
+  await other.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  await other.c.tick(snapshot(), new Set(), signal);
+  await other.c.tick(snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  other.c.handoffDropped(theirTrade(other).id);
+  assert.ok(other.c.block(["Theo"], []).includes("the hand-over was interrupted"), other.c.block(["Theo"], []));
+});
+
 test("a trade ended outside a conversation is judged once and the feeling stored", async () => {
   const h = harness();
   const s = snapshot();
@@ -407,6 +441,44 @@ test("partial outside give, the hand-off gives the rest", async () => {
   await h.c.gaveOutside("Theo", "bread", 3);
   assert.equal(theirTrade(h).state, "i_gave");
   assert.equal(h.c.leftToGive(id), null, "my side was given");
+});
+
+test("S3: gives credited to a proposal that is declined go back to the ledger for the next one", async () => {
+  const h = harness();
+  const s = snapshot();
+  const propose = (count: number) => h.c.onDecision(decision({ action: "propose", give: bread(count) }), "Theo", s);
+  await h.c.gaveOutside("Theo", "bread", 4);
+  await propose(4);
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), [], "the earlier give covered the first proposal");
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", s);
+  assert.equal(theirTrade(h).state, "cancelled");
+  h.state.now += 1_000;
+  await propose(4);
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), [], "and the second one: the 4 bread went back");
+});
+
+test("S3: a proposal that expires 'no answer' gives the ledger's gives back too", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.gaveOutside("Theo", "bread", 4);
+  await h.c.onDecision(decision({ action: "propose", give: bread(4) }), "Theo", s);
+  h.state.now += 3 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.match(theirTrade(h).note, /no answer/u);
+  await h.c.onDecision(decision({ action: "propose", give: bread(4) }), "Theo", s);
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), []);
+});
+
+test("S3: an agreed trade cancelled keeps nothing in the ledger", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await h.c.gaveOutside("Theo", "bread", 2);
+  await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Theo", s);
+  assert.equal(theirTrade(h).state, "cancelled");
+  h.state.now += 1_000;
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
+  assert.deepEqual(h.c.leftToGive(theirTrade(h).id), bread(5), "nothing went back");
 });
 
 test("outside give to another partner is not counted", async () => {
@@ -954,6 +1026,22 @@ test("an open trade owed the item is credited first, the ledger gets only the re
   assert.equal(theirTrade(h).state, "done");
   await h.c.onDecision(decision({ first: "them", get: ingots(4) }), "Theo", withIron(snapshot(), 8));
   assert.deepEqual(theirTrade(h).received, ingots(3), "only the 3 left over are credited to the next trade");
+});
+
+test("S2: a payment tossed 8 min after the player's line is still claimed by a proposal accepted at 11 min", async () => {
+  const h = harness();
+  h.c.heardLine("Theo", h.state.now, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 8 * MIN;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 2 * MIN + 30_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 30_000;
+  const proposal = proposeTrade({ self: "Ayla", partner: "Theo", give: bread(5), get: ingots(5), first: "them", now: h.state.now });
+  await h.book.update("Theo", (r) => withTrade(r, proposal));
+  await h.c.offerAccepted(proposal.id, "Theo");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  assert.ok(h.events.some((e) => e.kind === "trade" && e.event === "received"));
 });
 
 test("a gain my own step yields is not recorded for a talking player", async () => {

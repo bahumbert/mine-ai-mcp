@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { sideText } from "./items.ts";
 import { isOpen } from "./trade.ts";
-import { type ItemCount, type Judged, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type Trade } from "./types.ts";
+import { type GiveProgress, type ItemCount, type Judged, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type Trade } from "./types.ts";
 
 const KEPT_ENDED_TRADES = 3;
 const MAX_WORD = 20;
@@ -88,19 +88,36 @@ function owedText(t: Trade): string {
     .filter((w) => w.left > 0).map((w) => `${w.left} ${w.item}`).join(", ");
 }
 
-/** What changed hands in an agreed trade: nothing, or the part payment that arrived before my give. */
-function agreedHandOver(t: Trade, partner: string): string {
-  const give = sideText(t.give) || "nothing";
-  if (t.received.length === 0) return `nothing handed over yet: you have not given your ${give} and have not received their ${sideText(t.get) || "nothing"}`;
-  return `you have not given your ${give} yet; ${partner} handed over ${sideText(t.received)} and still owes ${owedText(t)}`;
+/** What of my side is given (part of it, when `progress` says so) and what is left: "you gave 3 bread of your 5 bread, 2 bread still to give", else null. */
+function partGiven(t: Trade, progress: GiveProgress | undefined): string | null {
+  const given = (progress?.given ?? []).filter((g) => g.count > 0);
+  if (given.length === 0) return null;
+  const left = t.give.map((g) => ({ item: g.item, count: g.count - (given.find((x) => x.item === g.item)?.count ?? 0) })).filter((g) => g.count > 0);
+  return `you gave ${sideText(given)} of your ${sideText(t.give)}, ${sideText(left) || "nothing"} still to give`;
 }
 
-function describeTrade(t: Trade, partner: string, now: number): string {
+/** What changed hands in an agreed trade: nothing, part of my side, or the part payment that arrived before my give. */
+function agreedHandOver(t: Trade, partner: string, progress: GiveProgress | undefined): string {
+  const give = sideText(t.give) || "nothing";
+  const part = partGiven(t, progress);
+  if (t.received.length === 0) return part === null ? `nothing handed over yet: you have not given your ${give} and have not received their ${sideText(t.get) || "nothing"}` : `${part}; you have not received their ${sideText(t.get) || "nothing"}`;
+  return `${part ?? `you have not given your ${give} yet`}; ${partner} handed over ${sideText(t.received)} and still owes ${owedText(t)}`;
+}
+
+/** Why my due give waits, in brackets; "it is handed over for you" when nothing holds it back. */
+function giveWait(partner: string, progress: GiveProgress | undefined): string {
+  if (progress?.waits === "retake") return " (the hand-over was interrupted; it is tried again shortly)";
+  if (progress?.waits === "partner_away") return ` (the hand-over failed; it is tried again when ${partner} is within ${progress.nearWithin} blocks)`;
+  return " (it is handed over for you)";
+}
+
+function describeTrade(t: Trade, partner: string, now: number, progress?: (tradeId: string) => GiveProgress | undefined): string {
   const ago = minutesAgo(t.gaveAt ?? t.agreedAt ?? t.createdAt, now);
+  const mine = progress?.(t.id);
   if (t.state === "proposed") return `you proposed giving ${sideText(t.give) || "nothing"} for ${sideText(t.get) || "nothing"} ${ago} min ago, no answer yet`;
-  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first; ${agreedHandOver(t, partner)}`;
+  if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first; ${agreedHandOver(t, partner, mine)}`;
   if (t.state === "i_gave") return `you gave ${sideText(t.give)} ${ago} min ago, ${partner} owes ${owedText(t)}`;
-  if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}; you have not given your ${sideText(t.give)} yet (it is handed over for you)`;
+  if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}; ${partGiven(t, mine) ?? `you have not given your ${sideText(t.give)} yet`}${giveWait(partner, mine)}`;
   return `${partner} did not pay in time (${t.note}), still owes ${owedText(t)}`;
 }
 
@@ -114,7 +131,7 @@ function describeSaid(partner: string, has: readonly SaidItem[], needs: readonly
 }
 
 /** The text block the prompts use for one partner; a partner with no record reads as a stranger. */
-export function describeRelation(r: Relation | null, partner: string, now: number): string {
+export function describeRelation(r: Relation | null, partner: string, now: number, progress?: (tradeId: string) => GiveProgress | undefined): string {
   if (r === null) return `You have not dealt with ${partner} before.`;
   const feel = `${r.feeling > 0 ? "+" : ""}${r.feeling}`;
   const head = `You and ${partner}: ${r.word === "" ? "no opinion yet" : r.word} (${feel})${r.why === "" ? "" : `, ${r.why}`}.`;
@@ -122,7 +139,7 @@ export function describeRelation(r: Relation | null, partner: string, now: numbe
   const counts = `${f.tradesDone} trades done, ${f.keptLate} kept late, ${f.promisesBroken} broken` +
     `${f.iFailedToPay > 0 ? `, you failed to pay ${f.iFailedToPay}` : ""}${f.giftsGiven + f.giftsReceived > 0 ? `, gifts: ${f.giftsGiven} given, ${f.giftsReceived} received` : ""}.`;
   const pending = r.trades.filter((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && owedText(t) !== ""));
-  const open = pending.length > 0 ? [`Open: ${pending.map((t) => describeTrade(t, partner, now)).join("; ")}.`] : [];
+  const open = pending.length > 0 ? [`Open: ${pending.map((t) => describeTrade(t, partner, now, progress)).join("; ")}.`] : [];
   return [head, counts, ...open, ...describeSaid(partner, r.saidHas, r.saidNeeds, now)].join(" ");
 }
 

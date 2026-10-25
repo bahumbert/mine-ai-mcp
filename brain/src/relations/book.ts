@@ -2,7 +2,7 @@
 import type { Memory } from "../memory.ts";
 import { describeRelation, newRelation, relationNote } from "./record.ts";
 import { isOpen } from "./trade.ts";
-import type { Relation, Trade } from "./types.ts";
+import type { GiveProgress, Relation, Trade } from "./types.ts";
 
 export interface RelationBookDeps {
   save(memory: Memory): Promise<void>;
@@ -71,7 +71,7 @@ export class RelationBook {
   }
 
   /** The prompt text for each partner (a stranger reads as not dealt with). */
-  summaries(partners: readonly string[]): string[] {
-    return partners.map((p) => describeRelation(this.get(p), p, this.deps.now()));
+  summaries(partners: readonly string[], progress?: (tradeId: string) => GiveProgress | undefined): string[] {
+    return partners.map((p) => describeRelation(this.get(p), p, this.deps.now(), progress));
   }
 }

@@ -32,16 +32,17 @@ export class EarlierLedger {
     this.heardAt.set(lower(player), at);
   }
 
-  /** Some player's window is open: gains are worth watching for. */
+  /** Some player's window is open, or a recorded gain still waits for its trade: gains are worth watching for. */
   watching(now: number): boolean {
     for (const [player, at] of this.heardAt) {
       if (now - at <= EARLIER_GAIN_MS) return true;
       this.heardAt.delete(player);
     }
-    return false;
+    return this.gains.some(fresh(now, EARLIER_GAIN_MS));
   }
 
   gave(partner: string, item: string, count: number, at: number): void {
+    this.gives = this.gives.filter(fresh(at, EARLIER_GIVE_MS));
     this.gives.push({ player: lower(partner), item, count, at });
   }
 
@@ -70,6 +71,7 @@ export class EarlierLedger {
     if (gains.length === 0) return [];
     const open = [...near].filter(([player]) => now - (this.heardAt.get(player) ?? -Infinity) <= EARLIER_GAIN_MS).sort((a, b) => a[1] - b[1]);
     if (open.length === 0 || (open.length > 1 && open[0]![1] === open[1]![1])) return [];
+    this.gains = this.gains.filter(fresh(now, EARLIER_GAIN_MS));
     for (const g of gains) this.gains.push({ player: open[0]![0], item: g.item, count: g.count, at: now });
     return [...gains];
   }

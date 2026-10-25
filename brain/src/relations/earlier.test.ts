@@ -68,6 +68,30 @@ test("windows close 10 min after the last line", () => {
   assert.equal(l.watching(t0 + EARLIER_GAIN_MS + 1), false);
 });
 
+test("S2: an unclaimed gain keeps the window open until 10 min after the gain, and a claimed one does not", () => {
+  const l = new EarlierLedger();
+  l.heard("Owner", t0);
+  l.gained(beef(16), new Map([["owner", 2]]), t0 + 8 * 60 * SEC);
+  assert.equal(l.watching(t0 + 11 * 60 * SEC), true, "the window by line closed at 10 min, the gain is still waiting");
+  assert.equal(l.watching(t0 + 8 * 60 * SEC + EARLIER_GAIN_MS), true);
+  assert.equal(l.watching(t0 + 8 * 60 * SEC + EARLIER_GAIN_MS + 1), false);
+  assert.deepEqual(l.claimGains(trade(), carrying(16), t0 + 9 * 60 * SEC), beef(16));
+  assert.equal(l.watching(t0 + 11 * 60 * SEC), false, "the only gain was claimed");
+});
+
+test("S5: gains and gives older than the window are dropped as new ones come in", () => {
+  const l = new EarlierLedger();
+  const step = 1_800;
+  for (let i = 0; i < 1000; i += 1) {
+    l.heard("Owner", t0 + i * step);
+    l.gained(beef(1), new Map([["owner", 2]]), t0 + i * step);
+    l.gave("Owner", "cobblestone", 1, t0 + i * step);
+  }
+  // Claiming at t0, before every entry, keeps all that survived the pruning: the last 10 min, 334 entries of 1.
+  assert.equal(l.claimGains(trade("Owner", 10_000), carrying(10_000), t0).reduce((n, c) => n + c.count, 0), 334);
+  assert.equal(l.claimGives(trade(), t0).length, 334);
+});
+
 test("earlier gives are claimed by the next trade with the partner, once, and expire", () => {
   const l = new EarlierLedger();
   l.gave("OWNER", "cobblestone", 60, t0);

@@ -11,8 +11,8 @@ import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./hando
 import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
-import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
-import { type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
+import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
+import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
 const COLLECT_WATCH_MS = 5_000;
@@ -73,6 +73,8 @@ export class TradeController implements BoardPeer {
   private readonly givenOutside = new Map<string, Map<string, number>>();
   /** Gives a partner took, and payments picked up while they talked, with no trade yet: kept for the next trade with them. */
   private readonly earlier = new EarlierLedger();
+  /** Per proposal: the earlier gives it took from the ledger, which go back there when it ends unagreed. */
+  private readonly fromLedger = new Map<string, ItemCount[]>();
   private readonly collected = new Set<string>();
   private readonly nobodyGave = new Set<string>();
   private readonly judging: PendingJudgment[] = [];
@@ -234,7 +236,9 @@ export class TradeController implements BoardPeer {
 
   /** A trade just made takes the partner's earlier gives still inside the window, once (capped at its side); an agreed one also the payment picked up before the agreement. Returns the trade as it stands then. */
   private async claimEarlier(trade: Trade, now: number, carried = this.previous?.inventory ?? []): Promise<Trade> {
-    for (const e of this.earlier.claimGives(trade, now)) this.creditGiven(trade, e.item, e.count);
+    const claimed = this.earlier.claimGives(trade, now);
+    for (const e of claimed) this.creditGiven(trade, e.item, e.count);
+    if (trade.state === "proposed" && claimed.length > 0) this.fromLedger.set(trade.id, claimed);
     const { trade: next, used } = creditTrade(trade, trade.state === "agreed" ? this.earlier.claimGains(trade, carried, now) : [], now);
     if (used.length > 0) await this.recordStep(next, "received");
     return next;
@@ -394,7 +398,7 @@ export class TradeController implements BoardPeer {
   block(partners: readonly string[], lacks: readonly string[]): string {
     const idle = [...this.nobodyGave].map((id) => this.find(id)).filter((t): t is Trade => t !== undefined)
       .map((t) => `Nobody has given yet on your agreed trade with ${t.partner} (you give ${sideText(t.give) || "nothing"}, they give ${sideText(t.get) || "nothing"}): you may go first, ask them to, or cancel it.`);
-    return relationsBlock([...this.deps.book.summaries(partners), ...idle], lacks);
+    return relationsBlock([...this.deps.book.summaries(partners, (id) => this.giveProgress(id)), ...idle], lacks);
   }
 
   /** Resolves when the judgments started so far are over (the agent's shutdown, the tests). */
@@ -423,21 +427,12 @@ export class TradeController implements BoardPeer {
 
   /** The newest trade with that partner proposed at or after `since`; a read, nothing is written. */
   latestWith(partner: string, since: number): Trade | null {
-    return this.newest((t) => same(t.partner, partner) && t.createdAt >= since);
+    return newestTrade(this.deps.book.trades(), (t) => same(t.partner, partner) && t.createdAt >= since);
   }
 
   /** The newest trade with any partner created at or after `since` that is agreed or further; a read, nothing is written. */
   agreedSince(since: number): Trade | null {
-    return this.newest((t) => t.createdAt >= since && AGREED_STATES.has(t.state));
-  }
-
-  /** The newest trade the filter keeps; on equal `createdAt` the later one in the book wins. */
-  private newest(match: (t: Trade) => boolean): Trade | null {
-    let newest: Trade | null = null;
-    for (const t of this.deps.book.trades()) {
-      if (match(t) && (newest === null || t.createdAt >= newest.createdAt)) newest = t;
-    }
-    return newest;
+    return newestTrade(this.deps.book.trades(), (t) => t.createdAt >= since && AGREED_STATES.has(t.state));
   }
 
   private openWith(partner: string): Trade | undefined {
@@ -451,7 +446,9 @@ export class TradeController implements BoardPeer {
     await this.deps.book.update(trade.partner, (r) => (ended ? withEndedTrade(r, trade) : withTrade(r, trade)));
     for (const event of events) this.deps.journal({ kind: "trade", event, partner: trade.partner, tradeId: trade.id, give: trade.give, get: trade.get, first: trade.first, note: trade.note });
     if (!ended) return;
-    for (const held of [this.nobodyGave, this.watches, this.givenOutside, this.giveTakenAt]) held.delete(trade.id);
+    // A proposal that ended unagreed gives the ledger's gives it took back (the window restarts now: the original time is not kept).
+    if (trade.state === "cancelled" && trade.agreedAt === null) for (const e of this.fromLedger.get(trade.id) ?? []) this.earlier.gave(trade.partner, e.item, e.count, this.deps.now());
+    for (const held of [this.nobodyGave, this.watches, this.givenOutside, this.giveTakenAt, this.fromLedger]) held.delete(trade.id);
     // A cancelled trade moved nothing: there is nothing to judge.
     if (trade.state !== "cancelled") this.judging.push({ partner: trade.partner, trade, since: this.deps.now() });
   }
@@ -522,9 +519,23 @@ export class TradeController implements BoardPeer {
     if (!mineToGive || this.pending.has(t.id)) return false;
     const dropped = this.droppedAt.get(t.id);
     if (dropped !== undefined && now - dropped < RETAKE_AFTER_MS) return false;
-    if ((this.giveFailures.get(t.id) ?? 0) === 0) return true;
+    return (this.giveFailures.get(t.id) ?? 0) === 0 || this.partnerNear(t, at);
+  }
+
+  /** The partner stands within opening distance of `at` (a failed give is retried only then). */
+  private partnerNear(t: Trade, at: Position | null): boolean {
     const there = partnerPosition(this.partners, t.partner);
     return at !== null && there !== null && manhattan(at, there) <= this.deps.persona.settings.conversation.openingDistance;
+  }
+
+  /** What of my side an open trade has given and why its give waits, for the line the model reads; undefined for a trade that is not open. */
+  giveProgress(tradeId: string): GiveProgress | undefined {
+    const trade = this.find(tradeId);
+    if (trade === undefined || !isOpen(trade)) return undefined;
+    const given = [...(this.givenOutside.get(tradeId) ?? [])].filter(([, count]) => count > 0).map(([item, count]) => ({ item, count }));
+    const retake = this.deps.now() - (this.droppedAt.get(tradeId) ?? -Infinity) < RETAKE_AFTER_MS;
+    const away = (this.giveFailures.get(tradeId) ?? 0) > 0 && !this.partnerNear(trade, this.position);
+    return { given, waits: away ? "partner_away" : retake ? "retake" : null, nearWithin: this.deps.persona.settings.conversation.openingDistance };
   }
 
   /** A give for the trade is pending and was taken less than the pay-back time ago: it is bounded by its own walk, toss and wait. */
@@ -577,7 +588,7 @@ export class TradeController implements BoardPeer {
     const task = (async () => {
       try {
         const from = book.get(j.partner)?.feeling ?? 0;
-        const judged = await mind.judgeRelation({ persona, partner: j.partner, block: book.summaries([j.partner])[0] ?? "", trade: j.trade }, signal);
+        const judged = await mind.judgeRelation({ persona, partner: j.partner, block: book.summaries([j.partner], (id) => this.giveProgress(id))[0] ?? "", trade: j.trade }, signal);
         if (judged === null) return void log(`relation: no usable judgment of ${j.partner}`);
         const next = await book.update(j.partner, (r) => withFeeling(r, judged));
         journal({ kind: "relation", event: "judged", partner: next.partner, from, to: next.feeling, word: next.word, why: next.why, by: "judge" });
