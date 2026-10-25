@@ -160,7 +160,7 @@ test("collect fallback once: a partner line, no gain in 5 s, one collect", async
   const s = snapshot();
   await h.c.onDecision(decision({ first: "them" }), "Theo", s);
   await h.c.tick(s, new Set(), signal);
-  h.c.heardLine("Theo", h.state.now);
+  h.c.heardLine("Theo", h.state.now, 2);
   h.state.now += 4_000;
   await h.c.tick(s, new Set(), signal);
   assert.deepEqual(h.handoffs, []);
@@ -169,7 +169,7 @@ test("collect fallback once: a partner line, no gain in 5 s, one collect", async
   assert.deepEqual(kinds(h), ["collect"]);
   assert.deepEqual(h.handoffs[0], { kind: "collect", tradeId: theirTrade(h).id, items: ingots(5) });
   await h.c.handoffEnded(theirTrade(h).id, "done", "picked up");
-  h.c.heardLine("Theo", h.state.now);
+  h.c.heardLine("Theo", h.state.now, 2);
   h.state.now += 6_000;
   await h.c.tick(s, new Set(), signal);
   assert.equal(h.handoffs.length, 1, "no second collect");
@@ -180,7 +180,7 @@ test("collect fallback waits for the partner to be near", async () => {
   const far = snapshot({ theo: { x: 40, y: 64, z: 0 } });
   await h.c.onDecision(decision({ first: "them" }), "Theo", far);
   await h.c.tick(far, new Set(), signal);
-  h.c.heardLine("Theo", h.state.now);
+  h.c.heardLine("Theo", h.state.now, 2);
   h.state.now += 6_000;
   await h.c.tick(far, new Set(), signal);
   assert.deepEqual(h.handoffs, []);
@@ -601,7 +601,7 @@ test("a collect watch firing during the wait goes on top of it", async () => {
   const s = snapshot();
   await h.c.onDecision(decision({ first: "them" }), "Theo", s);
   await h.c.tick(s, new Set(), signal);
-  h.c.heardLine("Theo", h.state.now);
+  h.c.heardLine("Theo", h.state.now, 2);
   h.state.now += 6_000;
   await h.c.tick(s, new Set(), signal);
   assert.equal(h.awaits.length, 1);
@@ -917,4 +917,82 @@ test("D1: a dropped give (a stop) does not count toward the attempts", async () 
   }
   assert.equal(theirTrade(h).state, "agreed");
   assert.equal(h.handoffs.length, 4);
+});
+
+test("a payment tossed before the agreement is received at agreement and my give comes due (stage 3e)", async () => {
+  const h = harness();
+  h.c.heardLine("Theo", h.state.now, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 5_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", withIron(snapshot(), 5));
+  assert.deepEqual(h.events.filter((e) => e.kind === "trade").map((e) => e.event), ["agreed", "received"]);
+  assert.equal(theirTrade(h).state, "they_gave");
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(kinds(h), ["give"], "the give is handed over from the new end state");
+});
+
+test("with no player talking the tick does not run", async () => {
+  const h = harness();
+  assert.equal(h.c.busy(), false);
+  h.c.heardLine("Theo", h.state.now, 2);
+  assert.equal(h.c.busy(), true);
+  h.state.now += 10 * MIN + 1;
+  assert.equal(h.c.busy(), false);
+});
+
+test("an open trade owed the item is credited first, the ledger gets only the rest", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  h.c.heardLine("Theo", h.state.now, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 8), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).state, "done");
+  await h.c.onDecision(decision({ first: "them", get: ingots(4) }), "Theo", withIron(snapshot(), 8));
+  assert.deepEqual(theirTrade(h).received, ingots(3), "only the 3 left over are credited to the next trade");
+});
+
+test("a gain my own step yields is not recorded for a talking player", async () => {
+  const h = harness();
+  h.c.heardLine("Theo", h.state.now, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(["iron_ingot"]), signal);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", withIron(snapshot(), 5));
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(theirTrade(h).received, []);
+});
+
+test("a line from a speaker beyond opening distance, or at no known distance, opens no window", () => {
+  const h = harness();
+  h.c.heardLine("Theo", h.state.now, 17);
+  assert.equal(h.c.busy(), false);
+  h.c.heardLine("Theo", h.state.now, null);
+  assert.equal(h.c.busy(), false);
+  h.c.heardLine("Theo", h.state.now, 16);
+  assert.equal(h.c.busy(), true);
+});
+
+test("onlyWatching: a window alone is true; an open trade makes it false", async () => {
+  const h = harness();
+  assert.equal(h.c.onlyWatching(), false);
+  h.c.heardLine("Theo", h.state.now, 2);
+  assert.equal(h.c.onlyWatching(), true);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  assert.equal(h.c.busy(), true);
+  assert.equal(h.c.onlyWatching(), false);
+});
+
+test("the payment is capped by the inventory of the snapshot that agrees the trade, not the last tick's", async () => {
+  const h = harness();
+  h.c.heardLine("Theo", h.state.now, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  assert.deepEqual(theirTrade(h).received, [], "the 5 iron are no longer carried in the snapshot at hand");
 });

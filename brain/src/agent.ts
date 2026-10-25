@@ -333,7 +333,7 @@ export class Agent {
             // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
-            this.relations?.trades.heardLine(message.username, Date.now());
+            this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
             if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
             this.inbox.push(message);
             this.wakeChat?.();

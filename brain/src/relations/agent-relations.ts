@@ -16,6 +16,9 @@ import { openingRelationLines, tooFarLine } from "./prompts.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, RelationEvent, TradeEvent } from "./types.ts";
 
+/** With only a player's window open (no trade), the tick runs this often at most: it only watches for a payment tossed before the deal. */
+const WATCH_LOOK_MS = 2_000;
+
 export interface AgentRelationsDeps {
   readonly persona: Persona;
   readonly mind: Mind;
@@ -43,6 +46,7 @@ export class AgentRelations {
   /** Note writes run one after the other in the background: the book never waits for the body's queue. */
   private writes: Promise<unknown> = Promise.resolve();
   private looking = false;
+  private lastLookAt = 0;
 
   constructor(private readonly deps: AgentRelationsDeps) {
     const { persona, log } = deps;
@@ -103,8 +107,10 @@ export class AgentRelations {
 
   /** The agent's poll: while a trade is open, its tick runs in the background (never held up by, nor holding up, a step). */
   look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): void {
-    if (this.looking || signal.aborted || !this.trades.busy()) return;
+    const now = (this.deps.clock ?? realClock).now();
+    if (this.looking || signal.aborted || !this.trades.busy() || (this.trades.onlyWatching() && now - this.lastLookAt < WATCH_LOOK_MS)) return;
     this.looking = true;
+    this.lastLookAt = now;
     void (async () => {
       const snapshot = await this.deps.runtime.status();
       this.trades.reconcileHandoffs(onStack);
