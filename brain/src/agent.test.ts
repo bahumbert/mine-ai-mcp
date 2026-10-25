@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Step } from "./actions.ts";
 import { Agent, type AgentOptions } from "./agent.ts";
@@ -2436,14 +2436,23 @@ test("T7 + D2: a give that waited behind a long order past the deadline ends bro
 });
 
 /** A step of the agent's run by hand (B1): it starts, its yield lands in the inventory and it ends in one turn, so no look sees the step running. */
-async function stepEndingBetweenLooks(agent: Agent, runtime: FakeRuntime, step: Step, gained: { name: string; count: number }[], settleMs = 150): Promise<void> {
-  const inside = agent as unknown as { startStep(work: object, controller: AbortController, step: Step): void; endStep(work: object): void };
+async function stepEndingBetweenLooks(t: TestContext, agent: Agent, runtime: FakeRuntime, step: Step, gained: { name: string; count: number }[]): Promise<void> {
+  const inside = agent as unknown as { relations: AgentRelations; startStep(work: object, controller: AbortController, step: Step): void; endStep(work: object): void };
+  const answers: string[] = [];
+  const look = inside.relations.look.bind(inside.relations);
+  inside.relations.look = (yields, onStack, signal) => { const answer = look(yields, onStack, signal); answers.push(answer); return answer; };
+  const real = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date, "now", () => real() + offset);
   const work = { step: null };
   inside.startStep(work, new AbortController(), step);
-  await sleep(40);
+  await until(() => answers.includes("ticked")); // a tick read the inventory before the yield landed
   runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, ...gained] };
   inside.endStep(work);
-  await sleep(settleMs);
+  offset += 2_000; // past the 2 s watch throttle of a window alone
+  answers.length = 0;
+  await until(() => answers.includes("ticked"));
+  await until(() => !(inside.relations as unknown as { looking: boolean }).looking);
 }
 
 test("B1: what a finished step yielded is not kept as a talking player's early payment", async (t) => {
@@ -2451,7 +2460,7 @@ test("B1: what a finished step yielded is not kept as a talking player's early p
   const lines: string[] = [];
   const { agent } = agentFor(t, runtime, {}, { log: (line) => lines.push(line) });
   (agent as unknown as { relations: AgentRelations }).relations.trades.heardLine("Theo", Date.now(), 2);
-  await stepEndingBetweenLooks(agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }], 2_300); // a window alone is watched every 2 s
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }]);
   assert.ok(!lines.some((line) => line.includes("picked up while a player talked")), lines.join("\n"));
 });
 
@@ -2461,7 +2470,7 @@ test("B1: a trade agreed after a step ended does not count the step's yield as t
   chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
   await until(() => heldTrade(agent)?.state === "agreed", 4_000);
-  await stepEndingBetweenLooks(agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }]);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }]);
   assert.equal(heldTrade(agent)?.state, "agreed");
   assert.deepEqual(heldTrade(agent)?.received, []);
 });
@@ -2472,7 +2481,7 @@ test("B1: in the same tick a real payment of another item is credited and the st
   chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them", get: [{ item: "iron_ingot", count: 5 }, { item: "oak_log", count: 2 }] } });
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot and 2 oak_log for your 5 bread, you after me?"));
   await until(() => heldTrade(agent)?.state === "agreed", 4_000);
-  await stepEndingBetweenLooks(agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }, { name: "oak_log", count: 2 }]);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }, { name: "oak_log", count: 2 }]);
   assert.deepEqual(heldTrade(agent)?.received, [{ item: "oak_log", count: 2 }]);
 });
 
@@ -2483,7 +2492,6 @@ test("B1: the next look carries the yields of a step that ended since the last o
   const seen: string[][] = [];
   const look = inside.relations.look.bind(inside.relations);
   inside.relations.look = (yields, onStack, signal) => { seen.push([...yields]); return look(yields, onStack, signal); };
-  await sleep(40);
   const work = { step: null };
   inside.startStep(work, new AbortController(), { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] });
   inside.endStep(work);
