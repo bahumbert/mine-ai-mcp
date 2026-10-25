@@ -10,6 +10,7 @@ import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock } from "../../../../src/test-support/fake-bot/index.ts";
 import { ZERO_ARENA, arenaFrame } from "../../arena/frame.ts";
 import { awaitFlowDried, bucketPourAndFill, isTakenSourceUpdate } from "./bucket-pour-and-fill.ts";
+import { ANSWER_WALL_MS, afterServerTicks } from "../server-answer.ts";
 import { fakeContractSubject } from "../subject.ts";
 
 const TAKEN_CELL = new Vec3(2, -60, 0);
@@ -60,7 +61,7 @@ test("the wait does not hold for nothing, nor for water out of the flow's reach 
     if (wetCell !== undefined) harness.world.setCell(wetCell, flowing(1));
     const startedAt = subject.now();
     await awaitFlowDried(subject, TAKEN_CELL);
-    assert.ok(subject.now() - startedAt < 3_000, `waited ${subject.now() - startedAt} ms with water at ${String(wetCell)}: nothing to wait for but the 40 ticks`);
+    assert.ok(subject.now() - startedAt < 3_000, `waited ${subject.now() - startedAt} ms with water at ${String(wetCell)}: nothing to wait for but the server ticks of an absence`);
   }
 });
 
@@ -74,33 +75,34 @@ test("the wait holds while flowing water is within 7 steps of the taken source a
   assert.ok(subject.now() - startedAt >= 2_500, "returned while the flow was still there");
 });
 
-test("a flow that has not dried in 5 s fails naming the source and the cells still wet", async () => {
+test("a flow that has not dried within the answer bound (10 s) fails naming the source and the cells still wet", async () => {
   const { harness, subject } = bucketScene();
   using _installed = harness.clock.install();
   harness.world.setCell(WALL_CELL, flowing(5));
   await assert.rejects(
     awaitFlowDried(subject, TAKEN_CELL),
-    (error: Error) => /the flow from the source taken at \(2, -60, 0\) had not dried within 5 s/.test(error.message) && error.message.includes("-4,0=water level 5"),
+    (error: Error) => /the flow from the source taken at \(2, -60, 0\) had not dried within 10 s/.test(error.message) && error.message.includes("-4,0=water level 5"),
   );
 });
 
-test("water that comes back within the 40 ticks after the cells were dry fails: dry once is not dried", async () => {
+test("water that comes back within the 21 proven server ticks after the cells were dry fails: dry once is not dried", async () => {
   const { harness, subject } = bucketScene();
   using _installed = harness.clock.install();
   harness.world.setCell(WALL_CELL, flowing(5));
   inMs(500, () => harness.world.setCell(WALL_CELL, "air"));
   inMs(1_200, () => harness.world.setCell(WALL_CELL, flowing(6)));
-  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /flowed again within 40 ticks/);
+  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /flowed again within 21 server ticks/);
 });
 
 test("a server that sends no ticks fails on the wall bound, not on ticks alone", async () => {
   const { harness, subject } = bucketScene();
   using _installed = harness.clock.install();
-  await subject.wait(1_500);
+  // Ticks have come (the client knows the world age) before the server stops.
+  await afterServerTicks(subject, 1, "before the stop");
   harness.server.stop();
   const startedAt = subject.now();
-  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /the world age moved less than 40 ticks/);
-  assert.ok(subject.now() - startedAt <= 5_100, `waited ${subject.now() - startedAt} ms`);
+  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /stays dry: the world age did not move 40 ticks within 10000 ms: the server is stalled/);
+  assert.ok(subject.now() - startedAt <= ANSWER_WALL_MS + 100, `waited ${subject.now() - startedAt} ms`);
 });
 
 test("the whole check passes when the taken source's flow recedes through the wall cell: a step of it lands right after the wall pour starts listening", async () => {

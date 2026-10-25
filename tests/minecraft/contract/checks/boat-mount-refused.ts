@@ -7,16 +7,15 @@
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { type ContractSubject, holdsWithin } from "../subject.ts";
-import { getOffAndStand } from "./boat-seat.ts";
+import { afterClientTicks, answerArrives, serverQuiet } from "../server-answer.ts";
+import type { ContractSubject } from "../subject.ts";
+import { FREE_BOT_PHYSICS_TICKS, getOffAndStand } from "./boat-seat.ts";
 
-/** Longer than any answer of a server on time: a refusal is shown by this much silence. */
-const SILENCE_MS = 1_500;
-const SEAT_WALL_MS = 3_000;
-const BOAT_SPAWN_WALL_MS = 5_000;
-
-/** Whether she was seated, and the passenger lists of `boat` she heard, after trying to mount it. */
-async function tryMount(subject: ContractSubject, boat: Entity): Promise<{ mounted: boolean; lists: number[][] }> {
+/**
+ * Whether she was seated, and the passenger lists of `boat` she heard, after trying to mount it. A mount the server takes is
+ * waited for (`answerArrives`); one it refuses is shown by the server's ticks passing with nothing sent (`serverQuiet`).
+ */
+async function tryMount(subject: ContractSubject, boat: Entity, expected: "taken" | "refused", why: string): Promise<{ mounted: boolean; mounts: number; lists: number[][] }> {
   const { bot } = subject;
   const lists: number[][] = [];
   let mounts = 0;
@@ -26,9 +25,9 @@ async function tryMount(subject: ContractSubject, boat: Entity): Promise<{ mount
   bot.on("mount", onMount);
   try {
     bot.mount(boat);
-    const seated = await holdsWithin(subject, () => bot.vehicle?.id === boat.id, SEAT_WALL_MS);
-    if (!seated) await holdsWithin(subject, () => false, SILENCE_MS);
-    return { mounted: seated && mounts === 1, lists };
+    if (expected === "taken") await answerArrives(subject, () => bot.vehicle?.id === boat.id, `the mount of ${why} (refused?)`);
+    else await serverQuiet(subject, `after the mount of ${why}`);
+    return { mounted: bot.vehicle?.id === boat.id && mounts === 1, mounts, lists };
   } finally {
     bot._client.off("set_passengers", onList);
     bot.off("mount", onMount);
@@ -39,26 +38,19 @@ async function tryMount(subject: ContractSubject, boat: Entity): Promise<{ mount
 async function boatAt(subject: ContractSubject, x: number, z: number): Promise<Entity> {
   const at = subject.world([x, -60, z]);
   const find = () => Object.values(subject.bot.entities).find((entity) => entity.name === "oak_boat" && Math.abs(entity.position.x - at.x) < 0.2 && Math.abs(entity.position.z - at.z) < 0.2);
-  assert.ok(await holdsWithin(subject, () => find() !== undefined, BOAT_SPAWN_WALL_MS), `no oak_boat entity at ${at.x} ${at.z}`);
+  await answerArrives(subject, () => find() !== undefined, `no oak_boat entity at ${at.x} ${at.z}`);
   return find()!;
 }
 
 /** A refused mount: nothing heard, the server has no rider of hers, and her physics run. */
 async function assertRefused(subject: ContractSubject, boat: Entity, why: string): Promise<void> {
   const { bot } = subject;
-  const answer = await tryMount(subject, boat);
+  const answer = await tryMount(subject, boat, "refused", why);
   assert.equal(answer.mounted, false, `the server seated her in ${why}`);
   assert.deepEqual(answer.lists, [], `the server answered a refused mount (${why}) with a passenger list`);
   assert.equal(await subject.seatedOnServer(boat), false, `the server has her seated in ${why}`);
   assert.equal(bot.vehicle ?? null, null, `her client has a vehicle after a refused mount (${why})`);
-  let ticks = 0;
-  const onTick = () => void (ticks += 1);
-  bot.on("physicsTick", onTick);
-  try {
-    assert.ok(await holdsWithin(subject, () => ticks >= 5, 1_000), `no physics tick after a refused mount (${why}): the bot is frozen`);
-  } finally {
-    bot.off("physicsTick", onTick);
-  }
+  await afterClientTicks(subject, FREE_BOT_PHYSICS_TICKS, `after a refused mount (${why}) the bot is frozen`);
 }
 
 export const boatMountRefused: ContractCheck = {
@@ -81,14 +73,14 @@ export const boatMountRefused: ContractCheck = {
     await assertRefused(subject, await boatAt(subject, 0.5, -6.5), "a boat 7 blocks off");
     // The boat at the edge of the reach is taken; she gets off beside it, where the two boats with passengers are near.
     const edge = await boatAt(subject, 6.5, 0.5);
-    const taken = await tryMount(subject, edge);
-    assert.equal(taken.mounted, true, "the server refused a boat 6 blocks off");
+    const taken = await tryMount(subject, edge, "taken", "a boat 6 blocks off");
+    assert.equal(taken.mounted, true, `the client heard ${taken.mounts} mount events for the boat 6 blocks off, not 1`);
     assert.equal(await subject.seatedOnServer(edge), true, "the server does not have her seated in the boat 6 blocks off");
     await getOffAndStand(subject, edge);
     await assertRefused(subject, await boatAt(subject, 6.5, 3.5), "a boat with its two seats taken");
     const shared = await boatAt(subject, 6.5, -2.5);
-    const second = await tryMount(subject, shared);
-    assert.equal(second.mounted, true, "the server refused a boat with one passenger");
+    const second = await tryMount(subject, shared, "taken", "a boat with one passenger");
+    assert.equal(second.mounted, true, `the client heard ${second.mounts} mount events for the boat with one passenger, not 1`);
     const riders = second.lists.at(-1) ?? [];
     assert.ok(riders.includes(bot.entity.id) && riders.length === 2, `the list of a boat with one passenger is ${JSON.stringify(riders)}, not her and the passenger`);
     assert.equal(await subject.seatedOnServer(shared), true, "the server does not have her seated as the second rider");

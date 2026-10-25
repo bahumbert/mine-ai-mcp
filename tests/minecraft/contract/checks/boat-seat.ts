@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import { getOff } from "../../../../src/actions/navigate/boat-get-off.ts";
 import type { ContractFixture } from "../checks.ts";
-import { type ContractSubject, type LocalPoint, holdsWithin, settleWithin } from "../subject.ts";
+import { answerArrives, afterClientTicks, serverQuiet } from "../server-answer.ts";
+import { type ContractSubject, type LocalPoint, settleWithin } from "../subject.ts";
 
 /**
  * A boat on the floor two blocks east of the feet, in reach to mount. On land: a pool (2x3 water sources, 2026-10-21)
@@ -15,14 +16,10 @@ export const BOAT_FIXTURE: ContractFixture = {
   position: [0.5, -60, 0.5],
   entities: [{ name: "oak_boat", position: [2.5, -60, 0.5] }],
 };
-/** Server ticks a check listens for an answer: what `getOff` waits (`DISMOUNT_SERVER_TICKS`, two time packets). */
-const LISTEN_TICKS = 40;
-/** The wall bound on those ticks: 2 s on time, more on a server behind (`INVENTORY_SETTLE_WALL_MS` and the like). */
-const LISTEN_WALL_MS = 5_000;
-/** The summon comes with the trial's start; the seat is one round trip. */
-const BOAT_SPAWN_WALL_MS = 5_000;
-const SEAT_WALL_MS = 3_000;
+/** The bound of the runtime's own `getOff` call (its dismount waits of its own), not of a wait for the server's answer. */
 const GET_OFF_WALL_MS = 20_000;
+/** Physics ticks that show a free bot is not frozen (after a get-off, after a refused mount): 5 take a quarter of a second with the physics on. */
+export const FREE_BOT_PHYSICS_TICKS = 5;
 
 /** Where the seat fixture summons its boat, arena-local. */
 const BOAT_SUMMONED_AT = BOAT_FIXTURE.entities![0]!.position;
@@ -38,10 +35,10 @@ export function boatSummonedAt(subject: ContractSubject, summonedAtLocal: LocalP
 export async function mountBoat(subject: ContractSubject, summonedAt: LocalPoint = BOAT_SUMMONED_AT): Promise<Entity> {
   const { bot } = subject;
   const boatOf = () => boatSummonedAt(subject, summonedAt);
-  assert.ok(await holdsWithin(subject, () => boatOf() !== undefined, BOAT_SPAWN_WALL_MS), "no oak_boat entity in view");
+  await answerArrives(subject, () => boatOf() !== undefined, "no oak_boat entity in view");
   const boat = boatOf()!;
   bot.mount(boat);
-  assert.ok(await holdsWithin(subject, () => bot.vehicle?.id === boat.id, SEAT_WALL_MS), "the mount was not confirmed (no passenger list)");
+  await answerArrives(subject, () => bot.vehicle?.id === boat.id, "the mount was not confirmed (no passenger list)");
   assert.equal(await subject.seatedOnServer(boat), true, "the server does not have her seated after the mount");
   return boat;
 }
@@ -54,7 +51,7 @@ export interface HeardWhileSeated {
   readonly physicsTicks: number;
 }
 
-/** Listen to positions, passenger lists and physics ticks while 40 server ticks pass. */
+/** Listen to positions, passenger lists and physics ticks while the server runs the ticks of an absence (`serverQuiet`: 40 observed, 21 proven). */
 export async function listenWhileSeated(subject: ContractSubject, boat: Entity): Promise<HeardWhileSeated> {
   const { bot } = subject;
   const heard = { positions: 0, listsWithoutHer: 0, physicsTicks: 0 };
@@ -66,10 +63,8 @@ export async function listenWhileSeated(subject: ContractSubject, boat: Entity):
   bot.on("forcedMove", onPosition);
   bot._client.on("set_passengers", onPassengers);
   bot.on("physicsTick", onTick);
-  const startAge = bot.time.age;
   try {
-    const passed = await holdsWithin(subject, () => bot.time.age - startAge >= LISTEN_TICKS, LISTEN_WALL_MS);
-    assert.ok(passed, `the world age moved ${bot.time.age - startAge} ticks in ${LISTEN_WALL_MS} ms: the server is stalled`);
+    await serverQuiet(subject, "listening to a seated bot");
   } finally {
     bot.off("forcedMove", onPosition);
     bot._client.off("set_passengers", onPassengers);
@@ -93,12 +88,5 @@ export async function getOffAndStand(subject: ContractSubject, boat: Entity): Pr
   assert.equal(settled.value!.answered, true, `getOff ended on ${settled.value!.ended}`);
   assert.equal(await subject.seatedOnServer(boat), false, "the server still has her seated after getOff");
   assert.equal(bot.vehicle ?? null, null, "the client still has a vehicle after getOff");
-  let ticks = 0;
-  const onTick = () => void (ticks += 1);
-  bot.on("physicsTick", onTick);
-  try {
-    assert.ok(await holdsWithin(subject, () => ticks >= 5, 1_000), "no physics tick after getOff: the bot is frozen");
-  } finally {
-    bot.off("physicsTick", onTick);
-  }
+  await afterClientTicks(subject, FREE_BOT_PHYSICS_TICKS, "after getOff the bot is frozen");
 }

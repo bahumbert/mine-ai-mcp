@@ -13,22 +13,19 @@
 import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { ContractCheck } from "../checks.ts";
+import { ANSWER_WALL_MS, ABSENCE_TICKS, afterClientTicks, answerArrives, serverQuiet } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { stackOf } from "../window-packets.ts";
 
-/** The use is answered within a tick or two on a server on time; a bound with room for one behind. */
-const ANSWER_WALL_MS = 2_000;
-/** An absence is shown over this long. */
-const ABSENCE_MS = 1_500;
-/** The forced look reaches the server with the use packet (`rotation`); a short wait lets the physics tick send it too. */
-const LOOK_SETTLE_MS = 300;
+/**
+ * Physics ticks after the forced look: `lookAt(aim, true)` sets the look to send at once (`physics.js:331-353`) and the next physics tick
+ * sends it (`updatePosition`, `physics.js:184-193`); the second tick leaves room for the order of the tick's own steps.
+ */
+const LOOK_SENT_TICKS = 2;
+/** The client holds the item this long around the use (its own action, a client clock: the use packet itself is sent at `activateItem`). */
 const USE_HOLD_MS = 100;
 /** Water flows 7 steps from a source at most. */
 const FLOW_REACH = 7;
-/** The flow around a taken source dries within this wall time (the water ticks every 5 server ticks, a level a step). */
-const DRY_WALL_MS = 5_000;
-/** The dry cells stay dry over this many observed ticks: 40 prove at least 21 server ticks (`ContractSubject.serverTicks`). */
-const STAYS_DRY_TICKS = 40;
 /** The top face of the floor block at (2, -61, 0): the pour lands in the cell above it. */
 const FLOOR_AIM = new Vec3(2.5, -60, 0.5);
 const POURED_CELL = new Vec3(2, -60, 0);
@@ -61,8 +58,11 @@ function cellName(block: CellBlock): string {
   return block === null ? "null" : block.name === "water" ? `water level ${String(block.getProperties().level)}` : block.name;
 }
 
-/** Select hotbar slot `slot`, look at `aimLocal` (arena-local, like `watchingLocal`), use the held item once, and wait `waitMs` for what the server answers. */
-async function useBucketAt(subject: ContractSubject, step: string, slot: number, aimLocal: Vec3, watchingLocal: Vec3, waitMs: number): Promise<Heard> {
+/**
+ * Select hotbar slot `slot`, look at `aimLocal` (arena-local, like `watchingLocal`), use the held item once, and wait for what the server
+ * does: an `answer` (the slot, the cell and the acknowledgement arrive) or `silence` (the acknowledgement alone, over the ticks of an absence).
+ */
+async function useBucketAt(subject: ContractSubject, step: string, slot: number, aimLocal: Vec3, watchingLocal: Vec3, expect: "answer" | "silence"): Promise<Heard> {
   const { bot } = subject;
   const aim = subject.world([aimLocal.x, aimLocal.y, aimLocal.z]);
   const watching = subject.world([watchingLocal.x, watchingLocal.y, watchingLocal.z]);
@@ -82,9 +82,10 @@ async function useBucketAt(subject: ContractSubject, step: string, slot: number,
     heard.order.push(`slot:${slotNumber}`);
   };
   bot.setQuickBarSlot(slot - WATER_BUCKET_SLOT);
+  // Kept from the old check: the hotbar packet goes before the use on one connection, so the server does not need this hold; whether the client does is unmeasured.
   await subject.wait(USE_HOLD_MS);
   await bot.lookAt(aim, true);
-  await subject.wait(LOOK_SETTLE_MS);
+  await afterClientTicks(subject, LOOK_SENT_TICKS, `${step}: the look before the use`);
   heard.trace.push(`${step}: before the use the cell is ${cellName(bot.blockAt(watching))} (age ${String(bot.time.age)})`);
   bot.on(eventName, onCell);
   bot.inventory.on("updateSlot", onUpdateSlot);
@@ -93,14 +94,24 @@ async function useBucketAt(subject: ContractSubject, step: string, slot: number,
     bot.activateItem();
     await subject.wait(USE_HOLD_MS);
     bot.deactivateItem();
-    await holdsWithin(subject, () => heard.cell.length > 0 && Object.keys(heard.slots).length > 0, waitMs);
-    await subject.wait(USE_HOLD_MS);
+    if (expect === "silence") await serverQuiet(subject, `${step}: after the use`);
+    else await answeredBy(subject, heard, step);
   } finally {
     bot.off(eventName, onCell);
     bot.inventory.off("updateSlot", onUpdateSlot);
     bot._client.off("acknowledge_player_digging", onAck);
   }
   return heard;
+}
+
+/** Wait for the answer of a pour or a fill: the slot, the cell and the acknowledgement; a failure names what was heard. */
+async function answeredBy(subject: ContractSubject, heard: Heard, step: string): Promise<void> {
+  const arrived = () => heard.cell.length > 0 && Object.keys(heard.slots).length > 0 && heard.order.includes("ack");
+  try {
+    await answerArrives(subject, arrived, `${step}: the use`);
+  } catch (error) {
+    throw new Error(`${(error as Error).message} (heard ${heard.order.join(", ") || "nothing"}; ${heard.trace.join(" | ")})`);
+  }
 }
 
 /** The water cells of the layer of `takenLocal` within the flow's reach of it, as the client holds them: `<dx>,<dz>=<state>` from the taken source. */
@@ -125,14 +136,13 @@ function wetCellsAround(subject: ContractSubject, takenLocal: Vec3): string[] {
  */
 export async function awaitFlowDried(subject: ContractSubject, takenLocal: Vec3): Promise<void> {
   const source = `the flow from the source taken at ${takenLocal}`;
-  if (!(await holdsWithin(subject, () => wetCellsAround(subject, takenLocal).length === 0, DRY_WALL_MS))) {
-    throw new Error(`${source} had not dried within ${DRY_WALL_MS / 1000} s: ${wetCellsAround(subject, takenLocal).join(" ")}`);
+  // The water recedes over server ticks (a step every 5), which the server sends: the shared answer bound, long enough for a server behind its schedule.
+  if (!(await holdsWithin(subject, () => wetCellsAround(subject, takenLocal).length === 0, ANSWER_WALL_MS))) {
+    throw new Error(`${source} had not dried within ${ANSWER_WALL_MS / 1000} s: ${wetCellsAround(subject, takenLocal).join(" ")}`);
   }
-  if (!(await subject.serverTicks(STAYS_DRY_TICKS, DRY_WALL_MS))) {
-    throw new Error(`the world age moved less than ${STAYS_DRY_TICKS} ticks in ${DRY_WALL_MS / 1000} s after ${source} dried: the server is behind, dry is not shown`);
-  }
+  await serverQuiet(subject, `${source} stays dry`);
   const back = wetCellsAround(subject, takenLocal);
-  assert.equal(back.length, 0, `${source} flowed again within ${STAYS_DRY_TICKS} ticks: ${back.join(" ")}`);
+  assert.equal(back.length, 0, `${source} flowed again within ${ABSENCE_TICKS} server ticks: ${back.join(" ")}`);
 }
 
 /**
@@ -158,30 +168,30 @@ export const bucketPourAndFill: ContractCheck = {
     const { bot } = subject;
     const slotOf = (slot: number) => stackOf(bot.inventory.slots[slot]);
     assert.deepEqual([slotOf(WATER_BUCKET_SLOT), slotOf(BUCKET_STACK_SLOT)], ["water_bucket x1", "bucket x2"], "the fixture's buckets");
-    const dry = await useBucketAt(subject, "dry floor", BUCKET_STACK_SLOT, DRY_FLOOR_AIM, POURED_CELL, ABSENCE_MS);
+    const dry = await useBucketAt(subject, "dry floor", BUCKET_STACK_SLOT, DRY_FLOOR_AIM, POURED_CELL, "silence");
     assert.deepEqual(dry.order, ["ack"], `an empty bucket at dry floor is only acknowledged: ${dry.order.join(", ")}`);
     assert.equal(slotOf(BUCKET_STACK_SLOT), "bucket x2", "the empty buckets changed after a use on dry floor");
     for (const [label, aim] of [["the sky", SKY_AIM], ["ground past the reach", OUT_OF_REACH_AIM]] as const) {
-      const heard = await useBucketAt(subject, label, WATER_BUCKET_SLOT, aim, POURED_CELL, ABSENCE_MS);
+      const heard = await useBucketAt(subject, label, WATER_BUCKET_SLOT, aim, POURED_CELL, "silence");
       assert.deepEqual(heard.order, ["ack"], `a pour at ${label} is only acknowledged: ${heard.order.join(", ")}`);
       assert.equal(slotOf(WATER_BUCKET_SLOT), "water_bucket x1", `the water bucket changed after a pour at ${label}`);
     }
-    const poured = await useBucketAt(subject, "floor pour", WATER_BUCKET_SLOT, FLOOR_AIM, POURED_CELL, ANSWER_WALL_MS);
+    const poured = await useBucketAt(subject, "floor pour", WATER_BUCKET_SLOT, FLOOR_AIM, POURED_CELL, "answer");
     assert.equal(poured.cell[0], "water level 0", `the pour on the floor: the cell above it heard ${poured.cell.join(", ")} (${poured.trace.join(" | ")})`);
     assert.equal(poured.slots[WATER_BUCKET_SLOT], "bucket x1", "the water bucket is an empty bucket after the pour");
     assert.deepEqual(poured.order, [`slot:${WATER_BUCKET_SLOT}`, "cell", "ack"], "the slot comes first, then the block change, then the acknowledgement");
-    const filled = await useBucketAt(subject, "floor fill", WATER_BUCKET_SLOT, FLOOR_AIM, POURED_CELL, ANSWER_WALL_MS);
+    const filled = await useBucketAt(subject, "floor fill", WATER_BUCKET_SLOT, FLOOR_AIM, POURED_CELL, "answer");
     assertTook(filled, "the empty bucket took the source");
     assert.equal(filled.slots[WATER_BUCKET_SLOT], "water_bucket x1", "the empty bucket is a water bucket after the fill");
     // The water around the taken source then flows into its cell, which the server also sends.
     assert.deepEqual(filled.order.slice(0, 3), [`slot:${WATER_BUCKET_SLOT}`, "cell", "ack"], "a fill answers in the order of a pour");
     // Only the step after a taken source starts from a dry state: the other uses follow none.
     await awaitFlowDried(subject, POURED_CELL);
-    const side = await useBucketAt(subject, "wall pour", WATER_BUCKET_SLOT, WALL_AIM, WALL_POURED_CELL, ANSWER_WALL_MS);
+    const side = await useBucketAt(subject, "wall pour", WATER_BUCKET_SLOT, WALL_AIM, WALL_POURED_CELL, "answer");
     assert.equal(side.cell[0], "water level 0", `the pour at a wall's face: the cell in front of it heard ${side.cell.join(", ")} (${side.trace.join(" | ")})`);
     assert.equal(side.slots[WATER_BUCKET_SLOT], "bucket x1");
     // A stack of two buckets: one is used up and the water bucket goes to the first free hotbar slot.
-    const fromStack = await useBucketAt(subject, "stack fill", BUCKET_STACK_SLOT, WALL_AIM, WALL_POURED_CELL, ANSWER_WALL_MS);
+    const fromStack = await useBucketAt(subject, "stack fill", BUCKET_STACK_SLOT, WALL_AIM, WALL_POURED_CELL, "answer");
     assertTook(fromStack, "the stacked buckets took the source");
     assert.equal(fromStack.slots[BUCKET_STACK_SLOT], "bucket x1", "one bucket of the stack is used");
     assert.equal(fromStack.slots[FIRST_FREE_HOTBAR_SLOT], "water_bucket x1", "the water bucket is in the first free hotbar slot");
