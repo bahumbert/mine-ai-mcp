@@ -103,7 +103,7 @@ class VariantTransfer {
     this.deadline = this.now() + this.wallMs;
   }
 
-  /** Why the next click must not be sent, if it must not: the window is no longer the open one, an abort, or the call's wall bound (a rescue click ignores the last two). */
+  /** Why the next click must not be sent, if it must not: the window is no longer the open one, an abort, or the call's bound with no stack settled (a rescue click ignores the last two). */
   private stopReason(rescue = false): Error | null {
     if (this.bot.currentWindow !== this.window) {
       return new Error("The container window closed under the transfer: reopen the container and read what it holds before moving more.");
@@ -111,7 +111,7 @@ class VariantTransfer {
     if (rescue) return null;
     if (this.options.signal?.aborted) return abortReason(this.options.signal);
     if (this.now() <= this.deadline) return null;
-    return new Error(`The transfer took longer than ${this.wallMs} ms: the server is lagging or stopped. Reopen the container and read what it holds before moving more.`);
+    return new Error(`No stack settled for ${this.wallMs} ms: the server is lagging or stopped, and part of a stack may have moved. Reopen the container and read what it holds before moving more.`);
   }
 
   private async click(slot: number, mouseButton: number, rescue = false): Promise<void> {

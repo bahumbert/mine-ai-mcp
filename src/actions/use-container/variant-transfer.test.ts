@@ -172,8 +172,9 @@ test("a transfer in which no source stack settles within its bound fails with th
   let received = 0;
   scene.windows.onClickReceived(() => void (received += 1));
   const slowClock = { now: () => scene.clock.now() + received * 2_000, sleep: scene.clock.sleep };
-  await assert.rejects(scene.transfer("deposit", "cobblestone", 63, { wallMs: 3_000, timing: slowClock }), /took longer than 3000 ms/);
+  await assert.rejects(scene.transfer("deposit", "cobblestone", 63, { wallMs: 3_000, timing: slowClock }), /No stack settled for 3000 ms: the server is lagging or stopped, and part of a stack may have moved. Reopen the container/);
   assert.equal(scene.cursor(), null);
+  assert.deepEqual(scene.chest(), ["0: cobblestone x32"], "the half of the stack that went on before the refused click: the text says part of a stack may have moved");
 });
 
 test("a transfer of 27 stacks on a server at 8 ticks a second finishes: the bound renews at each settled stack", async () => {

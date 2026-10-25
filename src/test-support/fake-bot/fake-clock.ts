@@ -48,11 +48,11 @@ const MOCKED_APIS = ["setTimeout", "setInterval", "Date"] as const;
 /** One installed clock at a time: node's mock timers are global, so two would fight over them. `by` is where it was installed (a `file:line`). */
 let installed: { restore(): void; readonly by: string } | null = null;
 
-/** The first `file:line` of the stack outside this file: the test that called `install()`. */
+/** The `file:line` of the test that called `install()`: the first stack frame in a `*.test.ts` file (a shared helper may call `install()` for it), else the first frame outside this file. */
 function installerOfThisCall(): string {
-  const frames = (new Error().stack ?? "").split("\n").slice(1);
-  const outside = frames.find((frame) => !frame.includes("fake-clock.ts"));
-  return outside?.match(/(?:\(|\bat )(.+?:\d+):\d+\)?\s*$/)?.[1] ?? "an unknown caller";
+  const frames = (new Error().stack ?? "").split("\n").slice(1).filter((frame) => !frame.includes("fake-clock.ts"));
+  const caller = frames.find((frame) => /\.test\.ts:\d+/.test(frame)) ?? frames[0];
+  return (caller?.match(/\((.+?:\d+):\d+\)\s*$/) ?? caller?.match(/\bat (.+?:\d+):\d+\s*$/))?.[1] ?? "an unknown caller";
 }
 
 /** Lets every promise reaction already queued run, timers included. */

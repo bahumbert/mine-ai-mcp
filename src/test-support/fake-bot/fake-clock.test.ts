@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock, failIfFakeClockLeftInstalled } from "./fake-clock.js";
+import { createFakeClock, failIfFakeClockLeftInstalled, type FakeClock } from "./fake-clock.js";
+import { installClockForTest } from "./fake-clock-installer-fixture.js";
 
 test("a mocked clock runs a 1000 ms setTimeout once and moves Date.now and performance.now by 1000", async () => {
   const clock = createFakeClock({ mode: "mocked", startMs: 5_000 });
@@ -97,11 +98,12 @@ test("an aborted sleep rejects with the signal's reason and leaves no timer", as
   assert.equal(clock.pendingTimers(), 0);
 });
 
-test("a second install while a clock is installed throws, naming the file that installed the first", () => {
-  const first = createFakeClock({ mode: "mocked" });
-  using _installed = first.install();
-  assert.throws(() => createFakeClock({ mode: "mocked" }).install(), /already installed by .*fake-clock\.test\.ts:\d+/);
-});
+for (const [how, installFirst] of [["the test", (clock: FakeClock) => clock.install()], ["a shared helper for the test", installClockForTest]] as const) {
+  test(`a second install while a clock is installed throws, naming the test that installed the first (${how} called install)`, () => {
+    using _installed = installFirst(createFakeClock({ mode: "mocked" }));
+    assert.throws(() => createFakeClock({ mode: "mocked" }).install(), /already installed by .*fake-clock\.test\.ts:\d+/);
+  });
+}
 
 test("after the installed clock is disposed another installs", () => {
   {

@@ -47,8 +47,6 @@ export interface MutexQueueMarks {
   restoreQueued(): void;
   restoreDone(): void;
   leave(): void;
-  /** The arrangement has not run yet (it may be running): nothing of the trial outside its server exists, so it can start over on another server. */
-  arrangementPending(): boolean;
 }
 
 function median(values: readonly number[]): number {
@@ -227,7 +225,6 @@ export class ServerPool {
       restoreQueued: () => take("restore", true),
       restoreDone: () => take("restore", false),
       leave: () => { take("arrangement", false); take("restore", false); },
-      arrangementPending: () => waiting.arrangement,
     };
   }
 

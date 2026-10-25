@@ -9,7 +9,7 @@ import { config, result, job, runnerOf } from "./trial-fixtures.ts";
 function queueMarks(events: string[]): NonNullable<TrialJob["queue"]> {
   return {
     arranged: () => { if (!events.includes("arranged")) events.push("arranged"); }, restoreQueued: () => events.push("restoreQueued"),
-    restoreDone: () => events.push("restoreDone"), leave: () => events.push("leave"), arrangementPending: () => !events.includes("arranged"),
+    restoreDone: () => events.push("restoreDone"), leave: () => events.push("leave"),
   };
 }
 
