@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { serverSeatWatchOf, watchServerSeat } from "./server-seat-watch.js";
 import { NO_TELEPORT } from "./vehicle-sync.js";
 
@@ -100,9 +100,13 @@ test("release forgets the held seat once the server answered", () => {
 test("each bot has its own watch and stop leaves no listener behind", () => {
   const first = botAt(new Vec3(0, 63, 0));
   const second = botAt(new Vec3(0, 63, 0));
-  const counts = (entry: ReturnType<typeof botAt>) => (["dismount", "mount", "death", "respawn"] as const).reduce((sum, name) => sum + entry.raw.listenerCount(name), 0) + entry.client.listenerCount("update_view_position") + entry.client.listenerCount("position");
+  const added = (entry: ReturnType<typeof botAt>) => {
+    const onBot = listenersAddedSince(entry.raw);
+    const onClient = listenersAddedSince(entry.client);
+    return () => (["dismount", "mount", "death", "respawn"] as const).reduce((sum, name) => sum + onBot(name), 0) + onClient("update_view_position") + onClient("position");
+  };
   // Mineflayer's own plugins listen for some of these too (its position handler among them).
-  const ownListeners = counts(first);
+  const leftByFirst = added(first);
   const watch = watchServerSeat(first.bot);
   const other = watchServerSeat(second.bot);
   assert.equal(serverSeatWatchOf(first.bot), watch);
@@ -113,5 +117,5 @@ test("each bot has its own watch and stop leaves no listener behind", () => {
   assert.equal(other.heldAt(), null, "the other bot never got off");
   watch.stop();
   assert.equal(serverSeatWatchOf(first.bot), undefined);
-  assert.equal(counts(first), ownListeners, "only Mineflayer's own listeners remain");
+  assert.equal(leftByFirst(), 0, "only Mineflayer's own listeners remain");
 });

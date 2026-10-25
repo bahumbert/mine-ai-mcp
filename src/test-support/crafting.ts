@@ -3,7 +3,7 @@ import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { CarriedCounts } from "./carried-counts.js";
-import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot } from "./fake-bot/index.js";
 import { registryNameOf } from "./fake-bot/item-variants.js";
 
 export const craftingRegistry = minecraftData("1.21.4");
@@ -54,18 +54,21 @@ const TABLE = new Vec3(1, 64, 0);
  * table next to the bot and `findBlock` answers it. `recipes`: extra recipes offered before the fixture's own, as
  * Mineflayer lists other wood families first. `clock`: the harness's (a mocked one the test drives); the world age is
  * the server's own, which only the harness clock moves.
+ * `groundY`: the fake world's ground, as `createFakeBot` takes it (`null`: open air, for a test that reads what blocks
+ * are near the bot and must not count the stone under it).
  */
 export function craftingBot(
   carried: Readonly<Record<string, number>>,
   tableAvailable = false,
   recipes: readonly Recipe[] = [],
-  { clock }: { readonly clock?: FakeClock } = {},
+  { clock, groundY }: { readonly clock?: FakeClock; readonly groundY?: FakeBotOptions["groundY"] } = {},
 ) {
   const known = [...recipes, ...RECIPES];
   for (const name of Object.keys(carried)) assert.ok(craftingRegistry.itemsByName[registryNameOf(name)], `unknown test item ${name}`);
   const craftCalls: string[] = [];
   const harness = createFakeBot({
     clock,
+    groundY,
     version: craftingRegistry.version.minecraftVersion,
     carried,
     cells: tableAvailable ? { [`${TABLE.x},${TABLE.y},${TABLE.z}`]: "crafting_table" } : {},

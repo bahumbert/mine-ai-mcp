@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeWorld, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeWorld, createFakeBot, entityBodyOf, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { endermanGazeRisk } from "../perception/combat/gaze.js";
 import { attachEndermanGazeControl } from "./enderman-gaze.js";
 
@@ -20,6 +20,7 @@ function screen(world: FakeWorld, block: "stone" | "air"): void {
 test("End eye contact is diverted without changing movement yaw; idle gaze is guarded too", async () => {
   const { bot } = fixture();
   const original = bot.look;
+  const added = listenersAddedSince(bot);
   const guard = attachEndermanGazeControl(bot, () => null);
   await bot.look(0, 0, true);
   assert.equal(bot.entity.yaw, 0);
@@ -31,7 +32,7 @@ test("End eye contact is diverted without changing movement yaw; idle gaze is gu
   assert.equal(bot.entity.pitch, 0.7, "safe upward crystal aim stays intact");
   guard[Symbol.dispose]();
   assert.equal(bot.look, original);
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(added("physicsTick"), 0);
 });
 
 test("gaze guard respects dimension, cover, pumpkin and deliberate selected Enderman combat", async () => {
@@ -50,7 +51,7 @@ test("gaze guard respects dimension, cover, pumpkin and deliberate selected Ende
   using _guard = attachEndermanGazeControl(bot, () => ({ kind: "mob", targetId: 7 }));
   await bot.look(0, 0, true);
   assert.equal(bot.entity.pitch, 0);
-  bot.entities[8] = createFakeBot({ entities: { 8: { name: "enderman", position: ENDERMAN_FEET } } }).bot.entities[8]!;
+  bot.entities[8] = entityBodyOf(8, { name: "enderman", position: ENDERMAN_FEET });
   await bot.look(0, 0, true);
   assert.equal(bot.entity.pitch, -Math.PI / 2, "another Enderman is still protected from provocation");
 });

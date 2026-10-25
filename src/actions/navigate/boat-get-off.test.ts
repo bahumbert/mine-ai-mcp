@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type FakeHarness, type FakeServerOptions, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, type FakeServerOptions, createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { getOff } from "./boat-get-off.js";
 
 /** Boat 7, which the bot sits in once `seat` ran. */
@@ -88,8 +88,7 @@ test("a death during the get-off ends it at once, shift released, nothing resume
   const { bot } = harness;
   harness.server.stop();
   // Mineflayer's own plugins listen for some of these too: only the get-off's own listeners are counted.
-  const listeners = () => bot.listenerCount("dismount") + bot.listenerCount("death") + bot.listenerCount("respawn") + bot.listenerCount("forcedMove");
-  const ownListeners = listeners();
+  const added = listenersAddedSince(bot);
   harness.clock.after(50, () => bot.emit("death"));
   const startedAt = performance.now();
   const result = await getOffOver(harness, 1_000, { wallMs: 5_000 });
@@ -98,7 +97,7 @@ test("a death during the get-off ends it at once, shift released, nothing resume
   assert.equal(result.answered, false);
   assert.deepEqual(shifts(harness), [true, false]);
   assert.equal(positions.length, 0);
-  assert.equal(listeners() - ownListeners, 0, "no listener is left");
+  assert.equal(added("dismount") + added("death") + added("respawn") + added("forcedMove"), 0, "no listener is left");
 });
 
 // Backlog 76 (Cleo, run 16): a 1.21.4 server reads the shift from entity_action, never from player_input.

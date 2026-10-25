@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { forgetVehicle, recoverPhysics, watchVehicle } from "./vehicle-sync.js";
 
 /** A bot by boat 7, seated in it by the server unless `seated` is false; the client records the positions fed to Mineflayer's own handler. */
@@ -22,9 +22,9 @@ async function ridingBot({ seated = true } = {}) {
     dismounts.push(vehicle);
   });
   // Mineflayer's own plugins listen for a death and a respawn too: only the watch's own listeners are counted.
-  const ownDeathListeners = bot.listenerCount("death") + bot.listenerCount("respawn");
+  const added = listenersAddedSince(bot);
   const stop = watchVehicle(bot);
-  return { bot, self, boat, client, positions, dismounts, stop, ownDeathListeners, entities };
+  return { bot, self, boat, client, positions, dismounts, stop, added, entities };
 }
 
 // Mineflayer acts only on a passenger list that names the bot: one without her kept the vehicle and physics off for good.
@@ -97,10 +97,10 @@ test("a death while seated forgets the vehicle without a fake position", async (
 });
 
 test("a respawn while seated forgets the vehicle too, and the listeners go with the watch", async () => {
-  const { bot, dismounts, stop, ownDeathListeners } = await ridingBot();
+  const { bot, dismounts, stop, added } = await ridingBot();
   bot.emit("respawn");
   assert.equal(bot.vehicle, null);
   assert.equal(dismounts.length, 1);
   stop();
-  assert.equal(bot.listenerCount("death") + bot.listenerCount("respawn") - ownDeathListeners, 0);
+  assert.equal(added("death") + added("respawn"), 0);
 });

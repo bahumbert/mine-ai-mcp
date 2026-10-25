@@ -1,8 +1,7 @@
-import type { BotEvents } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, listenerCounts } from "../../test-support/fake-bot/index.js";
 import { climbsBy, fallsUnder, observeBodyProgress, ReflexProgress, risesOver, turnsTrue, watchBodyTicks } from "./reflex-progress.js";
 
 function fixture() {
@@ -75,14 +74,14 @@ test("a death marks", () => {
 
 test("detach removes every listener", () => {
   const { bot, emitter, progress } = fixture();
-  const listeners = (name: string | symbol) => emitter.listenerCount(name as keyof BotEvents);
-  const before = Object.fromEntries(emitter.eventNames().map((name) => [String(name), listeners(name)]));
+  const before = listenerCounts(emitter);
   const detach = observeBodyProgress(bot, progress.mark);
   const stop = watchBodyTicks(bot, progress.mark, { landed: turnsTrue(() => true) });
   assert.ok(emitter.listenerCount("physicsTick") > 0);
   stop();
   detach();
-  for (const name of emitter.eventNames()) assert.equal(listeners(name), before[String(name)] ?? 0, String(name));
+  const after = listenerCounts(emitter);
+  for (const name of Object.keys(after)) assert.equal(after[name], before[name] ?? 0, name);
 });
 
 test("a probe sampler marks when its value turns true, not while it stays true", () => {

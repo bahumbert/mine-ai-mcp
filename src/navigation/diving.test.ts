@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { Bot } from "mineflayer";
-import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { movementStep } from "../test-support/navigation.js";
 import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
@@ -22,14 +22,13 @@ function pond(position: Vec3, onGround: boolean, options: Pick<FakeBotOptions, "
   const harness = createFakeBot({ position, groundY: null, ...fake, ...(mocked ? { clock: createFakeClock({ mode: "mocked" }) } : {}) });
   const { bot } = harness;
   Object.assign(bot.entity, { onGround });
-  const idle = { death: bot.listenerCount("death"), respawn: bot.listenerCount("respawn"), physicsTick: bot.listenerCount("physicsTick") };
+  /** Listeners of `event` the dive left on the bot, beyond the fake's own (a `death` handler of its dig, its physics). */
+  const left = listenersAddedSince(bot);
   const load = (cell: { x: number; y: number; z: number }, kind: Kind, level = 0) => {
     world.load(cell, kind === "stone" ? { stateId: 1 } : kind === "air" ? { stateId: 0 }
       : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: level === 0 } });
     harness.world.setCell(new Vec3(cell.x, cell.y, cell.z), kind === "water" && level > 0 ? { name: "water", properties: { level } } : kind);
   };
-  /** Listeners of `event` the dive left on the bot, beyond the fake's own (a `death` handler of its dig, its physics). */
-  const left = (event: keyof typeof idle) => bot.listenerCount(event) - idle[event];
   return { world, harness, bot, breath: harness.breath, clock: harness.clock, load, left };
 }
 
