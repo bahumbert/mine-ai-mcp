@@ -5,6 +5,7 @@ import type { Bot } from "mineflayer";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { boatNamed, carriedBoats } from "./boat-state.ts";
 
 /** How long the state is waited for after the cancelled navigate returned (a batch of 14 concurrent trials, 1 read the boat 2.2 blocks off at the first look; a server behind with the ride's last moves is the guess, unproven; the failure text carries the distance). */
 const STATE_WAIT_MS = 5_000;
@@ -21,7 +22,6 @@ const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
 const SHIFT_PRESS = 0;
 /** A boat entity this close to her feet is the one she stands on. */
 const UNDER_FEET_BLOCKS = 2;
-const boatNamed = (name: string | undefined) => name !== undefined && (name.endsWith("_boat") || name.endsWith("_raft"));
 
 /**
  * Calls `onShiftAfterSeated` at the first shift press that goes out while she sits in a boat: the get-off of a ride's
@@ -41,8 +41,6 @@ function watchGetOffShift(bot: Bot, onShiftAfterSeated: () => void): () => void 
   } as typeof client.write;
   return () => void (client.write = write);
 }
-
-const carriedBoats = (bot: Bot) => bot.inventory.items().filter((item) => boatNamed(item.name)).reduce((sum, item) => sum + item.count, 0);
 
 /** What she stands in after the cancel: seated or not, boats carried, and the nearest boat's distance from her feet. */
 function readState(bot: Bot) {

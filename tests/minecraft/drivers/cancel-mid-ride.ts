@@ -4,6 +4,7 @@ import type { ClientCompletion } from "mine-labs/client";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaPoint, arenaX } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { boatNamed, carriedBoats } from "./boat-state.ts";
 
 const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** The far land the navigate is aimed at, over a sea the bot crosses by boat. */
@@ -15,8 +16,6 @@ const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** How long after the cancel the navigate may take to settle, and the stopped boat to be looked at. */
   settleWithinMs: z.number().int().positive(),
 });
-
-const boatNamed = (name: string | undefined) => name !== undefined && (name.endsWith("_boat") || name.endsWith("_raft"));
 
 /**
  * Cancel a navigate that is riding a boat over deep water: the bot must stay seated in the stopped boat (not swim,
@@ -64,7 +63,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const [next] = await Promise.all([secondRide, watchBoat()]);
   if (broken !== null) return { status: "failed", detail: `the second navigate did not ride on from the seat (${broken}): ${next.summary}` };
   if (next.result.status !== "succeeded") return { status: "failed", detail: `the navigate after the cancel read ${next.result.status}: ${next.summary}; first: ${settled.summary}` };
-  const carried = bot.inventory.items().filter((item) => boatNamed(item.name)).reduce((sum, item) => sum + item.count, 0);
+  const carried = carriedBoats(bot);
   return carried > 0
     ? { status: "succeeded", detail: `cancelled seated (${waited} ms), boat kept still; then ${next.summary}` }
     : { status: "failed", detail: `the second navigate crossed but no boat is carried: ${next.summary}` };

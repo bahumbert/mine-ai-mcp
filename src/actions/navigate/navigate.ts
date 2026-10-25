@@ -11,8 +11,6 @@ import {
   createMovements,
   nearGoal,
   nearXzGoal,
-  RELAXED_DIG_STRAIGHT_DOWN,
-  RELAXED_FLOWING_WATER,
   type Goal,
   type Navigate,
   type NavigationResult,
@@ -26,8 +24,9 @@ import { asVec3, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
-import { retryBoatTakeBack } from "./boat-left-retry.js";
+import { boatLeftEvidence, retryBoatTakeBack } from "./boat-left-retry.js";
 import { describeBoatLeft } from "./boat-take-back.js";
+import { describeEscape } from "./describe-escape.js";
 import { startFromSeat } from "./seated-leg.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
 import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
@@ -612,16 +611,7 @@ async function crossByBoatFromHere(
   const boatLeft = await retryBoatTakeBack(bot, crossed, context.signal);
   const onward = await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
   const boatBlocks = crossed.blocks + (onward.navigation.boatBlocks ?? 0);
-  const left = onward.navigation.boatLeft ?? boatLeft;
-  return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks, ...(left !== undefined && { boatLeft: left }) } };
-}
-
-/** The line that tells the model which rule of its own was set aside once to get it out of a pocket, and what that dug. */
-function describeEscape(relaxed: readonly string[]): string {
-  const flowing = relaxed.includes(RELAXED_FLOWING_WATER);
-  if (!relaxed.includes(RELAXED_DIG_STRAIGHT_DOWN))
-    return "- Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once (a water source and lava still refuse).";
-  return `- Dug down out of a pocket: your rule against digging straight down was set aside once${flowing ? " and a dig next to flowing water was allowed" : ""}.`;
+  return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks, ...boatLeftEvidence(onward.navigation.boatLeft, boatLeft) } };
 }
 
 export function formatNavigateResult(result: NavigateResult): string {

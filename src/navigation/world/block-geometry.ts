@@ -81,7 +81,13 @@ export function safeSupportingCell(world: WorldView, position: Position3): Block
   return nearest;
 }
 
-/** How far a collision top may sit from the feet and still hold the body: a body settles on a top within this. */
+/**
+ * How far a collision top may sit from the feet and still hold the body. Our choice, unmeasured as a game fact (no
+ * contract check reads how close to a top the server settles a body). It takes in snow of two layers and a lily pad
+ * (tops of 0.1 or less) and a bank top level with the water: a boat resting 0.477 below the water-level top (contract
+ * `boat-follows-vehicle-move`) and 0.5625 high (plan 2026-10-25-run20-boat-fixes, unmeasured here) puts her feet 0.0855
+ * above that bank's top, inside this, so the bank edge holds her and the boat beside it is left alone (intended).
+ */
 const HOLD_TOLERANCE = 0.1;
 
 /**

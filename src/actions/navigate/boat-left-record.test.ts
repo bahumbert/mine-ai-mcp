@@ -195,3 +195,24 @@ test("a cancel during the retry before the onward leg ends it with the cancel", 
   await assert.rejects(settled(world, retryBoatTakeBack(world.bot, { status: "crossed", blocks: 30, detail: "", boatLeft: left }, controller.signal)), /cancelled by the test/u);
   assert.equal(world.bot.entities[7] !== undefined, true, "one hit sent, no more");
 });
+
+// The retry describes the boat it hit, not whichever boat lies nearest when it ends.
+test("a retry whose boat drifts off describes that boat, not a nearer boat that lies beside her", async () => {
+  const world = seaHarness({
+    boatsCarried: 0,
+    waterDepth: 2,
+    entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 62.49, 0.5) }, 8: { name: "birch_boat", position: new Vec3(0.5, 62.49, 2.5) } },
+  });
+  world.bot.entity.position = new Vec3(0.5, 63.05, 0.5);
+  using _timers = world.clock.install();
+  makeHitsMiss(world);
+  const hit = world.bot.attack.bind(world.bot);
+  world.bot.attack = (target) => {
+    hit(target);
+    target.position = new Vec3(0.5, 62.49, 5.5);
+  };
+  const left = { cause: "still_there", reason: "the boat is still under you", hits: 34, elapsedMs: 10_000, goneAfterHit: null } as const;
+  const retried = await settled(world, retryBoatTakeBack(world.bot, { status: "crossed", blocks: 30, detail: "", boatLeft: left }));
+  assert.equal(retried?.cause, "left_nearby");
+  assert.match(retried.reason, /^the boat is still floating 5 blocks away after \d+ hits in \d+\.\d s;/u, "the boat it hit is 5 blocks off; the other lies 2 blocks off");
+});
