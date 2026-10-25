@@ -19,6 +19,7 @@ import { ZERO_ARENA, arenaActionInput, arenaFrame, type ArenaFrame } from "../ar
 import type { ScenarioRun } from "../scenario.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
 
+// check-reads: tests/minecraft/scenarios/**/*.yaml, tests/minecraft/templates/**/*.yaml
 const MINECRAFT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** A lane's z offset (`LANE_SPACING` 512) and an x offset no lane has, so a driver that forgets or doubles either axis is seen. */
 const SIDEWAYS = arenaFrame({ x: 64, z: 1536 });

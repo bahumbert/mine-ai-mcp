@@ -10,6 +10,7 @@ import { SchedulerRig } from "./scheduler-rig.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 import { handleSubmit } from "./submission-handler.ts";
 
+// check-reads: tests/minecraft/contract/scenarios/air-supply-under-water.yaml, tests/minecraft/templates/**/*.yaml
 const CONTRACT_DIR = fileURLToPath(new URL("../contract/scenarios", import.meta.url));
 const ONE_FILE = join(CONTRACT_DIR, "air-supply-under-water.yaml");
 

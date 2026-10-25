@@ -10,6 +10,7 @@ import { scenarioTestContext } from "../scenario-test-context.ts";
 import { run } from "./cancel-mid-ride.ts";
 
 /** Moves x as well as z, so the lines the bot crosses (read as x) are in the lane's frame, not the arena's. */
+// check-reads: tests/minecraft/scenarios/pathfinder/boat-ride-cancelled-then-navigate.yaml, tests/minecraft/templates/**/*.yaml
 const FRAME = arenaFrame({ x: 64, z: 512 });
 const PARAMS = { target: [105, -60, 0], cancelPastX: 30, farBankX: 90, settleWithinMs: 5_000 };
 const BOAT_ID = 100;

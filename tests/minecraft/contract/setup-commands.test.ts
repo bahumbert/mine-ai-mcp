@@ -7,6 +7,7 @@ import { parse } from "yaml";
 import { CONTRACT_CHECKS, contractCheckNamed } from "./checks.ts";
 import { contractClientArgs, contractTags, setupCommands } from "./setup-commands.ts";
 
+// check-reads: tests/minecraft/contract/scenarios/**/*.yaml
 const SCENARIOS = path.join(path.dirname(fileURLToPath(import.meta.url)), "scenarios");
 
 interface ContractYaml {

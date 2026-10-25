@@ -7,6 +7,7 @@ import test from "node:test";
 import * as mineLabs from "mine-labs";
 
 /** What the scenario server (tests/minecraft/shared) runs a trial with: the pinned package exports it only through patches/. */
+// check-reads: tests/minecraft/shared/mine-labs-compile.snapshot.json, tests/minecraft/scenarios/**/*.yaml, tests/minecraft/contract/scenarios/**/*.yaml, tests/minecraft/templates/**/*.yaml
 const SCENARIO_SERVER_EXPORTS = [
   "runScenarioTrial",
   "MinecraftServer",

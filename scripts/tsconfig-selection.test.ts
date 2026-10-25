@@ -30,6 +30,7 @@ test("a tsconfig that does not parse is named and extends nothing", () => {
   expect(extendsOf.get("tests/tsconfig.json")).toEqual([]);
 });
 
+// check-reads: tsconfig*.json, */tsconfig*.json
 test("the repository's own tsconfig files parse: every project present extends the build config", () => {
   const root = join(import.meta.dir, "..");
   const present = PROJECT_DIRS.map((dir) => `${dir}tsconfig.json`).filter((file) => existsSync(join(root, file)));

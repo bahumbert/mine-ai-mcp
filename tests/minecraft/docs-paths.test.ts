@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// check-reads: tests/minecraft/README.md, tests/minecraft/**/*.yaml
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 
 /** `tests/minecraft/<...>.yaml`, written out in full (a pattern with `<name>` or `*` names no file). */

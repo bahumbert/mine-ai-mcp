@@ -3,6 +3,7 @@ import { readdirSync } from "node:fs";
 import path from "node:path";
 import { loadScenario, type Scenario } from "mine-labs";
 
+// check-reads: tests/minecraft/scenarios/**/*.yaml, tests/minecraft/contract/scenarios/**/*.yaml, tests/minecraft/templates/**/*.yaml
 /** Directories with scenarios; `templates/` holds partial defaults, not scenarios. */
 const SCENARIO_ROOTS = ["scenarios", "contract/scenarios"].map((directory) => path.resolve(import.meta.dirname, "..", directory));
 

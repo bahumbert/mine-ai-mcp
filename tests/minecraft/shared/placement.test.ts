@@ -13,6 +13,7 @@ import { shiftScenario } from "../arena/shift-scenario.ts";
 import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, runsOurClientHost, type ArenaPorts } from "./placement.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 
+// check-reads: scenarios/**/*.yaml, tests/minecraft/scenarios/**/*.yaml, tests/minecraft/templates/**/*.yaml
 const MINECRAFT_DIR = fileURLToPath(new URL("..", import.meta.url));
 const OUR_CLIENT_HOST = path.join(MINECRAFT_DIR, "client-host.ts");
 const LEGACY_SMELT_YAML = fileURLToPath(new URL("../../../scenarios/flat/craft/smelt-batch-normal.yaml", import.meta.url));

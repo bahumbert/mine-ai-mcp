@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, typecheckPlan } from "./check.js";
-import { IMPORTER_DEPTH, IMPORTER_TEST_CAP } from "./import-graph.js";
+import { dataReadReport, malformedReport, planDataReads, unmatchedReport } from "./data-readers.js";
+import { aliasesFromPackageJson, buildReverseGraph, IMPORTER_DEPTH, IMPORTER_TEST_CAP, testsReachedBy } from "./import-graph.js";
 
 function checkout(layout: "directory" | "file" | "none", content = ""): string {
   const root = mkdtempSync(join(tmpdir(), "check-git-"));
@@ -118,4 +119,116 @@ test("config changes and source changes together typecheck the union, each once,
 test("a config-only change typechecks the projects it selects with no source file", () => {
   const plan = typecheckPlan([], new Map(), new Map([["tests/", "bun.lock changed"]]));
   expect(plan).toEqual([{ script: "typecheck:tests", reason: "bun.lock changed" }]);
+});
+
+// The declaration marker is built here so no line of this file starts with it: the scan of the suite's sources would read it.
+const MARK = "// check-reads:";
+const SCENARIO_GLOB = "tests/minecraft/scenarios/**/*.yaml";
+
+/** An in-memory tree: the plan of what a change selects, then the tests the import graph reaches from the plan's starts. */
+function dataReadTree(sources: Record<string, string>, extraFiles: readonly string[], changed: readonly string[], options: { cap?: number } = {}) {
+  const map = new Map(Object.entries(sources));
+  const files = [...map.keys(), ...extraFiles];
+  const plan = planDataReads(changed, map, files);
+  const graph = buildReverseGraph(map, { known: new Set([...files, ...changed]), aliases: aliasesFromPackageJson({}) });
+  const reached = testsReachedBy(plan.starts, graph, { depth: IMPORTER_DEPTH, cap: options.cap ?? IMPORTER_TEST_CAP, testRoots: ["tests/"] });
+  return { plan, reached };
+}
+
+const READER_TREE = {
+  "tests/minecraft/arena/all-scenarios.ts": `${MARK} ${SCENARIO_GLOB}\nexport const all = 1;\n`,
+  "tests/minecraft/arena/shift.test.ts": `import { all } from "./all-scenarios.ts";\nconsole.log(all);\n`,
+  "tests/minecraft/arena/census.test.ts": `import { all } from "./all-scenarios.ts";\nconsole.log(all);\n`,
+  "tests/minecraft/other.test.ts": `export const other = 1;\n`,
+};
+const YAML = "tests/minecraft/scenarios/air/breathe.yaml";
+
+test("a changed or deleted scenario YAML runs the tests importing the file that reads it, and names the data file and its reader", () => {
+  for (const existing of [[YAML], []]) {
+    const { plan, reached } = dataReadTree(READER_TREE, existing, [YAML]);
+    expect(plan.reads).toEqual([{ data: YAML, reader: "tests/minecraft/arena/all-scenarios.ts" }]);
+    expect(reached.tests.map((entry) => entry.file)).toEqual(["tests/minecraft/arena/census.test.ts", "tests/minecraft/arena/shift.test.ts"]);
+    expect(dataReadReport(plan.reads)).toEqual([`  ${YAML} via tests/minecraft/arena/all-scenarios.ts`]);
+  }
+});
+
+test("a changed file no declared glob matches selects nothing", () => {
+  const { plan, reached } = dataReadTree(READER_TREE, ["docs/notes.md", "tests/minecraft/contract/scenarios/x.yaml"], ["docs/notes.md", "tests/minecraft/contract/scenarios/x.yaml"]);
+  expect(plan.reads).toEqual([]);
+  expect(plan.starts).toEqual([]);
+  expect(reached.tests).toEqual([]);
+});
+
+test("two readers matching one file are both started and both named", () => {
+  const sources = { ...READER_TREE, "tests/minecraft/lanes.ts": `${MARK} tests/minecraft/**/*.yaml\n`, "tests/minecraft/lanes.test.ts": `import "./lanes.ts";\n` };
+  const { plan, reached } = dataReadTree(sources, [YAML], [YAML]);
+  expect(plan.reads.map((read) => read.reader)).toEqual(["tests/minecraft/arena/all-scenarios.ts", "tests/minecraft/lanes.ts"]);
+  expect(plan.starts).toEqual(["tests/minecraft/arena/all-scenarios.ts", "tests/minecraft/lanes.ts"]);
+  expect(reached.tests.map((entry) => entry.file)).toContain("tests/minecraft/lanes.test.ts");
+});
+
+test("a declaration in a test file selects that test itself", () => {
+  const sources = { "tests/minecraft/contract/setup.test.ts": `import "x";\n${MARK} tests/minecraft/contract/scenarios/*.yaml\n` };
+  const changed = ["tests/minecraft/contract/scenarios/a.yaml"];
+  const { reached } = dataReadTree(sources, changed, changed);
+  expect(reached.tests).toEqual([{ file: "tests/minecraft/contract/setup.test.ts", depth: 0, from: "tests/minecraft/contract/setup.test.ts" }]);
+});
+
+test("a glob lists several globs, matches any depth with ** and one segment with *", () => {
+  const sources = { "tests/r.ts": `${MARK} data/*.json, deep/**/*.yaml\n` };
+  const reads = (changed: string[]) => planDataReads(changed, new Map(Object.entries(sources)), changed).reads.length;
+  expect(reads(["data/a.json"])).toBe(1);
+  expect(reads(["data/sub/a.json"])).toBe(0);
+  expect(reads(["deep/a.yaml"])).toBe(1);
+  expect(reads(["deep/x/y/a.yaml"])).toBe(1);
+  expect(reads(["deep/a.yaml.bak"])).toBe(0);
+});
+
+test("a malformed declaration is reported with its file and line, and its globs are not used", () => {
+  const sources = new Map([
+    ["tests/a.ts", `export {};\n${MARK}\n`],
+    ["tests/b.ts", `${MARK} data/*.yaml data/b.yaml\n`],
+    ["tests/c.ts", `${MARK} /etc/passwd\n`],
+    ["tests/d.ts", `${MARK} ../x/*.yaml\n`],
+    ["tests/e.ts", `${MARK} data/a.yaml,, data/b.yaml\n`],
+  ]);
+  const plan = planDataReads(["data/a.yaml", "data/b.yaml"], sources, ["data/a.yaml", "data/b.yaml"]);
+  expect(plan.malformed.map((entry) => `${entry.file}:${entry.line}`)).toEqual(["tests/a.ts:2", "tests/b.ts:1", "tests/c.ts:1", "tests/d.ts:1", "tests/e.ts:1"]);
+  expect(plan.reads).toEqual([]);
+  expect(malformedReport(plan.malformed)[0]).toContain("tests/a.ts:2");
+});
+
+test("the marker inside code or after other text is not a declaration", () => {
+  const sources = new Map([["tests/a.ts", `const text = "${MARK} data/*.yaml";\nfoo(); ${MARK} data/*.yaml\n`]]);
+  const plan = planDataReads(["data/a.yaml"], sources, ["data/a.yaml"]);
+  expect(plan).toMatchObject({ reads: [], malformed: [] });
+});
+
+test("a well-formed glob matching no file is listed as stale, a glob matching a deleted path is not", () => {
+  const sources = new Map([["tests/a.ts", `${MARK} gone/*.yaml, there/*.yaml\n`]]);
+  const plan = planDataReads(["there/x.yaml"], sources, ["tests/a.ts"]);
+  expect(plan.unmatched).toEqual([{ reader: "tests/a.ts", glob: "gone/*.yaml" }]);
+  expect(unmatchedReport(plan.unmatched)[0]).toContain("gone/*.yaml");
+  expect(planDataReads([], sources, ["gone/a.yaml", "there/b.yaml"]).unmatched).toEqual([]);
+});
+
+test("the tests a data file reaches count against the cap like any importer's", () => {
+  const sources: Record<string, string> = { "tests/lib.ts": `${MARK} data/*.yaml\n`, "tests/mid.ts": `import "./lib.ts";\n` };
+  for (const name of ["a", "b", "c"]) sources[`tests/${name}.test.ts`] = `import "./mid.ts";\n`;
+  sources["tests/direct.test.ts"] = `import "./lib.ts";\n`;
+  const { reached } = dataReadTree(sources, ["data/x.yaml"], ["data/x.yaml"], { cap: 2 });
+  expect(reached.tests.map((entry) => entry.file)).toEqual(["tests/direct.test.ts"]);
+  expect(reached.dropped).toBe(3);
+});
+
+test("a near-miss of the marker is reported, not ignored", () => {
+  for (const line of ["//check-reads: data/*.yaml", "// check-reads : data/*.yaml", "//  check-reads: data/*.yaml", "/* check-reads: data/*.yaml */"]) {
+    const plan = planDataReads(["data/a.yaml"], new Map([["tests/r.ts", `${line}\n`]]), ["data/a.yaml"]);
+    expect({ line, reads: plan.reads.length, malformed: plan.malformed.length }).toEqual({ line, reads: 0, malformed: 1 });
+  }
+});
+
+test("the next step is named in what check prints about a stale or malformed declaration", () => {
+  expect(unmatchedReport([{ reader: "tests/a.ts", glob: "gone/*.yaml" }])[0]).toContain("fix or remove");
+  expect(malformedReport([{ file: "tests/a.ts", line: 2, reason: "empty glob", text: "x" }])[0]).toContain("fix or remove");
 });

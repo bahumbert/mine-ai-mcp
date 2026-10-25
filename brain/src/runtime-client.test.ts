@@ -35,6 +35,7 @@ function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>
   return client;
 }
 
+// check-reads: src/bot-data/bot-data.sql
 const dropsReply = () => ({ structuredContent: { response: { format: "json", data: { result: { drops: { items: [{ item: "wheat", sources: [], mobs: [] }], blocks: [] } } } } } });
 const lost = () => Promise.reject(new Error("Streamable HTTP error: 404 session not found"));
 

@@ -2,7 +2,8 @@
  * `bun run check`: the quick loop. Typechecks the projects with changed files or with files importing them (type-only
  * imports included), and runs the tests next to the changed files (`x.ts` → `x.test.ts`) plus the tests that load
  * them through up to `IMPORTER_DEPTH` importers (`--depth <n>`; `--depth 0` = next-to only): uncommitted work by
- * default, `bun run check origin/main` for the whole branch.
+ * default, `bun run check origin/main` for the whole branch. A changed data file (a scenario YAML...) counts as a change
+ * of the module declaring that it reads it (`// check-reads: <glob>`, `scripts/data-readers.ts`): its importers' tests run.
  * `bun run test` (`--all`): every project present in this checkout (the monitor is not in every one); arguments after
  * `--all` go to its `bun test` call (`bun run test -- --coverage`).
  */
@@ -18,6 +19,7 @@ import {
   type ReverseGraph,
   type TestsReached,
 } from "./import-graph.js";
+import { dataReadReport, malformedReport, planDataReads, unmatchedReport, type DataReadPlan } from "./data-readers.js";
 import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
 
 const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
@@ -119,12 +121,38 @@ function configSelection(changedRaw: readonly string[], projectDirs: readonly st
   return configTypechecks(changedRaw, extendsOf, projectDirs);
 }
 
-/** The reverse import graph of every tracked or untracked source of the projects; `deleted` stay resolvable. */
-function repositoryGraph(deleted: readonly string[]): ReverseGraph {
-  const files = git("ls-files", "--cached", "--others", "--exclude-standard").filter((file) => inProject(file) && existsSync(file));
-  const sources = new Map(files.filter((file) => /\.tsx?$/u.test(file)).map((file) => [file, readFileSync(file, "utf8")] as const));
-  const known = new Set([...files, ...deleted]);
+/** Every tracked or untracked file (a tracked file deleted in the tree included). */
+function repositoryFiles(): string[] {
+  return git("ls-files", "--cached", "--others", "--exclude-standard");
+}
+
+/** The reverse import graph of the projects' sources, each read once; `deleted` stay resolvable. */
+function repositoryGraph(files: readonly string[], deleted: readonly string[]): ReverseGraph {
+  const present = files.filter((file) => inProject(file) && existsSync(file));
+  const sources = new Map(present.filter((file) => /\.tsx?$/u.test(file)).map((file) => [file, readFileSync(file, "utf8")] as const));
+  const known = new Set([...present, ...deleted]);
   return buildReverseGraph(sources, { known, aliases: aliasesFromPackageJson(JSON.parse(readFileSync("package.json", "utf8"))) });
+}
+
+/** The project sources naming the marker (one `git grep`, so a change with no source file reads none of the others). */
+function declaringSources(): Map<string, string> {
+  const files = git("grep", "-l", "--untracked", "-e", "check-reads", "--", "*.ts", "*.tsx").filter((file) => inProject(file) && existsSync(file));
+  return new Map(files.map((file) => [file, readFileSync(file, "utf8")] as const));
+}
+
+/**
+ * What the changed paths select among the declared data readers; a malformed declaration ends the run. A changed
+ * `.ts` file is not printed: it is an importer origin already (a source scan declares `src/**` and would list every change).
+ */
+function dataReadsOrExit(changedRaw: readonly string[], files: readonly string[]): DataReadPlan {
+  const plan = planDataReads(changedRaw, declaringSources(), files);
+  for (const line of malformedReport(plan.malformed)) console.error(line);
+  if (plan.malformed.length > 0) process.exit(1);
+  for (const line of unmatchedReport(plan.unmatched)) console.log(line);
+  const shown = plan.reads.filter((read) => !/\.tsx?$/u.test(read.data));
+  if (shown.length > 0) console.log(`check: ${new Set(shown.map((read) => read.data)).size} changed data file(s) read by a declared reader`);
+  for (const line of dataReadReport(shown)) console.log(line);
+  return plan;
 }
 
 /** Path prefixes of the suite's test paths (`src/`, `scenarios/src/`...), for the projects present in this checkout. */
@@ -140,9 +168,9 @@ export function siblingTests(changedSources: readonly string[], testRoots: reado
 }
 
 /** `repositoryGraph` for the changed files, with the time it took. */
-function timedRepositoryGraph(changedAll: readonly string[]): ReverseGraph {
+function timedRepositoryGraph(files: readonly string[], changedAll: readonly string[]): ReverseGraph {
   const startedAt = performance.now();
-  const graph = repositoryGraph(changedAll.filter((file) => !existsSync(file)));
+  const graph = repositoryGraph(files, changedAll.filter((file) => !existsSync(file)));
   console.log(`check: import graph built in ${((performance.now() - startedAt) / 1000).toFixed(1)} s`);
   return graph;
 }
@@ -202,19 +230,26 @@ function main(): never {
   const args = parsedArgsOrExit();
   const base = args.base === undefined ? "HEAD" : git("merge-base", "HEAD", args.base)[0] ?? "HEAD";
   const changedRaw = changedPaths(base);
+  if (changedRaw.length === 0) {
+    console.log("check: no changed TypeScript file");
+    process.exit(0);
+  }
+  const files = repositoryFiles();
+  const dataReads = dataReadsOrExit(changedRaw, files);
   const changedAll = projectPaths(changedRaw);
   const changed = changedAll.filter((file) => /\.(ts|tsx)$/u.test(file) && existsSync(file));
   const present = PROJECTS.filter((project) => existsSync(project.dir)).map((project) => project.dir);
   const config = configSelection(changedRaw, present);
-  if (changedAll.length === 0 && config.reasons.size === 0) {
+  if (changedAll.length === 0 && config.reasons.size === 0 && dataReads.reads.length === 0) {
     console.log("check: no changed TypeScript file");
     process.exit(0);
   }
   if (config.pointer !== undefined) console.log(config.pointer);
-  const graph = changedAll.length === 0 ? undefined : timedRepositoryGraph(changedAll);
+  const graph = changedAll.length === 0 && dataReads.reads.length === 0 ? undefined : timedRepositoryGraph(files, changedAll);
   const testRoots = suiteTestRoots();
-  const importerTestFiles = graph === undefined ? [] : importerTests(changedAll, graph, args.depth, testRoots);
-  const tests = [...new Set([...siblingTests(changed, testRoots), ...importerTestFiles])].filter(existsSync);
+  // A data file's reader starts the importer walk only: it is never in `changed`, so a data change runs no typecheck.
+  const importerTestFiles = graph === undefined ? [] : importerTests([...changedAll, ...dataReads.starts], graph, args.depth, testRoots);
+  const tests = [...new Set([...siblingTests([...changed, ...dataReads.starts], testRoots), ...importerTestFiles])].filter(existsSync);
   const importing = graph === undefined ? new Map<string, string>() : projectsImporting(changedAll, graph, PROJECTS.map((project) => project.dir));
   const typechecks = typecheckPlan(changed, importing, config.reasons);
   let ok = true;
@@ -224,7 +259,7 @@ function main(): never {
   }
   if (tests.length > 0) ok = run(["bun", "test", ...tests.map((file) => `./${file}`)]) && ok;
   else if (config.pointer === undefined) console.log("check: no test file next to or importing the changed files (bun run test for everything)");
-  console.log(`check: ${new Set([...changedAll, ...configFiles(changedRaw)]).size} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
+  console.log(`check: ${new Set([...changedAll, ...configFiles(changedRaw), ...dataReads.reads.map((read) => read.data)]).size} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
   process.exit(ok ? 0 : 1);
 }
 
