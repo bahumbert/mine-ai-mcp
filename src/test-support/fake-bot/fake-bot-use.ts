@@ -18,8 +18,8 @@ import type { FakeEntities } from "./fake-bot-items.js";
 import { answerBucketUse } from "./fake-bot-bucket.js";
 import { lookDirection, lookMeeting } from "./fake-bot-look.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
+import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeBot } from "./fake-bot.js";
-import type { FakeClock } from "./fake-clock.js";
 import { EQUIPMENT_SLOTS, type FakeInventory, itemOf } from "./fake-inventory.js";
 import type { FakeServer } from "./fake-server.js";
 import type { FakeWorld } from "./fake-world.js";
@@ -36,7 +36,8 @@ const MAIN_HAND = 0;
 const OFF_HAND = 1;
 /** A boat on water sinks to rest this far below the surface, about 1.5 s after it is put (-60.111 to -60.477 measured). */
 const REST_BELOW_SURFACE = 0.366;
-const REST_AFTER_MS = 1_500;
+/** The measured "about 1.5 s" at the server's 20 ticks a second: the server counts ticks, so a slower server takes longer. */
+const REST_AFTER_TICKS = 30;
 /** An entity's yaw travels as one byte, 256 steps a turn. */
 const YAW_STEPS_PER_TURN = 256;
 const DEGREES_PER_TURN = 360;
@@ -66,21 +67,24 @@ function boatAt(bot: FakeBot, entities: FakeEntities, name: string, point: Vec3,
   return meetsBoat || boxMeetsBlocks(bot, point, boat.width, boat.height) ? null : boat;
 }
 
-type UseParts = { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; entities: FakeEntities };
+type UseParts = { server: FakeServer; world: FakeWorld; inventory: FakeInventory; entities: FakeEntities };
 
 /**
- * The server's side of a boat put on water: after a while it floats at its rest level. One move stands for the bobbing the
- * server sends (-60.25, -60.43, -60.53 ... -60.477); a boat a rider controls is not simulated by the server, so it stays.
+ * The server's side of a boat put on water: `REST_AFTER_TICKS` server ticks later it floats at its rest level. One move stands for the bobbing the
+ * server sends (-60.25, -60.43, -60.53 ... -60.477); a boat a rider controls is not simulated by the server, so it stays. The move is not lagged (like the fireballs' moves): the lag of `lagMs` delays what the client
+ * asks, and the put already waited for it.
  */
 function restOnWater(bot: FakeBot, parts: UseParts, boat: Entity, surface: number): void {
-  parts.clock.after(REST_AFTER_MS, () =>
-    parts.server.answer(() => {
-      if (bot.entities[boat.id] !== boat || parts.server.riderOf(boat.id) !== null) return;
-      boat.position.y = surface - REST_BELOW_SURFACE;
-      parts.server.setServerPosition(boat.id, boat.position);
-      bot.emit("entityMoved", boat);
-    }),
-  );
+  let ticks = 0;
+  const stopCounting = onServerTick(parts.server, () => {
+    ticks += 1;
+    if (ticks < REST_AFTER_TICKS && bot.entities[boat.id] === boat) return;
+    stopCounting();
+    if (bot.entities[boat.id] !== boat || parts.server.riderOf(boat.id) !== null) return;
+    boat.position.y = surface - REST_BELOW_SURFACE;
+    parts.server.setServerPosition(boat.id, boat.position);
+    bot.emit("entityMoved", boat);
+  });
 }
 
 /** The server's side of a boat item used: the boat is put where the look meets, one taken from the stack outside creative. */

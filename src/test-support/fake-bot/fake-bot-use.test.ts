@@ -122,6 +122,50 @@ test("a boat on water sinks to its rest level 0.366 below the surface by 1.5 s a
   assert.deepEqual(moved.map((y) => Math.round(y * 1000)), [Math.round((WATER_SURFACE - 0.366) * 1000)], "one move to the rest level");
 });
 
+const restLevel = WATER_SURFACE - 0.366;
+const isResting = (boat: { position: Vec3 }) => Math.abs(boat.position.y - restLevel) < 0.001;
+
+test("a boat rests 30 server ticks after it is put: a server at 10 ticks a second takes 3 s of clock, not 1.5", async () => {
+  const harness = boatBot({ server: { ticksPerSecond: 10 } });
+  const [boat] = await useAt(harness, 0, WATER_AIM);
+  await harness.clock.advance(1_000);
+  assert.equal(isResting(boat!), false, `still at the surface after 2.1 s of clock: ${boat!.position.y}`);
+  await harness.clock.advance(2_500);
+  assert.equal(isResting(boat!), true, `rests at ${boat!.position.y}`);
+});
+
+test("a boat put on water does not rest while the server is stopped, and rests once it has run its ticks again", async () => {
+  const harness = boatBot();
+  const [boat] = await useAt(harness, 0, WATER_AIM);
+  harness.server.stop();
+  await harness.clock.advance(10_000);
+  assert.equal(isResting(boat!), false, "a stopped server runs no ticks");
+  harness.server.resume();
+  await harness.clock.advance(3_000);
+  assert.equal(isResting(boat!), true, `rests at ${boat!.position.y}`);
+});
+
+test("a short stop is caught up: the boat rests inside the owed ticks at the resume", async () => {
+  const harness = boatBot();
+  const [boat] = await useAt(harness, 0, WATER_AIM);
+  harness.server.stop();
+  await harness.clock.advance(1_500);
+  assert.equal(isResting(boat!), false);
+  harness.server.resume();
+  assert.equal(isResting(boat!), true, `rests at ${boat!.position.y}`);
+});
+
+test("a boat removed before its rest is not moved: nothing is heard and nothing throws", async () => {
+  const harness = boatBot();
+  const moved: number[] = [];
+  harness.bot.on("entityMoved", (entity) => void moved.push(entity.id));
+  const [boat] = await useAt(harness, 0, WATER_AIM);
+  harness.entities.remove(boat!.id);
+  await harness.clock.advance(3_000);
+  assert.deepEqual(moved, []);
+  assert.equal(harness.bot.entities[boat!.id], undefined);
+});
+
 test("a boat put on water and mounted at once keeps the rider's moves: the rest level is the server's own, not a rider's", async () => {
   const harness = boatBot();
   const [boat] = await useAt(harness, 0, WATER_AIM);

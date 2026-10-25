@@ -3,7 +3,8 @@
  * tick (`fake-bot-combat-rules.ts` FIREBALL_*) and tells the client rarely: one tick after it appears a position packet with a delta of
  * zero, then at its 2nd tick and at every 10th one from the 10th its velocity and its position (`entity_move_look` with the delta
  * since the last one told in 1/4096 of a block, `sync_entity_position` with the absolute position when the delta passes 8 blocks).
- * A hit in reach (`use_entity`, mouse 1) sets it flying along the way the attacker looks; the client hears the new velocity and a move
+ * The ball's true position is the server's (`setServerPosition` at launch and each tick), so a hit is judged on it while the client holds
+ * the last position it was told. A hit in reach (`use_entity`, mouse 1) sets it flying along the way the attacker looks; the client hears the new velocity and a move
  * packet of zero in that tick, nothing about an owner. A hit out of reach changes nothing. At the bot it hurts her (`damage_event`
  * of type `unattributed_fireball`, the ball as cause and direct source) and blows up (`explosion`, the ball destroyed).
  * Not modelled: the ball's yaw and pitch (they lerp toward its heading), blocks (a ball flies on until removed or until it meets
@@ -124,6 +125,7 @@ export function attachFakeFireballs(bot: FakeBot, parts: FireballParts): FakeFir
     const heading = ball.velocity.norm() === 0 ? ball.velocity : ball.velocity.scaled(1 / ball.velocity.norm());
     ball.velocity = ball.velocity.plus(heading.scaled(ball.power)).scaled(FIREBALL_DRAG);
     ball.position = ball.position.plus(ball.velocity);
+    parts.server.setServerPosition(ball.entity.id, ball.position);
     if (touchesBot(ball)) return explodeOnBot(ball);
     if (ball.ticks === 1) tellStill(ball);
     else if (ball.ticks === FIRST_TOLD_TICK || ball.ticks % TELL_EVERY_TICKS === 0) {
@@ -137,6 +139,7 @@ export function attachFakeFireballs(bot: FakeBot, parts: FireballParts): FakeFir
     launch(position, motion) {
       const entity = parts.entities.spawn({ name: "fireball", position, velocity: motion.clone() });
       balls.set(entity.id, { entity, position: position.clone(), velocity: motion.clone(), power: FIREBALL_LAUNCH_POWER, ticks: 0 });
+      parts.server.setServerPosition(entity.id, position);
       return entity;
     },
     hit(entity) {

@@ -5,6 +5,8 @@
  * shooter, direct source the projectile), the projectile gone, `update_health`; a tick later her push, which carries one tick of her
  * own physics. A hit the hurt window absorbs lights no fire and pushes nobody, but the projectile is gone all the same. Fire costs
  * 1 of `on_fire` damage at 1, 2, 3 and 4 s and goes out at 5 s; a second fireball starts the five seconds over.
+ * The projectile stays at its spawn point on the client and on the server (it is only removed at its landing, and a projectile is not
+ * hurtable), so no `setServerPosition` is needed for it.
  * Not modelled: the arrow's count in her metadata, the burn hurt's own `entity_velocity` (0, -0.0784, 0), the spawn height (0.85 of
  * the shooter's height: unmeasured), a flight bent by gravity or blocks, water putting the fire out, a shield.
  */

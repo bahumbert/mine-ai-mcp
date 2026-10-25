@@ -4,7 +4,8 @@
  * `entity_velocity` is told twice (around the health metadata), then its motion decays by 0.98 a tick, a component under 0.003 is
  * dropped, and the tracker tells the velocity every 3 ticks when it changed by more than 0.0003 since the last one told (else
  * on a later 3rd tick), the last being a velocity of zero. No position packet moves it. Mineflayer files only the velocity
- * (`entities.js:302-307`).
+ * (`entities.js:302-307`). The mob's position never changes in the fake, so its server and client positions cannot differ and
+ * `inEntityReach` needs no `setServerPosition` for it.
  * Not modelled: a mob with AI (it takes 0.36 up as well, then walks, falls and turns on its own: `sync_entity_position` and move packets
  * each tick), the sporadic move packet with a delta of zero and `onGround` false, a push on a mob the hit killed or on one hurt by
  * another actor (unmeasured), a tracker's phase (the fake counts from the hit).
