@@ -421,7 +421,8 @@ test("a model that throws frees its slot for the next waiter", async () => {
 });
 
 test("unknown slots run five calls at once with no wait", async () => {
-  const queue = new ModelQueue({ slots: null, file: null });
+  // A fixed clock: on the wall clock a loaded machine crosses a millisecond between the ask and the start (flaky, 2026-10-25).
+  const queue = new ModelQueue({ slots: null, file: null, now: () => 0 });
   const fake = controlled();
   const tracked = queue.track(fake.model, "ada");
   const calls = [0, 1, 2, 3, 4].map(() => tracked.complete([], signal));
