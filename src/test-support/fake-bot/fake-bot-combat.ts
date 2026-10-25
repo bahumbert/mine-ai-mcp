@@ -7,7 +7,7 @@
  * Scene controls (`FakeHarness.combat`) are what other actors do. Mineflayer's handlers of these packets are not installed
  * on the fake client, so each send also runs the handler's effect (`entities.js:398-402` for `damage_event`, `:385-395` for
  * `entity_status`, `health.js` for `update_health`, `physics.js:314-326` for `explosion`).
- * Not modelled: a hit's knockback on a mob, the weapon's durability, critical and sweeping hits, armor (a fixture mob has none),
+ * Not modelled: the weapon's durability, critical and sweeping hits, armor (a fixture mob has none),
  * absorption hearts, the bot's natural regeneration, the difficulty's scaling of a mob's attack (the amount given to `hurtBot` is final), a blast
  * stopped by blocks (vanilla's seen percent) or reaching a creative bot, a creative bot hurt (the fake ignores her hurts), a hit written in the same tick as a slot change (the server used the old
  * slot), drops other than a spec's `drops`, the blast's crater and its damage to mobs.
@@ -23,6 +23,7 @@ import { DEFAULT_MOB_HEALTH, HURT_WINDOW_TICKS, KNOCKBACK_SIDEWAYS, NOT_HURTABLE
 import { attachFakeHeldUse } from "./fake-bot-held-use.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
+import type { Swing } from "./fake-bot-swing.js";
 import type { FakeBot } from "./fake-bot.js";
 import type { FakeInventory } from "./fake-inventory.js";
 import type { FakeServer } from "./fake-server.js";
@@ -52,10 +53,8 @@ export interface FakeCombat {
   explode(position: Vec3): void;
 }
 
-type CombatParts = { server: FakeServer; inventory: FakeInventory; entities: ServerEntities };
+type CombatParts = { server: FakeServer; inventory: FakeInventory; entities: ServerEntities; swing: Swing };
 
-/** A bot that has stood about has a full swing (the ticker counts from the login). */
-const STANDING_SWING_TICKS = 1_000;
 /** The death animation keeps a dead mob on the client for 945 ms. */
 const DEATH_ANIMATION_TICKS = 19;
 const SWING_ARM = 0;
@@ -224,14 +223,7 @@ function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: Mo
 /** Give `bot` the server's answers to a hit and the scene controls of the harness. */
 export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   const sender = createSender(bot, parts);
-  let ticksSinceSwing = STANDING_SWING_TICKS;
-  let heldType = parts.inventory.heldItem?.type;
-  onServerTick(parts.server, () => void (ticksSinceSwing += 1));
-  // `Player.tick`: a different item type in the main hand starts the swing over.
-  parts.inventory.onHeldItemChanged((held) => {
-    if (held?.type !== heldType) ticksSinceSwing = 0;
-    heldType = held?.type;
-  });
+  const { swing } = parts;
   attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender });
   const knock = attachMobKnockback(bot, sender);
   const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock);
@@ -248,14 +240,14 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
       const fireballHit = entity === undefined ? null : fireballs.hit(entity);
       if (fireballHit !== null) {
         // `Player.attack` starts the swing over before it deflects a ball; a hit the server ignores is not an attack.
-        if (fireballHit === "deflected") ticksSinceSwing = 0;
+        if (fireballHit === "deflected") swing.startOver();
         return;
       }
       if (!isHurtable(bot, entity) || !inEntityReach(bot, parts.server, entity)) return;
       const weapon = weaponOf(parts.inventory.heldItem?.name);
-      const damage = swingDamage(weapon, ticksSinceSwing);
-      const sprintBonus = sprint.active() && swingStrength(weapon, ticksSinceSwing) > SPRINT_BONUS_ABOVE_STRENGTH;
-      ticksSinceSwing = 0;
+      const damage = swingDamage(weapon, swing.ticksSince());
+      const sprintBonus = sprint.active() && swingStrength(weapon, swing.ticksSince()) > SPRINT_BONUS_ABOVE_STRENGTH;
+      swing.startOver();
       const result = hurtCreature(entity, bot.entity, damage, "player_attack", () => {
         knock.push(entity, entity.position.minus(bot.entity.position), KNOCKBACK_SIDEWAYS);
         if (sprintBonus) knock.push(entity, lookingAt(bot), SPRINT_KNOCKBACK);

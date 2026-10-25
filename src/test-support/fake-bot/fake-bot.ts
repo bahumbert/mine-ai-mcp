@@ -21,6 +21,7 @@ import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-slee
 import { attachFakeUse } from "./fake-bot-use.js";
 import { type FakeCombat, attachFakeCombat } from "./fake-bot-combat.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
+import { attachFakeSwing } from "./fake-bot-swing.js";
 import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
 import { attachFakeWindows } from "./fake-bot-windows.js";
 import type { FakeWindows } from "./fake-window-server.js";
@@ -211,13 +212,14 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeDigging(bot, clock, world);
   const serverEntities = attachFakeEntities(bot, { server, inventory, entities });
   attachFakeVehicle(bot, { server });
-  attachFakeBoatDamage(bot, { server, entities: serverEntities });
+  const swing = attachFakeSwing({ server, inventory });
+  attachFakeBoatDamage(bot, { server, entities: serverEntities, inventory, swing });
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
   const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {}, spawn: serverEntities.spawn });
   attachFakeUse(bot, { clock, server, world, inventory, entities });
-  attachFakeItems(bot, { clock, server, world, inventory, spawn: serverEntities.spawn });
+  attachFakeItems(bot, { server, world, inventory, spawn: serverEntities.spawn });
   attachFakePlacement(bot, { clock, server, world, inventory, windows });
-  const combat = attachFakeCombat(bot, { server, inventory, entities: serverEntities });
+  const combat = attachFakeCombat(bot, { server, inventory, entities: serverEntities, swing });
   attachFakeLavaFlow({ server, world });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { server });

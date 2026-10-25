@@ -10,7 +10,6 @@ import type { Entity } from "prismarine-entity";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import { EQUIPMENT_SLOTS, type FakeInventory, type TossedStack } from "./fake-inventory.js";
-import type { FakeClock } from "./fake-clock.js";
 import type { FakeServer } from "./fake-server.js";
 import { DEFAULT_MOB_HEALTH, NOT_HURTABLE_TYPES } from "./fake-bot-combat-rules.js";
 import type { FakeWorld } from "./fake-world.js";
@@ -35,7 +34,7 @@ export interface FakeEntities {
 /** Give `bot` its hand, `equip`, `toss` and `tossStack`. */
 export function attachFakeItems(
   bot: FakeBot,
-  parts: { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; spawn: ServerEntities["spawn"] },
+  parts: { server: FakeServer; world: FakeWorld; inventory: FakeInventory; spawn: ServerEntities["spawn"] },
 ): void {
   const { inventory, server } = parts;
   Object.defineProperties(bot, {

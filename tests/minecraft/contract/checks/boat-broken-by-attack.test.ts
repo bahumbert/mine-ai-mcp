@@ -24,13 +24,12 @@ test("boat-broken-by-attack holds when the server stalls over 2 s and the game d
 });
 
 test("boat-broken-by-attack fails, naming the ticks read, when the boat broke at hits the ticks say are too few", async () => {
-  // Every hit lands twice (an artificial fault: the fake gives every hit its full 10, even two in one tick, which the game does not): the boat is gone after 3 hits, and the ticks between them leave at most 20 damage.
+  // Every hit lands six times (an artificial fault: the five after the first weigh 2.08 each in one tick, 20.4 a hit with the first): the boat is gone after 3 hits, and the ticks between them leave at most 20 damage.
   await assert.rejects(
     runCheck({}, (subject) => {
       const hit = subject.bot.attack.bind(subject.bot);
       subject.bot.attack = (target) => {
-        hit(target);
-        hit(target);
+        for (let landing = 0; landing < 6; landing += 1) hit(target);
       };
       return subject;
     }),

@@ -22,7 +22,7 @@ export const NOT_HURTABLE_TYPES: ReadonlySet<string> = new Set(["player", "proje
  * the swing periods of 12.5 and 22 ticks), the others by `weapon-damage-swords`, `-axes`, `-pickaxes` and `-shovels-hoes`, which hit three zombies per tool (a full swing, 10 ticks
  * after it, 2 ticks after that): the tools the importers' tests name, 3 runs on the 1.21.4 server, vanilla's numbers every time.
  */
-const HAND: Weapon = { damage: 1, attackSpeed: 4 };
+export const HAND: Weapon = { damage: 1, attackSpeed: 4 };
 const SWORD_SPEED = 1.6;
 const PICKAXE_SPEED = 1.2;
 const MEASURED_WEAPONS: Readonly<Record<string, Weapon>> = {
@@ -51,13 +51,17 @@ const MEASURED_WEAPONS: Readonly<Record<string, Weapon>> = {
 /** Items whose hit differs from the hand's and that no check measured. */
 const UNMEASURED_TOOL = /_(sword|axe|pickaxe|shovel|hoe)$|^(trident|mace)$/u;
 
+/** Whether a held item hits as the hand does: nothing in hand, or an item that is neither a measured weapon nor a tool (vanilla: only a weapon or tool carries an attack damage attribute of its own, read in the source, not measured). */
+export function hitsAsHand(heldName: string | undefined): boolean {
+  return heldName === undefined || (MEASURED_WEAPONS[heldName] === undefined && !UNMEASURED_TOOL.test(heldName));
+}
+
 /** The weapon a held item is; an item that is not a tool hits as the hand does. */
 export function weaponOf(heldName: string | undefined): Weapon {
-  if (heldName === undefined) return HAND;
+  if (heldName === undefined || hitsAsHand(heldName)) return HAND;
   const known = MEASURED_WEAPONS[heldName];
   if (known !== undefined) return known;
-  if (UNMEASURED_TOOL.test(heldName)) throw new Error(`the fake bot does not know the damage of ${heldName}: add a measured weapon to fake-bot-combat-rules.ts with a contract check`);
-  return HAND;
+  throw new Error(`the fake bot does not know the damage of ${heldName}: add a measured weapon to fake-bot-combat-rules.ts with a contract check`);
 }
 
 const TICKS_PER_SECOND = 20;
@@ -86,12 +90,12 @@ export const SPRINT_KNOCKBACK = 0.5;
 export const HURT_WINDOW_TICKS = 20;
 const HURT_WINDOW_OPEN_BELOW = 10;
 
-/** What a hurt does to a creature that was `invulnerableTicks` into its hurt window with `lastHurt` taken (`LivingEntity.hurtServer`): nothing, the excess of a bigger hit, or all of it. */
 /** Whether a hurt now opens the window afresh and is told to the client; inside it only the excess of a bigger hit counts and nothing is told. */
 export function opensHurtWindow(invulnerableTicks: number): boolean {
   return invulnerableTicks <= HURT_WINDOW_OPEN_BELOW;
 }
 
+/** What a hurt does to a creature that was `invulnerableTicks` into its hurt window with `lastHurt` taken (`LivingEntity.hurtServer`): nothing, the excess of a bigger hit, or all of it. */
 export function damageTaken(amount: number, invulnerableTicks: number, lastHurt: number): number {
   if (opensHurtWindow(invulnerableTicks)) return amount;
   return amount > lastHurt ? amount - lastHurt : 0;

@@ -101,7 +101,7 @@ test("a hit on a boat past the server's reach does nothing", async () => {
   assert.notEqual(harness.bot.entities[BOAT_ID], undefined);
 });
 
-test("the break happens when the server answers: not while it is stopped (its queued hits land in one tick), a lag later when it lags", async () => {
+test("a stopped server breaks nothing and prices the hits it queued at the resume tick, one swing between them (18.3 after 1.25 s of wall time); a lagging one breaks the boat a lag later", async () => {
   const stopped = boatBeside();
   stopped.server.stop();
   for (let hit = 0; hit < 5; hit += 1) {
@@ -111,7 +111,7 @@ test("the break happens when the server answers: not while it is stopped (its qu
   assert.notEqual(stopped.bot.entities[BOAT_ID], undefined, "a stopped server breaks nothing");
   stopped.server.resume();
   await stopped.clock.advance(50);
-  assert.equal(stopped.bot.entities[BOAT_ID], undefined, "five hits read in one tick are 50 damage");
+  assert.notEqual(stopped.bot.entities[BOAT_ID], undefined, "five hits read at the resume tick weigh 10 + 4 x 2.08 = 18.3, whatever wall time passed while stopped");
   const lagging = boatBeside({ lagMs: 200 });
   for (let hit = 0; hit < 8; hit += 1) {
     lagging.bot.attack(lagging.bot.entities[BOAT_ID]!);
@@ -120,6 +120,71 @@ test("the break happens when the server answers: not while it is stopped (its qu
   assert.notEqual(lagging.bot.entities[BOAT_ID], undefined, "the eighth hit is still on its way");
   await lagging.clock.advance(100);
   assert.equal(lagging.bot.entities[BOAT_ID], undefined);
+});
+
+/** Whether the boat is gone after the server reads `hits` hits in one tick (the bot has stood about: the first is a full swing). */
+async function brokenByHitsInOneTick(hits: number, options: FakeBotOptions = {}): Promise<boolean> {
+  const harness = boatBeside(options);
+  harness.server.stop();
+  for (let hit = 0; hit < hits; hit += 1) harness.bot.attack(harness.bot.entities[BOAT_ID]!);
+  harness.server.resume();
+  await harness.clock.advance(100);
+  return harness.bot.entities[BOAT_ID] === undefined;
+}
+
+test("hits read in one tick share one swing counter: the first weighs 10, each next 2.08, so 15 do not break the boat and 16 do", async () => {
+  assert.equal(await brokenByHitsInOneTick(15), false);
+  assert.equal(await brokenByHitsInOneTick(16), true);
+});
+
+const ZOMBIE_ID = 8;
+const STACKS = { 36: { name: "oak_boat" }, 37: { name: "stick" } };
+
+/** A boat 2 blocks ahead and a zombie 2 blocks to the side; a boat stack in the hand, a stick beside it. */
+const boatAndZombie = (): FakeHarness => boatBeside({ slots: STACKS, entities: { [BOAT_ID]: { name: "oak_boat", position: BOAT_SPOT }, [ZOMBIE_ID]: { name: "zombie", position: new Vec3(2.5, -60, 0.5) } } });
+const zombieHealth = ({ bot }: FakeHarness) => Number(bot.entities[ZOMBIE_ID]!.metadata[bot.registry.entitiesByName.zombie!.metadataKeys!.indexOf("health")]);
+
+test("a boat hit starts the swing over: a mob hit in the same tick is weak (1 x 0.208 by hand, the boat stack in hand priced as the hand)", async () => {
+  const harness = boatAndZombie();
+  harness.server.stop();
+  harness.bot.attack(harness.bot.entities[BOAT_ID]!);
+  harness.bot.attack(harness.bot.entities[ZOMBIE_ID]!);
+  harness.server.resume();
+  await harness.clock.advance(100);
+  assert.ok(Math.abs(zombieHealth(harness) - (20 - 0.208)) < 0.001, `the zombie has ${zombieHealth(harness)}`);
+});
+
+/** What starts the swing over, run on the stopped server before the boat hits. */
+const SWING_STARTERS: Readonly<Record<string, (harness: FakeHarness) => void>> = {
+  "a mob hit": ({ bot }) => bot.attack(bot.entities[ZOMBIE_ID]!),
+  "a deflected fireball": ({ bot, combat }) => {
+    bot.entity.yaw = -Math.PI / 2;
+    bot.entity.pitch = 0;
+    bot.attack(combat.launchFireball(new Vec3(2.5, -59.1, 0.5), new Vec3(-0.2, 0, 0)));
+  },
+  "a new item type in the hand": ({ bot }) => bot.setQuickBarSlot(1),
+};
+
+test("a mob hit, a deflected fireball and a new item type in the hand start the swing over: a boat hit in the same tick is weak, so 19 hits after it do not break the boat and 20 do", async () => {
+  for (const [starter, start] of Object.entries(SWING_STARTERS)) {
+    for (const [hits, broken] of [[19, false], [20, true]] as const) {
+      const harness = boatAndZombie();
+      harness.server.stop();
+      start(harness);
+      for (let hit = 0; hit < hits; hit += 1) harness.bot.attack(harness.bot.entities[BOAT_ID]!);
+      harness.server.resume();
+      await harness.clock.advance(100);
+      assert.equal(harness.bot.entities[BOAT_ID] === undefined, broken, `${hits} boat hits after ${starter} (2.08 each: 39.5, then 41.6)`);
+    }
+  }
+});
+
+test("a hit on a boat with a weapon or tool in hand throws: its scaling is unmeasured", async () => {
+  for (const tool of ["iron_sword", "trident"]) {
+    const harness = boatBeside({ slots: { 36: { name: tool } } });
+    harness.bot.attack(harness.bot.entities[BOAT_ID]!);
+    await assert.rejects(harness.clock.advance(100), new RegExp(`boat hit with ${tool}: not modelled, unmeasured`, "u"));
+  }
 });
 
 test("two harnesses on one clock break their own boats and drop their own items", async () => {
@@ -176,6 +241,6 @@ test("a seat the server keeps after her client forgot the boat: the boat is hit 
   assert.deepEqual(server.ridersOf(BOAT_ID), [], "the server let her off the boat her client no longer knew");
   assert.equal(server.sentPositions.length, 1);
   writeShiftKey(bot, false);
-  // The first hit counted (10 damage, 3 ticks drained): 6 more 250 ms apart break it, 7 hits in all, not 8.
-  assert.equal(await hitUntilGone(harness, 250), 6, "the hit before the get-off counted: the boat was in reach of the seat");
+  // The first hit counted (10 damage, 3 ticks drained); the next comes 3 ticks after it and weighs 5.92 (strength 0.7), then 250 ms apart: 7 more hits break it (8 in all).
+  assert.equal(await hitUntilGone(harness, 250), 7, "the hit before the get-off counted: the boat was in reach of the seat");
 });
