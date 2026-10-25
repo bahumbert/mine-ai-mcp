@@ -120,13 +120,16 @@ export class AgentRelations {
     if (this.looking || (this.trades.onlyWatching() && now - this.lastLookAt < WATCH_LOOK_MS)) return "busy_wait";
     this.looking = true;
     this.lastLookAt = now;
+    let ticking = false;
     void (async () => {
       const snapshot = await this.deps.runtime.status();
       this.trades.reconcileHandoffs(onStack);
+      ticking = true;
       await this.trades.tick(snapshot, ownStepYields, signal);
     })()
       .catch((error: unknown) => {
-        this.trades.forgetSeen();
+        // A tick that started has set its own baseline from the snapshot it read; only a failure before it leaves the old one.
+        if (!ticking) this.trades.forgetSeen();
         this.deps.log(`trade check failed: ${String(error)}`);
       })
       .finally(() => { this.looking = false; });

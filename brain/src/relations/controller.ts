@@ -336,7 +336,7 @@ export class TradeController implements BoardPeer {
   /** Busy for a player's window alone (no trade, hand-off or judgment): the agent may poll slowly. */
   onlyWatching(): boolean { return this.busy() && !this.busy(false); }
 
-  /** No baseline: the next tick counts no gain. The agent's look calls it whenever no tick ran on the yields it dropped. */
+  /** No baseline: the next tick counts no gain. The agent's look calls it whenever no tick started on the yields it dropped. */
   forgetSeen(): void { this.previous = null; }
 
   /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */

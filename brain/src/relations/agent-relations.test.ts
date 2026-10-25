@@ -27,11 +27,19 @@ function relationsOverTime(t: TestContext) {
   const runtime = new FakeRuntime();
   const logs: string[] = [];
   const time = { offset: 0 };
+  /** Armed, the journal throws on the next `received` event: a tick that fails after it credited a payment. */
+  const journal = { failOnReceived: false };
   const real = Date.now.bind(Date);
   t.mock.method(Date, "now", () => real() + time.offset);
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {}, modelSlotFree: () => true,
-    inConversationWith: () => false, isAgent: () => false, lacks: () => [], journal: () => {}, log: (line) => logs.push(line),
+    inConversationWith: () => false, isAgent: () => false, lacks: () => [], log: (line) => logs.push(line),
+    journal: (event) => {
+      if (journal.failOnReceived && event.kind === "trade" && event.event === "received") {
+        journal.failOnReceived = false;
+        throw new Error("journal down");
+      }
+    },
   });
   const carry = (iron: number) => { runtime.snapshot = { ...runtime.snapshot, position: { x: 0, y: 64, z: 0 }, inventory: [{ name: "bread", count: 10 }, ...(iron > 0 ? [{ name: "iron_ingot", count: iron }] : [])], players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }] }; };
   carry(0);
@@ -43,7 +51,7 @@ function relationsOverTime(t: TestContext) {
   };
   const trade = () => relations.book.get("Theo")?.trades.at(-1);
   const keptLines = () => logs.filter((line) => line.includes("picked up while a player talked"));
-  return { relations, runtime, logs, time, carry, look, trade, keptLines };
+  return { relations, runtime, logs, time, journal, carry, look, trade, keptLines };
 }
 
 test("B2: hours of own work after a window closed by time are not kept as a talking player's earlier gain", async (t) => {
@@ -91,6 +99,40 @@ test("B3: a tick whose status failed restarts the baseline: the next one counts 
   h.runtime.status = status;
   h.time.offset += 3_000;
   assert.equal(await h.look(), "ticked");
+  assert.deepEqual(h.keptLines(), []);
+  assert.deepEqual(h.trade()?.received, [], "the step's iron is not Theo's payment");
+});
+
+test("R1: a tick that fails after it read the status keeps its baseline: the payment tossed next is still credited", async (t) => {
+  const h = relationsOverTime(t);
+  const owing = { ...IRON_TRADE, get: [{ item: "iron_ingot", count: 5 }, { item: "oak_log", count: 2 }] };
+  await h.relations.trades.onDecision(owing, "Theo", h.runtime.snapshot);
+  await h.look();
+  h.time.offset += 1_000;
+  h.carry(5);
+  h.journal.failOnReceived = true;
+  await h.look();
+  assert.ok(h.logs.some((line) => line.includes("trade check failed")), h.logs.join("\n"));
+  assert.deepEqual(h.trade()?.received, [{ item: "iron_ingot", count: 5 }], "the iron was credited before the journal failed");
+  h.runtime.snapshot = { ...h.runtime.snapshot, inventory: [...h.runtime.snapshot.inventory, { name: "oak_log", count: 2 }] };
+  h.time.offset += 1_000;
+  await h.look();
+  assert.deepEqual(h.trade()?.received, [{ item: "iron_ingot", count: 5 }, { item: "oak_log", count: 2 }]);
+  assert.equal(h.trade()?.state, "they_gave");
+});
+
+test("R1: a hand-off check that throws before the tick forgets the baseline like a failed status", async (t) => {
+  const h = relationsOverTime(t);
+  await h.relations.trades.onDecision(IRON_TRADE, "Theo", h.runtime.snapshot);
+  await h.look();
+  h.carry(3);
+  const reconcile = h.relations.trades.reconcileHandoffs.bind(h.relations.trades);
+  h.relations.trades.reconcileHandoffs = () => { throw new Error("stack unreadable"); };
+  await h.look(["iron_ingot"]);
+  assert.ok(h.logs.some((line) => line.includes("stack unreadable")));
+  h.relations.trades.reconcileHandoffs = reconcile;
+  h.time.offset += 3_000;
+  await h.look();
   assert.deepEqual(h.keptLines(), []);
   assert.deepEqual(h.trade()?.received, [], "the step's iron is not Theo's payment");
 });
