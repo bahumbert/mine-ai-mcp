@@ -1,5 +1,6 @@
 /** The shared fake Mineflayer bot, its clock, server, world and inventory (spec `2026-10-21-shared-fake-bot`). */
 export { type FakeBot, type FakeBotOptions, type FakeEntitySpec, type FakeHarness, createFakeBot } from "./fake-bot.js";
+export { type FakeChat } from "./fake-bot-chat.js";
 export { type FakeCombat } from "./fake-bot-combat.js";
 export { type ShotProjectile } from "./fake-bot-combat-rules.js";
 export { type FakeBreath, type FakeBreathParts } from "./fake-bot-breath.js";

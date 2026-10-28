@@ -14,9 +14,6 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,16}$/u;
  */
 export const MAX_WHISPER_LENGTH = 256 - "/tell ".length - 16 - 1;
 
-/** A shout is sent as `/shout <message>`, one command of at most 256 characters. */
-export const MAX_SHOUT_LENGTH = 256 - "/shout ".length;
-
 /** The server disconnects a client for `§` and for U+0000-U+001F or U+007F in chat (no reconnect follows). */
 const CHAT_REFUSED_CHARACTERS = /[§\u0000-\u001f\u007f]/u;
 
@@ -24,6 +21,9 @@ const CHAT_REFUSED_CHARACTERS = /[§\u0000-\u001f\u007f]/u;
 export function isChatTextAccepted(text: string): boolean {
   return !CHAT_REFUSED_CHARACTERS.test(text);
 }
+
+/** A shout is sent as `/shout <message>`, one command of at most 256 characters. */
+export const MAX_SHOUT_LENGTH = 256 - "/shout ".length;
 
 const publicMessageSchema = z
   .string()
