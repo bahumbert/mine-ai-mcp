@@ -31,8 +31,8 @@ export interface ContractSubject {
   setWeather(weather: Weather): Promise<void>;
   /** The server spawns `stack` as an item entity at `position` (a world position: `world` of a local one), pickable after `pickupDelayTicks`; resolves with it once the client has it. */
   summonItem(stack: { readonly name: string; readonly count: number }, position: Vec3, pickupDelayTicks: number): Promise<Entity>;
-  /** Another actor hurts the bot (`/damage`: a mob's attack by `sourceId`, or no source); resolves once the client heard the hurt. */
-  hurtBot(amount: number, sourceId: number | null): Promise<void>;
+  /** Another actor hurts the bot (`/damage`: a mob's attack by `sourceId`, an arrow `arrowId` shot by it, or no source); resolves once the client heard the hurt. */
+  hurtBot(amount: number, sourceId: number | null, arrowId?: number): Promise<void>;
   /** The server kills a mob (`/kill`); resolves once the client heard it die. */
   kill(entityId: number): Promise<void>;
   /** A creeper ignited with no fuse explodes at `position`, breaking no block; resolves once the client heard the explosion. */
@@ -90,6 +90,13 @@ const SUMMON_MATCH_DISTANCE = 0.5;
 function selectorOf(entity: Entity): string {
   const { x, y, z } = entity.position;
   return `@e[type=${entity.name},x=${x},y=${y},z=${z},distance=..0.5,limit=1]`;
+}
+
+/** The damage type and source of a `/damage`: a mob's attack by `sourceId`, an arrow (`by` the arrow, `from` the shooter), or `generic` with none. */
+function damageSourceArguments(bot: Bot, sourceId: number | null, arrowId: number | undefined): string {
+  if (sourceId === null) return "minecraft:generic";
+  const shooter = selectorOf(bot.entities[sourceId]!);
+  return arrowId === undefined ? `minecraft:mob_attack by ${shooter}` : `minecraft:arrow by ${selectorOf(bot.entities[arrowId]!)} from ${shooter}`;
 }
 
 /** Resolve with the first `event` for which `wanted` holds, or throw after the wall bound (the command did nothing: is the bot op?). */
@@ -246,8 +253,8 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       await clock.advance(50);
       return summoned!;
     },
-    async hurtBot(amount, sourceId) {
-      server.answer(() => combat.hurtBot(amount, sourceId));
+    async hurtBot(amount, sourceId, arrowId) {
+      server.answer(() => combat.hurtBot(amount, sourceId, arrowId));
       await clock.advance(50);
     },
     async kill(entityId) {
@@ -353,9 +360,9 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
     },
-    async hurtBot(amount, sourceId) {
+    async hurtBot(amount, sourceId, arrowId) {
       const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, "/damage");
-      const source = sourceId === null ? "minecraft:generic" : `minecraft:mob_attack by ${selectorOf(bot.entities[sourceId]!)}`;
+      const source = damageSourceArguments(bot, sourceId, arrowId);
       bot.chat(`/damage ${bot.username} ${amount} ${source}`);
       await heard;
     },

@@ -309,3 +309,60 @@ test("localized talk during a database lock does not throw out of the listener",
 
   assert.deepEqual(readRecentEvents(data, bot.username, 50).events.map((event) => event.summary), ["Alex: second, after the lock"]);
 });
+
+/** A bot with a player "Alex", a zombie and an arrow near her, and the store the runtime writes to; `hurts()` reads the `hurt_by` events. */
+function hurtScene(t: TestContext) {
+  const harness = createFakeBot({ username: "MineAI", position: { x: 0.5, y: 64, z: 0.5 } });
+  const { bot, entities, combat } = harness;
+  const data = SqlBotData.create({
+    storage: { kind: "temporary" },
+    identity: { worldId: "player-events-hurt-test", scope: { kind: "bot", botId: bot.username } },
+  });
+  const stopObserving = observePlayerEvents(bot, data, () => undefined);
+  t.after(() => {
+    stopObserving();
+    data.close();
+  });
+  const player = entities.spawn({ name: "player", type: "player", username: "Alex", position: { x: 2.5, y: 64, z: 0.5 } });
+  const zombie = entities.spawn({ name: "zombie", type: "hostile", position: { x: -2.5, y: 64, z: 0.5 } });
+  const arrow = entities.spawn({ name: "arrow", type: "projectile", position: { x: 2.5, y: 65, z: 0.5 } });
+  const hurts = () => readRecentEvents(data, bot.username, 50).events.filter((event) => event.type === "hurt_by").map(({ summary, payload }) => ({ summary, payload }));
+  return { bot, combat, player, zombie, arrow, hurts, stopObserving };
+}
+
+test("a player's hit records hurt_by naming the player, with no other direct entity and the wall-clock time", (t) => {
+  const { combat, player, hurts } = hurtScene(t);
+  const before = Date.now();
+  combat.hurtBot(2, player.id);
+
+  const [hurt, ...rest] = hurts();
+  assert.equal(rest.length, 0);
+  assert.equal(hurt?.summary, "Alex hurt MineAI.");
+  assert.deepEqual({ ...hurt?.payload, at: undefined }, { attacker: "Alex", direct: null, at: undefined });
+  assert.ok((hurt?.payload as { at: number }).at >= before && (hurt?.payload as { at: number }).at <= Date.now());
+});
+
+test("an arrow from a player records the shooter with direct arrow", (t) => {
+  const { combat, player, arrow, hurts } = hurtScene(t);
+  combat.hurtBot(2, player.id, arrow.id);
+
+  assert.deepEqual(hurts().map(({ payload }) => ({ ...payload, at: undefined })), [{ attacker: "Alex", direct: "arrow", at: undefined }]);
+});
+
+test("damage with no player as its cause records nothing: a mob, no cause, the bot itself, an unknown entity, a hit on someone else", (t) => {
+  const { bot, combat, player, zombie, hurts } = hurtScene(t);
+  const packet = (entityId: number, cause: number) => bot._client.emit("damage_event", { entityId, sourceTypeId: 0, sourceCauseId: cause, sourceDirectId: cause });
+  combat.hurtBot(2, zombie.id);
+  combat.hurtBot(2, null);
+  combat.hurtBot(2, bot.entity.id);
+  packet(bot.entity.id, 9_000);
+  packet(player.id, bot.entity.id + 1);
+  assert.deepEqual(hurts(), []);
+});
+
+test("the damage listener is removed with the observer", (t) => {
+  const { combat, player, stopObserving, hurts } = hurtScene(t);
+  stopObserving();
+  combat.hurtBot(2, player.id);
+  assert.deepEqual(hurts(), []);
+});

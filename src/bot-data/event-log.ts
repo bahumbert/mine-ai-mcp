@@ -91,6 +91,21 @@ const playerDimensionChangeEventInputSchema = z.strictObject({
   payload: playerDimensionChangePayloadSchema,
 });
 
+/** A player hurt the bot (a hit, or an arrow it shot); mobs, the environment and the bot itself record nothing. */
+const playerHurtEventInputSchema = z.strictObject({
+  type: z.literal("hurt_by"),
+  observedAt: z.string().min(1),
+  summary: z.string().min(1),
+  payload: z.strictObject({
+    /** The cause player's username. */
+    attacker: z.string().min(1),
+    /** The direct entity's name when it is not the player itself (`arrow`). */
+    direct: z.string().min(1).nullable(),
+    /** Wall-clock ms (`Date.now()`) when the client heard the hit. */
+    at: z.number().int().nonnegative(),
+  }),
+});
+
 const hostileEncounterPayloadSchema = z.strictObject({
   response: z.enum(["fight", "evade", "hide", "deflect"]),
   outcome: z.enum([
@@ -257,6 +272,7 @@ export const botEventInputSchema = z.discriminatedUnion("type", [
   playerMessageEventInputSchema,
   playerDeathEventInputSchema,
   playerDimensionChangeEventInputSchema,
+  playerHurtEventInputSchema,
 ]);
 export type BotEventInput = z.output<typeof botEventInputSchema>;
 
@@ -266,6 +282,11 @@ const playerMessageEventSchema = playerMessageEventInputSchema.extend({
 });
 
 const playerDeathEventSchema = playerDeathEventInputSchema.extend({
+  eventId: z.number().int().positive(),
+  botId: z.string().min(1),
+});
+
+const playerHurtEventSchema = playerHurtEventInputSchema.extend({
   eventId: z.number().int().positive(),
   botId: z.string().min(1),
 });
@@ -320,6 +341,7 @@ export const botEventSchema = z.discriminatedUnion("type", [
   playerMessageEventSchema,
   playerDeathEventSchema,
   playerDimensionChangeEventSchema,
+  playerHurtEventSchema,
   hostileEncounterEventSchema,
   hungerReflexEventSchema,
   breathReflexEventSchema,

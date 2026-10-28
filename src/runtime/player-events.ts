@@ -1,6 +1,7 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { createRequire } from "node:module";
 import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { damageSourceEntity } from "./damage-source.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -41,6 +42,7 @@ export function observePlayerEvents(
 ): () => void {
   const guarded = guardObservedWrite("player-events");
   const stopObservingChat = observeChat(bot, data, guarded);
+  const stopObservingHurts = observeHurts(bot, data, guarded);
   let lastDeathMessage: string | null = null;
   const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
     if (packet.playerId !== undefined && packet.playerId !== bot.entity?.id) return;
@@ -79,6 +81,7 @@ export function observePlayerEvents(
     bot.off("forcedMove", onForcedMove);
     bot.off("death", onDeath);
     stopObservingChat();
+    stopObservingHurts();
   };
 }
 
@@ -127,6 +130,29 @@ function observeChat(bot: Bot, data: SqlBotData, guarded: GuardedWrite): () => v
     bot.off(LOCAL_CHAT_EVENT, onLocalChat as never);
     bot.removeChatPattern(LOCAL_CHAT_PATTERN_NAME);
   };
+}
+
+type DamagePacket = { entityId?: number; sourceCauseId?: number; sourceDirectId?: number };
+
+/** Records each hit a player (by hand or by arrow) lands on the bot as `hurt_by`; mobs, the environment and self-damage record nothing; returns the stop. */
+function observeHurts(bot: Bot, data: SqlBotData, guarded: GuardedWrite): () => void {
+  const onDamage = (packet: DamagePacket) => {
+    if (packet.entityId !== bot.entity?.id) return;
+    const cause = damageSourceEntity(bot, packet.sourceCauseId ?? 0)?.entity;
+    if (cause === undefined || cause.id === bot.entity.id || cause.type !== "player" || !cause.username) return;
+    const direct = damageSourceEntity(bot, packet.sourceDirectId ?? 0)?.entity;
+    const attacker = cause.username;
+    guarded(() =>
+      recordEvent(data, bot.username, {
+        type: "hurt_by",
+        observedAt: new Date().toISOString(),
+        summary: `${attacker} hurt ${bot.username}.`,
+        payload: { attacker, direct: direct === undefined || direct.id === cause.id ? null : (direct.name ?? null), at: Date.now() },
+      }),
+    );
+  };
+  bot._client?.on("damage_event", onDamage);
+  return () => void bot._client?.removeListener("damage_event", onDamage);
 }
 
 /** The foreground action is cancelled before the event is written, so a failing write cannot keep the dead bot working. */

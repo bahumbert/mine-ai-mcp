@@ -18,6 +18,7 @@ import { IncidentRecorder } from "./incident-recorder.js";
 import { observeCombatPackets } from "./combat-packets.js";
 import { projectileSnapshot } from "./projectile-snapshot.js";
 import { currentVehicle } from "../actions/navigate/vehicle-sync.js";
+import { damageSourceEntity } from "../runtime/damage-source.js";
 
 const vectorSchema = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const velocityComponent = z.number().int().min(-32768).max(32767);
@@ -147,9 +148,9 @@ export function observeIncidents(
     return typeof flags === "number" ? flags : null;
   };
   const attacker = (encodedId: number) => {
-    if (encodedId === 0) return null;
-    const id = encodedId - 1;
-    const entity = bot.entities[id];
+    const source = damageSourceEntity(bot, encodedId);
+    if (source === null) return null;
+    const { id, entity } = source;
     if (!entity) return { id, name: null, position: null, bearingRadians: null };
     const offset = entity.position.minus(bot.entity.position);
     const bearing = Math.atan2(-offset.x, -offset.z) - bot.entity.yaw;

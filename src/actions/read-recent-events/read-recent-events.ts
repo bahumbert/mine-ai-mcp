@@ -226,6 +226,13 @@ Constraint: ${event.payload.constraint ?? "none"}`;
         `- To: \`${event.payload.to}\``,
         `- Arrived at: \`${event.payload.position.x}, ${event.payload.position.y}, ${event.payload.position.z}\``,
       ].join("\n");
+    case "hurt_by":
+      return [
+        `### Event ${event.eventId}: hurt by a player`,
+        `- Observed: ${event.observedAt}`,
+        `- Attacker: \`${event.payload.attacker}\``,
+        `- Direct source: ${event.payload.direct ?? "the attacker itself"}`,
+      ].join("\n");
     case "hostile_encounter":
       return [
         `### Event ${event.eventId}: hostile encounter`,

@@ -72,6 +72,9 @@ The event log captures these event types:
   line reads: "drowned", "was slain by Zombie", "tried to swim in lava".
 - `player_dimension_change`: The bot crossing a portal, with the dimensions
   left and entered and where it arrived.
+- `hurt_by`: A player hurt the bot, by hand or by arrow: the attacker's username, the direct
+  entity (`arrow`) when it is not the attacker, and the wall-clock time. Mobs and the
+  environment record nothing; every hit is a row.
 - `hostile_encounter`: Combat reflex engagements detailing the response mode
   (`fight`, `evade`, or `hide`), outcome, health before and after, engaged
   threat IDs, combat styles used, and for a hide how deep it dug, whether it

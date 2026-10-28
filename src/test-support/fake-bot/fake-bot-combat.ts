@@ -37,8 +37,8 @@ function lookingAt(bot: FakeBot): Vec3 {
 export interface FakeCombat {
   /** A creature on the client is hurt by `sourceId` (null: no source) for `amount`: the hurt window and the death apply. */
   hurt(entityId: number, sourceId: number | null, amount: number): void;
-  /** The bot is hurt by `sourceId` (null: no source) for `amount`, pushed away from it: `damage_event`, `entity_velocity`, `update_health`; at 0 she dies. */
-  hurtBot(amount: number, sourceId: number | null): void;
+  /** The bot is hurt by `sourceId` (null: no source) for `amount`, pushed away from it: `damage_event`, `entity_velocity`, `update_health`; at 0 she dies. With `arrowId` (an arrow on the bot) it is `/damage ... arrow by <arrow> from <source>`: type `arrow`, the arrow the direct source. */
+  hurtBot(amount: number, sourceId: number | null, arrowId?: number): void;
   /** A creature swings its arm (`animation` 0, `entitySwingArm`). */
   swing(entityId: number): void;
   /** A creature dies at once (`/kill`): `entity_status` 3, its removal after the death animation. */
@@ -263,10 +263,13 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
       const source = sourceId === null ? null : (bot.entities[sourceId] ?? null);
       hurtCreature(entity, source, amount, source?.name === "player" ? "player_attack" : source === null ? "generic" : "mob_attack");
     },
-    hurtBot: (amount, sourceId) => {
+    hurtBot: (amount, sourceId, arrowId) => {
       const source = sourceId === null ? null : (bot.entities[sourceId] ?? null);
       if (sourceId !== null && source === null) throw new Error(`no entity ${sourceId} on the bot to hurt her from`);
-      hurtTheBot(amount, source, source === null ? "generic" : "mob_attack", source === null ? null : knockbackFrom(source.position, bot.entity.position));
+      const arrow = arrowId === undefined ? undefined : bot.entities[arrowId];
+      if (arrowId !== undefined && arrow === undefined) throw new Error(`no entity ${arrowId} on the bot to hurt her by`);
+      const type = source === null ? "generic" : arrow === undefined ? "mob_attack" : "arrow";
+      hurtTheBot(amount, source, type, source === null ? null : knockbackFrom((arrow ?? source).position, bot.entity.position), arrow === undefined ? {} : { direct: arrow });
     },
     swing: (entityId) => {
       const entity = bot.entities[entityId];

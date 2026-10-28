@@ -18,6 +18,7 @@ import { projectileHitBot } from "./checks/projectile-hit-bot.ts";
 import { deflectFireball } from "./checks/deflect-fireball.ts";
 import { bowDrawAndRelease } from "./checks/bow-draw-and-release.ts";
 import { consumeFood } from "./checks/consume-food.ts";
+import { damageEventAttacker } from "./checks/damage-event-attacker.ts";
 import { damageEventToBot } from "./checks/damage-event-to-bot.ts";
 import { explosionKnockback } from "./checks/explosion-knockback.ts";
 import { shieldRaised } from "./checks/shield-raised.ts";
@@ -150,6 +151,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackOutOfReach,
   bowDrawAndRelease,
   consumeFood,
+  damageEventAttacker,
   damageEventToBot,
   explosionKnockback,
   shieldRaised,
