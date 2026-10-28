@@ -29,16 +29,16 @@ export function drifted(r: Relation, now: number, t: Temperament): Relation {
   return { ...r, score, scoredAt: now };
 }
 
-/** What a late payment takes back of the same trade's broken promise: what it applied and what has not faded yet. */
-function takenBack(r: Relation, tradeId: string | undefined, firstImpression: number): number {
+/** What a late payment takes back of the same trade's broken promise: what it applied less what forgiveness has faded since. */
+function takenBack(r: Relation, tradeId: string | undefined, now: number, forgiveness: number): number {
   const broken = [...r.ledger].reverse().find((e) => e.kind === "promise_broken" && e.tradeId === tradeId && tradeId !== undefined);
   if (broken === undefined) return 0;
-  return Math.round(Math.min(Math.abs(broken.delta), Math.max(0, firstImpression - r.score)));
+  return plain(Math.round(Math.max(0, Math.abs(broken.delta) - (forgiveness * Math.max(0, now - broken.at)) / HOUR_MS)));
 }
 
 /** The delta an input asks for before clamping to the score range; null when it cannot be scored. */
-function wantedDelta(e: ScoreInput, drift: Relation, s: Scoring): number | null {
-  const { sensitivity, firstImpression } = s.temperament;
+function wantedDelta(e: ScoreInput, drift: Relation, now: number, s: Scoring): number | null {
+  const { sensitivity, forgiveness } = s.temperament;
   if (e.kind === "earlier") return null;
   if (e.kind === "nudge") {
     if (e.nudge === undefined || !Number.isFinite(e.nudge)) return null;
@@ -46,17 +46,23 @@ function wantedDelta(e: ScoreInput, drift: Relation, s: Scoring): number | null 
     return plain(Math.round(Math.max(-max, Math.min(max, Math.round(e.nudge))) * sensitivity));
   }
   const base = Math.round(s.score.amounts[AMOUNT_OF[e.kind]] * sensitivity);
-  return e.kind === "kept_late" ? base + takenBack(drift, e.tradeId, firstImpression) : base;
+  return e.kind === "kept_late" ? base + takenBack(drift, e.tradeId, now, forgiveness) : base;
 }
 
 /** Drifts the score to `now`, then applies one event: scaled by sensitivity, clamped to -100..100, the applied delta kept in the ledger. */
 export function withScoreEvent(r: Relation, e: ScoreInput, now: number, s: Scoring): Relation {
   const drift = drifted(r, now, s.temperament);
-  const wanted = wantedDelta(e, drift, s);
+  const wanted = wantedDelta(e, drift, now, s);
   if (wanted === null) return r;
   const score = plain(Math.max(MIN_SCORE, Math.min(MAX_SCORE, drift.score + wanted)));
   const event: ScoreEvent = { kind: e.kind, delta: plain(Math.round(score - drift.score)), why: e.why, at: now, ...(e.tradeId !== undefined && { tradeId: e.tradeId }) };
   return { ...drift, score, ledger: [...drift.ledger, event].slice(-s.score.ledgerSize) };
+}
+
+/** A hit from this partner: one `hurt` event per `hurtDebounceSeconds`, none inside that window (so a fight is one event). `lastHurt` moves with it. */
+export function withHurt(r: Relation, direct: string | null, now: number, s: Scoring): Relation {
+  if (r.lastHurt !== null && now - r.lastHurt < s.score.hurtDebounceSeconds * 1000) return r;
+  return { ...withScoreEvent(r, { kind: "hurt", why: direct === "arrow" ? "shot you" : "hit you" }, now, s), lastHurt: now };
 }
 
 /** The word of a score for prompts only; thresholds from the settings. */

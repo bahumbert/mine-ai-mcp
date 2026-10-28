@@ -4,7 +4,7 @@ import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import { scoringOf } from "./relations/score.ts";
 import type { Scoring } from "./relations/types.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, HurtBy, ItemCount, PlayerMessage, Position, RuntimeEvents, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 
@@ -45,6 +45,8 @@ export class FakeRuntime implements BotRuntime {
     policy: null,
   };
   inbox: PlayerMessage[] = [];
+  /** `hurt_by` events the next `readEvents` hands over. */
+  hurtEvents: HurtBy[] = [];
   /** Wait slices each tool stays pending before it succeeds. */
   durations: Partial<Record<ForegroundTool, number>> = {};
   /** Tools that settle as failed with this error. */
@@ -301,10 +303,12 @@ export class FakeRuntime implements BotRuntime {
     return [...this.areas];
   }
 
-  async readMessages(): Promise<readonly PlayerMessage[]> {
+  async readEvents(): Promise<RuntimeEvents> {
     const messages = this.inbox;
+    const hurts = this.hurtEvents;
     this.inbox = [];
-    return messages;
+    this.hurtEvents = [];
+    return { messages, hurts };
   }
 
   /** Notes saved with `note_save`, oldest first; a test may seed them to stand for an earlier run. */

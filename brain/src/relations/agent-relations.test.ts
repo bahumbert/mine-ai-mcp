@@ -322,3 +322,44 @@ test("an answer journals only its own scored row, not one another writer queued 
   await relations.answered(refusal(), "Theo");
   assert.deepEqual(rows.map((r) => r.scoreKind), ["request_refused"]);
 });
+
+const hit = (attacker: string, direct: string | null = null, at = 0) => ({ attacker, direct, at });
+
+test("hits debounced per attacker", async () => {
+  const { relations, time, rows } = relationsWithClock();
+  for (let i = 0; i < 10; i++) {
+    relations.hurt(hit("Theo"));
+    time.at += 400;
+  }
+  relations.hurt(hit("Ayla"));
+  await until(() => rows.length === 2);
+  assert.deepEqual(rows.map((r) => [r.partner, r.scoreKind, r.delta]), [["Theo", "hurt", -25], ["Ayla", "hurt", -25]]);
+  time.at += 61_000;
+  relations.hurt(hit("Theo"));
+  await until(() => rows.length === 3);
+  assert.deepEqual(rows.map((r) => r.partner), ["Theo", "Ayla", "Theo"]);
+});
+
+test("a hit inside the window writes nothing", async () => {
+  const runtime = new FakeRuntime();
+  let queries = 0;
+  const query = runtime.queryBotData.bind(runtime);
+  runtime.queryBotData = async (sql) => { queries += 1; return query(sql); };
+  const { relations, time, rows } = relationsWithClock({ runtime });
+  for (let i = 0; i < 10; i++) {
+    relations.hurt(hit("Theo"));
+    time.at += 400;
+  }
+  await until(() => rows.length === 1);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(queries, 0, "the first hit saves a new note; a rewrite would first look up and delete the old one");
+});
+
+test("a stranger hit is created at the first impression; the why names the weapon", async () => {
+  const { relations, rows } = relationsWithClock();
+  assert.equal(relations.book.get("Theo"), null);
+  relations.hurt(hit("Theo"));
+  relations.hurt(hit("Ayla", "arrow"));
+  await until(() => rows.length === 2);
+  assert.deepEqual([relations.book.get("Theo")?.score, ...rows.map((r) => r.why)], [-25, "hit you", "shot you"]);
+});

@@ -60,7 +60,10 @@ export class RelationBook {
   }
 
   private async apply(key: string, partner: string, change: (r: Relation) => Relation): Promise<Relation> {
-    const next = change(this.relations.get(key) ?? newRelation(partner, this.deps.now(), this.deps.scoring.temperament.firstImpression));
+    const current = this.relations.get(key);
+    const next = change(current ?? newRelation(partner, this.deps.now(), this.deps.scoring.temperament.firstImpression));
+    // A change that left the record as it was (a hit inside the debounce window) has nothing to write.
+    if (next === current && this.stored.has(key)) return next;
     this.relations.set(key, next);
     const memory: Memory = { kind: "relation", relation: next };
     try {

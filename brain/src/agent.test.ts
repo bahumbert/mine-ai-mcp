@@ -1140,9 +1140,9 @@ test("a \"stop\" with a request while nothing runs is an order (live 2026-10-11,
 
 test("a chat poll that fails (the runtime restarting) is logged and retried at the next poll, the agent keeps listening (review B5)", async (t) => {
   const runtime = new FakeRuntime();
-  const read = runtime.readMessages.bind(runtime);
+  const read = runtime.readEvents.bind(runtime);
   let calls = 0;
-  runtime.readMessages = async () => {
+  runtime.readEvents = async () => {
     calls += 1;
     if (calls === 2) throw new Error("runtime restarting");
     return read();
@@ -1159,9 +1159,9 @@ test("a chat poll that fails (the runtime restarting) is logged and retried at t
 
 test("a chat poll that keeps failing is logged once, and again only after a read worked (review R17)", async (t) => {
   const runtime = new FakeRuntime();
-  const read = runtime.readMessages.bind(runtime);
+  const read = runtime.readEvents.bind(runtime);
   let calls = 0;
-  runtime.readMessages = async () => {
+  runtime.readEvents = async () => {
     calls += 1;
     if ((calls >= 2 && calls <= 6) || (calls >= 9 && calls <= 12)) throw new Error("runtime down");
     return read();
@@ -2677,4 +2677,12 @@ test("a line that asks for something opens a request, and the answer to it score
   await until(() => savedRelations(runtime)[0]?.ledger.length === 1);
   const theo = savedRelations(runtime)[0]!;
   assert.deepEqual([theo.requests, theo.ledger[0]?.kind, theo.score], [[], "request_refused", -3]);
+});
+
+test("a hurt_by event read from the runtime scores the attacker", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  runtime.hurtEvents.push({ attacker: "Steve", direct: null, at: Date.now() });
+  await until(() => events.some((e) => e.kind === "relation" && e.event === "scored" && e.scoreKind === "hurt" && e.partner === "Steve"));
 });

@@ -361,3 +361,23 @@ test("the frontier-map queries run on the real bot-data schema, each in the dime
   assert.equal(await nether.waterAlong(ORIGIN, { x: 56, y: 64, z: 8 }).then((water) => water?.share), 0);
   assert.deepEqual(await nether.nearestLand(ORIGIN), { x: 56, z: 8 });
 });
+
+function eventsPages(pages: readonly { events: readonly { type: string; payload: unknown }[]; remainingEventCount: number }[]): ToolClient & { calls: number } {
+  const client = {
+    calls: 0,
+    callTool: async () => ({ structuredContent: { response: { format: "json", data: { result: pages[client.calls++]! } } } }),
+    close: async () => {},
+  };
+  return client;
+}
+
+test("readEvents returns messages and hurts in one pass, reading on while events remain", async () => {
+  const said = { username: "Theo", channel: "chat", direction: "incoming", message: "hi", addressed: false };
+  const client = eventsPages([
+    { events: [{ type: "player_message", payload: said }, { type: "hurt_by", payload: { attacker: "Theo", direct: null, at: 5 } }], remainingEventCount: 1 },
+    { events: [{ type: "hurt_by", payload: { attacker: "Ayla", direct: "arrow", at: 9 } }, { type: "player_message", payload: { ...said, direction: "outgoing" } }], remainingEventCount: 0 },
+  ]);
+  const { messages, hurts } = await McpBotRuntime.over(client).readEvents();
+  assert.deepEqual(messages.map((m) => m.message), ["hi"]);
+  assert.deepEqual(hurts, [{ attacker: "Theo", direct: null, at: 5 }, { attacker: "Ayla", direct: "arrow", at: 9 }]);
+});

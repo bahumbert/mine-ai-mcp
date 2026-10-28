@@ -103,6 +103,29 @@ test("late payment after the penalty faded", () => {
   assert.equal(none.ledger.at(-1)?.delta, 3);
 });
 
+test("late payment from a liked partner takes back the penalty", () => {
+  const s = scoringOf();
+  const broken = withScoreEvent(at(50), { kind: "promise_broken", why: "x", tradeId: "t1" }, t0, s);
+  assert.equal(broken.score, 30);
+  const paid = withScoreEvent(broken, { kind: "kept_late", why: "y", tradeId: "t1" }, t0, s);
+  assert.equal(paid.ledger.at(-1)?.delta, 23);
+  assert.equal(paid.score, 53);
+});
+
+test("late payment 2 h later takes back half", () => {
+  const s = scoringOf();
+  const broken = withScoreEvent(at(0), { kind: "promise_broken", why: "x", tradeId: "t1" }, t0, s);
+  const paid = withScoreEvent(broken, { kind: "kept_late", why: "y", tradeId: "t1" }, t0 + 2 * H, s);
+  assert.equal(paid.ledger.at(-1)?.delta, 13);
+});
+
+test("late payment dated before its broken promise takes back no more than the penalty", () => {
+  const s = scoringOf();
+  const broken = withScoreEvent(at(0), { kind: "promise_broken", why: "x", tradeId: "t1" }, t0, s);
+  const paid = withScoreEvent(broken, { kind: "kept_late", why: "y", tradeId: "t1" }, t0 - H, s);
+  assert.equal(paid.ledger.at(-1)?.delta, 23);
+});
+
 test("bands", () => {
   const { bands } = scoringOf().score;
   const names = [-60, -59, -20, -19, 19, 20, 59, 60].map((n) => band(n, bands));

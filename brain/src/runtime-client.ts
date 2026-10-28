@@ -100,6 +100,19 @@ export interface PlayerMessage {
   readonly distance?: number;
 }
 
+/** One hit on the bot by a player (runtime event `hurt_by`): `direct` names what struck (an arrow), null when the player did. */
+export interface HurtBy {
+  readonly attacker: string;
+  readonly direct: string | null;
+  readonly at: number;
+}
+
+/** What one read of the runtime's recent events holds for the brain. */
+export interface RuntimeEvents {
+  readonly messages: readonly PlayerMessage[];
+  readonly hurts: readonly HurtBy[];
+}
+
 export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 
 /** Foreground tools the brain drives (all are body-locking tasks in the runtime). */
@@ -329,7 +342,7 @@ export interface BotRuntime {
    */
   toolEnum(tool: string, property: string): Promise<readonly string[]>;
   /** Incoming player messages since the last call (the runtime keeps the read cursor). */
-  readMessages(): Promise<readonly PlayerMessage[]>;
+  readEvents(): Promise<RuntimeEvents>;
 /**
    * The containers `owner` placed itself (`placed_containers`), plus the ones it opened inside a protected region it
    * owns, in `dimension` (`BotSnapshot.dimension`, either spelling), within `within` blocks of `near` (horizontally),
@@ -483,6 +496,8 @@ const playerMessagePayloadSchema = z.object({
   addressed: z.boolean(),
   distance: z.number().optional(),
 });
+
+const hurtByPayloadSchema = z.object({ attacker: z.string(), direct: z.string().nullable(), at: z.number() });
 
 const actionOutputSchema = z.object({
   result: z.looseObject({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
@@ -769,17 +784,22 @@ export class McpBotRuntime implements BotRuntime {
     }));
   }
 
-  async readMessages(): Promise<readonly PlayerMessage[]> {
+  async readEvents(): Promise<RuntimeEvents> {
     const messages: PlayerMessage[] = [];
+    const hurts: HurtBy[] = [];
     for (;;) {
-      const { result } = eventsSchema.parse(await this.call("read_recent_events", { limit: EVENT_PAGE }, "Check for players talking to me."));
+      const { result } = eventsSchema.parse(await this.call("read_recent_events", { limit: EVENT_PAGE }, "Check for players talking to me or hitting me."));
       for (const event of result.events) {
+        if (event.type === "hurt_by") {
+          hurts.push(hurtByPayloadSchema.parse(event.payload));
+          continue;
+        }
         if (event.type !== "player_message") continue;
         const payload = playerMessagePayloadSchema.parse(event.payload);
         if (payload.direction !== "incoming") continue;
         messages.push({ username: payload.username, channel: payload.channel, message: payload.message, addressed: payload.addressed, ...(payload.distance !== undefined && { distance: payload.distance }) });
       }
-      if (result.remainingEventCount === 0) return messages;
+      if (result.remainingEventCount === 0) return { messages, hurts };
     }
   }
 

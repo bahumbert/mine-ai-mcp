@@ -6,7 +6,7 @@ import { realClock, type Clock } from "../conversation/socialise.ts";
 import { memoryNote, relationContextPrefix, relationNotesQuery, type Memory, type Recalled } from "../memory.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
 import type { Persona } from "../persona.ts";
-import type { BotRuntime, BotSnapshot } from "../runtime-client.ts";
+import type { BotRuntime, BotSnapshot, HurtBy } from "../runtime-client.ts";
 import type { SkillContext } from "../skills.ts";
 import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
@@ -15,7 +15,7 @@ import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
-import { newScoredRows, scoringOf } from "./score.ts";
+import { newScoredRows, scoringOf, withHurt } from "./score.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, Relation, RelationEvent, TradeEvent } from "./types.ts";
 
@@ -138,6 +138,13 @@ export class AgentRelations {
       const heard = online !== undefined && ((whisperTo !== null && same(whisperTo, name)) || (online.position !== null && manhattan(online.position, snapshot.position) <= this.deps.hearingRange));
       void this.book.update(online?.username ?? known?.partner ?? name, (r) => openRequest(r, what, now, heard)).catch((error: unknown) => this.deps.log(`could not note my request to ${name}: ${String(error)}`));
     }
+  }
+
+  /** A player hit me: it scores as a `hurt` unless this attacker's last hit is inside the debounce window (decided inside the update, so two hits in one tick score once). */
+  hurt(h: HurtBy): void {
+    const now = this.now();
+    void this.scoredUpdate(h.attacker, (r) => withHurt(r, h.direct, now, this.book.scoring))
+      .catch((error: unknown) => this.deps.log(`could not note the hit by ${h.attacker}: ${String(error)}`));
   }
 
   /** Requests that ran out are closed and the ignored ones score, as the clock says (no model call, no brain tick needed). */

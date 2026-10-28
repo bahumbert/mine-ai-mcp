@@ -320,8 +320,8 @@ export class Agent {
     signal.addEventListener("abort", () => this.wake?.(), { once: true });
     const { persona } = this.options;
     this.options.journal?.({ kind: "persona", name: persona.displayName, stance: persona.stance, goal: persona.goal ?? null, preferences: persona.preferences ?? null });
-    // The runtime keeps chat from before this brain started; answering it now would be confusing.
-    await this.options.runtime.readMessages();
+    // The runtime keeps chat and hits from before this brain started; answering or scoring them now would be confusing.
+    await this.options.runtime.readEvents();
     await this.recallMemory();
     await this.rotateActivityNotes();
     await this.recallAreas();
@@ -348,7 +348,9 @@ export class Agent {
         // its reply), so a "stop" is not stuck behind a queue of calls.
         // A runtime restarting under a poll fails the read: the next poll tries again (review B5).
         try {
-          for (const message of await this.options.runtime.readMessages()) {
+          const { messages, hurts } = await this.options.runtime.readEvents();
+          for (const hurt of hurts) this.relations?.hurt(hurt);
+          for (const message of messages) {
             // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
