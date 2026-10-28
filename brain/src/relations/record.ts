@@ -176,7 +176,7 @@ const scoreEvent = z.object({
   kind: z.enum(["trade_done", "kept_late", "promise_broken", "gift_received", "request_helped", "request_refused", "request_ignored", "hurt", "nudge", "earlier"]),
   delta: z.number(), why: z.string(), at: z.number(), tradeId: z.string().optional(),
 });
-const openRequest = z.object({ what: z.string(), at: z.number(), inRange: z.boolean(), agreed: z.boolean() });
+const openRequest = z.object({ what: z.string(), at: z.number(), inRange: z.boolean(), agreed: z.boolean(), heard: z.boolean().default(false) });
 const relationBase = {
   partner: z.string().min(1),
   facts: z.object({

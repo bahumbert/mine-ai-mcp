@@ -14,7 +14,7 @@ import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { openingRelationLines, tooFarLine } from "./prompts.ts";
-import { expireRequests, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
+import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
 import { newScoredRows, scoringOf, withHurt } from "./score.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, Relation, RelationEvent, TradeEvent } from "./types.ts";
@@ -140,6 +140,14 @@ export class AgentRelations {
     }
   }
 
+  /** A line from this character was heard (chat or whisper, any distance): the requests I made of them before it are answered, so their silence is never scored. A stranger gets no record. */
+  heardFrom(name: string): void {
+    if (this.book.get(name) === null) return;
+    const at = this.now();
+    // No look at the open requests here: the ask's own update may still be queued, and this one runs after it.
+    void this.book.update(name, (r) => heardFrom(r, at)).catch((error: unknown) => this.deps.log(`could not note a line from ${name} against my requests: ${String(error)}`));
+  }
+
   /** A player hit me: it scores as a `hurt` unless this attacker's last hit is inside the debounce window (decided inside the update, so two hits in one tick score once). */
   hurt(h: HurtBy): void {
     const now = this.now();
@@ -156,7 +164,11 @@ export class AgentRelations {
     for (const r of this.book.records()) {
       const o = { waiting: this.deps.waitingFrom(r.partner), offline: !this.deps.isOnline(r.partner) };
       if (expireRequests(r, now, requestAnswerMinutes, o).relation === r) continue;
-      void this.scoredUpdate(r.partner, (current) => withExpiredRequests(current, now, this.book.scoring, o))
+      void this.scoredUpdate(r.partner, (current) => {
+        // Read inside the update: a line queued before it may have marked a request heard since this look.
+        for (const q of expireRequests(current, now, requestAnswerMinutes, o).heardDropped) this.deps.log(`request to ${r.partner} for ${q.what} dropped: they spoke since`);
+        return withExpiredRequests(current, now, this.book.scoring, o);
+      })
         .catch((error: unknown) => this.deps.log(`could not close my requests to ${r.partner}: ${String(error)}`));
     }
   }

@@ -210,10 +210,21 @@ test("v1 note with empty word has no earlier event", () => {
 });
 
 test("v2 round trip", () => {
-  const r = { ...ledgerFixture(), requests: [{ what: "5 oak_log", at: t0, inRange: true, agreed: false }], lastHurt: t0 + 7 };
+  const r = { ...ledgerFixture(), requests: [{ what: "5 oak_log", at: t0, inRange: true, agreed: false, heard: false }], lastHurt: t0 + 7 };
   assert.deepEqual(parseRelationNote(relationNote(r).note), r);
 });
 
 test("a v2 note with a broken ledger reads null, not as a v1 note", () => {
   assert.equal(parseRelationNote(JSON.stringify({ v: 2, ...ledgerFixture(), ledger: "x" })), null);
+});
+
+test("a v2 note without heard loads as not heard", () => {
+  const note = JSON.parse(relationNote({ ...ledgerFixture(), requests: [{ what: "coal", at: t0, inRange: true, agreed: false, heard: true }] }).note) as { requests: Record<string, unknown>[] };
+  delete note.requests[0]!.heard;
+  assert.equal(parseRelationNote(JSON.stringify(note))?.requests[0]?.heard, false);
+});
+
+test("heard round-trips", () => {
+  const r = { ...ledgerFixture(), requests: [{ what: "coal", at: t0, inRange: true, agreed: true, heard: true }] };
+  assert.deepEqual(parseRelationNote(relationNote(r).note), r);
 });

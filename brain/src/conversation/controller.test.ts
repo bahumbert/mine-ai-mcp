@@ -8,7 +8,7 @@ import { ConversationBudget, ConversationController, maxConversations, type Cont
 const signal = new AbortController().signal;
 const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "short", say: "Theo! How's the mine?" };
 
-function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"]; relations?: ControllerDeps["relations"]; pollMs?: number } = {}) {
+function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"]; relations?: ControllerDeps["relations"]; pollMs?: number; sent?: Promise<void> } = {}) {
   const { chat, mind: scripted } = scriptedMind();
   const mind = options.decision === undefined ? scripted : Object.assign(Object.create(scripted) as typeof scripted, { openConversation: async () => options.decision as OpeningDecision });
   const clock = { now: 1_000_000 };
@@ -21,7 +21,7 @@ function setup(options: { random?: number; budget?: ConversationBudget; modelFre
   const controller = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), ...(options.relations !== undefined && { relations: options.relations }), talkRange: 64, ...(options.pollMs !== undefined && { openPollMs: options.pollMs }),
     ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now,
-    speak: (text, to, whisperTo, shout) => spoken.push({ text, to, whisperTo, shout }),
+    speak: async (text, to, whisperTo, shout) => { spoken.push({ text, to, whisperTo, shout }); await options.sent; },
     journal: (event) => journal.push(event), memorize: (memory) => memories.push(memory), log: (line) => logs.push(line),
     history: () => options.history ?? [],
   });
@@ -398,7 +398,7 @@ function pair(deliverAtOnce: boolean) {
     const budget = new ConversationBudget(2);
     const controller = new ConversationController({
       self, persona: testPersona(), mind, budget, modelFree: () => true, talkRange: 64, random: () => 0, now: () => clock.now,
-      speak: (text) => {
+      speak: async (text) => {
         const hear = () => getOther().heard(self, text, [other], "chat");
         if (deliverAtOnce) hear(); else outbox.push(hear);
       },
@@ -674,9 +674,32 @@ test("an opening that asks someone it speaks to for something tells the relation
   const t = setup({ relations });
   t.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo", "Bruno"], asks_what: "some iron" });
   assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(5)), signal), true);
+  await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual(asked, [{ names: ["Theo"], what: "some iron" }]);
   const plain = setup({ relations });
   plain.chat.reply({ ...OPEN, say: "Theo, how is the mine?" });
   assert.equal(await plain.controller.maybeOpen(plain.facts(plain.theoAt(5)), signal), true);
+  await new Promise((r) => setTimeout(r, 0));
   assert.equal(asked.length, 1, "an opening that asks nothing opens no request");
+});
+
+test("an opening's ask opens its request once the line is said, and none when the say fails", async () => {
+  const asked: string[] = [];
+  const relations = { blocksFor: () => [], openingLines: () => [], asked: (names: readonly string[]) => asked.push(...names), ended: () => {} };
+  let sent = () => {};
+  const t = setup({ relations, sent: new Promise<void>((resolve) => { sent = resolve; }) });
+  t.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo"], asks_what: "some iron" });
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(5)), signal), true);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(asked, [], "still being typed");
+  sent();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(asked, ["Theo"]);
+  const refused = Promise.reject(new Error("socket closed"));
+  refused.catch(() => undefined);
+  const failed = setup({ relations, sent: refused });
+  failed.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo"], asks_what: "some iron" });
+  await failed.controller.maybeOpen(failed.facts(failed.theoAt(5)), signal);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(asked, ["Theo"], "a line that was not said asks nothing");
 });

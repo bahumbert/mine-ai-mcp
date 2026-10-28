@@ -13,6 +13,7 @@ import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } f
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
 import { TradeBoard } from "./relations/board.ts";
+import { newRelation } from "./relations/record.ts";
 import type { Handoff } from "./relations/handoff.ts";
 import type { TradeAsks } from "./relations/trading.ts";
 
@@ -2685,4 +2686,56 @@ test("a hurt_by event read from the runtime scores the attacker", async (t) => {
   agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
   runtime.hurtEvents.push({ attacker: "Steve", direct: null, at: Date.now() });
   await until(() => events.some((e) => e.kind === "relation" && e.event === "scored" && e.scoreKind === "hurt" && e.partner === "Steve"));
+});
+
+const ASK_THEO = { spoken_to: ["Theo"], asks: "", language: "English", say: "Theo, can you spare 4 coal?", route: "talk", request: "", asks_of: ["Theo"], asks_what: "4 coal" };
+
+/** The ask goes out, held or not: Theo then has a record to speak against. */
+async function agentAsking(t: Parameters<typeof agentFor>[0], runtime: FakeRuntime) {
+  const made = agentFor(t, runtime);
+  const relations = (made.agent as unknown as { relations: AgentRelations }).relations;
+  made.chat.reply(ASK_THEO);
+  return { ...made, relations };
+}
+const theoRequests = (relations: AgentRelations) => relations.book.get("Theo")?.requests ?? [];
+
+test("a heard line reaches the relations: the partner's marks the request, the bot's own echo marks nothing", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, relations } = await agentAsking(t, runtime);
+  await agent.handle(say("Theo", "Ayla, do you have coal?"));
+  await until(() => theoRequests(relations).length === 1);
+  const at = theoRequests(relations)[0]!.at;
+  await new Promise((r) => setTimeout(r, 5));
+  runtime.inbox.push({ username: "Ayla", channel: "chat", message: "Theo, can you spare 4 coal?", addressed: false });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(theoRequests(relations)[0]?.heard, false, "its own line is never a member's");
+  runtime.inbox.push({ username: "Theo", channel: "chat", message: "I got no coal on me.", addressed: false });
+  await until(() => theoRequests(relations)[0]?.heard === true);
+  assert.equal(theoRequests(relations)[0]?.at, at);
+});
+
+test("a line said while the ask is still being typed does not count, and the request opens once it is said", async (t) => {
+  const runtime = tradingRuntime();
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const say0 = runtime.say.bind(runtime);
+  runtime.say = async (...args) => { await held; return say0(...args); };
+  const { agent, relations } = await agentAsking(t, runtime);
+  relations.book.load([newRelation("Theo", Date.now(), 0)]);
+  await agent.handle(say("Theo", "Ayla, do you have coal?"));
+  runtime.inbox.push({ username: "Theo", channel: "chat", message: "hello?", addressed: false });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(theoRequests(relations), [], "not asked yet: nobody has heard the ask");
+  release();
+  await until(() => theoRequests(relations).length === 1);
+  assert.equal(theoRequests(relations)[0]?.heard, false);
+});
+
+test("a failed say opens no request", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.say = async () => { throw new Error("socket closed"); };
+  const { agent, relations } = await agentAsking(t, runtime);
+  await agent.handle(say("Theo", "Ayla, do you have coal?"));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(theoRequests(relations), []);
 });

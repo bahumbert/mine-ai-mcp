@@ -63,7 +63,7 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
   let now = startAt;
   const talks = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => talks.current === null, talkRange: 64, localized: true,
-    random: () => 0, now: () => now, speak: () => undefined, journal: () => undefined, memorize: () => undefined, log: () => undefined, history: () => [],
+    random: () => 0, now: () => now, speak: async () => {}, journal: () => undefined, memorize: () => undefined, log: () => undefined, history: () => [],
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };
   const controller = new AbortController();

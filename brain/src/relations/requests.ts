@@ -20,7 +20,7 @@ export interface ExpireOptions {
 
 /** A new request to the partner; the oldest goes when three are open. */
 export function openRequest(r: Relation, what: string, at: number, inRange: boolean): Relation {
-  const request: OpenRequest = { what: what.trim().slice(0, MAX_WHAT), at, inRange, agreed: false };
+  const request: OpenRequest = { what: what.trim().slice(0, MAX_WHAT), at, inRange, agreed: false, heard: false };
   return { ...r, requests: [...r.requests, request].slice(-MAX_OPEN_REQUESTS) };
 }
 
@@ -35,17 +35,34 @@ export function answerRequest(r: Relation, n: number, answer: RequestAnswer, now
     : withScoreEvent(closed, { kind: "request_helped", why: `helped with your request for ${request.what}` }, now, s);
 }
 
-/** The requests that ran out: `ignored` are those in earshot nobody answered in time; the rest are dropped without a score. */
-export function expireRequests(r: Relation, now: number, answerMinutes: number, o: ExpireOptions = {}): { relation: Relation; ignored: readonly OpenRequest[] } {
-  if (o.waiting === true || r.requests.length === 0) return { relation: r, ignored: [] };
+/** A line from the partner was heard at `at`: each request asked before it is answered (its silence is never scored). The same record when none changes, so nothing is written. */
+export function heardFrom(r: Relation, at: number): Relation {
+  if (!r.requests.some((q) => !q.heard && q.at < at)) return r;
+  return { ...r, requests: r.requests.map((q) => (!q.heard && q.at < at ? { ...q, heard: true } : q)) };
+}
+
+export interface ExpiredRequests {
+  readonly relation: Relation;
+  /** In earshot, never answered by any line: these score. */
+  readonly ignored: readonly OpenRequest[];
+  /** Not agreed but the partner spoke after the ask: dropped with no score. */
+  readonly heardDropped: readonly OpenRequest[];
+}
+
+/** The requests that ran out: `ignored` are those in earshot nobody answered in time with any line; the rest are dropped without a score. */
+export function expireRequests(r: Relation, now: number, answerMinutes: number, o: ExpireOptions = {}): ExpiredRequests {
+  if (o.waiting === true || r.requests.length === 0) return { relation: r, ignored: [], heardDropped: [] };
   const kept: OpenRequest[] = [];
   const ignored: OpenRequest[] = [];
+  const heardDropped: OpenRequest[] = [];
   for (const q of r.requests) {
     const age = now - q.at;
     if (q.agreed ? age <= AGREED_FORGET_MS : age < answerMinutes * MINUTE_MS) kept.push(q);
-    else if (!q.agreed && q.inRange && o.atLoad !== true && o.offline !== true) ignored.push(q);
+    else if (q.agreed) continue;
+    else if (q.heard) heardDropped.push(q);
+    else if (q.inRange && o.atLoad !== true && o.offline !== true) ignored.push(q);
   }
-  return kept.length === r.requests.length ? { relation: r, ignored } : { relation: { ...r, requests: kept }, ignored };
+  return kept.length === r.requests.length ? { relation: r, ignored, heardDropped } : { relation: { ...r, requests: kept }, ignored, heardDropped };
 }
 
 /** The requests that ran out are closed and each ignored one scores, as one change. */

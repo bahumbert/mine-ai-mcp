@@ -73,7 +73,8 @@ export interface ControllerDeps {
   readonly localized?: boolean;
   readonly random: () => number;
   readonly now: () => number;
-  readonly speak: (text: string, to: readonly string[], whisperTo: string | null, shout: boolean) => void;
+  /** Resolves once the line is sent; rejects when it was not. */
+  readonly speak: (text: string, to: readonly string[], whisperTo: string | null, shout: boolean) => Promise<void>;
   readonly journal: (event: ConversationEvent) => void;
   readonly memorize: (memory: ConversationMemory) => void;
   readonly log: (line: string) => void;
@@ -315,9 +316,10 @@ export class ConversationController {
     });
     this.begin(c, true);
     lineSaid(c, now);
-    this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
+    const said = this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
     const asked = (decision.asksOf ?? []).filter((name) => to.some((heard) => same(heard, name)));
-    if (asked.length > 0) this.deps.relations?.asked(asked, decision.asksWhat ?? "something", o.snapshot);
+    // Stamped when the line is sent, not when it is decided: a line heard while it was typed is no answer. A say that failed asks nothing.
+    if (asked.length > 0) void said.then(() => this.deps.relations?.asked(asked, decision.asksWhat ?? "something", o.snapshot), () => undefined);
     if (o.intent !== undefined && partner !== null) this.askedAt.set(partner.toLowerCase(), now);
     this.journal("opened", c, { conversationKind: kind, topic: c.topic, planned: c.planned });
     return true;

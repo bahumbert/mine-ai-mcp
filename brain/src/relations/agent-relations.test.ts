@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import type { Body } from "../body.ts";
+import { Body, INSTANT_TYPING } from "../body.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
@@ -290,7 +290,7 @@ test("a reply stuck in the model queue is not ignored", async () => {
 
 test("restart drops stale requests", () => {
   const { relations, time } = relationsWithClock();
-  const stale = { ...newRelation("Theo", time.at - 10 * MIN, 0), requests: [{ what: "bread", at: time.at - 5 * MIN, inRange: true, agreed: false }, { what: "wool", at: time.at - 1_000, inRange: true, agreed: false }] };
+  const stale = { ...newRelation("Theo", time.at - 10 * MIN, 0), requests: [{ what: "bread", at: time.at - 5 * MIN, inRange: true, agreed: false, heard: false }, { what: "wool", at: time.at - 1_000, inRange: true, agreed: false, heard: false }] };
   relations.load({ relations: [stale], skipped: 0 });
   assert.deepEqual(relations.book.get("Theo")?.requests.map((q) => q.what), ["wool"]);
   assert.equal(relations.book.get("Theo")?.ledger.length, 0);
@@ -362,4 +362,87 @@ test("a stranger hit is created at the first impression; the why names the weapo
   relations.hurt(hit("Ayla", "arrow"));
   await until(() => rows.length === 2);
   assert.deepEqual([relations.book.get("Theo")?.score, ...rows.map((r) => r.why)], [-25, "hit you", "shot you"]);
+});
+
+/** Relations whose notes really go through a body over a fake runtime, so the notes written can be counted. */
+function relationsWithNotes() {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const made = relationsWithClock({ runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), log: (line) => logs.push(line) });
+  return { ...made, notes: runtime.notes, logs };
+}
+const askTheo = async (c: ReturnType<typeof relationsWithClock>) => {
+  c.relations.asked(["Theo"], "4 coal", null, around({ Theo: 3 }));
+  await until(() => c.relations.book.get("Theo")?.requests.length === 1);
+};
+
+test("a line from the asked partner stops the ignored score", async () => {
+  const c = relationsWithClock();
+  await askTheo(c);
+  c.time.at += 10_000;
+  c.relations.heardFrom("Theo");
+  c.time.at += 3 * MIN;
+  await c.look();
+  await until(() => c.relations.book.get("Theo")!.requests.length === 0);
+  assert.deepEqual([c.rows.length, c.relations.book.get("Theo")!.ledger.length], [0, 0]);
+});
+
+test("a line from someone else does not stop it", async () => {
+  const c = relationsWithClock();
+  await askTheo(c);
+  c.time.at += 10_000;
+  c.relations.heardFrom("Ayla");
+  c.time.at += 3 * MIN;
+  await c.look();
+  await until(() => c.rows.length === 1);
+  assert.equal(c.rows[0]?.scoreKind, "request_ignored");
+});
+
+test("a line read before the ask does not count", async () => {
+  const c = relationsWithClock();
+  c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
+  c.relations.heardFrom("Theo");
+  c.time.at += 1_000;
+  await askTheo(c);
+  c.time.at += 3 * MIN;
+  await c.look();
+  await until(() => c.rows.length === 1);
+  assert.equal(c.rows[0]?.scoreKind, "request_ignored");
+});
+
+test("a heard line writes no note when nothing changes", async () => {
+  const c = relationsWithNotes();
+  await askTheo(c);
+  c.time.at += 1_000;
+  c.relations.heardFrom("Theo");
+  await until(() => c.relations.book.get("Theo")!.requests[0]?.heard === true);
+  await new Promise((r) => setTimeout(r, 10));
+  const saved = c.notes.length;
+  c.relations.heardFrom("Theo");
+  c.relations.heardFrom("Nobody");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(c.notes.length, saved);
+  assert.equal(c.relations.book.get("Nobody"), null, "a stranger gets no record");
+});
+
+test("heardFrom while the ask's update is still queued marks it", async () => {
+  const c = relationsWithClock();
+  c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
+  c.time.at += 1_000;
+  c.relations.asked(["Theo"], "4 coal", null, around({ Theo: 3 }));
+  c.time.at += 1_000;
+  c.relations.heardFrom("Theo");
+  await until(() => c.relations.book.get("Theo")?.requests[0]?.heard === true);
+});
+
+test("a dropped heard request is logged and scores nothing", async () => {
+  const c = relationsWithNotes();
+  await askTheo(c);
+  c.time.at += 1_000;
+  c.relations.heardFrom("Theo");
+  c.time.at += 3 * MIN;
+  await c.look();
+  await until(() => c.relations.book.get("Theo")!.requests.length === 0);
+  assert.deepEqual(c.logs.filter((l) => l.includes("dropped")), ["request to Theo for 4 coal dropped: they spoke since"]);
+  assert.equal(c.rows.length, 0);
 });

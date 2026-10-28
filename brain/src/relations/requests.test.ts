@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { testScoring } from "../testing.ts";
 import { newRelation } from "./record.ts";
-import { answerRequest, expireRequests, openRequest, requestLines, withExpiredRequests } from "./requests.ts";
+import { answerRequest, expireRequests, heardFrom, openRequest, requestLines, withExpiredRequests } from "./requests.ts";
 import type { Relation } from "./types.ts";
 
 const MIN = 60_000;
@@ -15,7 +15,7 @@ test("opens up to 3, oldest dropped", () => {
   let r = fresh();
   for (const what of ["a", "b", "c", "d"]) r = asked(r, what);
   assert.deepEqual(r.requests.map((q) => q.what), ["b", "c", "d"]);
-  assert.deepEqual(r.requests[0], { what: "b", at: t0, inRange: true, agreed: false });
+  assert.deepEqual(r.requests[0], { what: "b", at: t0, inRange: true, agreed: false, heard: false });
 });
 
 test("refused scores request_refused and closes", () => {
@@ -97,4 +97,43 @@ test("requestLines numbers the open requests with their age", () => {
     "2. You asked Theo for help with a house 1 min ago; they agreed.",
   ]);
   assert.deepEqual(requestLines(fresh(), "Theo", t0), []);
+});
+
+test("heardFrom marks the requests asked before the line", () => {
+  const r = asked(asked(fresh(), "bread", t0), "wool", t0 + 10_000);
+  const out = heardFrom(r, t0 + 5_000);
+  assert.deepEqual(out.requests.map((q) => [q.what, q.heard]), [["bread", true], ["wool", false]]);
+});
+
+test("heardFrom with nothing to mark returns the same record", () => {
+  const r = asked(fresh(), "bread", t0);
+  const noRequests = fresh();
+  assert.equal(heardFrom(noRequests, t0 + MIN), noRequests);
+  assert.equal(heardFrom(r, t0), r, "a line at the very instant of the ask is not after it");
+  const heard = heardFrom(r, t0 + 1);
+  assert.equal(heardFrom(heard, t0 + MIN), heard);
+});
+
+test("a heard request runs out with no score", () => {
+  const r = heardFrom(asked(fresh(), "bread"), t0 + 1_000);
+  const out = expireRequests(r, t0 + 5 * MIN, 2);
+  assert.deepEqual([out.relation.requests, out.ignored, out.heardDropped.map((q) => q.what)], [[], [], ["bread"]]);
+  assert.deepEqual(withExpiredRequests(r, t0 + 5 * MIN, scoring).ledger, []);
+});
+
+test("an unheard request still runs out ignored", () => {
+  const out = expireRequests(heardFrom(asked(asked(fresh(), "bread", t0), "wool", t0 + MIN), t0 + 30_000), t0 + 5 * MIN, 2);
+  assert.deepEqual([out.ignored.map((q) => q.what), out.heardDropped.map((q) => q.what)], [["wool"], ["bread"]]);
+});
+
+test("an agreed and heard request keeps the 30-min path", () => {
+  const agreed = heardFrom(answerRequest(asked(fresh(), "bread"), 1, "agreed", t0, scoring), t0 + 1_000);
+  assert.equal(expireRequests(agreed, t0 + 5 * MIN, 2).relation.requests.length, 1);
+  const dropped = withExpiredRequests(agreed, t0 + 31 * MIN, scoring);
+  assert.deepEqual([dropped.requests, dropped.ledger], [[], []]);
+});
+
+test("a heard request can still be refused", () => {
+  const r = answerRequest(heardFrom(asked(fresh(), "coal"), t0 + 1_000), 1, "refused", t0 + MIN, scoring);
+  assert.deepEqual([r.requests, r.ledger.map((e) => e.kind)], [[], ["request_refused"]]);
 });

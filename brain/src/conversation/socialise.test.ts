@@ -18,7 +18,7 @@ function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) 
   const budget = new ConversationBudget(2);
   const talks = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget, modelFree: () => talks.current === null, talkRange: 64, localized,
-    random: () => 0, now: () => now, speak: (text, _to, _whisperTo, shout) => spoken.push({ text, shout }), journal: () => undefined,
+    random: () => 0, now: () => now, speak: async (text, _to, _whisperTo, shout) => { spoken.push({ text, shout }); }, journal: () => undefined,
     memorize: () => undefined, log: () => undefined, history: () => [],
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };

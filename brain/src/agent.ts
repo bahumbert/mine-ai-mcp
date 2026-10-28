@@ -355,6 +355,8 @@ export class Agent {
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
             this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
+            // Any line from a partner I asked answers the ask (owner 2026-10-28): before the inbox filters it.
+            this.relations?.heardFrom(message.username);
             if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
             this.inbox.push(message);
             this.wakeChat?.();
@@ -453,8 +455,8 @@ export class Agent {
     if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
-    this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
-    if (decision.asksOf !== undefined && decision.say.trim() !== "") this.relations?.asked(decision.asksOf, decision.asksWhat ?? "something", whisperTo, snapshot);
+    const said = this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
+    this.openRequestsOnceSaid(said, decision, whisperTo, snapshot);
     const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
@@ -1478,7 +1480,7 @@ export class Agent {
     if (this.runSignal.aborted) return;
     try {
       const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);
-      if (stillOn()) this.speak(line, undefined, undefined, whisperTo);
+      if (stillOn()) void this.speak(line, undefined, undefined, whisperTo); // a failed say is logged by speak
     } catch (error) {
       this.options.log(`narration failed: ${String(error)}`);
     }
@@ -1545,12 +1547,21 @@ export class Agent {
     return last !== undefined && last.name.toLowerCase() !== this.options.persona.username.toLowerCase() && at - last.at <= TALKED_TO_MS ? { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } : undefined;
   }
 
-  /** `since`: when the message being answered was heard (thinking time counts as typing time). */
-  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null, shout = false): void {
-    if (text.trim() === "") return;
+  /** The ask in the reply becomes an open request when its line is sent, not when decided (typing runs seconds behind earlier speech: a line heard before that is no answer to it); a say that failed opens none. */
+  private openRequestsOnceSaid(said: Promise<void>, decision: ChatDecision, whisperTo: string | null, snapshot: BotSnapshot): void {
+    const { asksOf, asksWhat } = decision;
+    if (asksOf === undefined || decision.say.trim() === "") return;
+    void said.then(() => this.relations?.asked(asksOf, asksWhat ?? "something", whisperTo, snapshot), () => undefined);
+  }
+
+  /** `since`: when the message being answered was heard (thinking time counts as typing time). Resolves once the line is sent; rejects (after logging) when the runtime threw. A refusal the runtime reports without throwing still resolves (`Body.say` only logs it). */
+  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null, shout = false): Promise<void> {
+    if (text.trim() === "") return Promise.resolve();
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);
-    this.body.say(text, since, whisperTo ?? undefined, shout).catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    const sent = this.body.say(text, since, whisperTo ?? undefined, shout);
+    sent.catch((error: unknown) => this.options.log(`say failed: ${String(error)}`));
+    return sent;
   }
 
   private remember(speaker: string, text: string): ChatLine {

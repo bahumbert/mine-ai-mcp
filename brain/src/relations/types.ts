@@ -71,6 +71,8 @@ export interface OpenRequest {
   /** The partner was within hearing when I asked. */
   readonly inRange: boolean;
   readonly agreed: boolean;
+  /** A line from the partner was heard after the ask: it is answered, so silence is never scored (the model still may say agreed / refused / done). */
+  readonly heard: boolean;
 }
 
 export type Temperament = Persona["settings"]["relations"]["temperament"];
