@@ -1,5 +1,5 @@
 // The per-agent trade controller: chat decisions become trades, payments are credited, deadlines run, hand-offs and judgments are asked for.
-import type { GistPartner, Mind, TradeDecision } from "../mind.ts";
+import type { GistPartner, TradeDecision } from "../mind.ts";
 import type { Persona } from "../persona.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
@@ -10,14 +10,14 @@ import { EARLIER_GIVE_MS, EarlierLedger } from "./earlier.ts";
 import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
-import { forgetOldSaid, withEndedTrade, withFeeling, withSaid, withTrade } from "./record.ts";
+import { forgetOldSaid, withSaid, withTrade } from "./record.ts";
+import { scoredRow, withScoreEvent } from "./score.ts";
+import { scoreEndedTrade } from "./trade-score.ts";
 import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
 import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
 const COLLECT_WATCH_MS = 5_000;
-/** The judge call waits this long (wall clock) for a model slot, then leaves the feeling unchanged. */
-const JUDGE_WAIT_MS = 120_000;
 /** A hand-off dropped by a shelter or a stop is taken again after this long. */
 const RETAKE_AFTER_MS = 30_000;
 /** A payment picked up within this long after the partner was last near is still theirs. */
@@ -28,13 +28,10 @@ export interface TradeControllerDeps {
   readonly self: string;
   readonly persona: Persona;
   readonly book: RelationBook;
-  readonly mind: Mind;
   readonly settings: TradeSettings;
   readonly now: () => number;
   /** The agent pushes the routine objective for this hand-off. */
   readonly takeHandoff: (h: Handoff) => void;
-  readonly modelSlotFree: () => boolean;
-  readonly inConversationWith: (name: string) => boolean;
   readonly journal: (e: TradeEvent | RelationEvent) => void;
   readonly log: (line: string) => void;
   /** The brain's trade board: a trade with another bot of this brain is made on the proposer's terms. Absent: every partner is treated as outside the brain. */
@@ -46,7 +43,6 @@ type EventName = TradeEvent["event"];
 /** What the last tick saw: my inventory and where each player stood. */
 interface Seen { readonly inventory: BotSnapshot["inventory"]; readonly partners: ReadonlyMap<string, Position | null> }
 
-interface PendingJudgment { readonly partner: string; readonly trade: Trade; readonly since: number }
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const EVENT_OF_STATE: Record<TradeState, EventName> = { proposed: "proposed", agreed: "agreed", i_gave: "gave", they_gave: "received", done: "done", broken: "broken", cancelled: "cancelled" };
@@ -77,7 +73,6 @@ export class TradeController implements BoardPeer {
   private readonly fromLedger = new Map<string, ItemCount[]>();
   private readonly collected = new Set<string>();
   private readonly nobodyGave = new Set<string>();
-  private readonly judging: PendingJudgment[] = [];
   private readonly running = new Set<Promise<void>>();
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -309,7 +304,7 @@ export class TradeController implements BoardPeer {
     }
   }
 
-  /** The agent's poll tick: credits gains, runs the deadlines, takes due hand-offs and judgments. Never waits on a model. */
+  /** The agent's poll tick: credits gains, runs the deadlines, takes due hand-offs. Never waits on a model. */
   tick(snapshot: BotSnapshot, ownStepYields: ReadonlySet<string>, signal: AbortSignal): Promise<void> {
     return this.exclusive(async () => {
       const now = this.deps.now();
@@ -321,19 +316,18 @@ export class TradeController implements BoardPeer {
       if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now);
       await this.settleOpen(now);
       this.startCollects(now);
-      this.runJudgments(now, signal);
       if (!this.busy()) this.previous = null;
     });
   }
 
-  /** Whether the agent should tick: a trade is open, one broken by them may still be paid late, a hand-off or a judgment is waiting. */
+  /** Whether the agent should tick: a trade is open, one broken by them may still be paid late, a hand-off is waiting. */
   busy(withWindow = true): boolean {
     const now = this.deps.now();
     const waiting = this.deps.book.trades().some((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && now - (t.endedAt ?? now) < this.deps.settings.offersForgetMinutes * MINUTE_MS && owedItems(t).length > 0));
-    return waiting || (withWindow && this.earlier.watching(now)) || this.pending.size > 0 || this.judging.length > 0 || this.running.size > 0;
+    return waiting || (withWindow && this.earlier.watching(now)) || this.pending.size > 0 || this.running.size > 0;
   }
 
-  /** Busy for a player's window alone (no trade, hand-off or judgment): the agent may poll slowly. */
+  /** Busy for a player's window alone (no trade or hand-off): the agent may poll slowly. */
   onlyWatching(): boolean { return this.busy() && !this.busy(false); }
 
   /** No baseline: the next tick counts no gain. The agent's look calls it whenever no tick started on the yields it dropped. */
@@ -377,20 +371,20 @@ export class TradeController implements BoardPeer {
     this.droppedAt.set(tradeId, this.deps.now());
   }
 
-  /** The gist's judgment of each other member and what they said they have or need. */
+  /** The gist's nudge of the score of each other member (one write with what they said they have or need). */
   onConversationEnded(partners: readonly GistPartner[]): Promise<void> {
     return this.exclusive(async () => {
       const now = this.deps.now();
       for (const p of partners) {
-        if (p.judged === null && p.has.length === 0 && p.needs.length === 0) continue;
-        const from = this.deps.book.get(p.name)?.feeling ?? 0;
-        const next = await this.deps.book.update(p.name, (r) => {
-          const said = forgetOldSaid(withSaid(r, p.has, p.needs, now), now, this.deps.settings.offersForgetMinutes);
-          return p.judged === null ? said : withFeeling(said, p.judged);
+        const { nudge } = p;
+        if (nudge === null && p.has.length === 0 && p.needs.length === 0) continue;
+        const { book, settings } = this.deps;
+        const next = await book.update(p.name, (r) => {
+          const said = forgetOldSaid(withSaid(r, p.has, p.needs, now), now, settings.offersForgetMinutes);
+          return nudge === null ? said : withScoreEvent(said, { kind: "nudge", nudge: nudge.value, why: nudge.why }, now, book.scoring);
         });
-        if (p.judged === null) continue;
-        this.deps.journal({ kind: "relation", event: "judged", partner: next.partner, from, to: next.feeling, word: next.word, why: next.why, by: "gist" });
-        for (let i = this.judging.length - 1; i >= 0; i -= 1) if (same(this.judging[i]!.partner, p.name)) this.judging.splice(i, 1);
+        const row = nudge === null ? null : scoredRow(next);
+        if (row !== null) this.deps.journal(row);
       }
     });
   }
@@ -402,7 +396,7 @@ export class TradeController implements BoardPeer {
     return relationsBlock([...this.deps.book.summaries(partners, (id) => this.giveProgress(id)), ...idle], lacks);
   }
 
-  /** Resolves when the judgments started so far are over (the agent's shutdown, the tests). */
+  /** Resolves when the background steps started so far are over (the agent's shutdown, the tests). */
   async settled(): Promise<void> {
     while (this.running.size > 0) await Promise.all([...this.running]);
   }
@@ -440,14 +434,18 @@ export class TradeController implements BoardPeer {
   private async record(trade: Trade, ...events: EventName[]): Promise<void> {
     const ended = !isOpen(trade);
     if (trade.state !== "proposed") this.deps.board?.withdraw(trade.id);
-    await this.deps.book.update(trade.partner, (r) => (ended ? withEndedTrade(r, trade) : withTrade(r, trade)));
+    // An end and its score are one write: a replayed end cannot be scored twice, a crash cannot store the end without its score.
+    if (ended) {
+      const scored = await scoreEndedTrade(this.deps.book, trade, this.deps.now());
+      if (scored !== null) this.deps.journal(scored);
+    } else {
+      await this.deps.book.update(trade.partner, (r) => withTrade(r, trade));
+    }
     for (const event of events) this.deps.journal({ kind: "trade", event, partner: trade.partner, tradeId: trade.id, give: trade.give, get: trade.get, first: trade.first, note: trade.note });
     if (!ended) return;
     // A proposal that ended unagreed gives the ledger's gives it took back (the window restarts now: the original time is not kept).
     if (trade.state === "cancelled" && trade.agreedAt === null) for (const e of this.fromLedger.get(trade.id) ?? []) this.earlier.gave(trade.partner, e.item, e.count, this.deps.now());
     for (const held of [this.nobodyGave, this.watches, this.givenOutside, this.giveTakenAt, this.fromLedger]) held.delete(trade.id);
-    // A cancelled trade moved nothing: there is nothing to judge.
-    if (trade.state !== "cancelled") this.judging.push({ partner: trade.partner, trade, since: this.deps.now() });
   }
 
   private async creditGains(snapshot: BotSnapshot, previous: Seen, ownStepYields: ReadonlySet<string>, now: number): Promise<void> {
@@ -564,37 +562,5 @@ export class TradeController implements BoardPeer {
       this.pending.set(id, "collect");
       this.deps.takeHandoff({ kind: "collect", tradeId: id, items: owedItems(trade) });
     }
-  }
-
-  /** Judgments of ended trades: none inside a conversation (its gist judges), a model slot waited for up to 2 minutes. */
-  private runJudgments(now: number, signal: AbortSignal): void {
-    for (const j of [...this.judging]) {
-      const drop = (): void => void this.judging.splice(this.judging.indexOf(j), 1);
-      if (this.deps.inConversationWith(j.partner)) drop();
-      else if (this.deps.modelSlotFree()) {
-        drop();
-        this.judge(j, signal);
-      } else if (now - j.since >= JUDGE_WAIT_MS) {
-        drop();
-        this.deps.log(`relation: no model slot to judge ${j.partner} after trade ${j.trade.id} within ${JUDGE_WAIT_MS / 1_000} s; the feeling stays`);
-      }
-    }
-  }
-
-  private judge(j: PendingJudgment, signal: AbortSignal): void {
-    const { book, mind, persona, log, journal } = this.deps;
-    const task = (async () => {
-      try {
-        const from = book.get(j.partner)?.feeling ?? 0;
-        const judged = await mind.judgeRelation({ persona, partner: j.partner, block: book.summaries([j.partner], (id) => this.giveProgress(id))[0] ?? "", trade: j.trade }, signal);
-        if (judged === null) return void log(`relation: no usable judgment of ${j.partner}`);
-        const next = await book.update(j.partner, (r) => withFeeling(r, judged));
-        journal({ kind: "relation", event: "judged", partner: next.partner, from, to: next.feeling, word: next.word, why: next.why, by: "judge" });
-      } catch (error) {
-        log(`relation: could not judge ${j.partner}: ${String(error)}`);
-      }
-    })();
-    this.running.add(task);
-    void task.finally(() => this.running.delete(task));
   }
 }

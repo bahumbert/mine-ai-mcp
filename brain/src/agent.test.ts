@@ -1732,7 +1732,7 @@ test("a trade the checks refuse goes back to the chat tier once with the reason 
   await agent.handle(say("Theo", "Ayla, bread for iron?"));
   await until(() => runtime.said.length === 1);
   assert.equal(chat.requests.length, 2);
-  assert.match(chat.requests[0]?.[1]?.content ?? "", /Your relations:\nYou have not dealt with Theo before\./u);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Your relations:\nHow you feel about someone shows[^\n]*\nYou have not dealt with Theo before;/u);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /you carry 0 iron_ingot, not 5/u);
   assert.deepEqual(runtime.said, ["Sorry, I have none."]);
   assert.deepEqual(savedRelations(runtime), []);
@@ -2658,4 +2658,23 @@ test("two bad replies in a row still end the order with \"could not work out wha
   await until(() => runtime.said.length === 2);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
   assert.equal(agent.activity, "idle");
+});
+
+test("a line that asks for something opens a request, and the answer to it scores", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply(
+    { spoken_to: ["Ayla"], asks: "", language: "English", say: "Theo, could you give me 5 oak_log?", route: "talk", request: "", asks_of: ["Theo"], asks_what: "5 oak_log" },
+    { spoken_to: ["Ayla"], asks: "", language: "English", say: "Understood.", route: "talk", request: "", my_request: { n: 1, answer: "refused" } },
+  );
+  await agent.handle(say("Theo", "Ayla, what do you need?"));
+  await until(() => runtime.said.length === 1);
+  await until(() => savedRelations(runtime)[0]?.requests.length === 1);
+  assert.equal(savedRelations(runtime)[0]?.requests[0]?.what, "5 oak_log");
+  await agent.handle(say("Theo", "Ayla, no, sorry"));
+  await until(() => runtime.said.length === 2);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /Your requests to Theo:\n1\. You asked Theo for 5 oak_log 0 min ago\./u);
+  await until(() => savedRelations(runtime)[0]?.ledger.length === 1);
+  const theo = savedRelations(runtime)[0]!;
+  assert.deepEqual([theo.requests, theo.ledger[0]?.kind, theo.score], [[], "request_refused", -3]);
 });

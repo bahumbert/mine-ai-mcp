@@ -48,6 +48,8 @@ export type ConversationMemory = Extract<Memory, { kind: "conversation" }>;
 export interface ConversationRelations {
   /** Each named member's record text, given to the gist call (which then also judges them). */
   readonly blocksFor: (names: readonly string[]) => readonly { readonly name: string; readonly block: string }[];
+  /** An opening line asked these names for something: each becomes an open request. */
+  readonly asked: (names: readonly string[], what: string, snapshot: BotSnapshot) => void;
   /** One line per nearby partner for an opening call. */
   readonly openingLines: (names: readonly string[]) => readonly string[];
   /** The gist's judgment of the members, once a gist call returned them. */
@@ -314,6 +316,8 @@ export class ConversationController {
     this.begin(c, true);
     lineSaid(c, now);
     this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
+    const asked = (decision.asksOf ?? []).filter((name) => to.some((heard) => same(heard, name)));
+    if (asked.length > 0) this.deps.relations?.asked(asked, decision.asksWhat ?? "something", o.snapshot);
     if (o.intent !== undefined && partner !== null) this.askedAt.set(partner.toLowerCase(), now);
     this.journal("opened", c, { conversationKind: kind, topic: c.topic, planned: c.planned });
     return true;

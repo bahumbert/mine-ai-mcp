@@ -2,13 +2,14 @@ import type { LocalizedChat } from "../llm-mind.ts";
 import { personaPrompt } from "../llm-mind.ts";
 import type { ConversationFacts, GistInput, Nearby, OpeningInput, PastTalk } from "../mind.ts";
 import type { Persona } from "../persona.ts";
+import { askFieldsInstructions } from "../relations/prompts.ts";
 import { PLANNED_LINES } from "./state.ts";
 
 /**
  * The conversation prompts (spec 2026-10-18-conversations-design). The code states facts; the model decides whether to
  * talk, about what, for how long, and writes every line (Rule #0).
  */
-export function openingSystemPrompt(persona: Persona, localizedChat?: LocalizedChat): string {
+export function openingSystemPrompt(persona: Persona, localizedChat?: LocalizedChat, withRequests = false): string {
   const lengths = (["short", "medium", "long"] as const).map((length) => `"${length}" = ${PLANNED_LINES[length].join("-")} lines in all, every speaker counted`).join("; ");
   return `${personaPrompt(persona)}
 
@@ -19,7 +20,7 @@ Reply with only a JSON object {"open": true, "to": ["Name"], "topic": "...", "le
 - "topic": what you want to talk about, in a few words.
 - "length": how long you mean it to be: ${lengths}. A chance meeting while you work leans short; when you went to see someone, medium or long.
 - "say": your first line, in your own words, one or two sentences, under 200 characters; name those you speak to in it, for they hear it as spoken to them only when it names them (a line naming nobody is heard by nobody).
-${localizedChat === undefined ? "" : `Talk carries about ${localizedChat.range} blocks: only those within that distance hear you.\n`}When "calling" is given, the people you want are out of earshot: ${localizedChat === undefined ? "your line is plain talk, so they hear it only if they come close; say where you are or what you want" : "your line is shouted to call them over; say where you are or what you want"}.
+${withRequests ? `${askFieldsInstructions()}\n` : ""}${localizedChat === undefined ? "" : `Talk carries about ${localizedChat.range} blocks: only those within that distance hear you.\n`}When "calling" is given, the people you want are out of earshot: ${localizedChat === undefined ? "your line is plain talk, so they hear it only if they come close; say where you are or what you want" : "your line is shouted to call them over; say where you are or what you want"}.
 Stay in character. Never mention being an AI, a model, a prompt, JSON or tools.`;
 }
 
@@ -72,9 +73,9 @@ export function gistSystemPrompt(persona: Persona, withPartners = false): string
   return `${personaPrompt(persona)}
 
 A conversation you were in has ended. Sum it up for your memory in one sentence, first person: what was talked about and anything agreed (who does what for whom).
-${withPartners ? `Then say how you feel about each of the others now, from what you know of them and what they said and did, and note what they said they have or need.
-Reply with only a JSON object {"gist": "...", "partners": [{"name": "...", "feeling": 0, "word": "...", "why": "...", "has": ["item_id"], "needs": ["item_id"]}]}.
-- "feeling": a whole number from -3 (dislike, distrust) to +3 (fondness, trust); 0 is neutral. "word": one word. "why": one sentence in your own words.
+${withPartners ? `Then say how this conversation changed what you think of each of the others, from what you know of them and what they said and did, and note what they said they have or need.
+Reply with only a JSON object {"gist": "...", "partners": [{"name": "...", "nudge": 0, "why": "...", "has": ["item_id"], "needs": ["item_id"]}]}.
+- "nudge": a whole number from -${persona.settings.relations.score.nudgeMax} to +${persona.settings.relations.score.nudgeMax}: how much this conversation changed what you think of them, from your traits; 0 when it did not. "why": one sentence in your own words.
 - "has" and "needs": Minecraft item ids they said they have or need in this conversation; [] when they said none.` : `Reply with only a JSON object {"gist": "..."}.`}`;
 }
 

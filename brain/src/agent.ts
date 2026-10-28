@@ -274,8 +274,10 @@ export class Agent {
     const { conversations, persona, localizedChat } = options;
     this.relations = !persona.settings.relations.enabled ? null : new AgentRelations({
       persona, mind: options.mind, runtime: options.runtime, body: this.body, takeHandoff: (h) => this.takeHandoff(h),
-      modelSlotFree: conversations?.modelFree ?? (() => true), inConversationWith: (name) => this.talks?.isMember(name) === true,
       isAgent: (name) => this.isOtherAgent(name),
+      hearingRange: localizedChat?.range ?? persona.settings.conversation.stayingDistance,
+      isOnline: (name) => this.onlineNames.some((online) => online.toLowerCase() === name.toLowerCase()),
+      waitingFrom: (name) => this.inbox.hasFrom(name),
       lacks: (inventory) => describeLacks(this.stack.at(-1)?.wanted ?? [], inventory ?? this.lastLook?.inventory ?? []),
       journal: (event) => options.journal?.(event), log: (line) => options.log(line),
       ...(options.tradeBoard !== undefined && { board: options.tradeBoard }),
@@ -408,11 +410,11 @@ export class Agent {
     const line = this.remember(message.username, message.message);
     const talkedTo = this.noteNamed(message, heardAt);
     const named = this.namedIn(message);
-    if (!this.hears(message, named)) return;
-    if (!(await this.conversationGate(message, heard, named))) return;
-    const chat = await this.decideChat(message, heard, heardAt, talkedTo);
+    const chat = await this.decideHeard(message, heard, heardAt, talkedTo, named);
     if (chat === null) return;
     const { decision, snapshot, conversation } = chat;
+    // What they said of my requests counts even if the reply below is dropped: it was said.
+    await this.relations?.answered(decision, message.username);
     const { route } = decision;
     const request = route === "act" || route === "later" ? ` ${JSON.stringify(decision.request)}` : "";
     log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}`);
@@ -450,6 +452,7 @@ export class Agent {
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
     this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
+    if (decision.asksOf !== undefined && decision.say.trim() !== "") this.relations?.asked(decision.asksOf, decision.asksWhat ?? "something", whisperTo, snapshot);
     const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
@@ -586,6 +589,18 @@ export class Agent {
     return true;
   }
 
+  /** Whether the line is heard, may be answered now, and what the chat tier decides; the speaker counts as waiting meanwhile (requests made to them are not ignored). */
+  private async decideHeard(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined, named: readonly string[]): ReturnType<Agent["decideChat"]> {
+    const release = this.inbox.hold(message.username);
+    try {
+      if (!this.hears(message, named)) return null;
+      if (!(await this.conversationGate(message, heard, named))) return null;
+      return await this.decideChat(message, heard, heardAt, talkedTo);
+    } finally {
+      release();
+    }
+  }
+
   /**
    * The chat tier's decision about `message` (a trade in it checked), with the snapshot and conversation it was made
    * in, or null when there is none to act on. A model server that does not answer is waited for and asked again while
@@ -597,6 +612,7 @@ export class Agent {
     for (;;) {
       try {
         const snapshot = await this.options.runtime.status();
+        this.onlineNames = snapshot.players.map((player) => player.username);
         const conversation = this.talks?.facts();
         const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
         const input: ChatInput = { persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };

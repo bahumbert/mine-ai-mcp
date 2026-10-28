@@ -121,7 +121,7 @@ test("with preferences, how a request is taken is the character's call; the work
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
   assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
-  assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow/u);
+  assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow, and how you feel about who asks./u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
   const { mind, action, chat } = scriptedMind();
   action.reply({ done: "nothing to do" });
@@ -964,6 +964,18 @@ const opening = () => ({
   lastFailed: null, calling: false,
 });
 
+test("an opening asks for items only when it was given relations, and reads asks_of", async () => {
+  const { chat, mind } = scriptedMind();
+  const reply = { open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, can you give me 5 iron_ingot?", asks_of: ["Theo"], asks_what: "5 iron_ingot" };
+  chat.reply(reply, reply);
+  const withRelations = await mind.openConversation({ ...opening(), relations: ["You have not dealt with Theo before."] }, signal);
+  assert.deepEqual([withRelations.asksOf, withRelations.asksWhat], [["Theo"], "5 iron_ingot"]);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"asks_of": the names your own line asks/u);
+  const without = await mind.openConversation(opening(), signal);
+  assert.deepEqual([without.asksOf, without.asksWhat], [undefined, undefined]);
+  assert.doesNotMatch(chat.requests[1]?.[0]?.content ?? "", /asks_of/u);
+});
+
 test("openConversation reads the opening reply", async () => {
   const { chat, mind } = scriptedMind();
   chat.reply({ open: true, to: ["Theo"], topic: "the mine", length: "medium", say: "Theo! How's the mine going?" }, { open: false });
@@ -1149,6 +1161,41 @@ test("a malformed trade is dropped, the say is kept", async () => {
   assert.equal(decision.trade, undefined);
 });
 
+const withRequests = (requests: readonly string[]): ChatInput => ({ ...chatInput("Ayla, ok, I will bring it"), relations: { block: "Your relations:\nYou and Steve: friend (+2).", tradeOn: true, requests } });
+
+test("asks_of parsed", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...TALK, asks_of: ["Theo", " Bruno ", "Theo", 3, ""], asks_what: "5 oak_log" }, { ...TALK, asks_of: "Theo" }, { ...TALK, asks_of: ["Theo"] });
+  const decision = await mind.chat(withRelations(true), signal);
+  assert.deepEqual([decision.asksOf, decision.asksWhat], [["Theo", "Bruno"], "5 oak_log"]);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"asks_of": the names your own line asks for items or for help \(a request, an order; not a question\)/u);
+  const notAList = await mind.chat(withRelations(true), signal);
+  assert.equal(notAList.asksOf, undefined, "a name that is not in a list asks nothing");
+  const noWhat = await mind.chat(withRelations(true), signal);
+  assert.deepEqual([noWhat.asksOf, noWhat.asksWhat], [["Theo"], "something"]);
+});
+
+test("my_request is read only when the speaker has open requests, and a malformed one is dropped", async () => {
+  const { chat, mind } = scriptedMind();
+  const mine = { n: 2, answer: "refused" };
+  chat.reply({ ...TALK, my_request: mine }, { ...TALK, my_request: { n: 0, answer: "refused" } }, { ...TALK, my_request: { n: 1, answer: "maybe" } }, { ...TALK, my_request: "refused" }, { ...TALK, my_request: mine });
+  const lines = ["1. You asked Steve for 5 oak_log 1 min ago.", "2. You asked Steve for bread 0 min ago."];
+  const decision = await mind.chat(withRequests(lines), signal);
+  assert.deepEqual(decision.myRequest, mine);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Your requests to Steve:\n1\. You asked Steve for 5 oak_log 1 min ago\.\n2\. You asked Steve for bread 0 min ago\.\n- "my_request"/u);
+  for (const bad of [1, 2, 3]) assert.equal((await mind.chat(withRequests(lines), signal)).myRequest, undefined, `malformed ${bad}`);
+  assert.equal((await mind.chat(withRequests([]), signal)).myRequest, undefined, "nothing open: nothing read");
+  assert.doesNotMatch(chat.requests[4]?.[1]?.content ?? "", /Your requests to/u);
+});
+
+test("fields not asked when relations are off", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...TALK, asks_of: ["Theo"], asks_what: "bread", my_request: { n: 1, answer: "done" } });
+  const decision = await mind.chat(withRelations(false), signal);
+  assert.deepEqual([decision.asksOf, decision.asksWhat, decision.myRequest], [undefined, undefined, undefined]);
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /asks_of/u);
+});
+
 test("no trade paragraph and no trade read when tradeOn is false", async () => {
   const { chat, mind } = scriptedMind();
   chat.reply({ ...TALK, trade: TRADE }, { ...TALK, trade: TRADE });
@@ -1161,30 +1208,21 @@ test("no trade paragraph and no trade read when tradeOn is false", async () => {
 
 test("the gist returns the partners when relations are given", async () => {
   const { chat, mind } = scriptedMind();
-  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 1, word: "friend", why: "fair", has: ["iron_ingot"], needs: [] }] });
+  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", nudge: 4, why: "fair", has: ["iron_ingot"], needs: [] }] });
   const gist = await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "iron", lines: [], relations: [{ name: "Theo", block: "You and Theo: new." }] }, signal);
   assert.equal(gist.gist, "Talked iron.");
-  assert.deepEqual(gist.partners, [{ name: "Theo", judged: { feeling: 1, word: "friend", why: "fair" }, has: ["iron_ingot"], needs: [] }]);
+  assert.deepEqual(gist.partners, [{ name: "Theo", nudge: { value: 4, why: "fair" }, has: ["iron_ingot"], needs: [] }]);
   assert.match(chat.requests[0]?.[0]?.content ?? "", /"partners"/u);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"nudge": a whole number from -10 to [+]10/u);
   assert.match(chat.requests[0]?.[1]?.content ?? "", /You and Theo: new\./u);
 });
 
 test("the gist without relations asks no partners and returns []", async () => {
   const { chat, mind } = scriptedMind();
-  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 3 }] });
+  chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", nudge: 3 }] });
   const gist = await mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "iron", lines: [] }, signal);
   assert.deepEqual(gist, { gist: "Talked iron.", partners: [] });
   assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /partners/u);
-});
-
-test("judgeRelation parses the judgment, and a bad reply is null", async () => {
-  const { chat, mind } = scriptedMind();
-  const trade = { id: "t", partner: "Theo", give: [], get: [], first: "me" as const, state: "broken" as const, createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: 0, received: [], endedAt: 1, brokenBy: "them" as const, late: false, note: "they paid 0 of 5 iron_ingot" };
-  const input = { persona: testPersona(), partner: "Theo", block: "You and Theo: new.", trade };
-  chat.reply({ feeling: -2, word: "wary", why: "did not pay" }, { feeling: "lots" });
-  assert.deepEqual(await mind.judgeRelation(input, signal), { feeling: -2, word: "wary", why: "did not pay" });
-  assert.equal(await mind.judgeRelation(input, signal), null);
-  assert.match(chat.requests[0]?.[1]?.content ?? "", /they paid 0 of 5 iron_ingot/u);
 });
 
 test("the goal tier is told what it knows of the others only when there is something", async () => {

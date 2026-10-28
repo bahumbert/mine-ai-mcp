@@ -3,7 +3,7 @@ import test from "node:test";
 import type { Memory } from "../memory.ts";
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
-import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
+import { FakeRuntime, scriptedMind, testPersona, testScoring } from "../testing.ts";
 import { RelationBook } from "./book.ts";
 import { TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
@@ -27,21 +27,21 @@ interface Harness {
   readonly events: (TradeEvent | RelationEvent)[];
   readonly logs: string[];
   readonly chat: ReturnType<typeof scriptedMind>["chat"];
-  readonly state: { now: number; slotFree: boolean; talking: Set<string> };
+  readonly state: { now: number };
 }
 
 function harness(over: { settings?: Partial<TradeSettings> } = {}): Harness {
-  const state = { now: t0, slotFree: true, talking: new Set<string>() };
+  const state = { now: t0 };
   const handoffs: Handoff[] = [];
   const awaits: Handoff[] = [];
   const events: (TradeEvent | RelationEvent)[] = [];
   const logs: string[] = [];
   const saved: Memory[] = [];
-  const book = new RelationBook({ save: async (m) => { saved.push(m); }, remove: async () => {}, now: () => state.now, log: (l) => logs.push(l) });
-  const { chat, mind } = scriptedMind();
+  const book = new RelationBook({ save: async (m) => { saved.push(m); }, remove: async () => {}, now: () => state.now, log: (l) => logs.push(l), scoring: testScoring() });
+  const { chat } = scriptedMind();
   const c = new TradeController({
-    self: "Ayla", persona: testPersona(), book, mind, settings: { ...settings, ...over.settings }, now: () => state.now,
-    takeHandoff: (h) => (h.kind === "await" ? awaits : handoffs).push(h), modelSlotFree: () => state.slotFree, inConversationWith: (name) => state.talking.has(name),
+    self: "Ayla", persona: testPersona(), book, settings: { ...settings, ...over.settings }, now: () => state.now,
+    takeHandoff: (h) => (h.kind === "await" ? awaits : handoffs).push(h),
     journal: (e) => events.push(e), log: (l) => logs.push(l),
   });
   return { c, book, handoffs, awaits, events, logs, chat, state };
@@ -143,6 +143,32 @@ test("a late payment closes a broken trade as kept late", async () => {
   assert.equal(theirTrade(h).state, "done");
   const facts = h.book.get("Theo")!.facts;
   assert.deepEqual([facts.promisesBroken, facts.keptLate, facts.tradesDone], [0, 1, 1]);
+});
+
+test("late payment nets keptLate", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  await h.c.tick(s, new Set(), signal);
+  h.state.now += 11 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(Math.round(h.book.get("Theo")!.score), -20, "the broken promise cost its amount");
+  h.state.now += MIN;
+  await h.c.tick(snapshot({ inventory: [...s.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  const r = h.book.get("Theo")!;
+  assert.equal(Math.round(r.score), 3);
+  assert.deepEqual(r.ledger.map((e) => [e.kind, e.delta]), [["promise_broken", -20], ["kept_late", 23]]);
+  assert.deepEqual(h.events.filter((e) => e.kind === "relation").map((e) => e.kind === "relation" ? [e.scoreKind, e.delta, e.score] : null), [["promise_broken", -20, -20], ["kept_late", 23, 3]]);
+});
+
+test("a trade ended without a score (cancelled) leaves the ledger empty", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
+  await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", s);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.deepEqual([h.book.get("Theo")!.ledger.length, h.events.filter((e) => e.kind === "relation").length], [0, 0]);
 });
 
 test("my own step yielding the item is not credited, a collect hand-off is", async () => {
@@ -291,31 +317,9 @@ test("S9: while the retry give runs the line says it is handed over, not that it
   assert.ok(h.c.block(["Theo"], []).includes("tried again when Theo is within"), "the give no longer runs: it waits for the partner again");
 });
 
-test("a trade ended outside a conversation is judged once and the feeling stored", async () => {
+test("a trade ended outside a conversation makes no model call", async () => {
   const h = harness();
   const s = snapshot();
-  h.chat.reply({ feeling: -2, word: "wary", why: "short payment" });
-  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
-  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 11 * MIN;
-  await h.c.tick(s, new Set(), signal);
-  await h.c.settled();
-  assert.equal(h.chat.requests.length, 1);
-  const r = h.book.get("Theo")!;
-  assert.deepEqual([r.feeling, r.word], [-2, "wary"]);
-  const judged = h.events.find((e): e is RelationEvent => e.kind === "relation");
-  assert.deepEqual([judged?.from, judged?.to, judged?.by], [0, -2, "judge"]);
-  h.state.now += MIN;
-  await h.c.tick(s, new Set(), signal);
-  await h.c.settled();
-  assert.equal(h.chat.requests.length, 1, "judged once");
-});
-
-test("no judge call while in a conversation with the partner: the gist sets the feeling", async () => {
-  const h = harness();
-  const s = snapshot();
-  h.state.talking.add("Theo");
   await h.c.onDecision(decision({ first: "me" }), "Theo", s);
   await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
   await h.c.tick(s, new Set(), signal);
@@ -323,34 +327,26 @@ test("no judge call while in a conversation with the partner: the gist sets the 
   await h.c.tick(s, new Set(), signal);
   await h.c.settled();
   assert.equal(h.chat.requests.length, 0);
-  await h.c.onConversationEnded([{ name: "Theo", judged: { feeling: -1, word: "careless", why: "late" }, has: ["iron_ingot"], needs: ["bread"] }]);
+});
+
+test("gist nudge scores the partner", async () => {
+  const h = harness();
+  await h.c.onConversationEnded([{ name: "Theo", nudge: { value: -6, why: "he was rude" }, has: ["iron_ingot"], needs: ["bread"] }]);
   const r = h.book.get("Theo")!;
-  assert.deepEqual([r.feeling, r.word], [-1, "careless"]);
+  assert.equal(r.score, -6);
+  assert.deepEqual(r.ledger.map((e) => [e.kind, e.delta, e.why]), [["nudge", -6, "he was rude"]]);
   assert.deepEqual(r.saidHas.map((x) => x.item), ["iron_ingot"]);
-  assert.equal(h.events.find((e) => e.kind === "relation" && e.by === "gist") !== undefined, true);
+  assert.deepEqual(h.events, [{ kind: "relation", event: "scored", partner: "Theo", scoreKind: "nudge", delta: -6, score: -6, why: "he was rude" }]);
 });
 
-test("the judge falls back when no model slot comes free in 2 minutes", async () => {
+test("bad nudge keeps the gist and moves nothing", async () => {
   const h = harness();
-  const s = snapshot();
-  h.state.slotFree = false;
-  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
-  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 11 * MIN;
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 119_000;
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 2_000;
-  await h.c.tick(s, new Set(), signal);
-  await h.c.settled();
-  assert.equal(h.chat.requests.length, 0);
-  assert.equal(h.book.get("Theo")!.feeling, 0);
-  assert.match(h.logs.join("\n"), /no model slot/u);
-  h.state.slotFree = true;
-  await h.c.tick(s, new Set(), signal);
-  await h.c.settled();
-  assert.equal(h.chat.requests.length, 0, "the skipped judgment is not asked later");
+  await h.c.onConversationEnded([{ name: "Theo", nudge: null, has: ["iron_ingot"], needs: [] }, { name: "Bruno", nudge: null, has: [], needs: [] }]);
+  const r = h.book.get("Theo")!;
+  assert.deepEqual([r.score, r.ledger.length], [0, 0]);
+  assert.deepEqual(r.saidHas.map((x) => x.item), ["iron_ingot"]);
+  assert.equal(h.book.get("Bruno"), null, "nothing said, nothing scored: no record");
+  assert.deepEqual(h.events, []);
 });
 
 test("owing does not block work: nothing is handed off before the agreement says so, and the tick is quick", async () => {
@@ -380,7 +376,7 @@ test("propose, decline and cancel move a trade through its states", async () => 
 test("block carries the records, nobody-gave and what the objective lacks", async () => {
   const h = harness();
   const s = snapshot();
-  h.book.load([newRelation("Theo", t0)]);
+  h.book.load([newRelation("Theo", t0, 0)]);
   await h.c.onDecision(decision({ first: "them" }), "Theo", s);
   h.state.now += 3 * MIN;
   await h.c.tick(s, new Set(), signal);
@@ -389,26 +385,6 @@ test("block carries the records, nobody-gave and what the objective lacks", asyn
   assert.match(block, /not dealt with Zed/u);
   assert.match(block, /Nobody has given yet.*Theo/u);
   assert.match(block, /lacks: iron_ingot x3/u);
-});
-
-test("the judge keeps waiting for a model slot for 2 minutes and then asks", async () => {
-  const h = harness();
-  const s = snapshot();
-  h.chat.reply({ feeling: 1, word: "fair", why: "paid late" });
-  h.state.slotFree = false;
-  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
-  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 11 * MIN;
-  await h.c.tick(s, new Set(), signal);
-  h.state.now += 119_000;
-  await h.c.tick(s, new Set(), signal);
-  assert.equal(h.chat.requests.length, 0);
-  h.state.slotFree = true;
-  await h.c.tick(s, new Set(), signal);
-  await h.c.settled();
-  assert.equal(h.chat.requests.length, 1);
-  assert.equal(h.book.get("Theo")!.word, "fair");
 });
 
 test("onDecision answers the trade id it recorded, and null when it recorded none", async () => {

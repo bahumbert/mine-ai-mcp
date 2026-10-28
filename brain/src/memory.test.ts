@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm } from "./memory.ts";
+import { newRelation } from "./relations/record.ts";
+import type { Relation } from "./relations/types.ts";
 
 const LIMITS = { places: 8, lately: 5, farms: 4, times: 3 };
 
@@ -81,8 +83,8 @@ test("a conversation is remembered as a sentence without the character, and the 
   assert.match(recallQuery("Ayla", LIMITS), /brain memory: conversation .*LIMIT 5/u);
 });
 
-const relationOf = (partner: string, lastDealt: number, word = "friend") => ({
-  partner, feeling: 1, word, why: "paid back", lastDealt, trades: [], saidHas: [], saidNeeds: [],
+const relationOf = (partner: string, lastDealt: number, score = 30): Relation => ({
+  ...newRelation(partner, lastDealt, 0), score, lastDealt,
   facts: { tradesDone: 1, promisesKept: 1, keptLate: 0, promisesBroken: 0, iFailedToPay: 0, giftsGiven: 0, giftsReceived: 0 },
 });
 
@@ -99,10 +101,18 @@ test("a relation note round trip", () => {
 
 test("relations recall caps at 30, newest dealt first, one per partner, skips a bad note and counts it", () => {
   const contexts = Array.from({ length: 35 }, (_, i) => memoryNote({ kind: "relation", relation: relationOf(`Bot${i}`, i) }).context);
-  const stale = memoryNote({ kind: "relation", relation: relationOf("Bot34", 1, "old") }).context;
+  const stale = memoryNote({ kind: "relation", relation: relationOf("Bot34", 1, -5) }).context;
   const recalled = recall([...contexts.toReversed(), "brain memory: relation:Zed {bad", stale], LIMITS);
   assert.equal(recalled.relations.length, 30);
   assert.deepEqual(recalled.relations.slice(0, 2).map((r) => r.partner), ["Bot34", "Bot33"]);
-  assert.equal(recalled.relations[0]?.word, "friend", "the newest note of a partner wins");
+  assert.equal(recalled.relations[0]?.score, 30, "the newest note of a partner wins");
   assert.equal(recalled.skipped, 1);
+});
+
+test("recall reads an old relation note", () => {
+  const { score: _score, scoredAt: _scoredAt, ledger: _ledger, requests: _requests, lastHurt: _lastHurt, ...old } = { ...relationOf("Theo", 5), feeling: -2, word: "wary", why: "he cheated" };
+  const recalled = recall([`brain memory: relation:Theo ${JSON.stringify({ kind: "relation", relation: old })}`], LIMITS);
+  assert.equal(recalled.skipped, 0);
+  assert.equal(recalled.relations[0]?.score, -60);
+  assert.equal(recalled.relations[0]?.ledger[0]?.kind, "earlier");
 });

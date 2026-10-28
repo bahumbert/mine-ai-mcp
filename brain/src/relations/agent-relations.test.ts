@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import type { Body } from "../body.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
-import { AgentRelations } from "./agent-relations.ts";
+import type { BotSnapshot } from "../runtime-client.ts";
+import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
+import { newRelation } from "./record.ts";
+import type { RelationEvent } from "./types.ts";
 
-function relationsWithClock() {
+function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
+  const rows: RelationEvent[] = [];
   const runtime = new FakeRuntime();
   let statusCalls = 0;
   const status = runtime.status.bind(runtime);
@@ -12,11 +16,12 @@ function relationsWithClock() {
   const clock = { now: () => time.at, sleep: async () => {} };
   const time = { at: 1_000_000 };
   const relations = new AgentRelations({
-    persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {}, modelSlotFree: () => true,
-    inConversationWith: () => false, isAgent: () => false, lacks: () => [], journal: () => {}, log: () => {}, clock,
+    persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
+    isAgent: () => false, lacks: () => [], journal: (event) => { if (event.kind === "relation") rows.push(event); }, log: () => {}, clock,
+    hearingRange: 32, isOnline: () => true, waitingFrom: () => false, ...over,
   });
   const look = async () => { relations.look(new Set(), new Set(), new AbortController().signal); await new Promise((r) => setTimeout(r, 5)); };
-  return { relations, time, look, calls: () => statusCalls };
+  return { relations, time, look, rows, calls: () => statusCalls };
 }
 
 const MIN = 60_000;
@@ -32,8 +37,8 @@ function relationsOverTime(t: TestContext) {
   const real = Date.now.bind(Date);
   t.mock.method(Date, "now", () => real() + time.offset);
   const relations = new AgentRelations({
-    persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {}, modelSlotFree: () => true,
-    inConversationWith: () => false, isAgent: () => false, lacks: () => [], log: (line) => logs.push(line),
+    persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
+    isAgent: () => false, lacks: () => [], log: (line) => logs.push(line), hearingRange: 32, isOnline: () => true, waitingFrom: () => false,
     journal: (event) => {
       if (journal.failOnReceived && event.kind === "trade" && event.event === "received") {
         journal.failOnReceived = false;
@@ -174,4 +179,146 @@ test("with only a window open look() polls status at most every 2 s", async () =
   time.at += 1;
   await look();
   assert.equal(calls(), 2);
+});
+
+/** A snapshot with the bot at the origin and the named players at the given x (null: online but not loaded). */
+const around = (players: Record<string, number | null>): BotSnapshot => ({
+  ...new FakeRuntime().snapshot, position: { x: 0, y: 64, z: 0 },
+  players: Object.entries(players).map(([username, x]) => ({ username, position: x === null ? null : { x, y: 64, z: 0 } })),
+});
+const refusal = (n = 1) => ({ say: "", route: "talk" as const, request: "", myRequest: { n, answer: "refused" as const } });
+
+test("a refusal heard scores the speaker", async () => {
+  const { relations, rows } = relationsWithClock();
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await relations.answered(refusal(), "Theo");
+  const theo = relations.book.get("Theo")!;
+  assert.deepEqual([theo.score, theo.requests, theo.ledger.map((e) => e.kind)], [-3, [], ["request_refused"]]);
+  assert.deepEqual(rows.map((r) => [r.scoreKind, r.delta, r.score]), [["request_refused", -3, -3]]);
+});
+
+test("an answer that names no open request moves nothing", async () => {
+  const { relations, rows } = relationsWithClock();
+  await relations.answered(refusal(), "Theo");
+  assert.equal(relations.book.get("Theo"), null, "no record is made for it");
+  relations.asked(["Theo"], "bread", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await relations.answered(refusal(2), "Theo");
+  assert.deepEqual([relations.book.get("Theo")?.requests.length, rows.length], [1, 0]);
+});
+
+test("an ignored request scores after 2 min with no brain tick in between", async () => {
+  const { relations, time, look, rows } = relationsWithClock();
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await look();
+  time.at += 110_000;
+  await look();
+  assert.equal(relations.book.get("Theo")!.ledger.length, 0, "not yet");
+  time.at += 10_000;
+  await look();
+  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  const theo = relations.book.get("Theo")!;
+  assert.deepEqual([theo.requests, theo.ledger[0]?.kind, theo.ledger[0]?.why], [[], "request_ignored", "did not answer when you asked for 5 oak_log"]);
+  assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
+  time.at += 10 * MIN;
+  await look();
+  assert.equal(relations.book.get("Theo")!.ledger.length, 1, "scored once");
+});
+
+test("out of range is never ignored", async () => {
+  const { relations, time, look } = relationsWithClock({ hearingRange: 32 });
+  relations.asked(["Theo"], "bread", null, around({ Theo: 80 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  assert.equal(relations.book.get("Theo")?.requests[0]?.inRange, false);
+  await look();
+  time.at += 10 * MIN;
+  await look();
+  await until(() => relations.book.get("Theo")!.requests.length === 0);
+  assert.equal(relations.book.get("Theo")!.ledger.length, 0);
+});
+
+test("whisper to an offline player is never ignored", async () => {
+  const online = new Set<string>();
+  const { relations, time, look } = relationsWithClock({ isOnline: (name) => online.has(name) });
+  relations.book.load([newRelation("Zed", time.at, 0)]);
+  relations.asked(["Zed"], "bread", "Zed", around({}));
+  await until(() => relations.book.get("Zed")?.requests.length === 1);
+  assert.equal(relations.book.get("Zed")?.requests[0]?.inRange, false, "offline: nobody heard the whisper");
+  relations.asked(["Theo"], "wool", "Theo", around({ Theo: null }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  assert.equal(relations.book.get("Theo")?.requests[0]?.inRange, true, "online but not loaded: a whisper reaches them");
+  online.add("Zed");
+  await look();
+  time.at += 10 * MIN;
+  await look();
+  await until(() => relations.book.get("Zed")!.requests.length === 0);
+  assert.equal(relations.book.get("Zed")!.ledger.length, 0);
+});
+
+test("a name that is neither in the book nor online asks nothing", async () => {
+  const { relations } = relationsWithClock();
+  relations.asked(["Nobody", "Ayla"], "bread", null, around({}));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual([relations.book.get("Nobody"), relations.book.get("Ayla")], [null, null]);
+});
+
+test("opening's asks_of opens a request", async () => {
+  const { relations } = relationsWithClock();
+  relations.forConversations().asked(["theo"], "iron_ingot", around({ Theo: 5 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  assert.deepEqual(relations.book.get("Theo")?.requests.map((q) => [q.what, q.inRange, q.agreed]), [["iron_ingot", true, false]]);
+});
+
+test("a reply stuck in the model queue is not ignored", async () => {
+  let waiting = true;
+  const { relations, time, look, rows } = relationsWithClock({ waitingFrom: () => waiting });
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await look();
+  time.at += 5 * MIN;
+  await look();
+  assert.deepEqual([relations.book.get("Theo")!.requests.length, rows.length], [1, 0], "their line is waiting for a model slot");
+  await relations.answered(refusal(), "Theo");
+  assert.deepEqual(rows.map((r) => r.scoreKind), ["request_refused"]);
+  waiting = false;
+  time.at += 10 * MIN;
+  await look();
+  assert.equal(relations.book.get("Theo")!.ledger.length, 1);
+});
+
+test("restart drops stale requests", () => {
+  const { relations, time } = relationsWithClock();
+  const stale = { ...newRelation("Theo", time.at - 10 * MIN, 0), requests: [{ what: "bread", at: time.at - 5 * MIN, inRange: true, agreed: false }, { what: "wool", at: time.at - 1_000, inRange: true, agreed: false }] };
+  relations.load({ relations: [stale], skipped: 0 });
+  assert.deepEqual(relations.book.get("Theo")?.requests.map((q) => q.what), ["wool"]);
+  assert.equal(relations.book.get("Theo")?.ledger.length, 0);
+});
+
+test("the chat block shows the speaker's open requests, numbered", async () => {
+  const { relations, time } = relationsWithClock();
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  time.at += 90_000;
+  const block = relations.chatBlock("Theo", [], around({ Theo: 3 }));
+  assert.deepEqual(block.requests, ["1. You asked Theo for 5 oak_log 1 min ago."]);
+  assert.deepEqual(relations.chatBlock("Bruno", [], around({})).requests, []);
+});
+
+test("a whisper makes only the one whispered to hear: the others it asks are out of range", async () => {
+  const { relations } = relationsWithClock();
+  relations.asked(["Ayla2", "Bob"], "bread", "Ayla2", around({ Ayla2: 2, Bob: 200 }));
+  await until(() => relations.book.get("Bob")?.requests.length === 1 && relations.book.get("Ayla2")?.requests.length === 1);
+  assert.deepEqual([relations.book.get("Ayla2")?.requests[0]?.inRange, relations.book.get("Bob")?.requests[0]?.inRange], [true, false]);
+});
+
+test("an answer journals only its own scored row, not one another writer queued before it", async () => {
+  const { relations, rows } = relationsWithClock();
+  relations.asked(["Theo"], "bread", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  rows.length = 0;
+  void relations.book.score("Theo", { kind: "trade_done", why: "paid" });
+  await relations.answered(refusal(), "Theo");
+  assert.deepEqual(rows.map((r) => r.scoreKind), ["request_refused"]);
 });

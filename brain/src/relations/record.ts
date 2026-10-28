@@ -1,17 +1,17 @@
-// The relationship record's rules: facts counted from ended trades, the model's feeling, what a partner said, the note form.
+// The relationship record's rules: facts counted from ended trades, what a partner said, the note form and its migration.
 import { z } from "zod";
 import { sideText } from "./items.ts";
+import { band, drifted } from "./score.ts";
 import { isOpen } from "./trade.ts";
-import { type GiveProgress, type ItemCount, type Judged, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type Trade } from "./types.ts";
+import { type Band, type GiveProgress, type ItemCount, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type ScoreEvent, type Scoring, type Trade } from "./types.ts";
 
 const KEPT_ENDED_TRADES = 3;
-const MAX_WORD = 20;
-const MAX_WHY = 200;
 
 const NO_FACTS: RelationFacts = { tradesDone: 0, promisesKept: 0, keptLate: 0, promisesBroken: 0, iFailedToPay: 0, giftsGiven: 0, giftsReceived: 0 };
 
-export function newRelation(partner: string, now: number): Relation {
-  return { partner, feeling: 0, word: "", why: "", facts: NO_FACTS, trades: [], saidHas: [], saidNeeds: [], lastDealt: now };
+/** Someone new: the score starts at the character's first impression. */
+export function newRelation(partner: string, now: number, firstImpression: number): Relation {
+  return { partner, score: firstImpression, scoredAt: now, ledger: [], requests: [], lastHurt: null, facts: NO_FACTS, trades: [], saidHas: [], saidNeeds: [], lastDealt: now };
 }
 
 /** Open trades plus the last few ended ones (by end time); the facts already count the rest. */
@@ -56,12 +56,6 @@ export function withEndedTrade(r: Relation, trade: Trade): Relation {
   const counted = before !== undefined && before.state === trade.state && before.brokenBy === trade.brokenBy;
   const facts = counted ? r.facts : factsOfEnd(r.facts, trade, before);
   return replaceTrade({ ...r, facts }, trade);
-}
-
-/** Stores the model's judgment: feeling rounded and clamped to -3..3, word and why trimmed. */
-export function withFeeling(r: Relation, judged: Judged): Relation {
-  const feeling = Number.isFinite(judged.feeling) ? Math.max(-3, Math.min(3, Math.round(judged.feeling))) + 0 : r.feeling;
-  return { ...r, feeling: Object.is(feeling, -0) ? 0 : feeling, word: judged.word.trim().slice(0, MAX_WORD), why: judged.why.trim().slice(0, MAX_WHY) };
 }
 
 function mergeSaid(old: readonly SaidItem[], said: readonly (ItemCount | string)[], now: number): SaidItem[] {
@@ -130,11 +124,38 @@ function describeSaid(partner: string, has: readonly SaidItem[], needs: readonly
   return out;
 }
 
+const LATELY_SHOWN = 3;
+
+/** What a band means for the prompt: the model reads it, no code decides by it. */
+function bandWords(b: Band, partner: string): string {
+  switch (b) {
+    case "enemy": return `you count ${partner} an enemy`;
+    case "dislike": return `you dislike ${partner}`;
+    case "neutral": return `you have no strong feeling about ${partner}`;
+    case "like": return `you like ${partner}`;
+    case "friend": return `you count ${partner} a friend`;
+  }
+}
+
+function agoText(at: number, now: number): string {
+  const minutes = minutesAgo(at, now);
+  if (minutes < 60) return `${minutes} min ago`;
+  return minutes < 1_440 ? `${Math.floor(minutes / 60)} h ago` : `${Math.floor(minutes / 1_440)} d ago`;
+}
+
+function eventText(e: ScoreEvent, now: number): string {
+  const delta = e.kind === "earlier" ? "" : `${e.delta > 0 ? "+" : ""}${e.delta} `;
+  return `${delta}${e.why} (${agoText(e.at, now)})`;
+}
+
 /** The text block the prompts use for one partner; a partner with no record reads as a stranger. */
-export function describeRelation(r: Relation | null, partner: string, now: number, progress?: (tradeId: string) => GiveProgress | undefined): string {
-  if (r === null) return `You have not dealt with ${partner} before.`;
-  const feel = `${r.feeling > 0 ? "+" : ""}${r.feeling}`;
-  const head = `You and ${partner}: ${r.word === "" ? "no opinion yet" : r.word} (${feel})${r.why === "" ? "" : `, ${r.why}`}.`;
+export function describeRelation(r: Relation | null, partner: string, now: number, scoring: Scoring, progress?: (tradeId: string) => GiveProgress | undefined): string {
+  const { bands } = scoring.score;
+  if (r === null) return `You have not dealt with ${partner} before; your first impression is that ${bandWords(band(scoring.temperament.firstImpression, bands), partner)}.`;
+  const current = drifted(r, now, scoring.temperament);
+  const shown = Math.round(current.score);
+  const lately = r.ledger.slice(-LATELY_SHOWN).reverse().map((e) => eventText(e, now));
+  const head = `You and ${partner}: ${shown}, ${bandWords(band(shown, bands), partner)}.${lately.length === 0 ? "" : ` Lately: ${lately.join("; ")}.`}`;
   const f = r.facts;
   const counts = `${f.tradesDone} trades done, ${f.keptLate} kept late, ${f.promisesBroken} broken` +
     `${f.iFailedToPay > 0 ? `, you failed to pay ${f.iFailedToPay}` : ""}${f.giftsGiven + f.giftsReceived > 0 ? `, gifts: ${f.giftsGiven} given, ${f.giftsReceived} received` : ""}.`;
@@ -151,18 +172,46 @@ const tradeSchema = z.object({
   endedAt: z.number().nullable(), brokenBy: z.enum(["me", "them"]).nullable(), late: z.boolean(), note: z.string(),
 });
 const said = z.object({ item: z.string(), count: z.number().nullable(), at: z.number() });
-export const relationSchema = z.object({
-  partner: z.string().min(1), feeling: z.number(), word: z.string(), why: z.string(),
+const scoreEvent = z.object({
+  kind: z.enum(["trade_done", "kept_late", "promise_broken", "gift_received", "request_helped", "request_refused", "request_ignored", "hurt", "nudge", "earlier"]),
+  delta: z.number(), why: z.string(), at: z.number(), tradeId: z.string().optional(),
+});
+const openRequest = z.object({ what: z.string(), at: z.number(), inRange: z.boolean(), agreed: z.boolean() });
+const relationBase = {
+  partner: z.string().min(1),
   facts: z.object({
     tradesDone: z.number(), promisesKept: z.number(), keptLate: z.number(), promisesBroken: z.number(),
     iFailedToPay: z.number(), giftsGiven: z.number(), giftsReceived: z.number(),
   }),
   trades: z.array(tradeSchema), saidHas: z.array(said), saidNeeds: z.array(said), lastDealt: z.number(),
-});
+};
+/** A version 1 note adds the model's feeling (-3..+3), word and why. */
+const relationV1 = z.object({ ...relationBase, feeling: z.number(), word: z.string(), why: z.string(), v: z.undefined().optional() });
+const MIGRATED_SCORE_PER_FEELING = 30;
 
-/** One runtime note per partner: the record as JSON, context `relation:<partner>`. */
+/** A version 1 note (the model's feeling -3..+3) becomes a score, its word and why the one "earlier" ledger event. */
+function migrate({ feeling, word, why, ...old }: Omit<z.infer<typeof relationV1>, "v">): Relation {
+  const score = Math.max(-100, Math.min(100, feeling * MIGRATED_SCORE_PER_FEELING));
+  const earlier = word === "" ? [] : [{ kind: "earlier" as const, delta: 0, why: `${word}: ${why}`, at: old.lastDealt }];
+  return { ...old, score: score === 0 ? 0 : score, scoredAt: old.lastDealt, ledger: earlier, requests: [], lastHurt: null };
+}
+
+const relationV2 = z.object({
+  ...relationBase, v: z.literal(2), score: z.number(), scoredAt: z.number(), ledger: z.array(scoreEvent),
+  requests: z.array(openRequest).default([]), lastHurt: z.number().nullable().default(null),
+}).transform(({ v: _version, ...relation }): Relation => relation);
+
+/** A note of either version; the memory recall reads relation notes through this too. */
+export const relationSchema = z.union([relationV2, relationV1.transform(({ v: _version, ...old }) => migrate(old))]);
+
+/** The record as it is written in a note: marked version 2, so it is not read as an old note. */
+export function versioned(r: Relation): Relation & { readonly v: 2 } {
+  return { v: 2, ...r };
+}
+
+/** One runtime note per partner: the record as JSON (version 2), context `relation:<partner>`. */
 export function relationNote(r: Relation): { note: string; context: string } {
-  return { note: JSON.stringify(r), context: `relation:${r.partner}` };
+  return { note: JSON.stringify(versioned(r)), context: `relation:${r.partner}` };
 }
 
 /** Reads a relation note; a bad one reads as no record (null), never throws. */

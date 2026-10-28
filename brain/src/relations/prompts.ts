@@ -1,10 +1,8 @@
 // What the model is told about relations and trades, and how its answers are read; the code states facts, the model decides.
 import { z } from "zod";
-import { personaPrompt } from "../llm-mind.ts";
 import type { GistPartner, TradeDecision } from "../mind.ts";
-import type { Persona } from "../persona.ts";
 import { describeRelation } from "./record.ts";
-import type { ItemCount, Judged, Relation, Trade } from "./types.ts";
+import type { Relation, Scoring } from "./types.ts";
 
 const MAX_SIDE_ENTRIES = 4;
 const MAX_COUNT = 64;
@@ -17,11 +15,14 @@ export function tradeInstructions(): string {
   Leave "trade" out when your line is no part of a swap.`;
 }
 
+/** What the model is told about a score: it shows in talk and in deeds, how much is the character's own. No threshold, no rule. */
+export const FEELING_SHOWS = "How you feel about someone shows in how you talk to them and in what you do for them; how much is yours, from your traits.";
+
 /** The record text of the speaker and the other members, and what the current objective lacks. */
 export function relationsBlock(summaries: readonly string[], lacks: readonly string[]): string {
   if (summaries.length === 0 && lacks.length === 0) return "";
   const lacking = lacks.length === 0 ? [] : [`Your current objective lacks: ${lacks.join(", ")}.`];
-  return [...(summaries.length === 0 ? [] : ["Your relations:", ...summaries]), ...lacking].join("\n");
+  return [...(summaries.length === 0 ? [] : ["Your relations:", FEELING_SHOWS, ...summaries]), ...lacking].join("\n");
 }
 
 /** The chat input's line for a speaker who is another agent out of trading reach: the model must not offer to walk to them. */
@@ -52,7 +53,7 @@ export function parseTrade(raw: unknown): TradeDecision | null {
 const text = (value: unknown, max: number): string => (typeof value === "string" ? value.trim().slice(0, max) : "");
 const words = (value: unknown): string[] => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : []);
 
-/** Reads the gist's `partners`: each good entry kept (its judgment only when its feeling is a number), bad ones dropped. */
+/** Reads the gist's `partners`: each good entry kept (its nudge only when it is a number), bad ones dropped. */
 export function parseGistPartners(raw: unknown): GistPartner[] {
   if (!Array.isArray(raw)) return [];
   const out: GistPartner[] = [];
@@ -61,43 +62,45 @@ export function parseGistPartners(raw: unknown): GistPartner[] {
     const e = item as Record<string, unknown>;
     const name = text(e.name, 64);
     if (name === "") continue;
-    const judged: Judged | null = typeof e.feeling === "number" && Number.isFinite(e.feeling) ? { feeling: e.feeling, word: text(e.word, 200), why: text(e.why, 1_000) } : null;
-    out.push({ name, judged, has: words(e.has), needs: words(e.needs) });
+    const nudge = typeof e.nudge === "number" && Number.isFinite(e.nudge) ? { value: e.nudge, why: text(e.why, 200) || "the conversation" } : null;
+    out.push({ name, nudge, has: words(e.has), needs: words(e.needs) });
   }
   return out;
 }
 
-const side$ = (items: readonly ItemCount[]): string => (items.length === 0 ? "nothing" : items.map((i) => `${i.count} ${i.item}`).join(", "));
+const MAX_ASKED = 5;
+const ANSWERS = ["agreed", "refused", "done"] as const;
 
-/** The judge call's system prompt: one judgment of a partner after a trade ended outside a conversation. */
-export function judgeSystemPrompt(persona: Persona): string {
-  return `${personaPrompt(persona)}
-
-A trade with someone has ended. Judge how you feel about them now, in character: what you know of them and what happened.
-Reply with only a JSON object {"feeling": 0, "word": "...", "why": "..."}.
-- "feeling": a whole number from -3 (dislike, distrust) to +3 (fondness, trust); 0 is neutral. How far it moves from what you felt is your own, from your traits: a forgiving character moves less (a little, or not at all), a resentful or grudge-holding one more (several steps).
-- "word": one word for how you see them. "why": one sentence, in your own words.`;
+/** The reply fields that open a request: whom my own line asks for items or help, and for what. */
+export function askFieldsInstructions(): string {
+  return `- "asks_of": the names your own line asks for items or for help (a request, an order; not a question); [] when it asks for nothing. "asks_what": what you ask, in a few words.`;
 }
 
-/** The judge call's request: the record with the partner, then the trade that just ended and how it ended. */
-export function describeJudge(input: { readonly persona: Persona; readonly partner: string; readonly block: string; readonly trade: Trade }): string {
-  const t = input.trade;
-  const how = t.state === "done" ? "completed" : t.state === "broken" ? `broken${t.brokenBy === "me" ? " by you" : ` by ${input.partner}`}` : t.state;
-  return `${input.block}\n\nThe trade with ${input.partner} just ended, ${how}${t.late ? " (paid late)" : ""}: you give ${side$(t.give)}, ${input.partner} gives ${side$(t.get)}, ${t.first === "me" ? "you" : input.partner} first.${t.note === "" ? "" : ` ${t.note}.`}`;
+/** The numbered requests I made of the speaker, and the field that says which one their new line answers. */
+export function requestsBlock(speaker: string, lines: readonly string[]): string {
+  if (lines.length === 0) return "";
+  return `Your requests to ${speaker}:\n${lines.join("\n")}\n- "my_request": only when the new message answers one of them: {"n": <its number>, "answer": "agreed" | "refused" | "done"} ("done": they say it is done or hand it over); leave it out otherwise.`;
 }
 
-const judgedSchema = z.object({ feeling: z.number(), word: z.string().default(""), why: z.string().default("") });
+/** Reads "asks_of" and "asks_what": the names that are strings (at most a few), and what; anything else asks nothing. */
+export function parseAsks(askOf: unknown, askWhat: unknown): { asksOf?: string[]; asksWhat?: string } {
+  const names = [...new Set(words(askOf).map((name) => name.slice(0, 64)))].slice(0, MAX_ASKED);
+  if (names.length === 0) return {};
+  return { asksOf: names, asksWhat: text(askWhat, 200) || "something" };
+}
 
-/** Reads the judge's reply; unusable is null (the feeling stays as it is). */
-export function parseJudged(raw: unknown): Judged | null {
-  const parsed = judgedSchema.safeParse(raw);
-  return parsed.success ? parsed.data : null;
+/** Reads "my_request": a whole number n >= 1 and one of the three answers; anything else answers nothing. */
+export function parseMyRequest(raw: unknown): { n: number; answer: (typeof ANSWERS)[number] } | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const { n, answer } = raw as Record<string, unknown>;
+  const known = ANSWERS.find((a) => a === answer);
+  return typeof n === "number" && Number.isInteger(n) && n >= 1 && known !== undefined ? { n, answer: known } : undefined;
 }
 
 /** One line per nearby partner for the opening request: their record, and what they said they have that the objective lacks. */
-export function openingRelationLines(entries: readonly { readonly partner: string; readonly relation: Relation | null }[], lacks: readonly string[], now: number): string[] {
+export function openingRelationLines(entries: readonly { readonly partner: string; readonly relation: Relation | null }[], lacks: readonly string[], now: number, scoring: Scoring): string[] {
   return entries.map(({ partner, relation }) => {
     const wanted = relation === null ? [] : relation.saidHas.map((s) => s.item).filter((item) => lacks.some((lack) => lack.includes(item)));
-    return `${describeRelation(relation, partner, now)}${wanted.length === 0 ? "" : ` You lack ${wanted.join(", ")}.`}`;
+    return `${describeRelation(relation, partner, now, scoring)}${wanted.length === 0 ? "" : ` You lack ${wanted.join(", ")}.`}`;
   });
 }

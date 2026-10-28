@@ -2,6 +2,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn, type CompleteOptions } from "./chat-model.ts";
 import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
+import { scoringOf } from "./relations/score.ts";
+import type { Scoring } from "./relations/types.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 import { sameDimension } from "./bot-data-sql.ts";
@@ -512,7 +514,7 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 }, relations: { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 } },
+    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 }, conversation: { sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20, silenceSeconds: 60, groupReplyJitterMs: [0, 0], openingDistance: 16, stayingDistance: 32 }, relations: { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32, temperament: { firstImpression: 0, sensitivity: 1, forgiveness: 5 }, score: { amounts: { tradeDone: 8, keptLate: 3, promiseBroken: -20, giftReceived: 10, requestHelped: 6, requestRefused: -3, requestIgnored: -5, hurt: -25 }, nudgeMax: 10, ledgerSize: 10, bands: { enemy: -60, dislike: -20, like: 20, friend: 60 }, requestAnswerMinutes: 2, hurtDebounceSeconds: 60 } } },
     models: {},
     ...overrides,
   };
@@ -584,4 +586,9 @@ export async function until(condition: () => boolean, timeoutMs = 2_000): Promis
     if (Date.now() > deadline) throw new Error("condition not reached in time");
     await sleep(5);
   }
+}
+
+/** The default score amounts and temperament, as a persona without overrides has them. */
+export function testScoring(): Scoring {
+  return scoringOf(testPersona().settings.relations);
 }

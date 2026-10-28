@@ -52,7 +52,7 @@ test("trade and relation events are written as they are", () => {
   const log = new BrainLog(path);
   const events = [
     { kind: "trade", event: "agreed", partner: "Theo", tradeId: "Ayla-Theo-1", give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "me", note: "" },
-    { kind: "relation", event: "judged", partner: "Theo", from: 0, to: -2, word: "wary", why: "short payment", by: "judge" },
+    { kind: "relation", event: "scored", partner: "Theo", scoreKind: "promise_broken", delta: -20, score: -20, why: "did not pay 2 of 3 bread" },
   ] as const;
   for (const event of events) log.write(event, new Date("2026-10-19T12:00:00Z"));
   assert.deepEqual(lines(path).map(({ seq: _seq, at: _at, ...event }) => event), events);

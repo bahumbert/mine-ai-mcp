@@ -1,4 +1,5 @@
 // Shapes of the relations and trading feature (no logic): a relationship record per partner and the trades in it.
+import type { Persona } from "../persona.ts";
 
 export interface ItemCount {
   readonly item: string;
@@ -50,14 +51,60 @@ export interface SaidItem {
   readonly at: number;
 }
 
+export type ScoreKind = "trade_done" | "kept_late" | "promise_broken" | "gift_received"
+  | "request_helped" | "request_refused" | "request_ignored" | "hurt" | "nudge" | "earlier";
+
+/** One thing that moved a score; `delta` is what was actually applied (clamping included). */
+export interface ScoreEvent {
+  readonly kind: ScoreKind;
+  readonly delta: number;
+  readonly why: string;
+  readonly at: number;
+  /** The trade a `promise_broken` or `kept_late` belongs to. */
+  readonly tradeId?: string;
+}
+
+/** What I asked of a partner and have no answer to yet. */
+export interface OpenRequest {
+  readonly what: string;
+  readonly at: number;
+  /** The partner was within hearing when I asked. */
+  readonly inRange: boolean;
+  readonly agreed: boolean;
+}
+
+export type Temperament = Persona["settings"]["relations"]["temperament"];
+export type ScoreSettings = Persona["settings"]["relations"]["score"];
+
+/** What turns an event into a score change: the amounts and this character's temperament. */
+export interface Scoring {
+  readonly score: ScoreSettings;
+  readonly temperament: Temperament;
+}
+
+/** An event to score; `nudge` is the model's value for kind "nudge". */
+export interface ScoreInput {
+  readonly kind: ScoreKind;
+  readonly why: string;
+  readonly nudge?: number;
+  readonly tradeId?: string;
+}
+
+/** Words for a score in prompts only; no code decides by a band (Rule #0). */
+export type Band = "enemy" | "dislike" | "neutral" | "like" | "friend";
+
 export interface Relation {
   readonly partner: string;
-  /** -3..+3, set by the model only; 0 for someone new. */
-  readonly feeling: number;
-  /** The model's word ("friend", "wary"); "" for someone new. */
-  readonly word: string;
-  /** One sentence, the model's. */
-  readonly why: string;
+  /** -100..100, with fractions (drift is exact); shown rounded. One way: my opinion of them. */
+  readonly score: number;
+  /** Wall clock ms of the last drift applied to `score`. */
+  readonly scoredAt: number;
+  /** The latest events that moved the score, newest last. */
+  readonly ledger: readonly ScoreEvent[];
+  /** What I asked of them and have no answer to yet (at most 3). */
+  readonly requests: readonly OpenRequest[];
+  /** When a hurt by them was last scored (the debounce); null before any. */
+  readonly lastHurt: number | null;
   readonly facts: RelationFacts;
   /** Open trades plus the last 3 ended ones. */
   readonly trades: readonly Trade[];
@@ -87,13 +134,6 @@ export interface TradeSettings {
   readonly tradeReach: number;
 }
 
-/** The model's judgment of a partner. */
-export interface Judged {
-  readonly feeling: number;
-  readonly word: string;
-  readonly why: string;
-}
-
 /** Journal row for a trade's step (read by the monitor). */
 export interface TradeEvent {
   readonly kind: "trade";
@@ -106,14 +146,13 @@ export interface TradeEvent {
   readonly note: string;
 }
 
-/** Journal row for a feeling the model set. */
+/** Journal row for an event that moved a score (read by the monitor). */
 export interface RelationEvent {
   readonly kind: "relation";
-  readonly event: "judged";
+  readonly event: "scored";
   readonly partner: string;
-  readonly from: number;
-  readonly to: number;
-  readonly word: string;
+  readonly scoreKind: ScoreKind;
+  readonly delta: number;
+  readonly score: number;
   readonly why: string;
-  readonly by: "gist" | "judge";
 }

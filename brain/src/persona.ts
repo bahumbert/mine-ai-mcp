@@ -32,6 +32,8 @@ export type Tier = (typeof TIERS)[number];
 
 const modelId = z.string().trim().min(1);
 
+/** The points one kind of relations event moves a score by: a whole number, -100 to 100. */
+const scoreAmount = (fallback: number) => z.number().int().min(-100).max(100).default(fallback);
 /** A feeling's pull in the activity draw: 0 (never) to 10. */
 const feelingMultiplier = (fallback: number) => z.number().min(0).max(10).default(fallback);
 
@@ -143,6 +145,35 @@ export const personaSchema = z.strictObject({
       maxOpenTrades: z.number().int().min(1).max(20).default(3),
       /** A trade partner counts only when seen and at most this many blocks away (Manhattan). */
       tradeReach: z.number().int().min(1).max(256).default(32),
+      /** How this character takes what happens with someone (spec 2026-10-28-relationships-step1-design). */
+      temperament: z.strictObject({
+        /** The score of someone new, and what a score drifts back to. */
+        firstImpression: z.number().int().min(-30).max(30).default(0),
+        /** Multiplies the amount of every score event. */
+        sensitivity: z.number().min(0.2).max(3).default(1),
+        /** Score points per hour the score drifts back towards the first impression. */
+        forgiveness: z.number().min(0).max(50).default(5),
+      }).prefault({}),
+      /** The one-way score of each partner, -100..100: what moves it and by how much. */
+      score: z.strictObject({
+        amounts: z.strictObject({
+          tradeDone: scoreAmount(8), keptLate: scoreAmount(3), promiseBroken: scoreAmount(-20), giftReceived: scoreAmount(10),
+          requestHelped: scoreAmount(6), requestRefused: scoreAmount(-3), requestIgnored: scoreAmount(-5), hurt: scoreAmount(-25),
+        }).prefault({}),
+        /** The largest change one conversation's nudge makes (before sensitivity). */
+        nudgeMax: z.number().int().min(0).max(50).default(10),
+        /** Events kept in a relation's ledger. */
+        ledgerSize: z.number().int().min(3).max(30).default(10),
+        /** Only words the score in prompts ("you dislike him"); no code decides by them. */
+        bands: z.strictObject({
+          enemy: z.number().int().min(-100).max(100).default(-60), dislike: z.number().int().min(-100).max(100).default(-20),
+          like: z.number().int().min(-100).max(100).default(20), friend: z.number().int().min(-100).max(100).default(60),
+        }).refine((b) => b.enemy < b.dislike && b.dislike < b.like && b.like < b.friend, "bands must rise: enemy < dislike < like < friend").prefault({}),
+        /** Minutes a request waits for any answer before it counts as ignored. */
+        requestAnswerMinutes: z.number().min(0.5).max(60).default(2),
+        /** Seconds within which hits by one attacker count as one hurt. */
+        hurtDebounceSeconds: z.number().min(1).max(600).default(60),
+      }).prefault({}),
     }).prefault({}),
   }).prefault({}),
   /** Per-tier model ids for this character; missing tiers use the `MINE_AI_LLM_<TIER>_MODEL` defaults. */

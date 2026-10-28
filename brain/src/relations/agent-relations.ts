@@ -1,6 +1,7 @@
 // What an agent holds for relations: the book (saved as notes), the trade controller, and the calls the agent makes into them.
 import type { Body } from "../body.ts";
 import type { ConversationRelations } from "../conversation/controller.ts";
+import { manhattan } from "../conversation/state.ts";
 import { realClock, type Clock } from "../conversation/socialise.ts";
 import { memoryNote, relationContextPrefix, relationNotesQuery, type Memory, type Recalled } from "../memory.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
@@ -13,11 +14,18 @@ import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { openingRelationLines, tooFarLine } from "./prompts.ts";
+import { expireRequests, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
+import { newScoredRows, scoringOf } from "./score.ts";
 import { reachOf } from "./trading.ts";
-import type { ItemCount, RelationEvent, TradeEvent } from "./types.ts";
+import type { ItemCount, Relation, RelationEvent, TradeEvent } from "./types.ts";
 
 /** With only a player's window open (no trade), the tick runs this often at most: it only watches for a payment tossed before the deal. */
 const WATCH_LOOK_MS = 2_000;
+
+/** Open requests are looked at for running out this often at most (wall clock). */
+const REQUEST_CHECK_MS = 5_000;
+
+const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 export type LookAnswer = "ticked" | "busy_wait" | "idle";
 
@@ -28,8 +36,6 @@ export interface AgentRelationsDeps {
   readonly body: Body;
   /** The agent puts the hand-off on its stack. */
   readonly takeHandoff: (h: Handoff) => void;
-  readonly modelSlotFree: () => boolean;
-  readonly inConversationWith: (name: string) => boolean;
   /** Whether the name is another agent (a bot of the project), not a player. */
   readonly isAgent: (name: string) => boolean;
   /** What the running objective lacks, as the chat tier is told; the inventory of the snapshot at hand, else the last one looked at. */
@@ -40,6 +46,12 @@ export interface AgentRelationsDeps {
   readonly clock?: Clock;
   /** The brain's trade board, when the characters of one process trade with each other. */
   readonly board?: TradeBoard;
+  /** Blocks (Manhattan) my talk carries: Localized Chat's range when the server has it, else the staying distance. */
+  readonly hearingRange: number;
+  /** Whether the player is in the game now (at the agent's last look). */
+  readonly isOnline: (name: string) => boolean;
+  /** A line from that name is in the inbox or its chat decision is still running. */
+  readonly waitingFrom: (name: string) => boolean;
 }
 
 export class AgentRelations {
@@ -49,19 +61,25 @@ export class AgentRelations {
   private writes: Promise<unknown> = Promise.resolve();
   private looking = false;
   private lastLookAt = 0;
+  private lastRequestCheckAt = 0;
 
   constructor(private readonly deps: AgentRelationsDeps) {
     const { persona, log } = deps;
-    this.book = new RelationBook({ save: (memory) => this.queue(() => this.saveNote(memory)), remove: (context) => this.queue(() => this.forgetNotes(context)), now: () => Date.now(), log });
+    this.book = new RelationBook({ save: (memory) => this.queue(() => this.saveNote(memory)), remove: (context) => this.queue(() => this.forgetNotes(context)), now: () => this.now(), log, scoring: scoringOf(persona.settings.relations) });
     this.trades = new TradeController({
-      self: persona.username, persona, book: this.book, mind: deps.mind, settings: persona.settings.relations, now: () => Date.now(),
-      takeHandoff: deps.takeHandoff, modelSlotFree: deps.modelSlotFree, inConversationWith: deps.inConversationWith, journal: deps.journal, log, ...(deps.board !== undefined && { board: deps.board }),
+      self: persona.username, persona, book: this.book, settings: persona.settings.relations, now: () => Date.now(),
+      takeHandoff: deps.takeHandoff, journal: deps.journal, log, ...(deps.board !== undefined && { board: deps.board }),
     });
   }
 
-  /** The records recalled at start. */
+  private now(): number {
+    return (this.deps.clock ?? realClock).now();
+  }
+
+  /** The records recalled at start; requests that ran out while the brain was away are dropped (nobody watched the wait). */
   load(recalled: Pick<Recalled, "relations" | "skipped">): void {
-    this.book.load(recalled.relations);
+    const { requestAnswerMinutes } = this.book.scoring.score;
+    this.book.load(recalled.relations.map((r) => expireRequests(r, this.now(), requestAnswerMinutes, { atLoad: true }).relation));
     if (recalled.skipped > 0) this.deps.log(`could not read ${recalled.skipped} relation note(s): skipped`);
     this.deps.log(`remembers ${recalled.relations.length} relation(s)`);
   }
@@ -71,7 +89,8 @@ export class AgentRelations {
     const { inReach, away } = reachOf(speaker, snapshot, this.deps.persona.settings.relations.tradeReach);
     // Another agent out of reach: it is told not to offer a walk to them (a player is gone to at any distance).
     const tooFar = this.deps.isAgent(speaker) && !inReach ? tooFarLine(speaker, away) : "";
-    return { block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar].filter((part) => part !== "").join("\n"), tradeOn: true };
+    const mine = this.book.get(speaker);
+    return { block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar].filter((part) => part !== "").join("\n"), tradeOn: true, requests: mine === null ? [] : requestLines(mine, speaker, this.now()) };
   }
 
   /** A reply that carries a trade: the trade is checked, and sent back once when the checks refuse it. */
@@ -88,6 +107,53 @@ export class AgentRelations {
     });
   }
 
+  /** The speaker's line answered one of my open requests: a refusal or a done scores in the same write that closes it. */
+  async answered(decision: ChatDecision, speaker: string): Promise<void> {
+    const mine = decision.myRequest;
+    if (mine === undefined) return;
+    const before = this.book.get(speaker);
+    if (before === null || before.requests[mine.n - 1] === undefined) return void this.deps.log(`my_request ${mine.n} (${mine.answer}) from ${speaker} names no open request: ignored`);
+    await this.scoredUpdate(speaker, (r) => answerRequest(r, mine.n, mine.answer, this.now(), this.book.scoring))
+      .catch((error: unknown) => this.deps.log(`could not note ${speaker}'s answer to my request: ${String(error)}`));
+  }
+
+  /** One book update that journals a row for each event it added, and only those (rows are told apart inside the update, so a change queued by another writer is not counted twice). */
+  private async scoredUpdate(partner: string, change: (r: Relation) => Relation): Promise<void> {
+    let rows: RelationEvent[] = [];
+    await this.book.update(partner, (r) => {
+      const next = change(r);
+      rows = newScoredRows(r, next);
+      return next;
+    });
+    for (const row of rows) this.deps.journal(row);
+  }
+
+  /** My own line asked these characters for something: each becomes an open request (heard, or not, when it was said). */
+  asked(names: readonly string[], what: string, whisperTo: string | null, snapshot: BotSnapshot): void {
+    const now = this.now();
+    for (const name of names) {
+      const online = snapshot.players.find((p) => same(p.username, name));
+      const known = this.book.get(name);
+      if (same(name, this.deps.persona.username) || (online === undefined && known === null)) continue;
+      const heard = online !== undefined && ((whisperTo !== null && same(whisperTo, name)) || (online.position !== null && manhattan(online.position, snapshot.position) <= this.deps.hearingRange));
+      void this.book.update(online?.username ?? known?.partner ?? name, (r) => openRequest(r, what, now, heard)).catch((error: unknown) => this.deps.log(`could not note my request to ${name}: ${String(error)}`));
+    }
+  }
+
+  /** Requests that ran out are closed and the ignored ones score, as the clock says (no model call, no brain tick needed). */
+  private expireOpenRequests(): void {
+    const now = this.now();
+    if (now - this.lastRequestCheckAt < REQUEST_CHECK_MS) return;
+    this.lastRequestCheckAt = now;
+    const { requestAnswerMinutes } = this.book.scoring.score;
+    for (const r of this.book.records()) {
+      const o = { waiting: this.deps.waitingFrom(r.partner), offline: !this.deps.isOnline(r.partner) };
+      if (expireRequests(r, now, requestAnswerMinutes, o).relation === r) continue;
+      void this.scoredUpdate(r.partner, (current) => withExpiredRequests(current, now, this.book.scoring, o))
+        .catch((error: unknown) => this.deps.log(`could not close my requests to ${r.partner}: ${String(error)}`));
+    }
+  }
+
   /** A `give_item` step ended done outside a hand-off: it counts toward my side of the open trade with that player. */
   gaveOutside(player: string, item: string, count: number): void {
     void this.trades.gaveOutside(player, item, count).catch((error: unknown) => this.deps.log(`could not count a give to ${player} in the trade: ${String(error)}`));
@@ -97,7 +163,8 @@ export class AgentRelations {
   forConversations(): ConversationRelations {
     return {
       blocksFor: (names) => names.map((name) => ({ name, block: this.book.summaries([name], (id) => this.trades.giveProgress(id))[0] ?? "" })),
-      openingLines: (names) => openingRelationLines(names.map((partner) => ({ partner, relation: this.book.get(partner) })), this.deps.lacks(), Date.now()),
+      openingLines: (names) => openingRelationLines(names.map((partner) => ({ partner, relation: this.book.get(partner) })), this.deps.lacks(), Date.now(), this.book.scoring),
+      asked: (names, what, snapshot) => this.asked(names, what, null, snapshot),
       ended: (partners) => void this.trades.onConversationEnded(partners).catch((error: unknown) => this.deps.log(`could not note a conversation's judgments: ${String(error)}`)),
     };
   }
@@ -112,7 +179,8 @@ export class AgentRelations {
    * "ticked": a tick started with the yields; "idle": nothing is open, so no gain is counted; "busy_wait": a tick runs or the watch throttle skipped it, so the yields must wait for the next look.
    */
   look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): LookAnswer {
-    const now = (this.deps.clock ?? realClock).now();
+    const now = this.now();
+    if (!signal.aborted) this.expireOpenRequests();
     if (signal.aborted || !this.trades.busy()) {
       this.trades.forgetSeen();
       return "idle";
@@ -187,7 +255,7 @@ export class AgentRelations {
   }
 
   private async saveNote(memory: Memory): Promise<void> {
-    const outcome = await this.deps.body.act("note_save", memoryNote(memory), "Remember what I know of this character.");
+    const outcome = await this.deps.body.act("note_save", memoryNote(memory, this.book.scoring), "Remember what I know of this character.");
     if (outcome.status !== "succeeded") this.deps.log(`could not save a relation (${outcome.status}): ${outcome.error ?? ""}`);
   }
 

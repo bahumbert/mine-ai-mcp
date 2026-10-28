@@ -444,13 +444,13 @@ test("two controllers: both openings resolve before either line is heard, one op
 
 test("gist partners reach the book, and the gist prompt carries the records", async () => {
   const ended: GistPartner[][] = [];
-  const t = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations: { blocksFor: (names) => names.map((name) => ({ name, block: `You and ${name}: new.` })), openingLines: () => [], ended: (partners) => ended.push([...partners]) } });
-  t.chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 1, word: "friend", why: "fair", has: ["iron_ingot"], needs: [] }] });
+  const t = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations: { blocksFor: (names) => names.map((name) => ({ name, block: `You and ${name}: new.` })), openingLines: () => [], asked: () => {}, ended: (partners) => ended.push([...partners]) } });
+  t.chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", nudge: 3, why: "fair", has: ["iron_ingot"], needs: [] }] });
   t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
   t.clock.now += 5_000;
   t.controller.said(true);
   await t.controller.finished();
-  assert.deepEqual(ended, [[{ name: "Theo", judged: { feeling: 1, word: "friend", why: "fair" }, has: ["iron_ingot"], needs: [] }]]);
+  assert.deepEqual(ended, [[{ name: "Theo", nudge: { value: 3, why: "fair" }, has: ["iron_ingot"], needs: [] }]]);
   assert.match(t.chat.requests[0]?.[0]?.content ?? "", /"partners"/u);
   assert.match(t.chat.requests[0]?.[1]?.content ?? "", /You and Theo: new\./u);
   assert.equal(t.memories[0]?.talk.gist, "Talked iron.");
@@ -458,7 +458,7 @@ test("gist partners reach the book, and the gist prompt carries the records", as
 
 test("a gist with no partners leaves the feelings alone, and the fallback gist never reaches the book", async () => {
   const ended: GistPartner[][] = [];
-  const relations = { blocksFor: () => [], openingLines: () => [], ended: (partners: readonly GistPartner[]) => ended.push([...partners]) };
+  const relations = { blocksFor: () => [], openingLines: () => [], asked: () => {}, ended: (partners: readonly GistPartner[]) => ended.push([...partners]) };
   const plain = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations });
   plain.chat.reply({ gist: "Talked iron." });
   plain.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
@@ -666,4 +666,17 @@ test("two bots at cap 2: after both talks end, a third opening gets a slot", asy
   await Promise.all(bots.map((bot) => bot.controller.finished()));
   assert.equal(budget.active, 0);
   assert.equal(await third.controller.openSocial("Theo", THEO_NEAR.position, third.facts(third.theoAt(3)), signal, 500), true);
+});
+
+test("an opening that asks someone it speaks to for something tells the relations, those not spoken to excepted", async () => {
+  const asked: { names: readonly string[]; what: string }[] = [];
+  const relations = { blocksFor: () => [], openingLines: () => [], asked: (names: readonly string[], what: string) => asked.push({ names, what }), ended: () => {} };
+  const t = setup({ relations });
+  t.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo", "Bruno"], asks_what: "some iron" });
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(5)), signal), true);
+  assert.deepEqual(asked, [{ names: ["Theo"], what: "some iron" }]);
+  const plain = setup({ relations });
+  plain.chat.reply({ ...OPEN, say: "Theo, how is the mine?" });
+  assert.equal(await plain.controller.maybeOpen(plain.facts(plain.theoAt(5)), signal), true);
+  assert.equal(asked.length, 1, "an opening that asks nothing opens no request");
 });

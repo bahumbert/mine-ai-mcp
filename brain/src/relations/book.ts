@@ -1,8 +1,9 @@
 // The agent's book of relations: records in memory, saved as one runtime note per partner, writes serialised per partner.
 import type { Memory } from "../memory.ts";
 import { describeRelation, newRelation, relationNote } from "./record.ts";
+import { withScoreEvent } from "./score.ts";
 import { isOpen } from "./trade.ts";
-import type { GiveProgress, Relation, Trade } from "./types.ts";
+import type { GiveProgress, Relation, ScoreInput, Scoring, Trade } from "./types.ts";
 
 export interface RelationBookDeps {
   save(memory: Memory): Promise<void>;
@@ -10,6 +11,8 @@ export interface RelationBookDeps {
   remove(context: string): Promise<void>;
   now(): number;
   log(line: string): void;
+  /** The amounts and the character's temperament that turn an event into a score change. */
+  scoring: Scoring;
 }
 
 const keyOf = (partner: string) => partner.toLowerCase();
@@ -21,6 +24,11 @@ export class RelationBook {
   private readonly queues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: RelationBookDeps) {}
+
+  /** What scores are made of; a caller that changes a record and scores it does both in one `update`. */
+  get scoring(): Scoring {
+    return this.deps.scoring;
+  }
 
   /** Takes the records recalled from the notes. */
   load(relations: readonly Relation[]): void {
@@ -46,8 +54,13 @@ export class RelationBook {
     return run;
   }
 
+  /** Drifts the partner's score to now, applies one event and saves the note; serialised with every other update of the partner. */
+  score(partner: string, e: ScoreInput): Promise<Relation> {
+    return this.update(partner, (r) => withScoreEvent(r, e, this.deps.now(), this.deps.scoring));
+  }
+
   private async apply(key: string, partner: string, change: (r: Relation) => Relation): Promise<Relation> {
-    const next = change(this.relations.get(key) ?? newRelation(partner, this.deps.now()));
+    const next = change(this.relations.get(key) ?? newRelation(partner, this.deps.now(), this.deps.scoring.temperament.firstImpression));
     this.relations.set(key, next);
     const memory: Memory = { kind: "relation", relation: next };
     try {
@@ -58,6 +71,11 @@ export class RelationBook {
       this.deps.log(`could not save the relation with ${partner}: ${String(error)}`);
     }
     return next;
+  }
+
+  /** Every record the book holds. */
+  records(): Relation[] {
+    return [...this.relations.values()];
   }
 
   /** Every trade kept with every partner: the open ones and the last ended ones. */
@@ -72,6 +90,6 @@ export class RelationBook {
 
   /** The prompt text for each partner (a stranger reads as not dealt with). */
   summaries(partners: readonly string[], progress?: (tradeId: string) => GiveProgress | undefined): string[] {
-    return partners.map((p) => describeRelation(this.get(p), p, this.deps.now(), progress));
+    return partners.map((p) => describeRelation(this.get(p), p, this.deps.now(), this.deps.scoring, progress));
   }
 }

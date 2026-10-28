@@ -89,11 +89,37 @@ test("conversation settings default", () => {
 
 test("relations settings default", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
-  const defaults = { enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
+  const defaults = {
+    enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32,
+    temperament: { firstImpression: 0, sensitivity: 1, forgiveness: 5 },
+    score: {
+      amounts: { tradeDone: 8, keptLate: 3, promiseBroken: -20, giftReceived: 10, requestHelped: 6, requestRefused: -3, requestIgnored: -5, hurt: -25 },
+      nudgeMax: 10, ledgerSize: 10, bands: { enemy: -60, dislike: -20, like: 20, friend: 60 }, requestAnswerMinutes: 2, hurtDebounceSeconds: 60,
+    },
+  };
   assert.deepEqual(personaSchema.parse(base).settings.relations, defaults);
   assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { payBackMinutes: 0 } } }).success, false);
   assert.deepEqual(personaSchema.parse({ ...base, settings: { relations: { payBackMinutes: 20 } } }).settings.relations, { ...defaults, payBackMinutes: 20 });
   assert.equal(personaSchema.parse({ ...base, settings: { relations: { enabled: false } } }).settings.relations.enabled, false);
+});
+
+test("bands out of order are refused", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const withBands = (bands: object) => personaSchema.safeParse({ ...base, settings: { relations: { score: { bands } } } }).success;
+  assert.equal(withBands({ enemy: -10, dislike: -20 }), false);
+  assert.equal(withBands({ like: 70 }), false);
+  assert.equal(withBands({ enemy: -80, dislike: -30, like: 10, friend: 50 }), true);
+});
+
+test("temperament and score amounts are bounded", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const ok = (relations: object) => personaSchema.safeParse({ ...base, settings: { relations } }).success;
+  assert.equal(ok({ temperament: { sensitivity: 0.1 } }), false);
+  assert.equal(ok({ temperament: { firstImpression: 31 } }), false);
+  assert.equal(ok({ temperament: { forgiveness: 51 } }), false);
+  assert.equal(ok({ temperament: { firstImpression: -30, sensitivity: 3, forgiveness: 0 } }), true);
+  assert.equal(ok({ score: { ledgerSize: 2 } }), false);
+  assert.equal(ok({ score: { amounts: { hurt: -101 } } }), false);
 });
 
 test("relations tradeReach defaults to 32 and must be 1 to 256", () => {

@@ -26,6 +26,8 @@ export class Inbox {
   /** The sequence number of each speaker's (lower case) latest line, and the count so far. */
   private readonly latest = new Map<string, number>();
   private seq = 0;
+  /** Speakers (lower case) whose line was taken and is being decided: a count each. */
+  private readonly held = new Map<string, number>();
 
   constructor(private readonly burstMs: number, private readonly now: () => number = Date.now) {}
 
@@ -67,6 +69,23 @@ export class Inbox {
     if (this.bursts.length === 0) return null;
     const now = this.now();
     return Math.max(0, Math.min(...this.bursts.map((burst) => burst.last + this.burstMs - now)));
+  }
+
+  /** Marks a line of `speaker` as being decided until the returned release is called. */
+  hold(speaker: string): () => void {
+    const name = speaker.toLowerCase();
+    this.held.set(name, (this.held.get(name) ?? 0) + 1);
+    return () => {
+      const left = (this.held.get(name) ?? 1) - 1;
+      if (left <= 0) this.held.delete(name);
+      else this.held.set(name, left);
+    };
+  }
+
+  /** Whether a line of `speaker` waits to be taken or is being decided. */
+  hasFrom(speaker: string): boolean {
+    const name = speaker.toLowerCase();
+    return this.held.has(name) || this.bursts.some((burst) => burst.speaker === name);
   }
 
   /** Whether `speaker` said something after the message `since` (its {@link Heard.seq}) was taken. */

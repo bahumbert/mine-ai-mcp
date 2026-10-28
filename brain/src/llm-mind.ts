@@ -4,9 +4,8 @@ import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type JudgeInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type TradeDecision, type WorkDecision, type WorkInput } from "./mind.ts";
-import { describeJudge, judgeSystemPrompt, parseGistPartners, parseJudged, parseTrade, tradeInstructions } from "./relations/prompts.ts";
-import type { Judged } from "./relations/types.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type TradeDecision, type WorkDecision, type WorkInput } from "./mind.ts";
+import { askFieldsInstructions, parseAsks, parseGistPartners, parseMyRequest, parseTrade, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -89,6 +88,10 @@ const chatReplySchema = z.object({
   close: z.boolean().optional(),
   // Only offered when relations are on: read by `parseTrade`, a malformed one is dropped.
   trade: z.unknown().optional(),
+  // Only offered when relations are on: read by `parseAsks` / `parseMyRequest`, a malformed one is dropped.
+  asks_of: z.unknown().optional(),
+  asks_what: z.unknown().optional(),
+  my_request: z.unknown().optional(),
   route: z.enum(ROUTES),
   // Where the request happens; the code writes the coordinates itself.
   place: z.enum(PLACES).optional(),
@@ -114,6 +117,8 @@ const openingReplySchema = z.object({
   topic: z.string().default(""),
   length: z.enum(["short", "medium", "long"]).default("short"),
   say: z.string().default(""),
+  asks_of: z.unknown().optional(),
+  asks_what: z.unknown().optional(),
 });
 const gistReplySchema = z.object({ gist: z.string().default(""), partners: z.unknown().optional() });
 
@@ -229,7 +234,7 @@ export class LlmMind implements Mind {
         ...(this.localizedChat !== undefined && !inTalk && reply.shout === true && { shout: true }),
         ...(inTalk && reply.close === true && { close: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
-        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...tradeOf(input, reply.trade),
+        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...tradeOf(input, reply.trade), ...requestsOf(input, reply),
       };
     });
   }
@@ -352,7 +357,7 @@ export class LlmMind implements Mind {
   }
 
   async openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision> {
-    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat), describeOpening(input, this.localizedChat), signal, (json) => {
+    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat, input.relations !== undefined), describeOpening(input, this.localizedChat), signal, (json) => {
       const reply = openingReplySchema.parse(json);
       // A line is heard as spoken to someone only when it names them (ADR-017): a nameless opening reaches nobody.
       if (reply.open && reply.say.trim() !== "") {
@@ -363,7 +368,7 @@ export class LlmMind implements Mind {
           throw new SendBack(`your line names none of those it is for (${listeners.join(", ")}): they hear it as spoken to them only when it names them, so name the ones you speak to in the line`);
         }
       }
-      return { open: reply.open, to: addressees(reply.to), topic: reply.topic.trim(), length: reply.length, say: reply.say.trim() };
+      return { open: reply.open, to: addressees(reply.to), topic: reply.topic.trim(), length: reply.length, say: reply.say.trim(), ...(input.relations !== undefined && parseAsks(reply.asks_of, reply.asks_what)) };
     });
   }
 
@@ -373,10 +378,6 @@ export class LlmMind implements Mind {
       const reply = gistReplySchema.parse(json);
       return { gist: reply.gist.trim(), partners: withPartners ? parseGistPartners(reply.partners) : [] };
     });
-  }
-
-  async judgeRelation(input: JudgeInput, signal: AbortSignal): Promise<Judged | null> {
-    return this.ask("conversation", this.models.chat, judgeSystemPrompt(input.persona), describeJudge(input), signal, parseJudged);
   }
 }
 
@@ -413,10 +414,18 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     describeConversation(input),
     ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
     ...(input.relations === undefined || input.relations.block === "" ? [] : [input.relations.block]),
+    ...(input.relations?.requests === undefined ? [] : [requestsBlock(message.username, input.relations.requests)]),
     // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
     // 2026-10-07).
     `New message: ${message.username} ${channel}${heardFrom(message.distance, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
   ].filter((part) => part !== "").join("\n\n");
+}
+
+/** The reply's requests: whom its line asks (when relations are on) and which open request the new line answers (when one is shown); malformed fields are dropped and the line stands. */
+function requestsOf(input: ChatInput, reply: z.infer<typeof chatReplySchema>): Pick<ChatDecision, "asksOf" | "asksWhat" | "myRequest"> {
+  if (input.relations?.tradeOn !== true) return {};
+  const myRequest = (input.relations.requests?.length ?? 0) > 0 ? parseMyRequest(reply.my_request) : undefined;
+  return { ...parseAsks(reply.asks_of, reply.asks_what), ...(myRequest !== undefined && { myRequest }) };
 }
 
 /** The reply's trade, read only when the trade field was offered; a malformed one is dropped and the line stands. */
@@ -603,8 +612,9 @@ ${persona.preferences === undefined ? "" : `- "work": first, the kind of work th
   "none" (chat, or an errand like giving or following); mining is anything dug with a pickaxe (stone, ores). Your
   "say" shows how you feel about that work (${feelings(persona)}), in your own words: glad about what you love,
   reluctant about what you dislike or hate; and how you take it (gladly,
-  grudgingly, bargaining, or declining) is yours, in character, as your stance and whose requests come first allow.
+  grudgingly, bargaining, or declining) is yours, in character, as your stance and whose requests come first allow, and how you feel about who asks.
 `}${tradeOn ? `${tradeInstructions()}
+${askFieldsInstructions()}
 ` : ""}Understand casual phrasing, typos, slang and other languages.`;
 }
 

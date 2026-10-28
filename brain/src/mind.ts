@@ -8,7 +8,7 @@ import type { ConversationKind, PlannedLength } from "./conversation/state.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { Handoff } from "./relations/handoff.ts";
-import type { ItemCount, Judged, Trade } from "./relations/types.ts";
+import type { ItemCount } from "./relations/types.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import type { ActivityTotal } from "./time-spent.ts";
 
@@ -83,7 +83,7 @@ export interface ChatInput {
   /** For a line to everyone that asks nothing: true for the one bot that answers it (the nearest the speaker); absent: none does. */
   readonly claimEveryoneLine?: () => boolean;
   /** The relations block of the speaker and the other members, and whether the trade field is offered (spec 2026-10-19-relations-trading-design). */
-  readonly relations?: { readonly block: string; readonly tradeOn: boolean };
+  readonly relations?: { readonly block: string; readonly tradeOn: boolean; /** The numbered requests I made of the speaker and have no answer to. */ readonly requests?: readonly string[] };
 }
 
 /** The chat tier's trade decision on a line: propose, accept, decline or cancel a swap; sides are item ids with counts. */
@@ -117,6 +117,11 @@ export interface ChatDecision {
   readonly close?: boolean;
   /** A swap of items the line proposes, accepts, declines or cancels; only read when `ChatInput.relations.tradeOn`. */
   readonly trade?: TradeDecision;
+  /** The names my own line asks for items or help (not a question) and what I ask; only read when `ChatInput.relations.tradeOn`. */
+  readonly asksOf?: readonly string[];
+  readonly asksWhat?: string;
+  /** Which of my open requests to the speaker their line answers (1-based as shown in `ChatInput.relations.requests`), and how. */
+  readonly myRequest?: { readonly n: number; readonly answer: "agreed" | "refused" | "done" };
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */
@@ -290,6 +295,9 @@ export interface OpeningDecision {
   readonly topic: string;
   readonly length: PlannedLength;
   readonly say: string;
+  /** The names the opening line asks for items or help and what; only read when the opening was given relations. */
+  readonly asksOf?: readonly string[];
+  readonly asksWhat?: string;
 }
 
 export interface GistInput {
@@ -297,14 +305,15 @@ export interface GistInput {
   readonly others: readonly string[];
   readonly topic: string;
   readonly lines: readonly ChatLine[];
-  /** Each other member's record text; given: the gist also judges them and notes what they said they have or need. */
+  /** Each other member's record text; given: the gist also scores them and notes what they said they have or need. */
   readonly relations?: readonly { readonly name: string; readonly block: string }[];
 }
 
-/** What the model judged of one member of a finished conversation. */
+/** What the model took from one member of a finished conversation: how it changed what it thinks of them, and what they said they have or need. */
 export interface GistPartner {
   readonly name: string;
-  readonly judged: Judged | null;
+  /** How the talk changed the opinion (whole number, clamped by the score settings) and why; null when the model gave none. */
+  readonly nudge: { readonly value: number; readonly why: string } | null;
   readonly has: readonly string[];
   readonly needs: readonly string[];
 }
@@ -312,13 +321,6 @@ export interface GistPartner {
 export interface Gist {
   readonly gist: string;
   readonly partners: readonly GistPartner[];
-}
-
-export interface JudgeInput {
-  readonly persona: Persona;
-  readonly partner: string;
-  readonly block: string;
-  readonly trade: Trade;
 }
 
 /** The thinking part of an agent (ADR-008, ADR-011). Code around it only runs the skills it picks. */
@@ -335,6 +337,4 @@ export interface Mind {
   openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision>;
   /** Chat tier: one sentence to remember a finished conversation by. */
   sumUpConversation(input: GistInput, signal: AbortSignal): Promise<Gist>;
-  /** Chat tier: how a trade that ended outside a conversation changes the feeling for the partner; null when the reply is unusable. */
-  judgeRelation(input: JudgeInput, signal: AbortSignal): Promise<Judged | null>;
 }

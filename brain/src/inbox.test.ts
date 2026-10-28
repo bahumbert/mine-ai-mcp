@@ -87,3 +87,20 @@ test("spokeSince sees any of the speakers after seq", () => {
   assert.equal(inbox.spokeSince(["Bruno"], heard.seq), false);
   assert.equal(inbox.spokeSince([], heard.seq), false);
 });
+
+test("hasFrom sees a line that waits, whatever the case, until it is taken", () => {
+  const { clock, inbox } = inboxAt();
+  assert.equal(inbox.hasFrom("Theo"), false);
+  inbox.push(line("Theo", "hello"));
+  assert.equal(inbox.hasFrom("THEO"), true);
+  assert.equal(inbox.hasFrom("Bruno"), false);
+  clock.now += 2_000;
+  inbox.next();
+  assert.equal(inbox.hasFrom("Theo"), false);
+  const release = inbox.hold("Theo");
+  const again = inbox.hold("theo");
+  release();
+  assert.equal(inbox.hasFrom("Theo"), true, "a line is still being decided");
+  again();
+  assert.equal(inbox.hasFrom("Theo"), false);
+});
