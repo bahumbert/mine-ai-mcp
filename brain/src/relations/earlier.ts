@@ -68,20 +68,38 @@ export class EarlierLedger {
    * `near`: player (lower case) -> distance, within hand-off distance. Returns what it recorded.
    */
   gained(gains: readonly ItemCount[], near: ReadonlyMap<string, number>, now: number): ItemCount[] {
-    if (gains.length === 0) return [];
-    const open = [...near].filter(([player]) => now - (this.heardAt.get(player) ?? -Infinity) <= EARLIER_GAIN_MS).sort((a, b) => a[1] - b[1]);
-    if (open.length === 0 || (open.length > 1 && open[0]![1] === open[1]![1])) return [];
-    this.gains = this.gains.filter(fresh(now, EARLIER_GAIN_MS));
-    for (const g of gains) this.gains.push({ player: open[0]![0], item: g.item, count: g.count, at: now });
-    return [...gains];
+    return this.gainedBy(gains, near, now)?.items ?? [];
   }
 
-  /** `gained` for the part of a tick's gains no open trade took (`credited`: trade id -> items) and my own step did not yield (`mined`). */
-  keepUnpaid(o: { gains: readonly ItemCount[]; credited: ReadonlyMap<string, readonly ItemCount[]>; mined: ReadonlySet<string> } & Parameters<typeof nearPlayers>[0], now: number): ItemCount[] {
+  /** `gained` that also names the player (lower case) the gains were recorded for; null when nothing was recorded. */
+  private gainedBy(gains: readonly ItemCount[], near: ReadonlyMap<string, number>, now: number): { player: string; items: ItemCount[] } | null {
+    if (gains.length === 0) return null;
+    const open = [...near].filter(([player]) => now - (this.heardAt.get(player) ?? -Infinity) <= EARLIER_GAIN_MS).sort((a, b) => a[1] - b[1]);
+    if (open.length === 0 || (open.length > 1 && open[0]![1] === open[1]![1])) return null;
+    const player = open[0]![0];
+    this.gains = this.gains.filter(fresh(now, EARLIER_GAIN_MS));
+    for (const g of gains) this.gains.push({ player, item: g.item, count: g.count, at: now });
+    return { player, items: [...gains] };
+  }
+
+  /** What the partner's recorded gains hold inside the window, summed per item; a read, nothing is consumed. */
+  keptFrom(partner: string, now: number): ItemCount[] {
+    const sums = new Map<string, number>();
+    for (const e of this.gains.filter((x) => x.player === lower(partner) && fresh(now, EARLIER_GAIN_MS)(x))) sums.set(e.item, (sums.get(e.item) ?? 0) + e.count);
+    return [...sums].map(([item, count]) => ({ item, count }));
+  }
+
+  /** `gained` for the part of a tick's gains no open trade took (`credited`: trade id -> items) and my own step did not yield (`mined`); names the player they were kept for. */
+  keepUnpaid(o: Parameters<EarlierLedger["keepUnpaidFor"]>[0], now: number): ItemCount[] {
+    return this.keepUnpaidFor(o, now)?.items ?? [];
+  }
+
+  /** `keepUnpaid` that names the player (lower case) the gains were kept for; null when nothing was kept. */
+  keepUnpaidFor(o: { gains: readonly ItemCount[]; credited: ReadonlyMap<string, readonly ItemCount[]>; mined: ReadonlySet<string> } & Parameters<typeof nearPlayers>[0], now: number): { player: string; items: ItemCount[] } | null {
     const paid = new Map<string, number>();
     for (const items of o.credited.values()) for (const i of items) paid.set(i.item, (paid.get(i.item) ?? 0) + i.count);
     const rest = o.gains.filter((g) => !o.mined.has(g.item)).map((g) => ({ item: g.item, count: g.count - (paid.get(g.item) ?? 0) })).filter((g) => g.count > 0);
-    return rest.length === 0 ? [] : this.gained(rest, nearPlayers(o), now);
+    return rest.length === 0 ? null : this.gainedBy(rest, nearPlayers(o), now);
   }
 
   /** A trade just agreed takes what its partner's recorded gains cover of what they owe, capped at what I carry now; consumed. */

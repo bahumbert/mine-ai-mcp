@@ -156,7 +156,7 @@ export class TradeController implements BoardPeer {
           this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
           return null;
         }
-        return this.proposeAndPost(deal, now);
+        return this.proposeAndPost(deal, now, this.previous?.inventory ?? snapshot.inventory);
       }
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) {
@@ -165,7 +165,7 @@ export class TradeController implements BoardPeer {
         }
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
-        return this.proposeAndPost(deal, now);
+        return this.proposeAndPost(deal, now, this.previous?.inventory ?? snapshot.inventory);
       }
       if (d.action === "accept") {
         if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
@@ -183,11 +183,13 @@ export class TradeController implements BoardPeer {
   }
 
   /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */
-  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number): Promise<string> {
+  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number, carried: BotSnapshot["inventory"]): Promise<string> {
     const proposed = proposeTrade(deal);
     await this.record(proposed, "proposed");
     this.post(proposed);
-    await this.claimEarlier(proposed, now);
+    await this.claimEarlier(proposed, now, carried);
+    // A payment dropped while the model was still deciding is already kept: the proposal it answers is agreed as it is posted.
+    await this.agreePaidProposals(carried, now);
     return proposed.id;
   }
 
@@ -314,6 +316,7 @@ export class TradeController implements BoardPeer {
       this.position = snapshot.position;
       this.noteNear(snapshot, now);
       if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now);
+      await this.agreePaidProposals(snapshot.inventory, now);
       await this.settleOpen(now);
       this.startCollects(now);
       if (!this.busy()) this.previous = null;
@@ -466,8 +469,26 @@ export class TradeController implements BoardPeer {
       this.watches.delete(id);
       await this.recordStep(next, "received");
     }
-    const kept = this.earlier.keepUnpaid({ gains, credited, mined, partners, previous: previous.partners, self: snapshot.position, handoffDistance: this.deps.settings.handoffDistance, recentlyNear: this.recentlyNear(now) }, now);
-    if (kept.length > 0) this.deps.log(`trade: ${sideText(kept)} picked up while a player talked to me, with no trade agreed yet; kept for a trade agreed within ${EARLIER_GIVE_MS / MINUTE_MS} min`);
+    const kept = this.earlier.keepUnpaidFor({ gains, credited, mined, partners, previous: previous.partners, self: snapshot.position, handoffDistance: this.deps.settings.handoffDistance, recentlyNear: this.recentlyNear(now) }, now);
+    if (kept !== null) this.deps.log(`trade: ${sideText(kept.items)} picked up while a player talked to me (kept for ${kept.player}), with no trade agreed yet; kept for a trade agreed within ${EARLIER_GIVE_MS / MINUTE_MS} min`);
+  }
+
+  /**
+   * A partner who pays my whole proposal has accepted it (a player's acceptance in words never reaches a proposal: only a board
+   * offer is accepted by words): every `get` item is covered by what the earlier ledger kept from them and I carry now.
+   * The trade is agreed on its own terms by the path of a spoken agreement, which credits the kept gains. A gift proposal
+   * (nothing asked back) is never paid, and a partial payment stays kept until a later gain completes the side.
+   */
+  private async agreePaidProposals(carried: BotSnapshot["inventory"], now: number): Promise<void> {
+    for (const trade of this.deps.book.trades().filter((t) => t.state === "proposed" && t.get.length > 0)) {
+      const kept = this.earlier.keptFrom(trade.partner, now);
+      const covered = trade.get.every((g) => Math.min(kept.find((k) => k.item === g.item)?.count ?? 0, carried.filter((c) => c.name === g.item).reduce((n, c) => n + c.count, 0)) >= g.count);
+      if (!covered) continue;
+      this.deps.log(`trade: ${trade.partner} paid my proposal ${trade.id}: agreed`);
+      const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now });
+      await this.record(agreed, "agreed");
+      await this.startAgreed(agreed, trade.partner, now, carried);
+    }
   }
 
   /** Remembers who stands within hand-off distance now; the ones not near for a while are forgotten. */

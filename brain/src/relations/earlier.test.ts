@@ -121,3 +121,14 @@ test("keepUnpaid records only what no trade took and my own step did not yield",
   assert.deepEqual(kept, beef(10));
   assert.deepEqual(l.claimGains(trade(), carrying(16), t0), beef(10));
 });
+
+test("keptFrom answers the partner's recorded gains inside the window, summed per item", () => {
+  const l = new EarlierLedger();
+  l.heard("Owner", t0);
+  l.gained(beef(4), new Map([["owner", 2]]), t0);
+  l.gained(beef(2), new Map([["owner", 2]]), t0 + SEC);
+  assert.deepEqual(l.keptFrom("Owner", t0 + 2 * SEC), beef(6));
+  assert.deepEqual(l.keptFrom("Finn", t0 + 2 * SEC), [], "another player's gains are not theirs");
+  assert.deepEqual(l.keptFrom("Owner", t0 + EARLIER_GAIN_MS + 2 * SEC), [], "past the window");
+  assert.deepEqual(l.keptFrom("Owner", t0 + 2 * SEC), beef(6), "a read consumes nothing");
+});

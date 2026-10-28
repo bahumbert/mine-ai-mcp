@@ -1130,3 +1130,105 @@ test("a partner named in another case than the world lists them: the collect fal
   await h.c.tick(s, new Set(), signal);
   assert.deepEqual(kinds(h), ["collect"]);
 });
+
+// W7 (rel-r2): a partner who pays my whole proposal has accepted it.
+const propose = (h: Harness, over: Partial<TradeDecision> = {}, s: BotSnapshot = snapshot()) => h.c.onDecision(decision({ action: "propose", first: "them", ...over }), "Theo", s);
+const baseline = async (h: Harness): Promise<void> => { h.c.heardLine("Theo", h.state.now, 2); await h.c.tick(snapshot(), new Set(), signal); h.state.now += 5_000; };
+
+test("a partner who drops my whole get side agrees my proposal and I give (rel-r2)", async () => {
+  const h = harness();
+  await propose(h);
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  assert.deepEqual(h.events.filter((e) => e.kind === "trade").map((e) => e.event), ["proposed", "agreed", "received"]);
+  assert.match(h.logs.join("\n"), /Theo paid my proposal .*: agreed/u);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(kinds(h), ["give"], "my give is handed over from the new end state");
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).state, "done");
+});
+
+test("a partial payment keeps the proposal open; the rest completes it", async () => {
+  const h = harness();
+  await propose(h);
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 2), new Set(), signal);
+  assert.equal(theirTrade(h).state, "proposed");
+  h.state.now += 5_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("a payment after the proposal was cancelled agrees nothing", async () => {
+  const h = harness();
+  await propose(h);
+  await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Theo", snapshot());
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.deepEqual(kinds(h), []);
+});
+
+test("gains from someone else do not agree the proposal", async () => {
+  const h = harness();
+  await propose(h);
+  const bruno = (s: BotSnapshot): BotSnapshot => ({ ...s, players: [{ username: "Theo", position: { x: 40, y: 64, z: 0 } }, { username: "Bruno", position: { x: 2, y: 64, z: 0 } }] });
+  h.c.heardLine("Bruno", h.state.now, 2);
+  await h.c.tick(bruno(snapshot()), new Set(), signal);
+  h.state.now += 5_000;
+  await h.c.tick(bruno(withIron(snapshot(), 5)), new Set(), signal);
+  assert.equal(theirTrade(h).state, "proposed");
+  assert.match(h.logs.join("\n"), /kept for bruno/u, "the kept line names the player");
+});
+
+test("my own step's yield does not agree the proposal", async () => {
+  const h = harness();
+  await propose(h);
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(["iron_ingot"]), signal);
+  assert.equal(theirTrade(h).state, "proposed");
+});
+
+test("a gift proposal (nothing asked back) is never paid", async () => {
+  const h = harness();
+  await propose(h, { get: [] });
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "proposed");
+});
+
+test("paid before my proposal was recorded: the proposal is agreed as it is posted", async () => {
+  const h = harness();
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 20_000;
+  await propose(h, {}, snapshot()); // the chat snapshot was taken before the drop; the last tick saw it
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("the payment is credited once however many ticks run after it (4 of 4, not 8)", async () => {
+  const h = harness();
+  await propose(h, { give: bread(5), get: [{ item: "iron_ingot", count: 4 }] });
+  await baseline(h);
+  for (let i = 0; i < 3; i += 1) {
+    await h.c.tick(withIron(snapshot(), 4), new Set(), signal);
+    h.state.now += 1_000;
+  }
+  assert.deepEqual(theirTrade(h).received, [{ item: "iron_ingot", count: 4 }]);
+  assert.equal(h.events.filter((e) => e.kind === "trade" && e.event === "received").length, 1);
+  assert.equal(h.book.get("Theo")!.trades.length, 1);
+});
+
+test("a proposal nobody paid is still cancelled as no answer", async () => {
+  const h = harness();
+  await propose(h);
+  await baseline(h);
+  h.state.now += 4 * MIN;
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+});
