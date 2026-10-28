@@ -33,6 +33,7 @@ Thumbs.db
 /brain/bench
 /.claude/skills
 /.claude/agents
+/.claude/rules
 CLAUDE.md
 CLAUDE.local.md
 .worktreeinclude
