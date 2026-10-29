@@ -3,7 +3,7 @@ import { z } from "zod";
 import { sideText } from "./items.ts";
 import { band, drifted } from "./score.ts";
 import { isOpen } from "./trade.ts";
-import { type Band, type GiveProgress, type ItemCount, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, type ScoreEvent, type Scoring, type Trade } from "./types.ts";
+import { type Band, type GiveProgress, type ItemCount, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, SCORE_KINDS, type ScoreEvent, type Scoring, type Trade } from "./types.ts";
 
 const KEPT_ENDED_TRADES = 3;
 
@@ -173,7 +173,7 @@ const tradeSchema = z.object({
 });
 const said = z.object({ item: z.string(), count: z.number().nullable(), at: z.number() });
 const scoreEvent = z.object({
-  kind: z.enum(["trade_done", "kept_late", "promise_broken", "gift_received", "request_helped", "request_refused", "request_ignored", "hurt", "nudge", "earlier"]),
+  kind: z.enum(SCORE_KINDS),
   delta: z.number(), why: z.string(), at: z.number(), tradeId: z.string().optional(),
 });
 const openRequest = z.object({ what: z.string(), at: z.number(), inRange: z.boolean(), agreed: z.boolean(), heard: z.boolean().default(false) });

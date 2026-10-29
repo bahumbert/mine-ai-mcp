@@ -2,7 +2,7 @@
 import type { RelationBook } from "./book.ts";
 import { sideText } from "./items.ts";
 import { withEndedTrade } from "./record.ts";
-import { scoredRow, withScoreEvent } from "./score.ts";
+import { newScoredRows, withScoreEvent } from "./score.ts";
 import type { Relation, RelationEvent, ScoreInput, Scoring, Trade } from "./types.ts";
 
 /** "2 of 3 bread": what of their side has not come in. */
@@ -34,13 +34,13 @@ export function withTradeEnd(r: Relation, trade: Trade, now: number, s: Scoring)
   return input === null ? ended : withScoreEvent(ended, input, now, s);
 }
 
-/** Saves the ended trade and its score in one write; the journal row of the score, or null when the trade scored nothing. */
-export async function scoreEndedTrade(book: RelationBook, trade: Trade, now: number): Promise<RelationEvent | null> {
-  let row: RelationEvent | null = null;
+/** Saves the ended trade and its score in one write; the journal rows of the score events that write added (none when the trade scored nothing or its end was seen before). */
+export async function scoreEndedTrade(book: RelationBook, trade: Trade, now: number): Promise<RelationEvent[]> {
+  let rows: RelationEvent[] = [];
   await book.update(trade.partner, (r) => {
     const next = withTradeEnd(r, trade, now, book.scoring);
-    row = next.ledger.at(-1) === r.ledger.at(-1) ? null : scoredRow(next);
+    rows = newScoredRows(r, next);
     return next;
   });
-  return row;
+  return rows;
 }

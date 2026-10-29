@@ -11,7 +11,7 @@ import { awaitKey, COLLECT_RADIUS, type Handoff, type HandoffEnd } from "./hando
 import { sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withSaid, withTrade } from "./record.ts";
-import { scoredRow, withScoreEvent } from "./score.ts";
+import { newScoredRows, withScoreEvent } from "./score.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
 import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
 import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
@@ -156,7 +156,7 @@ export class TradeController implements BoardPeer {
           this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
           return null;
         }
-        return this.proposeAndPost(deal, now, this.previous?.inventory ?? snapshot.inventory);
+        return this.proposeAndPost(deal, now, this.carriedNow(snapshot));
       }
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) {
@@ -165,7 +165,7 @@ export class TradeController implements BoardPeer {
         }
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
-        return this.proposeAndPost(deal, now, this.previous?.inventory ?? snapshot.inventory);
+        return this.proposeAndPost(deal, now, this.carriedNow(snapshot));
       }
       if (d.action === "accept") {
         if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
@@ -173,7 +173,7 @@ export class TradeController implements BoardPeer {
         // Before the record: saving an agreed trade takes its id off the board.
         if (offer !== undefined) this.deps.board?.accept(offer.id, this.deps.self);
         await this.record(agreed, "agreed");
-        await this.startAgreed(agreed, speaker, now, snapshot.inventory);
+        await this.startAgreed(agreed, speaker, now, this.carriedNow(snapshot));
         return agreed.id;
       }
       if (theirOffer !== undefined) this.deps.board?.decline(theirOffer.id, this.deps.self, d.action === "decline" ? "declined" : "cancelled");
@@ -231,8 +231,17 @@ export class TradeController implements BoardPeer {
     return credited;
   }
 
+  /**
+   * The latest inventory a tick saw; the chat `snapshot` only when no tick has watched. A chat snapshot is read before the
+   * model call, 7-20 s before a decision: a payment dropped meanwhile is in the earlier ledger and in the bag, not in it.
+   * With no snapshot at hand (a board accept) and no tick watching there is nothing to claim against: `[]` (review 2026-10-29 S1).
+   */
+  private carriedNow(snapshot?: BotSnapshot): BotSnapshot["inventory"] {
+    return this.previous?.inventory ?? snapshot?.inventory ?? [];
+  }
+
   /** A trade just made takes the partner's earlier gives still inside the window, once (capped at its side); an agreed one also the payment picked up before the agreement. Returns the trade as it stands then. */
-  private async claimEarlier(trade: Trade, now: number, carried = this.previous?.inventory ?? []): Promise<Trade> {
+  private async claimEarlier(trade: Trade, now: number, carried = this.carriedNow()): Promise<Trade> {
     const claimed = this.earlier.claimGives(trade, now);
     for (const e of claimed) this.creditGiven(trade, e.item, e.count);
     if (trade.state === "proposed" && claimed.length > 0) this.fromLedger.set(trade.id, claimed);
@@ -382,12 +391,14 @@ export class TradeController implements BoardPeer {
         const { nudge } = p;
         if (nudge === null && p.has.length === 0 && p.needs.length === 0) continue;
         const { book, settings } = this.deps;
-        const next = await book.update(p.name, (r) => {
+        let rows: RelationEvent[] = [];
+        await book.update(p.name, (r) => {
           const said = forgetOldSaid(withSaid(r, p.has, p.needs, now), now, settings.offersForgetMinutes);
-          return nudge === null ? said : withScoreEvent(said, { kind: "nudge", nudge: nudge.value, why: nudge.why }, now, book.scoring);
+          const next = nudge === null ? said : withScoreEvent(said, { kind: "nudge", nudge: nudge.value, why: nudge.why }, now, book.scoring);
+          rows = newScoredRows(r, next);
+          return next;
         });
-        const row = nudge === null ? null : scoredRow(next);
-        if (row !== null) this.deps.journal(row);
+        for (const row of rows) this.deps.journal(row);
       }
     });
   }
@@ -439,8 +450,7 @@ export class TradeController implements BoardPeer {
     if (trade.state !== "proposed") this.deps.board?.withdraw(trade.id);
     // An end and its score are one write: a replayed end cannot be scored twice, a crash cannot store the end without its score.
     if (ended) {
-      const scored = await scoreEndedTrade(this.deps.book, trade, this.deps.now());
-      if (scored !== null) this.deps.journal(scored);
+      for (const row of await scoreEndedTrade(this.deps.book, trade, this.deps.now())) this.deps.journal(row);
     } else {
       await this.deps.book.update(trade.partner, (r) => withTrade(r, trade));
     }
@@ -466,6 +476,8 @@ export class TradeController implements BoardPeer {
       if (trade === undefined) continue;
       const { trade: next, used } = creditTrade(trade, items, now);
       if (used.length === 0) continue;
+      // A payment kept for this partner before this tick (a tick that had no baseline) must not stay kept for their next trade (review 2026-10-29 S1).
+      this.earlier.consume(trade.partner, used, now);
       this.watches.delete(id);
       await this.recordStep(next, "received");
     }

@@ -132,3 +132,18 @@ test("keptFrom answers the partner's recorded gains inside the window, summed pe
   assert.deepEqual(l.keptFrom("Owner", t0 + EARLIER_GAIN_MS + 2 * SEC), [], "past the window");
   assert.deepEqual(l.keptFrom("Owner", t0 + 2 * SEC), beef(6), "a read consumes nothing");
 });
+
+test("consume takes the partner's kept items oldest first and never another partner's", () => {
+  const l = new EarlierLedger();
+  l.heard("Owner", t0);
+  l.heard("Finn", t0);
+  l.gained(beef(4), new Map([["owner", 2]]), t0);
+  l.gained(beef(3), new Map([["owner", 2]]), t0 + SEC);
+  l.gained(beef(9), new Map([["finn", 2]]), t0 + SEC);
+  l.consume("Owner", beef(5), t0 + 2 * SEC);
+  assert.deepEqual(l.keptFrom("Owner", t0 + 2 * SEC), beef(2), "4 + 3 kept, 5 consumed");
+  assert.deepEqual(l.keptFrom("Owner", t0 + EARLIER_GAIN_MS + SEC / 2), beef(2), "once the older entry (t0) has expired the 2 left are still there: they are the newer entry's, the older was taken first");
+  assert.deepEqual(l.keptFrom("Finn", t0 + 2 * SEC), beef(9), "another partner's gains stay");
+  l.consume("Owner", beef(50), t0 + 3 * SEC);
+  assert.deepEqual(l.keptFrom("Owner", t0 + 3 * SEC), [], "capped at what it holds, nothing goes negative");
+});

@@ -62,7 +62,7 @@ test("replayed end scores once even when two writes are started together", async
   const book = new RelationBook({ save: async (m) => { saved.push(m); }, remove: async () => {}, now: () => t0, log: () => {}, scoring });
   const broken = brokenByThem();
   const rows = await Promise.all([scoreEndedTrade(book, broken, t0 + 10 * MIN), scoreEndedTrade(book, broken, t0 + 10 * MIN)]);
-  assert.deepEqual(rows.map((row) => row?.scoreKind ?? null), ["promise_broken", null]);
+  assert.deepEqual(rows.map((written) => written.map((row) => row.kind === "relation" && row.event === "scored" ? row.scoreKind : null)), [["promise_broken"], []]);
   assert.deepEqual(book.get("Theo")?.ledger.map((e) => e.kind), ["promise_broken"]);
   assert.equal(book.get("Theo")?.facts.promisesBroken, 1);
 });

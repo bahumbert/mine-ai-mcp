@@ -51,8 +51,9 @@ export interface SaidItem {
   readonly at: number;
 }
 
-export type ScoreKind = "trade_done" | "kept_late" | "promise_broken" | "gift_received"
-  | "request_helped" | "request_refused" | "request_ignored" | "hurt" | "nudge" | "earlier";
+/** Every kind of event that moves a score: the type, the stored ledger's schema and the tests read this one list. */
+export const SCORE_KINDS = ["trade_done", "kept_late", "promise_broken", "gift_received", "request_helped", "request_refused", "request_ignored", "hurt", "nudge", "earlier"] as const;
+export type ScoreKind = (typeof SCORE_KINDS)[number];
 
 /** One thing that moved a score; `delta` is what was actually applied (clamping included). */
 export interface ScoreEvent {

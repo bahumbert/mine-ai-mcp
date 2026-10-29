@@ -1067,16 +1067,6 @@ test("onlyWatching: a window alone is true; an open trade makes it false", async
   assert.equal(h.c.onlyWatching(), false);
 });
 
-test("the payment is capped by the inventory of the snapshot that agrees the trade, not the last tick's", async () => {
-  const h = harness();
-  h.c.heardLine("Theo", h.state.now, 2);
-  await h.c.tick(snapshot(), new Set(), signal);
-  h.state.now += 1_000;
-  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
-  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
-  assert.deepEqual(theirTrade(h).received, [], "the 5 iron are no longer carried in the snapshot at hand");
-});
-
 test("journal order: a full trade is proposed, agreed, gave, received, done", async () => {
   const h = harness();
   const s = snapshot();
@@ -1231,4 +1221,86 @@ test("a proposal nobody paid is still cancelled as no answer", async () => {
   h.state.now += 4 * MIN;
   await h.c.tick(snapshot(), new Set(), signal);
   assert.equal(theirTrade(h).state, "cancelled");
+});
+
+/** The payment kept in the earlier ledger: the partner talked, a tick saw nothing, the next saw 5 iron (kept for Theo), 15 s pass while the model decides. */
+const keptPaymentThenSlowDecision = async (h: Harness): Promise<BotSnapshot> => {
+  const chatSnapshot = snapshot(); // taken when the line was read, before the drop
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 15_000;
+  return chatSnapshot;
+};
+
+test("a spoken accept after a payment dropped while the model thought credits the kept payment (review 2026-10-29 S1)", async () => {
+  const h = harness();
+  const chatSnapshot = await keptPaymentThenSlowDecision(h);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", chatSnapshot);
+  assert.deepEqual(theirTrade(h).received, ingots(5), "the 5 iron I carry now are claimed, not the 0 of the stale chat snapshot");
+  assert.equal(theirTrade(h).state, "they_gave");
+  for (let i = 0; i < 3; i += 1) { h.state.now += 2_000; await h.c.tick(withIron(snapshot(), 5), new Set(), signal); }
+  assert.deepEqual(theirTrade(h).received, ingots(5), "credited once, not again by the ticks after");
+  assert.deepEqual(kinds(h), ["give"], "my give is handed over from the new end state");
+});
+
+test("with no tick watching, a spoken accept claims against the chat snapshot", async () => {
+  const h = harness();
+  await keptPaymentThenSlowDecision(h);
+  h.c.forgetSeen();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", withIron(snapshot(), 5));
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("a payment spent before the accept is not credited beyond what I carry now", async () => {
+  const h = harness();
+  const chatSnapshot = await keptPaymentThenSlowDecision(h);
+  await h.c.tick(withIron(snapshot(), 2), new Set(), signal); // 3 of the 5 iron were spent since
+  await h.c.onDecision(decision({ first: "them" }), "Theo", chatSnapshot);
+  assert.deepEqual(theirTrade(h).received, ingots(2));
+});
+
+test("a board accept claims against the latest tick's inventory, not nothing", async () => {
+  const h = harness();
+  await keptPaymentThenSlowDecision(h);
+  const proposal = proposeTrade({ self: "Ayla", partner: "Theo", give: bread(5), get: ingots(5), first: "them", now: h.state.now });
+  await h.book.update("Theo", (r) => withTrade(r, proposal));
+  await h.c.offerAccepted(proposal.id, "Theo");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("a tick that failed before it started, then a spoken accept: the payment is credited once and the ledger keeps nothing for Theo", async () => {
+  const h = harness();
+  const chatSnapshot = await keptPaymentThenSlowDecision(h);
+  h.c.forgetSeen(); // the tick failed before it started: no baseline
+  await h.c.onDecision(decision({ first: "them" }), "Theo", chatSnapshot);
+  assert.deepEqual(theirTrade(h).received, [], "the stale chat snapshot had no iron to claim");
+  h.state.now += 2_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5), "the next tick credits the payment as a gain");
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).state, "done");
+  h.state.now += 3 * MIN;
+  await propose(h, { give: bread(4) }, withIron(snapshot(), 5));
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(theirTrade(h).state, "proposed", "the payment already credited to the first trade does not pay the next proposal");
+});
+
+const scoredRows = (h: Harness) => h.events.filter((e) => e.kind === "relation" && e.event === "scored");
+const nudgeOf = (value: number, why: string) => [{ name: "Theo", nudge: { value, why }, has: [], needs: [] }];
+
+test("a gist journals one score row per nudge that scored, and none for has/needs only or a nudge that scores nothing, though the record holds an older row", async () => {
+  const h = harness();
+  await h.c.onConversationEnded(nudgeOf(-6, "he was rude"));
+  assert.deepEqual(scoredRows(h).map((e) => e.kind === "relation" && e.event === "scored" ? [e.scoreKind, e.delta, e.why] : null), [["nudge", -6, "he was rude"]]);
+  await h.c.onConversationEnded([{ name: "Theo", nudge: null, has: ["iron_ingot"], needs: ["bread"] }]);
+  assert.equal(scoredRows(h).length, 1, "has/needs only: no new row");
+  assert.deepEqual(h.book.get("Theo")!.saidHas.map((x) => x.item), ["iron_ingot"]);
+  const before = h.book.get("Theo")!.ledger;
+  await h.c.onConversationEnded(nudgeOf(Number.NaN, "not a number"));
+  assert.equal(scoredRows(h).length, 1, "a nudge that scores nothing: the older row is not journaled again");
+  assert.deepEqual(h.book.get("Theo")!.ledger, before);
+  await h.c.onConversationEnded(nudgeOf(4, "he helped"));
+  assert.equal(scoredRows(h).length, 2, "the next nudge adds exactly one");
 });

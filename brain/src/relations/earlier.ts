@@ -89,6 +89,27 @@ export class EarlierLedger {
     return [...sums].map(([item, count]) => ({ item, count }));
   }
 
+  /**
+   * (Review 2026-10-29 S1.) The partner's recorded gains that a trade has now been credited for are taken out, oldest first and capped at what
+   * the ledger holds: the same payment must not stay kept for a later trade (a tick without a baseline credits it as a new gain).
+   */
+  consume(partner: string, items: readonly ItemCount[], now: number): void {
+    this.gains = this.gains.filter(fresh(now, EARLIER_GAIN_MS));
+    for (const { item, count } of items) this.takeGains(partner, item, count);
+    this.gains = this.gains.filter((e) => e.count > 0);
+  }
+
+  /** Takes up to `room` of the partner's recorded gains of the item, oldest first; answers how many it took. Emptied entries stay for the caller to drop. */
+  private takeGains(partner: string, item: string, room: number): number {
+    let left = room;
+    for (const e of this.gains.filter((x) => x.player === lower(partner) && x.item === item)) {
+      const take = Math.min(e.count, left);
+      e.count -= take;
+      left -= take;
+    }
+    return room - left;
+  }
+
   /** `gained` for the part of a tick's gains no open trade took (`credited`: trade id -> items) and my own step did not yield (`mined`); names the player they were kept for. */
   keepUnpaid(o: Parameters<EarlierLedger["keepUnpaidFor"]>[0], now: number): ItemCount[] {
     return this.keepUnpaidFor(o, now)?.items ?? [];
@@ -107,13 +128,9 @@ export class EarlierLedger {
     this.gains = this.gains.filter(fresh(now, EARLIER_GAIN_MS));
     const claimed: ItemCount[] = [];
     for (const owed of owedItems(trade)) {
-      let room = Math.min(owed.count, carried.filter((c) => c.name === owed.item).reduce((n, c) => n + c.count, 0));
-      for (const e of this.gains.filter((x) => x.player === lower(trade.partner) && x.item === owed.item)) {
-        const take = Math.min(e.count, room);
-        e.count -= take;
-        room -= take;
-        if (take > 0) claimed.push({ item: owed.item, count: take });
-      }
+      const room = Math.min(owed.count, carried.filter((c) => c.name === owed.item).reduce((n, c) => n + c.count, 0));
+      const took = this.takeGains(trade.partner, owed.item, room);
+      if (took > 0) claimed.push({ item: owed.item, count: took });
     }
     this.gains = this.gains.filter((e) => e.count > 0);
     return claimed;

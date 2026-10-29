@@ -4,7 +4,7 @@ import { testScoring } from "../testing.ts";
 import { withScoreEvent } from "./score.ts";
 import { describeRelation, forgetOldSaid, newRelation, parseRelationNote, relationNote, withEndedTrade, withSaid, withTrade } from "./record.ts";
 import { agreeTrade, creditTrade, failTrade, markGave, settleTrade } from "./trade.ts";
-import type { GiveProgress, ItemCount, Relation, Trade, TradeSettings } from "./types.ts";
+import { type GiveProgress, type ItemCount, type Relation, SCORE_KINDS, type Trade, type TradeSettings } from "./types.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
@@ -227,4 +227,10 @@ test("a v2 note without heard loads as not heard", () => {
 test("heard round-trips", () => {
   const r = { ...ledgerFixture(), requests: [{ what: "coal", at: t0, inRange: true, agreed: true, heard: true }] };
   assert.deepEqual(parseRelationNote(relationNote(r).note), r);
+});
+
+test("every score kind round-trips through relationSchema", () => {
+  const ledger = SCORE_KINDS.map((kind, i) => ({ kind, delta: i, why: `why ${kind}`, at: t0 + i }));
+  const r: Relation = { ...fresh(), ledger };
+  assert.deepEqual(parseRelationNote(relationNote(r).note)?.ledger, ledger);
 });
