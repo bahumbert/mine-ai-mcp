@@ -140,10 +140,9 @@ export class AgentRelations {
     }
   }
 
-  /** A line from this character was heard (chat or whisper, any distance): the requests I made of them before it are answered, so their silence is never scored. A stranger gets no record. */
-  heardFrom(name: string): void {
+  /** A line to me from this character, read at `at`: the requests I made of them before it are answered, so their silence is never scored. A stranger gets no record. */
+  heardFrom(name: string, at: number = this.now()): void {
     if (this.book.get(name) === null) return;
-    const at = this.now();
     // No look at the open requests here: the ask's own update may still be queued, and this one runs after it.
     void this.book.update(name, (r) => heardFrom(r, at)).catch((error: unknown) => this.deps.log(`could not note a line from ${name} against my requests: ${String(error)}`));
   }

@@ -446,3 +446,15 @@ test("a dropped heard request is logged and scores nothing", async () => {
   assert.deepEqual(c.logs.filter((l) => l.includes("dropped")), ["request to Theo for 4 coal dropped: they spoke since"]);
   assert.equal(c.rows.length, 0);
 });
+
+test("heardFrom stamps the line at the time it was read, not when it is noted", async () => {
+  const c = relationsWithClock();
+  c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
+  const readAt = c.time.at + 500;
+  c.time.at += 1_000;
+  await askTheo(c);
+  c.time.at += 1_000;
+  c.relations.heardFrom("Theo", readAt);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(c.relations.book.get("Theo")!.requests[0]?.heard, false, "read before the ask");
+});

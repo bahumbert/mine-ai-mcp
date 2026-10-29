@@ -104,3 +104,13 @@ test("hasFrom sees a line that waits, whatever the case, until it is taken", () 
   again();
   assert.equal(inbox.hasFrom("Theo"), false);
 });
+
+test("a heard burst carries the read time of its newest line", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "Ayla"));
+  clock.now += 1_000;
+  inbox.push(line("Tom", "hello"));
+  const lastRead = clock.now;
+  clock.now += 5_000;
+  assert.equal(inbox.next()?.readAt, lastRead);
+});

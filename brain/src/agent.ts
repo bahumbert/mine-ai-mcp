@@ -355,8 +355,8 @@ export class Agent {
             if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
             this.lastHeard.set(message.username.toLowerCase(), Date.now());
             this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
-            // Any line from a partner I asked answers the ask (owner 2026-10-28): before the inbox filters it.
-            this.relations?.heardFrom(message.username);
+            // Only a line spoken to me answers an ask (owner 2026-10-29); the ones the code cannot tell are read by the chat tier (decideHeard).
+            if (this.lineIsToMe(message)) this.relations?.heardFrom(message.username);
             if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
             this.inbox.push(message);
             this.wakeChat?.();
@@ -568,6 +568,23 @@ export class Agent {
     });
   }
 
+  /** Whether code alone knows the line is spoken to me: a whisper, my name as a word, or a talk partner naming no other character. */
+  private lineIsToMe(message: PlayerMessage): boolean {
+    if (message.channel === "whisper" || message.addressed) return true;
+    if (this.talks?.isMember(message.username) !== true) return false;
+    const self = this.options.persona.username.toLowerCase();
+    return this.namedIn(message).every((name) => name.toLowerCase() === self);
+  }
+
+  /** Whether the chat tier's reading puts the line to me: it answers one of my requests, or it is not an ignored line and names me, or nobody when the speaker did not just talk to another character (`"everyone"` alone is not me). */
+  private readAsToMe(decision: ChatDecision, justTalkedToAnother: boolean): boolean {
+    if (decision.myRequest !== undefined) return true;
+    if (decision.route === "ignore") return false;
+    const self = this.options.persona.username.toLowerCase();
+    // A nameless line soon after its speaker named another character is that character's (the same rule `handle` drops the reply by).
+    return (decision.to === undefined && !justTalkedToAnother) || (decision.to ?? []).some((name) => name.toLowerCase() === self);
+  }
+
   /**
    * In a conversation of three or more, not every member answers every line (spec 2026-10-18): a line naming members
    * but not her is only recorded; a line naming nobody is answered after a random wait, unless a member spoke meanwhile.
@@ -599,7 +616,12 @@ export class Agent {
     try {
       if (!this.hears(message, named)) return null;
       if (!(await this.conversationGate(message, heard, named))) return null;
-      return await this.decideChat(message, heard, heardAt, talkedTo);
+      const chat = await this.decideChat(message, heard, heardAt, talkedTo);
+      // Marked before the release below: the waiting hold must not end before the mark, or the request expires unheard.
+      // A tier that could not read the line gives the speaker the benefit of the doubt; a line refused above marks nothing.
+      const readAt = heard?.readAt ?? heardAt;
+      if (chat === null ? !this.runSignal.aborted : this.readAsToMe(chat.decision, talkedTo !== undefined)) this.relations?.heardFrom(message.username, readAt);
+      return chat;
     } finally {
       release();
     }

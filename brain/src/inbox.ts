@@ -5,6 +5,8 @@ export interface Heard {
   readonly message: PlayerMessage;
   /** How many lines were joined into it. */
   readonly lines: number;
+  /** When its newest line was read (the inbox clock): a request asked after this is not answered by it. */
+  readonly readAt: number;
   /** Passed to {@link Inbox.superseded}: later lines of the speaker are newer than this. */
   readonly seq: number;
 }
@@ -60,6 +62,7 @@ export class Inbox {
         addressed: burst!.lines.some((line) => line.addressed),
       },
       lines: burst!.lines.length,
+      readAt: burst!.last,
       seq: this.seq,
     };
   }
