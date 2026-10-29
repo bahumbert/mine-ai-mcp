@@ -1,6 +1,6 @@
 // What the model is told about relations and trades, and how its answers are read; the code states facts, the model decides.
 import { z } from "zod";
-import type { GistPartner, TradeDecision } from "../mind.ts";
+import type { ChatDecision, ChatInput, GistPartner, TradeDecision } from "../mind.ts";
 import { describeRelation } from "./record.ts";
 import type { Relation, Scoring } from "./types.ts";
 
@@ -90,11 +90,23 @@ export function parseAsks(askOf: unknown, askWhat: unknown): { asksOf?: string[]
 }
 
 /** Reads "my_request": a whole number n >= 1 and one of the three answers; anything else answers nothing. */
-export function parseMyRequest(raw: unknown): { n: number; answer: (typeof ANSWERS)[number] } | undefined {
+function parseMyRequest(raw: unknown): { n: number; answer: (typeof ANSWERS)[number] } | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const { n, answer } = raw as Record<string, unknown>;
   const known = ANSWERS.find((a) => a === answer);
   return typeof n === "number" && Number.isInteger(n) && n >= 1 && known !== undefined ? { n, answer: known } : undefined;
+}
+
+/**
+ * The relation fields of a chat reply (`trade`, `asks_of`, `asks_what`, `my_request`), read only when the trade field was
+ * offered (`tradeOn`); the request answer only when a request was shown to be answered. Malformed fields are dropped and the line stands.
+ */
+export function relationReplyFields(input: Pick<ChatInput, "relations">, reply: { readonly trade?: unknown; readonly asks_of?: unknown; readonly asks_what?: unknown; readonly my_request?: unknown }): Pick<ChatDecision, "trade" | "asksOf" | "asksWhat" | "myRequest"> {
+  const { relations } = input;
+  if (relations?.tradeOn !== true) return {};
+  const trade = parseTrade(reply.trade);
+  const myRequest = (relations.requests?.length ?? 0) > 0 ? parseMyRequest(reply.my_request) : undefined;
+  return { ...(trade !== null && { trade }), ...parseAsks(reply.asks_of, reply.asks_what), ...(myRequest !== undefined && { myRequest }) };
 }
 
 /** One line per nearby partner for the opening request: their record, and what they said they have that the objective lacks. */

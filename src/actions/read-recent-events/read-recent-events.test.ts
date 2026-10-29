@@ -166,3 +166,26 @@ test("a status recorded before dig_straight_down existed reads back with its def
   assert.equal(read.status.policy.effective.navigation.dig_straight_down, false, "a recorded value is kept");
   assert.deepEqual(withNavigationDefaults({ kind: "message" }), { kind: "message" });
 });
+
+test("formats a hurt_by row as the attacker and what struck, 'the attacker itself' when the player did", (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  recordEvent(data, "MineAI", { type: "hurt_by", observedAt: "2026-10-29T01:02:03.000Z", summary: "Zed hurt MineAI.", payload: { attacker: "Zed", direct: null, at: 1_000 } });
+  recordEvent(data, "MineAI", { type: "hurt_by", observedAt: "2026-10-29T01:02:04.000Z", summary: "Zed shot MineAI.", payload: { attacker: "Zed", direct: "arrow", at: 2_000 } });
+
+  const markdown = formatReadRecentEventsResult(readRecentBotEvents(data, "MineAI", { limit: 50 }));
+  assert.match(markdown, /### Event 1: hurt by a player\n- Observed: 2026-10-29T01:02:03.000Z\n- Attacker: `Zed`\n- Direct source: the attacker itself\n/);
+  assert.match(markdown, /### Event 2: hurt by a player\n- Observed: 2026-10-29T01:02:04.000Z\n- Attacker: `Zed`\n- Direct source: arrow\n/);
+});
+
+test("formats a dimension change row with where the bot came from, went to and arrived", (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  recordEvent(data, "MineAI", {
+    type: "player_dimension_change",
+    observedAt: "2026-10-29T01:02:03.000Z",
+    summary: "MineAI went to the nether.",
+    payload: { from: "overworld", to: "the_nether", position: { x: 1.5, y: 70, z: -2 } },
+  });
+
+  const markdown = formatReadRecentEventsResult(readRecentBotEvents(data, "MineAI", { limit: 50 }));
+  assert.match(markdown, /### Event 1: dimension change\n- Observed: 2026-10-29T01:02:03.000Z\n- From: `overworld`\n- To: `the_nether`\n- Arrived at: `1.5, 70, -2`/);
+});

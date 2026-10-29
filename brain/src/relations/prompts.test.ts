@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { chatSystemPrompt } from "../llm-mind.ts";
 import { testPersona, testScoring } from "../testing.ts";
-import { openingRelationLines, parseGistPartners, parseTrade, relationsBlock, tooFarLine, tradeInstructions } from "./prompts.ts";
+import { openingRelationLines, parseGistPartners, parseTrade, relationReplyFields, relationsBlock, tooFarLine, tradeInstructions } from "./prompts.ts";
 import { newRelation, withSaid } from "./record.ts";
 
 const good = { action: "propose", give: [{ item: "oak_log", count: 5 }], get: [{ item: "bread", count: 3 }], first: "me" };
@@ -103,4 +103,25 @@ test("F10 tooFarLine tells a partner out of reach cannot be gone to, with the di
 
 test("tradeInstructions forbids claiming a hand-over", () => {
   assert.match(tradeInstructions(), /never say you gave, dropped or handed over items unless your "Open:" line says you gave them/u);
+});
+
+const tradingOn = { relations: { block: "", tradeOn: true, requests: ["1. bread (asked 2 min ago)"] } };
+const rawReply = { trade: { action: "decline" }, asks_of: ["Theo"], asks_what: "bread", my_request: { n: 1, answer: "agreed" } };
+
+test("relationReplyFields reads the trade, the ask and the answered request when the trade field was offered", () => {
+  assert.deepEqual(relationReplyFields(tradingOn, rawReply), {
+    trade: { action: "decline", give: [], get: [], first: "me" },
+    asksOf: ["Theo"],
+    asksWhat: "bread",
+    myRequest: { n: 1, answer: "agreed" },
+  });
+});
+
+test("relationReplyFields reads no request answer when no request was shown, and drops malformed fields", () => {
+  assert.deepEqual(relationReplyFields({ relations: { block: "", tradeOn: true } }, { ...rawReply, trade: "nonsense" }), { asksOf: ["Theo"], asksWhat: "bread" });
+});
+
+test("relationReplyFields reads nothing when the trade field was not offered (relations off, or on without trading)", () => {
+  assert.deepEqual(relationReplyFields({}, rawReply), {});
+  assert.deepEqual(relationReplyFields({ relations: { block: "", tradeOn: false } }, rawReply), {});
 });

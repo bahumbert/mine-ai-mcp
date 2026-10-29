@@ -4,8 +4,8 @@ import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type TradeDecision, type WorkDecision, type WorkInput } from "./mind.ts";
-import { askFieldsInstructions, parseAsks, parseGistPartners, parseMyRequest, parseTrade, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyFields, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -86,9 +86,9 @@ const chatReplySchema = z.object({
   shout: z.boolean().optional(),
   // Only offered inside a conversation: the line is a goodbye that ends it for her.
   close: z.boolean().optional(),
-  // Only offered when relations are on: read by `parseTrade`, a malformed one is dropped.
+  // Only offered when relations are on: read by `relationReplyFields`, a malformed one is dropped.
   trade: z.unknown().optional(),
-  // Only offered when relations are on: read by `parseAsks` / `parseMyRequest`, a malformed one is dropped.
+  // Only offered when relations are on: read by `relationReplyFields` (`parseAsks` / `parseMyRequest`), a malformed one is dropped.
   asks_of: z.unknown().optional(),
   asks_what: z.unknown().optional(),
   my_request: z.unknown().optional(),
@@ -234,7 +234,7 @@ export class LlmMind implements Mind {
         ...(this.localizedChat !== undefined && !inTalk && reply.shout === true && { shout: true }),
         ...(inTalk && reply.close === true && { close: true }),
         ...(acts && reply.place !== undefined && { place: reply.place }),
-        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...tradeOf(input, reply.trade), ...requestsOf(input, reply),
+        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...relationReplyFields(input, reply),
       };
     });
   }
@@ -419,19 +419,6 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     // 2026-10-07).
     `New message: ${message.username} ${channel}${heardFrom(message.distance, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
   ].filter((part) => part !== "").join("\n\n");
-}
-
-/** The reply's requests: whom its line asks (when relations are on) and which open request the new line answers (when one is shown); malformed fields are dropped and the line stands. */
-function requestsOf(input: ChatInput, reply: z.infer<typeof chatReplySchema>): Pick<ChatDecision, "asksOf" | "asksWhat" | "myRequest"> {
-  if (input.relations?.tradeOn !== true) return {};
-  const myRequest = (input.relations.requests?.length ?? 0) > 0 ? parseMyRequest(reply.my_request) : undefined;
-  return { ...parseAsks(reply.asks_of, reply.asks_what), ...(myRequest !== undefined && { myRequest }) };
-}
-
-/** The reply's trade, read only when the trade field was offered; a malformed one is dropped and the line stands. */
-function tradeOf(input: ChatInput, raw: unknown): { trade?: TradeDecision } {
-  const trade = input.relations?.tradeOn === true ? parseTrade(raw) : null;
-  return trade === null ? {} : { trade };
 }
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */

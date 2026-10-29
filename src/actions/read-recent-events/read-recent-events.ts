@@ -144,6 +144,27 @@ export function formatReadRecentEventsResult(result: ReadRecentEventsResult): st
   return sections.join("\n\n");
 }
 
+/** The bot arrived in another dimension: where it came from, went to and stands. */
+function formatPlayerDimensionChange(event: Extract<BotEvent, { type: "player_dimension_change" }>): string {
+  return [
+    `### Event ${event.eventId}: dimension change`,
+    `- Observed: ${event.observedAt}`,
+    `- From: \`${event.payload.from}\``,
+    `- To: \`${event.payload.to}\``,
+    `- Arrived at: \`${event.payload.position.x}, ${event.payload.position.y}, ${event.payload.position.z}\``,
+  ].join("\n");
+}
+
+/** A player hurt the bot: who, and what struck when it was not the player itself. */
+function formatHurtBy(event: Extract<BotEvent, { type: "hurt_by" }>): string {
+  return [
+    `### Event ${event.eventId}: hurt by a player`,
+    `- Observed: ${event.observedAt}`,
+    `- Attacker: \`${event.payload.attacker}\``,
+    `- Direct source: ${event.payload.direct ?? "the attacker itself"}`,
+  ].join("\n");
+}
+
 function formatEvent(event: BotEvent): string {
   switch (event.type) {
     case "equipment_low_durability":
@@ -219,20 +240,9 @@ Constraint: ${event.payload.constraint ?? "none"}`;
         `- Cause: ${event.payload.cause ?? "not reported"}`,
       ].join("\n");
     case "player_dimension_change":
-      return [
-        `### Event ${event.eventId}: dimension change`,
-        `- Observed: ${event.observedAt}`,
-        `- From: \`${event.payload.from}\``,
-        `- To: \`${event.payload.to}\``,
-        `- Arrived at: \`${event.payload.position.x}, ${event.payload.position.y}, ${event.payload.position.z}\``,
-      ].join("\n");
+      return formatPlayerDimensionChange(event);
     case "hurt_by":
-      return [
-        `### Event ${event.eventId}: hurt by a player`,
-        `- Observed: ${event.observedAt}`,
-        `- Attacker: \`${event.payload.attacker}\``,
-        `- Direct source: ${event.payload.direct ?? "the attacker itself"}`,
-      ].join("\n");
+      return formatHurtBy(event);
     case "hostile_encounter":
       return [
         `### Event ${event.eventId}: hostile encounter`,

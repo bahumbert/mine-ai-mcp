@@ -4,6 +4,9 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontex
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
+import { readEventPages, type RuntimeEvents } from "./runtime-events.ts";
+
+export type { HurtBy, RuntimeEvents } from "./runtime-events.ts";
 
 export interface Position {
   readonly x: number;
@@ -98,19 +101,6 @@ export interface PlayerMessage {
   readonly addressed: boolean;
   /** Blocks between the speaker and the bot, when the server's Localized Chat mod says so. */
   readonly distance?: number;
-}
-
-/** One hit on the bot by a player (runtime event `hurt_by`): `direct` names what struck (an arrow), null when the player did. */
-export interface HurtBy {
-  readonly attacker: string;
-  readonly direct: string | null;
-  readonly at: number;
-}
-
-/** What one read of the runtime's recent events holds for the brain. */
-export interface RuntimeEvents {
-  readonly messages: readonly PlayerMessage[];
-  readonly hurts: readonly HurtBy[];
 }
 
 export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
@@ -481,24 +471,6 @@ const queryResultSchema = z.object({
   }),
 });
 
-const eventsSchema = z.object({
-  result: z.object({
-    events: z.array(z.object({ type: z.string(), payload: z.unknown() })),
-    remainingEventCount: z.number(),
-  }),
-});
-
-const playerMessagePayloadSchema = z.object({
-  username: z.string(),
-  channel: z.enum(["chat", "whisper"]),
-  direction: z.enum(["incoming", "outgoing"]),
-  message: z.string(),
-  addressed: z.boolean(),
-  distance: z.number().optional(),
-});
-
-const hurtByPayloadSchema = z.object({ attacker: z.string(), direct: z.string().nullable(), at: z.number() });
-
 const actionOutputSchema = z.object({
   result: z.looseObject({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
 });
@@ -521,8 +493,6 @@ const jsonReplySchema = z.object({ response: z.object({ format: z.literal("json"
 
 /** The runtime contract's longest rationale (`rationaleSchema` in src/server/mcp.ts); a longer one fails the whole call. */
 const MAX_RATIONALE = 200;
-/** Largest page `read_recent_events` accepts. */
-const EVENT_PAGE = 100;
 
 /** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
 function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number; position?: Position | undefined } }[]): NearbyMob[] {
@@ -785,22 +755,7 @@ export class McpBotRuntime implements BotRuntime {
   }
 
   async readEvents(): Promise<RuntimeEvents> {
-    const messages: PlayerMessage[] = [];
-    const hurts: HurtBy[] = [];
-    for (;;) {
-      const { result } = eventsSchema.parse(await this.call("read_recent_events", { limit: EVENT_PAGE }, "Check for players talking to me or hitting me."));
-      for (const event of result.events) {
-        if (event.type === "hurt_by") {
-          hurts.push(hurtByPayloadSchema.parse(event.payload));
-          continue;
-        }
-        if (event.type !== "player_message") continue;
-        const payload = playerMessagePayloadSchema.parse(event.payload);
-        if (payload.direction !== "incoming") continue;
-        messages.push({ username: payload.username, channel: payload.channel, message: payload.message, addressed: payload.addressed, ...(payload.distance !== undefined && { distance: payload.distance }) });
-      }
-      if (result.remainingEventCount === 0) return { messages, hurts };
-    }
+    return readEventPages((limit) => this.call("read_recent_events", { limit }, "Check for players talking to me or hitting me."));
   }
 
   async submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, waitMs: number): Promise<ForegroundState> {

@@ -22,6 +22,7 @@ import { AgentRelations } from "./relations/agent-relations.ts";
 import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
+import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.ts";
 import { agreedDetail, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
@@ -350,17 +351,7 @@ export class Agent {
         try {
           const { messages, hurts } = await this.options.runtime.readEvents();
           for (const hurt of hurts) this.relations?.hurt(hurt);
-          for (const message of messages) {
-            // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
-            if (message.username.toLowerCase() === this.options.persona.username.toLowerCase()) continue;
-            this.lastHeard.set(message.username.toLowerCase(), Date.now());
-            this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
-            // Only a line spoken to me answers an ask (owner 2026-10-29); the ones the code cannot tell are read by the chat tier (decideHeard).
-            if (this.lineIsToMe(message)) this.relations?.heardFrom(message.username);
-            if (message.channel === "chat") this.options.everyone?.heard(message.username, message.message, this.options.persona.username, message.distance ?? null);
-            this.inbox.push(message);
-            this.wakeChat?.();
-          }
+          for (const message of messages) this.takeMessage(message);
           unreadable = false;
         } catch (error) {
           if (!unreadable) this.options.log(`chat unreadable, retrying at the next poll (not logged again until a read works): ${String(error)}`);
@@ -379,6 +370,20 @@ export class Agent {
       await working;
       await chatting;
     }
+  }
+
+  /** One line the poll read: noted as heard, offered to the relations and the shared chat, and queued for the chat tier. */
+  private takeMessage(message: PlayerMessage): void {
+    const { persona, everyone } = this.options;
+    // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
+    if (message.username.toLowerCase() === persona.username.toLowerCase()) return;
+    this.lastHeard.set(message.username.toLowerCase(), Date.now());
+    this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
+    // Only a line spoken to me answers an ask (owner 2026-10-29); the ones the code cannot tell are read by the chat tier (decideHeard).
+    if (lineIsToMe(message, { self: persona.username.toLowerCase(), isMember: this.talks?.isMember(message.username) === true, named: this.namedIn(message) })) this.relations?.heardFrom(message.username);
+    if (message.channel === "chat") everyone?.heard(message.username, message.message, persona.username, message.distance ?? null);
+    this.inbox.push(message);
+    this.wakeChat?.();
   }
 
   /** The chat loop: one message at a time to the chat tier, once its speaker has paused for the burst window. */
@@ -568,23 +573,6 @@ export class Agent {
     });
   }
 
-  /** Whether code alone knows the line is spoken to me: a whisper, my name as a word, or a talk partner naming no other character. */
-  private lineIsToMe(message: PlayerMessage): boolean {
-    if (message.channel === "whisper" || message.addressed) return true;
-    if (this.talks?.isMember(message.username) !== true) return false;
-    const self = this.options.persona.username.toLowerCase();
-    return this.namedIn(message).every((name) => name.toLowerCase() === self);
-  }
-
-  /** Whether the chat tier's reading puts the line to me: it answers one of my requests, or it is not an ignored line and names me, or nobody when the speaker did not just talk to another character (`"everyone"` alone is not me). */
-  private readAsToMe(decision: ChatDecision, justTalkedToAnother: boolean): boolean {
-    if (decision.myRequest !== undefined) return true;
-    if (decision.route === "ignore") return false;
-    const self = this.options.persona.username.toLowerCase();
-    // A nameless line soon after its speaker named another character is that character's (the same rule `handle` drops the reply by).
-    return (decision.to === undefined && !justTalkedToAnother) || (decision.to ?? []).some((name) => name.toLowerCase() === self);
-  }
-
   /**
    * In a conversation of three or more, not every member answers every line (spec 2026-10-18): a line naming members
    * but not her is only recorded; a line naming nobody is answered after a random wait, unless a member spoke meanwhile.
@@ -619,8 +607,8 @@ export class Agent {
       const chat = await this.decideChat(message, heard, heardAt, talkedTo);
       // Marked before the release below: the waiting hold must not end before the mark, or the request expires unheard.
       // A tier that could not read the line gives the speaker the benefit of the doubt; a line refused above marks nothing.
-      const readAt = heard?.readAt ?? heardAt;
-      if (chat === null ? !this.runSignal.aborted : this.readAsToMe(chat.decision, talkedTo !== undefined)) this.relations?.heardFrom(message.username, readAt);
+      const markAt = markHeardAt(chat, { aborted: this.runSignal.aborted, readAt: heard?.readAt ?? heardAt, justTalkedToAnother: talkedTo !== undefined, self: this.options.persona.username.toLowerCase() });
+      if (markAt !== null) this.relations?.heardFrom(message.username, markAt);
       return chat;
     } finally {
       release();
@@ -1571,9 +1559,9 @@ export class Agent {
 
   /** The ask in the reply becomes an open request when its line is sent, not when decided (typing runs seconds behind earlier speech: a line heard before that is no answer to it); a say that failed opens none. */
   private openRequestsOnceSaid(said: Promise<void>, decision: ChatDecision, whisperTo: string | null, snapshot: BotSnapshot): void {
-    const { asksOf, asksWhat } = decision;
-    if (asksOf === undefined || decision.say.trim() === "") return;
-    void said.then(() => this.relations?.asked(asksOf, asksWhat ?? "something", whisperTo, snapshot), () => undefined);
+    const ask = askFromReply(decision);
+    if (ask === null) return;
+    void said.then(() => this.relations?.asked(ask.names, ask.what, whisperTo, snapshot), () => undefined);
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). Resolves once the line is sent; rejects (after logging) when the runtime threw. A refusal the runtime reports without throwing still resolves (`Body.say` only logs it). */
