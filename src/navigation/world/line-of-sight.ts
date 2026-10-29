@@ -9,17 +9,17 @@
  * An unloaded cell stops the ray: nothing can be seen through the unknown.
  */
 import type { BlockRaycaster } from "../../world/block-visibility.js";
-import type { BlockObservation, CollisionBox } from "./world.js";
+import { type BlockObservation, type CollisionBox, collisionBoxesAt } from "./world.js";
 
 /** What a ray can strike in one cell: its boxes, none for a cell it passes through, or null when the cell is unloaded. */
 export type ObstacleLookup = (x: number, y: number, z: number) => readonly CollisionBox[] | null;
 
 export const NO_OBSTACLE: readonly CollisionBox[] = Object.freeze([]);
 
-/** The collision a ray meets in a cell holding `block`. */
-export function obstaclesOf(block: BlockObservation): readonly CollisionBox[] | null {
+/** The collision a ray meets in cell `x`, `z` holding `block`, where that cell has it. */
+export function obstaclesOf(block: BlockObservation, x: number, z: number): readonly CollisionBox[] | null {
   if (block.kind === "unloaded") return null;
-  return block.traits.empty || block.traits.liquid !== null ? NO_OBSTACLE : block.collisionShapes;
+  return block.traits.empty || block.traits.liquid !== null ? NO_OBSTACLE : collisionBoxesAt(block, x, z);
 }
 
 /**

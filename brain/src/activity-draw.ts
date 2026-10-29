@@ -15,16 +15,17 @@ export type FeelingMultipliers = Persona["settings"]["feelingMultipliers"];
 
 /**
  * Never drawn: getting there is never a purpose (spec 2026-10-04), following and fighting players need someone and come
- * from requests. The activities no skill does yet (trading, guarding, storing) are out by having no skill.
+ * from requests. The activities no skill does yet (guarding, storing) are out by having no skill.
  */
 const NOT_DRAWN: ReadonlySet<Activity> = new Set(["travelling", "following", "pvp"]);
 
 /**
  * The activities a character can take on now: one a skill of its own does ({@link SKILL_ACTIVITIES}), judged from what
- * is in sight where it needs a target (hunting an animal that is not hostile, mob combat a hostile mob). In
+ * is in sight where it needs a target (hunting an animal that is not hostile, mob combat a hostile mob, socialising someone
+ * to talk with: `partners`, trading someone and something to give). In
  * {@link ACTIVITIES} order.
  */
-export function availableActivities(skills: readonly SkillName[], snapshot: BotSnapshot): Activity[] {
+export function availableActivities(skills: readonly SkillName[], snapshot: BotSnapshot, partners: readonly string[]): Activity[] {
   const can = new Set<Activity>(skills.flatMap((skill) => SKILL_ACTIVITIES[skill]));
   const animals = snapshot.mobs.some((mob) => !mob.hostile);
   const monsters = snapshot.mobs.some((mob) => mob.hostile);
@@ -32,8 +33,16 @@ export function availableActivities(skills: readonly SkillName[], snapshot: BotS
     if (!can.has(activity) || NOT_DRAWN.has(activity)) return false;
     if (activity === "hunting") return animals;
     if (activity === "mob_combat") return monsters;
+    if (activity === "socialising") return partners.length > 0;
+    if (activity === "trading") return partners.length > 0 && hasStackToGive(snapshot);
     return true;
   });
+}
+
+/** Something to offer: any carried stack, but a single worn armour piece is not a stack she can give. */
+function hasStackToGive(snapshot: BotSnapshot): boolean {
+  const worn = new Set((snapshot.gear?.armour ?? []).flatMap((piece) => (piece.item === null ? [] : [piece.item])));
+  return snapshot.inventory.some((stack) => stack.count > (worn.has(stack.name) ? 1 : 0));
 }
 
 function feelingOf(activity: Activity, preferences: Preferences | undefined): keyof FeelingMultipliers {

@@ -107,9 +107,13 @@ export interface UnfinishedHouse {
   readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
+/** Why a skill failed, for the code that must tell failures apart (the detail is for the model and the journal only). */
+export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come";
+
 export type SkillResult =
-  | { readonly status: "done"; readonly detail: string }
-  | { readonly status: "failed"; readonly detail: string }
+  /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */
+  | { readonly status: "done"; readonly detail: string; readonly taken?: number }
+  | { readonly status: "failed"; readonly detail: string; readonly reason?: FailReason }
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
 
@@ -381,9 +385,47 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
+  const { result, taken } = await giveTo(context, player, item, count);
+  return result.status === "done" && taken !== null ? { ...result, taken } : result;
+}
+
+/**
+ * A hand-over to a player: how it went, how many of the items the recipient took (null when the runtime says nothing of a
+ * recipient), and whether the answer is settled: false when the server had not said yet (late or stopped), so the count
+ * may be short of what happened. An old runtime names no `settled`: read as settled.
+ */
+export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null; readonly settled: boolean; readonly droppedAt: Position | null }> {
   const approach = await come(context, player);
-  if (approach.status !== "done") return approach;
-  return once(context, "drop_item", { items: [{ item_name: item, count }], to_player: player }, `${player} asked me for ${item}.`, `gave ${count} ${item} to ${player}`);
+  if (approach.status !== "done") return { result: approach, taken: null, settled: true, droppedAt: null };
+  const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
+  if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true, droppedAt: null };
+  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null, settled: true, droppedAt: null };
+  const detail = handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}`;
+  return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result), droppedAt: tossSpot(outcome.result) };
+}
+
+/** Where the giver stood when it tossed (the action's `drop.droppedAt`); null when the result names no such spot. */
+function tossSpot(result: Readonly<Record<string, unknown>> | undefined): Position | null {
+  const at = (result?.drop as { droppedAt?: { x?: unknown; y?: unknown; z?: unknown } } | undefined)?.droppedAt;
+  return typeof at?.x === "number" && typeof at.y === "number" && typeof at.z === "number" ? { x: at.x, y: at.y, z: at.z } : null;
+}
+
+/** Whether the runtime's answer to a hand-over is final (`drop.recipient.settled`); true when it names no such field. */
+function recipientSettled(result: Readonly<Record<string, unknown>> | undefined): boolean {
+  const settled = ((result?.drop as { recipient?: { settled?: unknown } | null } | undefined)?.recipient)?.settled;
+  return typeof settled === "boolean" ? settled : true;
+}
+
+/** How many items the recipient picked up (the action's `drop.recipient.collectedCount`); null when the result names no recipient. */
+function recipientTook(result: Readonly<Record<string, unknown>> | undefined): number | null {
+  const counted = ((result?.drop as { recipient?: { collectedCount?: unknown } | null } | undefined)?.recipient)?.collectedCount;
+  return typeof counted === "number" ? counted : null;
+}
+
+/** Whether the recipient picked the toss up (the action's `drop.recipient.collected`); null when the result says nothing. */
+function handedOver(result: Readonly<Record<string, unknown>> | undefined): boolean | null {
+  const collected = ((result?.drop as { recipient?: { collected?: unknown } | null } | undefined)?.recipient)?.collected;
+  return typeof collected === "boolean" ? collected : null;
 }
 
 /**

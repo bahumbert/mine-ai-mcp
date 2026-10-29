@@ -1,0 +1,50 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-bamboo-inside-cell
+tags: [regression]
+description: >-
+  Live 2026-10-19, Ayla stood flush with the bamboo at 191,78,292, her centre in its cell, and no route started from
+  there. The bot walks into that cell beside the stalk (its placed box is x 191.623..191.810, z 292.556..292.744, offset
+  +0.2167 +0.15), then navigates to the stalk's far side, back, and to the free side. The stalk's offset depends on its
+  world cell, so each lane has its own: the driver enters the cell from the side the server's formula leaves room on.
+  Pass = every navigate succeeds and the server never put the bot back.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill 183 -60 -14 199 -55 -2 air"
+
+geometry:
+  - fill: { block: bamboo, from: [191, -60, -8], to: [191, -59, -8] }
+
+players:
+  - name: Actor
+    pos: [188.5, -60, -7.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/offset-inside-cell.ts]
+
+params:
+  debugExecuteJavaScript: true
+  stalk: [191, -60, -8]
+
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [186.5, -60, -7.5]
+      radius: 1.5
+    - kind: completion
+      who: Actor

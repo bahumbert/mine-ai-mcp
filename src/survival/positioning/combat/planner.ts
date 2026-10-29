@@ -21,7 +21,7 @@ export function missingProtection(world: WorldView, shell: readonly Vec3[]): Vec
       continue;
     }
     if (
-      !obstaclesOf(block)?.some(
+      !obstaclesOf(block, cell.x, cell.z)?.some(
         (box) =>
           box.minX === 0 && box.minY === 0 && box.minZ === 0 && box.maxX === 1 && box.maxY >= 1 && box.maxZ === 1,
       )

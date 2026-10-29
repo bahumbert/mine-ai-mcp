@@ -73,4 +73,9 @@ export class Inbox {
   superseded(speaker: string, since: number): boolean {
     return (this.latest.get(speaker.toLowerCase()) ?? 0) > since;
   }
+
+  /** Whether any of `speakers` said something after the message `seq` (its {@link Heard.seq}) was taken. */
+  spokeSince(speakers: readonly string[], seq: number): boolean {
+    return speakers.some((speaker) => this.superseded(speaker, seq));
+  }
 }

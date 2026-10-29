@@ -34,27 +34,27 @@ function seeded(seed: number): () => number {
 }
 
 test("with every skill and nothing in sight, the kinds of work a skill does are available; errands, targets and unbuilt skills are not", () => {
-  const available = availableActivities(SKILL_NAMES, snapshot());
+  const available = availableActivities(SKILL_NAMES, snapshot(), []);
   assert.deepEqual(new Set(available), new Set(["building", "terraforming", "farming", "crafting", "cooking", "woodcutting", "mining", "digging", "foraging", "exploring"]));
   for (const never of ["travelling", "following", "pvp", "trading", "guarding", "storing", "hunting", "mob_combat"] as const) assert.ok(!available.includes(never), never);
 });
 
 test("hunting needs an animal in sight and mob combat a hostile mob, both with the hunt skill", () => {
-  assert.ok(availableActivities(SKILL_NAMES, snapshot([cow])).includes("hunting"));
-  assert.ok(!availableActivities(SKILL_NAMES, snapshot([cow])).includes("mob_combat"));
-  assert.ok(availableActivities(SKILL_NAMES, snapshot([zombie])).includes("mob_combat"));
-  assert.ok(!availableActivities(SKILL_NAMES, snapshot([zombie])).includes("hunting"));
-  assert.deepEqual(availableActivities(SKILL_NAMES, snapshot([cow, zombie])).filter((activity) => activity === "hunting" || activity === "mob_combat"), ["hunting", "mob_combat"]);
+  assert.ok(availableActivities(SKILL_NAMES, snapshot([cow]), []).includes("hunting"));
+  assert.ok(!availableActivities(SKILL_NAMES, snapshot([cow]), []).includes("mob_combat"));
+  assert.ok(availableActivities(SKILL_NAMES, snapshot([zombie]), []).includes("mob_combat"));
+  assert.ok(!availableActivities(SKILL_NAMES, snapshot([zombie]), []).includes("hunting"));
+  assert.deepEqual(availableActivities(SKILL_NAMES, snapshot([cow, zombie]), []).filter((activity) => activity === "hunting" || activity === "mob_combat"), ["hunting", "mob_combat"]);
   const withoutHunt = SKILL_NAMES.filter((skill) => skill !== "hunt");
-  assert.deepEqual(availableActivities(withoutHunt, snapshot([cow, zombie])).filter((activity) => activity === "hunting" || activity === "mob_combat"), []);
+  assert.deepEqual(availableActivities(withoutHunt, snapshot([cow, zombie]), []).filter((activity) => activity === "hunting" || activity === "mob_combat"), []);
 });
 
 test("a persona's skills decide: build alone is building, collect_block the four gatherings, craft_item crafting and cooking, get_items all of those", () => {
-  assert.deepEqual(availableActivities(["build"], snapshot()), ["building"]);
-  assert.deepEqual(new Set(availableActivities(["collect_block"], snapshot())), new Set(["woodcutting", "mining", "digging", "foraging"]));
-  assert.deepEqual(new Set(availableActivities(["craft_item"], snapshot())), new Set(["crafting", "cooking"]));
-  assert.deepEqual(new Set(availableActivities(["get_items"], snapshot())), new Set(["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"]));
-  assert.deepEqual(availableActivities(["go_to", "follow_player", "give_item"], snapshot()), []);
+  assert.deepEqual(availableActivities(["build"], snapshot(), []), ["building"]);
+  assert.deepEqual(new Set(availableActivities(["collect_block"], snapshot(), [])), new Set(["woodcutting", "mining", "digging", "foraging"]));
+  assert.deepEqual(new Set(availableActivities(["craft_item"], snapshot(), [])), new Set(["crafting", "cooking"]));
+  assert.deepEqual(new Set(availableActivities(["get_items"], snapshot(), [])), new Set(["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"]));
+  assert.deepEqual(availableActivities(["go_to", "follow_player", "give_item"], snapshot(), []), []);
 });
 
 test("SKILL_ACTIVITIES covers every skill and every activityOf answer is one the skill is listed for", () => {
@@ -181,4 +181,32 @@ test("1000 draws with the hour's time fed back land near the spec's shares: love
   for (const neutral of ["digging", "foraging", "exploring", "crafting", "cooking", "terraforming"] as const) assert.ok(Math.abs(percent(neutral) - 10) <= 4, `${neutral} ${percent(neutral)}`);
   assert.ok(Math.abs(percent("mining") - 6) <= 4, `dislikes ${percent("mining")}`);
   assert.ok(Math.abs(percent("woodcutting") - 3) <= 4 && percent("woodcutting") > 0, `hates ${percent("woodcutting")}`);
+});
+
+test("socialising needs someone to talk with, and a skill that walks up to them", () => {
+  assert.ok(!availableActivities(SKILL_NAMES, snapshot(), []).includes("socialising"));
+  assert.ok(availableActivities(SKILL_NAMES, snapshot(), ["Theo"]).includes("socialising"));
+  assert.ok(!availableActivities(SKILL_NAMES.filter((skill) => skill !== "go_to_player"), snapshot(), ["Theo"]).includes("socialising"));
+});
+
+test("trading needs a partner and a stack to give: give_item maps to it", () => {
+  assert.deepEqual(SKILL_ACTIVITIES.give_item, ["trading"]);
+  const carrying = { ...snapshot(), inventory: [{ name: "oak_log", count: 8 }] };
+  assert.deepEqual(availableActivities(["give_item"], carrying, ["Theo"]), ["trading"]);
+  assert.deepEqual(availableActivities(["give_item"], carrying, []), [], "no one to trade with");
+  assert.deepEqual(availableActivities(["give_item"], snapshot(), ["Theo"]), [], "nothing to give");
+  assert.deepEqual(availableActivities(["go_to"], carrying, ["Theo"]), [], "without the give_item skill");
+});
+
+test("worn armour alone is nothing to trade", () => {
+  const worn = { ...snapshot(), inventory: [{ name: "iron_chestplate", count: 1 }], gear: { tools: [], armour: [{ class: "chestplate", item: "iron_chestplate" }] } };
+  assert.deepEqual(availableActivities(["give_item"], worn, ["Theo"]), []);
+  const spare = { ...worn, inventory: [{ name: "iron_chestplate", count: 2 }] };
+  assert.deepEqual(availableActivities(["give_item"], spare, ["Theo"]), ["trading"], "a second one is givable");
+});
+
+test("a persona that loves trading draws it more often than one that hates it", () => {
+  const loves = activityChances(["trading", "mining"], { loves: "trading", likes: "mining", dislikes: "farming", hates: "building" }, MULTIPLIERS, noTime);
+  const hates = activityChances(["trading", "mining"], { loves: "building", likes: "mining", dislikes: "farming", hates: "trading" }, MULTIPLIERS, noTime);
+  assert.ok(share(loves, "trading") > share(hates, "trading"));
 });

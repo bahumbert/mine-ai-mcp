@@ -4,8 +4,11 @@ import type { Facing } from "./building/blueprint.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
+import type { ConversationKind, PlannedLength } from "./conversation/state.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
+import type { Handoff } from "./relations/handoff.ts";
+import type { ItemCount, Judged, Trade } from "./relations/types.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import type { ActivityTotal } from "./time-spent.ts";
 
@@ -75,6 +78,20 @@ export interface ChatInput {
   readonly knownNames?: readonly string[];
   /** The character the speaker's latest line naming one was for, when this line names none and that was lately (see Agent.talkedTo). */
   readonly talkedTo?: { readonly name: string; readonly secondsAgo: number };
+  /** The conversation this line is part of, when the character is in one (spec 2026-10-18-conversations-design). */
+  readonly conversation?: ConversationFacts;
+  /** For a line to everyone that asks nothing: true for the one bot that answers it (the nearest the speaker); absent: none does. */
+  readonly claimEveryoneLine?: () => boolean;
+  /** The relations block of the speaker and the other members, and whether the trade field is offered (spec 2026-10-19-relations-trading-design). */
+  readonly relations?: { readonly block: string; readonly tradeOn: boolean };
+}
+
+/** The chat tier's trade decision on a line: propose, accept, decline or cancel a swap; sides are item ids with counts. */
+export interface TradeDecision {
+  readonly action: "propose" | "accept" | "decline" | "cancel";
+  readonly give: readonly ItemCount[];
+  readonly get: readonly ItemCount[];
+  readonly first: "me" | "them";
 }
 
 export interface ChatDecision {
@@ -96,6 +113,10 @@ export interface ChatDecision {
   readonly startsNow?: boolean;
   /** Only on a server with localized chat: the line is shouted, so everyone hears it. */
   readonly shout?: boolean;
+  /** The line ends the conversation for the character (a goodbye); only asked inside one. */
+  readonly close?: boolean;
+  /** A swap of items the line proposes, accepts, declines or cancels; only read when `ChatInput.relations.tradeOn`. */
+  readonly trade?: TradeDecision;
 }
 
 /** Something the agent works towards: an order from someone, or a step of its own goal (`requester` null). */
@@ -109,6 +130,8 @@ export interface Objective {
   readonly purpose: Activity | null;
   /** For an order: where the chat tier read it happens ("you": around the bot itself; the request carries the coordinates). */
   readonly place?: Place;
+  /** A trade's hand-off (spec 2026-10-19-relations-trading-design): a code routine, its own decision, never an order. */
+  readonly handoff?: Handoff;
 }
 
 /** One step already taken for the current objective, as the work tier sees it. */
@@ -192,6 +215,8 @@ export interface GoalInput {
   readonly drawn: readonly Activity[];
   /** The chance of each available activity, most likely first: the kinds of work its "for" may name. */
   readonly chances: readonly ActivityChance[];
+  /** What it knows of the others it could talk to: one record text per partner it has dealt with. */
+  readonly relations?: readonly string[];
 }
 
 /** The goal tier's answer: the objective, and the kind of work it is for (null when it named none we know). */
@@ -209,6 +234,93 @@ export interface NarrateInput {
   readonly history: readonly ChatLine[];
 }
 
+/** What the code knows of a past conversation with someone, for the prompts. */
+export interface PastTalk {
+  readonly with: readonly string[];
+  readonly topic: string;
+  readonly gist: string;
+  readonly minutesAgo: number;
+}
+
+/** The facts of the conversation a chat request is in (the "This conversation" block). */
+export interface ConversationFacts {
+  readonly kind: ConversationKind;
+  /** The other members. */
+  readonly others: readonly string[];
+  /** Who opened it (this character or one of the others). */
+  readonly opener: string;
+  readonly topic: string;
+  readonly planned: PlannedLength | null;
+  readonly lines: number;
+  readonly minutes: number;
+  readonly iAmOpener: boolean;
+  /** The cap is reached: it says goodbye now. */
+  readonly sayGoodbye: boolean;
+  readonly lastGists: readonly PastTalk[];
+  /** A trade the routine came to ask for, while this talk is with its partner and the ask has not been made. */
+  readonly intent?: NonNullable<OpeningInput["intent"]> & { readonly partner: string };
+}
+
+/** Someone near enough to talk to. */
+export interface Nearby {
+  readonly username: string;
+  /** Blocks (Manhattan); null when out of sight. */
+  readonly distance: number | null;
+  readonly lastTalk: PastTalk | null;
+}
+
+export interface OpeningInput {
+  readonly persona: Persona;
+  readonly kind: ConversationKind;
+  readonly near: readonly Nearby[];
+  readonly activity: string;
+  readonly lately: readonly string[];
+  readonly lastFailed: { readonly objective: string; readonly reason: string } | null;
+  /** Social, partner out of earshot: the line is shouted to call them over. */
+  readonly calling: boolean;
+  /** One summary line per nearby partner, with what they said they have against what the objective lacks. */
+  readonly relations?: readonly string[];
+  /** The trading routine came to ask for these items and can offer these stacks. */
+  readonly intent?: { readonly kind: "trade"; readonly want: readonly string[]; readonly offer: readonly ItemCount[] };
+}
+
+export interface OpeningDecision {
+  readonly open: boolean;
+  readonly to: readonly string[];
+  readonly topic: string;
+  readonly length: PlannedLength;
+  readonly say: string;
+}
+
+export interface GistInput {
+  readonly persona: Persona;
+  readonly others: readonly string[];
+  readonly topic: string;
+  readonly lines: readonly ChatLine[];
+  /** Each other member's record text; given: the gist also judges them and notes what they said they have or need. */
+  readonly relations?: readonly { readonly name: string; readonly block: string }[];
+}
+
+/** What the model judged of one member of a finished conversation. */
+export interface GistPartner {
+  readonly name: string;
+  readonly judged: Judged | null;
+  readonly has: readonly string[];
+  readonly needs: readonly string[];
+}
+
+export interface Gist {
+  readonly gist: string;
+  readonly partners: readonly GistPartner[];
+}
+
+export interface JudgeInput {
+  readonly persona: Persona;
+  readonly partner: string;
+  readonly block: string;
+  readonly trade: Trade;
+}
+
 /** The thinking part of an agent (ADR-008, ADR-011). Code around it only runs the skills it picks. */
 export interface Mind {
   /** Chat tier: fast, in character; answers and routes every message it hears. */
@@ -219,4 +331,10 @@ export interface Mind {
   chooseObjective(input: GoalInput, signal: AbortSignal): Promise<ChosenObjective>;
   /** Chat tier: one in-character line about an order (how it ended, or what it does now); empty means say nothing. */
   narrate(input: NarrateInput, signal: AbortSignal): Promise<string>;
+  /** Chat tier: whether and how to open a conversation with those near; `open: false` when it has nothing to say. */
+  openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision>;
+  /** Chat tier: one sentence to remember a finished conversation by. */
+  sumUpConversation(input: GistInput, signal: AbortSignal): Promise<Gist>;
+  /** Chat tier: how a trade that ended outside a conversation changes the feeling for the partner; null when the reply is unusable. */
+  judgeRelation(input: JudgeInput, signal: AbortSignal): Promise<Judged | null>;
 }

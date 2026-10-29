@@ -66,6 +66,13 @@ test("findNewItemEntity skips ids the bot discarded on purpose", () => {
   );
 });
 
+test("forget lets go of ids at once and ignores ones never remembered", () => {
+  const discarded = createDiscardedItems(1_000);
+  discarded.remember([7, 9], 0);
+  discarded.forget([7, 99]);
+  assert.deepEqual([...discarded.ignored(500)], [9]);
+});
+
 test("ignored adds the ids the buried provider lists, past the wall-clock memory too", () => {
   let buried = [3, 4];
   const discarded = createDiscardedItems(1_000, () => buried);

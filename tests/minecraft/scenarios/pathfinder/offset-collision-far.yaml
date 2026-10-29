@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+
+name: offset-collision-far
+tags: [regression]
+description: >-
+  Same failure as offset-collision-probe, far from the origin where the position seed wraps the 32-bit product of its x
+  (|x| > 686): bamboo and pointed dripstone with and without its smaller clamp. The stalks stand at x 700, east of the
+  wrap (the wrap at x < -686 lies outside every lane's cell, x -512..1535). The server is the oracle for the formula;
+  each lane's place gives every stalk its own offset.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill 695 -60 -105 715 -55 -85 air"
+
+# Three bamboo and three pointed dripstone (frustum, frustum, tip). A neighbour update may change a dripstone's thickness;
+# the driver reads the state at walk time.
+geometry:
+  - fill: { block: bamboo, from: [700, -60, -100], to: [700, -59, -100] }
+  - fill: { block: bamboo, from: [703, -60, -100], to: [703, -59, -100] }
+  - fill: { block: bamboo, from: [700, -60, -97], to: [700, -59, -97] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=frustum]", at: [706, -60, -100] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=frustum]", at: [709, -60, -100] }
+  - setblock: { block: "pointed_dripstone[vertical_direction=up,thickness=tip]", at: [700, -60, -94] }
+
+players:
+  - name: Actor
+    pos: [701.5, -60, -98.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/offset-collision.ts]
+
+params:
+  debugExecuteJavaScript: true
+  stalks:
+    - { at: [700, -60, -100] }
+    - { at: [703, -60, -100] }
+    - { at: [700, -60, -97] }
+    - { at: [706, -60, -100] }
+    - { at: [709, -60, -100] }
+    - { at: [700, -60, -94] }
+
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - kind: completion
+      who: Actor

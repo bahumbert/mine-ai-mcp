@@ -4,12 +4,12 @@ import type { ForegroundTool } from "./runtime-client.ts";
 /**
  * The kinds of work a character spends its time on (spec 2026-10-03-specialisations-preferences): our vocabulary, like
  * the skill names, not game knowledge. Preferences name them, the time per activity is counted in them, and the
- * opportunities a character sees are tagged with them. Some have no skill yet (trading, pvp, guarding, storing): a
+ * opportunities a character sees are tagged with them. Some have no skill yet (pvp, guarding, storing): a
  * persona may still love or hate them, the feeling is in the prompt until the skill exists.
  */
 export const ACTIVITIES = [
   "building", "terraforming", "farming", "mining", "woodcutting", "digging", "foraging", "hunting", "mob_combat", "pvp",
-  "exploring", "following", "travelling", "crafting", "cooking", "storing", "trading", "guarding",
+  "exploring", "following", "socialising", "travelling", "crafting", "cooking", "storing", "trading", "guarding",
 ] as const;
 export type Activity = (typeof ACTIVITIES)[number];
 
@@ -26,6 +26,8 @@ const WORDS: Readonly<Partial<Record<Activity, string>>> = {
   digging: "digging out a cellar, a pond or a tunnel",
   terraforming: "reshaping ground",
   following: "following someone",
+  socialising: "chatting with someone",
+  trading: "trading items with someone",
   foraging: "foraging",
   exploring: "exploring",
 };
@@ -36,13 +38,21 @@ export function describeActivity(activity: Activity): string {
 }
 
 /**
- * The activity a model named: by id (`mob_combat`) or as the prompts word it (`fighting monsters`), in any case.
- * Anything else, "none" included, is no activity.
+ * The activity a model named: by id (`mob_combat`) or as the prompts word it (`fighting monsters`), in any case,
+ * alone or at the start of more words (`trading iron_ingot`, `building: a house`; the longest name wins). A name
+ * inside the text, glued to another word (`buildings`) or none at all ("none" included) is no activity.
  */
 export function parseActivity(text: string | undefined): Activity | null {
   if (text === undefined) return null;
   const words = text.trim().toLowerCase().replace(/[_\s]+/gu, " ");
-  return ACTIVITIES.find((activity) => activity.replaceAll("_", " ") === words || describeActivity(activity).toLowerCase() === words) ?? null;
+  let best: { activity: Activity; length: number } | null = null;
+  for (const activity of ACTIVITIES) {
+    for (const name of [activity.replaceAll("_", " "), describeActivity(activity).toLowerCase()]) {
+      const startsHere = words === name || (words.startsWith(name) && !/[\p{L}\p{N}]/u.test(words.charAt(name.length)));
+      if (startsHere && (best === null || name.length > best.length)) best = { activity, length: name.length };
+    }
+  }
+  return best?.activity ?? null;
 }
 
 /** Game facts the activity of a step depends on, looked up by the agent through the runtime. */
@@ -145,13 +155,13 @@ export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> 
   farm: ["farming"],
   explore: ["exploring"],
   go_to: ["travelling"],
-  go_to_player: ["travelling"],
+  go_to_player: ["travelling", "socialising"],
   follow_player: ["following"],
   hunt: ["hunting", "mob_combat"],
   collect_block: ["woodcutting", "mining", "digging", "foraging"],
   craft_item: ["crafting", "cooking"],
   get_items: ["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"],
-  give_item: [],
+  give_item: ["trading"],
   drop_item: [],
   eat: [],
   equip: [],

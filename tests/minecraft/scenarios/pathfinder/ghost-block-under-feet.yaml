@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: ghost-block-under-feet-then-navigate
+tags: [regression]
+description: >-
+  Live 2026-10-18, Ayla stood 15+ min: her client held the cell under her as air while the server held it as stone (a
+  ghost block), so the server put her back to the same spot every 100 ms and every route failed with stance=airborne.
+  The client-side floor under the bot is turned to air; the runtime must see the repeated corrections, ask the server
+  for the real cells, and the navigate 10 blocks on must then succeed.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+players:
+  - name: Stuck
+    pos: [ 0.5, -60, 0.5 ]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Stuck,gamemode=!spectator]"
+
+params:
+  debugExecuteJavaScript: true
+  actions:
+    # Client side only: the server keeps the stone.
+    - action: debug_execute_javascript
+      input:
+        code: "bot.world.setBlockStateId(bot.entity.position.floored().offset(0, -1, 0), 0); return 'ghost under feet';"
+    # The server puts her back every 100 ms; two seconds are enough for the runtime to resync the cells.
+    - action: debug_execute_javascript
+      input:
+        code: "await bot.waitForTicks(40); return 'waited';"
+    - { action: navigate, input: { x: 10, y: -60, z: 0, range: 1 } }
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: reach
+      who: Stuck
+      pos: [ 10.5, -60, 0.5 ]
+      radius: 2.0
+    - kind: completion
+      who: Stuck

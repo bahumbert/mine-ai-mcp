@@ -23,7 +23,7 @@
  * two physics disagree. The cell holding the box is what has to be broken for
  * the body to stand up.
  */
-import type { BlockPosition, Position3, WorldView } from "./world.js";
+import { type BlockPosition, type Position3, type WorldView, collisionBoxesAt } from "./world.js";
 
 const STANDING_HEIGHT = 1.8;
 /** The shortest pose the server can keep a player in; a box below this is a floor or a wall, not a ceiling. */
@@ -44,7 +44,7 @@ export function overheadPinningCell(world: WorldView, position: Position3): Bloc
       for (let z = Math.floor(minZ); z <= Math.floor(maxZ); z += 1) {
         const block = world.blockAt(x, y, z);
         if (block.kind !== "loaded") continue;
-        for (const box of block.collisionShapes) {
+        for (const box of collisionBoxesAt(block, x, z)) {
           const bottom = y + box.minY;
           if (bottom <= clearance || bottom >= top) continue;
           if (x + box.maxX <= minX || x + box.minX >= maxX || z + box.maxZ <= minZ || z + box.minZ >= maxZ) continue;

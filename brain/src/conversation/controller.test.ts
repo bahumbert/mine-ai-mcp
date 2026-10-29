@@ -1,0 +1,669 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { ChatLine, GistPartner, OpeningDecision } from "../mind.ts";
+import type { BotSnapshot } from "../runtime-client.ts";
+import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
+import { ConversationBudget, ConversationController, maxConversations, type ControllerDeps, type ConversationEvent, type ConversationMemory } from "./controller.ts";
+
+const signal = new AbortController().signal;
+const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "short", say: "Theo! How's the mine?" };
+
+function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"]; relations?: ControllerDeps["relations"]; pollMs?: number } = {}) {
+  const { chat, mind: scripted } = scriptedMind();
+  const mind = options.decision === undefined ? scripted : Object.assign(Object.create(scripted) as typeof scripted, { openConversation: async () => options.decision as OpeningDecision });
+  const clock = { now: 1_000_000 };
+  const spoken: { text: string; to: readonly string[]; whisperTo: string | null; shout: boolean }[] = [];
+  const journal: ConversationEvent[] = [];
+  const memories: ConversationMemory[] = [];
+  const logs: string[] = [];
+  const budget = options.budget ?? new ConversationBudget(2);
+  const draw = { value: options.random ?? 0.1 };
+  const controller = new ConversationController({
+    self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), ...(options.relations !== undefined && { relations: options.relations }), talkRange: 64, ...(options.pollMs !== undefined && { openPollMs: options.pollMs }),
+    ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now,
+    speak: (text, to, whisperTo, shout) => spoken.push({ text, to, whisperTo, shout }),
+    journal: (event) => journal.push(event), memorize: (memory) => memories.push(memory), log: (line) => logs.push(line),
+    history: () => options.history ?? [],
+  });
+  const snapshotWith = (players: BotSnapshot["players"]): BotSnapshot => ({ ...new FakeRuntime().snapshot, position: { x: 0, y: 64, z: 0 }, players });
+  const theoAt = (blocks: number) => snapshotWith([{ username: "Theo", position: { x: blocks, y: 64, z: 0 } }]);
+  const facts = (snapshot: BotSnapshot) => ({ snapshot, activity: "idle", lately: [], lastFailed: null, busy: false });
+  return { chat, controller, clock, spoken, journal, memories, logs, budget, draw, snapshotWith, theoAt, facts };
+}
+
+test("no model call when nobody is within 16 blocks, the draw fails, or it is busy, the queue full or too soon", async () => {
+  let free = true;
+  const t = setup({ modelFree: () => free });
+  t.chat.reply(OPEN, OPEN, OPEN, OPEN, OPEN);
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(17)), signal), false, "17 blocks");
+  assert.equal(await t.controller.maybeOpen(t.facts(t.snapshotWith([])), signal), false, "nobody");
+  t.clock.now += 30_000;
+  t.draw.value = 0.5;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false, "the draw fails");
+  t.clock.now += 30_000;
+  t.draw.value = 0.1;
+  assert.equal(await t.controller.maybeOpen({ ...t.facts(t.theoAt(10)), busy: true }, signal), false, "busy");
+  free = false;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false, "queue full");
+  free = true;
+  t.clock.now += 10_000;
+  assert.equal(t.chat.requests.length, 0, "no model call at all");
+  assert.ok(t.logs.some((line) => line === "conversation: chance 0.30 drew no"));
+});
+
+test("no model call before 30 s since the last check", async () => {
+  const t = setup({ random: 0.5 });
+  t.chat.reply(OPEN);
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  t.clock.now += 29_999;
+  t.draw.value = 0;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.chat.requests.length, 0);
+});
+
+test("no model call at the budget cap", async () => {
+  const budget = new ConversationBudget(1);
+  assert.equal(budget.tryTake(), true);
+  const t = setup({ budget });
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.chat.requests.length, 0);
+});
+
+test("opens on yes: one line to Theo, a record with both, an opened row", async () => {
+  const t = setup();
+  t.chat.reply(OPEN);
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), true);
+  assert.deepEqual(t.spoken, [{ text: "Theo! How's the mine?", to: ["Theo"], whisperTo: null, shout: false }]);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
+  assert.equal(t.controller.current?.lines, 1);
+  assert.deepEqual(t.journal, [{ kind: "conversation", event: "opened", id: t.controller.current!.id, members: ["Ayla", "Theo"], conversationKind: "chance", topic: "the mine", planned: "short" }]);
+  assert.equal(t.budget.active, 1);
+});
+
+test("budget given back on open: false, an empty line or an error", async () => {
+  const t = setup();
+  t.chat.reply({ open: false }, { ...OPEN, say: "" });
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.budget.active, 0);
+  t.clock.now += 30_000;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.budget.active, 0);
+  t.clock.now += 30_000;
+  t.chat.reply("not json", "still not", "nor this");
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.budget.active, 0);
+  assert.deepEqual(t.spoken, []);
+});
+
+test("pair cooldown: Theo again after an end waits 10 minutes", async () => {
+  const t = setup();
+  t.chat.reply(OPEN, { gist: "Chatted." }, OPEN);
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  t.controller.end("goodbye");
+  await t.controller.finished();
+  assert.equal(t.budget.active, 0);
+  t.clock.now += 9 * 60_000;
+  t.draw.value = 0;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.chat.requests.length, 2, "the opening and the gist only");
+  t.clock.now += 61_000;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), true);
+});
+
+test("heard: a line naming her opens a record by its speaker; a non-member naming a member joins", () => {
+  const t = setup();
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
+  assert.equal(t.controller.current?.opener, "Theo");
+  assert.equal(t.controller.current?.lines, 1);
+  assert.equal(t.budget.active, 0, "not opened by her: no budget");
+  t.controller.heard("Bruno", "Theo, wait for me", ["Theo"], "chat");
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo", "Bruno"]);
+  assert.equal(t.journal.at(-1)?.event, "joined");
+  t.controller.heard("Cleo", "nice weather", [], "chat");
+  assert.equal(t.controller.isMember("Cleo"), false);
+  assert.equal(t.controller.current?.lines, 2);
+});
+
+test("a whisper opens a whisper record", () => {
+  const t = setup();
+  t.controller.heard("Theo", "psst Ayla", ["Ayla"], "whisper");
+  assert.equal(t.controller.current?.whisper, true);
+});
+
+test("own line is not heard as a member's", () => {
+  const t = setup();
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const before = t.controller.current!.lines;
+  t.controller.heard("Ayla", "hello Theo", ["Theo"], "chat");
+  assert.equal(t.controller.current!.lines, before);
+  const fresh = setup();
+  fresh.controller.heard("Ayla", "hello Theo", ["Ayla", "Theo"], "chat");
+  assert.equal(fresh.controller.current, null);
+});
+
+test("said with close ends the conversation as goodbye, and journals it with the gist", async () => {
+  const t = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }] });
+  t.chat.reply({ gist: "Talked about nothing much." });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.clock.now += 5_000;
+  t.controller.said(true);
+  assert.equal(t.controller.current, null);
+  await t.controller.finished();
+  const ended = t.journal.at(-1);
+  assert.equal(ended?.event, "ended");
+  assert.equal(ended?.reason, "goodbye");
+  assert.equal(ended?.lines, 2);
+  assert.equal(ended?.gist, "Talked about nothing much.");
+  assert.deepEqual(t.memories[0]?.talk.members, ["Theo"], "the memory holds the others only");
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /Theo: "see you"/u);
+});
+
+test("after the cap, her next line ends it as cap", () => {
+  const t = setup({ modelFree: () => false });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  for (let line = 0; line < 23; line += 1) t.controller.heard("Theo", "and", [], "chat");
+  assert.equal(t.controller.facts()?.sayGoodbye, true);
+  t.controller.said(false);
+  assert.equal(t.controller.current, null);
+  assert.equal(t.journal.at(-1)?.reason, "cap");
+});
+
+test("tick ends out_of_range after 20 s alone", async () => {
+  const t = setup({ modelFree: () => false });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  await t.controller.tick(t.snapshotWith([]), signal);
+  assert.notEqual(t.controller.current, null);
+  t.clock.now += 20_000;
+  await t.controller.tick(t.snapshotWith([]), signal);
+  assert.equal(t.controller.current, null);
+  assert.deepEqual(t.journal.map((event) => event.event), ["opened", "left", "ended"]);
+  assert.equal(t.journal.at(-1)?.reason, "out_of_range");
+});
+
+test("without a way to wait, a full queue gives the topic as the gist at once", async () => {
+  let free = true;
+  const t = setup({ modelFree: () => free });
+  t.chat.reply(OPEN);
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  free = false;
+  t.controller.end("silence");
+  assert.equal(t.chat.requests.length, 1, "only the opening");
+  assert.equal(t.memories[0]?.talk.gist, "the mine");
+});
+
+test("gist waits for a free slot", async () => {
+  let free = true;
+  let grant!: (ok: boolean) => void;
+  const waits: number[] = [];
+  const t = setup({ modelFree: () => free, waitForModel: (ms) => { waits.push(ms); return new Promise<boolean>((resolve) => { grant = resolve; }); } });
+  t.chat.reply(OPEN, { gist: "Planned the mine." });
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  free = false;
+  t.controller.end("silence");
+  assert.deepEqual(waits, [120_000]);
+  assert.equal(t.journal.at(-1)?.event, "opened", "nothing is written while it waits");
+  free = true;
+  grant(true);
+  await t.controller.finished();
+  assert.equal(t.chat.requests.length, 2, "the opening and one gist call");
+  assert.equal(t.journal.at(-1)?.event === "ended" && t.journal.at(-1)?.gist, "Planned the mine.");
+  assert.equal(t.memories[0]?.talk.gist, "Planned the mine.");
+});
+
+test("the fallback gist is never empty", async () => {
+  const gistOf = async (history: ChatLine[], opener: string, topic = "") => {
+    const t = setup({ modelFree: () => false, waitForModel: async () => false, history });
+    t.controller.heard(opener, "Ayla, hi", ["Ayla"], "chat");
+    if (topic !== "") t.controller.current!.topic = topic;
+    t.controller.end("silence");
+    await t.controller.finished();
+    return t.memories[0]?.talk.gist;
+  };
+  const said = (speaker: string, text: string, at: number): ChatLine => ({ speaker, text, at });
+  assert.equal(await gistOf([said("Theo", "I will bring the logs", 1_000_001), said("Ayla", "great", 1_000_002)], "Theo"), `Theo: "I will bring the logs"`, "no topic: the last line another member said");
+  assert.equal(await gistOf([], "GlutenFoul"), "with GlutenFoul", "no topic, no member line");
+  assert.equal(await gistOf([said("Theo", "x", 1_000_001)], "Theo", "the mine"), "the mine", "the topic first");
+  assert.equal((await gistOf([said("Theo", "x".repeat(300), 1_000_001)], "Theo"))?.length, 120, "cut to 120 characters");
+});
+
+test("an empty gist from the model uses the fallback", async () => {
+  const t = setup();
+  t.chat.reply({ gist: "" });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.end("silence");
+  await t.controller.finished();
+  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+});
+
+test("the brain stopping ends the wait for a slot: the fallback is written, no model call", async () => {
+  const t = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>(() => undefined) });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const stop = new AbortController();
+  t.controller.end("silence", stop.signal);
+  stop.abort();
+  await t.controller.finished();
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+  const early = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>(() => undefined) });
+  early.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const stopped = AbortSignal.abort();
+  early.controller.end("silence", stopped);
+  await early.controller.finished();
+  assert.equal(early.memories[0]?.talk.gist, "with Theo");
+});
+
+test("a new conversation can open while the last gist waits; the gist lands on the old one", async () => {
+  let grant!: (ok: boolean) => void;
+  const t = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>((resolve) => { grant = resolve; }) });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  const oldId = t.controller.current!.id;
+  t.controller.end("silence");
+  t.clock.now += 11 * 60_000;
+  t.controller.heard("Theo", "Ayla, again", ["Ayla"], "chat");
+  assert.notEqual(t.controller.current, null);
+  assert.notEqual(t.controller.current?.id, oldId);
+  grant(false);
+  await t.controller.finished();
+  const ended = t.journal.filter((event) => event.event === "ended");
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0]?.id, oldId);
+  assert.equal(t.memories[0]?.talk.id, oldId);
+});
+
+test("the last talks feed the next opening and the conversation block", async () => {
+  const t = setup();
+  t.controller.recalled([{ members: ["Theo"], topic: "iron", gist: "I promised logs", endedAt: new Date(t.clock.now - 12 * 60_000).toISOString() }]);
+  t.chat.reply(OPEN);
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /12 min ago about iron: I promised logs/u);
+  assert.equal(t.controller.facts()?.lastGists[0]?.gist, "I promised logs");
+});
+
+test("a social opening skips the draw, calls out of earshot with a shout when localized chat is on", async () => {
+  const t = setup({ random: 0.99, localized: true });
+  t.chat.reply({ ...OPEN, say: "Theo! Come over!" });
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), true);
+  assert.equal(t.spoken[0]?.shout, true);
+  assert.equal(t.controller.current?.kind, "social");
+  assert.equal(t.controller.current?.waitUntil, t.clock.now + 60_000);
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /out of earshot/u);
+  const plain = setup({ localized: false });
+  plain.chat.reply(OPEN);
+  await plain.controller.openSocial("Theo", null, plain.facts(plain.snapshotWith([])), signal);
+  assert.equal(plain.spoken[0]?.shout, false);
+});
+
+test("--max-conversations: default 2, 0 accepted, a negative or fractional value is refused", () => {
+  assert.equal(maxConversations(undefined), 2);
+  assert.equal(maxConversations("0"), 0);
+  assert.equal(maxConversations("3"), 3);
+  for (const bad of ["-1", "1.5", "two", ""]) assert.throws(() => maxConversations(bad), /\[BAD_START_ARG\]/u);
+});
+
+test("a social opening is skipped, without a model call, when the model queue is full", async () => {
+  const t = setup({ modelFree: () => false });
+  t.chat.reply(OPEN);
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), false);
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.budget.active, 0);
+});
+
+test("simultaneous openings: the username that sorts later takes the other as opener and gives its budget slot back", async () => {
+  const t = setup();
+  const aaron = { username: "Aaron", position: { x: 5, y: 64, z: 0 } };
+  t.chat.reply({ ...OPEN, to: ["Aaron"], say: "Aaron, a word?" });
+  await t.controller.maybeOpen(t.facts(t.snapshotWith([aaron])), signal);
+  assert.equal(t.budget.active, 1);
+  t.controller.heard("Aaron", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.current?.opener, "Aaron");
+  assert.equal(t.controller.current?.planned, null);
+  assert.equal(t.controller.current?.topic, "");
+  assert.equal(t.controller.current?.lines, 2);
+  assert.equal(t.budget.active, 0);
+  assert.equal(t.controller.facts()?.iAmOpener, false);
+});
+
+test("simultaneous openings: the username that sorts first keeps its record and its slot", async () => {
+  const t = setup();
+  const zed = { username: "Zed", position: { x: 5, y: 64, z: 0 } };
+  t.chat.reply({ ...OPEN, to: ["Zed"], say: "Zed, a word?" });
+  await t.controller.maybeOpen(t.facts(t.snapshotWith([zed])), signal);
+  t.controller.heard("Zed", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.current?.opener, "Ayla");
+  assert.equal(t.budget.active, 1);
+  assert.equal(t.controller.current?.lines, 2);
+});
+
+test("a nameless line from someone within talk range joins; from farther away or unknown, it does not", () => {
+  const t = setup();
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.heard("Steve", "nice day", [], "chat", false);
+  t.controller.heard("Cleo", "hello", [], "chat");
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
+  t.controller.heard("Steve", "nice day", [], "chat", true);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo", "Steve"]);
+  assert.equal(t.journal.at(-1)?.event, "joined");
+  const alone = setup();
+  alone.controller.heard("Steve", "nice day", [], "chat", true);
+  assert.equal(alone.controller.current, null, "near alone opens nothing");
+});
+
+test("budget given back when the model keeps writing nameless openings", async () => {
+  const t = setup();
+  const nameless = { ...OPEN, say: "The ground here is uneven." };
+  t.chat.reply(nameless, nameless, nameless, nameless, nameless, nameless);
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false);
+  assert.equal(t.budget.active, 0);
+  assert.equal(t.controller.current, null);
+  assert.deepEqual(t.spoken, []);
+});
+
+test("members are the names the opening line names", async () => {
+  const t = setup();
+  const players = t.snapshotWith([{ username: "Bruno", position: { x: 5, y: 64, z: 0 } }, { username: "Lena", position: { x: 6, y: 64, z: 0 } }]);
+  t.chat.reply({ ...OPEN, to: ["Bruno", "Lena"], say: "Bruno, a word?" });
+  assert.equal(await t.controller.maybeOpen(t.facts(players), signal), true);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Bruno"]);
+  assert.deepEqual(t.spoken.map((line) => line.to), [["Bruno"]]);
+  assert.deepEqual(t.journal[0]?.members, ["Ayla", "Bruno"]);
+});
+
+test("an opening whose line names nobody it is for opens nothing, gives the slot back and logs it", async () => {
+  const decision: OpeningDecision = { open: true, to: ["Theo"], topic: "x", length: "short", say: "Got a minute?" };
+  const social = setup({ decision });
+  assert.equal(await social.controller.openSocial("Theo", null, social.facts(social.snapshotWith([])), signal), false);
+  assert.equal(social.budget.active, 0);
+  assert.deepEqual(social.spoken, []);
+  assert.ok(social.logs.includes("conversation: opening names nobody it is for"));
+  const chance = setup({ decision });
+  assert.equal(await chance.controller.maybeOpen(chance.facts(chance.theoAt(10)), signal), false);
+  assert.equal(chance.budget.active, 0);
+});
+
+/** Two controllers whose `speak` reaches the other's `heard`, at once or when `deliver` is called; each opening call waits for `release`. */
+function pair(deliverAtOnce: boolean) {
+  const clock = { now: 1_000_000 };
+  const outbox: (() => void)[] = [];
+  const make = (self: string, other: string, getOther: () => ConversationController) => {
+    const { mind: inner } = scriptedMind();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const mind = Object.assign(Object.create(inner) as typeof inner, {
+      openConversation: async () => {
+        await gate;
+        return { open: true, to: [other], topic: "x", length: "short" as const, say: `${other}, hello from ${self}` };
+      },
+    });
+    const budget = new ConversationBudget(2);
+    const controller = new ConversationController({
+      self, persona: testPersona(), mind, budget, modelFree: () => true, talkRange: 64, random: () => 0, now: () => clock.now,
+      speak: (text) => {
+        const hear = () => getOther().heard(self, text, [other], "chat");
+        if (deliverAtOnce) hear(); else outbox.push(hear);
+      },
+      journal: () => {}, memorize: () => {}, log: () => {}, history: () => [],
+    });
+    return { controller, budget, release };
+  };
+  const ayla: ReturnType<typeof make> = make("Ayla", "Theo", () => theo.controller);
+  const theo: ReturnType<typeof make> = make("Theo", "Ayla", () => ayla.controller);
+  const snapshot = (otherName: string): BotSnapshot => ({ ...new FakeRuntime().snapshot, position: { x: 0, y: 64, z: 0 }, players: [{ username: otherName, position: { x: 3, y: 64, z: 0 } }] });
+  const facts = (otherName: string) => ({ snapshot: snapshot(otherName), activity: "idle", lately: [], lastFailed: null, busy: false });
+  return { ayla, theo, outbox, facts };
+}
+
+test("two controllers: an opening line that names the other reaches it (Theo opens while Ayla's call is pending)", async () => {
+  const p = pair(true);
+  const aylaOpening = p.ayla.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, p.facts("Theo"), signal);
+  const theoOpening = p.theo.controller.openSocial("Ayla", { x: 3, y: 64, z: 0 }, p.facts("Ayla"), signal);
+  p.theo.release();
+  assert.equal(await theoOpening, true);
+  assert.equal(p.ayla.controller.current?.opener, "Theo", "heard while her own call was pending");
+  p.ayla.release();
+  assert.equal(await aylaOpening, false, "she says nothing");
+  assert.equal(p.ayla.budget.active, 0);
+  assert.equal(p.theo.budget.active, 1);
+  assert.equal(p.ayla.controller.current?.opener, "Theo");
+});
+
+test("two controllers: both openings resolve before either line is heard, one opener is left", async () => {
+  const p = pair(false);
+  const aylaOpening = p.ayla.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, p.facts("Theo"), signal);
+  const theoOpening = p.theo.controller.openSocial("Ayla", { x: 3, y: 64, z: 0 }, p.facts("Ayla"), signal);
+  p.ayla.release();
+  p.theo.release();
+  assert.equal(await aylaOpening, true);
+  assert.equal(await theoOpening, true);
+  for (const deliver of p.outbox) deliver();
+  assert.equal(p.ayla.controller.current?.opener, "Ayla");
+  assert.equal(p.theo.controller.current?.opener, "Ayla");
+  assert.equal(p.ayla.budget.active, 1);
+  assert.equal(p.theo.budget.active, 0);
+});
+
+test("gist partners reach the book, and the gist prompt carries the records", async () => {
+  const ended: GistPartner[][] = [];
+  const t = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations: { blocksFor: (names) => names.map((name) => ({ name, block: `You and ${name}: new.` })), openingLines: () => [], ended: (partners) => ended.push([...partners]) } });
+  t.chat.reply({ gist: "Talked iron.", partners: [{ name: "Theo", feeling: 1, word: "friend", why: "fair", has: ["iron_ingot"], needs: [] }] });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.clock.now += 5_000;
+  t.controller.said(true);
+  await t.controller.finished();
+  assert.deepEqual(ended, [[{ name: "Theo", judged: { feeling: 1, word: "friend", why: "fair" }, has: ["iron_ingot"], needs: [] }]]);
+  assert.match(t.chat.requests[0]?.[0]?.content ?? "", /"partners"/u);
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /You and Theo: new\./u);
+  assert.equal(t.memories[0]?.talk.gist, "Talked iron.");
+});
+
+test("a gist with no partners leaves the feelings alone, and the fallback gist never reaches the book", async () => {
+  const ended: GistPartner[][] = [];
+  const relations = { blocksFor: () => [], openingLines: () => [], ended: (partners: readonly GistPartner[]) => ended.push([...partners]) };
+  const plain = setup({ history: [{ speaker: "Theo", text: "see you", at: 1_000_001 }], relations });
+  plain.chat.reply({ gist: "Talked iron." });
+  plain.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  plain.clock.now += 5_000;
+  plain.controller.said(true);
+  await plain.controller.finished();
+  assert.deepEqual(ended, [], "no partners in the reply");
+  const busy = setup({ modelFree: () => false, relations });
+  busy.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  busy.controller.said(true);
+  await busy.controller.finished();
+  assert.deepEqual(ended, [], "no model call, no judgment");
+});
+
+const TRADE_INTENT = { kind: "trade" as const, want: ["iron_ingot"], offer: [{ item: "oak_log", count: 32 }] };
+
+test("a carried trade intent reaches the facts of a talk with its partner, until her next line asks it", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  assert.equal(t.controller.facts(), undefined);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.deepEqual(t.controller.facts()?.intent, { ...TRADE_INTENT, partner: "Theo" });
+  assert.equal(t.controller.askedSince("Theo", 0), false, "shown is not asked");
+  t.clock.now += 1_000;
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("THEO", t.clock.now), true, "her line after the facts is the ask, case-insensitive");
+  assert.equal(t.controller.askedSince("Theo", t.clock.now + 1), false);
+  assert.equal(t.controller.facts()?.intent, undefined, "asked once");
+});
+
+test("a carried intent for someone who is not in the talk is not shown and no line asks it", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.heard("Bruno", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined);
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Theo", 0), false);
+  assert.equal(t.controller.askedSince("Bruno", 0), false);
+});
+
+test("a line said without the intent shown asks nothing", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Theo", 0), false, "facts() was never asked for");
+});
+
+test("a second carryIntent replaces the first; releaseIntent removes it and later talks have none", () => {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.carryIntent("Bruno", { ...TRADE_INTENT, want: ["bread"] });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined, "Theo's was replaced");
+  t.controller.releaseIntent();
+  t.controller.heard("Bruno", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.intent, undefined);
+  t.controller.said(false);
+  assert.equal(t.controller.askedSince("Bruno", 0), false);
+});
+
+test("an opening that carries the intent records the ask for its partner, and it survives the end", async () => {
+  const t = setup();
+  t.chat.reply(OPEN, { gist: "Talked." });
+  const before = t.clock.now;
+  assert.equal(await t.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, { ...t.facts(t.theoAt(3)), intent: TRADE_INTENT }, signal), true);
+  assert.equal(t.controller.askedSince("Theo", before), true);
+  t.controller.end("goodbye");
+  await t.controller.finished();
+  assert.equal(t.controller.askedSince("Theo", before), true, "kept after the talk ended");
+});
+
+test("an opening without the intent records no ask", async () => {
+  const t = setup();
+  t.chat.reply(OPEN);
+  await t.controller.openSocial("Theo", { x: 3, y: 64, z: 0 }, t.facts(t.theoAt(3)), signal);
+  assert.equal(t.controller.askedSince("Theo", 0), false);
+});
+
+const later = (ms: number, run: () => void): void => void setTimeout(run, ms);
+const THEO_NEAR = { username: "Theo", position: { x: 3, y: 64, z: 0 } };
+
+test("a deliberate opening waits for the model to be free, then proceeds", async () => {
+  let free = false;
+  const t = setup({ modelFree: () => free, pollMs: 5 });
+  t.chat.reply(OPEN);
+  later(30, () => { free = true; });
+  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), true);
+  assert.equal(t.budget.active, 1);
+});
+
+test("a deliberate opening uses waitForModel when it is wired", async () => {
+  let free = false;
+  const waits: number[] = [];
+  const t = setup({ modelFree: () => free, pollMs: 5, waitForModel: async (ms) => { waits.push(ms); free = true; return true; } });
+  t.chat.reply(OPEN);
+  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), true);
+  assert.equal(waits.length, 1);
+});
+
+test("a full conversation cap fails at the deadline by the wall clock, whatever the tick clock says, and names the reason", async () => {
+  const budget = new ConversationBudget(1);
+  budget.tryTake();
+  const t = setup({ budget, pollMs: 5 });
+  const started = performance.now();
+  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 80), false);
+  assert.ok(performance.now() - started >= 75, "it waited the whole time");
+  assert.equal(t.controller.openRefusal, "conversation limit");
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.budget.active, 1, "the slot of the other talk is untouched");
+  assert.ok(t.logs.some((line) => /opening to Theo refused: conversation limit/u.test(line)));
+});
+
+test("a model that stays busy fails with 'model busy'", async () => {
+  const t = setup({ modelFree: () => false, pollMs: 5 });
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal, 40), false);
+  assert.equal(t.controller.openRefusal, "model busy");
+  assert.equal(t.budget.active, 0);
+});
+
+test("no wait: a refusal is immediate and keeps its reason", async () => {
+  const t = setup({ modelFree: () => false });
+  const started = performance.now();
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), false);
+  assert.ok(performance.now() - started < 50);
+  assert.equal(t.controller.openRefusal, "model busy");
+});
+
+test("a bot in a chance talk with others opens once that talk ends; if it never ends, the reason names who", async () => {
+  const t = setup({ pollMs: 5 });
+  t.controller.heard("Cleo", "Ayla, hi", ["Ayla"], "chat");
+  t.chat.reply({ gist: "Chatted." }, OPEN);
+  later(30, () => t.controller.end("goodbye"));
+  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), true);
+  assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
+  const stuck = setup({ pollMs: 5 });
+  stuck.controller.heard("Cleo", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(await stuck.controller.openSocial("Theo", THEO_NEAR.position, stuck.facts(stuck.snapshotWith([THEO_NEAR])), signal, 40), false);
+  assert.equal(stuck.controller.openRefusal, "in a talk with Cleo");
+});
+
+test("an abort during the wait stops it and takes no slot", async () => {
+  const abort = new AbortController();
+  const t = setup({ modelFree: () => false, pollMs: 5 });
+  later(20, () => abort.abort());
+  const started = performance.now();
+  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), abort.signal, 5_000), false);
+  assert.ok(performance.now() - started < 1_000);
+  assert.equal(t.budget.active, 0);
+  const early = setup({ pollMs: 5 });
+  assert.equal(await early.controller.openSocial("Theo", null, early.facts(early.snapshotWith([])), abort.signal, 5_000), false, "already aborted");
+  assert.equal(early.budget.active, 0);
+  assert.equal(early.chat.requests.length, 0);
+});
+
+test("the partner opens to the bot during the wait: the wait ends in their talk, with no model call", async () => {
+  const t = setup({ modelFree: () => false, pollMs: 5 });
+  later(20, () => t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat"));
+  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 5_000), true);
+  assert.equal(t.chat.requests.length, 0);
+  assert.equal(t.budget.active, 0);
+});
+
+test("the conversation slot comes back on every way a social talk ends, so another opening finds it", async () => {
+  const ways: { name: string; end: (t: ReturnType<typeof setup>) => Promise<void> }[] = [
+    { name: "goodbye", end: async (t) => t.controller.said(true) },
+    { name: "silence", end: async (t) => { t.clock.now += 10 * 60_000; await t.controller.tick(t.theoAt(3), signal); } },
+    { name: "out of range", end: async (t) => { await t.controller.tick(t.snapshotWith([]), signal); t.clock.now += 21_000; await t.controller.tick(t.snapshotWith([]), signal); } },
+    { name: "taken over", end: async (t) => t.controller.end("taken_over") },
+  ];
+  for (const way of ways) {
+    const budget = new ConversationBudget(1);
+    const t = setup({ budget });
+    t.chat.reply(OPEN, { gist: "Chatted." }, { gist: "Chatted." });
+    assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.theoAt(3)), signal), true, way.name);
+    assert.equal(budget.active, 1);
+    await way.end(t);
+    await t.controller.finished();
+    assert.equal(t.controller.current, null, way.name);
+    assert.equal(budget.active, 0, `${way.name} gives the slot back`);
+    assert.equal(budget.tryTake(), true, `${way.name}: another opening finds a slot`);
+  }
+  const thrown = setup();
+  thrown.chat.reply("not json", "still not", "nor this");
+  assert.equal(await thrown.controller.openSocial("Theo", THEO_NEAR.position, thrown.facts(thrown.theoAt(3)), signal), false);
+  assert.equal(thrown.budget.active, 0, "an opening call that throws");
+  const declined = setup();
+  declined.chat.reply({ open: false });
+  assert.equal(await declined.controller.openSocial("Theo", THEO_NEAR.position, declined.facts(declined.theoAt(3)), signal), false);
+  assert.equal(declined.budget.active, 0, "an opening the model declines");
+});
+
+test("two bots at cap 2: after both talks end, a third opening gets a slot", async () => {
+  const budget = new ConversationBudget(2);
+  const bots = ["Ayla", "Bruno"].map(() => setup({ budget }));
+  for (const bot of bots) {
+    bot.chat.reply(OPEN, { gist: "Chatted." });
+    assert.equal(await bot.controller.openSocial("Theo", THEO_NEAR.position, bot.facts(bot.theoAt(3)), signal), true);
+  }
+  assert.equal(budget.active, 2);
+  const third = setup({ budget, pollMs: 5 });
+  third.chat.reply(OPEN);
+  assert.equal(await third.controller.openSocial("Theo", THEO_NEAR.position, third.facts(third.theoAt(3)), signal), false, "full");
+  for (const bot of bots) bot.controller.said(true);
+  await Promise.all(bots.map((bot) => bot.controller.finished()));
+  assert.equal(budget.active, 0);
+  assert.equal(await third.controller.openSocial("Theo", THEO_NEAR.position, third.facts(third.theoAt(3)), signal, 500), true);
+});

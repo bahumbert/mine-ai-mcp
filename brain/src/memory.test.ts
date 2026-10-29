@@ -71,3 +71,38 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   const older = { kind: "small medieval house", site, part: 2 };
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
 });
+
+test("a conversation is remembered as a sentence without the character, and the newest 5 are read back newest first", () => {
+  const talk = (index: number) => ({ id: `Theo-${index}`, members: ["Theo", "Bruno"], topic: "the mine", gist: `gist ${index}`, endedAt: `2026-10-18T12:0${index}:00.000Z`, reason: "goodbye" as const });
+  assert.equal(memoryNote({ kind: "conversation", talk: { ...talk(1), members: ["Theo"] } }).note, "I talked with Theo about the mine: gist 1 (2026-10-18T12:01:00.000Z).");
+  const contexts = [7, 6, 5, 4, 3, 2, 1].map((index) => memoryNote({ kind: "conversation", talk: talk(index) }).context);
+  assert.deepEqual(recall(contexts, LIMITS).conversations.map((known) => known.gist), ["gist 7", "gist 6", "gist 5", "gist 4", "gist 3"]);
+  assert.deepEqual(recall(contexts, LIMITS).conversations[0], { members: ["Theo", "Bruno"], topic: "the mine", gist: "gist 7", endedAt: "2026-10-18T12:07:00.000Z" });
+  assert.match(recallQuery("Ayla", LIMITS), /brain memory: conversation .*LIMIT 5/u);
+});
+
+const relationOf = (partner: string, lastDealt: number, word = "friend") => ({
+  partner, feeling: 1, word, why: "paid back", lastDealt, trades: [], saidHas: [], saidNeeds: [],
+  facts: { tradesDone: 1, promisesKept: 1, keptLate: 0, promisesBroken: 0, iFailedToPay: 0, giftsGiven: 0, giftsReceived: 0 },
+});
+
+test("a relation note round trip", () => {
+  const relation = relationOf("Theo", 5);
+  const { note, context } = memoryNote({ kind: "relation", relation });
+  assert.match(note, /Theo/u);
+  assert.match(context, /^brain memory: relation:Theo \{/u);
+  const recalled = recall([context], LIMITS);
+  assert.deepEqual(recalled.relations, [relation]);
+  assert.equal(recalled.skipped, 0);
+  assert.match(recallQuery("Ayla", LIMITS), /brain memory: relation:/u);
+});
+
+test("relations recall caps at 30, newest dealt first, one per partner, skips a bad note and counts it", () => {
+  const contexts = Array.from({ length: 35 }, (_, i) => memoryNote({ kind: "relation", relation: relationOf(`Bot${i}`, i) }).context);
+  const stale = memoryNote({ kind: "relation", relation: relationOf("Bot34", 1, "old") }).context;
+  const recalled = recall([...contexts.toReversed(), "brain memory: relation:Zed {bad", stale], LIMITS);
+  assert.equal(recalled.relations.length, 30);
+  assert.deepEqual(recalled.relations.slice(0, 2).map((r) => r.partner), ["Bot34", "Bot33"]);
+  assert.equal(recalled.relations[0]?.word, "friend", "the newest note of a partner wins");
+  assert.equal(recalled.skipped, 1);
+});

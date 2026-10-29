@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import type { Step } from "./actions.ts";
 import { Agent, type AgentOptions } from "./agent.ts";
+import { EveryoneLines } from "./everyone-lines.ts";
+import { ConversationBudget, type ConversationController } from "./conversation/controller.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
+import type { AgentRelations } from "./relations/agent-relations.ts";
+import { TradeBoard } from "./relations/board.ts";
+import type { Handoff } from "./relations/handoff.ts";
+import type { TradeAsks } from "./relations/trading.ts";
 
 function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
@@ -1289,6 +1296,1213 @@ test("a plain stop from one player ends her work and the character's own goals, 
   assert.deepEqual(stacks.filter((stack) => stack.length > 0 && !stack.includes("collect 16 oak_log")).at(0), ["mine stone"], "Steve's logs ended, Alex's queued order stayed");
 });
 
+test("a reply that shouts is sent as a shout in public chat, and as a plain whisper to a whisperer", async (t) => {
+  const runtime = new FakeRuntime();
+  const tiers = scriptedMind({ range: 64 });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  const running = agent.run(controller.signal);
+  t.after(async () => {
+    controller.abort();
+    await running;
+  });
+  tiers.chat.reply(
+    { spoken_to: ["Ayla"], say: "Coming!", shout: true, route: "talk", request: "" },
+    { spoken_to: ["Ayla"], say: "Psst!", shout: true, route: "talk", request: "" },
+  );
+  runtime.inbox.push(say("Steve", "Ayla, are you there?"));
+  await until(() => runtime.said.length === 1);
+  runtime.inbox.push({ ...say("Steve", "Ayla, are you there?"), channel: "whisper" });
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input), [
+    { message: "Coming!", shout: true },
+    { message: "Psst!", to: "Steve" },
+  ]);
+});
+
+// Conversations (spec 2026-10-18-conversations-design).
+function talkOptions(extra: Partial<AgentOptions> = {}, modelFree = true): Partial<AgentOptions> {
+  return { conversations: { budget: new ConversationBudget(2), modelFree: () => modelFree }, otherAgents: ["Vex", "Bruno"], ...extra };
+}
+
+const toAyla = { spoken_to: ["Ayla"], route: "talk" };
+
+test("another agent's line is still ignored outside a conversation, and always without conversations", async (t) => {
+  const runtime = new FakeRuntime();
+  const withTalks = agentFor(t, runtime, {}, talkOptions());
+  await withTalks.agent.handle(say("Vex", "hello everyone", false));
+  await withTalks.agent.handle(say("Vex", "Bruno, did you see?", false));
+  assert.equal(withTalks.chat.requests.length, 0);
+  assert.equal(withTalks.agent.conversation, null);
+  const off = agentFor(t, new FakeRuntime());
+  await off.agent.handle(say("Vex", "Ayla, got a minute?"));
+  assert.equal(off.chat.requests.length, 0, "conversations off: as before");
+  assert.equal(off.agent.conversation, null);
+});
+
+test("an agent's line naming her opens a conversation and is answered; a member's line naming nobody is answered too", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Sure, what's up?" }, { ...toAyla, say: "The farm is fine." });
+  await agent.handle(say("Vex", "Ayla, got a minute?"));
+  assert.deepEqual(runtime.said, ["Sure, what's up?"]);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /This conversation:/u);
+  assert.deepEqual(agent.conversation?.members, ["Ayla", "Vex"]);
+  await agent.handle(say("Vex", "how is the farm?", false));
+  assert.deepEqual(runtime.said, ["Sure, what's up?", "The farm is fine."]);
+  assert.equal(agent.conversation?.lines, 4);
+});
+
+test("in a group, a line naming another member is not answered by her, and a nameless one is dropped when a member spoke meanwhile", async (t) => {
+  const runtime = new FakeRuntime();
+  const settings = { ...testPersona().settings, chatBurstMs: 60_000 };
+  const { agent, chat } = agentFor(t, runtime, { settings }, talkOptions());
+  chat.reply({ ...toAyla, say: "Hello you two." });
+  await agent.handle(say("Vex", "Ayla and Bruno, hello"));
+  assert.deepEqual(agent.conversation?.members, ["Ayla", "Vex", "Bruno"]);
+  assert.equal(chat.requests.length, 1);
+  await agent.handle(say("Bruno", "Vex, how are you?", false));
+  assert.equal(chat.requests.length, 1, "a line naming another member: no call");
+  // Bruno spoke after the message Ayla is about to read.
+  (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Bruno", "anyone hungry?", false));
+  await agent.handle(say("Vex", "I could eat", false), { message: say("Vex", "I could eat", false), lines: 1, seq: 0 });
+  assert.equal(chat.requests.length, 1, "a nameless line after which a member spoke: no call");
+  chat.reply({ ...toAyla, say: "Me too." });
+  await agent.handle(say("Vex", "bread then?", false));
+  assert.deepEqual(runtime.said, ["Hello you two.", "Me too."], "nobody spoke since: she answers");
+});
+
+test("close ends the conversation, journaled as goodbye with its gist", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }));
+  chat.reply({ ...toAyla, say: "Bye, Vex!", close: true }, { gist: "Said hello to Vex." });
+  await agent.handle(say("Vex", "Ayla, I must go, bye"));
+  assert.equal(agent.conversation, null);
+  await until(() => events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "goodbye");
+  assert.equal(ended?.kind === "conversation" && ended.gist, "Said hello to Vex.");
+  const chatRow = events.find((event) => event.kind === "chat");
+  assert.ok(chatRow?.kind === "chat" && chatRow.conversation !== undefined, "the chat row carries the conversation");
+});
+
+test("an order ends a chance conversation taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  assert.notEqual(agent.conversation, null);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "taken_over");
+});
+
+test("simultaneous openings merge: both end with both members", async (t) => {
+  const open = (to: string) => ({ open: true, to: [to], topic: "hello", length: "short", say: `${to}, hi` });
+  const budget = new ConversationBudget(2);
+  const world = (self: string, other: string) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players: [{ username: other, position: { x: 10, y: 64, z: 0 } }] };
+    const tiers = agentFor(t, runtime, { username: self, displayName: self }, talkOptions({ random: () => 0, otherAgents: [other], conversations: { budget, modelFree: () => true } }));
+    tiers.chat.reply(open(other), { spoken_to: [other], say: "Hi!", route: "talk" }, { spoken_to: [other], say: "Hi again.", route: "talk" });
+    return { runtime, ...tiers };
+  };
+  const ayla = world("Ayla", "Vex");
+  const vex = world("Vex", "Ayla");
+  await until(() => ayla.agent.conversation !== null && vex.agent.conversation !== null);
+  ayla.runtime.inbox.push(say("Vex", "Ayla, hi"));
+  vex.runtime.inbox.push(say("Ayla", "Vex, hi"));
+  await until(() => ayla.runtime.said.length >= 2 && vex.runtime.said.length >= 2);
+  assert.deepEqual([...ayla.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
+  assert.deepEqual([...vex.agent.conversation!.members].sort(), ["Ayla", "Vex"]);
+  assert.equal(budget.active, 1, "one slot held for the one conversation");
+  assert.equal(ayla.agent.conversation!.opener, "Ayla");
+  assert.equal(vex.agent.conversation!.opener, "Ayla", "Vex sorts later: it takes Ayla as the opener");
+  assert.deepEqual([ayla.runtime.said.length, vex.runtime.said.length], [2, 2], "each side answered the other's line once");
+  assert.equal(ayla.chat.requests.length, 2);
+  assert.equal(vex.chat.requests.length, 2);
+});
+
+test("its own line coming back is not a member's: no wake, no line counted", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Hi." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const lines = agent.conversation!.lines;
+  runtime.inbox.push(say("Ayla", "Hi."));
+  await sleep(40);
+  assert.equal(agent.conversation?.lines, lines);
+  assert.equal(chat.requests.length, 1);
+});
+
+test("an order ends a social conversation: its follow step is aborted, the order runs", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 5;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  chat.reply({ open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true }, { gist: "Walked a bit, then an order came." });
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social");
+  assert.match(agent.activity, /go and chat with Vex/u);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  await until(() => events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  const ended = events.find((event) => event.kind === "conversation" && event.event === "ended");
+  assert.equal(ended?.kind === "conversation" && ended.reason, "taken_over");
+  await until(() => action.requests.length >= 1);
+  assert.match(action.requests[0]?.[1]?.content ?? "", /Objective \(asked by Steve\): "collect 5 dirt"/u);
+});
+
+test("socialising is never offered to a character without conversations", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, planner } = agentFor(t, runtime, { goal: "Live well." });
+  planner.reply({ objective: "chat with Vex", for: "socialising" });
+  await until(() => planner.requests.length >= 1);
+  assert.doesNotMatch(JSON.stringify(planner.requests[0]), /chatting with someone/u);
+  assert.equal(agent.conversation, null);
+});
+
+test("a runtime that stays down is logged once by the conversation check, again only after a read worked", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ log: (line) => logs.push(line) }));
+  chat.reply({ ...toAyla, say: "Hi." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await until(() => logs.some((line) => line.startsWith("listening as")));
+  const status = runtime.status.bind(runtime);
+  let down = true;
+  runtime.status = async () => {
+    if (down) throw new Error("runtime down");
+    return status();
+  };
+  await sleep(120);
+  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 1);
+  down = false;
+  await sleep(60);
+  down = true;
+  await sleep(60);
+  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 2, "logged again after a read worked");
+});
+
+test("no chance opening while a socialising objective is on its way to its partner", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 1_500;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const settings = { ...testPersona().settings, conversation: { ...testPersona().settings.conversation, checkEverySeconds: 1 } };
+  const { agent, chat, planner } = agentFor(t, runtime, { goal: "Be friendly.", settings }, talkOptions({ otherAgents: ["Vex"], random: () => 0 }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  await until(() => agent.activity.includes("go and chat with Vex"));
+  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, { username: "Bruno", position: { x: 4, y: 64, z: 0 } }] };
+  await sleep(1_300);
+  assert.equal(chat.requests.length, 0, "no opening call to Bruno on the way");
+  assert.equal(agent.conversation, null);
+});
+
+test("a player's nameless line from within talk range joins the conversation; from farther away it does not", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Hi Vex." }, { ...toAyla, say: "Hello Steve." });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle({ ...say("Steve", "lovely weather", false), distance: 100 });
+  assert.equal(agent.conversation?.members.includes("Steve"), false);
+  await agent.handle({ ...say("Steve", "lovely weather", false), distance: 10 });
+  assert.equal(agent.conversation?.members.includes("Steve"), true);
+});
+
+test("a request from a conversation member keeps the conversation", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  const act = { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true };
+  chat.reply({ ...toAyla, say: "Sure." }, act, { ...toAyla, say: "Almost done, Vex." }, { gist: "x" });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const record = agent.conversation;
+  assert.notEqual(record, null);
+  await agent.handle(say("Vex", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, record, "the same record: the favour did not end it");
+  assert.ok(!events.some((event) => event.kind === "conversation" && event.event === "ended"));
+  // The next line of the member is still handled inside the conversation.
+  await agent.handle(say("Vex", "how is it going?", false));
+  // The done report of the favour may be asked after it: the line's own request is the last one that is not a report.
+  const lineRequest = chat.requests.filter((turns) => !(turns[1]?.content ?? "").includes(") is done:")).at(-1);
+  assert.match(lineRequest?.[1]?.content ?? "", /This conversation:/u);
+  assert.equal(agent.conversation, record);
+});
+
+test("a request from someone who is not a member still ends it taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  assert.equal(agent.conversation, null);
+  assert.equal(events.some((event) => event.kind === "conversation" && event.event === "ended" && event.reason === "taken_over"), true);
+});
+
+test("a stop from a member still ends the conversation taken_over", async (t) => {
+  const runtime = new FakeRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ journal: (event) => events.push(event) }, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "Stopping.", route: "stop", request: "" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  await agent.handle(say("Vex", "Ayla, stop", false));
+  assert.equal(agent.conversation, null);
+  assert.equal(events.some((event) => event.kind === "conversation" && event.event === "ended" && event.reason === "taken_over"), true);
+});
+
+test("a later from a member keeps the conversation going", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat, action } = agentFor(t, runtime, {}, talkOptions({}, false));
+  chat.reply({ ...toAyla, say: "Sure." }, { spoken_to: ["Ayla"], say: "Later.", route: "later", request: "collect 5 dirt" });
+  action.reply({ done: "got it" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  const record = agent.conversation;
+  await agent.handle(say("Vex", "Ayla, collect 5 dirt when you can", false));
+  assert.equal(agent.conversation, record);
+});
+
+test("a favour agreed with the partner of a social conversation keeps it; the routine resumes without a second opening", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.navigate = 5;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Vex"] }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  chat.reply(
+    { open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" },
+    { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true },
+    { gist: "Talked about the village." }, { gist: "Talked about the village." },
+  );
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social");
+  const record = agent.conversation;
+  await agent.handle(say("Vex", "Ayla, please collect 5 dirt"));
+  assert.equal(agent.conversation, record, "the favour did not end the conversation");
+  await until(() => action.requests.length >= 1);
+  assert.equal(events.filter((event) => event.kind === "conversation" && event.event === "opened").length, 1, "one opening only");
+});
+
+/** The next call answers 400 ms after the test starts, as a live model takes seconds: every bot has registered its distance to the speaker before any claims the line. */
+function slowModel(model: { hold(): () => void }): void {
+  const release = model.hold();
+  setTimeout(release, 400);
+}
+
+/** Two agents (Ayla and Vex) sharing one record of the lines to everyone; each model reads the line as a greeting. */
+function greetedBy(t: Parameters<typeof agentFor>[0], speakerAt: { ayla: number; vex: number }, line: ReturnType<typeof say> & { distance?: number }, hearers: { ayla: boolean; vex: boolean } = { ayla: true, vex: true }) {
+  const everyone = new EveryoneLines();
+  const greeting = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey!", route: "talk", request: "" };
+  const make = (name: string, at: number, hears: boolean) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players: [steveAt(at)] };
+    const built = agentFor(t, runtime, { id: name.toLowerCase(), username: name }, { everyone, otherAgents: ["Ayla", "Vex"].filter((other) => other !== name) });
+    built.chat.reply(greeting);
+    slowModel(built.chat);
+    return { runtime, hears, ...built };
+  };
+  const ayla = make("Ayla", speakerAt.ayla, hearers.ayla);
+  const vex = make("Vex", speakerAt.vex, hearers.vex);
+  return { ayla, vex, say: async () => {
+    await sleep(100); // the agents drain the chat from before they started first
+    for (const bot of [ayla, vex]) if (bot.hears) bot.runtime.inbox.push(line);
+  } };
+}
+
+test("a greeting to everyone is answered by the bot nearest the speaker only, distances from positions", async (t) => {
+  const { ayla, vex, say: speak } = greetedBy(t, { ayla: 30, vex: 5 }, say("Steve", "sups boys ?", false));
+  await speak();
+  await until(() => vex.runtime.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual([ayla.runtime.said, vex.runtime.said], [[], ["Hey!"]]);
+});
+
+test("a greeting to everyone with the line's own distance (localized chat) is answered by the nearer bot only", async (t) => {
+  const everyone = new EveryoneLines();
+  const greeting = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey!", route: "talk", request: "" };
+  const bots = [["Ayla", 40], ["Vex", 6]].map(([name, distance]) => {
+    const runtime = new FakeRuntime();
+    const built = agentFor(t, runtime, { id: String(name).toLowerCase(), username: String(name) }, { everyone, otherAgents: ["Ayla", "Vex"].filter((other) => other !== name) });
+    built.chat.reply(greeting);
+    slowModel(built.chat);
+    return { runtime, distance: distance as number };
+  });
+  await sleep(100); // the agents drain the chat from before they started first
+  for (const bot of bots) bot.runtime.inbox.push({ ...say("Steve", "sups boys ?", false), distance: bot.distance });
+  const runtimes = bots.map((bot) => bot.runtime);
+  await until(() => runtimes[1]!.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual(runtimes.map((runtime) => runtime.said), [[], ["Hey!"]]);
+});
+
+test("a bot that does not hear the greeting is no candidate: the one that heard it answers", async (t) => {
+  const { ayla, vex, say: speak } = greetedBy(t, { ayla: 30, vex: 5 }, say("Steve", "sups boys ?", false), { ayla: true, vex: false });
+  await speak();
+  await until(() => ayla.runtime.said.length > 0, 4_000);
+  await sleep(300);
+  assert.deepEqual([ayla.runtime.said, vex.runtime.said], [["Hey!"], []]);
+});
+
+const MIN = 60_000;
+const ACCEPT = { spoken_to: ["Ayla"], asks: "", language: "English", say: "Deal.", route: "talk", request: "", trade: { action: "accept", give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "me" } };
+
+/** A runtime with Theo two blocks away and 10 bread carried, for the trade tests. */
+function tradingRuntime(): FakeRuntime {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "bread", count: 10 }], players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }] };
+  return runtime;
+}
+
+/** The relation notes of the runtime, newest first, read back the way a restart does. */
+function savedRelations(runtime: FakeRuntime) {
+  return recall(runtime.notes.map((note) => note.context).reverse(), { places: 8, lately: 5, farms: 4, times: 3 }).relations;
+}
+
+test("work resumes after a trade hand-off", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await until(() => action.requests.length === 2, 4_000);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log/u, "the earlier objective's next step is asked for");
+  assert.equal(runtime.cancelled.length, 1, "its running step was set aside for the give");
+  assert.deepEqual(events.filter((event) => event.kind === "trade").map((event) => event.event), ["agreed", "gave"]);
+  const trade = savedRelations(runtime)[0]?.trades[0];
+  assert.deepEqual([trade?.state, trade?.first], ["i_gave", "me"]);
+  await until(() => agent.activity === "idle");
+});
+
+test("shelter keeps the trade due: a stop during the give drops the hand-off, the trade stays open and is given later, then broken at its deadline", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.drop_item = 100_000;
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT, { say: "Okay.", route: "stop", request: "" });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await agent.handle(say("Steve", "Ayla, stop"));
+  await until(() => runtime.cancelled.length === 1);
+  await sleep(100);
+  assert.equal(agent.activity, "idle");
+  assert.deepEqual([savedRelations(runtime)[0]?.trades[0]?.state, savedRelations(runtime)[0]?.trades[0]?.gaveAt], ["agreed", null], "the trade is still due");
+  delete runtime.durations.drop_item;
+  offset = 31_000;
+  await sleep(300);
+  assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "i_gave", "taken again later and given");
+  offset += 11 * MIN;
+  await sleep(300);
+  const broken = savedRelations(runtime)[0]?.trades[0];
+  assert.deepEqual([broken?.state, broken?.brokenBy], ["broken", "them"]);
+  clock.mock.restore();
+});
+
+test("a player's give_item request outside a trade is unchanged, and keeps no relation", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(3)] };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "give Steve 2 dirt" }, { say: "Here you go!" });
+  action.reply({ step: { skill: "give_item", player: "Steve", item: "dirt", count: 2 } }, { done: "Steve has 2 dirt" });
+  await agent.handle(say("Steve", "could you give me 2 dirt"));
+  await until(() => runtime.said.length === 2);
+  assert.deepEqual(bodyCalls(runtime), ["navigate", "drop_item"]);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+test("a trade the checks refuse goes back to the chat tier once with the reason and is then not made", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  const unaffordable = { ...ACCEPT, say: "Deal, all my iron!", trade: { ...ACCEPT.trade, give: [{ item: "iron_ingot", count: 5 }], get: [{ item: "bread", count: 1 }] } };
+  chat.reply(unaffordable, { ...ACCEPT, say: "Sorry, I have none.", trade: undefined });
+  await agent.handle(say("Theo", "Ayla, bread for iron?"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /Your relations:\nYou have not dealt with Theo before\./u);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /you carry 0 iron_ingot, not 5/u);
+  assert.deepEqual(runtime.said, ["Sorry, I have none."]);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+test("relations off: no relation block, no trade paragraph, no trade", async (t) => {
+  const runtime = tradingRuntime();
+  const persona = testPersona();
+  const { agent, chat } = agentFor(t, runtime, { settings: { ...persona.settings, relations: { ...persona.settings.relations, enabled: false } } });
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.said.length === 1);
+  assert.doesNotMatch(chat.requests[0]?.[0]?.content ?? "", /"trade"/u);
+  assert.doesNotMatch(chat.requests[0]?.[1]?.content ?? "", /Your relations/u);
+  await sleep(100);
+  assert.deepEqual(bodyCalls(runtime), []);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+/** The objectives the agent took on, as `<requester or own>: <text>`, from its journal. */
+const takenObjectives = (events: BrainEvent[]): string[] => events.flatMap((event) => (event.kind === "objective" && event.event === "taken" ? [`${event.requester ?? "own"}: ${event.text}`] : []));
+const TRADE_AND_ORDER = { ...ACCEPT, route: "act", request: "give Theo 5 bread" };
+
+test("a trade line routed act takes no order", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply(TRADE_AND_ORDER);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread, I pay 5 iron_ingot right after"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await until(() => agent.activity === "idle");
+  assert.deepEqual(takenObjectives(events), ["own: hand over 5 bread to Theo (trade)"]);
+});
+
+test("a later route with a trade takes no order", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  // "later" is a route only while the character works for someone else.
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await agent.handle(say("Steve", "Ayla, collect 16 oak_log"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...TRADE_AND_ORDER, route: "later" });
+  await agent.handle(say("Theo", "Ayla, give me 5 bread, I pay 5 iron_ingot right after"));
+  // Q1 (2026-10-24): the give waits below the player's order instead of interrupting it.
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "queued" && event.text === "hand over 5 bread to Theo (trade)"));
+  assert.deepEqual(takenObjectives(events), ["Steve: collect 16 oak_log"]);
+  assert.equal(runtime.cancelled.length, 0, "the order's step runs on");
+});
+
+test("decline with act keeps the order", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply({ ...TRADE_AND_ORDER, trade: { action: "decline", give: [], get: [], first: "me" } });
+  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 5 } }, { done: "Theo has the bread" });
+  await agent.handle(say("Theo", "Ayla, never mind the trade, just give me 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 5 bread"]);
+});
+
+test("an ignored proposal keeps the order", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  const propose = { ...ACCEPT, trade: { ...ACCEPT.trade, action: "propose", first: "them" } };
+  chat.reply(propose);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "proposed");
+  // A second proposal with the same partner is refused by the checks (twice) and dropped: the order stays.
+  chat.reply({ ...propose, route: "act", request: "give Theo 1 bread" }, { ...propose, route: "act", request: "give Theo 1 bread" });
+  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 1 } }, { done: "Theo has the bread" });
+  await agent.handle(say("Theo", "Ayla, give me 1 bread now"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 1 bread"]);
+  assert.equal(savedRelations(runtime)[0]?.trades.length, 1, "still the one proposal");
+});
+
+test("a stop with a trade still stops", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, route: "stop", request: "" });
+  await agent.handle(say("Theo", "Ayla, stop that, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.cancelled.length >= 1);
+  assert.ok(!takenObjectives(events).some((line) => line.startsWith("Theo:")), "a stop takes no order");
+});
+
+test("a hand-off already given ends done without a give and the previous objective resumes", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations; takeHandoff(h: Handoff): void };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  const id = inside.relations.book.trades()[0]!.id;
+  // The give was made by another objective while the hand-off was waiting on the stack.
+  await inside.relations.trades.gaveOutside("Theo", "bread", 5);
+  inside.takeHandoff({ kind: "give", tradeId: id, partner: "Theo", items: [{ item: "bread", count: 5 }] });
+  await until(() => action.requests.length === 2, 4_000);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log/u, "the objective below takes its next step");
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"), "no give_item call");
+  const finished = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("hand over") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(finished, [["done", "already handed over"]]);
+});
+
+test("a queued give for a trade broken meanwhile ends failed, naming the trade over, without a give, and the previous objective resumes (review 2026-10-24, 4)", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations; takeHandoff(h: Handoff): void };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  const id = inside.relations.book.trades()[0]!.id;
+  // The deadline broke the trade while the give waited behind a long order.
+  await inside.relations.book.update("Theo", (r) => ({ ...r, trades: r.trades.map((trade) => ({ ...trade, state: "broken" as const })) }));
+  inside.takeHandoff({ kind: "give", tradeId: id, partner: "Theo", items: [{ item: "bread", count: 5 }] });
+  await until(() => action.requests.length === 2, 4_000);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log/u, "the objective below takes its next step");
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"), "no give_item call");
+  const finished = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("hand over") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(finished, [["failed", "the trade with Theo is over (broken): nothing given"]]);
+});
+
+test("a queued give for a trade that ended done meanwhile (given outside the hand-off) ends done 'already handed over', never 'nothing given'", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations; takeHandoff(h: Handoff): void };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  const id = inside.relations.book.trades()[0]!.id;
+  // They paid, then another objective's give_item paid my side: the trade is done before the queued give runs.
+  await inside.relations.book.update("Theo", (r) => ({ ...r, trades: r.trades.map((trade) => ({ ...trade, state: "done" as const, gaveAt: 1 })) }));
+  inside.takeHandoff({ kind: "give", tradeId: id, partner: "Theo", items: [{ item: "bread", count: 5 }] });
+  await until(() => action.requests.length === 2, 4_000);
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"), "no give_item call");
+  const finished = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("hand over") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(finished, [["done", "already handed over"]]);
+});
+
+test("an agreed trade where they pay first sets the own objective aside for a wait; the payment ends it, the give follows and the objective resumes", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" }, { journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  await until(() => takenObjectives(events).includes("own: wait for Theo to give their side (trade)"), 4_000);
+  assert.ok(runtime.cancelled.length >= 1, "the own step was aborted for the wait");
+  const finishedWait = () => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("wait for Theo"));
+  assert.equal(finishedWait(), false, "the wait runs while nothing arrives");
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await until(finishedWait, 4_000);
+  const waits = events.flatMap((event) => (event.kind === "objective" && event.event === "finished" && event.text.startsWith("wait for Theo") ? [[event.outcome, event.detail]] : []));
+  assert.deepEqual(waits, [["done", "they gave"]]);
+  await until(() => action.requests.length >= 2, 4_000);
+  assert.match(action.requests.at(-1)?.[1]?.content ?? "", /collect 16 oak_log/u, "the own objective resumes after the wait");
+});
+
+test("a stop during the wait for their side drops it: the trade stays open and the wait is not on the stack", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  await until(() => takenObjectives(events).includes("own: wait for Theo to give their side (trade)"), 4_000);
+  const inside = agent as unknown as { relations: AgentRelations; stack: { objective: { handoff?: Handoff } }[] };
+  chat.reply({ spoken_to: ["Ayla"], asks: "", language: "English", say: "Okay.", route: "stop", request: "" });
+  await agent.handle(say("Theo", "Ayla, stop that"));
+  await until(() => inside.stack.every((work) => work.objective.handoff === undefined), 4_000);
+  assert.equal(inside.relations.book.trades()[0]?.state, "agreed", "the trade stays open");
+  assert.equal(inside.relations.trades.awaits(inside.relations.book.trades()[0]!.id), true);
+});
+
+/** Ayla (bread, Theo 2 blocks away) whose own `get_items` for 3 iron_ingot ends failed: the goal tier is asked again with trading in reach. */
+async function failedIronObjective(t: Parameters<typeof agentFor>[0], extra: Partial<AgentOptions> = {}, theoX = 30, others: FakeRuntime["snapshot"]["players"] = []) {
+  // Theo is out of the opening distance: no chance opening takes the talk before the routine does.
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: theoX, y: 64, z: 0 } }, ...others] };
+  runtime.durations.navigate = 5;
+  const events: BrainEvent[] = [];
+  const built = agentFor(t, runtime, { goal: "Forge an iron kit." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Theo"], random: () => 0, ...extra }));
+  built.planner.reply({ objective: "get 3 iron_ingot" });
+  built.action.reply({ step: { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] } }, { give_up: "no iron anywhere near" });
+  return { runtime, events, ...built };
+}
+
+test("a failed own get_items objective draws trading and shows the trade-needs line to the next goal call", async (t) => {
+  const { planner } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  const prompt = JSON.stringify(planner.requests[1]);
+  assert.match(prompt, /feel most like [^.]*trading items with someone/u);
+  assert.match(prompt, /trade for iron_ingot you could not get: ask Theo what they would want for it \(you carry 10 bread\)/u);
+});
+
+test("without anyone to trade with, a failed objective draws no trading", async (t) => {
+  const runtime = tradingRuntime();
+  const built = agentFor(t, runtime, { goal: "Forge an iron kit." }, { random: () => 0 });
+  built.planner.reply({ objective: "get 3 iron_ingot" });
+  built.action.reply({ step: { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] } }, { give_up: "no iron anywhere near" });
+  built.planner.reply({ objective: "gather wood" });
+  await until(() => built.planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(JSON.stringify(built.planner.requests[1]), /trading items with someone|trade for/u);
+});
+
+test("a trading objective runs the routine: no work-tier call, a trade step in the journal, done on an agreed trade", async (t) => {
+  const { runtime, events, agent, chat, action, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for 5 iron ingots", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" }, ACCEPT, { gist: "Agreed bread for iron." }, { gist: "Agreed bread for iron." });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the trading objective asked the work tier nothing");
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  // The hand-off sets the routine aside; it resumes with the talk still on and follows until the talk ends.
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await sleep(100);
+  (agent as unknown as { talks: ConversationController }).talks.end("out_of_range");
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "done"), 6_000);
+  const rows = events.filter((event) => event.kind === "step" && event.objective.startsWith("trade Theo"));
+  const row = rows.at(-1);
+  assert.equal(rows.length, 1, "F9: set aside for the hand-off, then ended done on resume: no second trade step");
+  assert.deepEqual(row?.kind === "step" && row.input, { skill: "trade", partner: "Theo" });
+  const finished = events.find((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo"));
+  assert.match(String(finished?.kind === "objective" && finished.detail), /^agreed with Theo: 5 bread for 5 iron_ingot/u);
+  assert.equal(action.requests.length, 2);
+  assert.ok(runtime.submitted.some((call) => call.tool === "drop_item"), "the hand-off ran");
+});
+
+test("a goal reply \"for\": \"trading iron_ingot\" runs the trade routine, not a work-tier step", async (t) => {
+  const { agent, action, planner, chat } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo to trade me 3 iron_ingot for some of my bread", for: "trading iron_ingot" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the objective asked the work tier nothing");
+});
+
+test("a trading objective that ends refused is not asked again: the next goal call is not a trade ask to that partner", async (t) => {
+  const { events, agent, chat, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for 3 iron ingots", for: "trading" }, { objective: "gather wood" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, want to swap for iron?" }, { gist: "He said no." });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  (agent as unknown as { talks: ConversationController }).talks.end("out_of_range");
+  await until(() => planner.requests.length >= 3, 8_000);
+  assert.ok(events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "failed"));
+  const situation = planner.requests[2]?.[1]?.content ?? "";
+  assert.doesNotMatch(situation, /feel most like.*trading|trade for iron_ingot/u);
+});
+
+test("F7: a trading objective naming only carried items asks Theo for the need instead of failing 'already carry'", async (t) => {
+  const { events, agent, action, planner, chat } = await failedIronObjective(t);
+  planner.reply({ objective: "ask Theo to trade me 1 bread for some of my bread", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.equal(action.requests.length, 2, "the routine ran: no work-tier call");
+  assert.ok(!events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry/u.test(event.detail ?? "")));
+  assert.ok((agent as unknown as { asks: TradeAsks }).asks.needs.current(Date.now(), []).includes("iron_ingot"));
+});
+
+test("F7: a second trading objective that fails before any ask pauses trading: the next goal call draws none though a need is set, until a new need", async (t) => {
+  const { events, agent, planner } = await failedIronObjective(t);
+  const asks = (agent as unknown as { asks: TradeAsks }).asks;
+  await until(() => planner.requests.length >= 2, 4_000);
+  asks.failedFast(Date.now() - 60_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u, "one fast failure: trading is still drawn");
+  // The need is gone when the objective is planned (the memory ran out): "already carry bread" fails at once.
+  asks.needs.drop("iron_ingot");
+  planner.reply({ objective: "ask Theo to trade me bread", for: "trading" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry bread/u.test(event.detail ?? "")), 4_000);
+  await until(() => planner.requests.length >= 3, 4_000);
+  assert.equal(asks.paused(Date.now()), true);
+  asks.needs.set(["iron_ingot"], Date.now());
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 4, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[3]), /trading items with someone|trade for/u, "paused: no trading though a need is set");
+  asks.failed(["bucket"], [], Date.now());
+  assert.equal(asks.paused(Date.now()), false, "a new need ends the pause");
+});
+
+test("an order during a trading objective aborts the routine and runs", async (t) => {
+  const { agent, chat, action, planner } = await failedIronObjective(t);
+  planner.reply({ objective: "trade Theo for iron ingots", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "iron", length: "long", say: "Theo! Walk with me?" }, { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 dirt", starts_now: true }, { gist: "An order came." });
+  action.reply({ done: "got the dirt" });
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  await until(() => action.requests.length >= 3, 6_000);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /Objective \(asked by Steve\): "collect 5 dirt"/u);
+});
+
+test("every partner refused lately: the next goal call draws no trading, though a need is set", async (t) => {
+  const { agent, planner } = await failedIronObjective(t);
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[1]), /trading items with someone|trade for/u);
+});
+
+test("one partner of two refused lately: trading is still drawn for the other", async (t) => {
+  const { agent, planner } = await failedIronObjective(t, { otherAgents: ["Theo", "Bruno"] }, 30, [{ username: "Bruno", position: { x: 20, y: 64, z: 0 } }]);
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  planner.reply({ objective: "ask Bruno for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u);
+});
+
+test("a refusal older than 10 minutes, or a miss that is not yet a refusal, leaves trading drawn", async (t) => {
+  const old = await failedIronObjective(t);
+  (old.agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 10 * 60_000 - 1);
+  old.planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => old.planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(old.planner.requests[1]), /trading items with someone/u);
+  const missed = await failedIronObjective(t);
+  (missed.agent as unknown as { asks: TradeAsks }).asks.refused.missed("Theo", ["bread"], Date.now());
+  missed.planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => missed.planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(missed.planner.requests[1]), /trading items with someone/u);
+});
+
+test("a hand-off the partner did not take is retaken and done once the partner takes it (s1d, bug A)", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.simulateInventory = true;
+  runtime.groundItems = [{ item: "bread", count: 5 }];
+  runtime.dropOutcomes.push(
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 0 } },
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: true, collectedCount: 5 } },
+  );
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
+  await sleep(200);
+  assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "agreed", "not taken: the trade is still due, no gave row");
+  offset = 31_000;
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "drop_item").length, 2);
+  clock.mock.restore();
+});
+
+test("a partly taken hand-off credits the taken part: the retake gives only what is left", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.simulateInventory = true;
+  runtime.groundItems = [{ item: "bread", count: 3 }];
+  runtime.dropOutcomes.push(
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 2 } },
+    { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 3 }], recipient: { collected: true, collectedCount: 3 } },
+  );
+  const { agent, chat } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
+  await sleep(200);
+  offset = 31_000;
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
+  const counts = runtime.submitted.filter((call) => call.tool === "drop_item").map((call) => (call.input.items as { count: number }[])[0]?.count);
+  assert.deepEqual(counts, [5, 3]);
+  clock.mock.restore();
+});
+
+test("an outside give_item the partner did not pick up is not counted toward the trade (s1d, bug A)", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 0 } });
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } }, { say: "Sure.", route: "act", request: "give Theo 5 bread" });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  const inside = agent as unknown as { relations: AgentRelations };
+  await until(() => inside.relations.book.trades().some((trade) => trade.state === "agreed"));
+  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 5 } }, { done: "left it" });
+  await agent.handle(say("Steve", "Ayla, give Theo 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  await sleep(300);
+  assert.equal(inside.relations.book.trades()[0]?.gaveAt, null, "left at the feet, never taken: not a give");
+  assert.deepEqual(inside.relations.trades.leftToGive(inside.relations.book.trades()[0]!.id), [{ item: "bread", count: 5 }]);
+});
+
+const sideOf = (item: string, count: number) => [{ item, count }];
+
+/** Moves what one runtime drops to a named player into the other's inventory, and relays each line one says to the other. */
+function linkAgents(a: { name: string; runtime: FakeRuntime; agent: Agent }, b: { name: string; runtime: FakeRuntime; agent: Agent }, t: { after(fn: () => Promise<void>): void }): void {
+  const seen = new Map<FakeRuntime, number>();
+  const move = (from: typeof a, to: typeof b): void => {
+    const calls = from.runtime.submitted;
+    for (let i = seen.get(from.runtime) ?? 0; i < calls.length; i++) {
+      const call = calls[i]!;
+      if (call.tool === "send_message") void to.agent.handle(say(from.name, String(call.input.message)));
+      if (call.tool !== "drop_item") continue;
+      for (const { item_name: item, count } of call.input.items as { item_name: string; count: number }[]) {
+        const give = (inventory: readonly { name: string; count: number }[], by: number) => [...inventory.filter((s) => s.name !== item), { name: item, count: (inventory.find((s) => s.name === item)?.count ?? 0) + by }];
+        from.runtime.snapshot = { ...from.runtime.snapshot, inventory: give(from.runtime.snapshot.inventory, -count) };
+        to.runtime.snapshot = { ...to.runtime.snapshot, inventory: give(to.runtime.snapshot.inventory, count) };
+      }
+    }
+    seen.set(from.runtime, calls.length);
+  };
+  const timer = setInterval(() => { move(a, b); move(b, a); }, 10);
+  t.after(async () => clearInterval(timer));
+}
+
+test("two bots of one brain: the trading routine waits for its turn, opens, and both records hold the proposer's terms and reach done", async (t) => {
+  const budget = new ConversationBudget(1);
+  budget.tryTake();
+  const board = new TradeBoard();
+  const aylaLog: string[] = [];
+  const ayla = await failedIronObjective(t, { tradeBoard: board, conversations: { budget, modelFree: () => true }, random: () => 1, log: (line) => aylaLog.push(line) });
+  ayla.runtime.snapshot = { ...ayla.runtime.snapshot, players: [{ username: "Theo", position: { x: 3, y: 64, z: 0 } }] };
+  const theoRuntime = new FakeRuntime();
+  theoRuntime.snapshot = { ...theoRuntime.snapshot, inventory: [{ name: "iron_ingot", count: 10 }], players: [{ username: "Ayla", position: { x: 3, y: 64, z: 0 } }] };
+  const theo = agentFor(t, theoRuntime, { id: "theo", username: "Theo" }, talkOptions({ tradeBoard: board, conversations: { budget, modelFree: () => true }, otherAgents: ["Ayla"], random: () => 1 }));
+  linkAgents({ name: "Ayla", runtime: ayla.runtime, agent: ayla.agent }, { name: "Theo", runtime: theoRuntime, agent: theo.agent }, t);
+  const words = { spoken_to: ["Ayla"], asks: "", language: "English", route: "talk", request: "" };
+  ayla.planner.reply({ objective: "trade Theo for 4 iron ingots", for: "trading" });
+  ayla.chat.reply(
+    { open: true, to: ["Theo"], topic: "iron", length: "short", say: "Theo, I need iron: what do you want for it?" },
+    { ...words, spoken_to: ["Theo"], say: "Theo, 4 iron_ingot for 4 bread?", trade: { action: "propose", give: sideOf("bread", 4), get: sideOf("iron_ingot", 4), first: "me" } },
+    { gist: "Agreed bread for iron." }, { gist: "Agreed bread for iron." },
+  );
+  theo.chat.reply(
+    { ...words, say: "What would you give?" },
+    { ...words, say: "Deal.", trade: { action: "accept", give: sideOf("iron_ingot", 1), get: sideOf("bread", 1), first: "them" } },
+    { gist: "Agreed iron for bread." }, { gist: "Agreed iron for bread." },
+  );
+  await until(() => aylaLog.some((line) => line === "trading: trade with Theo"), 4_000);
+  await sleep(150);
+  assert.equal(ayla.agent.conversation, null, "the cap is full: the routine waits, no talk yet");
+  assert.ok(!ayla.events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo")), "the trade objective is still waiting for its turn, not failed");
+  budget.give();
+  const trades = (runtime: FakeRuntime, partner: string) => savedRelations(runtime).find((r) => r.partner === partner)?.trades[0];
+  await until(() => trades(theoRuntime, "Ayla")?.state === "done" && trades(ayla.runtime, "Theo")?.state === "done", 8_000);
+  const [mine, theirs] = [trades(ayla.runtime, "Theo")!, trades(theoRuntime, "Ayla")!];
+  assert.equal(mine.id, theirs.id, "one trade, one id");
+  assert.deepEqual([mine.give, mine.get, theirs.give, theirs.get], [sideOf("bread", 4), sideOf("iron_ingot", 4), sideOf("iron_ingot", 4), sideOf("bread", 4)], "Ayla's terms on both sides");
+});
+
+type ShareInside = { startedAt: number; times: { activity: string; purpose: string; ended: string; minutes: number }[] };
+/** The agent has been up `sinceStart` minutes and spent `minutes` of them on trading steps that ended `endedAgo` minutes ago. */
+function tradedFor(agent: Agent, sinceStart: number, minutes: number, endedAgo = 0): void {
+  const inside = agent as unknown as ShareInside;
+  inside.startedAt = Date.now() - sinceStart * MIN;
+  inside.times.push({ activity: "trading", purpose: "trading", ended: new Date(Date.now() - endedAgo * MIN).toISOString(), minutes });
+}
+const ownDrawn = (events: BrainEvent[]) => events.flatMap((event) => (event.kind === "objective" && event.event === "own" ? [event.drawn ?? []] : []));
+
+test("F9: 16 min of trading in the 30 min since the start: the next goal call draws no trading though a need is set; time passing without trading brings it back", async (t) => {
+  const { events, agent, planner } = await failedIronObjective(t);
+  tradedFor(agent, 30, 16);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(String(planner.requests[1]?.[1]?.content), /feel most like[^.]*trading|trade for/u);
+  assert.ok(ownDrawn(events).every((drawn) => !drawn.includes("trading")), "the journal's drawn has no trading");
+  // Edge 4: the wall clock moves, no step runs; the trading minutes fall out of the hour.
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, "now", () => now() + 61 * MIN);
+  (agent as unknown as { asks: TradeAsks }).asks.needs.set(["iron_ingot"], Date.now());
+  planner.reply({ objective: "gather wood again" });
+  await until(() => planner.requests.length >= 3, 6_000);
+  assert.match(String(planner.requests[2]?.[1]?.content), /feel most like[^.]*trading/u, "trading capped, then drawn again");
+});
+
+test("F9: 3 min after the start, all of it trading: no ceiling yet, trading is forced as today", async (t) => {
+  const { agent, planner } = await failedIronObjective(t);
+  tradedFor(agent, 3, 3);
+  planner.reply({ objective: "ask Theo for iron", for: "trading" });
+  await until(() => planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u);
+});
+
+test("F9: while trading is capped a partner's proposal in chat is still answered, agreed and handed off", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, { random: () => 0 });
+  tradedFor(agent, 30, 16);
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+  assert.equal((agent as unknown as { relations: AgentRelations }).relations.book.trades().length, 1, "the trade was made");
+});
+
+test("F10: with Theo 200 blocks away a failed objective draws no trading and shows no trade-needs line; at 10 blocks it does", async (t) => {
+  const far = await failedIronObjective(t, {}, 200);
+  far.planner.reply({ objective: "gather wood" });
+  await until(() => far.planner.requests.length >= 2, 4_000);
+  assert.doesNotMatch(JSON.stringify(far.planner.requests[1]), /trading items with someone|trade for/u);
+  assert.ok(!far.runtime.submitted.some((call) => call.tool === "navigate"), "no walk toward the far partner");
+  const near = await failedIronObjective(t, {}, 10);
+  near.planner.reply({ objective: "gather wood" });
+  await until(() => near.planner.requests.length >= 2, 4_000);
+  assert.match(JSON.stringify(near.planner.requests[1]), /trade for iron_ingot you could not get: ask Theo/u);
+});
+
+/** A runtime with Vex (another agent) `x` blocks away and Theo (a player) 200 away; the log lines of the agent. */
+function chatFromFarAgent(t: Parameters<typeof agentFor>[0], vexX: number) {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: vexX, y: 64, z: 0 } }, { username: "Theo", position: { x: 200, y: 64, z: 0 } }] };
+  const events: BrainEvent[] = [];
+  const logs: string[] = [];
+  return { runtime, events, logs, ...agentFor(t, runtime, { preferences: { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } }, talkOptions({ journal: (event) => events.push(event), log: (line) => logs.push(line) })) };
+}
+const ORDER = { spoken_to: ["Ayla"], asks: "", language: "English", say: "On my way.", route: "act", request: "bring 5 iron_ingot to Vex", work: "trading" };
+
+test("F10: an order to trade from an agent 200 blocks away is not taken, and the log says why", async (t) => {
+  const { events, logs, agent, chat } = chatFromFarAgent(t, 200);
+  chat.reply(ORDER);
+  await agent.handle(say("Vex", "Ayla, come to me and trade iron"));
+  await sleep(50);
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.some((line) => line.startsWith('not taken: Vex is too far away to trade with ("bring 5 iron_ingot to Vex")')), logs.join("\n"));
+});
+
+test("F10: the same order from an agent 10 blocks away is taken as today", async (t) => {
+  const { events, agent, chat } = chatFromFarAgent(t, 10);
+  chat.reply(ORDER);
+  await agent.handle(say("Vex", "Ayla, come to me and trade iron"));
+  await until(() => takenObjectives(events).length > 0);
+  assert.deepEqual(takenObjectives(events), ["Vex: bring 5 iron_ingot to Vex"]);
+});
+
+test("F10: a player 200 blocks away is still obeyed for a trading order, and an agent far away for any other purpose", async (t) => {
+  const player = chatFromFarAgent(t, 200);
+  player.chat.reply({ ...ORDER, request: "give Theo 5 bread" });
+  await player.agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  await until(() => takenObjectives(player.events).length > 0);
+  assert.deepEqual(takenObjectives(player.events), ["Theo: give Theo 5 bread"]);
+  const building = chatFromFarAgent(t, 200);
+  building.chat.reply({ ...ORDER, request: "build a hut", work: "building" });
+  await building.agent.handle(say("Vex", "Ayla, build a hut"));
+  await until(() => takenObjectives(building.events).length > 0);
+  assert.deepEqual(takenObjectives(building.events), ["Vex: build a hut"]);
+});
+
+test("F10: the chat input tells the model an agent speaker out of reach cannot be gone to; not for one in reach, not for a player", async (t) => {
+  const far = chatFromFarAgent(t, 200);
+  far.chat.reply({ ...ORDER, route: "talk" });
+  await far.agent.handle(say("Vex", "Ayla, trade iron?"));
+  assert.match(far.chat.requests[0]?.[1]?.content ?? "", /Vex is too far away to trade with \(200 blocks away\): do not offer to go to them; they can come to you\./u);
+  const near = chatFromFarAgent(t, 10);
+  near.chat.reply({ ...ORDER, route: "talk" });
+  await near.agent.handle(say("Vex", "Ayla, trade iron?"));
+  assert.doesNotMatch(near.chat.requests[0]?.[1]?.content ?? "", /too far away to trade/u);
+  const player = chatFromFarAgent(t, 10);
+  player.chat.reply({ ...ORDER, route: "talk" });
+  await player.agent.handle(say("Theo", "Ayla, trade iron?"));
+  assert.doesNotMatch(player.chat.requests[0]?.[1]?.content ?? "", /too far away to trade/u);
+  const unseen = chatFromFarAgent(t, 10);
+  unseen.runtime.snapshot = { ...unseen.runtime.snapshot, players: [] };
+  unseen.chat.reply({ ...ORDER, route: "talk" });
+  await unseen.agent.handle(say("Vex", "Ayla, trade iron?"));
+  assert.match(unseen.chat.requests[0]?.[1]?.content ?? "", /Vex is too far away to trade with \(out of sight\)/u);
+});
+
+test("F10: a trade with a speaker 200 blocks away goes back to the chat tier once with the reach reason and is then not made", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 200, y: 64, z: 0 } }] };
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply(ACCEPT, { ...ACCEPT, say: "Come to me, then.", trade: undefined });
+  await agent.handle(say("Theo", "Ayla, bread for iron?"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /Theo is too far away to trade with \(200 blocks away\): no trade from here; say they can come to you/u);
+  assert.deepEqual(runtime.said, ["Come to me, then."]);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+test("F10: a second reach refusal records no trade", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [] };
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply(ACCEPT, { ...ACCEPT, say: "Deal anyway." });
+  await agent.handle(say("Theo", "Ayla, bread for iron?"));
+  await until(() => runtime.said.length === 1);
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /Theo is too far away to trade with \(out of sight\)/u);
+  assert.deepEqual(savedRelations(runtime), []);
+});
+
+/** A toss nobody takes: it lies on the ground again for the pick-back. */
+const untaken = (runtime: FakeRuntime) => ({ status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: false, collectedCount: 0, settled: true }, effect: () => { runtime.groundItems = [{ item: "bread", count: 5 }]; } }) as const;
+/** The trade as the agent holds it now (the note save waits behind a running foreground action, the book does not). */
+const heldTrade = (agent: Agent) => (agent as unknown as { relations: AgentRelations }).relations.book.trades().at(-1);
+const dropCount = (runtime: FakeRuntime): number => runtime.submitted.filter((call) => call.tool === "drop_item").length;
+
+test("D1: a partner who never takes the give gets exactly 2 tosses in 15 min, the trade ends broken by me, and the own objective then runs to its end with no abort", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  runtime.simulateInventory = true;
+  runtime.dropOutcomes.push(untaken(runtime), untaken(runtime));
+  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { step: { skill: "collect_block", block: "oak_log", count: 16 } }, { step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply(ACCEPT);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
+  await sleep(200);
+  assert.equal(heldTrade(agent)?.state, "agreed", "one try is not the end");
+  offset = 31_000;
+  await until(() => heldTrade(agent)?.state === "broken", 4_000);
+  assert.deepEqual([heldTrade(agent)?.brokenBy, heldTrade(agent)?.note], ["me", "Theo did not take 5 bread (2 tries); I kept them"]);
+  const aborted = runtime.cancelled.length;
+  delete runtime.durations.collect_block;
+  offset += 15 * MIN;
+  await until(() => runtime.submitted.filter((call) => call.tool === "collect_block").length >= 3, 4_000);
+  await sleep(300);
+  assert.equal(dropCount(runtime), 2, "no third toss in 15 min");
+  assert.equal(runtime.cancelled.length, aborted, "the next step of the own objective was never aborted");
+  clock.mock.restore();
+});
+
+test("T7: a give coming due during a player's order waits below it: the order's step is not aborted, and the give runs after the order", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, steveAt(3)] };
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 5 dirt" }, ACCEPT);
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 5 } }, { done: "got the dirt" });
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => heldTrade(agent)?.state === "agreed", 4_000);
+  await sleep(300);
+  assert.equal(dropCount(runtime), 0, "the give waits");
+  assert.equal(runtime.cancelled.length, 0, "the order's step runs on");
+  const stack = (agent as unknown as { stack: { objective: { handoff?: unknown } }[] }).stack;
+  assert.equal(stack.at(-1)?.objective.handoff, undefined, "the order is on top");
+  assert.ok(stack.some((work) => work.objective.handoff !== undefined), "the hand-off is on the stack, below it");
+});
+
+test("T7: the give queued behind a player's order runs once the order ends", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, steveAt(3)] };
+  runtime.durations.collect_block = 40;
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 5 dirt" }, ACCEPT);
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 5 } }, { done: "got the dirt" });
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => dropCount(runtime) === 1, 6_000);
+  assert.equal(runtime.cancelled.length, 0, "the order was never aborted");
+  assert.ok(runtime.submitted.findIndex((call) => call.tool === "drop_item") > runtime.submitted.findIndex((call) => call.tool === "collect_block"));
+  await until(() => heldTrade(agent)?.state === "i_gave", 4_000);
+});
+
+test("T7 + D2: a give that waited behind a long order past the deadline ends broken by me, with the order undisturbed", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, steveAt(3)] };
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime);
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, "now", () => now() + offset);
+  chat.reply({ say: "On it.", route: "act", request: "collect 5 dirt" }, { ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 5 } }, { done: "got the dirt" });
+  await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => heldTrade(agent)?.state === "agreed", 4_000);
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
+  await until(() => heldTrade(agent)?.state === "they_gave", 4_000);
+  offset += 11 * MIN;
+  await until(() => heldTrade(agent)?.state === "broken", 4_000);
+  assert.deepEqual([heldTrade(agent)?.brokenBy, heldTrade(agent)?.note], ["me", "could not hand over 5 bread within 10 min"]);
+  assert.equal(dropCount(runtime), 0);
+  assert.equal(runtime.cancelled.length, 0, "the order's step was never aborted");
+  chat.reply({ say: "Stopped.", route: "stop", request: "" });
+  await agent.handle(say("Steve", "Ayla, stop"));
+  await until(() => agent.activity === "idle", 4_000);
+  await sleep(200);
+  assert.equal(dropCount(runtime), 0, "the ended trade is never handed over");
+  assert.equal(heldTrade(agent)?.state, "broken");
+  clock.mock.restore();
+});
+
+/** A step of the agent's run by hand (B1): it starts, its yield lands in the inventory and it ends in one turn, so no look sees the step running. */
+async function stepEndingBetweenLooks(t: TestContext, agent: Agent, runtime: FakeRuntime, step: Step, gained: { name: string; count: number }[]): Promise<void> {
+  const inside = agent as unknown as { relations: AgentRelations; startStep(work: object, controller: AbortController, step: Step): void; endStep(work: object): void };
+  const answers: string[] = [];
+  const look = inside.relations.look.bind(inside.relations);
+  inside.relations.look = (yields, onStack, signal) => { const answer = look(yields, onStack, signal); answers.push(answer); return answer; };
+  const real = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date, "now", () => real() + offset);
+  const work = { step: null };
+  inside.startStep(work, new AbortController(), step);
+  await until(() => answers.includes("ticked")); // a tick read the inventory before the yield landed
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, ...gained] };
+  inside.endStep(work);
+  offset += 2_000; // past the 2 s watch throttle of a window alone
+  answers.length = 0;
+  await until(() => answers.includes("ticked"));
+  await until(() => !(inside.relations as unknown as { looking: boolean }).looking);
+}
+
+test("B1: what a finished step yielded is not kept as a talking player's early payment", async (t) => {
+  const runtime = tradingRuntime();
+  const lines: string[] = [];
+  const { agent } = agentFor(t, runtime, {}, { log: (line) => lines.push(line) });
+  (agent as unknown as { relations: AgentRelations }).relations.trades.heardLine("Theo", Date.now(), 2);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }]);
+  assert.ok(!lines.some((line) => line.includes("picked up while a player talked")), lines.join("\n"));
+});
+
+test("B1: a trade agreed after a step ended does not count the step's yield as their payment", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread, you after me?"));
+  await until(() => heldTrade(agent)?.state === "agreed", 4_000);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }]);
+  assert.equal(heldTrade(agent)?.state, "agreed");
+  assert.deepEqual(heldTrade(agent)?.received, []);
+});
+
+test("B1: in the same tick a real payment of another item is credited and the step's yield is not", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply({ ...ACCEPT, trade: { ...ACCEPT.trade, first: "them", get: [{ item: "iron_ingot", count: 5 }, { item: "oak_log", count: 2 }] } });
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot and 2 oak_log for your 5 bread, you after me?"));
+  await until(() => heldTrade(agent)?.state === "agreed", 4_000);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "iron_ingot", count: 3 }, { name: "oak_log", count: 2 }]);
+  assert.deepEqual(heldTrade(agent)?.received, [{ item: "oak_log", count: 2 }]);
+});
+
+test("B1: the next look carries the yields of a step that ended since the last one, and the set is cleared once a look has seen them", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent } = agentFor(t, runtime);
+  const inside = agent as unknown as { relations: AgentRelations; startStep(work: object, controller: AbortController, step: Step): void; endStep(work: object): void };
+  const seen: string[][] = [];
+  const look = inside.relations.look.bind(inside.relations);
+  inside.relations.look = (yields, onStack, signal) => { seen.push([...yields]); return look(yields, onStack, signal); };
+  const work = { step: null };
+  inside.startStep(work, new AbortController(), { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] });
+  inside.endStep(work);
+  seen.length = 0;
+  await until(() => seen.length >= 3, 2_000);
+  assert.deepEqual(seen[0], ["iron_ingot"], "the first look after the step still knows its yield");
+  assert.deepEqual(seen[2], [], "an idle look cleared the set");
+});
+
 test("what a collect_block step mines is wanted: fresh raw_iron is not named as junk when the inventory is full (run 15 N5)", async (t) => {
   const runtime = new FakeRuntime();
   runtime.dropSources = { ...runtime.dropSources, raw_iron: [{ block: "iron_ore", chance: 1, planted: false }] };
@@ -1444,28 +2658,4 @@ test("two bad replies in a row still end the order with \"could not work out wha
   await until(() => runtime.said.length === 2);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
   assert.equal(agent.activity, "idle");
-});
-
-test("a reply that shouts is sent as a shout in public chat, and as a plain whisper to a whisperer", async (t) => {
-  const runtime = new FakeRuntime();
-  const tiers = scriptedMind({ range: 64 });
-  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
-  const controller = new AbortController();
-  const running = agent.run(controller.signal);
-  t.after(async () => {
-    controller.abort();
-    await running;
-  });
-  tiers.chat.reply(
-    { spoken_to: ["Ayla"], say: "Coming!", shout: true, route: "talk", request: "" },
-    { spoken_to: ["Ayla"], say: "Psst!", shout: true, route: "talk", request: "" },
-  );
-  runtime.inbox.push(say("Steve", "Ayla, are you there?"));
-  await until(() => runtime.said.length === 1);
-  runtime.inbox.push({ ...say("Steve", "Ayla, are you there?"), channel: "whisper" });
-  await until(() => runtime.said.length === 2);
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input), [
-    { message: "Coming!", shout: true },
-    { message: "Psst!", to: "Steve" },
-  ]);
 });

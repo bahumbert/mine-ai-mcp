@@ -10,9 +10,13 @@ import { isInWater } from "../../survival/perception/body.js";
 import { dropItemOutcomes, type DropRecipient, type HoleClosure } from "./contract.js";
 import { pluggedCellCount, sealDisposalHole } from "./disposal-hole.js";
 import type { DropItemDependencies } from "./drop-item.js";
+import { tossAimHeight } from "./hand-over.js";
 
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
 const HANDOVER_RANGE = 2;
+
+/** Ticks between facing the recipient and tossing, so the server has the look the toss is thrown along. */
+const LOOK_SETTLE_TICKS = 3;
 
 /**
  * How far, in the plane, the bot ends a hole drop from the hole's column.
@@ -70,11 +74,20 @@ export async function approachPlayer(
 
   const target = bot.players[name]?.entity;
   if (!target) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
-  await bot.lookAt(target.position);
+  // Aimed so the toss rests at their feet: facing their body overshot them and facing their feet fell short, back at the
+  // giver (B2, 2026-10-19).
+  const reach = Math.hypot(target.position.x - bot.entity.position.x, target.position.z - bot.entity.position.z);
+  await bot.lookAt(target.position.offset(0, tossAimHeight(reach), 0));
+  // The server learns the new pitch with the next position packet; a toss sent before it flies level and overshoots.
+  await bot.waitForTicks(LOOK_SETTLE_TICKS);
   return {
     name,
     distance: Number(bot.entity.position.distanceTo(target.position).toFixed(2)),
     position: { x: target.position.x, y: target.position.y, z: target.position.z },
+    collected: false,
+    collectedCount: 0,
+    tossedCount: 0,
+    settled: false,
   };
 }
 

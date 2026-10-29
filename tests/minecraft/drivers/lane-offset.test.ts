@@ -68,7 +68,7 @@ function smeltedResult(produced: unknown): ActionResult {
  * says, a bucket used on the `refuse` cell is refused, the first navigate of a cancel scenario (`settleWithinMs`) stays
  * pending until `cancel_foreground_action` and reads cancelled, anything else succeeds.
  */
-async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame): Promise<Recorded[]> {
+async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame, username?: string): Promise<Recorded[]> {
   const { client: _launch, ...scenario } = await loadScenario(file);
   const definition = scenarioDefinitionSchema.parse({ ...scenario, params: withoutWallWaits(scenario.params) });
   const [x, y, z] = frame.world(scenario.players[0]!.pos as [number, number, number]);
@@ -84,6 +84,7 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
   let calls = 0;
   const context = scenarioTestContext({
     scenario: definition,
+    username,
     arena: frame,
     bot,
     client: {
@@ -117,6 +118,13 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
   return recorded;
 }
 
+/** A scenario with several players is run once as each, so a driver that gives each player its own part is seen in all of them. */
+async function recordEveryPlayer(run: ScenarioRun, file: string, frame: ArenaFrame): Promise<Recorded[]> {
+  const { players } = await loadScenario(file);
+  if (players.length < 2) return recordDriverRun(run, file, frame);
+  return (await Promise.all(players.map((player) => recordDriverRun(run, file, frame, player.name)))).flat();
+}
+
 /** The params with the wall-clock waits they name (`NO_WAIT_PARAMS`) cut to nothing. */
 function withoutWallWaits(params: Record<string, unknown>): Record<string, unknown> {
   return { ...params, ...Object.fromEntries(Object.entries(NO_WAIT_PARAMS).filter(([key]) => key in params)) };
@@ -139,8 +147,8 @@ const driversThatMoved = new Set<string>();
 for (const { file, driver, name } of scenarios.filter(({ driver }) => !OWN_TEST.has(path.basename(driver)))) {
   test(`${name}: ${path.basename(driver)} asks for the zero run's cells moved into the lane`, async () => {
     const { run } = (await import(path.join(MINECRAFT_DIR, driver))) as { run: ScenarioRun };
-    const atZero = await recordDriverRun(run, file, arenaFrame(ZERO_ARENA));
-    const inLane = await recordDriverRun(run, file, SIDEWAYS);
+    const atZero = await recordEveryPlayer(run, file, arenaFrame(ZERO_ARENA));
+    const inLane = await recordEveryPlayer(run, file, SIDEWAYS);
     assert.deepEqual(inLane, shifted(atZero, SIDEWAYS));
     if (JSON.stringify(inLane) !== JSON.stringify(atZero)) driversThatMoved.add(path.basename(driver));
   });
@@ -155,6 +163,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "arrow-reservation.ts": "runs single-action.ts; the scenario's action input holds no x or z",
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
+  "hand-over.ts": "drop_item to a player and pick_up_items within a radius: the cells it asks for are the server's answer",
   "idle-then-breathe.ts": "no action, reads the air",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
 };

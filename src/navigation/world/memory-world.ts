@@ -34,6 +34,8 @@ const AIR_TRAITS: BlockTraits = Object.freeze({
 export interface MemoryBlock {
   readonly stateId: number;
   readonly collisionShapes?: readonly CollisionBox[];
+  /** The block's per-cell sideways offset maximum, as `offsetBlocks` gives it (see `LoadedBlock.horizontalOffset`). */
+  readonly horizontalOffset?: number;
   readonly traits?: Partial<BlockTraits>;
 }
 
@@ -64,6 +66,7 @@ export class MemoryWorld implements WorldView {
       block.stateId,
       block.collisionShapes ?? (traits.empty ? [] : [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }]),
       traits,
+      block.horizontalOffset,
     );
     this.#blocks.set(blockKey(position), after);
     const change = Object.freeze({

@@ -42,6 +42,8 @@ export interface OpportunityFacts {
     readonly roles: readonly { readonly role: BlockRole; readonly block: string; readonly style: string }[];
     readonly shortfall: readonly Shortfall[];
   } | null;
+  /** Items an own objective could not get, the partners to ask (online) and what she can offer, biggest stack first. */
+  readonly tradeNeeds?: { readonly items: readonly string[]; readonly partners: readonly string[]; readonly offer: readonly { readonly item: string; readonly count: number }[] };
 }
 
 /** Shown to the goal tier at most: more is a list to read, not a hint. */
@@ -79,6 +81,23 @@ function lowFood(facts: OpportunityFacts): Opportunity[] {
   const animals = facts.snapshot.mobs.filter((mob) => !mob.hostile).map((mob) => `${mob.count} ${mob.name} ${Math.round(mob.distance)} blocks away`);
   const near = animals.length === 0 ? "" : `; animals in sight: ${animals.join(", ")}`;
   return [{ activities: ["farming", "hunting", "cooking"], text: `${carried}; your hunger is ${food}/20${starving}${near}` }];
+}
+
+const TRADE_PARTNERS_SHOWN = 3;
+const TRADE_OFFER_SHOWN = 5;
+
+/** Items she could not get by her own work and who might have them: the partners nearest first (those out of sight last). */
+function tradeNeeds(facts: OpportunityFacts): Opportunity[] {
+  const needs = facts.tradeNeeds;
+  if (needs === undefined || needs.items.length === 0 || needs.partners.length === 0) return [];
+  const { position, players } = facts.snapshot;
+  const away = (name: string) => {
+    const there = players.find((player) => player.username.toLowerCase() === name.toLowerCase())?.position;
+    return there === undefined || there === null ? Infinity : Math.abs(there.x - position.x) + Math.abs(there.y - position.y) + Math.abs(there.z - position.z);
+  };
+  const asked = [...needs.partners].sort((a, b) => away(a) - away(b)).slice(0, TRADE_PARTNERS_SHOWN);
+  const carried = needs.offer.slice(0, TRADE_OFFER_SHOWN).map((entry) => `${entry.count} ${entry.item}`).join(", ");
+  return [{ activities: ["trading"], text: `trade for ${needs.items.join(", ")} you could not get: ask ${asked.join(", ")} what they would want for it (you carry ${carried})` }];
 }
 
 function minutesSince(iso: string, now: number): number {
@@ -214,7 +233,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
  * "no farm yet" never reached the prompt behind the house and bed lines (run 11, 2026-10-14).
  */
 export function findOpportunities(facts: OpportunityFacts, drawn: readonly Activity[] = []): Opportunity[] {
-  const pressing = [wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
+  const pressing = [tradeNeeds, wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
   const rest = [farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noFarm, noBed, gear].flatMap((finder) => finder(facts));
   return [...pressing, ...drawnFirst(rest, drawn)].slice(0, MAX_OPPORTUNITIES);
 }

@@ -4,13 +4,16 @@ import { Agent } from "./agent.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { readLocalizedChat } from "./chat-range.ts";
-import { LlmMind } from "./llm-mind.ts";
+import { ConversationBudget, maxConversations } from "./conversation/controller.ts";
+import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
+import { EveryoneLines } from "./everyone-lines.ts";
+import { TradeBoard } from "./relations/board.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free] [--max-conversations <n>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
@@ -23,6 +26,8 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
   --start-gap        Seconds between one agent's start and the next one's (default 0: all at once). The model server
                      queues first calls from many bots at once for a minute or more.
   --start-when-free  Also start the next agent only once a model slot is free (needs --model-slots).
+  --max-conversations  How many conversations this brain's characters may have opened at once (default 2; 0: none opens one).
+                     Conversations are spec 2026-10-18-conversations-design.
 
 Each agent thinks with three LLM tiers (ADR-008): chat (fast: answers and routes every message), action (turns a
 request into skill steps) and planner (bigger jobs). They may all use the same model.
@@ -116,6 +121,27 @@ async function openBrainLog(url: string): Promise<BrainLog | null> {
   }
 }
 
+/** One mind per persona, its three tiers counted by the brain's model queue and reported to its brain log. */
+function createMinds(
+  personas: readonly Persona[],
+  brainLogs: readonly (BrainLog | null)[],
+  queue: ModelQueue,
+  overrides: Readonly<Record<"chat" | "action" | "planner", string | undefined>>,
+  localizedChat: LocalizedChat | undefined,
+): LlmMind[] {
+  return personas.map((persona, index) => {
+    const models = {
+      chat: queue.track(createModel(persona, "chat", overrides.chat), persona.id),
+      action: queue.track(createModel(persona, "action", overrides.action), persona.id),
+      planner: queue.track(createModel(persona, "planner", overrides.planner), persona.id),
+    };
+    console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
+    const brainLog = brainLogs[index];
+    console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
+    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
+  });
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
@@ -127,6 +153,7 @@ async function main(): Promise<void> {
       "model-slots": { type: "string" },
       "start-gap": { type: "string" },
       "start-when-free": { type: "boolean" },
+      "max-conversations": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -141,23 +168,16 @@ async function main(): Promise<void> {
   const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
   const slots = positiveInteger(values["model-slots"] ?? env("MODEL_SLOTS"));
   const gapMs = startGapMs(values["start-gap"]);
+  const everyone = new EveryoneLines();
+  const tradeBoard = new TradeBoard((line) => console.log(`${new Date().toISOString()} [board] ${line}`));
+  const budget = new ConversationBudget(maxConversations(values["max-conversations"]));
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
   const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: (line) => console.log(`${new Date().toISOString()} [queue] ${line}`) });
   const localizedChat = readLocalizedChat(env);
   if (localizedChat !== undefined) console.log(`localized chat: talk carries ${localizedChat.range} blocks`);
-  const minds = personas.map((persona, index) => {
-    const models = {
-      chat: queue.track(createModel(persona, "chat", values["chat-model"]), persona.id),
-      action: queue.track(createModel(persona, "action", values["action-model"]), persona.id),
-      planner: queue.track(createModel(persona, "planner", values["planner-model"]), persona.id),
-    };
-    console.log(`[${persona.id}] models: chat ${models.chat.name}, action ${models.action.name}, planner ${models.planner.name}`);
-    const brainLog = brainLogs[index];
-    console.log(`[${persona.id}] brain log: ${brainLog?.path ?? "none (the host did not say where its bot data is)"}`);
-    return new LlmMind(models, brainLog === null ? undefined : (call) => brainLog?.write({ kind: "model", ...call }), localizedChat);
-  });
+  const minds = createMinds(personas, brainLogs, queue, { chat: values["chat-model"], action: values["action-model"], planner: values["planner-model"] }, localizedChat);
   // What a till failed on is learned once for every character of the process.
   const soil = new TillFacts();
   const runtimes = await Promise.all(specs.map((spec, index) => McpBotRuntime.connect(spec.url, `agent-${personas[index]!.id}`)));
@@ -178,6 +198,10 @@ async function main(): Promise<void> {
         otherAgents: usernames.filter((name) => name !== persona.username),
         knownNames,
         soil,
+        everyone,
+        tradeBoard,
+        conversations: { budget, modelFree: () => queue.freeFor(persona.id), waitForModel: (ms, signal) => queue.freeWithin(persona.id, ms, AbortSignal.any([signal, shutdown.signal])) },
+        ...(localizedChat !== undefined && { localizedChat }),
         log,
         ...(brainLogs[index] !== null && { journal: (event) => brainLogs[index]?.write(event) }),
       });

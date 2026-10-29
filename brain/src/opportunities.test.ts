@@ -192,3 +192,19 @@ test("a temporary house is a home: its temporary parts and what improving it nee
   assert.deepEqual(texts(settled({ temporaryHouse: { ...temporaryHouse, roles: [] } })), []);
   assert.deepEqual(texts(settled()), []);
 });
+
+test("trade needs come first among the pressing lines, naming the nearest partners and what is carried", () => {
+  const players = [{ username: "Far", position: { x: 90, y: 64, z: 0 } }, { username: "Near", position: { x: 5, y: 64, z: 0 } }, { username: "Mid", position: { x: 30, y: 64, z: 0 } }, { username: "Farther", position: { x: 99, y: 64, z: 0 } }];
+  const offer = ["a", "b", "c", "d", "e", "f"].map((n, i) => ({ item: `oak_${n}`, count: i + 1 }));
+  const facts = settled({ snapshot: snapshot({ food: 2, players }), tradeNeeds: { items: ["iron_ingot", "bread"], partners: ["Far", "Near", "Mid", "Farther"], offer } });
+  const found = findOpportunities(facts);
+  assert.deepEqual(found[0]?.activities, ["trading"]);
+  assert.equal(found[0]?.text, "trade for iron_ingot, bread you could not get: ask Near, Mid, Far what they would want for it (you carry 1 oak_a, 2 oak_b, 3 oak_c, 4 oak_d, 5 oak_e)");
+  assert.ok(found.slice(1).some((line) => line.activities.includes("farming")), "the other pressing lines follow");
+});
+
+test("without trade needs the opportunities are as before", () => {
+  assert.deepEqual(findOpportunities(settled()), []);
+  assert.deepEqual(findOpportunities(settled({ tradeNeeds: { items: [], partners: ["Theo"], offer: [] } })), []);
+  assert.deepEqual(findOpportunities(settled({ tradeNeeds: { items: ["bread"], partners: [], offer: [] } })), []);
+});

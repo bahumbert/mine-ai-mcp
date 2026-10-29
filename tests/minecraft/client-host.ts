@@ -92,6 +92,7 @@ function scenarioContextOf(bot: Bot, session: NodeClientSession, arena: ArenaFra
   });
   return {
     scenario: session.scenario,
+    username: session.username,
     arena,
     bot,
     waitForTicks: async (ticks) => {
@@ -188,6 +189,8 @@ function runtimeOptions(session: NodeClientSession, artifacts: string | undefine
   const worldId = session.scenario.name ?? "scenario";
   return {
     incidents: { directory: incidents },
+    // A scenario that damages the client's world on purpose (a ghost block) says so in its params.
+    debugExecuteJavaScript: session.scenario.params?.debugExecuteJavaScript === true,
     botData: {
       // Repeated trials use in-memory SQLite. Persist the chronology only
       // when the host's evidence switch is enabled for an investigation.

@@ -59,6 +59,8 @@ import { observeEquipmentEvents } from "./equipment-events.js";
 import { observeNavigationEvents } from "./navigation-events.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { currentVehicle, recoverPhysics, watchVehicle } from "../actions/navigate/vehicle-sync.js";
+import { watchGhostBlocks } from "./ghost-block.js";
+import { placeOffsetShapes } from "./offset-shapes.js";
 import { watchServerSeat } from "../actions/navigate/server-seat-watch.js";
 import { observeReflexActivity } from "./reflex-activity.js";
 import { observeBotStatus } from "./bot-status.js";
@@ -367,6 +369,8 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
     pinned.close();
   });
   resources.defer(watchVehicle(bot));
+  resources.defer(placeOffsetShapes(bot));
+  resources.defer(watchGhostBlocks(bot));
   resources.defer(watchServerSeat(bot).stop);
   return { runner, routes };
 }

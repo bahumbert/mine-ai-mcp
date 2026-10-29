@@ -14,6 +14,8 @@ export interface ScenarioCall extends ActionOutput<string, ActionResult> {
 }
 
 export interface ScenarioContext {
+  /** The name this client plays under, so one driver can give each declared player its own part. */
+  readonly username?: string;
   readonly scenario: ScenarioDefinition;
   /**
    * The lane this client runs in (`MINE_AI_ARENA`; the zero offset on a plain `mine-labs run`). A scenario's YAML `params`

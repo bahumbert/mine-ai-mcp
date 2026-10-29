@@ -29,7 +29,7 @@ export function standingCell(world: WorldView, cell: Vec3): boolean {
 
 function positionRays(world: WorldView, added: ReadonlySet<string>) {
   return worldViewRaycaster((x, y, z) =>
-    added.has(new Vec3(x, y, z).toString()) ? CUBE : obstaclesOf(world.blockAt(x, y, z)),
+    added.has(new Vec3(x, y, z).toString()) ? CUBE : obstaclesOf(world.blockAt(x, y, z), x, z),
   );
 }
 

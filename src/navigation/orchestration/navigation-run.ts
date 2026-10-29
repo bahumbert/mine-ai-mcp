@@ -61,6 +61,7 @@ import { IncrementalSearch } from "../search/search.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
+import { partialCellAt, partialCellExit } from "../world/body-clearance.js";
 import { overheadPinningCell } from "../world/overhead-pin.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
 import { ArrivalRepeat } from "./arrival-repeat.js";
@@ -75,6 +76,7 @@ import {
   samePosition,
   type BlockPosition,
   type NavigationObservation,
+  type Position3,
   type WorldChange,
 } from "../world/world.js";
 import type { NavigationRequest } from "./navigator.js";
@@ -258,6 +260,8 @@ export class NavigationRun {
   readonly #searchIdentities = new Set<string>();
   readonly #planningStall: PlanningStall;
   readonly #arrivalRepeat: ArrivalRepeat;
+  /** Whether the run already stepped out of a partial cell; see `#leavePartialCell`. */
+  #leftPartialCell = false;
   readonly #movementFailures = new Set<string>();
   #pinReleases = 0;
   /** The movement failure being replanned around, until a new route commits. */
@@ -547,6 +551,12 @@ export class NavigationRun {
           });
         continue;
       }
+      const partial = observation.stance === "supported" ? partialCellAt(this.context.world, observation.position) : null;
+      if (partial !== null) {
+        const left = await this.#leavePartialCell(partial, observation.position);
+        if (left === "left") continue;
+        return left;
+      }
       const stalled = this.#judgeProgress(goal, node);
       if (stalled) return stalled;
       // Plan: reuse the segment searched while walking, if the bot ended where
@@ -572,6 +582,30 @@ export class NavigationRun {
       if (execution.kind === "outcome") return execution.outcome;
       searchReason = execution.reason;
     }
+  }
+  /**
+   * Step out of a blocked cell the body stands in beside a box (a bamboo stalk, which stands off centre): search never
+   * plans from such a cell and the straight first step can cross the box. Once per run, so a second one is a failure
+   * and never a loop. "left": stepped out, observe again.
+   */
+  async #leavePartialCell(cell: BlockPosition, position: Position3): Promise<"left" | NavigationOutcome> {
+    const exit = this.#leftPartialCell ? null : partialCellExit(this.context.world, position);
+    if (exit !== null) {
+      this.#leftPartialCell = true;
+      this.status({ kind: "stabilizing", runId: this.context.runId, reason: "inside_partial_block" });
+      const arrived = await this.context.bot.centerOnCell(exit, this.context.signal);
+      if (this.context.signal.aborted) return this.#stopped();
+      if (arrived) return "left";
+    }
+    return this.#failed({
+      kind: "movement_failed",
+      movement: {
+        kind: "unstable",
+        stepId: "leave_partial_cell",
+        phase: "moving",
+        observation: `Standing inside the partial block at ${cell.x},${cell.y},${cell.z} with no clear side to step out to.`,
+      },
+    });
   }
   /**
    * Whether the run is being moved back between routes; see `STALLED_ROUTES`.

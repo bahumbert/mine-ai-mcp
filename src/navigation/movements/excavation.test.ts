@@ -273,7 +273,7 @@ test("the ray's known path agrees with the ray itself over random terrain", () =
         }
     const blockAt = (x: number, y: number, z: number) => world.blockAt(x, y, z);
     const sight = stanceSight(blockAt, STANCE);
-    const rays = worldViewRaycaster((x, y, z) => obstaclesOf(blockAt(x, y, z)));
+    const rays = worldViewRaycaster((x, y, z) => obstaclesOf(blockAt(x, y, z), x, z));
     for (let x = -5; x <= 5; x += 1)
       for (let y = 59; y <= 68; y += 1)
         for (let z = -5; z <= 5; z += 1) {
@@ -289,7 +289,7 @@ test("the ray's known path agrees with the ray itself over random terrain", () =
           };
           const byRay =
             Math.hypot(x + 0.5 - STANCE.x, y + 0.5 - (STANCE.y + 1.65), z + 0.5 - STANCE.z) <= DIG_REACH &&
-            visibleBlockAim(rays, eye, { x, y, z }, DIG_REACH, obstaclesOf(target) ?? []) !== null;
+            visibleBlockAim(rays, eye, { x, y, z }, DIG_REACH, obstaclesOf(target, x, z) ?? []) !== null;
           assert.equal(sight.canSee(dig, []), byRay, `round ${round} target ${x},${y},${z}`);
           compared += 1;
         }
