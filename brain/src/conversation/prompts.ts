@@ -75,12 +75,12 @@ export function gistSystemPrompt(persona: Persona, withPartners = false): string
 A conversation you were in has ended. Sum it up for your memory in one sentence, first person: what was talked about and anything agreed (who does what for whom).
 ${withPartners ? `Then say how this conversation changed what you think of each of the others, from what you know of them and what they said and did, and note what they said they have or need.
 Reply with only a JSON object {"gist": "...", "partners": [{"name": "...", "nudge": 0, "why": "...", "has": ["item_id"], "needs": ["item_id"]}]}.
-- "nudge": a whole number from -${persona.settings.relations.score.nudgeMax} to +${persona.settings.relations.score.nudgeMax}: how much this conversation changed what you think of them, from your traits; 0 when it did not. "why": one sentence in your own words.
+- "nudge": a whole number from -${persona.settings.relations.score.nudgeMax} to +${persona.settings.relations.score.nudgeMax}: how much this conversation changed what you think of them, from what was said and done in this conversation only and from your traits; 0 when it did not. "why": one sentence in your own words.
 - "has" and "needs": Minecraft item ids they said they have or need in this conversation; [] when they said none.` : `Reply with only a JSON object {"gist": "..."}.`}`;
 }
 
 export function describeGist(input: GistInput): string {
   const lines = input.lines.map((line) => `${line.speaker}: ${JSON.stringify(line.text)}`).join("\n");
   const known = (input.relations ?? []).map((r) => r.block).join("\n");
-  return `You talked with ${input.others.join(", ")}${input.topic === "" ? "" : ` about ${input.topic}`}.\n\n${known === "" ? "" : `What you knew of them:\n${known}\n\n`}What was said:\n${lines === "" ? "(nothing)" : lines}`;
+  return `You talked with ${input.others.join(", ")}${input.topic === "" ? "" : ` about ${input.topic}`}.\n\n${known === "" ? "" : `What you knew of them before this conversation (already counted in how you feel; do not count it again):\n${known}\n\n`}What was said:\n${lines === "" ? "(nothing)" : lines}`;
 }

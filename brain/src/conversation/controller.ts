@@ -126,6 +126,10 @@ export class ConversationController {
   /** Everyone who was a member at some point of the current record. */
   private touched = new Set<string>();
   private holdsBudget = false;
+  /** The current conversation's lines, hers and its members', in the order they were said (the last `gistLines`), for its gist. */
+  private lines: ChatLine[] = [];
+  /** Her latest line of the chat history that {@link said} kept, so one line is kept once. */
+  private lastOwnKept: ChatLine | null = null;
   private lastCheckAt: number | null = null;
   private readonly cooldownFrom = new Map<string, number>();
   /** The latest talk with each partner (lower case), at most {@link PARTNERS_KEPT} partners. */
@@ -315,6 +319,7 @@ export class ConversationController {
       ...(waitUntil !== undefined && { waitUntil }),
     });
     this.begin(c, true);
+    this.keep(this.deps.self, decision.say, now);
     lineSaid(c, now);
     const said = this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
     const asked = (decision.asksOf ?? []).filter((name) => to.some((heard) => same(heard, name)));
@@ -327,7 +332,6 @@ export class ConversationController {
 
   /** A line another character or player said, with the names it holds as words; `near`: a player within talk range (their nameless line joins). */
   heard(speaker: string, text: string, named: readonly string[], channel: "chat" | "whisper", near = false): void {
-    void text;
     const { self } = this.deps;
     if (same(speaker, self)) return;
     const now = this.deps.now();
@@ -337,6 +341,7 @@ export class ConversationController {
       if (!namesHer) return;
       const opened = openConversation({ self, opener: speaker, kind: "chance", members: named, topic: "", planned: null, whisper: channel === "whisper", now });
       this.begin(opened, false);
+      this.keep(speaker, text, now);
       lineSaid(opened, now);
       this.journal("opened", opened, { conversationKind: "chance", topic: "", planned: null });
       return;
@@ -356,6 +361,7 @@ export class ConversationController {
       this.touched.add(speaker);
       this.journal("joined", c, { member: speaker, why: "spoke to the conversation" });
     }
+    this.keep(speaker, text, now);
     lineSaid(c, now);
     for (const member of addMembers(c, named)) {
       this.touched.add(member);
@@ -371,6 +377,7 @@ export class ConversationController {
     const afterCap = capReached(c, this.limits, now);
     const asked = this.pendingIntent();
     if (asked?.shown === true) this.askedAt.set(asked.partner.toLowerCase(), now);
+    this.keepOwnLine(c);
     lineSaid(c, now);
     if (close) this.end("goodbye", signal);
     else if (afterCap) this.end("cap", signal);
@@ -389,7 +396,8 @@ export class ConversationController {
     this.touched = new Set();
     for (const name of everyone) if (!same(name, self)) this.cooldownFrom.set(name.toLowerCase(), now);
     const others = (c.members.filter((name) => !same(name, self)).length > 0 ? c.members : everyone).filter((name) => !same(name, self));
-    const lines = this.history().filter((line) => (line.at === undefined || line.at >= c.startedAt) && everyone.some((name) => same(name, line.speaker)));
+    const lines = this.lines;
+    this.lines = [];
     const finish = (gist: string): void => {
       this.deps.log(`conversation: ended ${reason} after ${c.lines} lines`);
       this.journal("ended", c, { reason, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10, gist });
@@ -428,12 +436,23 @@ export class ConversationController {
     });
   }
 
-  private history(): readonly ChatLine[] {
-    return this.deps.history();
+  /** Her line just said in the conversation: the agent writes it to the chat history before it calls {@link said}. */
+  private keepOwnLine(c: Conversation): void {
+    const mine = this.deps.history().findLast((line) => same(line.speaker, this.deps.self));
+    if (mine === undefined || mine === this.lastOwnKept || (mine.at !== undefined && mine.at < c.startedAt)) return;
+    this.lastOwnKept = mine;
+    this.keep(mine.speaker, mine.text, mine.at ?? this.deps.now());
+  }
+
+  /** Keeps a line of the current conversation, at most `gistLines` of them. */
+  private keep(speaker: string, text: string, at: number): void {
+    this.lines.push({ speaker, text, at });
+    if (this.lines.length > this.limits.gistLines) this.lines.splice(0, this.lines.length - this.limits.gistLines);
   }
 
   private begin(c: Conversation, own: boolean): void {
     this.record = c;
+    this.lines = [];
     this.holdsBudget = own;
     this.touched = new Set(c.members);
   }

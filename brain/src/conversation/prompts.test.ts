@@ -94,3 +94,9 @@ test("the block with a trade intent adds one line after the opener line; without
   assert.equal(block.split("\n")[3], "- You came to trade: ask Theo for iron_ingot now, offer some of 32 oak_log; say what you would give.", "right after the opener line");
   assert.equal(conversationBlock(facts({})), plain);
 });
+
+test("the gist prompt marks what was known as already counted and asks for this conversation's nudge only", () => {
+  const input = { persona: testPersona(), others: ["Theo"], topic: "iron", lines: [], relations: [{ name: "Theo", block: "You and Theo: Lately -5 insulted." }] };
+  assert.match(describeGist(input), /before this conversation \(already counted in how you feel; do not count it again\):\nYou and Theo: Lately -5/u);
+  assert.match(gistSystemPrompt(testPersona(), true), /from what was said and done in this conversation only/u);
+});

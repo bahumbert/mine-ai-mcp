@@ -129,6 +129,8 @@ export const personaSchema = z.strictObject({
       openingDistance: z.number().int().min(1).max(512).default(16),
       /** Vanilla servers (no localized chat): the distance a member may stay at (Manhattan). */
       stayingDistance: z.number().int().min(1).max(512).default(32),
+      /** The most lines of one conversation its gist reads (its last ones when it ran longer). */
+      gistLines: z.number().int().min(12).max(200).default(60),
     }).prefault({}),
     /** Relationship records and trading between characters (spec 2026-10-19-relations-trading-design). */
     relations: z.strictObject({

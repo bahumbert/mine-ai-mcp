@@ -79,12 +79,15 @@ test("conversation settings default", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
   const defaults = {
     sociability: 0.3, checkEverySeconds: 30, pairCooldownMinutes: 10, maxLines: 24, maxMinutes: 6, outOfRangeSeconds: 20,
-    silenceSeconds: 60, groupReplyJitterMs: [1_000, 4_000], openingDistance: 16, stayingDistance: 32,
+    silenceSeconds: 60, groupReplyJitterMs: [1_000, 4_000], openingDistance: 16, stayingDistance: 32, gistLines: 60,
   };
   assert.deepEqual(personaSchema.parse(base).settings.conversation, defaults);
   assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { sociability: 1.5 } } }).success, false);
   assert.deepEqual(personaSchema.parse({ ...base, settings: { conversation: { sociability: 0.6 } } }).settings.conversation, { ...defaults, sociability: 0.6 });
   assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { groupReplyJitterMs: [5, 1] } } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { gistLines: 11 } } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { conversation: { gistLines: 201 } } }).success, false);
+  assert.equal(personaSchema.parse({ ...base, settings: { conversation: { gistLines: 200 } } }).settings.conversation.gistLines, 200);
 });
 
 test("relations settings default", () => {

@@ -156,7 +156,8 @@ test("said with close ends the conversation as goodbye, and journals it with the
   assert.equal(ended?.lines, 2);
   assert.equal(ended?.gist, "Talked about nothing much.");
   assert.deepEqual(t.memories[0]?.talk.members, ["Theo"], "the memory holds the others only");
-  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /Theo: "see you"/u);
+  assert.match(t.chat.requests[0]?.[1]?.content ?? "", /Theo: "Ayla, hi"/u);
+  assert.doesNotMatch(t.chat.requests[0]?.[1]?.content ?? "", /see you/u, "a member's line of the chat history is not the conversation's: only the lines heard here are");
 });
 
 test("after the cap, her next line ends it as cap", () => {
@@ -212,19 +213,19 @@ test("gist waits for a free slot", async () => {
 });
 
 test("the fallback gist is never empty", async () => {
-  const gistOf = async (history: ChatLine[], opener: string, topic = "") => {
-    const t = setup({ modelFree: () => false, waitForModel: async () => false, history });
-    t.controller.heard(opener, "Ayla, hi", ["Ayla"], "chat");
+  const gistOf = async (said: string[], opener: string, topic = "") => {
+    const t = setup({ modelFree: () => false, waitForModel: async () => false, history: [{ speaker: "Ayla", text: "great", at: 1_000_002 }] });
+    t.controller.heard(opener, said[0] ?? "Ayla, hi", ["Ayla"], "chat");
+    for (const text of said.slice(1)) t.controller.heard(opener, text, [], "chat");
     if (topic !== "") t.controller.current!.topic = topic;
     t.controller.end("silence");
     await t.controller.finished();
     return t.memories[0]?.talk.gist;
   };
-  const said = (speaker: string, text: string, at: number): ChatLine => ({ speaker, text, at });
-  assert.equal(await gistOf([said("Theo", "I will bring the logs", 1_000_001), said("Ayla", "great", 1_000_002)], "Theo"), `Theo: "I will bring the logs"`, "no topic: the last line another member said");
-  assert.equal(await gistOf([], "GlutenFoul"), "with GlutenFoul", "no topic, no member line");
-  assert.equal(await gistOf([said("Theo", "x", 1_000_001)], "Theo", "the mine"), "the mine", "the topic first");
-  assert.equal((await gistOf([said("Theo", "x".repeat(300), 1_000_001)], "Theo"))?.length, 120, "cut to 120 characters");
+  assert.equal(await gistOf(["Ayla, hi", "I will bring the logs"], "Theo"), `Theo: "I will bring the logs"`, "no topic: the last line another member said");
+  assert.equal(await gistOf(["Ayla, hi"], "GlutenFoul"), 'GlutenFoul: "Ayla, hi"', "no topic: their opening line");
+  assert.equal(await gistOf(["Ayla, hi"], "Theo", "the mine"), "the mine", "the topic first");
+  assert.equal((await gistOf(["x".repeat(300)], "Theo"))?.length, 120, "cut to 120 characters");
 });
 
 test("an empty gist from the model uses the fallback", async () => {
@@ -233,7 +234,7 @@ test("an empty gist from the model uses the fallback", async () => {
   t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
   t.controller.end("silence");
   await t.controller.finished();
-  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+  assert.equal(t.memories[0]?.talk.gist, `Theo: "Ayla, hi"`);
 });
 
 test("the brain stopping ends the wait for a slot: the fallback is written, no model call", async () => {
@@ -244,13 +245,13 @@ test("the brain stopping ends the wait for a slot: the fallback is written, no m
   stop.abort();
   await t.controller.finished();
   assert.equal(t.chat.requests.length, 0);
-  assert.equal(t.memories[0]?.talk.gist, "with Theo");
+  assert.equal(t.memories[0]?.talk.gist, `Theo: "Ayla, hi"`);
   const early = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>(() => undefined) });
   early.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
   const stopped = AbortSignal.abort();
   early.controller.end("silence", stopped);
   await early.controller.finished();
-  assert.equal(early.memories[0]?.talk.gist, "with Theo");
+  assert.equal(early.memories[0]?.talk.gist, `Theo: "Ayla, hi"`);
 });
 
 test("a new conversation can open while the last gist waits; the gist lands on the old one", async () => {
@@ -702,4 +703,76 @@ test("an opening's ask opens its request once the line is said, and none when th
   await failed.controller.maybeOpen(failed.facts(failed.theoAt(5)), signal);
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(asked, ["Theo"], "a line that was not said asks nothing");
+});
+
+const gistedLines = async (t: ReturnType<typeof setup>): Promise<string> => {
+  t.controller.end("silence");
+  await t.controller.finished();
+  return t.chat.requests.at(-1)?.[1]?.content ?? "";
+};
+
+test("a conversation longer than gistLines gets its last gistLines lines, past the 12-line chat window, none from a stranger", async () => {
+  const t = setup();
+  t.chat.reply({ gist: "Talked." });
+  t.controller.heard("Theo", "Ayla, line 0", ["Ayla"], "chat");
+  t.controller.heard("Stranger", "buy cheap iron", [], "chat");
+  for (let i = 1; i < 80; i++) { t.clock.now += 1_000; t.controller.heard("Theo", `line ${i}`, [], "chat"); }
+  const text = await gistedLines(t);
+  assert.equal(text.match(/Theo: "/gu)?.length, 60);
+  assert.match(text, /"line 79"/u);
+  assert.doesNotMatch(text, /"line 19"/u);
+  assert.match(text, /"line 20"/u);
+  assert.doesNotMatch(text, /cheap iron/u);
+  const short = setup();
+  short.chat.reply({ gist: "Talked." });
+  short.controller.heard("Theo", "Ayla, line 0", ["Ayla"], "chat");
+  for (let i = 1; i < 26; i++) short.controller.heard("Theo", `line ${i}`, [], "chat");
+  assert.equal((await gistedLines(short)).match(/Theo: "/gu)?.length, 26, "all 26 lines of a talk shorter than gistLines");
+});
+
+test("her lines join the gist in the order said: her opening, and each reply once, none from before the conversation", async () => {
+  const history: ChatLine[] = [{ speaker: "Ayla", text: "old news", at: 999_000 }];
+  const t = setup({ history, random: 0.1 });
+  t.chat.reply(OPEN, { gist: "Talked." });
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  t.controller.heard("Theo", "Ayla, fine", ["Ayla"], "chat");
+  for (const text of ["reply one", "reply two"]) {
+    history.push({ speaker: "Ayla", text, at: t.clock.now });
+    t.controller.said(false);
+    t.controller.said(false);
+    t.clock.now += 1_000;
+  }
+  const text = await gistedLines(t);
+  const order = ["Theo! How's the mine?", "Ayla, fine", "reply one", "reply two"].map((line) => text.indexOf(line));
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.ok(order.every((at) => at > 0));
+  assert.equal(text.match(/reply one/gu)?.length, 1, "kept once though said() ran twice");
+  assert.doesNotMatch(text, /old news/u);
+});
+
+test("the next conversation's gist holds only its own lines, and a lagging gist keeps the old ones", async () => {
+  let grant!: (ok: boolean) => void;
+  const t = setup({ modelFree: () => false, waitForModel: () => new Promise<boolean>((resolve) => { grant = resolve; }) });
+  t.controller.heard("Theo", "Ayla, first talk", ["Ayla"], "chat");
+  t.controller.end("silence");
+  t.clock.now += 11 * 60_000;
+  t.controller.heard("Theo", "Ayla, second talk", ["Ayla"], "chat");
+  grant(false);
+  await t.controller.finished();
+  assert.equal(t.memories[0]?.talk.gist, `Theo: "Ayla, first talk"`);
+  t.controller.end("silence");
+  grant(false);
+  await t.controller.finished();
+  assert.equal(t.memories[1]?.talk.gist, `Theo: "Ayla, second talk"`);
+});
+
+test("a talk she opened that nobody answered is remembered with who it was with when it has no topic", async () => {
+  let free = true;
+  const t = setup({ modelFree: () => free });
+  t.chat.reply({ ...OPEN, topic: "" });
+  await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal);
+  free = false;
+  t.controller.end("silence");
+  await t.controller.finished();
+  assert.equal(t.memories[0]?.talk.gist, "with Theo");
 });
