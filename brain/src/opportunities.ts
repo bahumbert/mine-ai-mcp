@@ -42,6 +42,8 @@ export interface OpportunityFacts {
     readonly roles: readonly { readonly role: BlockRole; readonly block: string; readonly style: string }[];
     readonly shortfall: readonly Shortfall[];
   } | null;
+  /** What partners in reach said they need and she carries, newest first (relations/trading.ts `heardNeeds`). */
+  readonly heardNeeds?: readonly { readonly partner: string; readonly item: string; readonly carried: number; readonly saidAt: number }[];
   /** Items an own objective could not get, the partners to ask (online) and what she can offer, biggest stack first. */
   readonly tradeNeeds?: { readonly items: readonly string[]; readonly partners: readonly string[]; readonly offer: readonly { readonly item: string; readonly count: number }[] };
 }
@@ -98,6 +100,14 @@ function tradeNeeds(facts: OpportunityFacts): Opportunity[] {
   const asked = [...needs.partners].sort((a, b) => away(a) - away(b)).slice(0, TRADE_PARTNERS_SHOWN);
   const carried = needs.offer.slice(0, TRADE_OFFER_SHOWN).map((entry) => `${entry.count} ${entry.item}`).join(", ");
   return [{ activities: ["trading"], text: `trade for ${needs.items.join(", ")} you could not get: ask ${asked.join(", ")} what they would want for it (you carry ${carried})` }];
+}
+
+/** What a partner said they need and she carries: she may offer it for something she wants (the model decides). */
+function offersAsked(facts: OpportunityFacts): Opportunity[] {
+  return (facts.heardNeeds ?? []).slice(0, TRADE_PARTNERS_SHOWN).map((heard) => ({
+    activities: ["trading"],
+    text: `${heard.partner} said ${Math.max(0, Math.round((facts.now - heard.saidAt) / 60_000))} min ago they need ${heard.item}; you carry ${heard.carried}: you could offer it for something you want`,
+  }));
 }
 
 function minutesSince(iso: string, now: number): number {
@@ -233,7 +243,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
  * "no farm yet" never reached the prompt behind the house and bed lines (run 11, 2026-10-14).
  */
 export function findOpportunities(facts: OpportunityFacts, drawn: readonly Activity[] = []): Opportunity[] {
-  const pressing = [tradeNeeds, wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
+  const pressing = [tradeNeeds, offersAsked, wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
   const rest = [farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noFarm, noBed, gear].flatMap((finder) => finder(facts));
   return [...pressing, ...drawnFirst(rest, drawn)].slice(0, MAX_OPPORTUNITIES);
 }

@@ -93,7 +93,7 @@ test("conversation settings default", () => {
 test("relations settings default", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
   const defaults = {
-    enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32,
+    enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32, seekReach: 64,
     temperament: { firstImpression: 0, sensitivity: 1, forgiveness: 5 },
     score: {
       amounts: { tradeDone: 8, keptLate: 3, promiseBroken: -20, giftReceived: 10, requestHelped: 6, requestRefused: -3, requestIgnored: -5, hurt: -25 },

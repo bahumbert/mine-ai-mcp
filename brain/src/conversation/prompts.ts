@@ -34,6 +34,11 @@ function describeTalk(talk: PastTalk): string {
   return `${talk.minutesAgo} min ago about ${talk.topic === "" ? "nothing in particular" : talk.topic}: ${talk.gist === "" ? "(no gist)" : talk.gist}`;
 }
 
+/** A trade intent with nothing to ask for: the partner said it needs what the bot carries. */
+function offerText(partner: string, offer: readonly { readonly item: string }[]): string {
+  return `You came to offer ${partner} your ${offer.map((o) => o.item).join(", ")}: they said they need it; say what you would want for it.`;
+}
+
 export function describeOpening(input: OpeningInput, localizedChat?: LocalizedChat): string {
   const parts = [
     `${input.calling ? "You want to call over" : "Near you"}:\n${input.near.map(describeNearby).join("\n")}`,
@@ -43,7 +48,7 @@ export function describeOpening(input: OpeningInput, localizedChat?: LocalizedCh
     ...(input.lastFailed === null ? [] : [`Your last objective "${input.lastFailed.objective}" failed: ${input.lastFailed.reason}.`]),
     ...(input.calling ? [localizedChat === undefined ? "calling: they are out of earshot, your line is plain talk and may not reach them." : "calling: they are out of earshot, your line is shouted to call them over."] : []),
     input.kind === "social" ? "You chose to go and talk with them." : "You meet them while you work.",
-    ...(input.intent === undefined ? [] : [`You came to trade: ask for ${input.intent.want.join(", ")}, offer some of ${input.intent.offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`]),
+    ...(input.intent === undefined ? [] : [input.intent.want.length === 0 ? offerText("them", input.intent.offer) : `You came to trade: ask for ${input.intent.want.join(", ")}, offer some of ${input.intent.offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`]),
   ];
   return parts.join("\n\n");
 }
@@ -56,7 +61,7 @@ export function conversationBlock(facts: ConversationFacts): string {
     : `- ${facts.opener} opened it${facts.topic === "" ? "" : ` about ${facts.topic}`}.`);
   if (facts.intent !== undefined) {
     const { partner, want, offer } = facts.intent;
-    lines.push(`- You came to trade: ask ${partner} for ${want.join(", ")} now, offer some of ${offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`);
+    lines.push(want.length === 0 ? `- ${offerText(partner, offer)}` : `- You came to trade: ask ${partner} for ${want.join(", ")} now, offer some of ${offer.map((o) => `${o.count} ${o.item}`).join(", ")}; say what you would give.`);
   }
   lines.push(`- ${facts.lines} lines so far, ${facts.minutes} min.`);
   if (facts.iAmOpener && facts.planned !== null) {

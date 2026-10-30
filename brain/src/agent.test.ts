@@ -13,7 +13,7 @@ import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } f
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
 import { TradeBoard } from "./relations/board.ts";
-import { newRelation } from "./relations/record.ts";
+import { newRelation, withSaid } from "./relations/record.ts";
 import type { Handoff } from "./relations/handoff.ts";
 import type { TradeAsks } from "./relations/trading.ts";
 
@@ -2879,4 +2879,58 @@ test("a nameless line soon after its speaker named another character does not an
   await until(() => chat.requests.length === 3);
   await sleep(60);
   assert.equal(theoHeard(relations), false);
+});
+
+/** Ayla (10 bread) with Theo `theoX` blocks away who said, a minute ago, that he needs bread; trading is the only activity she can draw. */
+async function heardBreadNeed(t: Parameters<typeof agentFor>[0], theoX: number, talkRange?: number) {
+  const runtime = tradingRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: theoX, y: 64, z: 0 } }] };
+  runtime.durations.navigate = 5;
+  const events: BrainEvent[] = [];
+  const built = agentFor(t, runtime, { goal: "Forge an iron kit." }, talkOptions({ journal: (event) => events.push(event), otherAgents: ["Theo"], random: () => 0, ...(talkRange !== undefined && { localizedChat: { range: talkRange } }) }));
+  const relations = (built.agent as unknown as { relations: AgentRelations }).relations;
+  relations.book.load([withSaid(newRelation("Theo", Date.now(), 0), [], [{ item: "bread", count: 3 }], Date.now() - MIN)]);
+  return { runtime, events, relations, ...built };
+}
+
+test("an objective drawn from a heard need opens a talk with that partner", async (t) => {
+  const { planner, chat, agent } = await heardBreadNeed(t, 30);
+  planner.reply({ objective: "offer Theo some bread", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "bread", length: "short", say: "Theo, I heard you need bread: want some?" });
+  await until(() => planner.requests.length >= 1, 4_000);
+  assert.match(JSON.stringify(planner.requests[0]), /Theo said 1 min ago they need bread; you carry 10: you could offer it for something you want/u);
+  await until(() => agent.conversation?.kind === "social", 4_000);
+  assert.match(JSON.stringify(chat.requests[0]), /offer them your bread: they said they need it/u);
+});
+
+test("a partner 50 blocks away keeps trading in the draw and is planned when talk carries 64", async (t) => {
+  const { planner, chat, agent } = await heardBreadNeed(t, 50, 64);
+  planner.reply({ objective: "offer Theo some bread", for: "trading" });
+  chat.reply({ open: true, to: ["Theo"], topic: "bread", length: "short", say: "Theo, want some bread?" });
+  await until(() => planner.requests.length >= 1, 4_000);
+  assert.match(JSON.stringify(planner.requests[0]), /you could offer it for something you want/u, "in the draw at 50 blocks (seek reach 64)");
+  await until(() => agent.conversation?.kind === "social", 4_000);
+});
+
+test("the seek reach never passes the talk range: without Localized Chat (staying distance 32) a partner 50 blocks away is not drawn", async (t) => {
+  const { planner } = await heardBreadNeed(t, 50);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 1, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[0]), /you could offer it for something you want/u);
+});
+
+test("a partner beyond the seek reach is not drawn", async (t) => {
+  const { planner } = await heardBreadNeed(t, 70, 64);
+  planner.reply({ objective: "gather wood" });
+  await until(() => planner.requests.length >= 1, 4_000);
+  assert.doesNotMatch(JSON.stringify(planner.requests[0]), /you could offer it for something you want/u);
+});
+
+test("an order to trade from an agent 50 blocks away is still refused: the agreement reach stays 32 though the seek reach is 64", async (t) => {
+  const { events, logs, agent, chat } = chatFromFarAgent(t, 50);
+  chat.reply(ORDER);
+  await agent.handle(say("Vex", "Ayla, come to me and trade iron"));
+  await sleep(50);
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.some((line) => line.includes("Vex is too far away to trade with")), logs.join("\n"));
 });

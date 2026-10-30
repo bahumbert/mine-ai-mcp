@@ -12,7 +12,7 @@ import { minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "../time-spe
 import { stackSizeOf } from "./item-ids.ts";
 import { carriedOf, sideText } from "./items.ts";
 import { AGREED_STATES } from "./trade.ts";
-import { type ItemCount, MINUTE_MS, type Trade } from "./types.ts";
+import { type ItemCount, MINUTE_MS, type Relation, type SaidItem, type Trade } from "./types.ts";
 
 /** A need, and a partner's refusal, are forgotten after this long. */
 const ASK_MEMORY_MS = 10 * MINUTE_MS;
@@ -184,9 +184,36 @@ export function tradingShare(times: readonly ActivityTime[], now: number, starte
 
 const limitApplies = (share: TradingShare | undefined): share is TradingShare => share !== undefined && share.windowMinutes >= MIN_SHARE_WINDOW_MINUTES;
 
-/** The two activities drawn, with trading as the second when there is something to trade for, it can be done and it has not had its share of the time yet. */
-export function withTrading(drawn: readonly Activity[], available: readonly Activity[], needs: readonly string[], share?: TradingShare): Activity[] {
-  if (needs.length === 0 || !available.includes("trading") || drawn[0] === "trading" || (limitApplies(share) && share.share >= FORCED_SHARE)) return [...drawn];
+/** What a partner said it needs, that the bot carries: an item it could offer. */
+export interface HeardNeed {
+  readonly partner: string;
+  readonly item: string;
+  /** How many the bot carries now. */
+  readonly carried: number;
+  readonly saidAt: number;
+}
+
+/** A trade done with the partner gave that item after it was said: the need is met. */
+const metSince = (record: Relation, said: SaidItem): boolean => record.trades.some((trade) => trade.state === "done" && (trade.endedAt ?? trade.createdAt) >= said.at && trade.give.some((side) => side.item === said.item));
+
+/**
+ * What partners said they need (their relation records) and the bot carries, newest first. The record ages said items
+ * only on the next gist write, so the window is applied here. `only.asks` leaves out an offer the partner refused
+ * lately; `only.partners` (omitted: every record) the records of anyone not in that list.
+ */
+export function heardNeeds(relations: readonly Relation[], inventory: Inventory, now: number, forgetMinutes: number, only: { readonly asks?: TradeAsks; readonly partners?: readonly string[] } = {}): HeardNeed[] {
+  const wanted = only.partners?.map((partner) => partner.toLowerCase());
+  return relations
+    .filter((record) => wanted === undefined || wanted.includes(record.partner.toLowerCase()))
+    .flatMap((record) => record.saidNeeds
+      .filter((said) => now - said.at <= forgetMinutes * MINUTE_MS && carriedOf(inventory, said.item) >= 1 && !metSince(record, said) && only.asks?.refused.isRefused(record.partner, [said.item], now) !== true)
+      .map((said) => ({ partner: record.partner, item: said.item, carried: carriedOf(inventory, said.item), saidAt: said.at })))
+    .sort((a, b) => b.saidAt - a.saidAt);
+}
+
+/** The two activities drawn, with trading as the second when there is something to trade for (an own need, or `heardCount` needs heard from partners in reach), it can be done and it has not had its share of the time yet. */
+export function withTrading(drawn: readonly Activity[], available: readonly Activity[], needs: readonly string[], share?: TradingShare, heardCount = 0): Activity[] {
+  if ((needs.length === 0 && heardCount === 0) || !available.includes("trading") || drawn[0] === "trading" || (limitApplies(share) && share.share >= FORCED_SHARE)) return [...drawn];
   return drawn[0] === undefined ? ["trading"] : [drawn[0], "trading"];
 }
 
@@ -224,14 +251,34 @@ export function tradeNeedsFacts(needs: readonly string[], partners: readonly str
   return { items: [...needs], partners: partners.filter((partner) => !asks.refused.isRefused(partner, needs, now)), offer: offerFrom(inventory, needs) };
 }
 
+const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** An offer of what a partner in reach said it needs: to the partner the objective names, else to the newest heard need's partner; null when none applies. */
+function offerPlan(objective: string, partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number, inReach: readonly string[], heard: readonly HeardNeed[]): { readonly want: never[]; readonly partner: string; readonly offer: string[] } | { readonly failed: string } | null {
+  const offers = heard.filter((need) => carriedOf(snapshot.inventory, need.item) >= 1 && !asks.refused.isRefused(need.partner, [need.item], now));
+  const named = partners.find((partner) => namesWord(objective, partner));
+  const pick = named === undefined ? offers.find((need) => inReach.some((partner) => sameName(partner, need.partner))) : offers.find((need) => sameName(need.partner, named));
+  if (pick === undefined) return null;
+  if (named !== undefined && !inReach.includes(named)) return { failed: `${named} is too far away to trade with` };
+  return { want: [], partner: inReach.find((partner) => sameName(partner, pick.partner)) ?? pick.partner, offer: [pick.item] };
+}
+
 /**
- * What a trading objective sets out to do: the items it asks for and the partner to ask, or why it cannot. Only
- * `inReach` partners (omitted: every partner) are asked; an objective naming one who is not fails, whoever else is near.
+ * What a trading objective sets out to do: the items it asks for and the partner to ask (with nothing to ask for and a
+ * partner's `heard` need the bot carries: the item to offer that partner), or why it cannot. `reach` is the partners in
+ * reach (omitted: every partner) or `{ inReach, heard }` with the needs partners said. Only `inReach` partners are asked;
+ * an objective naming one who is not fails, whoever else is near.
  */
-export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number, inReach: readonly string[] = partners): { readonly want: string[]; readonly partner: string } | { readonly failed: string } {
+export function tradePlan(objective: string, needs: readonly string[], partners: readonly string[], asks: TradeAsks, snapshot: BotSnapshot, now: number, reach: readonly string[] | { readonly inReach: readonly string[]; readonly heard: readonly HeardNeed[] } = partners): { readonly want: string[]; readonly partner: string; readonly offer?: string[] } | { readonly failed: string } {
+  const { inReach, heard } = Array.isArray(reach) ? { inReach: reach as readonly string[], heard: [] } : reach as { readonly inReach: readonly string[]; readonly heard: readonly HeardNeed[] };
   // An item the objective names that it carries is what it offers, not what it asks for.
   const mentioned = wantedItems(objective, []);
   const named = mentioned.filter((item) => carriedOf(snapshot.inventory, item) === 0);
+  // Nothing to ask for: a partner who said it needs what the bot carries is offered it (even when the objective names that item).
+  if (needs.length === 0 && named.length === 0) {
+    const offer = offerPlan(objective, partners, asks, snapshot, now, inReach, heard);
+    if (offer !== null) return offer;
+  }
   // Every item it names is already in the bags: what it carries is the offer, and it asks for the needs.
   if (mentioned.length > 0 && named.length === 0 && needs.length === 0) return { failed: `already carry ${mentioned.join(", ")}` };
   const want = named.length > 0 ? named : [...needs];
@@ -246,6 +293,8 @@ export function tradePlan(objective: string, needs: readonly string[], partners:
 
 export interface TradeRoutineDeps extends Omit<SocialiseDeps, "openFacts"> {
   readonly want: readonly string[];
+  /** With no `want`: the items a partner said it needs, offered instead of the bag. */
+  readonly offer?: readonly string[];
   readonly asks: TradeAsks;
   readonly trades: Pick<TradeController, "latestWith">;
   readonly openFacts: Omit<OpenFacts, "snapshot" | "intent">;
@@ -265,10 +314,13 @@ export const agreedDetail = (partner: string, trade: Pick<Trade, "give" | "get">
  * talk that never took place counts as neither, except a partner who did not come (a miss too).
  */
 export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult> {
-  const { runtime, signal, partner, want, asks, trades, talks, since } = deps;
+  const { runtime, signal, partner, asks, trades, talks, since } = deps;
+  // A declined or missed offer is kept under the offered item: the ask memory is keyed by items.
+  const want = deps.want.length > 0 ? deps.want : deps.offer ?? [];
   const now = (): number => (deps.clock ?? { now: () => Date.now() }).now();
   const snapshot = await runtime.status();
-  const intent: OpenFacts["intent"] = { kind: "trade", want, offer: offerFrom(snapshot.inventory, want) };
+  const offer = deps.want.length === 0 && deps.offer !== undefined ? deps.offer.map((item) => ({ item, count: carriedOf(snapshot.inventory, item) })) : offerFrom(snapshot.inventory, want);
+  const intent: OpenFacts["intent"] = { kind: "trade", want: deps.want, offer };
   // The intent reaches a line whichever way the talk starts: in the opening, or in her reply to a talk already open.
   talks.carryIntent(partner, intent);
   try {

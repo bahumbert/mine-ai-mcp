@@ -100,3 +100,13 @@ test("the gist prompt marks what was known as already counted and asks for this 
   assert.match(describeGist(input), /before this conversation \(already counted in how you feel; do not count it again\):\nYou and Theo: Lately -5/u);
   assert.match(gistSystemPrompt(testPersona(), true), /from what was said and done in this conversation only/u);
 });
+
+test("an offer intent reads 'offer Lena your bread', no empty ask", () => {
+  const intent = { kind: "trade" as const, partner: "Lena", want: [], offer: [{ item: "bread", count: 5 }] };
+  const block = conversationBlock(facts({ others: ["Lena"], intent }));
+  assert.match(block, /offer Lena your bread: they said they need it/u);
+  assert.doesNotMatch(block, /ask Lena for\s*(now|,)/u);
+  const opening = describeOpening({ persona: testPersona(), kind: "social", near: [{ username: "Lena", distance: 3, lastTalk: null }], activity: "trading", lately: [], lastFailed: null, calling: false, intent: { kind: "trade", want: [], offer: [{ item: "bread", count: 5 }] } });
+  assert.match(opening, /offer them your bread: they said they need it/u);
+  assert.doesNotMatch(opening, /ask for\s*,/u);
+});

@@ -5,8 +5,9 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
-import { offerFrom, partnersInReach, reachOf, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
+import { heardNeeds, offerFrom, partnersInReach, reachOf, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
 import type { ActivityTime } from "../time-spent.ts";
+import { newRelation, withSaid } from "./record.ts";
 import type { ItemCount, Trade, TradeState } from "./types.ts";
 
 const MIN = 60_000;
@@ -76,8 +77,8 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
     found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "" } as Trade);
   };
   // The fake clock jumps instead of waiting: only for the runs that wait on a partner who never comes (a fake sleep in the follow loop would never yield).
-  const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number } = {}) => tradeRoutine({
-    runtime, signal: extra.signal ?? controller.signal, partner: "Theo", want: ["iron_ingot"], asks,
+  const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number; want?: string[]; offer?: string[] } = {}) => tradeRoutine({
+    runtime, signal: extra.signal ?? controller.signal, partner: "Theo", want: extra.want ?? ["iron_ingot"], ...(extra.offer !== undefined && { offer: extra.offer }), asks,
     trades: { latestWith: (partner, since) => { reads.push({ partner, since }); return found; } }, talks,
     context: { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: controller.signal, self: "Ayla" },
     openFacts: { activity: "trading", lately: [], lastFailed: null }, limits, since: extra.since ?? 5, ...(extra.fake === true && { clock }),
@@ -574,4 +575,94 @@ test("F10 two 'too far away' failures within 5 minutes pause trading for 5 minut
   asks.failedFast(0);
   asks.failedFast(MIN);
   assert.deepEqual(withoutRefusedTrading(available, ["Theo"], asks, MIN, undefined, ["Theo"]), ["exploring"]);
+});
+
+/** Theo said, `ago` ms before `now`, that he needs the items. */
+const theoNeeds = (items: readonly (string | ItemCount)[], now: number, ago = 0) => withSaid(newRelation("Theo", now - ago, 0), [], items, now - ago);
+const BAG = [stack("bread", 5), stack("oak_log", 12)];
+
+test("heardNeeds lists a said need the bot carries, newest first, and leaves out one it does not carry", () => {
+  const now = 10 * MIN;
+  const lena = withSaid(newRelation("Lena", 0, 0), [], [{ item: "oak_log", count: 2 }], now - 5 * MIN);
+  const found = heardNeeds([theoNeeds([{ item: "bread", count: 3 }, "iron_ingot"], now, MIN), lena], BAG, now, 60);
+  assert.deepEqual(found, [
+    { partner: "Theo", item: "bread", carried: 5, saidAt: now - MIN },
+    { partner: "Lena", item: "oak_log", carried: 12, saidAt: now - 5 * MIN },
+  ]);
+});
+
+test("heardNeeds leaves out a need said more than forgetMinutes ago though still in the record", () => {
+  const now = 100 * MIN;
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now, 60 * MIN + 1)], BAG, now, 60), []);
+  assert.equal(heardNeeds([theoNeeds(["bread"], now, 60 * MIN)], BAG, now, 60).length, 1, "exactly the window still counts");
+});
+
+test("heardNeeds leaves out a partner who refused that offer lately, and partners not asked for", () => {
+  const now = 10 * MIN;
+  const asks = new TradeAsks();
+  asks.refused.add("theo", ["bread"], now - MIN);
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { asks }), []);
+  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { asks: new TradeAsks() }).length, 1);
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { partners: ["Lena"] }), [], "Theo is not among the partners");
+  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { partners: ["THEO"] }).length, 1, "names compare lowercased");
+});
+
+test("heardNeeds leaves out a need a trade done after it already met", () => {
+  const now = 10 * MIN;
+  const done = (endedAt: number): Trade => ({ id: "t", partner: "Theo", give: [{ item: "bread", count: 3 }], get: [], first: "me", state: "done", createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: null, received: [], endedAt, brokenBy: null, late: false, note: "" } as Trade);
+  const said = theoNeeds(["bread"], now, 5 * MIN);
+  assert.deepEqual(heardNeeds([{ ...said, trades: [done(now - MIN)] }], BAG, now, 60), [], "given after he said it");
+  assert.equal(heardNeeds([{ ...said, trades: [done(now - 6 * MIN)] }], BAG, now, 60).length, 1, "given before he said it: a new need");
+});
+
+test("withTrading: no own need but a heard need in reach puts trading second; own need and no need are as before", () => {
+  const available: Activity[] = ["farming", "exploring", "trading"];
+  assert.deepEqual(withTrading(["farming", "exploring"], available, [], undefined, 1), ["farming", "trading"]);
+  assert.deepEqual(withTrading(["farming", "exploring"], available, ["iron_ingot"], undefined, 1), ["farming", "trading"], "own need and heard need");
+  assert.deepEqual(withTrading(["farming", "exploring"], available, [], undefined, 0), ["farming", "exploring"], "no need of either kind");
+  assert.deepEqual(withTrading(["farming", "exploring"], ["farming", "exploring"], [], undefined, 2), ["farming", "exploring"], "trading unavailable");
+});
+
+test("tradePlan with a heard need only: offers the item to the partner named, else the newest heard need's partner in reach", () => {
+  const t = setup(theoAt(30));
+  const snapshot = { ...t.runtime.snapshot, inventory: BAG };
+  const now = Date.now();
+  const heard = [{ partner: "Lena", item: "oak_log", carried: 12, saidAt: now - MIN }, { partner: "Theo", item: "bread", carried: 5, saidAt: now - 2 * MIN }];
+  assert.deepEqual(tradePlan("see what Theo wants", [], ["Theo", "Lena"], t.asks, snapshot, now, { inReach: ["Theo", "Lena"], heard }), { want: [], partner: "Theo", offer: ["bread"] }, "the partner the objective names");
+  assert.deepEqual(tradePlan("trade with someone", [], ["Theo", "Lena"], t.asks, snapshot, now, { inReach: ["Theo", "Lena"], heard }), { want: [], partner: "Lena", offer: ["oak_log"] }, "no partner named: the newest");
+  assert.deepEqual(tradePlan("trade with someone", [], ["Theo", "Lena"], t.asks, snapshot, now, { inReach: ["Theo"], heard }), { want: [], partner: "Theo", offer: ["bread"] }, "Lena is out of reach");
+  assert.deepEqual(tradePlan("offer Theo my bread", [], ["Theo"], t.asks, snapshot, now, { inReach: ["Theo"], heard }), { want: [], partner: "Theo", offer: ["bread"] }, "naming the carried item is no 'already carry'");
+});
+
+test("tradePlan offer: the item no longer carried at plan time, an unnamed partner without a heard need, a far named partner and a refused offer fail", () => {
+  const t = setup(theoAt(30));
+  const now = Date.now();
+  const heard = [{ partner: "Theo", item: "bread", carried: 5, saidAt: now }];
+  const eaten = { ...t.runtime.snapshot, inventory: [stack("oak_log", 12)] };
+  assert.deepEqual(tradePlan("trade with someone", [], ["Theo"], t.asks, eaten, now, { inReach: ["Theo"], heard }), { failed: "nothing to trade for" });
+  const snapshot = { ...t.runtime.snapshot, inventory: BAG };
+  assert.deepEqual(tradePlan("trade with Lena", [], ["Theo", "Lena"], t.asks, snapshot, now, { inReach: ["Theo", "Lena"], heard }), { failed: "nothing to trade for" }, "Lena said nothing");
+  assert.deepEqual(tradePlan("trade with Theo", [], ["Theo"], t.asks, snapshot, now, { inReach: [], heard }), { failed: "Theo is too far away to trade with" });
+  t.asks.refused.add("Theo", ["bread"], now);
+  assert.deepEqual(tradePlan("trade with Theo", [], ["Theo"], t.asks, snapshot, now, { inReach: ["Theo"], heard }), { failed: "nothing to trade for" }, "refused lately");
+});
+
+test("tradePlan: an own need wins over a heard one", () => {
+  const t = setup(theoAt(30));
+  const snapshot = { ...t.runtime.snapshot, inventory: BAG };
+  const heard = [{ partner: "Theo", item: "bread", carried: 5, saidAt: Date.now() }];
+  assert.deepEqual(tradePlan("trade with someone", ["iron_ingot"], ["Theo"], t.asks, snapshot, Date.now(), { inReach: ["Theo"], heard }), { want: ["iron_ingot"], partner: "Theo" });
+});
+
+test("an offer routine offers only the heard item, and a declined offer is refused under the offered item", async () => {
+  const t = setup(theoAt(30));
+  t.runtime.snapshot = { ...t.runtime.snapshot, inventory: BAG };
+  t.chat.reply(OPEN);
+  const running = t.run({ want: [], offer: ["bread"] });
+  await until(() => t.talks.current !== null);
+  t.talks.said(true);
+  assert.deepEqual(await running, { status: "failed", detail: "Theo did not trade bread" });
+  assert.match(JSON.stringify(t.chat.requests[0]), /offer them your bread: they said they need it/u);
+  assert.doesNotMatch(JSON.stringify(t.chat.requests[0]), /oak_log/u, "not the whole bag");
+  assert.equal(t.asks.refused.isRefused("Theo", ["bread"], Date.now()), true, "not redrawn for that item");
 });

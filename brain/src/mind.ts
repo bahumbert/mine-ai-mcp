@@ -285,7 +285,7 @@ export interface OpeningInput {
   readonly calling: boolean;
   /** One summary line per nearby partner, with what they said they have against what the objective lacks. */
   readonly relations?: readonly string[];
-  /** The trading routine came to ask for these items and can offer these stacks. */
+  /** The trading routine came to ask for these items and can offer these stacks; with nothing to ask for (`want` empty) it came to offer `offer`, which the partner said it needs. */
   readonly intent?: { readonly kind: "trade"; readonly want: readonly string[]; readonly offer: readonly ItemCount[] };
 }
 

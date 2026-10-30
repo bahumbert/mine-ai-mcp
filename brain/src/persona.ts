@@ -147,6 +147,8 @@ export const personaSchema = z.strictObject({
       maxOpenTrades: z.number().int().min(1).max(20).default(3),
       /** A trade partner counts only when seen and at most this many blocks away (Manhattan). */
       tradeReach: z.number().int().min(1).max(256).default(32),
+      /** A trade partner is sought (drawn, planned, walked to or called) when seen and at most this many blocks away (Manhattan): the Localized Chat talk range, so a partner who hears the bot counts. The hand-over terms keep `tradeReach`. */
+      seekReach: z.number().int().min(1).max(256).default(64),
       /** How this character takes what happens with someone (spec 2026-10-28-relationships-step1-design). */
       temperament: z.strictObject({
         /** The score of someone new, and what a score drifts back to. */

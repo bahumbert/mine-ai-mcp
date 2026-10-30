@@ -23,7 +23,7 @@ import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
 import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.ts";
-import { agreedDetail, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
+import { agreedDetail, heardNeeds, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
@@ -870,16 +870,18 @@ export class Agent {
     // Trading is not drawn while every partner refused lately: it would only fail "no one to trade with".
     // Nor while it has taken its share of the time since the agent started (relations/trading.ts `MAX_SHARE`).
     const share = tradingShare(hour, Date.now(), this.startedAt);
-    // Nor while no partner is seen within `relations.tradeReach` blocks: a far partner would only be called and waited for.
-    const inReach = partnersInReach(this.partners(), snapshot, persona.settings.relations.tradeReach);
+    // Nor while no partner is seen within `relations.seekReach` blocks (the talk range): the routine walks to or calls a partner that near.
+    const inReach = partnersInReach(this.partners(), snapshot, this.seekReach());
     const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now(), share, inReach);
     const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
     this.asks.dropRefused(this.partners(), Date.now());
     const needs = this.asks.needs.current(Date.now(), snapshot.inventory);
-    const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs, share);
+    // A partner in reach said it needs something she carries: a trade to offer, trading takes the second place for it too.
+    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, Date.now(), persona.settings.relations.offersForgetMinutes, { asks: this.asks, partners: inReach });
+    const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs, share, heard.length);
     const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, inReach, this.asks, snapshot.inventory, Date.now()) : undefined;
-    const opportunities = await this.opportunities(snapshot, drawn, tradeNeeds);
+    const opportunities = await this.opportunities(snapshot, drawn, { ...(tradeNeeds !== undefined && { tradeNeeds }), ...(heard.length > 0 && drawn.includes("trading") && { heardNeeds: heard }) });
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     this.modelFailures = 0;
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
@@ -1090,6 +1092,12 @@ export class Agent {
     return this.routineStep(work, "socialising", `chat with ${partner}`, { skill: "socialise", partner }, (base) => socialise({ ...base, partner, openFacts }));
   }
 
+  /** How far a partner is sought for a trade: `relations.seekReach`, never beyond what a line carries (the talk range) so the routine can call them. */
+  private seekReach(): number {
+    const { persona, localizedChat } = this.options;
+    return Math.min(persona.settings.relations.seekReach, localizedChat?.range ?? persona.settings.conversation.stayingDistance);
+  }
+
   /** The step of a `trading` objective of its own: relations/trading.ts asks a partner for the items it lacks. */
   private async tradeStep(work: Work): Promise<void> {
     const trades = this.relations?.trades;
@@ -1102,18 +1110,20 @@ export class Agent {
     }
     const snapshot = await this.options.runtime.status();
     const partners = this.partners();
-    const inReach = partnersInReach(partners, snapshot, this.options.persona.settings.relations.tradeReach);
-    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), partners, this.asks, snapshot, Date.now(), inReach);
+    const { offersForgetMinutes } = this.options.persona.settings.relations;
+    const inReach = partnersInReach(partners, snapshot, this.seekReach());
+    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, Date.now(), offersForgetMinutes, { asks: this.asks, partners: inReach });
+    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), partners, this.asks, snapshot, Date.now(), { inReach, heard });
     if ("failed" in plan) {
       // It failed before any ask: after two in a row trading is not drawn for a while.
       this.asks.failedFast(Date.now());
       return this.finish(work, "failed", plan.failed);
     }
-    const { want, partner } = plan;
+    const { want, partner, offer } = plan;
     // What it asks for is what the chat calls of the talk are told it lacks.
     for (const item of want) work.wanted.add(item);
     const openFacts = { activity: this.activity, lately: [...this.lately], lastFailed: this.lastFailed };
-    return this.routineStep(work, "trading", `trade with ${partner}`, { skill: "trade", partner }, (base) => tradeRoutine({ ...base, partner, want, asks: this.asks, trades, openFacts }));
+    return this.routineStep(work, "trading", `trade with ${partner}`, { skill: "trade", partner }, (base) => tradeRoutine({ ...base, partner, want, ...(offer !== undefined && { offer }), asks: this.asks, trades, openFacts }));
   }
 
   /** Runs a conversation routine as the objective's step: journals it, counts its time for `activity`, ends the objective with its result. */
@@ -1309,7 +1319,7 @@ export class Agent {
   }
 
   /** Things that could use doing now (the tasks a character looks for); the goal tier decides what to make of them. */
-  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[], tradeNeeds?: OpportunityFacts["tradeNeeds"]): Promise<Opportunity[]> {
+  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[], trading: Pick<OpportunityFacts, "tradeNeeds" | "heardNeeds"> = {}): Promise<Opportunity[]> {
     const ownHome = this.places.some((place) => place.own === true);
     const unfinished = this.building.unfinished;
     let houseShortfall: Shortfall[] = [];
@@ -1326,7 +1336,7 @@ export class Agent {
     } catch (error) {
       this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
-    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...(tradeNeeds !== undefined && { tradeNeeds }) }, drawn);
+    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...trading }, drawn);
   }
 
   /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */

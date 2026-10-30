@@ -208,3 +208,11 @@ test("without trade needs the opportunities are as before", () => {
   assert.deepEqual(findOpportunities(settled({ tradeNeeds: { items: [], partners: ["Theo"], offer: [] } })), []);
   assert.deepEqual(findOpportunities(settled({ tradeNeeds: { items: ["bread"], partners: [], offer: [] } })), []);
 });
+
+test("a heard need is a pressing trading opportunity with the partner and the count, at most three shown", () => {
+  const found = texts(settled({ heardNeeds: [{ partner: "Lena", item: "bread", carried: 8, saidAt: NOW - 4 * 60_000 }] }));
+  assert.equal(found.length, 1);
+  assert.match(found[0]!, /^\(trading\) Lena said 4 min ago they need bread; you carry 8: you could offer it for something you want/u);
+  const heardNeeds = ["A", "B", "C", "D"].map((partner) => ({ partner, item: "bread", carried: 2, saidAt: NOW }));
+  assert.equal(findOpportunities(settled({ heardNeeds })).length, 3);
+});
