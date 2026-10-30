@@ -105,6 +105,13 @@ test("tradeInstructions forbids claiming a hand-over", () => {
   assert.match(tradeInstructions(), /never say you gave, dropped or handed over items unless your "Open:" line says you gave them/u);
 });
 
+test("tradeInstructions says an accept hands nothing over yet", () => {
+  const text = tradeInstructions();
+  assert.match(text, /accepts or proposes[^.\n]*nothing is handed over yet/u);
+  assert.match(text, /gives first hands over after your line[^.\n]*by itself/u);
+  assert.match(text, /say what will happen, not that it happened/u);
+});
+
 const tradingOn = { relations: { block: "", tradeOn: true, requests: ["1. bread (asked 2 min ago)"] } };
 const rawReply = { trade: { action: "decline" }, asks_of: ["Theo"], asks_what: "bread", my_request: { n: 1, answer: "agreed" } };
 

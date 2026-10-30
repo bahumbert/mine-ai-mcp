@@ -64,6 +64,40 @@ test("a collect after a give left items on the ground picks them up", async () =
   assert.deepEqual(runtime.groundItems, [{ item: "stick", count: 3 }]);
 });
 
+/** A runtime whose bag gains iron once a pick-up was submitted: the partner's items walked over while the pick-up reported a failure. */
+class WalkedOver extends FakeRuntime {
+  constructor(private readonly gained = 5) { super(); }
+  override async status() {
+    const walked = this.submitted.some((call) => call.tool === "pick_up_items");
+    return walked ? { ...this.snapshot, inventory: [...this.snapshot.inventory, { name: "iron_ingot", count: this.gained }] } : this.snapshot;
+  }
+}
+
+test("a collect that picks one of two items reports the other failed", async () => {
+  const runtime = new WalkedOver();
+  runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "collect", tradeId: "t", items: [{ item: "iron_ingot", count: 5 }, { item: "bread", count: 1 }] }));
+  assert.equal(ended.outcome, "failed");
+  assert.match(ended.detail, /bread/u);
+  assert.match(ended.detail, /but not bread/u);
+});
+
+test("a collect whose pick-up failed but whose bag gained the item is done", async () => {
+  const runtime = new WalkedOver();
+  runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "collect", tradeId: "t", items: [{ item: "iron_ingot", count: 5 }] }));
+  assert.equal(ended.outcome, "done");
+  assert.match(ended.detail, /iron_ingot/u);
+});
+
+test("a collect whose bag gained part of an item reports what it picked by count", async () => {
+  const runtime = new WalkedOver(2);
+  runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "collect", tradeId: "t", items: [{ item: "iron_ingot", count: 5 }] }));
+  assert.match(ended.detail, /2 iron_ingot/u);
+  assert.doesNotMatch(ended.detail, /5 iron_ingot/u);
+});
+
 test("a collect that fails reports it", async () => {
   const runtime = new FakeRuntime();
   runtime.failures.pick_up_items = "[NO_ITEMS] nothing to pick up";

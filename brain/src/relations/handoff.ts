@@ -106,16 +106,25 @@ function sightingOutcomes(result: Readonly<Record<string, unknown>> | undefined)
 const notTaken = (partner: string, left: ItemCount): SkillResult =>
   ({ status: "failed", detail: `${partner} did not take ${sideText([left])}`, reason: "not_taken" });
 
+/**
+ * Picks up each item of their side around me. An item counts picked when the pick-up succeeded or the bag holds more of
+ * it than before the call (items walked over while a pick-up reported a failure); the others are named in the failure.
+ */
 async function collectTheirSide(context: SkillContext, items: readonly ItemCount[]): Promise<SkillResult> {
+  const picked: ItemCount[] = [];
   const failures: string[] = [];
-  let picked = 0;
-  for (const { item } of items) {
+  for (const wanted of items) {
+    const { item } = wanted;
+    const before = carriedOf((await context.runtime.status()).inventory, item);
     const outcome = await context.body.act("pick_up_items", { item, radius: COLLECT_RADIUS }, `Pick up the ${item} the partner of my trade gave me.`, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
-    if (outcome.status === "succeeded") picked += 1;
-    else failures.push(outcome.error ?? `pick_up_items ${outcome.status}`);
+    const gained = carriedOf((await context.runtime.status()).inventory, item) - before;
+    if (gained > 0) picked.push({ item, count: Math.min(wanted.count, gained) });
+    else if (outcome.status === "succeeded") picked.push(wanted);
+    else failures.push(`${item}: ${outcome.error ?? `pick_up_items ${outcome.status}`}`);
   }
-  return picked > 0 || failures.length === 0 ? { status: "done", detail: `picked up ${sideText(items)} around me` } : { status: "failed", detail: failures.join("; ") };
+  if (failures.length === 0) return { status: "done", detail: `picked up ${sideText(picked)} around me` };
+  return { status: "failed", detail: `${picked.length > 0 ? `picked up ${sideText(picked)}, but not ` : "picked up nothing: "}${failures.join("; ")}` };
 }
 
 export interface AwaitOptions {

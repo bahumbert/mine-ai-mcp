@@ -150,3 +150,25 @@ export function nearPlayers(o: { partners: ReadonlyMap<string, Position | null>;
   for (const name of o.recentlyNear) if (!near.has(name)) near.set(name, o.handoffDistance);
   return near;
 }
+
+/** A payment picked up within this long after the partner was last near is still theirs. */
+const RECENT_NEAR_MS = 30_000;
+
+/** Who stood within hand-off distance of me, and when (memory only). */
+export class NearLedger {
+  /** Player (lower case) -> the wall-clock time they were last within hand-off distance of me. */
+  private readonly at = new Map<string, number>();
+
+  /** Remembers who stands within hand-off distance now; the ones not near for a while are forgotten. */
+  note(snapshot: BotSnapshot, handoffDistance: number, now: number): void {
+    for (const p of snapshot.players) {
+      if (p.position !== null && manhattan(snapshot.position, p.position) <= handoffDistance) this.at.set(lower(p.username), now);
+    }
+    for (const [name, at] of this.at) if (now - at > RECENT_NEAR_MS) this.at.delete(name);
+  }
+
+  /** The players (lower case) near me at some point of the last 30 s. */
+  recently(now: number): ReadonlySet<string> {
+    return new Set([...this.at].filter(([, at]) => now - at <= RECENT_NEAR_MS).map(([name]) => name));
+  }
+}

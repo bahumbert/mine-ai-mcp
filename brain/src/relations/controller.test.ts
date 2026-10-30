@@ -997,6 +997,223 @@ test("a payment tossed before the agreement is received at agreement and my give
   assert.deepEqual(kinds(h), ["give"], "the give is handed over from the new end state");
 });
 
+test("stage 3e: a payment carried 80 s before the agreement with the partner 3 blocks away is received at agreement", async () => {
+  const h = harness();
+  const near = { theo: { x: 3, y: 64, z: 0 } } as const;
+  h.c.heardLine("Theo", h.state.now, 3);
+  await h.c.tick(snapshot(near), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(near), 5), new Set(), signal);
+  for (let i = 0; i < 16; i += 1) {
+    h.state.now += 5_000;
+    await h.c.tick(withIron(snapshot(near), 5), new Set(), signal);
+  }
+  await h.c.onDecision(decision({ first: "them" }), "Theo", withIron(snapshot(near), 5));
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  await h.c.tick(withIron(snapshot(near), 5), new Set(), signal);
+  assert.deepEqual(kinds(h), ["give"], "my give comes due and the payment is not credited twice");
+});
+
+const away = (inventory: BotSnapshot["inventory"] = snapshot().inventory) => snapshot({ theo: "absent", inventory });
+const bagWith = (iron: number) => withIron(snapshot(), iron).inventory;
+
+/** An agreed trade where Theo pays first, a collect started for it (he spoke, stands near, 5 s passed), and the ticks around it. */
+async function collecting(h: Harness, get: ItemCount[] = ingots(5)): Promise<void> {
+  await h.c.onDecision(decision({ first: "them", get }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 6_000;
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.deepEqual(kinds(h), ["collect"]);
+}
+
+/** The partner has walked off, the collect ends, and the next tick finds `iron` ingots in the bag. */
+async function collectEndsWithBag(h: Harness, iron: number, yields: ReadonlySet<string> = new Set()): Promise<void> {
+  h.state.now += 31_000; // the partner is no longer near, nor lately near
+  await h.c.tick(away(), new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "failed", "[NO_ITEMS] nothing to pick up");
+  h.state.now += 1_000;
+  await h.c.tick(away(bagWith(iron)), yields, signal);
+}
+
+test("items walked over after the agreement are received when the collect finds nothing; my give is queued", async () => {
+  const h = harness();
+  await collecting(h);
+  await collectEndsWithBag(h, 5);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  assert.deepEqual(kinds(h), ["collect", "give"], "the give runs from the new end state");
+});
+
+test("a tick credited part, then the collect ends with nothing more in the bag: no second credit", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them", get: ingots(16) }), "Theo", snapshot());
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 8), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(8));
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 6_000;
+  await h.c.tick(withIron(snapshot(), 8), new Set(), signal);
+  assert.deepEqual(kinds(h).filter((k) => k === "collect"), ["collect"]);
+  await collectEndsWithBag(h, 8);
+  assert.deepEqual(theirTrade(h).received, ingots(8), "the 8 in the bag were credited by the tick");
+});
+
+test("a tick credited 8 of 16, then 8 more walked over before the collect ended: paid once, 16 in all", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them", get: ingots(16) }), "Theo", snapshot());
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 8), new Set(), signal);
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 6_000;
+  await h.c.tick(withIron(snapshot(), 8), new Set(), signal);
+  await collectEndsWithBag(h, 16);
+  assert.deepEqual(theirTrade(h).received, ingots(16));
+});
+
+test("a partner who tossed and walked off, no collect started: credited before the 'nobody gave' cancel", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.state.now += 10 * MIN;
+  await h.c.tick(away(bagWith(5)), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+});
+
+test("nothing arrived: the 'nobody gave' cancel still happens", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.state.now += 10 * MIN;
+  await h.c.tick(away(), new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+});
+
+test("a collect before which the items already arrived is not started", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 30_000;
+  await h.c.tick(away(), new Set(), signal);
+  h.state.now += 30_000; // the partner is no longer near, nor lately near
+  await h.c.tick(away(bagWith(5)), new Set(), signal);
+  h.state.now += 6_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  assert.equal(kinds(h).includes("collect"), false);
+});
+
+test("the same item from my own step is not credited by the collect's end", async () => {
+  const h = harness();
+  await collecting(h);
+  await collectEndsWithBag(h, 5, new Set(["iron_ingot"]));
+  assert.deepEqual(theirTrade(h).received, []);
+});
+
+test("two trades owing the same item: the older is credited first, each only up to its own count", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  h.state.now += 1_000;
+  await h.c.onDecision(decision({ first: "them" }), "Bruno", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.state.now += 10 * MIN;
+  await h.c.tick(away(bagWith(7)), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  const bruno = h.book.get("Bruno")!.trades.at(-1)!;
+  assert.deepEqual(bruno.received, ingots(2));
+});
+
+test("first me: my give ran, their side arrives by walking over: received and done", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 6_000;
+  await h.c.tick(snapshot(), new Set(), signal);
+  await collectEndsWithBag(h, 5);
+  assert.equal(theirTrade(h).state, "done");
+});
+
+test("a restart loses the baseline: a collect that ends credits nothing from an absent baseline", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away(bagWith(5)));
+  const trade = theirTrade(h);
+  // A fresh controller over the same book: the baseline map is memory only.
+  const fresh = new TradeController({ self: "Ayla", persona: testPersona(), book: h.book, settings: { ...settings }, now: () => h.state.now, takeHandoff: () => {}, journal: () => {}, log: () => {} });
+  await fresh.tick(away(), new Set(), signal);
+  await fresh.handoffEnded(trade.id, "failed", "nothing");
+  await fresh.tick(away(bagWith(5)), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, []);
+});
+
+/** Only Bruno stands near, so a payment is his alone (the other players of `snapshot` stand at one distance, which keeps it for nobody). */
+const onlyBruno = (inventory: BotSnapshot["inventory"] = snapshot().inventory): BotSnapshot => ({ ...snapshot({ inventory }), players: [{ username: "Bruno", position: { x: 2, y: 64, z: 0 } }] });
+const receivedIron = (h: Harness, who: string): number => h.book.get(who)!.trades.at(-1)!.received.reduce((n, r) => n + r.count, 0);
+
+test("a payment kept for another player is not also credited to my open trade", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", onlyBruno());
+  await h.c.tick(onlyBruno(), new Set(), signal);
+  h.c.heardLine("Bruno", h.state.now, 2);
+  h.state.now += 1_000;
+  await h.c.tick(onlyBruno(bagWith(5)), new Set(), signal);
+  assert.ok(h.logs.some((l) => /kept for bruno/u.test(l)));
+  h.state.now += 10 * MIN - 1_000;
+  await h.c.tick(onlyBruno(bagWith(5)), new Set(), signal);
+  await h.c.onDecision(decision({ first: "them" }), "Bruno", onlyBruno(bagWith(5)));
+  assert.equal(receivedIron(h, "Theo") + receivedIron(h, "Bruno"), 5, "5 iron in the bag are paid once");
+});
+
+test("a payment kept for another player and claimed after my baseline does not hide my own unseen payment", async () => {
+  const h = harness();
+  h.c.heardLine("Bruno", h.state.now, 2);
+  await h.c.tick(onlyBruno(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(onlyBruno(bagWith(5)), new Set(), signal);
+  await h.c.onDecision(decision({ first: "them" }), "Theo", onlyBruno(bagWith(5)));
+  await h.c.onDecision(decision({ first: "them" }), "Bruno", onlyBruno(bagWith(5)));
+  assert.equal(receivedIron(h, "Bruno"), 5);
+  for (const iron of [5, 10]) {
+    h.state.now += 31_000; // Bruno is no longer lately near
+    await h.c.tick(away(bagWith(iron)), new Set(), signal);
+  }
+  h.state.now += 10 * MIN;
+  await h.c.tick(away(bagWith(10)), new Set(), signal);
+  assert.equal(receivedIron(h, "Theo"), 5);
+});
+
+test("part of the payment found in the bag: the collect still starts for what is left", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.c.heardLine("Theo", h.state.now, 2);
+  h.state.now += 3_000;
+  await h.c.tick(away(), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(away(bagWith(3)), new Set(), signal);
+  h.state.now += 6_000;
+  await h.c.tick(snapshot({ inventory: bagWith(3) }), new Set(), signal);
+  assert.equal(receivedIron(h, "Theo"), 3);
+  assert.deepEqual(kinds(h), ["collect"], "the 2 still owed are collected");
+});
+
+test("gains of a tick that had no baseline (after forgetSeen) are not a payment", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", away());
+  await h.c.tick(away(), new Set(), signal);
+  h.c.forgetSeen();
+  h.state.now += 1_000;
+  await h.c.tick(away(bagWith(5)), new Set(), signal);
+  h.state.now += 10 * MIN;
+  await h.c.tick(away(bagWith(5)), new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+});
+
 test("with no player talking the tick does not run", async () => {
   const h = harness();
   assert.equal(h.c.busy(), false);
