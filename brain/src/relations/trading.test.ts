@@ -634,6 +634,14 @@ test("tradePlan with a heard need only: offers the item to the partner named, el
   assert.deepEqual(tradePlan("offer Theo my bread", [], ["Theo"], t.asks, snapshot, now, { inReach: ["Theo"], heard }), { want: [], partner: "Theo", offer: ["bread"] }, "naming the carried item is no 'already carry'");
 });
 
+test("tradePlan: the goal prompt's offer form 'Offer Lena my bread' plans the offer with no need of its own", () => {
+  const t = setup(theoAt(30));
+  const snapshot = { ...t.runtime.snapshot, inventory: BAG };
+  const now = Date.now();
+  const heard = [{ partner: "Lena", item: "bread", carried: 5, saidAt: now - MIN }];
+  assert.deepEqual(tradePlan("Offer Lena my bread", [], ["Theo", "Lena"], t.asks, snapshot, now, { inReach: ["Theo", "Lena"], heard }), { want: [], partner: "Lena", offer: ["bread"] });
+});
+
 test("tradePlan offer: the item no longer carried at plan time, an unnamed partner without a heard need, a far named partner and a refused offer fail", () => {
   const t = setup(theoAt(30));
   const now = Date.now();

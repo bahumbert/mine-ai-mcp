@@ -40,6 +40,8 @@ import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type A
 const BODY_RESTARTED = "[BODY_RESTARTED]";
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
+/** A conversation reads the status every 2 s: its range (20 s) and silence (60 s) ends need no finer look. */
+const TALK_LOOK_MS = 2_000;
 const STARTUP_RETRY_MS = 10_000;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
@@ -99,6 +101,8 @@ export interface AgentOptions {
   /** The block names a till failed on, shared by the agents of one process (each agent has its own when none is given). */
   readonly soil?: TillFacts;
   readonly pollMs?: number;
+  /** How often a conversation reads the status (default 2 s); tests that watch it fail and recover use a short one. */
+  readonly talkLookMs?: number;
   /** Chat typing pace; tests use instant typing. */
   readonly typing?: TypingPace;
   /** Told what the character takes on, does and reports (the brain log, read by the monitor). */
@@ -264,6 +268,8 @@ export class Agent {
   private readonly asks = new TradeAsks();
   /** When conversations were last looked at, and whether that look is still running. */
   private talksCheckedAt = 0;
+  /** The conversation (its id, null for none) the last look was made for: a different one is looked at on the next pass. */
+  private talksLookedAt: string | null = null;
   private talksLooking = false;
   /** The conversation check could not read the runtime: logged once, again only after a read worked. */
   private talksUnreadable = false;
@@ -465,7 +471,7 @@ export class Agent {
     const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
-    if (conversation !== undefined) this.spokeInConversation(decision);
+    if (conversation !== undefined) this.spokeInConversation(decision, message.username);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
@@ -510,8 +516,8 @@ export class Agent {
   }
 
   /** Her line in a conversation counts in it; a goodbye (or a line after the cap) ends it. */
-  private spokeInConversation(decision: { readonly say: string; readonly close?: boolean }): void {
-    if (decision.say.trim() !== "") this.talks?.said(decision.close === true, this.runSignal);
+  private spokeInConversation(decision: { readonly say: string; readonly close?: boolean }, answering: string): void {
+    if (decision.say.trim() !== "") this.talks?.said(decision.close === true, answering, this.runSignal);
     else if (decision.close === true) this.talks?.end("goodbye", this.runSignal);
   }
 
@@ -658,8 +664,11 @@ export class Agent {
   private lookAtConversations(): void {
     const talks = this.talks;
     if (talks === null || this.talksLooking || this.runSignal.aborted) return;
-    if (talks.current === null && Date.now() - this.talksCheckedAt < this.options.persona.settings.conversation.checkEverySeconds * 1_000) return;
+    const talkId = talks.current?.id ?? null;
+    const every = talkId === null ? this.options.persona.settings.conversation.checkEverySeconds * 1_000 : this.options.talkLookMs ?? TALK_LOOK_MS;
+    if (talkId === this.talksLookedAt && Date.now() - this.talksCheckedAt < every) return;
     this.talksCheckedAt = Date.now();
+    this.talksLookedAt = talkId;
     this.talksLooking = true;
     void (async () => {
       const snapshot = await this.options.runtime.status();

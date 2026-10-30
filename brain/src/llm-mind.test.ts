@@ -1244,7 +1244,10 @@ test("the goal prompt describes trading only when it is among the available acti
   assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /swapping things you carry/u);
   assert.match(planner.requests[0]?.[0]?.content ?? "", /For trading, "for" is just trading items with someone: say in the objective what you need and who has it/u);
   assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /For trading/u);
+  assert.match(planner.requests[0]?.[0]?.content ?? "", /Ask <who> to trade me <count> <item> for some of my <item>", or, when someone said they need something you carry, "Offer <who> my <item>"/u, "both forms");
+  assert.doesNotMatch(planner.requests[1]?.[0]?.content ?? "", /Offer <who>/u);
 });
+
 
 test("a goal reply whose \"for\" is trading plus the wanted item is the trading purpose, only while trading is available", async () => {
   const { planner, mind } = scriptedMind();

@@ -484,8 +484,8 @@ test("a carried trade intent reaches the facts of a talk with its partner, until
   assert.deepEqual(t.controller.facts()?.intent, { ...TRADE_INTENT, partner: "Theo" });
   assert.equal(t.controller.askedSince("Theo", 0), false, "shown is not asked");
   t.clock.now += 1_000;
-  t.controller.said(false);
-  assert.equal(t.controller.askedSince("THEO", t.clock.now), true, "her line after the facts is the ask, case-insensitive");
+  t.controller.said(false, null);
+  assert.equal(t.controller.askedSince("THEO", t.clock.now), true, "in a talk of two her line after the facts is the ask, whoever it answers; case-insensitive");
   assert.equal(t.controller.askedSince("Theo", t.clock.now + 1), false);
   assert.equal(t.controller.facts()?.intent, undefined, "asked once");
 });
@@ -506,6 +506,30 @@ test("a line said without the intent shown asks nothing", () => {
   t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
   t.controller.said(false);
   assert.equal(t.controller.askedSince("Theo", 0), false, "facts() was never asked for");
+});
+
+function groupTalkShowingIntent() {
+  const t = setup();
+  t.controller.carryIntent("Theo", TRADE_INTENT);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.heard("Bruno", "Ayla, and me", ["Ayla"], "chat");
+  assert.deepEqual(t.controller.facts()?.intent, { ...TRADE_INTENT, partner: "Theo" }, "Theo is a member of the group talk");
+  t.clock.now += 1_000;
+  return t;
+}
+
+test("a line to another member of a group talk is not the ask", () => {
+  const t = groupTalkShowingIntent();
+  t.controller.said(false, "Bruno");
+  assert.equal(t.controller.askedSince("Theo", 0), false);
+  assert.deepEqual(t.controller.facts()?.intent, { ...TRADE_INTENT, partner: "Theo" }, "still pending");
+});
+
+test("a reply to the carried partner's line in a group talk is the ask, whatever the name's case", () => {
+  const t = groupTalkShowingIntent();
+  t.controller.said(false, "THEO");
+  assert.equal(t.controller.askedSince("Theo", t.clock.now), true);
+  assert.equal(t.controller.facts()?.intent, undefined);
 });
 
 test("a second carryIntent replaces the first; releaseIntent removes it and later talks have none", () => {

@@ -1472,7 +1472,7 @@ test("socialising is never offered to a character without conversations", async 
 test("a runtime that stays down is logged once by the conversation check, again only after a read worked", async (t) => {
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ log: (line) => logs.push(line) }));
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ log: (line) => logs.push(line), talkLookMs: 5 }));
   chat.reply({ ...toAyla, say: "Hi." });
   await agent.handle(say("Vex", "Ayla, hi"));
   await until(() => logs.some((line) => line.startsWith("listening as")));
@@ -1503,6 +1503,50 @@ test("no chance opening while a socialising objective is on its way to its partn
   await sleep(1_300);
   assert.equal(chat.requests.length, 0, "no opening call to Bruno on the way");
   assert.equal(agent.conversation, null);
+});
+
+/** The status reads made by the conversation look (found by its frame in the stack: the goal loop reads the status too). */
+function countStatusReads(runtime: FakeRuntime): { calls: number } {
+  const reads = { calls: 0 };
+  const status = runtime.status.bind(runtime);
+  runtime.status = async () => {
+    if ((new Error().stack ?? "").includes("lookAtConversations")) reads.calls += 1;
+    return status();
+  };
+  return reads;
+}
+
+test("in a conversation the status is read at most once per 2 s, and the first look after it opens is not delayed", async (t) => {
+  const runtime = new FakeRuntime();
+  const reads = countStatusReads(runtime);
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  chat.reply({ ...toAyla, say: "Sure, what's up?" });
+  await sleep(50);
+  const idle = reads.calls;
+  await agent.handle(say("Vex", "Ayla, hi"));
+  assert.notEqual(agent.conversation, null);
+  assert.ok(idle >= 1, "an idle look was made before the talk opened, so the first look below proves the key");
+  await until(() => reads.calls > idle, 500);
+  const first = reads.calls;
+  await sleep(700);
+  assert.ok(reads.calls - first <= 1, `${reads.calls - first} status reads in 0.7 s of conversation (poll 5 ms)`);
+});
+
+test("in a group talk her reply to the carried partner's line is the trade ask, a reply to another member is not", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
+  const talks = (agent as unknown as { talks: { carryIntent(partner: string, intent: { kind: "trade"; want: string[]; offer: { item: string; count: number }[] }): void; facts(): unknown; askedSince(partner: string, since: number): boolean } }).talks;
+  talks.carryIntent("Vex", { kind: "trade", want: ["iron_ingot"], offer: [{ item: "oak_log", count: 32 }] });
+  chat.reply({ ...toAyla, say: "Hi Bruno." }, { to: ["Bruno"], say: "", route: "ignore", request: "" }, { ...toAyla, say: "Fine, Bruno." }, { ...toAyla, say: "Vex, iron for oak?" });
+  await agent.handle(say("Bruno", "Ayla, hi"));
+  await agent.handle(say("Vex", "Ayla, hey"));
+  assert.equal(agent.conversation?.members.length, 3, "Bruno's talk, Vex joined");
+  talks.facts();
+  await agent.handle(say("Bruno", "Ayla, how are you?"));
+  assert.equal(talks.askedSince("Vex", 0), false, "her reply to Bruno is not the ask");
+  talks.facts();
+  await agent.handle(say("Vex", "Ayla, so?"));
+  assert.equal(talks.askedSince("Vex", 0), true, "her reply to Vex is");
 });
 
 test("a player's nameless line from within talk range joins the conversation; from farther away it does not", async (t) => {

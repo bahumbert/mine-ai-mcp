@@ -370,13 +370,15 @@ export class ConversationController {
   }
 
   /** Her own line in the conversation: a goodbye ends it, and so does a line after the cap told her to say goodbye. */
-  said(close: boolean, signal?: AbortSignal): void {
+  said(close: boolean, answering?: string | null, signal?: AbortSignal): void {
     const c = this.record;
     if (c === null) return;
     const now = this.deps.now();
     const afterCap = capReached(c, this.limits, now);
     const asked = this.pendingIntent();
-    if (asked?.shown === true) this.askedAt.set(asked.partner.toLowerCase(), now);
+    // In a group talk only a line answering the carried partner speaks to them; in a talk of two any line does.
+    const toPartner = asked !== null && (c.members.length <= 2 || (answering != null && same(answering, asked.partner)));
+    if (asked?.shown === true && toPartner) this.askedAt.set(asked.partner.toLowerCase(), now);
     this.keepOwnLine(c);
     lineSaid(c, now);
     if (close) this.end("goodbye", signal);
