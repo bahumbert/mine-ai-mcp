@@ -156,7 +156,7 @@ function describe(memory: Memory, scoring: Scoring | undefined): string {
       const { farm } = memory;
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
     }
-    case "conversation": return `I talked with ${memory.talk.members.join(", ")} about ${memory.talk.topic}: ${memory.talk.gist} (${memory.talk.endedAt}).`;
+    case "conversation": return `I talked with ${memory.talk.members.join(", ")}${memory.talk.topic === "" ? "" : ` about ${memory.talk.topic}`}: ${memory.talk.gist} (${memory.talk.endedAt}).`;
     case "relation": return scoring === undefined ? `My relationship record with ${memory.relation.partner}.` : describeRelation(memory.relation, memory.relation.partner, memory.relation.lastDealt, scoring);
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }

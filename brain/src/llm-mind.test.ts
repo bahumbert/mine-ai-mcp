@@ -1265,3 +1265,26 @@ test("a heard line from farther than her talk carries says so, a fact for her to
   await mind.chat({ ...input, message: { ...input.message, distance: 30 } }, signal);
   assert.doesNotMatch(local.chat.requests[1]?.at(-1)?.content ?? "", /beyond/u);
 });
+
+test("a persona with preferences gets the feelings line before the new message", async () => {
+  const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
+  const { mind, chat } = scriptedMind();
+  chat.reply({ work: "mining", say: "Ugh, stone.", route: "act", request: "get Tom 20 stone" });
+  await mind.chat({ ...chatInput("get me 20 stone"), persona: testPersona({ preferences }), activity: "Build a small house", canWait: false }, signal);
+  const request = chat.requests[0]?.at(-1)?.content ?? "";
+  const line = "How you feel about work: you love farming, like building, dislike fighting monsters, hate mining. Your line may show it about the work asked, even when you take it on.";
+  assert.ok(request.includes(line), request);
+  assert.ok(request.indexOf(line) < request.indexOf("New message:"), "before the new message");
+  assert.match(request, /taking a request on \(act\) stops it at once: you start right away, gladly or not, and never finish it first\./u);
+});
+
+test("no preferences: no feelings line; idle: no busy line (both read with the persona's request when busy)", async () => {
+  const { mind, chat } = scriptedMind();
+  chat.reply({ say: "Sure!", route: "act", request: "get Steve 20 stone" }, { say: "Sure!", route: "act", request: "get Steve 20 stone" });
+  await mind.chat({ ...chatInput("get me 20 stone"), activity: "Build a small house", canWait: false }, signal);
+  await mind.chat({ ...chatInput("get me 20 stone"), persona: testPersona({ preferences: { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } }), canWait: false }, signal);
+  assert.doesNotMatch(chat.requests[0]?.at(-1)?.content ?? "", /How you feel about work/u);
+  assert.match(chat.requests[0]?.at(-1)?.content ?? "", /stops it at once/u);
+  assert.doesNotMatch(chat.requests[1]?.at(-1)?.content ?? "", /stops it at once/u);
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /How you feel about work/u);
+});

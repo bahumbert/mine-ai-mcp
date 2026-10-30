@@ -8,6 +8,7 @@ import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, s
 import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyFields, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
+import { describePreferences, feelings } from "./preference-feelings.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import { describeTime } from "./time-spent.ts";
@@ -407,7 +408,7 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     describeSituation(input.snapshot, input.activity, input.places, input.areas),
     // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
     // once. The reply is written from what she knows: that it stops now.
-    ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
+    ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once: you start right away, gladly or not, and never finish it first."]),
     describeHistory(input.history),
     // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
     // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
@@ -415,6 +416,8 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
     ...(input.relations === undefined || input.relations.block === "" ? [] : [input.relations.block]),
     ...(input.relations?.requests === undefined ? [] : [requestsBlock(message.username, input.relations.requests)]),
+    // The feelings sit with the line too: in the system prompt alone they were lost under a long situation (ticket 10).
+    ...(input.persona.preferences === undefined ? [] : [`How you feel about work: ${feelings(input.persona)}. Your line may show it about the work asked, even when you take it on.`]),
     // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
     // 2026-10-07).
     `New message: ${message.username} ${channel}${heardFrom(message.distance, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
@@ -467,26 +470,6 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
 
 function describeAuthority(persona: Persona): string {
   return persona.authority.map((name) => name === "*" ? "any other player" : name === "Server" ? "Server (the world's operator)" : name).join(", then ");
-}
-
-/**
- * What the character prefers and avoids (ADR-015), as a feeling the models weigh, never a rule: "You love farming and
- * like building; you dislike fighting monsters and hate mining. ..." Empty without preferences.
- */
-/** "you love farming, like building, dislike fighting monsters, hate mining": the short form the chat tier's rules use. */
-function feelings(persona: Persona): string {
-  const preferences = persona.preferences;
-  if (preferences === undefined) return "";
-  return `you love ${describeActivity(preferences.loves)}, like ${describeActivity(preferences.likes)}, dislike ${describeActivity(preferences.dislikes)}, hate ${describeActivity(preferences.hates)}`;
-}
-
-export function describePreferences(persona: Persona): string {
-  const preferences = persona.preferences;
-  if (preferences === undefined) return "";
-  const [loves, likes, dislikes, hates] = [preferences.loves, preferences.likes, preferences.dislikes, preferences.hates].map(describeActivity);
-  // "In your own words": told to be "grumbling", Vex said "grumbling but I dig" (live 2026-10-04).
-  return `You love ${loves} and like ${likes}; you dislike ${dislikes} and hate ${hates}. Your feelings show whenever work comes up:
-glad about what you love, reluctant about what you dislike or hate, even when you do it anyway, said in your own words.`;
 }
 
 /**
