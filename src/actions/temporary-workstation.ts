@@ -50,9 +50,9 @@ export function workstationOperations(
   dropClock?: DropClock,
 ): WorkstationOperations {
   return {
-    place: (name, signal, onPlacementSent) => placeCarriedBlockNearby(bot, name, { signal, onPlacementSent }),
+    place: (name, signal, onPlacementSent) => placeCarriedBlockNearby(bot, name, { signal, onPlacementSent, takeBack: true }),
     moveToOpenGround: async (name, context) => {
-      const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name);
+      const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name, { takeBack: true });
       if (!spot) return false;
       // Arriving short of it is not a failure here: the second placement is the judge.
       await navigation.navigate({ movements: createMovements(bot), goal: exactBlockGoal(spot), signal: context.signal });
@@ -148,6 +148,9 @@ async function setWorkstationDown(
   }
   if (placement.kind === "no_item") return `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_item.`;
   if (placement.kind === "no_cell") {
+    if (placement.foreignArea) {
+      return `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_cell (the only free cells are ${placement.foreignArea}: the ${name} could not be picked up again there).`;
+    }
     return `[WORKSTATION_PLACEMENT_FAILED] ${name}: no_cell (no dry, clear cell within ${STANDING_SPOT_RADIUS} blocks: in water, a tunnel or a crowded spot); move to open dry ground first.`;
   }
   // A placement may report unsettled inventory even though the block appeared.

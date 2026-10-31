@@ -191,3 +191,26 @@ test("two craft requests on two bots keep their own table cells", async () => {
   assert.equal(secondStation.kind, "ready");
   assert.deepEqual([first.placed, second.placed], [[], ["place"]], "the first bot reuses its table, the second places its own");
 });
+
+test("the table is put down as one to take back: never inside an area another player owns", async () => {
+  const f = stationFixture({ crafting_table: 1 });
+  let takeBack: boolean | undefined;
+  const place: typeof placeCarriedBlockNearby = async (bot, name, options) => {
+    takeBack = options?.takeBack;
+    return f.place(bot, name, options);
+  };
+
+  await prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place });
+
+  assert.equal(takeBack, true);
+});
+
+test("a table with no cell but inside another player's area tells the model whose area and the way out", async () => {
+  const f = stationFixture({ crafting_table: 1 });
+  const place: typeof placeCarriedBlockNearby = async () => ({ kind: "no_cell", foreignArea: "inside Finn's protected area 'Finn_Perimeter': go 9 blocks west to its edge first" });
+
+  const station = await prepareCraftingStation(f.bot, noItems, true, { hold: f.hold, place });
+
+  assert.equal(station.kind, "failed");
+  assert.match(station.kind === "failed" ? station.error : "", /CRAFTING_TABLE_REQUIRED.*inside Finn's protected area 'Finn_Perimeter': go 9 blocks west to its edge first/u);
+});

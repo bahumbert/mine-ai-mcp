@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { setProtectedRegionsProvider } from "../world/protected-regions.js";
+import type { NavigationRuntime } from "../navigation/index.js";
 import { craftingBot } from "../test-support/crafting.js";
 import { type FakeClock, createFakeClock } from "../test-support/fake-bot/index.js";
 import { startOwnPlacement, type OwnPlacement } from "../world/own-placement.js";
 import type { WorldBlock } from "../world/placement.js";
 import type { ActionResult } from "./action.js";
-import { useTemporaryWorkstation, type WorkstationOperations } from "./temporary-workstation.js";
+import { useTemporaryWorkstation, workstationOperations, type WorkstationOperations } from "./temporary-workstation.js";
 
 /** `clock`: a mocked one the test installs, for a test whose waits for the server (world age, wall bound) run on it. */
 function fixture(clock?: FakeClock) {
@@ -479,4 +482,28 @@ test("a workstation a reflex set down in the chosen cell before the send is not 
 
   assert.equal(result.status, "succeeded");
   assert.deepEqual(f.calls, ["place", "place", "collect"], "the request's own table was placed, the reflex's was not taken for it");
+});
+
+test("no_cell inside another player's area says whose area it is and the way out", async () => {
+  const f = fixture();
+  const wayOut = "inside Finn's protected area 'Finn_Perimeter': go 9 blocks west to its edge first";
+  f.operations.place = async () => ({ kind: "no_cell", foreignArea: wayOut });
+  f.operations.moveToOpenGround = async () => false;
+  const result = await useTemporaryWorkstation(f.bot, "crafting_table", {}, f.operations, async () => ({ status: "succeeded" }), f.failure);
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /WORKSTATION_PLACEMENT_FAILED.*no_cell.*inside Finn's protected area 'Finn_Perimeter': go 9 blocks west to its edge first/u);
+});
+
+test("crafting in the middle of an area another player owns: the real placement refuses and no spot outside is within 8", async () => {
+  const cells: Record<string, string> = {};
+  for (let x = -16; x <= 16; x += 1) for (let z = -16; z <= 16; z += 1) for (let y = 50; y <= 61; y += 1) cells[`${x},${y},${z}`] = "stone";
+  const { bot } = createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 } });
+  setProtectedRegionsProvider(bot, () => [
+    { regionId: 1, dimension: "overworld", min: { x: -13, y: 40, z: -13 }, max: { x: 13, y: 80, z: 13 }, owner: "Finn", label: "Finn_Perimeter" },
+  ]);
+  const operations = workstationOperations(bot, {} as NavigationRuntime);
+  const placement = await operations.place("crafting_table");
+  assert.equal(placement.kind, "no_cell");
+  assert.match(placement.kind === "no_cell" ? (placement.foreignArea ?? "") : "", /Finn's protected area 'Finn_Perimeter': go 14 blocks (west|east|north|south) to its edge first/u);
+  assert.equal(await operations.moveToOpenGround("crafting_table", {}), false);
 });
