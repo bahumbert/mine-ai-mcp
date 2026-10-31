@@ -113,4 +113,19 @@ export function givesCarriedOver(taken: ReadonlyMap<string, number> | undefined,
 }
 
 /** What the model read when it decided on a line: when that line was heard, and the id of the speaker's offer on the board then. */
-export interface DecisionSeen { readonly heardAt: number; readonly seenOfferId?: string }
+export interface DecisionSeen {
+  readonly heardAt: number;
+  readonly seenOfferId?: string;
+  /** The line the model spoke with the decision: the terms are compared with its words (a log only). */
+  readonly say?: string;
+}
+
+/** The terms' items the spoken line names with another number (`16 glass_pane` in the words, 1 in the terms), as log lines; empty when the words agree with the terms. */
+export function termsDifferFromWords(say: string | undefined, terms: readonly ItemCount[]): string[] {
+  if (say === undefined) return [];
+  return terms.flatMap(({ item, count }) => {
+    const spelled = item.replaceAll("_", "[_ ]");
+    const named = [...say.matchAll(new RegExp(String.raw`(?<![\w.])(\d+)\s*(?:x\s*)?${spelled}s?(?![a-z_])`, "giu"))].map((m) => Number(m[1]));
+    return named.filter((n) => n !== count).map((n) => `trade: terms differ from the words: ${item} ${count} in terms, ${n} in the line`);
+  });
+}

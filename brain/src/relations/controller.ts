@@ -5,7 +5,7 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { BoardOffer, BoardPeer, TradeBoard } from "./board.ts";
 import type { RelationBook } from "./book.ts";
-import { checkTradeDecision, type DecisionSeen, givesCarriedOver, whyProposalDropped } from "./checks.ts";
+import { checkTradeDecision, type DecisionSeen, givesCarriedOver, termsDifferFromWords, whyProposalDropped } from "./checks.ts";
 import { CollectFallback, type CollectView } from "./collects.ts";
 import { EARLIER_GIVE_MS, EarlierLedger, NearLedger } from "./earlier.ts";
 import { awaitKey, type Handoff, type HandoffEnd } from "./handoff.ts";
@@ -152,7 +152,7 @@ export class TradeController implements BoardPeer {
         if (mine !== undefined) return this.note(null, `trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
-        return this.proposeAndPost(deal, now, this.carriedNow(snapshot));
+        return this.proposeAndPost(deal, now, this.carriedNow(snapshot), seen?.say);
       }
       if (d.action === "accept") {
         if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
@@ -185,14 +185,15 @@ export class TradeController implements BoardPeer {
       board?.decline(theirOffer.id, self, "countered");
       this.deps.log(`trade: counter-offer to ${speaker}: I give ${sideText(deal.give)}, I get ${sideText(deal.get)}; their ${theirOffer.id} declined`);
     }
-    const id = await this.proposeAndPost(deal, now, carried);
+    const id = await this.proposeAndPost(deal, now, carried, seen?.say);
     const fresh = this.find(id);
     if (fresh !== undefined) for (const [item, count] of kept) this.creditGiven(fresh, item, count);
     return id;
   }
 
   /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */
-  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number, carried: BotSnapshot["inventory"]): Promise<string> {
+  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number, carried: BotSnapshot["inventory"], said?: string): Promise<string> {
+    for (const line of termsDifferFromWords(said, [...deal.give, ...deal.get])) this.deps.log(line);
     const proposed = proposeTrade(deal);
     await this.record(proposed, "proposed");
     this.post(proposed);

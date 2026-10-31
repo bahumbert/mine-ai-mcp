@@ -24,7 +24,7 @@ function steveAt(x: number) {
 /** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */
 function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0, ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -494,7 +494,7 @@ test("the journal gets what it takes on, its stack, each step with its input and
   const runtime = new FakeRuntime();
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0, journal: (event) => events.push(event) });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -555,7 +555,7 @@ test("each finished step counts towards its activity, for the next goal call", a
 function journaledAgent(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0, journal: (event) => events.push(event), ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -1084,7 +1084,7 @@ test("a line naming nobody, right after its speaker named another character, car
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: (input: Parameters<typeof tiers.mind.chat>[0], signal: AbortSignal) => { asked.push(input.talkedTo === undefined ? undefined : `${input.talkedTo.name}@${input.talkedTo.secondsAgo}`); return tiers.mind.chat(input, signal); } } as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others, log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others, log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
@@ -1201,7 +1201,7 @@ test("a line naming nobody within 60 s of its speaker naming another character i
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: async (input: { message: { message: string } }) => input.message.message === "thanks" ? { to, say: "You're welcome!", route: "talk" as const, request: "" } : { to: ["Vex"], say: "", route: "ignore" as const, request: "" } } as unknown as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
@@ -1300,7 +1300,7 @@ test("a plain stop from one player ends her work and the character's own goals, 
 test("a reply that shouts is sent as a shout in public chat, and as a plain whisper to a whisperer", async (t) => {
   const runtime = new FakeRuntime();
   const tiers = scriptedMind({ range: 64 });
-  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0 });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -1830,32 +1830,14 @@ test("a later route with a trade takes no order", async (t) => {
   assert.equal(runtime.cancelled.length, 0, "the order's step runs on");
 });
 
-test("decline with act keeps the order", async (t) => {
+test("a decline with act takes no order: the line carried a trade and none came of it", async (t) => {
   const runtime = tradingRuntime();
   const events: BrainEvent[] = [];
-  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
   chat.reply({ ...TRADE_AND_ORDER, trade: { action: "decline", give: [], get: [], first: "me" } });
-  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 5 } }, { done: "Theo has the bread" });
   await agent.handle(say("Theo", "Ayla, never mind the trade, just give me 5 bread"));
-  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
-  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 5 bread"]);
-});
-
-test("an ignored proposal keeps the order", async (t) => {
-  const runtime = tradingRuntime();
-  const events: BrainEvent[] = [];
-  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
-  const propose = { ...ACCEPT, trade: { ...ACCEPT.trade, action: "propose", first: "them" } };
-  chat.reply(propose);
-  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
-  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "proposed");
-  // A second proposal with the same partner is refused by the checks (twice) and dropped: the order stays.
-  chat.reply({ ...propose, route: "act", request: "give Theo 1 bread" }, { ...propose, route: "act", request: "give Theo 1 bread" });
-  action.reply({ step: { skill: "give_item", player: "Theo", item: "bread", count: 1 } }, { done: "Theo has the bread" });
-  await agent.handle(say("Theo", "Ayla, give me 1 bread now"));
-  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
-  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 1 bread"]);
-  assert.equal(savedRelations(runtime)[0]?.trades.length, 1, "still the one proposal");
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"));
 });
 
 test("a stop with a trade still stops", async (t) => {
@@ -1870,6 +1852,230 @@ test("a stop with a trade still stops", async (t) => {
   await agent.handle(say("Theo", "Ayla, stop that, 5 iron_ingot for your 5 bread?"));
   await until(() => runtime.cancelled.length >= 1);
   assert.ok(!takenObjectives(events).some((line) => line.startsWith("Theo:")), "a stop takes no order");
+});
+
+/** An agent whose first impression of everyone is `rated` and whose rolls on an order come out as `rolls` in turn (the last one repeats); `rolled.count` is how often it was asked. */
+function moodyAgent(t: Parameters<typeof agentFor>[0], runtime: FakeRuntime, rated: number, rolls: number | number[], persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
+  const logs: string[] = [];
+  const events: BrainEvent[] = [];
+  const rolled = { count: 0 };
+  const scripted = [rolls].flat();
+  const { settings } = testPersona();
+  const settingsRated = { ...settings, relations: { ...settings.relations, temperament: { ...settings.relations.temperament, firstImpression: rated } } };
+  const built = agentFor(t, runtime, { settings: settingsRated, ...persona }, { obeyRandom: () => scripted[Math.min(rolled.count++, scripted.length - 1)]!, log: (line) => logs.push(line), journal: (event) => events.push(event), ...options });
+  return { ...built, logs, events, rolled };
+}
+const GIVE_ORDER = { say: "Fine.", route: "act", request: "give Theo 5 bread" };
+const GIVE_STEPS = [{ step: { skill: "give_item", player: "Theo", item: "bread", count: 5 } }, { done: "Theo has the bread" }] as const;
+
+test("an order the roll turns down is not taken: the model is told before it answers, the log has the chance and the request", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat, logs, events } = moodyAgent(t, runtime, -8, 0.5);
+  chat.reply(GIVE_ORDER);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  assert.match(chat.requests[0]?.[1]?.content ?? "", /You don't feel like doing what Theo asks right now \(you rate them -8\)\./u);
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.includes("not taken: Theo rated -8, chance 27 %, rolled no (\"give Theo 5 bread\")"), logs.join("\n"));
+  assert.deepEqual(runtime.said, ["Fine."], "the spoken line stays");
+});
+
+test("an order the roll lets through is taken, and the model is told nothing", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat, action, events } = moodyAgent(t, runtime, -8, 0.1);
+  chat.reply(GIVE_ORDER);
+  action.reply(...GIVE_STEPS);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.doesNotMatch(chat.requests[0]?.[1]?.content ?? "", /You don't feel like/u);
+  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 5 bread"]);
+});
+
+test("three identical orders from a refused speaker: one roll, three 'not taken', the own work goes on", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner, logs, events, rolled } = moodyAgent(t, runtime, -8, 0.5, { goal: "build yourself a base" });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply(GIVE_ORDER, GIVE_ORDER, GIVE_ORDER);
+  for (let i = 0; i < 3; i++) await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  assert.equal(logs.filter((line) => line.startsWith("not taken: Theo rated -8")).length, 3);
+  assert.equal(rolled.count, 1, "repeating the request does not roll again");
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(events.some((event) => event.kind === "objective" && event.event === "own" && event.text === "collect 16 oak_log"), "the own objective started");
+  assert.equal(runtime.cancelled.length, 0, "the own step runs on");
+});
+
+test("a later order refused by the roll is not queued behind the order being worked", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  // Steve's roll lets him through (0.1 < 27 %), Theo's does not.
+  const { agent, chat, action, events } = moodyAgent(t, runtime, -8, [0.1, 0.5]);
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await agent.handle(say("Steve", "Ayla, collect 16 oak_log"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Later.", route: "later", request: "give Theo 5 bread" });
+  await agent.handle(say("Theo", "Ayla, give me 5 bread when you can"));
+  assert.deepEqual(takenObjectives(events), ["Steve: collect 16 oak_log"]);
+  assert.ok(!events.some((event) => event.kind === "objective" && event.event === "queued"), "not queued either");
+});
+
+test("a stop with a request from a refused speaker still stops, and the request is not taken", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, planner, events, logs } = moodyAgent(t, runtime, -8, 0.5, { goal: "build yourself a base" });
+  planner.reply({ objective: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Stopping.", route: "stop", request: "give Theo 5 bread" });
+  await agent.handle(say("Theo", "Ayla, stop and give me 5 bread"));
+  await until(() => runtime.cancelled.length >= 1);
+  assert.ok(!takenObjectives(events).some((line) => line.startsWith("Theo:")));
+  assert.ok(logs.some((line) => line.startsWith("not taken: Theo rated -8")));
+});
+
+test("with relations off the order is taken as before: no roll, no mood line", async (t) => {
+  const runtime = tradingRuntime();
+  const { settings } = testPersona();
+  const { agent, chat, action, events, rolled } = moodyAgent(t, runtime, -8, 0.99, { settings: { ...settings, relations: { ...settings.relations, enabled: false } } });
+  chat.reply(GIVE_ORDER);
+  action.reply(...GIVE_STEPS);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual([takenObjectives(events), rolled.count], [["Theo: give Theo 5 bread"], 0]);
+});
+
+const THEO_OFFER = { id: "Theo-Ayla-1", proposer: "Theo", partner: "Ayla", give: [{ item: "iron_ingot", count: 5 }], get: [{ item: "bread", count: 5 }], first: "me" as const, postedAt: 1 };
+
+test("an order from a speaker whose offer is on the board is not taken, whatever the line's work; taken again once the offer is gone", async (t) => {
+  // s3h: Theo's line had no trade, no purpose, and only Ayla's proposal on the board; he gave 18 cobblestone outside the trade.
+  const runtime = tradingRuntime();
+  const board = new TradeBoard();
+  board.post(THEO_OFFER);
+  const { agent, chat, action, events, logs } = moodyAgent(t, runtime, 0, 0, {}, { tradeBoard: board });
+  chat.reply({ ...GIVE_ORDER, work: "none" }, { ...GIVE_ORDER, work: "none" });
+  action.reply(...GIVE_STEPS);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.includes("not taken: Theo and I have trade Theo-Ayla-1 open; its hand-off is how items move (\"give Theo 5 bread\")"), logs.join("\n"));
+  board.withdraw("Theo-Ayla-1");
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 5 bread"]);
+});
+
+test("an order from a speaker with an open trade of mine is not taken", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat, logs, events } = moodyAgent(t, runtime, 0, 0);
+  chat.reply({ ...ACCEPT, route: "talk", trade: { ...ACCEPT.trade, action: "propose", first: "them" } }, GIVE_ORDER);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "proposed");
+  await agent.handle(say("Theo", "Ayla, give me 5 bread now"));
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.some((line) => line.startsWith("not taken: Theo and I have trade ")), logs.join("\n"));
+});
+
+test("an order from a speaker is taken again once my trade with them ended", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat, action, events } = moodyAgent(t, runtime, 0, 0);
+  chat.reply({ ...ACCEPT, route: "talk", trade: { ...ACCEPT.trade, action: "propose", first: "them" } }, GIVE_ORDER, { ...ACCEPT, route: "talk", trade: { ...ACCEPT.trade, action: "cancel" } }, GIVE_ORDER);
+  action.reply(...GIVE_STEPS);
+  await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "proposed");
+  await agent.handle(say("Theo", "Ayla, give me 5 bread now"));
+  await agent.handle(say("Theo", "Ayla, forget the trade"));
+  await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "cancelled");
+  await agent.handle(say("Theo", "Ayla, give me 5 bread now"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual(takenObjectives(events), ["Theo: give Theo 5 bread"]);
+});
+
+test("an accept decided on the main path closes only the offer it read: replaced while the model thought, it is refused", async (t) => {
+  const runtime = tradingRuntime();
+  const board = new TradeBoard();
+  const built = moodyAgent(t, runtime, 0, 0, {}, talkOptions({ tradeBoard: board, otherAgents: ["Theo"] }));
+  built.chat.reply({ ...toAyla, say: "Hi." });
+  await built.agent.handle(say("Theo", "Ayla, got a minute?"));
+  board.post(THEO_OFFER);
+  const release = built.chat.hold();
+  built.chat.reply(ACCEPT_THEO);
+  const handling = built.agent.handle(say("Theo", "Ayla, take the deal", false));
+  await until(() => built.chat.requests.length === 2);
+  board.withdraw("Theo-Ayla-1");
+  board.post({ ...THEO_OFFER, id: "Theo-Ayla-2", postedAt: 2 });
+  release();
+  await handling;
+  assert.deepEqual((built.agent as unknown as { relations: AgentRelations }).relations.book.get("Theo")?.trades ?? [], []);
+  assert.ok(built.logs.some((line) => line.includes("offer changed since I read it (Theo-Ayla-1 -> Theo-Ayla-2)")), built.logs.join("\n"));
+});
+
+test("an order whose trade the checks dropped is not taken (the line's trade came to nothing)", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent, chat, logs, events } = moodyAgent(t, runtime, 0, 0);
+  // 50 bread are offered, 10 carried: the checks refuse the proposal, and again when the model restates it.
+  const unaffordable = { ...GIVE_ORDER, trade: { action: "propose", give: [{ item: "bread", count: 50 }], get: [{ item: "iron_ingot", count: 5 }], first: "me" } };
+  chat.reply(unaffordable, unaffordable);
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.includes("not taken: the line's trade with Theo came to nothing (\"give Theo 5 bread\")"), logs.join("\n"));
+});
+
+/** Ayla talking with the bot Theo, whose offer of 5 iron_ingot for 5 bread is on the board: his next line is held back in the model while he talks again, so her reply to it is talked over. */
+async function talkedOverByTheo(t: Parameters<typeof agentFor>[0], reply: Record<string, unknown>, meanwhile: (board: TradeBoard) => void = () => undefined, speaker = "Theo") {
+  const runtime = tradingRuntime();
+  const board = new TradeBoard();
+  const built = moodyAgent(t, runtime, 0, 0, {}, talkOptions({ tradeBoard: board, otherAgents: [speaker] }));
+  built.chat.reply({ ...toAyla, say: "Hi." });
+  await built.agent.handle(say(speaker, "Ayla, got a minute?"));
+  board.post({ ...THEO_OFFER, proposer: speaker, id: `${speaker}-Ayla-1` });
+  const release = built.chat.hold();
+  built.chat.reply(reply);
+  const line = say(speaker, "Ayla, take the deal", false);
+  const handling = built.agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  await until(() => built.chat.requests.length === 2);
+  (built.agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say(speaker, "and quickly", false));
+  meanwhile(board);
+  release();
+  await handling;
+  const relations = (built.agent as unknown as { relations: AgentRelations }).relations;
+  return { ...built, runtime, board, trades: relations.book.get(speaker)?.trades ?? [] };
+}
+const ACCEPT_THEO = { ...ACCEPT, spoken_to: ["Ayla"], say: "Deal!", trade: { ...ACCEPT.trade, first: "them" } };
+
+test("a talked-over accept of a bot's offer is kept: the trade is agreed, the line is not spoken", async (t) => {
+  const { runtime, logs, trades } = await talkedOverByTheo(t, ACCEPT_THEO);
+  assert.deepEqual(trades.map((trade) => [trade.id, trade.state]), [["Theo-Ayla-1", "agreed"]]);
+  assert.ok(logs.includes("  superseded: the line is dropped, its trade accept is kept"), logs.join("\n"));
+  assert.deepEqual(runtime.said, ["Hi."]);
+});
+
+test("a talked-over accept is refused when the offer was withdrawn or replaced meanwhile", async (t) => {
+  const withdrawn = await talkedOverByTheo(t, ACCEPT_THEO, (board) => board.withdraw("Theo-Ayla-1"));
+  assert.deepEqual(withdrawn.trades, []);
+  const replaced = await talkedOverByTheo(t, ACCEPT_THEO, (board) => { board.withdraw("Theo-Ayla-1"); board.post({ ...THEO_OFFER, id: "Theo-Ayla-2", postedAt: 2 }); });
+  assert.deepEqual(replaced.trades, []);
+  assert.ok(!replaced.logs.some((line) => line.includes("is kept")), "the newer offer is read next, the old accept is not applied to it");
+});
+
+test("a talked-over decline of a bot's offer is kept; a propose is dropped", async (t) => {
+  const declined = await talkedOverByTheo(t, { ...ACCEPT_THEO, trade: { ...ACCEPT.trade, action: "decline" } });
+  assert.ok(declined.logs.includes("  superseded: the line is dropped, its trade decline is kept"), declined.logs.join("\n"));
+  assert.equal(declined.board.offerFrom("Theo", "Ayla"), undefined, "the offer was declined");
+  const proposed = await talkedOverByTheo(t, { ...ACCEPT_THEO, trade: { ...ACCEPT.trade, action: "propose" } });
+  assert.deepEqual(proposed.trades, []);
+});
+
+test("a talked-over accept from a player is dropped as before", async (t) => {
+  const runtime = tradingRuntime();
+  const board = new TradeBoard();
+  board.post(THEO_OFFER);
+  const { agent, chat } = moodyAgent(t, runtime, 0, 0, {}, { tradeBoard: board });
+  chat.reply(ACCEPT_THEO);
+  const line = say("Theo", "Ayla, take the deal");
+  (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Theo", "and quickly"));
+  await agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  assert.deepEqual((agent as unknown as { relations: AgentRelations }).relations.book.get("Theo")?.trades ?? [], []);
 });
 
 test("a hand-off already given ends done without a give and the previous objective resumes", async (t) => {

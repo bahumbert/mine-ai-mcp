@@ -19,6 +19,7 @@ import type { BrainEvent } from "./brain-log.ts";
 import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ConversationFacts, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
+import { orderRefusal } from "./relations/order-refusal.ts";
 import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
@@ -109,6 +110,8 @@ export interface AgentOptions {
   readonly journal?: (event: BrainEvent) => void;
   /** Where the activity draw gets its chance, a number in [0, 1); tests inject a seeded one. Default `Math.random`. */
   readonly random?: () => number;
+  /** The source of the roll on whether an order is taken (its own: no other draw moves it). Default `Math.random`; tests script it. */
+  readonly obeyRandom?: () => number;
   /** People talked to who are not players here (e.g. the controller): a message opening with their name, then a comma, calls them. Default none. */
   readonly knownNames?: readonly string[];
   /** Minutes without any target item gained before a step is stopped, and how often the inventory is looked at; tests shorten them. */
@@ -288,6 +291,7 @@ export class Agent {
       lacks: (inventory) => describeLacks(this.stack.at(-1)?.wanted ?? [], inventory ?? this.lastLook?.inventory ?? []),
       journal: (event) => options.journal?.(event), log: (line) => options.log(line),
       ...(options.tradeBoard !== undefined && { board: options.tradeBoard }),
+      ...(options.obeyRandom !== undefined && { obeyRandom: options.obeyRandom }),
     });
     this.talks = conversations === undefined ? null : new ConversationController({
       self: persona.username,
@@ -427,7 +431,8 @@ export class Agent {
     const named = this.namedIn(message);
     const chat = await this.decideHeard(message, heard, heardAt, talkedTo, named);
     if (chat === null) return;
-    const { decision, snapshot, conversation } = chat;
+    const { decision, snapshot, conversation, seenOfferId } = chat;
+    const seen = { heardAt, ...(seenOfferId !== undefined && { seenOfferId }) };
     // What they said of my requests counts even if the reply below is dropped: it was said.
     await this.relations?.answered(decision, message.username);
     const { route } = decision;
@@ -442,14 +447,7 @@ export class Agent {
     const talkId = conversation === undefined ? undefined : this.talks?.current?.id;
     this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
     if (superseded) {
-      // The line answers a state that is gone and is dropped, but a stop is not: it was meant, and the newer line
-      // (read next) does not take it back.
-      if (route === "stop") {
-        log("  superseded: its speaker said something since; the line is dropped but the stop is kept");
-        this.stopAndRest(message.username);
-      } else {
-        log("  superseded: its speaker said something since, the reply is dropped");
-      }
+      await this.dropSuperseded(decision, message.username, snapshot, seen);
       return;
     }
     // A line naming nobody, soon after its speaker named another character, is that character's unless the model read
@@ -468,7 +466,7 @@ export class Agent {
     const whisperTo = message.channel === "whisper" ? message.username : null;
     const said = this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
     this.openRequestsOnceSaid(said, decision, whisperTo, snapshot);
-    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot) ?? null;
+    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot, seen) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
     if (conversation !== undefined) this.spokeInConversation(decision, message.username);
@@ -489,12 +487,31 @@ export class Agent {
       log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
       return;
     }
+    const refusal = routed === "act" || routed === "later" ? orderRefusal(this.relations, decision, message.username) : null;
+    if (refusal !== null) {
+      log(refusal);
+      return;
+    }
     if ((routed === "act" || routed === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
       log(`already on "${asked.text}" for ${asked.requester}`);
       return;
     }
     if (routed === "act") this.take(asked, whisperTo);
     if (routed === "later") this.takeAfterOwnGoal(asked, whisperTo);
+  }
+
+  /** The line answers a state that is gone and is dropped, but a stop is not: it was meant, and the newer line (read next) does not take it back; so is a bot's accept or decline of the offer it read, while that offer stands (a player's, a propose and a cancel are dropped: owner 2026-10-31). */
+  private async dropSuperseded(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen: { readonly heardAt: number; readonly seenOfferId?: string }): Promise<void> {
+    if (decision.route === "stop") {
+      this.options.log("  superseded: its speaker said something since; the line is dropped but the stop is kept");
+      this.stopAndRest(speaker);
+    } else {
+      this.options.log("  superseded: its speaker said something since, the reply is dropped");
+    }
+    const action = decision.trade?.action;
+    if ((action !== "accept" && action !== "decline") || !this.isOtherAgent(speaker) || this.relations?.offerStillStands(speaker, seen.seenOfferId) !== true) return;
+    this.options.log(`  superseded: the line is dropped, its trade ${action} is kept`);
+    if (await this.relations.decided(decision, speaker, snapshot, seen) !== null) this.asks.resume();
   }
 
   /** A "later" request: taken at once over the character's own goal, queued behind work done for someone. */
@@ -627,7 +644,7 @@ export class Agent {
    * the line is under {@link CHAT_RETRY_MS} old and its speaker has said nothing since (a stale reply is dropped unspoken
    * anyway); any other failure drops the line, as it always did.
    */
-  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; conversation: ConversationFacts | undefined } | null> {
+  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; conversation: ConversationFacts | undefined; seenOfferId?: string } | null> {
     const { persona, mind, log } = this.options;
     for (;;) {
       try {
@@ -639,7 +656,7 @@ export class Agent {
         let decision = await mind.chat(input, this.runSignal);
         if (this.relations !== null && decision.trade !== undefined) decision = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal });
         this.modelFailures = 0;
-        return { decision, snapshot, conversation };
+        return { decision, snapshot, conversation, ...(input.relations?.seenOfferId !== undefined && { seenOfferId: input.relations.seenOfferId }) };
       } catch (error) {
         if (this.runSignal.aborted) return null;
         if (!(error instanceof ModelUnavailable)) {

@@ -533,14 +533,39 @@ test("tradeOpenWith names my open trade, else a board offer either way, else nul
   assert.equal(h.relations.tradeOpenWith("Bruno"), h.relations.book.get("Bruno")?.trades.at(-1)?.id);
 });
 
-test("decided passes what the line saw on to the trade controller", async () => {
-  const h = relationsRating(0, []);
-  const calls: unknown[][] = [];
-  (h.relations.trades as unknown as { onDecision: (...a: unknown[]) => Promise<string | null> }).onDecision = async (...a) => { calls.push(a); return "id"; };
-  const decision = { say: "ok", route: "talk" as const, request: "", trade: { action: "accept" as const, give: [], get: [], first: "me" as const } };
-  const seen = { heardAt: 5, seenOfferId: "x" };
-  assert.equal(await h.relations.decided(decision, "Bruno", around({ Bruno: 2 }), seen), "id");
-  assert.equal(calls[0]?.[3], seen);
+test("decided closes only the offer the line read: an accept of a replaced offer is refused, of the same one agreed", async () => {
+  const board = new TradeBoard();
+  const h = relationsRating(0, [], { board });
+  const offer = { id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [{ item: "iron_ingot", count: 1 }], get: [{ item: "bread", count: 1 }], first: "me" as const, postedAt: 1 };
+  const accept = { say: "ok", route: "talk" as const, request: "", trade: { action: "accept" as const, give: [], get: [], first: "them" as const } };
+  board.post(offer);
+  assert.equal(await h.relations.decided(accept, "Bruno", around({ Bruno: 2 }), { heardAt: 5, seenOfferId: "Bruno-Ayla-2" }), null, "the line read another offer");
+  assert.equal(h.relations.book.get("Bruno")?.trades.length ?? 0, 0);
+  assert.equal(await h.relations.decided(accept, "Bruno", around({ Bruno: 2 }), { heardAt: 5, seenOfferId: "Bruno-Ayla-1" }), "Bruno-Ayla-1");
+  assert.equal(h.relations.book.get("Bruno")?.trades.at(-1)?.state, "agreed");
+});
+
+test("decided passes the spoken line on: a proposal whose words give another number than the terms logs it", async () => {
+  const logs: string[] = [];
+  const h = relationsRating(0, [], { log: (line) => logs.push(line) });
+  const propose = { say: "Bruno, 16 bread for 3 iron ingots?", route: "talk" as const, request: "", trade: { action: "propose" as const, give: [{ item: "bread", count: 1 }], get: [{ item: "iron_ingot", count: 3 }], first: "me" as const } };
+  assert.notEqual(await h.relations.decided(propose, "Bruno", around({ Bruno: 2 }), { heardAt: 5 }), null);
+  assert.ok(logs.includes("trade: terms differ from the words: bread 1 in terms, 16 in the line"), logs.join("\n"));
+});
+
+test("offerStillStands: only the offer that was read, and only when one was read", () => {
+  const board = new TradeBoard();
+  const h = relationsRating(0, [], { board });
+  board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [], get: [], first: "me", postedAt: 1 });
+  assert.deepEqual([h.relations.offerStillStands("Bruno", "Bruno-Ayla-1"), h.relations.offerStillStands("Bruno", "Bruno-Ayla-2"), h.relations.offerStillStands("Bruno", undefined)], [true, false, false]);
+  board.withdraw("Bruno-Ayla-1");
+  assert.equal(h.relations.offerStillStands("Bruno", "Bruno-Ayla-1"), false);
+});
+
+test("the rating is the drifted score, the first impression for a stranger", () => {
+  const h = relationsRating(-30, [0.5]);
+  assert.equal(h.relations.rating("Bruno"), -30);
+  assert.equal(h.relations.rating("Nobody"), 0);
 });
 
 test("a trade the checks refuse is dropped and the decision says so, whether the re-answer keeps it or leaves it out", async () => {

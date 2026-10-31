@@ -3,7 +3,7 @@ import test from "node:test";
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
-import { checkTradeDecision } from "./checks.ts";
+import { checkTradeDecision, termsDifferFromWords } from "./checks.ts";
 import type { Trade } from "./types.ts";
 
 const decision = (over: Partial<TradeDecision> = {}): TradeDecision => ({ action: "propose", give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "me", ...over });
@@ -58,4 +58,13 @@ test("an accept refused for an amount says how many I may propose instead; none 
   assert.doesNotMatch(check(decision({ action: "accept", give: [{ item: "cobblestone", count: 18 }] }), 5) ?? "", /you may propose/u);
   const promised = openTrade({ id: "p", partner: "Mia", state: "agreed", give: [{ item: "bread", count: 4 }] });
   assert.match(check(decision({ action: "accept", give: [{ item: "bread", count: 18 }] }), 5, { trades: [promised] }) ?? "", /you carry 10 bread, 4 of them promised in other trades, not 18: you may propose 6 instead$/u);
+});
+
+test("termsDifferFromWords names a number the words give an item of the terms that is not the terms' count", () => {
+  const terms = [{ item: "glass_pane", count: 1 }, { item: "cobblestone", count: 18 }];
+  assert.deepEqual(termsDifferFromWords("I give 16 glass panes for 18 cobblestone", terms), ["trade: terms differ from the words: glass_pane 1 in terms, 16 in the line"]);
+  assert.deepEqual(termsDifferFromWords("16 glass_pane for 18 cobblestone?", terms), ["trade: terms differ from the words: glass_pane 1 in terms, 16 in the line"]);
+  assert.deepEqual(termsDifferFromWords("1 glass pane for 18 cobblestone", terms), []);
+  assert.deepEqual(termsDifferFromWords("deal, glass panes for cobblestone", terms), [], "no number: nothing to compare");
+  assert.deepEqual(termsDifferFromWords(undefined, terms), []);
 });

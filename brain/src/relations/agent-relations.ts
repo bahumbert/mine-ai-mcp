@@ -16,6 +16,7 @@ import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffE
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
 import { notObeyingLine, openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
+import type { DecisionSeen } from "./checks.ts";
 import { newRelation } from "./record.ts";
 import { drifted, newScoredRows, scoringOf, withHurt } from "./score.ts";
 import { reachOf } from "./trading.ts";
@@ -107,10 +108,20 @@ export class AgentRelations {
 
   /** Whether the speaker's orders are taken now: the stored roll while it holds, else a new one on the drifted score (the first impression for a stranger). */
   private rollFor(speaker: string): { readonly mood: ObeyMood; readonly current: number } {
+    const current = this.rating(speaker);
+    return { mood: this.moods.moodOf(speaker, current, this.now(), this.deps.obeyRandom ?? Math.random), current };
+  }
+
+  /** How I rate the speaker now: the stored score drifted to this moment (the first impression for a stranger). */
+  rating(speaker: string): number {
     const now = this.now();
     const { temperament } = this.book.scoring;
-    const current = drifted(this.book.get(speaker) ?? newRelation(speaker, now, temperament.firstImpression), now, temperament).score;
-    return { mood: this.moods.moodOf(speaker, current, now, this.deps.obeyRandom ?? Math.random), current };
+    return drifted(this.book.get(speaker) ?? newRelation(speaker, now, temperament.firstImpression), now, temperament).score;
+  }
+
+  /** Whether the speaker's offer to me on the board is still the one that was read (`seenOfferId`): a reply that read an offer applies only to it. */
+  offerStillStands(speaker: string, seenOfferId: string | undefined): boolean {
+    return seenOfferId !== undefined && this.deps.board?.offerFrom(speaker, this.deps.persona.username)?.id === seenOfferId;
   }
 
   /** The roll made for the speaker's line (read without expiry: a long model call never rolls twice); null when none was made, so the order is taken. */
@@ -130,9 +141,9 @@ export class AgentRelations {
   }
 
   /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. `seen` is what the answered line was read against. */
-  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen?: { readonly heardAt: number; readonly seenOfferId?: string }): Promise<string | null> {
+  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen?: Pick<DecisionSeen, "heardAt" | "seenOfferId">): Promise<string | null> {
     if (decision.trade === undefined) return null;
-    return this.trades.onDecision(decision.trade, speaker, snapshot, seen).catch((error: unknown) => {
+    return this.trades.onDecision(decision.trade, speaker, snapshot, seen === undefined ? undefined : { ...seen, say: decision.say }).catch((error: unknown) => {
       this.deps.log(`could not record the trade with ${speaker}: ${String(error)}`);
       return null;
     });

@@ -1521,3 +1521,13 @@ test("a gist journals one score row per nudge that scored, and none for has/need
   await h.c.onConversationEnded(nudgeOf(4, "he helped"));
   assert.equal(scoredRows(h).length, 2, "the next nudge adds exactly one");
 });
+
+test("a proposal whose spoken line gives another number than the terms logs the difference, and is posted as proposed", async () => {
+  const h = harness();
+  const id = await h.c.onDecision(decision({ action: "propose", give: bread(1), get: ingots(18) }), "Theo", snapshot(), { heardAt: t0, say: "Theo, 16 bread for 18 iron ingots?" });
+  assert.notEqual(id, null);
+  assert.ok(h.logs.includes("trade: terms differ from the words: bread 1 in terms, 16 in the line"), h.logs.join("\n"));
+  h.logs.length = 0;
+  await h.c.onDecision(decision({ action: "propose", give: bread(2), get: ingots(18) }), "Theo", snapshot(), { heardAt: t0, say: "Theo, 2 bread for 18 iron ingots?" });
+  assert.ok(!h.logs.some((line) => line.includes("differ from the words")));
+});
