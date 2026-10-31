@@ -1031,6 +1031,7 @@ export class Agent {
       areas: this.areas,
       levelSites: work.levelSites,
       toolsLost: work.toolsLost,
+      ...(this.relations !== null && { owed: () => this.relations!.trades.owed() }),
       ...(requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
       phase: (activity) => {
         gain.alive();

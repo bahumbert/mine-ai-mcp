@@ -3,7 +3,7 @@ import type { Clock } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { Position } from "../runtime-client.ts";
 import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
-import { carriedOf, sideText } from "./items.ts";
+import { carriedOf, sideText, spareFor } from "./items.ts";
 import { type ItemCount, MINUTE_MS } from "./types.ts";
 
 /** How far around itself a collect looks for the partner's items. */
@@ -46,10 +46,51 @@ export function handoffOutcome(result: SkillResult): HandoffEnd {
 /** Tells the caller how many of an item the partner took, so a retake gives only what is left. */
 export type TakenCredit = (credit: ItemCount) => void;
 
-async function giveMySide(context: SkillContext, partner: string, items: readonly ItemCount[], credit?: TakenCredit): Promise<SkillResult> {
+/** What a get-back leaves of the trade's clock for the walk, the toss and the pick-back that follow (`settleTrade` ends the trade at the pay-back time whatever the give is doing). */
+export const GIVE_ALLOWANCE_MS = MINUTE_MS;
+
+/** What bounds the one get-back of an owed item that is short before a give. */
+export interface GetBack {
+  /** The pay-back time left on the trade's clock: the get-back is cut after this long on the wall clock. */
+  readonly getBackMs: number;
+  /** Whether the trade is still open (read after the get-back: a trade that ended meanwhile gets nothing tossed). */
+  readonly stillDue: () => boolean;
+}
+
+/** An item of my side the bag cannot give: `count` as agreed, `lacking` more to get (the count beyond what is spare for the partner: the bag minus what other agreed trades owe). */
+type Short = ItemCount & { readonly lacking: number };
+
+async function shortOf(context: SkillContext, partner: string, items: readonly ItemCount[]): Promise<Short[]> {
   const { inventory } = await context.runtime.status();
-  const short = items.filter((i) => carriedOf(inventory, i.item) < i.count);
-  if (short.length > 0) return { status: "failed", detail: `I no longer carry ${sideText(short)}`, reason: "items_gone" };
+  const owed = context.owed?.() ?? [];
+  return items.flatMap(({ item, count }) => {
+    const lacking = count - spareFor(carriedOf(inventory, item), owed, item, partner);
+    return lacking > 0 ? [{ item, count, lacking }] : [];
+  });
+}
+
+/**
+ * Runs `get_items` once for what is short (crafts or gathers it, as any fetch), bounded by the pay-back time left
+ * on the wall clock; null when nothing was short afterwards, else the line that says what is still lacking and what the fetch said.
+ */
+async function getBackShort(context: SkillContext, partner: string, short: readonly Short[], getBackMs: number): Promise<string | null> {
+  const timeout = AbortSignal.timeout(getBackMs);
+  const fetched = await runStep({ skill: "get_items", items: short.map(({ item, lacking }) => ({ item, count: lacking })) }, { ...context, signal: AbortSignal.any([context.signal, timeout]) });
+  const still = await shortOf(context, partner, short);
+  if (still.length === 0) return null;
+  const said = timeout.aborted ? `the trade's clock ran out after ${Math.round(getBackMs / 1000)} s` : fetched.status === "done" ? "what it fetched is owed to another agreed trade" : "detail" in fetched ? fetched.detail : fetched.status;
+  return `I no longer carry ${sideText(still)}; getting it back failed: ${said}`;
+}
+
+async function giveMySide(context: SkillContext, partner: string, items: readonly ItemCount[], credit?: TakenCredit, back?: GetBack): Promise<SkillResult> {
+  const short = await shortOf(context, partner, items);
+  if (short.length > 0) {
+    // Not before the first look: a give that is not short never fetches. Once only, and only while the trade is open.
+    const lacking = back === undefined ? `I no longer carry ${sideText(short)}` : await getBackShort(context, partner, short, back.getBackMs);
+    if (context.signal.aborted) return { status: "stopped" };
+    if (lacking !== null) return { status: "failed", detail: lacking, reason: "items_gone" };
+    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: "the trade is over: nothing given" };
+  }
   const unconfirmed: ItemCount[] = [];
   let sure = true;
   for (const { item, count } of items) {
@@ -159,6 +200,6 @@ export async function awaitTheirSide(context: SkillContext, partner: string, o: 
 }
 
 /** Runs one hand-off: a hand-over for each entry of my side (`credit` hears what the partner took), or `pick_up_items` around me for each entry of theirs. */
-export function runHandoff(context: SkillContext, h: Exclude<Handoff, { kind: "await" }>, credit?: TakenCredit): Promise<SkillResult> {
-  return h.kind === "give" ? giveMySide(context, h.partner, h.items, credit) : collectTheirSide(context, h.items);
+export function runHandoff(context: SkillContext, h: Exclude<Handoff, { kind: "await" }>, credit?: TakenCredit, back?: GetBack): Promise<SkillResult> {
+  return h.kind === "give" ? giveMySide(context, h.partner, h.items, credit, back) : collectTheirSide(context, h.items);
 }

@@ -1531,3 +1531,42 @@ test("a proposal whose spoken line gives another number than the terms logs the 
   await h.c.onDecision(decision({ action: "propose", give: bread(2), get: ingots(18) }), "Theo", snapshot(), { heardAt: t0, say: "Theo, 2 bread for 18 iron ingots?" });
   assert.ok(!h.logs.some((line) => line.includes("differ from the words")));
 });
+
+test("owed lists my side not yet given of agreed trades only, and what a partial give left", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
+  assert.deepEqual(h.c.owed(), [], "a proposal holds nothing back");
+  await h.c.onDecision(decision({ action: "accept" }), "Theo", s);
+  const id = theirTrade(h).id;
+  assert.deepEqual(h.c.owed(), [{ item: "bread", count: 5, partner: "Theo", tradeId: id }]);
+  await h.c.tookInHandoff(id, [{ item: "bread", count: 2 }]);
+  assert.deepEqual(h.c.owed(), [{ item: "bread", count: 3, partner: "Theo", tradeId: id }]);
+  await h.c.handoffEnded(id, "items_gone", "I no longer carry 3 bread; getting it back failed: nothing found");
+  assert.deepEqual(h.c.owed(), [], "a broken trade owes nothing");
+});
+
+test("payBackLeftMs counts down the trade's pay-back clock, never below zero, and is zero for a trade that is not open", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", snapshot());
+  const id = theirTrade(h).id;
+  assert.equal(h.c.payBackLeftMs(id), 10 * MIN);
+  h.state.now += 4 * MIN;
+  assert.equal(h.c.payBackLeftMs(id), 6 * MIN);
+  h.state.now += 20 * MIN;
+  assert.equal(h.c.payBackLeftMs(id), 0);
+  assert.equal(h.c.payBackLeftMs("nope"), 0);
+});
+
+test("payBackLeftMs of a trade they paid counts from when my give was taken, a retake included", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  const id = theirTrade(h).id;
+  h.state.now += 4 * MIN;
+  await h.c.tick(snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(kinds(h), ["give"], "their payment came: my give is taken");
+  h.state.now += 3 * MIN;
+  assert.equal(h.c.payBackLeftMs(id), 7 * MIN, "from the give's take, not from the agreement");
+});

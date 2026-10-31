@@ -580,3 +580,37 @@ test("a trade the checks refuse is dropped and the decision says so, whether the
     assert.deepEqual([out.trade, out.tradeDropped, out.route], [undefined, true, "act"]);
   }
 });
+
+const TABLE_TRADE = { action: "accept" as const, give: [{ item: "crafting_table", count: 1 }], get: [{ item: "iron_ingot", count: 1 }], first: "me" as const };
+
+/** An agreed give of a crafting_table that is no longer carried (s3i), the planks to make it again, and a real body to run the hand-off with. */
+async function tableOwedAndGone(t: TestContext) {
+  const h = relationsOverTime(t);
+  h.runtime.recipes = { crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] } };
+  h.runtime.simulateInventory = true;
+  h.runtime.walkOnNavigate = true;
+  h.runtime.snapshot = { ...h.runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }], players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }] };
+  await h.relations.trades.onDecision(TABLE_TRADE, "Theo", h.runtime.snapshot);
+  h.runtime.snapshot = { ...h.runtime.snapshot, inventory: [{ name: "oak_planks", count: 8 }] };
+  const give = { kind: "give" as const, tradeId: h.trade()!.id, partner: "Theo", items: TABLE_TRADE.give };
+  const context = { runtime: h.runtime, body: new Body(h.runtime, () => undefined), signal: new AbortController().signal };
+  return { ...h, give, context, crafted: () => h.runtime.submitted.filter((call) => call.tool === "craft_item") };
+}
+
+test("a give whose owed item is gone gets it back through the agent's hand-off, and the context lists what the trades owe", async (t) => {
+  const h = await tableOwedAndGone(t);
+  assert.deepEqual(h.relations.trades.owed().map((o) => [o.item, o.count, o.partner]), [["crafting_table", 1, "Theo"]]);
+  const end = await h.relations.runHandoff(h.give, h.context);
+  assert.equal(end.outcome, "done");
+  assert.equal(h.crafted().length, 1);
+});
+
+test("a get-back keeps a minute of the trade's clock for the give: with less left it is not tried at all", async (t) => {
+  const h = await tableOwedAndGone(t);
+  h.runtime.durations.craft_item = 10_000;
+  h.time.offset += 9.5 * MIN;
+  const end = await h.relations.runHandoff(h.give, h.context);
+  assert.equal(end.outcome, "items_gone");
+  assert.match(end.detail, /clock ran out/u);
+  assert.equal(h.runtime.submitted.some((call) => call.tool === "drop_item"), false);
+});

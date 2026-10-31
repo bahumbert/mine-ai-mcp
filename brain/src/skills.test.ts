@@ -2420,3 +2420,59 @@ test("in the Nether, logs seen in the overworld are named as the overworld's, no
   const here = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
   assert.match(here.status === "failed" ? here.detail : "", /you saw some 700 blocks east, around 700 64 8: go_to there yourself/u);
 });
+
+const owedToAyla = [{ item: "crafting_table", count: 1, partner: "Ayla", tradeId: "t1" }];
+const stevesFeet = (runtime: FakeRuntime, carried: number): void => {
+  runtime.walkOnNavigate = true;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }], inventory: [{ name: "crafting_table", count: carried }] };
+};
+
+test("give refuses an item an agreed trade owes to someone else, before any walk, and says how many can go", async () => {
+  const runtime = new FakeRuntime();
+  stevesFeet(runtime, 1);
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "crafting_table", count: 1 });
+  const refused = await runStep(step, contextFor(runtime, { owed: () => owedToAyla }));
+  assert.equal(refused.status, "failed");
+  assert.match(refused.status === "failed" ? refused.detail : "", /you owe 1 crafting_table to Ayla \(trade\): you can give 0/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("give hands over what is spare beyond the owed count, and to the trade's own partner what other trades do not owe", async () => {
+  const spare = new FakeRuntime();
+  stevesFeet(spare, 3);
+  const two = await runStep(stepSchema.parse({ skill: "give_item", player: "Steve", item: "crafting_table", count: 2 }), contextFor(spare, { owed: () => owedToAyla }));
+  assert.equal(two.status, "done");
+  const three = await runStep(stepSchema.parse({ skill: "give_item", player: "Steve", item: "crafting_table", count: 3 }), contextFor(spare, { owed: () => owedToAyla }));
+  assert.equal(three.status, "failed");
+  assert.match(three.status === "failed" ? three.detail : "", /you can give 2/u);
+
+  const partner = new FakeRuntime();
+  partner.walkOnNavigate = true;
+  partner.snapshot = { ...partner.snapshot, players: [{ username: "Ayla", position: { x: 3, y: 64, z: 0 } }], inventory: [{ name: "crafting_table", count: 1 }] };
+  const toAyla = await runStep(stepSchema.parse({ skill: "give_item", player: "ayla", item: "crafting_table", count: 1 }), contextFor(partner, { owed: () => owedToAyla }));
+  assert.equal(toAyla.status, "done", "the owed item goes to the one it is owed to, whatever the case of the name");
+});
+
+test("drop_item keeps an owed item even for an order, and says so", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "dirt", count: 4 }] };
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "crafting_table" }, { item: "dirt" }] }), contextFor(runtime, { requester: "Finn", owed: () => owedToAyla }));
+  assert.equal(result.status, "done");
+  assert.match(result.status === "done" ? result.detail : "", /kept 1 crafting_table: you owe 1 crafting_table to Ayla \(trade\)/u);
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "dirt" }]]);
+
+  const only = new FakeRuntime();
+  only.snapshot = { ...only.snapshot, inventory: [{ name: "crafting_table", count: 1 }] };
+  const refused = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "crafting_table" }] }), contextFor(only, { requester: "Finn", owed: () => owedToAyla }));
+  assert.equal(refused.status, "failed");
+  assert.doesNotMatch(refused.status === "failed" ? refused.detail : "", /"item":"crafting_table"/u, "the hint never tells the model to drop what is owed");
+  assert.deepEqual(only.submitted, []);
+});
+
+test("drop_item of a counted owed item drops only the spare ones", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 3 }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "crafting_table", dropped: 2 }] });
+  await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "crafting_table", count: 3 }] }), contextFor(runtime, { owed: () => owedToAyla }));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "crafting_table", count: 2 }]]);
+});

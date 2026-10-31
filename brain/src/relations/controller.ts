@@ -9,7 +9,7 @@ import { checkTradeDecision, type DecisionSeen, givesCarriedOver, termsDifferFro
 import { CollectFallback, type CollectView } from "./collects.ts";
 import { EARLIER_GIVE_MS, EarlierLedger, NearLedger } from "./earlier.ts";
 import { awaitKey, type Handoff, type HandoffEnd } from "./handoff.ts";
-import { sideText } from "./items.ts";
+import { type OwedItem, sideText } from "./items.ts";
 import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withSaid, withTrade } from "./record.ts";
 import { newScoredRows, withScoreEvent } from "./score.ts";
@@ -273,6 +273,23 @@ export class TradeController implements BoardPeer {
   leftToGive(tradeId: string): ItemCount[] | null {
     const trade = this.find(tradeId);
     return trade === undefined ? null : this.leftToGiveOf(trade);
+  }
+
+  /** My side not yet given of every agreed trade (`agreed`, `they_gave`): a proposal holds nothing back, `i_gave` has nothing left to give. */
+  owed(): OwedItem[] {
+    return this.deps.book.trades().filter((t) => t.state === "agreed" || t.state === "they_gave")
+      .flatMap((t) => (this.leftToGiveOf(t) ?? []).map((g) => ({ ...g, partner: t.partner, tradeId: t.id })));
+  }
+
+  /**
+   * How long my give for the trade may still run before the pay-back clock ends the trade: from the agreement while
+   * nothing was given back to me, from when the give was taken once they paid (`settleTrade`); 0 for a trade that is not open.
+   */
+  payBackLeftMs(tradeId: string): number {
+    const trade = this.find(tradeId);
+    if (trade === undefined || !isOpen(trade)) return 0;
+    const since = trade.state === "they_gave" ? this.giveTakenAt.get(tradeId) ?? trade.receivedAt ?? trade.agreedAt ?? trade.createdAt : trade.agreedAt ?? trade.createdAt;
+    return Math.max(0, this.deps.settings.payBackMinutes * MINUTE_MS - (this.deps.now() - since));
   }
 
   /**

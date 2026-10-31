@@ -12,6 +12,8 @@ import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces
 import type { HouseSize } from "./building/house.ts";
 import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
+import { handedOver, recipientSettled, recipientTook, tossSpot } from "./give-result.ts";
+import { carriedOf, owedText, spareFor, type OwedItem } from "./relations/items.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
@@ -80,6 +82,8 @@ export interface SkillContext {
   readonly soil?: TillFacts;
   /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
   readonly needed?: (snapshot: BotSnapshot) => ReadonlySet<string>;
+  /** My side not yet given of the agreed trades (every objective, orders too): `give_item` and `drop_item` keep it, the hand-off gives only what other trades do not owe. */
+  readonly owed?: () => readonly OwedItem[];
   /**
    * The place a `level_area` around a player was first aimed at in this objective, by the player's lower-case name: later
    * steps around the same player level the same place, wherever the player has gone since (run 13: Brea's second level
@@ -325,8 +329,7 @@ async function storeInChest(context: SkillContext, entries: readonly { item: str
   if (context.self === undefined) return null;
   const chest = (await context.runtime.knownContainers(context.self, before.position, CHEST_REACH, before.dimension).catch(() => [])).find((known) => known.slotCount === null || known.usedSlots < known.slotCount);
   if (chest === undefined) return null;
-  const carried = (item: string) => before.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
-  const items = entries.map((entry) => ({ item_name: entry.item, count: Math.min(entry.count ?? carried(entry.item), carried(entry.item)) })).filter((entry) => entry.count > 0);
+  const items = entries.map((entry) => ({ item_name: entry.item, count: Math.min(entry.count ?? carriedOf(before.inventory, entry.item), carriedOf(before.inventory, entry.item)) })).filter((entry) => entry.count > 0);
   if (items.length === 0) return null;
   const outcome = await context.body.act("use_container", { operation: "deposit", x: chest.x, y: chest.y, z: chest.z, items }, why, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
@@ -348,15 +351,21 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
   const workNeeds = context.needed?.(before) ?? new Set<string>();
   const needed = before.inventory.some((stack) => !workNeeds.has(stack.name)) ? workNeeds : new Set<string>();
   const kept = [...own.kept];
-  const entries = own.entries.filter((entry) => {
+  const wanted = own.entries.filter((entry) => {
     // A tool, bed or boat asked to go is a copy: the last of the class was kept above.
     if (!needed.has(entry.item) || kindOf(entry.item) !== null) return true;
-    const all = before.inventory.filter((stack) => stack.name === entry.item).reduce((sum, stack) => sum + stack.count, 0);
+    const all = carriedOf(before.inventory, entry.item);
     kept.push(`kept all ${Math.min(entry.count ?? all, all)} ${entry.item}: your current work needs them`);
     return false;
   });
+  const entries = wanted.flatMap((entry) => {
+    const spare = spareDrop(context, before.inventory, entry);
+    if (spare.kept !== null) kept.push(spare.kept);
+    return spare.entry === null ? [] : [spare.entry];
+  });
   // What may go instead is said with the refusal, or the same drop came back (run 11: up to 7 times in a row).
-  if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}${needed.size === 0 ? "" : `; ${junkHint(before, needed)}`}` };
+  const hinted = new Set([...needed, ...(context.owed?.() ?? []).map((o) => o.item)]);
+  if (entries.length === 0) return { status: "failed", detail: `nothing dropped; ${kept.join("; ")}${hinted.size === 0 ? "" : `; ${junkHint(before, hinted)}`}` };
   const stored = await storeInChest(context, entries, before, why);
   if (stored !== null) return stored;
   const items = entries.map((entry) => ({ item_name: entry.item, ...(entry.count !== undefined && { count: entry.count }) }));
@@ -384,7 +393,24 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
   return { status: "done", detail: `${onGround ? "dropped" : "buried"} ${what}${onGround ? " on the ground" : ""}${failedPart}${keptNote}; ${room}` };
 }
 
+/** The drop entry cut to what no agreed trade owes (orders too), with the line that says what was kept; the entry is null when nothing of it may go. */
+function spareDrop(context: SkillContext, inventory: BotSnapshot["inventory"], entry: { readonly item: string; readonly count?: number | undefined }): { readonly entry: typeof entry | null; readonly kept: string | null } {
+  const owed = context.owed?.() ?? [];
+  const holding = owedText(owed, entry.item);
+  if (holding === "") return { entry, kept: null };
+  const carried = carriedOf(inventory, entry.item);
+  const spare = spareFor(carried, owed, entry.item);
+  if (entry.count !== undefined && entry.count <= spare) return { entry, kept: null };
+  return { entry: spare === 0 ? null : { item: entry.item, count: entry.count === undefined ? spare : Math.min(entry.count, spare) }, kept: `kept ${carried - spare} ${entry.item}: you owe ${holding} (trade): you can drop ${spare}` };
+}
+
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
+  const owed = context.owed?.() ?? [];
+  const holding = owedText(owed, item, player);
+  if (holding !== "") {
+    const spare = spareFor(carriedOf((await context.runtime.status()).inventory, item), owed, item, player);
+    if (count > spare) return { status: "failed", detail: `you owe ${holding} (trade): you can give ${spare}; keep the rest for them` };
+  }
   const { result, taken } = await giveTo(context, player, item, count);
   return result.status === "done" && taken !== null ? { ...result, taken } : result;
 }
@@ -404,40 +430,15 @@ export async function giveTo(context: SkillContext, player: string, item: string
   return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result), droppedAt: tossSpot(outcome.result) };
 }
 
-/** Where the giver stood when it tossed (the action's `drop.droppedAt`); null when the result names no such spot. */
-function tossSpot(result: Readonly<Record<string, unknown>> | undefined): Position | null {
-  const at = (result?.drop as { droppedAt?: { x?: unknown; y?: unknown; z?: unknown } } | undefined)?.droppedAt;
-  return typeof at?.x === "number" && typeof at.y === "number" && typeof at.z === "number" ? { x: at.x, y: at.y, z: at.z } : null;
-}
-
-/** Whether the runtime's answer to a hand-over is final (`drop.recipient.settled`); true when it names no such field. */
-function recipientSettled(result: Readonly<Record<string, unknown>> | undefined): boolean {
-  const settled = ((result?.drop as { recipient?: { settled?: unknown } | null } | undefined)?.recipient)?.settled;
-  return typeof settled === "boolean" ? settled : true;
-}
-
-/** How many items the recipient picked up (the action's `drop.recipient.collectedCount`); null when the result names no recipient. */
-function recipientTook(result: Readonly<Record<string, unknown>> | undefined): number | null {
-  const counted = ((result?.drop as { recipient?: { collectedCount?: unknown } | null } | undefined)?.recipient)?.collectedCount;
-  return typeof counted === "number" ? counted : null;
-}
-
-/** Whether the recipient picked the toss up (the action's `drop.recipient.collected`); null when the result says nothing. */
-function handedOver(result: Readonly<Record<string, unknown>> | undefined): boolean | null {
-  const collected = ((result?.drop as { recipient?: { collected?: unknown } | null } | undefined)?.recipient)?.collected;
-  return typeof collected === "boolean" ? collected : null;
-}
-
 /**
  * Gets `count` more of each item like a player (`gathering.ts`), then comes back to where it started: fetching is a
  * basic function; when and what to fetch is the model's choice (ADR-011).
  */
 async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], purpose = `getting ${describeMaterials(items)}`): Promise<SkillResult> {
   const { position: start, inventory } = await context.runtime.status();
-  const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
-  const targets = items.map(({ item, count }) => ({ item, count: carried(item) + count }));
+  const targets = items.map(({ item, count }) => ({ item, count: carriedOf(inventory, item) + count }));
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
-  const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
+  const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carriedOf(inventory, item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
   const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
   if (gathered.status !== "done") return gathered;

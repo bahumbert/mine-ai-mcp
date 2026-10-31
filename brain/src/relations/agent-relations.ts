@@ -12,7 +12,7 @@ import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
 import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
-import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
+import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
 import { notObeyingLine, openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
@@ -282,7 +282,8 @@ export class AgentRelations {
         return { outcome: "done", detail: "already handed over" };
       }
       const taken: ItemCount[] = [];
-      end = handoffOutcome(await runHandoff(context, { ...h, items: left }, (credit) => taken.push(credit)));
+      const back = { getBackMs: Math.max(0, this.trades.payBackLeftMs(h.tradeId) - GIVE_ALLOWANCE_MS), stillDue: () => this.trades.closedAs(h.tradeId) === null };
+      end = handoffOutcome(await runHandoff({ ...context, owed: () => this.trades.owed() }, { ...h, items: left }, (credit) => taken.push(credit), back));
       // What the partner took counts even when the rest was not taken: the retake gives only what is left.
       if (taken.length > 0) await this.trades.tookInHandoff(h.tradeId, taken);
     } catch (error) {

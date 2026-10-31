@@ -451,3 +451,95 @@ test("a stop during the pick-back of an unsettled toss is stopped and credits no
   const result = await runHandoff({ ...contextFor(runtime), signal: abort.signal }, { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] });
   assert.equal(result.status, "stopped");
 });
+
+// The get-back of an owed item that is gone (live s3i 2026-10-31: the crafting_table owed was spent on a craft).
+const TABLE_RECIPE = { crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] } };
+const tableGone = (planks = 8): FakeRuntime => {
+  // With no planks the table cannot be made, and the fake world has no table block to dig (`collect_block` fails).
+  const runtime = new FakeRuntime();
+  runtime.recipes = TABLE_RECIPE;
+  runtime.simulateInventory = true;
+  runtime.walkOnNavigate = true;
+  if (planks === 0) runtime.failures.collect_block = "[NOT_FOUND] no crafting_table block within reach";
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Ayla", position: { x: 2, y: 64, z: 0 } }], inventory: [{ name: "oak_planks", count: planks }] };
+  return runtime;
+};
+const giveTable = (count = 1) => ({ kind: "give", tradeId: "t", partner: "Ayla", items: [{ item: "crafting_table", count }] }) as const;
+const alwaysDue = { getBackMs: 60 * MIN, stillDue: () => true };
+const crafts = (runtime: FakeRuntime) => runtime.submitted.filter((call) => call.tool === "craft_item");
+const drops = (runtime: FakeRuntime) => runtime.submitted.filter((call) => call.tool === "drop_item");
+
+test("a give short of an item gets it back once, then hands it over", async () => {
+  const runtime = tableGone();
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(), undefined, alwaysDue));
+  assert.equal(ended.outcome, "done");
+  assert.equal(crafts(runtime).length, 1);
+  assert.equal(drops(runtime).length, 1);
+});
+
+test("a give whose get-back fails ends items_gone with what the get-back said", async () => {
+  const runtime = tableGone(0);
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(), undefined, alwaysDue));
+  assert.equal(ended.outcome, "items_gone");
+  assert.match(ended.detail, /I no longer carry 1 crafting_table/u);
+  assert.match(ended.detail, /getting it back/u);
+  assert.equal(drops(runtime).length, 0);
+});
+
+test("a give with only the rest left fetches only the rest", async () => {
+  const runtime = tableGone();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "crafting_table", count: 1 }] };
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(2), undefined, alwaysDue));
+  assert.equal(ended.outcome, "done");
+  assert.deepEqual(crafts(runtime).map((call) => call.input.items), [[{ item_name: "crafting_table", count: 1 }]], "one table crafted, not two");
+});
+
+test("a give that is not short makes no get-back", async () => {
+  const runtime = tableGone();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }] };
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(), undefined, alwaysDue));
+  assert.equal(ended.outcome, "done");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool !== "drop_item" && call.tool !== "navigate"), []);
+});
+
+test("a give stopped during its get-back is stopped, so the trade stays due", async () => {
+  const runtime = tableGone();
+  const controller = new AbortController();
+  const context = { ...contextFor(runtime), signal: controller.signal };
+  runtime.failNext.craft_item = { error: "stopped", effect: () => controller.abort() };
+  const result = await runHandoff(context, giveTable(), undefined, alwaysDue);
+  assert.equal(handoffOutcome(result).outcome, "dropped");
+  assert.equal(drops(runtime).length, 0);
+});
+
+test("a give whose trade ended during the get-back tosses nothing", async () => {
+  const runtime = tableGone();
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(), undefined, { getBackMs: 60 * MIN, stillDue: () => false }));
+  assert.equal(ended.outcome, "failed");
+  assert.match(ended.detail, /the trade is over: nothing given/u);
+  assert.equal(drops(runtime).length, 0);
+});
+
+test("a get-back that outlasts the pay-back time left is cut on the wall clock and ends items_gone", async () => {
+  const runtime = tableGone();
+  runtime.durations.craft_item = 10_000;
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), giveTable(), undefined, { getBackMs: 1, stillDue: () => true }));
+  assert.equal(ended.outcome, "items_gone");
+  assert.match(ended.detail, /clock ran out/u);
+  assert.equal(drops(runtime).length, 0);
+});
+
+test("a give does not take the count another agreed trade owes: it fetches the difference", async () => {
+  const runtime = tableGone();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "crafting_table", count: 1 }] };
+  const owed = () => [{ item: "crafting_table", count: 1, partner: "Ayla", tradeId: "t" }, { item: "crafting_table", count: 1, partner: "Bruno", tradeId: "u" }];
+  const ended = handoffOutcome(await runHandoff({ ...contextFor(runtime), owed }, giveTable(), undefined, alwaysDue));
+  assert.equal(ended.outcome, "done");
+  assert.deepEqual(crafts(runtime).map((call) => call.input.items), [[{ item_name: "crafting_table", count: 1 }]], "Bruno's table is not given to Ayla: one more is made");
+
+  const noRecipe = tableGone(0);
+  noRecipe.snapshot = { ...noRecipe.snapshot, inventory: [{ name: "crafting_table", count: 1 }] };
+  const gone = handoffOutcome(await runHandoff({ ...contextFor(noRecipe), owed }, giveTable(), undefined, alwaysDue));
+  assert.equal(gone.outcome, "items_gone");
+  assert.equal(drops(noRecipe).length, 0);
+});
