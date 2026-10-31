@@ -34,12 +34,13 @@ export async function resendRefusedTrade(o: RefusedTrade): Promise<ChatDecision>
   const block = `${o.input.relations?.block ?? ""}
 
 The trade in your last reply was refused: ${reason}. Answer again; leave "trade" out or change it so it can be made.`;
-  const second = await o.mind.chat({ ...o.input, relations: { block, tradeOn: true } }, o.signal);
+  const second = await o.mind.chat({ ...o.input, relations: { ...o.input.relations, block, tradeOn: true } }, o.signal);
   const again = second.trade === undefined ? null : o.trades.checkDecision(second.trade, o.speaker, o.snapshot);
-  if (again === null) return second;
+  // The re-answer that leaves the trade out still came after a refused one: its order is no plain line.
+  if (again === null) return second.trade === undefined ? { ...second, tradeDropped: true } : second;
   o.log(`  trade refused again: ${again}; dropped`);
   const { trade: _dropped, ...kept } = second;
-  return kept;
+  return { ...kept, tradeDropped: true };
 }
 
 /** The items a running step is out to get (or the block it mines): its gains are its own work, never a partner's payment. */

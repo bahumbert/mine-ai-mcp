@@ -158,6 +158,17 @@ export const personaSchema = z.strictObject({
         /** Score points per hour the score drifts back towards the first impression. */
         forgiveness: z.number().min(0).max(50).default(5),
       }).prefault({}),
+      /** Whether an order is taken is a roll on the speaker's score (owner 2026-10-31): the chance is logistic, 50 % at `halfAt`. */
+      obey: z.strictObject({
+        /** The score with a 50 % chance of taking an order. */
+        halfAt: z.number().int().min(-100).max(100).default(-4),
+        /** How gentle the slope is: larger is flatter. */
+        spread: z.number().min(1).max(50).default(4),
+        /** Minutes one roll holds for a speaker. */
+        moodMinutes: z.number().min(0.5).max(120).default(5),
+        /** A score move of at least this many points since the roll rolls again. */
+        rerollOnChange: z.number().int().min(1).max(100).default(10),
+      }).prefault({}),
       /** The one-way score of each partner, -100..100: what moves it and by how much. */
       score: z.strictObject({
         amounts: z.strictObject({

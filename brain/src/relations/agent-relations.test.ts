@@ -4,6 +4,8 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
+import { obeyChance } from "./obey.ts";
+import { TradeBoard } from "./board.ts";
 import { newRelation } from "./record.ts";
 import type { RelationEvent } from "./types.ts";
 
@@ -18,7 +20,7 @@ function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
     isAgent: () => false, lacks: () => [], journal: (event) => { if (event.kind === "relation") rows.push(event); }, log: () => {}, clock,
-    hearingRange: 32, isOnline: () => true, waitingFrom: () => false, ...over,
+    hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0, ...over,
   });
   const look = async () => { relations.look(new Set(), new Set(), new AbortController().signal); await new Promise((r) => setTimeout(r, 5)); };
   return { relations, time, look, rows, calls: () => statusCalls };
@@ -38,7 +40,7 @@ function relationsOverTime(t: TestContext) {
   t.mock.method(Date, "now", () => real() + time.offset);
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
-    isAgent: () => false, lacks: () => [], log: (line) => logs.push(line), hearingRange: 32, isOnline: () => true, waitingFrom: () => false,
+    isAgent: () => false, lacks: () => [], log: (line) => logs.push(line), hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0,
     journal: (event) => {
       if (journal.failOnReceived && event.kind === "trade" && event.event === "received") {
         journal.failOnReceived = false;
@@ -457,4 +459,99 @@ test("heardFrom stamps the line at the time it was read, not when it is noted", 
   c.relations.heardFrom("Theo", readAt);
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(c.relations.book.get("Theo")!.requests[0]?.heard, false, "read before the ask");
+});
+
+const MOOD_LINE = /You don't feel like doing what Bruno asks right now \(you rate them -15\)\./u;
+
+/** Relations that rate Bruno at `score`, rolling with the given sequence of random numbers. */
+function relationsRating(score: number, rolls: number[], over: Partial<AgentRelationsDeps> = {}) {
+  const h = relationsWithClock({ obeyRandom: () => rolls.shift() ?? 0, ...over });
+  h.relations.load({ relations: [newRelation("Bruno", h.time.at, score)], skipped: 0 });
+  return { ...h, rolls };
+}
+
+test("the chat block tells the model it does not feel like obeying when the roll says no, and not when it says yes", () => {
+  const no = relationsRating(-15, [0.99]);
+  assert.match(no.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block, MOOD_LINE);
+  assert.deepEqual(no.relations.obeys("Bruno"), { obeys: false, chance: obeyChance(-15, -4, 4), score: -15 });
+  const yes = relationsRating(-15, [0]);
+  assert.doesNotMatch(yes.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block, /don't feel like/u);
+  assert.equal(yes.relations.obeys("Bruno")?.obeys, true);
+});
+
+test("a retry of the chat call inside the mood window reuses the roll, and the line shows the score as it is now", async () => {
+  const h = relationsRating(-15, [0.99, 0]);
+  h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
+  await h.relations.book.update("Bruno", (r) => ({ ...r, score: -7 }));
+  const again = h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block;
+  assert.match(again, /you rate them -7\)/u);
+  assert.deepEqual(h.rolls, [0], "the second roll was never drawn");
+});
+
+test("obeys reads the stored roll after the window ran out, and answers null before any", () => {
+  const h = relationsRating(-15, [0.99]);
+  assert.equal(h.relations.obeys("Bruno"), null);
+  h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
+  h.time.at += 30 * MIN;
+  assert.equal(h.relations.obeys("Bruno")?.obeys, false);
+});
+
+test("the score that is rolled has drifted back with forgiveness", () => {
+  const h = relationsRating(-30, [0.5]);
+  h.time.at += 3_600_000 * 5;
+  h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
+  assert.equal(h.relations.obeys("Bruno")?.score, -5);
+});
+
+test("a speaker with no record is rolled at the first impression, a player and a bot alike", () => {
+  for (const isAgent of [false, true]) {
+    const h = relationsWithClock({ obeyRandom: () => 0.99, isAgent: () => isAgent });
+    h.relations.chatBlock("Steve", [], around({ Steve: 1 }));
+    assert.deepEqual([h.relations.obeys("Steve")?.score, h.relations.obeys("Steve")?.obeys], [0, false]);
+  }
+});
+
+test("the chat block keeps the id of the offer the speaker made me", () => {
+  const board = new TradeBoard();
+  const h = relationsRating(0, [], { board });
+  assert.equal(h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).seenOfferId, undefined);
+  board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [{ item: "bread", count: 1 }], get: [], first: "me", postedAt: 1 });
+  assert.equal(h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).seenOfferId, "Bruno-Ayla-1");
+});
+
+test("tradeOpenWith names my open trade, else a board offer either way, else null", async () => {
+  const board = new TradeBoard();
+  const h = relationsRating(0, [], { board });
+  assert.equal(h.relations.tradeOpenWith("Bruno"), null);
+  board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [], get: [], first: "me", postedAt: 1 });
+  assert.equal(h.relations.tradeOpenWith("bruno"), "Bruno-Ayla-1");
+  board.withdraw("Bruno-Ayla-1");
+  board.post({ id: "Ayla-Bruno-2", proposer: "Ayla", partner: "Bruno", give: [], get: [], first: "me", postedAt: 2 });
+  assert.equal(h.relations.tradeOpenWith("Bruno"), "Ayla-Bruno-2");
+  board.withdraw("Ayla-Bruno-2");
+  await h.relations.trades.onDecision({ action: "propose", give: [{ item: "bread", count: 1 }], get: [], first: "me" }, "Bruno", around({ Bruno: 2 }));
+  assert.equal(h.relations.tradeOpenWith("Bruno"), h.relations.book.get("Bruno")?.trades.at(-1)?.id);
+});
+
+test("decided passes what the line saw on to the trade controller", async () => {
+  const h = relationsRating(0, []);
+  const calls: unknown[][] = [];
+  (h.relations.trades as unknown as { onDecision: (...a: unknown[]) => Promise<string | null> }).onDecision = async (...a) => { calls.push(a); return "id"; };
+  const decision = { say: "ok", route: "talk" as const, request: "", trade: { action: "accept" as const, give: [], get: [], first: "me" as const } };
+  const seen = { heardAt: 5, seenOfferId: "x" };
+  assert.equal(await h.relations.decided(decision, "Bruno", around({ Bruno: 2 }), seen), "id");
+  assert.equal(calls[0]?.[3], seen);
+});
+
+test("a trade the checks refuse is dropped and the decision says so, whether the re-answer keeps it or leaves it out", async () => {
+  const first = { say: "Here.", route: "act" as const, request: "give bread", trade: { action: "propose" as const, give: [{ item: "bread", count: 5 }], get: [], first: "me" as const } };
+  const snapshot = { ...new FakeRuntime().snapshot, inventory: [] };
+  const input = { persona: testPersona(), message: { username: "Bruno", channel: "chat" as const, message: "give me bread", addressed: true }, history: [], snapshot, activity: "idle", places: [], areas: [], relations: { block: "", tradeOn: true } };
+  for (const second of [first, { say: "No.", route: "act" as const, request: "give bread" }]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(second);
+    const h = relationsWithClock({ mind });
+    const out = await h.relations.checkedTrade(first, input, { speaker: "Bruno", snapshot, signal: new AbortController().signal });
+    assert.deepEqual([out.trade, out.tradeDropped, out.route], [undefined, true, "act"]);
+  }
 });

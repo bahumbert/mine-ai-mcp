@@ -116,3 +116,8 @@ export function openingRelationLines(entries: readonly { readonly partner: strin
     return `${describeRelation(relation, partner, now, scoring)}${wanted.length === 0 ? "" : ` You lack ${wanted.join(", ")}.`}`;
   });
 }
+
+/** The chat input's line for a speaker whose order the character's roll turned down: the model words the refusal itself. */
+export function notObeyingLine(speaker: string, score: number): string {
+  return `You don't feel like doing what ${speaker} asks right now (you rate them ${Math.round(score)}).`;
+}

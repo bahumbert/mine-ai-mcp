@@ -94,6 +94,7 @@ test("relations settings default", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
   const defaults = {
     enabled: true, payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32, seekReach: 64,
+    obey: { halfAt: -4, spread: 4, moodMinutes: 5, rerollOnChange: 10 },
     temperament: { firstImpression: 0, sensitivity: 1, forgiveness: 5 },
     score: {
       amounts: { tradeDone: 8, keptLate: 3, promiseBroken: -20, giftReceived: 10, requestHelped: 6, requestRefused: -3, requestIgnored: -5, hurt: -25 },
@@ -131,4 +132,14 @@ test("relations tradeReach defaults to 32 and must be 1 to 256", () => {
   assert.equal(personaSchema.parse({ ...base, settings: { relations: { tradeReach: 256 } } }).settings.relations.tradeReach, 256);
   assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { tradeReach: 0 } } }).success, false);
   assert.equal(personaSchema.safeParse({ ...base, settings: { relations: { tradeReach: 257 } } }).success, false);
+});
+
+test("obey settings are bounded", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  const ok = (obey: object) => personaSchema.safeParse({ ...base, settings: { relations: { obey } } }).success;
+  assert.equal(ok({ halfAt: -101 }), false);
+  assert.equal(ok({ spread: 0.5 }), false);
+  assert.equal(ok({ moodMinutes: 0.1 }), false);
+  assert.equal(ok({ rerollOnChange: 0 }), false);
+  assert.equal(ok({ halfAt: -20, spread: 6, moodMinutes: 1, rerollOnChange: 5 }), true);
 });

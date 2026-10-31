@@ -13,9 +13,11 @@ import { RelationBook } from "./book.ts";
 import { resendRefusedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
-import { openingRelationLines, tooFarLine } from "./prompts.ts";
+import { ObeyMoods, type ObeyMood } from "./obey.ts";
+import { notObeyingLine, openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
-import { newScoredRows, scoringOf, withHurt } from "./score.ts";
+import { newRelation } from "./record.ts";
+import { drifted, newScoredRows, scoringOf, withHurt } from "./score.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, Relation, RelationEvent, TradeEvent } from "./types.ts";
 
@@ -52,6 +54,8 @@ export interface AgentRelationsDeps {
   readonly isOnline: (name: string) => boolean;
   /** A line from that name is in the inbox or its chat decision is still running. */
   readonly waitingFrom: (name: string) => boolean;
+  /** The random source of the roll on whether an order is taken (its own, so no other draw moves it); `Math.random` unless a test scripts it. */
+  readonly obeyRandom?: () => number;
 }
 
 export class AgentRelations {
@@ -62,9 +66,11 @@ export class AgentRelations {
   private looking = false;
   private lastLookAt = 0;
   private lastRequestCheckAt = 0;
+  private readonly moods: ObeyMoods;
 
   constructor(private readonly deps: AgentRelationsDeps) {
     const { persona, log } = deps;
+    this.moods = new ObeyMoods(persona.settings.relations.obey);
     this.book = new RelationBook({ save: (memory) => this.queue(() => this.saveNote(memory)), remove: (context) => this.queue(() => this.forgetNotes(context)), now: () => this.now(), log, scoring: scoringOf(persona.settings.relations) });
     this.trades = new TradeController({
       self: persona.username, persona, book: this.book, settings: persona.settings.relations, now: () => Date.now(),
@@ -84,13 +90,38 @@ export class AgentRelations {
     this.deps.log(`remembers ${recalled.relations.length} relation(s)`);
   }
 
-  /** The relations block and the trade field for a chat request: the speaker's record, the other members' and what the objective lacks, and that an agent speaker out of reach cannot be gone to. */
+  /** The relations block and the trade field for a chat request: the speaker's record, the other members', what the objective lacks, that an agent speaker out of reach cannot be gone to, and that the roll turned the speaker's orders down. */
   chatBlock(speaker: string, others: readonly string[], snapshot: BotSnapshot): NonNullable<ChatInput["relations"]> {
     const { inReach, away } = reachOf(speaker, snapshot, this.deps.persona.settings.relations.tradeReach);
     // Another agent out of reach: it is told not to offer a walk to them (a player is gone to at any distance).
     const tooFar = this.deps.isAgent(speaker) && !inReach ? tooFarLine(speaker, away) : "";
     const mine = this.book.get(speaker);
-    return { block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar].filter((part) => part !== "").join("\n"), tradeOn: true, requests: mine === null ? [] : requestLines(mine, speaker, this.now()) };
+    const { mood, current } = this.rollFor(speaker);
+    const refusing = mood.obeys ? "" : notObeyingLine(speaker, current);
+    const seenOfferId = this.deps.board?.offerFrom(speaker, this.deps.persona.username)?.id;
+    return {
+      block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar, refusing].filter((part) => part !== "").join("\n"),
+      tradeOn: true, requests: mine === null ? [] : requestLines(mine, speaker, this.now()), ...(seenOfferId !== undefined && { seenOfferId }),
+    };
+  }
+
+  /** Whether the speaker's orders are taken now: the stored roll while it holds, else a new one on the drifted score (the first impression for a stranger). */
+  private rollFor(speaker: string): { readonly mood: ObeyMood; readonly current: number } {
+    const now = this.now();
+    const { temperament } = this.book.scoring;
+    const current = drifted(this.book.get(speaker) ?? newRelation(speaker, now, temperament.firstImpression), now, temperament).score;
+    return { mood: this.moods.moodOf(speaker, current, now, this.deps.obeyRandom ?? Math.random), current };
+  }
+
+  /** The roll made for the speaker's line (read without expiry: a long model call never rolls twice); null when none was made, so the order is taken. */
+  obeys(speaker: string): ObeyMood | null {
+    return this.moods.stored(speaker);
+  }
+
+  /** The id of the trade or board offer open between me and the speaker (mine first, then an offer either way), else null. */
+  tradeOpenWith(speaker: string): string | null {
+    const { board, persona } = this.deps;
+    return this.trades.openWith(speaker)?.id ?? board?.offerFrom(speaker, persona.username)?.id ?? board?.offerFrom(persona.username, speaker)?.id ?? null;
   }
 
   /** A reply that carries a trade: the trade is checked, and sent back once when the checks refuse it. */
@@ -98,10 +129,10 @@ export class AgentRelations {
     return resendRefusedTrade({ mind: this.deps.mind, input, first, trades: this.trades, log: this.deps.log, ...o });
   }
 
-  /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. */
-  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot): Promise<string | null> {
+  /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. `seen` is what the answered line was read against. */
+  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen?: { readonly heardAt: number; readonly seenOfferId?: string }): Promise<string | null> {
     if (decision.trade === undefined) return null;
-    return this.trades.onDecision(decision.trade, speaker, snapshot).catch((error: unknown) => {
+    return this.trades.onDecision(decision.trade, speaker, snapshot, seen).catch((error: unknown) => {
       this.deps.log(`could not record the trade with ${speaker}: ${String(error)}`);
       return null;
     });

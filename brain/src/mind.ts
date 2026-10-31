@@ -83,7 +83,7 @@ export interface ChatInput {
   /** For a line to everyone that asks nothing: true for the one bot that answers it (the nearest the speaker); absent: none does. */
   readonly claimEveryoneLine?: () => boolean;
   /** The relations block of the speaker and the other members, and whether the trade field is offered (spec 2026-10-19-relations-trading-design). */
-  readonly relations?: { readonly block: string; readonly tradeOn: boolean; /** The numbered requests I made of the speaker and have no answer to. */ readonly requests?: readonly string[] };
+  readonly relations?: { readonly block: string; readonly tradeOn: boolean; /** The numbered requests I made of the speaker and have no answer to. */ readonly requests?: readonly string[]; /** The id of the offer the speaker had on the board for me when the block was built: an accept closes only this one. */ readonly seenOfferId?: string };
 }
 
 /** The chat tier's trade decision on a line: propose, accept, decline or cancel a swap; sides are item ids with counts. */
@@ -117,6 +117,8 @@ export interface ChatDecision {
   readonly close?: boolean;
   /** A swap of items the line proposes, accepts, declines or cancels; only read when `ChatInput.relations.tradeOn`. */
   readonly trade?: TradeDecision;
+  /** The line carried a trade that the checks refused twice and dropped: it is no longer in `trade`, but the line is not a plain order. */
+  readonly tradeDropped?: true;
   /** The names my own line asks for items or help (not a question) and what I ask; only read when `ChatInput.relations.tradeOn`. */
   readonly asksOf?: readonly string[];
   readonly asksWhat?: string;

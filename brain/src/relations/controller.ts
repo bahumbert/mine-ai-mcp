@@ -128,7 +128,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** The chat decision's trade: a proposal, an agreement (the give starts when I go first) or an end. Answers the id of the trade it proposed or agreed, else null. */
-  onDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): Promise<string | null> {
+  onDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot, _seen?: { readonly heardAt: number; readonly seenOfferId?: string }): Promise<string | null> {
     return this.exclusive(async () => {
       const now = this.deps.now();
       // The inventory the next tick's gains are counted from, when no tick has been watching.
@@ -439,7 +439,8 @@ export class TradeController implements BoardPeer {
     return newestTrade(this.deps.book.trades(), (t) => t.createdAt >= since && AGREED_STATES.has(t.state));
   }
 
-  private openWith(partner: string): Trade | undefined { return this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner)); }
+  /** My open trade with the partner, if any. */
+  openWith(partner: string): Trade | undefined { return this.deps.book.trades().find((t) => isOpen(t) && same(t.partner, partner)); }
 
   /** Saves the trade in its partner's record (counting an end into the facts) and journals the events. */
   private async record(trade: Trade, ...events: EventName[]): Promise<void> {
