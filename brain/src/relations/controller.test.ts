@@ -77,7 +77,7 @@ test("checks: a second open trade with one partner, and a fourth in all", async 
   const h = harness();
   const s = snapshot();
   await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
-  assert.match(h.c.checkDecision(decision({ action: "propose" }), "Theo", s) ?? "", /already .*Theo/u);
+  assert.equal(h.c.checkDecision(decision({ action: "propose" }), "Theo", s), null, "a new proposal replaces the open one");
   assert.equal(h.c.checkDecision(decision({ action: "accept" }), "Theo", s), null, "accepting that proposal is fine");
   await h.c.onDecision(decision({ action: "propose", give: bread(1) }), "Bruno", s);
   await h.c.onDecision(decision({ action: "propose", give: bread(1) }), "Ayla2", s);
@@ -392,9 +392,9 @@ test("onDecision answers the trade id it recorded, and null when it recorded non
   const s = snapshot();
   const proposed = await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
   assert.equal(proposed, theirTrade(h).id);
-  assert.equal(await h.c.onDecision(decision({ action: "propose" }), "Theo", s), null, "a proposal while one is open is ignored");
   const agreed = await h.c.onDecision(decision({ action: "accept" }), "Theo", s);
   assert.equal(agreed, proposed, "the accepted proposal keeps its id");
+  assert.equal(await h.c.onDecision(decision({ action: "propose" }), "Theo", s), null, "a proposal while an agreed trade is open is ignored");
   assert.equal(await h.c.onDecision(decision({ action: "decline", give: [], get: [] }), "Theo", s), null);
   assert.equal(await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Zed", s), null, "nothing open to cancel");
 });

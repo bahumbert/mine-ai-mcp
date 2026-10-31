@@ -5,7 +5,7 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { BoardOffer, BoardPeer, TradeBoard } from "./board.ts";
 import type { RelationBook } from "./book.ts";
-import { checkTradeDecision } from "./checks.ts";
+import { checkTradeDecision, type DecisionSeen, givesCarriedOver, whyProposalDropped } from "./checks.ts";
 import { CollectFallback, type CollectView } from "./collects.ts";
 import { EARLIER_GIVE_MS, EarlierLedger, NearLedger } from "./earlier.ts";
 import { awaitKey, type Handoff, type HandoffEnd } from "./handoff.ts";
@@ -14,7 +14,7 @@ import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withSaid, withTrade } from "./record.ts";
 import { newScoredRows, withScoreEvent } from "./score.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
-import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
 import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A hand-off dropped by a shelter or a stop is taken again after this long. */
@@ -127,8 +127,11 @@ export class TradeController implements BoardPeer {
     });
   }
 
-  /** The chat decision's trade: a proposal, an agreement (the give starts when I go first) or an end. Answers the id of the trade it proposed or agreed, else null. */
-  onDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot, _seen?: { readonly heardAt: number; readonly seenOfferId?: string }): Promise<string | null> {
+  /**
+   * The chat decision's trade: a proposal, an agreement (the give starts when I go first) or an end. Answers the id of the trade it proposed or agreed, else null.
+   * `seen`: what the model read when it decided: the time of the line it answers, and the id of the speaker's offer on the board then.
+   */
+  onDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot, seen?: DecisionSeen): Promise<string | null> {
     return this.exclusive(async () => {
       const now = this.deps.now();
       // The inventory the next tick's gains are counted from, when no tick has been watching.
@@ -136,30 +139,17 @@ export class TradeController implements BoardPeer {
       const mine = this.openWith(speaker);
       const local = this.deps.board?.isLocal(speaker) === true;
       const theirOffer = this.offerFromPartner(speaker);
+      if (d.action === "accept" && seen !== undefined && theirOffer?.id !== seen.seenOfferId) {
+        return this.note(null, `trade: ${speaker}'s offer changed since I read it (${seen.seenOfferId ?? "none"} -> ${theirOffer?.id ?? "none"}); my accept is not applied`);
+      }
       const offer = d.action === "accept" ? theirOffer : undefined;
       const terms = this.termsOf(d, offer);
       const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
       const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? repeatOfDone(this.deps.book.trades(), speaker, terms, now) : undefined;
-      if (repeated !== undefined) {
-        this.deps.log(`trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
-        return null;
-      }
-      if (d.action === "propose") {
-        if (mine !== undefined) {
-          this.deps.log(`trade: a proposal to ${speaker} ignored, ${mine.id} is still open`);
-          return null;
-        }
-        if (local && theirOffer !== undefined) {
-          this.deps.log(`trade: my proposal to ${speaker} dropped, their older proposal to me stands`);
-          return null;
-        }
-        return this.proposeAndPost(deal, now, this.carriedNow(snapshot));
-      }
+      if (repeated !== undefined) return this.note(null, `trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
+      if (d.action === "propose") return this.onPropose(deal, mine, theirOffer, seen, this.carriedNow(snapshot));
       if (d.action === "accept" && local && offer === undefined) {
-        if (mine !== undefined) {
-          this.deps.log(`trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
-          return null;
-        }
+        if (mine !== undefined) return this.note(null, `trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
         return this.proposeAndPost(deal, now, this.carriedNow(snapshot));
@@ -177,6 +167,28 @@ export class TradeController implements BoardPeer {
       if (mine !== undefined) await this.record(cancelTrade(mine, now, d.action === "decline" ? "I declined" : "I cancelled"), "cancelled");
       return null;
     });
+  }
+
+  /** Logs why a decision is not applied, and answers `answer`: no trade id, or the open trade it stays with. */
+  private note<T>(answer: T, line: string): T { this.deps.log(line); return answer; }
+
+  /** A propose: replaces my open proposal to them (a restated one stays), and counters their offer when I read it first (`seen`, bot partners). */
+  private async onPropose(deal: Parameters<typeof proposeTrade>[0], mine: Trade | undefined, theirOffer: BoardOffer | undefined, seen: DecisionSeen | undefined, carried: BotSnapshot["inventory"]): Promise<string | null> {
+    const { partner: speaker, now } = deal;
+    const { board, self } = this.deps;
+    const dropped = whyProposalDropped({ speaker, mine, ownOfferId: board?.offerFrom(self, speaker)?.id, local: board?.isLocal(speaker) === true, theirOffer, heardAt: seen?.heardAt, seenOfferId: seen?.seenOfferId });
+    if (dropped !== null) return this.note(null, dropped);
+    if (mine !== undefined && sameDealTerms(mine, deal) && mine.first === deal.first) return this.note(mine.id, `trade: my proposal to ${speaker} repeats ${mine.id}, which stays open`);
+    const kept = mine === undefined ? [] : givesCarriedOver(this.givenOutside.get(mine.id), this.fromLedger.get(mine.id));
+    if (mine !== undefined) await this.record(cancelTrade(mine, now, "replaced"), "cancelled");
+    if (theirOffer !== undefined) {
+      board?.decline(theirOffer.id, self, "countered");
+      this.deps.log(`trade: counter-offer to ${speaker}: I give ${sideText(deal.give)}, I get ${sideText(deal.get)}; their ${theirOffer.id} declined`);
+    }
+    const id = await this.proposeAndPost(deal, now, carried);
+    const fresh = this.find(id);
+    if (fresh !== undefined) for (const [item, count] of kept) this.creditGiven(fresh, item, count);
+    return id;
   }
 
   /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */

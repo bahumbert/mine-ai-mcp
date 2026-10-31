@@ -36,7 +36,26 @@ test("F10 a speaker exactly at the reach passes; a decline and a cancel pass at 
 test("F10 a speaker in reach still meets every other check", () => {
   assert.match(check(decision({ get: [{ item: "not_an_item", count: 1 }] }), 5) ?? "", /not a Minecraft item id/u);
   assert.match(check(decision({ give: [{ item: "bread", count: 50 }] }), 5) ?? "", /you carry 10 bread, not 50/u);
-  assert.match(check(decision(), 5, { trades: [openTrade()] }) ?? "", /already have a trade open with Theo/u);
+  assert.match(check(decision(), 5, { trades: [openTrade({ state: "agreed" })] }) ?? "", /already have a trade open with Theo/u);
   assert.match(check(decision(), 5, { trades: [openTrade({ partner: "Mia" }), openTrade({ partner: "Bo" })], maxOpenTrades: 2 }) ?? "", /2 trades open, the most at once/u);
   assert.match(check(decision({ get: [{ item: "oak_log", count: 64 * 40 }] }), 5) ?? "", /no room in your inventory/u);
+});
+
+test("a propose to a partner I already have a proposal open with passes (it replaces it); an agreed trade still blocks", () => {
+  assert.equal(check(decision(), 5, { trades: [openTrade()] }), null);
+  assert.match(check(decision(), 5, { trades: [openTrade({ state: "agreed" })] }) ?? "", /already have a trade open with Theo \(agreed\)/u);
+  assert.match(check(decision(), 5, { trades: [openTrade({ state: "they_gave" })] }) ?? "", /already have a trade open with Theo \(they_gave\)/u);
+});
+
+test("a replacing propose at maxOpenTrades passes; another partner's proposal at the limit is still refused", () => {
+  const full = [openTrade(), openTrade({ id: "x", partner: "Mia" }), openTrade({ id: "y", partner: "Bo" })];
+  assert.equal(check(decision(), 5, { trades: full, maxOpenTrades: 3 }), null);
+  assert.match(check(decision(), 5, { trades: full.slice(1), maxOpenTrades: 2 }) ?? "", /2 trades open, the most at once/u);
+});
+
+test("an accept refused for an amount says how many I may propose instead; none when I carry nothing of it", () => {
+  assert.match(check(decision({ action: "accept", give: [{ item: "bread", count: 18 }] }), 5) ?? "", /you carry 10 bread, not 18: you may propose 10 instead$/u);
+  assert.doesNotMatch(check(decision({ action: "accept", give: [{ item: "cobblestone", count: 18 }] }), 5) ?? "", /you may propose/u);
+  const promised = openTrade({ id: "p", partner: "Mia", state: "agreed", give: [{ item: "bread", count: 4 }] });
+  assert.match(check(decision({ action: "accept", give: [{ item: "bread", count: 18 }] }), 5, { trades: [promised] }) ?? "", /you carry 10 bread, 4 of them promised in other trades, not 18: you may propose 6 instead$/u);
 });

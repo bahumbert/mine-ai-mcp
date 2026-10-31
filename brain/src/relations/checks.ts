@@ -1,6 +1,7 @@
 // The checks a trade decision passes before it becomes a trade: ids, what I carry, limits, room for what I get.
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
+import type { BoardOffer } from "./board.ts";
 import { DEFAULT_STACK, stackSizeOf } from "./item-ids.ts";
 import { carriedOf } from "./items.ts";
 import { isOpen } from "./trade.ts";
@@ -33,7 +34,10 @@ function whatIsWrongWithMySide(i: CheckInput, answered: Trade | undefined): stri
     const carried = carriedOf(i.snapshot.inventory, item) + (i.givenOutside?.get(item) ?? 0);
     const promised = promisedOf(i.trades, item, answered?.id);
     if (carried - promised < count) {
-      return `you carry ${carried} ${item}${promised > 0 ? `, ${promised} of them promised in other trades` : ""}, not ${count}`;
+      const free = carried - promised;
+      // An accept cannot change the offer's terms, so the model is told what it may propose instead (a counter-offer).
+      const hint = i.decision.action === "accept" && free > 0 ? `: you may propose ${free} instead` : "";
+      return `you carry ${carried} ${item}${promised > 0 ? `, ${promised} of them promised in other trades` : ""}, not ${count}${hint}`;
     }
   }
   return null;
@@ -69,8 +73,44 @@ export function checkTradeDecision(i: CheckInput): string | null {
   if (badId !== undefined) return `"${badId}" is not a Minecraft item id`;
   const open = i.trades.filter(isOpen);
   const mine = open.find((t) => t.partner.toLowerCase() === i.speaker.toLowerCase());
-  const answered = mine?.state === "proposed" && d.action === "accept" ? mine : undefined;
+  // My own proposal to them is answered by an accept, and replaced by a propose; any later state blocks both.
+  const answered = mine?.state === "proposed" ? mine : undefined;
   if (mine !== undefined && answered === undefined) return `you already have a trade open with ${i.speaker} (${mine.state}): finish or cancel it first`;
   if (open.length - (answered === undefined ? 0 : 1) >= i.maxOpenTrades) return `you already have ${open.length} trades open, the most at once`;
   return whatIsWrongWithMySide(i, answered) ?? whatIsWrongWithRoom(i);
 }
+
+export interface ProposalState {
+  readonly speaker: string;
+  /** My open trade with them. */
+  readonly mine: Trade | undefined;
+  /** The id of my offer to them on the board; read for a bot partner only (a player has no board). */
+  readonly ownOfferId: string | undefined;
+  readonly local: boolean;
+  readonly theirOffer: BoardOffer | undefined;
+  /** When the line I answer was heard; absent when the caller does not know. */
+  readonly heardAt: number | undefined;
+  /** The id of their offer the model read, if any: an offer it read is answered, however late its post was stamped. */
+  readonly seenOfferId: string | undefined;
+}
+
+/**
+ * Null when a propose goes on (replacing my open proposal to them; a counter-offer when their offer stood when the line
+ * was heard), else the log line saying why it is dropped: a trade past `proposed`, a proposal they already answered
+ * (their accept leaves the board before my record follows), or their offer posted later (the two crossed: the older stands).
+ */
+export function whyProposalDropped(s: ProposalState): string | null {
+  if (s.mine !== undefined && s.mine.state !== "proposed") return `trade: a proposal to ${s.speaker} ignored, ${s.mine.id} is still open`;
+  if (s.mine !== undefined && s.local && s.ownOfferId !== s.mine.id) return `trade: a proposal to ${s.speaker} ignored, they already answered ${s.mine.id}`;
+  const counter = s.theirOffer !== undefined && s.heardAt !== undefined && (s.theirOffer.postedAt <= s.heardAt || s.theirOffer.id === s.seenOfferId);
+  return s.theirOffer !== undefined && !counter ? `trade: my proposal to ${s.speaker} dropped, their older proposal to me stands` : null;
+}
+
+/** What a replaced proposal's partner took outside the hand-off, less the earlier-ledger gives that return to the ledger when it ends: the replacing proposal starts with it. */
+export function givesCarriedOver(taken: ReadonlyMap<string, number> | undefined, backToLedger: readonly ItemCount[] | undefined): [string, number][] {
+  const back = new Map((backToLedger ?? []).map((e) => [e.item, e.count]));
+  return [...taken ?? []].map(([item, count]): [string, number] => [item, count - (back.get(item) ?? 0)]).filter(([, count]) => count > 0);
+}
+
+/** What the model read when it decided on a line: when that line was heard, and the id of the speaker's offer on the board then. */
+export interface DecisionSeen { readonly heardAt: number; readonly seenOfferId?: string }
