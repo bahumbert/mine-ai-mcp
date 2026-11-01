@@ -12,6 +12,7 @@ import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import type { CombatPerception } from "../survival/perception/combat/observations.js";
 import type { CombatPositionPlan } from "../survival/positioning/combat/geometry.js";
 import type { FootingRecoverySnapshot } from "../survival/responses/footing.js";
+import { monotonicNow } from "../utils/index.js";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { damageSourceName } from "../world/damage-registry.js";
 import { IncidentRecorder } from "./incident-recorder.js";
@@ -120,7 +121,7 @@ export function observeIncidents(
   const hitCounts: Record<string, number> = {};
   const bearingCounts: Record<string, number> = {};
   const healthLossFollowingSource: Record<string, number> = {};
-  let lastHit: { source: string; atMs: number } | null = null;
+  let lastHit: { source: string; monotonicAtMs: number } | null = null;
   const threatSnapshot = () =>
     options.perception
       ?.read()
@@ -274,7 +275,7 @@ export function observeIncidents(
     if (health < before) {
       // Health packets can aggregate several hits. Keep uncorrelated losses
       // explicit instead of assigning them to a stale attacker.
-      const source = lastHit && Date.now() - lastHit.atMs < 250 ? lastHit.source : "unattributed";
+      const source = lastHit && monotonicNow() - lastHit.monotonicAtMs < 250 ? lastHit.source : "unattributed";
       healthLossFollowingSource[source] = (healthLossFollowingSource[source] ?? 0) + before - health;
       lastHit = null;
     }
@@ -360,7 +361,7 @@ export function observeIncidents(
         const bearing = angle == null ? "unknown" : Math.abs(angle) <= Math.PI / 2 ? "front" : "rear";
         hitCounts[source] = (hitCounts[source] ?? 0) + 1;
         bearingCounts[bearing] = (bearingCounts[bearing] ?? 0) + 1;
-        lastHit = { source, atMs: Date.now() };
+        lastHit = { source, monotonicAtMs: monotonicNow() };
         recorder.record("threats", { threats: threatSnapshot() });
         recorder.record("hit", {
           ...options.owner(),

@@ -20,7 +20,7 @@ import { DEFAULT_MAXIMUM_DROP, fallbackScaffoldItem, preferredScaffoldItem, scaf
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
-import { asVec3, type Position3 } from "../../utils/index.js";
+import { asVec3, elapsedSince, monotonicNow, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
@@ -306,7 +306,7 @@ async function swimToLandFirst(leg: NavigateLeg, context: ActionContext): Promis
 
 /** The asked route: refused before it starts, crossed by boat first, or planned, walked and judged. */
 async function routeToDestination(leg: NavigateLeg, context: ActionContext): Promise<NavigateResult> {
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   context.signal?.throwIfAborted();
   const refused = refusalBeforeRoute(leg);
   if (refused) return refused;
@@ -406,7 +406,7 @@ type PlannedRoute =
   | { readonly kind: "routed"; readonly route: NavigationResult; readonly swim: ReturnType<typeof watchSwim> | null }
   | { readonly kind: "ended"; readonly result: NavigateResult };
 
-/** Plans and walks the route under the swim watch, once more with a fallback scaffold when none of the policy's is carried. */
+/** Plans and walks the route (`startedAt`: a `monotonicNow()` reading) under the swim watch, once more with a fallback scaffold when none of the policy's is carried. */
 async function planRoute(leg: NavigateLeg, context: ActionContext, startedAt: number): Promise<PlannedRoute> {
   const { bot, request, toolLoss } = leg;
   const goal = destinationGoal(leg);
@@ -428,12 +428,12 @@ async function planRoute(leg: NavigateLeg, context: ActionContext, startedAt: nu
     }
     const lost = toolLoss?.loss();
     if (lost) {
-      leg.elapsedMs += Date.now() - startedAt;
+      leg.elapsedMs += elapsedSince(startedAt);
       return { kind: "ended", result: { status: "partial", error: lost.reason, navigation: legEvidence(leg) } };
     }
     return { kind: "routed", route, swim };
   } catch (cause) {
-    leg.elapsedMs += Date.now() - startedAt;
+    leg.elapsedMs += elapsedSince(startedAt);
     // Navigation settles its controls and can report an unrestored doorway.
     // Preserve that evidence when propagating the action's cancellation.
     if (context.signal?.aborted) throw cause;

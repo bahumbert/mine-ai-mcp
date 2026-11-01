@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { exactBlockGoal } from "./goals/index.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { runNavigation } from "./navigate.js";
@@ -211,4 +212,33 @@ test("an escape request reaches the run as an escape, and a plain one does not",
   await runNavigation(navigator, { ...request, escape: true });
   await runNavigation(navigator, request);
   assert.deepEqual(requests.map((started) => started.escape), [true, undefined]);
+});
+
+/** A route that takes `legMs` of the installed clock, steps the wall clock by `wallStepMs` in the middle, and completes. */
+async function elapsedAcrossWallStep(legMs: number, wallStepMs: number): Promise<number> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const { navigator } = fakeNavigator(async () => {
+    await clock.sleep(legMs / 2);
+    clock.stepWallClock(wallStepMs);
+    await clock.sleep(legMs / 2);
+    return { kind: "completed", evidence: evidence() };
+  });
+  const result = await clock.settle(runNavigation(navigator, request), legMs + 1_000);
+  assert.equal(result.status, "completed");
+  return result.elapsedMs;
+}
+
+test("the wall clock steps back 0.8 s during a 3 s route: elapsedMs is 3000", async () => {
+  assert.equal(await elapsedAcrossWallStep(3_000, -800), 3_000);
+});
+
+test("a 200 ms route with a 0.8 s step back reports 200, never negative", async () => {
+  assert.equal(await elapsedAcrossWallStep(200, -800), 200);
+});
+
+test("a 3 s route with a 1.2 s step forward reports 3000", async () => {
+  assert.equal(await elapsedAcrossWallStep(3_000, 1_200), 3_000);
 });

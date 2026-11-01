@@ -19,6 +19,8 @@ export interface FreezeWatchWorkerData {
   readonly dir: string;
   readonly botName: string;
   readonly stallMs: number;
+  /** The main thread's `wallMinusFreezeClockMs()` when it started the worker. */
+  readonly mainWallMinusClockMs: number;
 }
 
 export interface FreezeWatchOptions {
@@ -48,6 +50,34 @@ export function freezeViews(shared: SharedArrayBuffer) {
 }
 
 /**
+ * The clock the heartbeat and the marker times are written with by the main thread and aged with by the worker.
+ * `timeOrigin + now()` is monotonic, so a step of WSL's wall clock cannot hide a freeze or invent one. Each thread's
+ * `timeOrigin` is the wall clock at the thread's own start (measured on Bun 1.4.2: the two sums agree within 1.4 ms when
+ * no step came between the two starts): the worker calibrates to the main thread's reading (`offsetToMainClockMs`).
+ */
+export function freezeClockMs(): number {
+  return performance.timeOrigin + performance.now();
+}
+
+/** Wall clock minus `freezeClockMs()` on this thread: 0 until a step of the wall clock comes after the thread's start. */
+export function wallMinusFreezeClockMs(): number {
+  return Date.now() - freezeClockMs();
+}
+
+/**
+ * What the worker adds to its `freezeClockMs()` to read the main thread's: a wall step between the two threads' starts
+ * shifts one origin from the other by the step. Both offsets are read within the worker's start-up, a few ms apart.
+ */
+export function offsetToMainClockMs(mainWallMinusClockMs: number): number {
+  return wallMinusFreezeClockMs() - mainWallMinusClockMs;
+}
+
+/** Milliseconds since `stampedAtMs`, a main-thread `freezeClockMs()` reading; `offsetToMain` is the worker's, else 0. */
+export function stalledForMs(stampedAtMs: number, offsetToMain = 0): number {
+  return freezeClockMs() + offsetToMain - stampedAtMs;
+}
+
+/**
  * Cheap main-thread breadcrumb: the newest 64 are kept. A marker equal to the previous one takes no new slot (a
  * per-tick marker would push everything else out of the ring); it refreshes that slot's time and repeat count.
  * A no-op until a watch is running.
@@ -57,7 +87,7 @@ export function markPhase(text: string): void {
   const sequence = Atomics.load(active.head, 0);
   if (sequence > 0 && text === lastText) {
     const previous = (sequence - 1) % MARKER_SLOTS;
-    active.times[previous * (SLOT_BYTES / 8) + 1] = Date.now();
+    active.times[previous * (SLOT_BYTES / 8) + 1] = freezeClockMs();
     active.slots[previous * (SLOT_BYTES / 4) + REPEATS_INDEX]!++;
     return;
   }
@@ -67,7 +97,7 @@ export function markPhase(text: string): void {
   const { written } = encoder.encodeInto(text, bytes);
   active.slots[slot * (SLOT_BYTES / 4) + 1] = written;
   active.slots[slot * (SLOT_BYTES / 4) + REPEATS_INDEX] = 1;
-  active.times[slot * (SLOT_BYTES / 8) + 1] = Date.now();
+  active.times[slot * (SLOT_BYTES / 8) + 1] = freezeClockMs();
   Atomics.store(active.slots, slot * (SLOT_BYTES / 4), sequence + 1);
   Atomics.store(active.head, 0, sequence + 1);
 }
@@ -77,24 +107,24 @@ export function startFreezeWatch({ dir, botName, stallMs = 3000 }: FreezeWatchOp
   const views = freezeViews(shared);
   active = views;
   lastText = null;
-  views.bump[0] = Date.now();
+  views.bump[0] = freezeClockMs();
   const workerFile = new URL(
     import.meta.url.endsWith(".ts") ? "./freeze-watch-worker.ts" : "./freeze-watch-worker.js",
     import.meta.url,
   );
-  const data: FreezeWatchWorkerData = { shared, dir, botName, stallMs };
+  const data: FreezeWatchWorkerData = { shared, dir, botName, stallMs, mainWallMinusClockMs: wallMinusFreezeClockMs() };
   const worker = new Worker(fileURLToPath(workerFile), { workerData: data });
   let last: string | null = null;
   worker.on("message", (message: { file: string }) => {
     last = message.file;
     process.stderr.write(
-      `[mine-ai-mcp] freeze recovered after ${Math.round(Date.now() - views.bump[0]!)} ms (record: ${message.file})\n`,
+      `[mine-ai-mcp] freeze recovered after ${Math.round(stalledForMs(views.bump[0]!))} ms (record: ${message.file})\n`,
     );
   });
   worker.on("error", (cause) => process.stderr.write(`[mine-ai-mcp] freeze watch worker failed: ${cause}\n`));
   worker.unref();
   const beat = setInterval(() => {
-    views.bump[0] = Date.now();
+    views.bump[0] = freezeClockMs();
   }, 100);
   beat.unref();
   return {

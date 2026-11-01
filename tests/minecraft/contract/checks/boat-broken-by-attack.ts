@@ -10,10 +10,12 @@
  * lane's `clone` holds fewer in a gap and the catch-up runs them back to back; facts `live-testing.md`, "Ticks between two acts on
  * lanes"). A hit lands with its full 10 only when the player's last attack was 5 ticks ago (the hand's attack speed of 4: the damage
  * is scaled by `0.2 + 0.8 strength^2`, vanilla `Player.attack`, from the source, not measured here; on a lane, hits that a stall
- * queued into a tick or two did not break a boat). So the bot hits once the server has run 5 ticks since its last hit, whatever the wall
- * time, and what the boat holds after each hit is computed from the server's tick read right before each (strength and decay, with the
- * readings' error taken in the boat's favour both ways): the boat must break at a hit that could have broken it and not long after one
- * that must have. The drop's pickup is judged by the tick read when the client heard it.
+ * queued into a tick or two did not break a boat). So the bot hits every 250 ms of wall time (5 ticks at 20 a second; a hit is an act and waits
+ * for no answer, so a server that answers late does not space the hits past the boat's decay, T7g), and what the boat holds after each hit is computed from
+ * the server's tick read right before each (strength and decay, with the readings' error taken in the boat's favour both ways): the boat must break at
+ * a hit that could have broken it and not long after one that must have (the client hears the removal a round trip after it). The drop's pickup is
+ * judged by the tick read when the client heard it, from the first hit that could have broken the boat.
+ * A rider sits where the server's `position` put her; the physics run until the passenger list (about 2 ticks), so the seat is read at that `position` (T5).
  */
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
@@ -22,7 +24,8 @@ import type { ContractCheck } from "../checks.ts";
 import { ANSWER_WALL_MS, answerArrives } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { getOffAndStand, mountBoat } from "./boat-seat.ts";
-import { type Mark, READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
+import { TICK_MS } from "./combat-scene.ts";
+import { type Mark, READING_TICKS, markNow, roundTripTicks, tickOf } from "./server-tick-marks.ts";
 
 /** What a full hit by hand costs a boat, what it loses a server tick, and the damage it breaks above. */
 const HIT_DAMAGE = 10;
@@ -31,6 +34,8 @@ const BREAKS_ABOVE = 40;
 /** Ticks after which the player's swing is full again (the hand's attack speed of 4): a hit sooner weighs `0.2 + 0.8 strength^2` of a full one. */
 const SWING_RECOVERY_TICKS = 5;
 const MAX_HITS = 40;
+/** The wall time between two hits: the swing's recovery at 20 ticks a second (a slower server runs fewer ticks in it, which weakens a hit and its decay alike). */
+const HIT_EVERY_MS = SWING_RECOVERY_TICKS * TICK_MS;
 /** A reading is the act's own tick or up to `READING_TICKS` before it (it is sent right before the act). */
 const READING_OFFSETS = Array.from({ length: READING_TICKS + 1 }, (_, offset) => offset);
 /** The drop is picked up after its 10-tick delay (477 to 489 ms measured from the spawn the client sees). */
@@ -91,18 +96,26 @@ function listen(subject: ContractSubject): { readonly heard: Heard; stop(): void
 interface Hits {
   readonly ticks: readonly number[];
   readonly marks: readonly Mark[];
+  /** What the boat holds after each hit at least and at most, from `ticks`. */
+  readonly bounds: ReturnType<typeof damageBounds>;
 }
 
-/** Hit `boat`, each once the server has run `SWING_RECOVERY_TICKS` since the last hit (the wall time they take does not matter), until the client no longer has it (at most `MAX_HITS`); the hits. */
+/**
+ * Hit `boat` every `HIT_EVERY_MS` of wall time until the client no longer has it (at most `MAX_HITS`); the hits. A hit is an act, not a reading: it waits for no
+ * answer, so a server that answers late (2 lags per tick read) does not space the hits past the boat's decay (T7g: 9 ticks apart, 125 ms of lag). On a server
+ * at 20 ticks a second or fewer the hits are at most `SWING_RECOVERY_TICKS` apart and each leaves the boat at least 1.72 more damage (`hitDamage` less the decay
+ * of the ticks between), so 19 hits break it; `assertBrokeWhenTheTicksSay` judges them by the ticks read.
+ */
 async function hitUntilGone(subject: ContractSubject, boat: Entity): Promise<Hits> {
   const { bot } = subject;
   const marks: Mark[] = [];
   while (bot.entities[boat.id] !== undefined && marks.length < MAX_HITS) {
     marks.push(markNow(subject));
     bot.attack(boat);
-    await restTicksSince(subject, marks.at(-1)!, SWING_RECOVERY_TICKS, "the boat's hit");
+    await subject.wait(HIT_EVERY_MS);
   }
-  return { ticks: await Promise.all(marks.map((mark) => tickOf(subject, mark))), marks };
+  const ticks = await Promise.all(marks.map((mark) => tickOf(subject, mark)));
+  return { ticks, marks, bounds: damageBounds(ticks) };
 }
 
 /** What a hit costs a boat when the player's last attack was `ticksSince` ticks before it. */
@@ -136,22 +149,28 @@ export function damageBounds(reads: readonly number[]): { readonly low: readonly
 }
 
 /** What both sides saw of the hits, for a failure: the ticks read and when the client hit. */
-function describeHits({ ticks, marks }: Hits): string {
+function describeHits({ ticks, marks }: Pick<Hits, "ticks" | "marks">): string {
   return `server ticks read before the hits ${ticks.join(", ")}; the client hit at ${marks.map(({ atMs }) => `+${Math.round(atMs - marks[0]!.atMs)} ms`).join(", ")}`;
 }
 
+/** The index of the first hit that could have broken the boat by the ticks read (the damage bounds' high side), or -1. */
+function firstHitThatCouldBreak(hits: Hits): number {
+  return hits.bounds.high.findIndex((held) => held > BREAKS_ABOVE);
+}
+
 /**
- * Assert the boat broke by the last hit, and not long after a hit that must have broken it. The client hears the break a moment after it, so it may hit once more (a stalled server holds its queued hits in the
- * break's own tick); a boat the ticks say was broken for more than that, or could not be broken yet, fails.
+ * Assert the boat broke by the last hit, and not long after a hit that must have broken it. The client hears the break a round trip after it, so it hits
+ * on meanwhile (a stalled server holds its queued hits in the break's own tick); a boat the ticks say was broken for more than that, or could not be broken yet, fails.
  */
-function assertBrokeWhenTheTicksSay(hits: Hits): void {
-  const { low, high } = damageBounds(hits.ticks);
-  const earliest = high.findIndex((held) => held > BREAKS_ABOVE);
+async function assertBrokeWhenTheTicksSay(subject: ContractSubject, hits: Hits): Promise<void> {
+  const { low, high } = hits.bounds;
+  const earliest = firstHitThatCouldBreak(hits);
   assert.ok(earliest >= 0, `the boat broke by hit ${high.length} though no hit left more than ${Math.max(...high).toFixed(1)} damage, ${BREAKS_ABOVE} breaks it: ${describeHits(hits)}`);
   const mustHaveBroken = low.findIndex((held) => held > BREAKS_ABOVE);
   if (mustHaveBroken >= 0) {
     const ticksLater = hits.ticks.at(-1)! - hits.ticks[mustHaveBroken]!;
-    const allowed = SWING_RECOVERY_TICKS + 2 * READING_TICKS;
+    // The client hears the removal a round trip after the break, and hits every `HIT_EVERY_MS` meanwhile.
+    const allowed = SWING_RECOVERY_TICKS + 2 * READING_TICKS + (await roundTripTicks(subject));
     assert.ok(ticksLater <= allowed, `hit ${mustHaveBroken + 1} left at least ${low[mustHaveBroken]!.toFixed(1)} damage, more than the ${BREAKS_ABOVE} that breaks a boat, yet the client hit ${high.length - mustHaveBroken - 1} more times, up to ${ticksLater} ticks later, before the boat was gone (at most ${allowed}): ${describeHits(hits)}`);
   }
 }
@@ -167,14 +186,14 @@ function boatAt(subject: ContractSubject, x: number, z: number): Entity {
 /** Hit `boat` until it is gone and assert it broke when the server's ticks say; the hits. */
 async function breakByHits(subject: ContractSubject, boat: Entity): Promise<Hits> {
   const hits = await hitUntilGone(subject, boat);
-  assert.equal(subject.bot.entities[boat.id], undefined, `${MAX_HITS} hits did not break the boat; the ticks left it at most ${Math.max(...damageBounds(hits.ticks).high).toFixed(1)} damage, ${BREAKS_ABOVE} breaks it (a server too slow to hold hits 5 ticks apart, not a fault of the boat): ${describeHits(hits)}`);
-  assertBrokeWhenTheTicksSay(hits);
+  assert.equal(subject.bot.entities[boat.id], undefined, `${MAX_HITS} hits did not break the boat; the ticks left it at most ${Math.max(...hits.bounds.high).toFixed(1)} damage, ${BREAKS_ABOVE} breaks it (hits ${HIT_EVERY_MS} ms apart are at most ${SWING_RECOVERY_TICKS} ticks apart on a server at 20 ticks a second or fewer, so the client or the server ran late between them: see the ticks read): ${describeHits(hits)}`);
+  await assertBrokeWhenTheTicksSay(subject, hits);
   return hits;
 }
 
 /**
  * What the client heard of a rider's boat breaking: the boat gone, its item spawned and picked up, nothing for the rider. The item waits
- * its delay from the break, which was at the last hit or the one before (the client hits once more at most before it hears the removal);
+ * its delay from the break, which was at the first hit that could have broken the boat by the ticks read or later (the client hits on until it hears the removal, a round trip after);
  * the pickup is read when the client heard it, so it is never early, and late only by the lag that the wait's wall bound holds.
  */
 async function assertBreakHeard(subject: ContractSubject, heard: Heard, boat: Entity, hits: Hits): Promise<void> {
@@ -186,7 +205,7 @@ async function assertBreakHeard(subject: ContractSubject, heard: Heard, boat: En
   assert.ok(drop !== undefined, "no item entity after the boat broke");
   assert.ok(drop.at.distanceTo(boat.position) < DROP_DRIFT, `the drop spawned at ${drop.at}, not where the boat was ${boat.position}`);
   assert.deepEqual(heard.collected.map(({ itemId }) => itemId), [drop.entity.id], "the drop was not picked up");
-  const brokeAfter = Math.max(0, hits.ticks.length - 2);
+  const brokeAfter = firstHitThatCouldBreak(hits);
   const couldHaveBrokenAtTick = hits.ticks[brokeAfter]!;
   const pickedUpAtTick = await tickOf(subject, heard.collected[0]!.heard);
   const pickedUpAfterTicks = pickedUpAtTick - couldHaveBrokenAtTick;
@@ -218,8 +237,9 @@ export const boatBrokenByAttack: ContractCheck = {
     const quick = boatAt(subject, 0.5, 2.5);
     const ridden = boatAt(subject, RIDDEN_AT[0], RIDDEN_AT[2]);
     await breakByHits(subject, quick);
-    await mountBoat(subject, RIDDEN_AT);
-    const seat = bot.entity.position;
+    // The seat is the server's move (`mountBoat`), not where her body is after the mount: the physics ran between the move and the passenger list.
+    const { seat } = await mountBoat(subject, RIDDEN_AT);
+    assert.ok(seat !== null, "the server sent no position when it seated her");
     assert.ok(Math.hypot(seat.x - ridden.position.x, seat.z - ridden.position.z) < SEAT_TOLERANCE && Math.abs(seat.y - ridden.position.y - SEAT_BELOW_BOAT) < SEAT_TOLERANCE, `she sits at ${seat}, not at the boat ${ridden.position} (0.41 below its feet)`);
     const listening = listen(subject);
     let physicsTicks = 0;

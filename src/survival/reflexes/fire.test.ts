@@ -381,12 +381,14 @@ test("no escape in static lava is tried again 2 s later", async () => {
   await using resources = new AsyncDisposableStack();
   const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
-  await clock.advance(250);
+  // The answer is made in the slice the loop stops at: `answeredAt` is the clock's reading the 2 s are counted from.
+  while (driver.answered.snapshot().length === 0) await clock.advance(50);
+  const answeredAt = clock.now();
   const first = driver.answered.snapshot()[0];
   assert.equal(first?.failure.kind, "no_escape");
-  await clock.advance(first.since + 1_999 - clock.now());
+  await clock.advance(answeredAt + 1_999 - clock.now());
   assert.equal(driver.answered.snapshot()[0]?.id, first?.id, "the same lava within 2 s: still answered");
-  await clock.advance(first.since + 2_001 - clock.now());
+  await clock.advance(answeredAt + 2_001 - clock.now());
   assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "still burning in the same cells: tried again");
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
 });

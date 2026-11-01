@@ -30,9 +30,17 @@ test("attack-mob-knockback-decay fails, naming the ticks read, when the mob rest
   );
 });
 
-test("the knockback checks rest the swing by server ticks: at 14 ticks a second and over a stall that catches up, the sprinting hit is still a rested one", async () => {
+test("the knockback checks rest the swing and judge the pair of velocities by server ticks: at 14 and at 8 ticks a second and over a stall that catches up, the sprinting hit is still a rested one", async () => {
   for (const check of [attackMobKnockback, attackMobKnockbackSprint]) {
-    await runOnFake(check, { ticksPerSecond: 14 });
+    for (const ticksPerSecond of [14, 8]) await runOnFake(check, { ticksPerSecond });
     for (const atMs of [100, 900]) await runOnFake(check, {}, undefined, [{ atMs, ms: 700 }]);
   }
+});
+
+test("attack-mob-knockback-decay waits for the rest as long as the mob's velocities keep coming: a server at 8 ticks a second rests it 30 s on", async () => {
+  await runOnFake(attackMobKnockbackDecay, { ticksPerSecond: 8 });
+});
+
+test("attack-mob-knockback-decay fails, naming the stall, when the mob's velocities stop coming before it rests", async () => {
+  await assert.rejects(runOnFake(attackMobKnockbackDecay, {}, undefined, [{ atMs: 3_000, ms: 60_000 }]), /the mob \d+ told no velocity for 10000 ms before it rested/u);
 });

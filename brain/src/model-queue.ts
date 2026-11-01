@@ -1,5 +1,6 @@
 import { renameSync, writeFileSync } from "node:fs";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
+import { monotonicNow } from "./monotonic-clock.ts";
 
 /** Where the brain tells the monitor how busy the model is, next to the bots' folders (monitor "Model queue" panel). */
 export const MODEL_QUEUE_FILE = "brain-model-queue.json";
@@ -265,7 +266,7 @@ export async function startStaggered<T>(
   start: (agent: T, afterMs: number | null) => void,
   options: StaggerOptions,
 ): Promise<void> {
-  const now = options.now ?? Date.now;
+  const now = options.now ?? monotonicNow;
   const sleep = options.sleep ?? abortableSleep;
   let previous: number | null = null;
   try {

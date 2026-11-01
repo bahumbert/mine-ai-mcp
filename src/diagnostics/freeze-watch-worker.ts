@@ -1,12 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
-import { freezeViews, MARKER_BYTES, MARKER_SLOTS, REPEATS_INDEX, SLOT_BYTES, type FreezeWatchWorkerData } from "./freeze-watch.js";
+import { freezeViews, MARKER_BYTES, MARKER_SLOTS, offsetToMainClockMs, REPEATS_INDEX, SLOT_BYTES, stalledForMs, type FreezeWatchWorkerData } from "./freeze-watch.js";
 
-const { shared, dir, botName, stallMs }: FreezeWatchWorkerData = workerData;
+const { shared, dir, botName, stallMs, mainWallMinusClockMs }: FreezeWatchWorkerData = workerData;
+const toMainClock = offsetToMainClockMs(mainWallMinusClockMs);
 const views = freezeViews(shared);
 const decoder = new TextDecoder();
 let recorded = false;
+
+/** A main-thread stamp as a time of day: the wall clock now minus its age, so a record lines up with the other logs. */
+function wallTimeOf(stampedAtMs: number): string {
+  return new Date(Date.now() - stalledForMs(stampedAtMs, toMainClock)).toISOString();
+}
 
 function markers() {
   const end = Atomics.load(views.head, 0);
@@ -18,7 +24,7 @@ function markers() {
     const base = slot * SLOT_BYTES + 16;
     found.push({
       sequence,
-      at: new Date(views.times[slot * (SLOT_BYTES / 8) + 1]!).toISOString(),
+      at: wallTimeOf(views.times[slot * (SLOT_BYTES / 8) + 1]!),
       text: decoder.decode(views.text.subarray(base, base + length)),
       repeats: views.slots[slot * (SLOT_BYTES / 4) + REPEATS_INDEX]!,
     });
@@ -52,8 +58,8 @@ async function mainThreadStack(budgetMs: number): Promise<string | string[]> {
   }
 }
 
-async function record(stalledForMs: number): Promise<void> {
-  const stallStart = new Date(views.bump[0]!).toISOString();
+async function record(stalled: number): Promise<void> {
+  const stallStart = wallTimeOf(views.bump[0]!);
   const snapshot = markers();
   const stack = await mainThreadStack(500);
   const memory = process.memoryUsage();
@@ -61,7 +67,7 @@ async function record(stalledForMs: number): Promise<void> {
   fs.mkdirSync(dir, { recursive: true });
   const fd = fs.openSync(file, "w");
   try {
-    fs.writeSync(fd, JSON.stringify({ bot: botName, stallStart, stalledForMs, stallMs, markers: snapshot, memory, stack }, null, 2));
+    fs.writeSync(fd, JSON.stringify({ bot: botName, stallStart, stalledForMs: stalled, stallMs, markers: snapshot, memory, stack }, null, 2));
   } finally {
     fs.closeSync(fd);
   }
@@ -69,12 +75,12 @@ async function record(stalledForMs: number): Promise<void> {
 }
 
 setInterval(() => {
-  const stalledForMs = Date.now() - views.bump[0]!;
-  if (stalledForMs < stallMs) {
+  const stalled = stalledForMs(views.bump[0]!, toMainClock);
+  if (stalled < stallMs) {
     recorded = false;
     return;
   }
   if (recorded) return;
   recorded = true;
-  void record(stalledForMs).catch((cause) => process.stderr.write(`[mine-ai-mcp] freeze record failed: ${cause}\n`));
+  void record(stalled).catch((cause) => process.stderr.write(`[mine-ai-mcp] freeze record failed: ${cause}\n`));
 }, 100);

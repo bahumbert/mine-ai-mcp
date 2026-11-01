@@ -6,7 +6,8 @@ import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
-import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
+import { CHAT_RETRY_MS } from "./model-wait.ts";
+import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 
 function steveAt(x: number) {
@@ -807,10 +808,8 @@ test("a step that failed once is shown to the work tier (its own objective only)
 });
 
 test("a step that failed twice is refused every time, for any objective, until the 30 minutes are over", async (t) => {
-  let offset = 0;
-  const now = Date.now.bind(Date);
-  t.mock.method(Date, "now", () => now() + offset);
-  const { order } = craftOrders(t);
+  const clocks = steppedClocks(t);
+  const { order, runtime } = craftOrders(t);
   await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
   // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
   const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
@@ -818,10 +817,13 @@ test("a step that failed twice is refused every time, for any objective, until t
   assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago \(refused now\)/u);
   assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
   assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
-  offset = 31 * 60_000;
+  clocks.wall(-800);
+  clocks.monotonic(31 * 60_000);
+  const crafted = runtime.submitted.filter((call) => call.tool === "craft_item").length;
   const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
   assert.doesNotMatch(later[0] ?? "", /failed lately/u);
   assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, crafted + 1, "the step ran again, it was not refused");
 });
 
 test("a step refused three times ends the objective as failed; the count restarts when the step is allowed and runs", async (t) => {
@@ -906,19 +908,13 @@ test("a 60 s wall clock step does not stop a step that keeps gaining", async (t)
   runtime.durations.collect_mob_drop = 300;
   const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
   const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
-  const realNow = Date.now;
-  const stepAt = realNow() + 100;
-  Date.now = () => realNow() + (realNow() >= stepAt ? 60_000 : 0);
-  t.after(() => {
-    Date.now = realNow;
-    clearInterval(gains);
-  });
+  const clocks = steppedClocks(t);
+  setTimeout(() => clocks.wall(60_000), 100);
+  t.after(() => clearInterval(gains));
   chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
   action.reply(HUNT, { done: "got the ink" });
   await agent.handle(say("Steve", "get me 8 ink sacs"));
-  // Waited on the monotonic clock: `until` reads the stepped one.
-  const deadline = performance.now() + 5_000;
-  while (runtime.said.length < 2 && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  await until(() => runtime.said.length >= 2, 5_000);
   assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms: a clock step is not 60 s without a gain");
 });
 
@@ -1197,14 +1193,12 @@ test("a line naming nobody within 60 s of its speaker naming another character i
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
-    const now = Date.now.bind(Date);
-    let offset = 0;
-    const clock = t.mock.method(Date, "now", () => now() + offset);
+    const clocks = steppedClocks(t);
     await agent.handle(say("Tester", "Vex, mine some stone", false));
     runtime.said.length = 0;
-    offset = afterMs;
+    clocks.monotonic(afterMs);
     await agent.handle(say("Tester", "thanks", false));
-    clock.mock.restore();
+    clocks.restore();
     return runtime.said.length;
   };
   assert.equal(await outcome(["Tester"], 20_000), 0, "the model read it as for the speaker only: ignored");
@@ -1444,4 +1438,56 @@ test("two bad replies in a row still end the order with \"could not work out wha
   await until(() => runtime.said.length === 2);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
   assert.equal(agent.activity, "idle");
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock (back ~2 s every ~30 s); a duration is read on the
+// monotonic clock, a time of day (the chat history) stays on the wall clock.
+test("a chat line is asked again for CHAT_RETRY_MS of monotonic time, whatever the wall clock does", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const clocks = steppedClocks(t);
+  const { agent, chat } = agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
+  chat.unavailable(1_000);
+  const handling = agent.handle(say("Steve", "hello Ayla"));
+  await until(() => logs.some((line) => line.startsWith("model unavailable")));
+  // 119 s have passed while the wall clock jumped 5 minutes ahead: the line is still waited for.
+  clocks.monotonic(CHAT_RETRY_MS - 1_000);
+  clocks.wall(300_000);
+  await sleep(100);
+  assert.deepEqual(logs.filter((line) => line.includes("dropped")), [], "a wall clock step ahead does not end the wait early");
+  // 120.5 s have passed while the wall clock went back 5 minutes and 0.8 s: the wait is over.
+  clocks.monotonic(1_500);
+  clocks.wall(-300_800);
+  await until(() => logs.some((line) => line.includes("no answer in time")));
+  await handling;
+});
+
+test("a step's journal ms is its monotonic time: a wall clock step back of 60 s in the step does not make it negative", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 300;
+  const clocks = steppedClocks(t);
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Done." });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  clocks.wall(-60_000);
+  clocks.monotonic(2_000);
+  await until(() => events.some((event) => event.kind === "step"));
+  const step = events.find((event) => event.kind === "step");
+  assert.ok(step?.kind === "step" && step.ms >= 2_000 && step.ms < 10_000, `ms ${step?.kind === "step" ? step.ms : "no step"}`);
+});
+
+test("a follow ordered by a player counts their silence in monotonic time: a wall clock step of 11 minutes does not end it", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(1)] };
+  const clocks = steppedClocks(t);
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  chat.reply({ say: "Coming.", route: "act", request: "follow me" }, { say: "Done." });
+  action.reply({ step: { skill: "follow_player", player: "Steve", distance: 3 } }, { done: "followed" });
+  await agent.handle(say("Steve", "Ayla, follow me"));
+  await until(() => events.some((event) => event.kind === "state" && event.step !== null));
+  clocks.wall(11 * 60_000);
+  await sleep(1_000);
+  assert.deepEqual(events.filter((event) => event.kind === "step"), [], "still following after a poll (750 ms): the silence is 1 s of real time");
 });

@@ -5,7 +5,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../world/memory-world.js";
 import type { Position3 } from "../world/world.js";
-import { createFakeBot, flush } from "../../test-support/fake-bot/index.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
 import { watch } from "../../test-support/pending.js";
 
@@ -797,4 +800,35 @@ test("a water stance held through the bot surface is counted on the raw bot the 
   assert.equal(waterStancesHeld(raw), 1, "runtime.steering asks with the raw bot");
   release();
   assert.equal(waterStancesHeld(raw), 0);
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T4: the dig trace's elapsedMs is a duration.
+test("the dig trace of a 300 ms dig, with the wall clock stepped back 0.8 s meanwhile, says 300 ms and never a negative one", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const directory = mkdtempSync(join(tmpdir(), "dig-trace-"));
+  const file = join(directory, "trace.jsonl");
+  const previous = process.env.MINE_AI_DIG_TRACE;
+  process.env.MINE_AI_DIG_TRACE = file;
+  using _timers = clock.install();
+  try {
+    const bot = surface({
+      blockAt: () => ({ name: "stone" }),
+      dig: async () => {
+        await clock.advance(300);
+        clock.stepWallClock(-800);
+      },
+    });
+    const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+      { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] },
+      { runId: "run", planId: "plan", stepId: "trace", attempt: 1 },
+      new AbortController().signal,
+    );
+    assert.deepEqual(await effect.completion, { kind: "accepted" });
+    const [record] = readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { elapsedMs: number });
+    assert.equal(record!.elapsedMs, 300);
+  } finally {
+    if (previous === undefined) delete process.env.MINE_AI_DIG_TRACE;
+    else process.env.MINE_AI_DIG_TRACE = previous;
+    rmSync(directory, { recursive: true });
+  }
 });

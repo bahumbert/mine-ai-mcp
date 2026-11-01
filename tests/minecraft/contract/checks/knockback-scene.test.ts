@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ZERO_ARENA, arenaFrame } from "../../arena/frame.ts";
+import { fakeHarnessFor } from "../fake-harness.ts";
+import { fakeContractSubject } from "../subject.ts";
+import { attackMobKnockback } from "./attack-mob-knockback.ts";
 import type { LoggedPacket } from "./packet-log.ts";
-import { assertDecay, assertFirstPush } from "./knockback-scene.ts";
+import { assertDecay, assertFirstPush, assertPairInOneTick } from "./knockback-scene.ts";
 
 const UNIT = 8_000;
 const damageEvent = (atMs: number): LoggedPacket => ({ atMs, name: "damage_event", packet: {} });
@@ -69,4 +73,33 @@ test("the first velocity after the pair comes 1, 2 or 3 ticks on: the pair is se
   // Seen on a real server (lanes, 2026-10-24): 4 of 5 decays had 2 ticks (0.960 of the pair) between the pair and the next velocity, the rest every 3.
   for (const firstGap of [1, 2, 3]) assert.doesNotThrow(() => assertDecay("by hand", decayHeard([firstGap, 3, 3, 3]), 243), `first gap ${firstGap}`);
   assert.throws(() => assertDecay("by hand", decayHeard([4, 3, 3]), 243), /velocity 3 is 0\.92\d of the one before, 4 ticks of decay/u);
+});
+
+/** A velocity heard at `atMs` of wall, its server tick read as `tick` (no read when `tick` is null). */
+const velocityAtTick = (atMs: number, tick: number | null): LoggedPacket => ({ ...velocity(atMs, 0, 0, 0.4), ...(tick !== null && { heardAt: { tick: Promise.resolve(tick), atMs } }) });
+
+async function judgePair(first: LoggedPacket, second: LoggedPacket): Promise<void> {
+  const frame = arenaFrame(ZERO_ARENA);
+  const harness = fakeHarnessFor(attackMobKnockback.fixture, frame);
+  using _installed = harness.clock.install();
+  await assertPairInOneTick(fakeContractSubject(harness, frame), "still", [first, second]);
+}
+
+test("a pair of velocities 400 ms of wall apart but read in the same server tick is a pair: a slow server or a late client holds the packets, not the game", async () => {
+  await judgePair(velocityAtTick(100, 5_000), velocityAtTick(500, 5_000));
+  await judgePair(velocityAtTick(100, 5_000), velocityAtTick(100.1, 5_003));
+});
+
+test("a pair of velocities read 4 server ticks apart is refused naming the ticks read", async () => {
+  await assert.rejects(judgePair(velocityAtTick(100, 5_000), velocityAtTick(100.1, 5_004)), /still: the second velocity after the first: 4 server ticks \(read at ticks 5000 and 5004\), not 0 to 3/u);
+});
+
+test("a pair logged with no server tick is refused, not skipped: a watch that stops marking the velocities cannot pass unjudged", async () => {
+  await assert.rejects(judgePair(velocityAtTick(100, null), velocityAtTick(900, null)), /still: the pair of velocities was logged with no server tick/u);
+});
+
+test("assertFirstPush states the pair's equal velocities and gives it back, whatever the wall gap between them (the gap is judged in ticks)", () => {
+  const push = (atMs: number) => velocity(atMs, 0, 0, 0.4);
+  const [first, second] = assertFirstPush("still", damageEvent(100), [push(101), push(401)], AWAY_Z, "none");
+  assert.deepEqual([first.atMs, second.atMs], [101, 401]);
 });

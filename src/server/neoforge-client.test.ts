@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { askSlotBySlot, clickWithoutPrediction, encodeQuery, packetId, tolerateUnparsed, unknownStatesAsStone } from "./neoforge-client.js";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
+import { askSlotBySlot, clickWithoutPrediction, encodeQuery, oncePerSecondPerWindow, packetId, tolerateUnparsed, unknownStatesAsStone } from "./neoforge-client.js";
 
 test("an unreadable window's contents open the window empty; another unreadable packet is skipped", () => {
   // Live 2026-10-07: the contents of a crafting table's window held a modded item, and every boat craft timed out.
@@ -81,4 +82,29 @@ test("a block state the vanilla data does not know reads as stone, a known one a
 
   assert.equal(registry.blocksByStateId[10], dirt);
   assert.equal(registry.blocksByStateId[99_999], stone);
+});
+
+// WSL steps its wall clock back about 2 s every 30 s: a resend throttle read on `Date.now()` lets a stale-state-id
+// storm through (step forward) or silences a window for seconds (step back).
+for (const [direction, stepMs] of [["back", -2000], ["forward", 1200]] as const) {
+  test(`a window's resend gate opens again 1 s of monotonic time after the last, across a wall clock step ${direction}`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    const mayResend = oncePerSecondPerWindow();
+    assert.equal(mayResend(4), true, "the first unreadable packet of a window is asked for");
+    await clock.advance(400);
+    clock.stepWallClock(stepMs);
+    assert.equal(mayResend(4), false, "400 ms later the same window is not asked again");
+    assert.equal(mayResend(5), true, "another window has its own gate");
+    await clock.advance(700);
+    assert.equal(mayResend(4), true, "1100 ms after the first ask the gate is open");
+  });
+}
+
+test("the first ask of a window is allowed when the monotonic clock reads under a second", () => {
+  let reading = 300;
+  const mayResend = oncePerSecondPerWindow(() => reading);
+  assert.equal(mayResend(2), true);
+  reading = 900;
+  assert.equal(mayResend(2), false);
 });

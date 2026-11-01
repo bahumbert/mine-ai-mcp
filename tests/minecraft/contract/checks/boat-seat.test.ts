@@ -19,7 +19,7 @@ test("mountBoat seats her in the boat the fixture summoned, not in another oak b
     },
   });
   using _installed = harness.clock.install();
-  const boat = await mountBoat(fakeContractSubject(harness, frame));
+  const { boat } = await mountBoat(fakeContractSubject(harness, frame));
   assert.equal(boat.id, 100);
   assert.equal(harness.bot.vehicle?.id, 100);
 });

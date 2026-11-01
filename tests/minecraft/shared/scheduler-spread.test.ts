@@ -5,7 +5,8 @@ import { SchedulerRig } from "./scheduler-rig.ts";
 import { lanes, queued } from "./scheduler-queue-fixtures.ts";
 
 // T7c3. MAX_PLAYERS 22 gives 20 lanes a server: SERVERS_PER_KEY 2 spreads a key from 2 x 20 / 2 = 20 trials queued, 3 from 30.
-const SPREAD_ENV = { MINE_AI_SCENARIO_MAX_PLAYERS: "22" };
+// FRESH_SERVER_LANES is out of the way (20 lanes a server): these tests are about where trials go, `scheduler-fresh-server.test.ts` holds the bound.
+const SPREAD_ENV = { MINE_AI_SCENARIO_MAX_PLAYERS: "22", MINE_AI_SCENARIO_FRESH_SERVER_LANES: "20" };
 /** The target is out of the way (60): these tests are about where trials go, not how many run. */
 const spreadOver = (servers: number) => ({ ...SPREAD_ENV, MINE_AI_SCENARIO_SERVERS_PER_KEY: String(servers), MINE_AI_SCENARIO_TARGET_START: "60" });
 const serverIdsOf = (rig: SchedulerRig) => rig.pool.list().map(server => server.id);

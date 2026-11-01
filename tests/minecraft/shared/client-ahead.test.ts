@@ -127,7 +127,8 @@ test("a boot that succeeds between two failures clears the count: one transient 
 test("a client that never says it booted is killed at the boot bound on the wall clock and counts as a failed boot", OPTIONS, () => withRig(["hangs"], { MINE_AI_SCENARIO_CLIENT_BOOT_BOUND_MS: "200" }, async ({ ahead, clients, changes, logs }) => {
   ahead.spawn(SUBMISSION, hostClient());
   await until(() => changes.length >= 1, "the bound");
-  assert.equal(clients.spawned[0]!.ahead.child.signalCode, "SIGKILL");
+  await clients.spawned[0]!.ahead.closed;
+  assert.equal(clients.spawned[0]!.ahead.child.signalCode, "SIGKILL", "signalCode is the exit's record: set when the exit is reported, after the kill call");
   assert.equal(ahead.waitingCount(), 0);
   assert.match(logs.join("\n"), /did not boot within 0\.2 s/u);
 }));

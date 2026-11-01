@@ -31,6 +31,7 @@ interface Expectation {
   readonly before: BlockMatcher;
   readonly after: BlockMatcher;
   readonly operation: "break" | "place" | "activate";
+  /** A `monotonicNow()` reading: the ledger's `now` is the same clock, so a wall-clock step never moves a deadline. */
   readonly deadlineMs: number;
   /**
    * Cells whose every change belongs to this operation while it is remembered:

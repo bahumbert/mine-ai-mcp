@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, SEEN_MOVED, SEEN_TTL_MS, seenInWorld } from "./frontier.js";
 
 function temporaryBotData(): SqlBotData {
@@ -617,3 +617,24 @@ test("a failed attach recheck and a failed spawn-ring read are both reported in 
   await frontier.idle();
   assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE chunk_key = 'overworld|3|-2'")[0]?.count, 1);
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: the scan's TTL is a duration, so the default clock is monotonic.
+for (const row of [
+  { name: "a wall step forward of 1.2 s does not end it early", advanceMs: SEEN_TTL_MS - 1_000, wallStepMs: 1_200, rescanned: false },
+  { name: "a wall step back of 2 s does not stretch it", advanceMs: SEEN_TTL_MS + 500, wallStepMs: -2_000, rescanned: true },
+]) {
+  test(`seenInWorld rescans after its TTL on the default clock: ${row.name}`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    // The default `now` is bound when seenInWorld is called: step once first so it holds the stepped `Date.now`.
+    clock.stepWallClock(5_000);
+    const scans = { count: 0 };
+    const seen = seenInWorld(seeingBot({ oak_log: 3 }, scans), { chunksWithMaterial: () => 0 });
+    seen("oak_log");
+    const afterFirst = scans.count;
+    await clock.advance(row.advanceMs);
+    clock.stepWallClock(row.wallStepMs);
+    seen("oak_log");
+    assert.equal(scans.count > afterFirst, row.rescanned);
+  });
+}

@@ -25,6 +25,7 @@
  * keeps for the reflex — stays on the caller's side of this boundary.
  */
 import type { Bot } from "mineflayer";
+import { monotonicNow } from "../../../utils/monotonic-clock.js";
 import { nearEntityGoal, type BlockPosition, type MovementPolicy, type Navigate } from "../../index.js";
 
 /** A loaded Mineflayer entity, which is what `matches` is asked about. */
@@ -147,7 +148,7 @@ function describe(reason: string, target: HuntTarget): string {
  * finished with, which have refused a route, and how near the pursuit has ever
  * brought the bot to each.
  */
-class HuntTargeting {
+export class HuntTargeting {
   /** Targets with no verdict left to give: defeated, or gone while being fought. */
   readonly #retired = new Set<number>();
   readonly #stops = new Map<
@@ -190,7 +191,7 @@ class HuntTargeting {
       target.position.y - stop.position.y,
       target.position.z - stop.position.z,
     );
-    if (moved >= STOP_RESET_DISTANCE || Date.now() - stop.stoppedAt >= STOP_RESET_AFTER_MS) {
+    if (moved >= STOP_RESET_DISTANCE || monotonicNow() - stop.stoppedAt >= STOP_RESET_AFTER_MS) {
       this.#stops.delete(target.id);
     }
   }
@@ -281,7 +282,7 @@ class HuntTargeting {
     const previous = this.#stops.get(target.id);
     this.#stops.set(target.id, {
       count: (previous?.count ?? 0) + 1,
-      stoppedAt: Date.now(),
+      stoppedAt: monotonicNow(),
       position: target.position,
     });
     this.#lastStop = { target, reason };

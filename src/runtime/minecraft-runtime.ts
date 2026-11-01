@@ -38,6 +38,7 @@ import type { ReflexLimitKind } from "../session/abort.js";
 import { createPinnedEscape } from "../session/pinned-escape.js";
 import { PinnedWatch } from "../session/pinned-watch.js";
 import { attachIdleWaterControl } from "../survival/baseline/idle-water.js";
+import { monotonicNow } from "../utils/index.js";
 import { ReflexDriver } from "../survival/control/driver.js";
 import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import { attachSurvivalReceipts } from "../survival/evidence/receipts.js";
@@ -427,7 +428,7 @@ export async function createMinecraftRuntime(
             execution: combat.execution(),
           },
           precedingRequestId:
-            requestId === null && preceding && Date.now() - preceding.completedAtMs <= INCIDENT_HISTORY_MS
+            requestId === null && preceding && monotonicNow() - preceding.completedAtMs <= INCIDENT_HISTORY_MS
               ? preceding.requestId
               : null,
         };

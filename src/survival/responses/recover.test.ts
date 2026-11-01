@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
-import { type FakeHarness, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../policy/contract.js";
 import { survivalResources } from "../state/resources.js";
 import { recoverUnderCover } from "./recover.js";
@@ -130,6 +130,35 @@ test("a spent protected hold survives damage, another cell, and unrelated policy
   bot.health = 18;
   assert.equal((await recoverUnderCover(bot, options)).kind, "recovered");
 });
+
+/** Waits a protected hold made before its `maximumMs` of covered recovery ended, with the wall clock stepped by `wallStepMs` at the first one. */
+async function holdWaitsAcrossWallStep(maximumMs: number, wallStepMs: number): Promise<number> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({ clock, health: 6, food: 20 });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a budget started on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  let waits = 0;
+  const result = await clock.settle(recoverUnderCover(bot, {
+    signal: new AbortController().signal, recoverTo: 18, maximumMs,
+    isProtected: () => true,
+    defendIntruder: async () => {}, releaseItemUse: () => {},
+    wait: async () => {
+      if (++waits === 1) clock.stepWallClock(wallStepMs);
+      await clock.sleep(1_000);
+    },
+    survival: survivalResources(),
+    policy: () => DEFAULT_SURVIVAL_POLICY,
+  }), maximumMs + 5_000);
+  assert.equal(result.kind === "held" && result.stop, "exhausted");
+  return waits;
+}
+
+for (const wallStepMs of [-800, 1_200]) {
+  test(`covered recovery counts monotonic time: a 3 s budget with a ${wallStepMs} ms wall step is spent after 3 waits of 1 s`, async () => {
+    assert.equal(await holdWaitsAcrossWallStep(3_000, wallStepMs), 3);
+  });
+}
 
 test("losing cover during a bite returns exposure without answering recovery", async () => {
   let protectedNow = true;

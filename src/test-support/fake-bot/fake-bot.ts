@@ -211,7 +211,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
   const serverEntities = attachFakeEntities(bot, { server, inventory, entities });
-  attachFakeVehicle(bot, { server });
+  attachFakeVehicle(bot, { server, seatPositionLeadTicks: options.server?.seatPositionLeadTicks ?? 0 });
   const swing = attachFakeSwing({ server, inventory });
   attachFakeBoatDamage(bot, { server, entities: serverEntities, inventory, swing });
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});

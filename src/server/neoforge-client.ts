@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { z } from "zod";
+import { monotonicNow } from "../utils/index.js";
 
 const componentSchema = z.strictObject({
   id: z.string(),
@@ -73,16 +74,25 @@ export function joinAsNeoForgeClient(bot: Bot, components: NeoForgeComponents): 
   unknownStatesAsStone(bot.registry as unknown as BlockRegistry);
   const send = client.write.bind(client);
   const ids = { windowItems: packetId(bot.version, "window_items"), setSlot: packetId(bot.version, "set_slot") };
-  const resent = new Map<number, number>();
+  const mayResend = oncePerSecondPerWindow();
   tolerateUnparsed(client, ids, (windowId, stateId) => {
     if (windowId !== 0) mirrorInventoryInto(bot, windowId);
-    // Once a second at most: a stale state id makes the server answer with the whole contents again.
-    if (Date.now() - (resent.get(windowId) ?? 0) < 1000) return;
-    resent.set(windowId, Date.now());
+    if (!mayResend(windowId)) return;
     setImmediate(() => askSlotBySlot(send, bot, windowId, stateId));
   });
   clickWithoutPrediction(client);
   if (process.env.MINE_AI_TRACE_WINDOWS === "1") traceWindows(client);
+}
+
+/** Once a second at most per window: a stale state id makes the server answer with the whole contents again. */
+export function oncePerSecondPerWindow(now: () => number = monotonicNow): (windowId: number) => boolean {
+  const resent = new Map<number, number>();
+  return (windowId) => {
+    const last = resent.get(windowId);
+    if (last !== undefined && now() - last < 1000) return false;
+    resent.set(windowId, now());
+    return true;
+  };
 }
 
 /** Diagnostics (env MINE_AI_TRACE_WINDOWS=1): every container click sent and slot update received, one line each. */

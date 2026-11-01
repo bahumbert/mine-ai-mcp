@@ -1,5 +1,5 @@
 import type { Continuation } from "../../session/abort.js";
-import type { AnsweredEntry, AnsweredScope, Facts } from "../state/answered.js";
+import type { AnsweredEntry, AnsweredScope, Facts, TemporalPremise } from "../state/answered.js";
 import type { REFLEX_PRIORITY } from "./priority.js";
 export type ReflexName = (typeof REFLEX_PRIORITY)[number];
 
@@ -59,7 +59,7 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
   /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureMs`. */
-  temporal?(outcome: Outcome): AnsweredEntry["temporal"];
+  temporal?(outcome: Outcome): TemporalPremise | null;
   /**
    * For a danger that grows while the scene stays equal (air running out in still water, burning in static lava): the
    * driver remembers every failure of this reflex (its `failure()` and an exception) as `retry_after_failure`, which

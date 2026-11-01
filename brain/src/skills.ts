@@ -12,6 +12,8 @@ import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces
 import type { HouseSize } from "./building/house.ts";
 import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
+import { NEWEST_REGISTRY_VERSION as ENTITY_REGISTRY_VERSION } from "./newest-registry.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
@@ -70,7 +72,7 @@ export interface SkillContext {
   readonly alive?: () => void;
   /** Told that the step's work is another activity from now on (the house's site preparation is terraforming). */
   readonly phase?: (activity: Activity) => void;
-  /** When the player who asked for this step last said anything (epoch ms); unset for her own goals. */
+  /** When the player who asked for this step last said anything (a `monotonicNow()` reading); unset for her own goals. */
   readonly heardFrom?: () => number;
   /** The farms it made, as at their last tend; farming near one tends it. */
   readonly farms?: readonly KnownFarm[];
@@ -170,7 +172,7 @@ export function planFollowStep(snapshot: BotSnapshot, player: string, distance: 
 
 async function follow(context: SkillContext, player: string, distance: number, minutes?: number): Promise<SkillResult> {
   const { runtime, body, signal, heardFrom, alive } = context;
-  const started = Date.now();
+  const started = monotonicNow();
   const until = started + (minutes ?? FOLLOW_OWN_MINUTES) * 60_000;
   let unseen = 0;
   let failures = 0;
@@ -178,11 +180,11 @@ async function follow(context: SkillContext, player: string, distance: number, m
     alive?.();
     // Asked for by a player: it lasts while they keep talking (any line restarts the count). On her own goal: its minutes.
     if (heardFrom !== undefined && minutes === undefined) {
-      if (Date.now() - heardFrom() >= FOLLOW_QUIET_MS) {
+      if (monotonicNow() - heardFrom() >= FOLLOW_QUIET_MS) {
         return { status: "done", detail: `followed ${player}; they said nothing for ${FOLLOW_QUIET_MS / 60_000} minutes, so I went back to my own things` };
       }
-    } else if (Date.now() >= until) {
-      return { status: "done", detail: `followed ${player} for ${Math.round((Date.now() - started) / 60_000)} minutes` };
+    } else if (monotonicNow() >= until) {
+      return { status: "done", detail: `followed ${player} for ${Math.round(elapsedSince(started) / 60_000)} minutes` };
     }
     const step = planFollowStep(await runtime.status(), player, distance);
     if (step.kind === "lost") {
@@ -1051,17 +1053,12 @@ const EXPLORE_REACH = 512;
 const SIGHT = 128;
 /** The longest walk one explore step makes. */
 const EXPLORE_MAX_WALK = 384;
-/**
- * The entity registry that tells a creature's name from anything else: the newest one minecraft-data ships. The brain
- * is not told the server's version, and creature names stay the same across versions (new ones are only added).
- */
-const ENTITY_REGISTRY_VERSION = (minecraftData as unknown as { readonly supportedVersions: { readonly pc: readonly string[] } }).supportedVersions.pc.at(-1) ?? "";
 /** minecraft-data's entity types of the creatures that live in the world (the types `view_status` lists as mobs). */
 const CREATURE_TYPES: ReadonlySet<string> = new Set(["animal", "passive", "water_creature", "ambient", "hostile", "mob"]);
 /** What explore says after a creature it found: the way to what it drops. */
 const CREATURE_TAIL = "get_items what you want from it hunts it there";
 
-/** Whether `name` is a creature of the game (sheep, pig, zombie), by the entity registry. */
+/** Whether `name` is a creature of the game (sheep, pig, zombie), by the newest entity registry: creature names stay the same across versions (new ones are only added). */
 function isCreature(name: string): boolean {
   const entities = (minecraftData(ENTITY_REGISTRY_VERSION) as unknown as { readonly entitiesByName?: Readonly<Record<string, { readonly type?: string } | undefined>> } | undefined)?.entitiesByName;
   const type = entities?.[name]?.type;

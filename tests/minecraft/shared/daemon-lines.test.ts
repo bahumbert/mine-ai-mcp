@@ -25,26 +25,32 @@ test("a trial that never ran (its server did not start) says its phases are none
 const report: SampleReport = {
   cpuBusy: 0.634, ownCpu: 0.5, load1: 11.256, memAvailableMb: 18_204, ledgerMb: 9_871, target: 28, running: 24, queued: 28, servers: 3, starts: 5,
   held: { target: 4, "new-server-per-sample": 2 }, event: null,
+  serverTicks: [{ id: "s2", msptP95: 4.5 }],
 };
 
-test("a sample line keeps today's text and adds cpu, own, load1, mem, ledger, target, counts, starts and the trials held per bound", () => {
+test("a sample line has the counts and the tick P95 by server id, then cpu, own, load1, mem, ledger, target, counts, starts and the trials held per bound", () => {
   assert.equal(
-    sampleLine(report, [4.5, null, 11]),
-    "sample: 24 running, 28 queued, cpu 63%, 3 servers, p95 ms 4.5/-/11 | cpu=63% own=50% load1=11.26 mem=18204 ledger=9871 target=28 running=24 queued=28 servers=3 starts=5 held=target:4,new-server-per-sample:2",
+    sampleLine(report),
+    "sample: 24 running, 28 queued, cpu 63%, 3 servers, p95 ms s2=4.5 | cpu=63% own=50% load1=11.26 mem=18204 ledger=9871 target=28 running=24 queued=28 servers=3 starts=5 held=target:4,new-server-per-sample:2",
   );
 });
 
+test("a sample line names each server's tick P95 by its id, a dash for a server with no reading", () => {
+  const two: SampleReport = { ...report, serverTicks: [{ id: "s2", msptP95: 4.5 }, { id: "s7", msptP95: null }, { id: "s9", msptP95: 11 }] };
+  assert.match(sampleLine(two), /, p95 ms s2=4\.5\/s7=-\/s9=11 \| /u);
+});
+
 test("a sample line with nothing read yet shows dashes, and no held trials shows held=none", () => {
-  const blank: SampleReport = { ...report, cpuBusy: null, ownCpu: null, load1: null, held: {} };
+  const blank: SampleReport = { ...report, cpuBusy: null, ownCpu: null, load1: null, held: {}, serverTicks: [] };
   assert.equal(
-    sampleLine(blank, []),
+    sampleLine(blank),
     "sample: 24 running, 28 queued, cpu -, 3 servers, p95 ms  | cpu=- own=- load1=- mem=18204 ledger=9871 target=28 running=24 queued=28 servers=3 starts=5 held=none",
   );
 });
 
 test("a target change of the sample is said at the end of the line", () => {
-  assert.match(sampleLine({ ...report, event: "foreign load" }, []), / held=target:4,new-server-per-sample:2 target change: foreign load$/u);
-  assert.match(sampleLine({ ...report, event: "grew" }, []), / target change: grew$/u);
+  assert.match(sampleLine({ ...report, event: "foreign load" }), / held=target:4,new-server-per-sample:2 target change: foreign load$/u);
+  assert.match(sampleLine({ ...report, event: "grew" }), / target change: grew$/u);
 });
 
 test("a trial that asked for a client has its settle phase between arrange and join", () => {

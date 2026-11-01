@@ -67,6 +67,8 @@ export class Scheduler {
     this.#admission = initialAdmissionState(deps.config);
     // A client lost or a tuple given up: boot another for the queued trials, or fail the trials that cannot get one, without waiting for the next sample.
     deps.clientsAhead?.onChange(() => this.#pump(false));
+    // The build ended: the trials it held start now, new servers included, as at a submission.
+    deps.templateBuilds?.onEnd(() => this.#pump(false, true));
   }
 
   get runningCount(): number {
@@ -91,6 +93,7 @@ export class Scheduler {
       cpuBusy, ownCpu, load1, memAvailableMb, ledgerMb: ledgerMb(sample, this.#tally, this.deps.config), target: this.#admission.target,
       running: this.#running, queued: this.#queue.length, servers: sample.servers.length, starts: this.deps.pool.startedCount,
       held: this.#held, event: this.#admission.event,
+      serverTicks: sample.servers.map(({ id, msptP95 }) => ({ id, msptP95 })),
     };
   }
 
@@ -144,7 +147,7 @@ export class Scheduler {
   }
 
   #liveSample(): AdmissionSample | null {
-    return this.#base ? { ...this.#base, servers: this.deps.pool.readings() } : null;
+    return this.#base ? { ...this.#base, servers: this.deps.pool.readings(), templateBuild: this.deps.templateBuilds?.ledgerReading() } : null;
   }
 
   #cancel(submission: Submission, reason: string): void {
@@ -240,6 +243,8 @@ export class Scheduler {
   /** Null when the trial started; otherwise the reason it waits. */
   #tryStart(queued: QueuedTrial, isSample: boolean): string | null {
     const { submission, entry } = queued;
+    const building = this.deps.templateBuilds?.waitLine();
+    if (building) return this.#refusedNotForRoom(queued, building, "template-build");
     const gate = this.#holdGate(submission);
     if (gate) return this.#refusedNotForRoom(queued, gate, "hold");
     const cap = submission.spec.maxLanes;

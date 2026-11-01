@@ -3,7 +3,7 @@ import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
 import { BodyAbort, type BodyAbortCause, type Continuation } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
-import type { Answered, AnsweredEntry, Facts } from "../state/answered.js";
+import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
 import type {
   DangerObservation,
   ReflexDefinition,
@@ -14,7 +14,7 @@ import type {
 } from "./contract.js";
 import { observeBodyProgress, ReflexProgress } from "./reflex-progress.js";
 
-/** What a registered reflex needs from its driver: the shared runner, answers, clock and the driver's world revision. */
+/** What a registered reflex needs from its driver: the shared runner, answers and the driver's world revision. */
 export interface RegistrationHost {
   readonly bot: Bot;
   readonly runner: ActionRunner;
@@ -22,8 +22,6 @@ export interface RegistrationHost {
   publish(transition: SurvivalTransition): void;
   /** Bumped by the driver on death and dimension change: a claim started in an older world was cancelled. */
   world(): number;
-  /** The wall clock the retry delay is counted on (the answered scopes' clock). */
-  now(): number;
 }
 
 /** What the driver does with a registration, whatever the types of its danger, response and outcome. */
@@ -173,10 +171,10 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   /** The remembered failure of a reflex that retries: it expires after `retryAfterFailureMs`, the facts may reopen it sooner. */
-  #retryTemporal(why: string): AnsweredEntry["temporal"] {
+  #retryTemporal(why: string): TemporalPremise | null {
     const { retryAfterFailureMs } = this.definition;
     if (retryAfterFailureMs === undefined) return null;
-    return { premise: "retry_after_failure", expiresAt: this.host.now() + retryAfterFailureMs, why };
+    return { premise: "retry_after_failure", durationMs: retryAfterFailureMs, why };
   }
 
   /** Decide for an observed danger; claim the body unless the decision is not a response or the scope is answered. */
@@ -391,7 +389,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     host.answered.remember(
       { ...definition.facts(run.response), facts: () => null },
       { kind: "reflex_limit", why },
-      { premise: "reflex_limit", expiresAt: host.now() + run.limits.standDownMs, why },
+      { premise: "reflex_limit", durationMs: run.limits.standDownMs, why },
     );
   }
 }

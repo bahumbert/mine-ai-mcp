@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import type { NavigationBot } from "../bot.js";
 import type { BlockMatcher, PlannedOperation } from "../movements/movement.js";
 import type { BlockPosition } from "../world/world.js";
@@ -40,6 +41,7 @@ export async function executeWorldEffect(options: {
     readonly after: BlockMatcher;
     readonly owned?: readonly BlockPosition[];
   }[];
+  /** A `monotonicNow()` reading, as the ledger's deadlines are. */
   readonly deadlineMs: number;
   readonly invalidated?: Promise<{ readonly kind: "invalidated" }>;
 }): Promise<{ readonly result: WorldEffectResult; readonly issued: boolean }> {
@@ -58,7 +60,7 @@ export async function executeWorldEffect(options: {
     const timer = setTimeout(() => {
       ledger.expire(deadlineMs);
       resolve({ kind: "expired" });
-    }, Math.max(0, deadlineMs - Date.now()));
+    }, Math.max(0, deadlineMs - monotonicNow()));
     resources.defer(() => clearTimeout(timer));
   });
   const effect = bot.startEffect(operation, token, AbortSignal.any([signal, stopped.signal]));

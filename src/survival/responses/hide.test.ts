@@ -32,7 +32,7 @@ const SEALED_BOX: Record<string, FakeCell> = Object.fromEntries([
 
 type SceneOptions = Omit<FakeBotOptions, "clock" | "overrides"> & {
   readonly overrides?: FakeBotOptions["overrides"];
-  /** The hide reads `Date.now` and `setTimeout` for its deadline: a test about that installs this clock (`using`). */
+  /** The hide reads `monotonicNow` and `setTimeout` for its deadline: a test about that installs this clock (`using`). */
   readonly mockedClock?: boolean;
 };
 
@@ -556,14 +556,49 @@ test("the construction deadline ends a hide whose body never lands", async () =>
   assert.ok(Date.now() - started < 500);
 });
 
-test("the construction deadline runs on the wall clock when the physics stream has stopped", async () => {
+for (const [direction, wallStepMs] of [["back", -800], ["forward", 1_200]] as const) {
+  test(`the construction deadline counts monotonic time: a 3 s hide ends at 3 s though the wall clock stepped ${direction}`, async () => {
+    const { bot, clock } = scene({ health: 7, mockedClock: true });
+    using _installed = clock.install();
+    // Live the two clocks read unrelated values (uptime vs epoch): a deadline taken on the wrong one cannot pass.
+    clock.stepWallClock(5_000);
+    bot.entity.onGround = false;
+    clock.after(1_000, () => clock.stepWallClock(wallStepMs));
+    const started = clock.now();
+    const result = await clock.settle(hideBounded(bot, { maximumMs: 3_000 }), HIDE_LIMIT_MS);
+    assert.equal(result.kind, "failed");
+    assert.match(result.error ?? "", /The shelter was not finished within 3 s/);
+    const tookMs = clock.now() - started;
+    assert.ok(tookMs >= 3_000 && tookMs < 3_200, `the hide ended after ${tookMs} ms of clock, not at its 3000 ms deadline`);
+  });
+}
+
+test("a hide held while the threat stays keeps its partial shell until the monotonic deadline, though the wall clock is 5 s ahead", async () => {
+  const { bot, clock } = scene({ health: 18, cells: SEALED_BOX, carried: { cobblestone: 64, end_stone: 10 }, mockedClock: true });
+  using _installed = clock.install();
+  // Ordinary stone is no dragon shelter: the walls placed in it never close, so only the hold or the deadline ends the pass.
+  clock.stepWallClock(5_000);
+  const started = clock.now();
+  const result = await clock.settle(hideInPlace(bot, {
+    threatContext: combatTestContext(bot), signal: new AbortController().signal,
+    recoverTo: 18, maximumMs: 3_000, blockNames: DRAGON_PROTECTION_BLOCKS, holdWhile: () => true,
+  }), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /The shelter was not finished within 3 s/);
+  const tookMs = clock.now() - started;
+  assert.ok(tookMs >= 3_000 && tookMs < 3_200, `the hold ended after ${tookMs} ms of clock, not at its 3000 ms deadline`);
+});
+
+test("a stopped physics stream bounds a wait by the monotonic deadline, though the wall clock is 5 s behind", async () => {
   const { bot, clock } = scene({ health: 7, mockedClock: true });
   using _installed = clock.install();
+  clock.stepWallClock(-5_000);
   bot.entity.onGround = false;
   bot.physicsEnabled = false; // the client runs no tick
-  const started = Date.now();
-  const result = await clock.settle(hideBounded(bot, { maximumMs: 40 }), HIDE_LIMIT_MS);
+  const started = clock.now();
+  const result = await clock.settle(hideBounded(bot, { maximumMs: 3_000 }), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
-  assert.match(result.error ?? "", /The shelter was not finished within \d+ s/);
-  assert.ok(Date.now() - started < 500);
+  assert.match(result.error ?? "", /The shelter was not finished within 3 s/);
+  const tookMs = clock.now() - started;
+  assert.ok(tookMs >= 3_000 && tookMs < 3_200, `the hide ended after ${tookMs} ms of clock, not at its 3000 ms deadline`);
 });

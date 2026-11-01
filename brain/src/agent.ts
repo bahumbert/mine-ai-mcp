@@ -13,6 +13,7 @@ import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
@@ -146,7 +147,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -189,7 +190,7 @@ export class Agent {
   /** Each finished step's activity and time over the last hour of play, oldest first. */
   private readonly times: ActivityTime[] = [];
   /** When old activity notes were last deleted. */
-  private rotatedAt = 0;
+  private rotatedAt = Number.NEGATIVE_INFINITY;
   /** When each player (lower case) last said anything: a follow they asked for ends after a long silence. */
   private readonly lastHeard = new Map<string, number>();
   /** Game facts learnt from the runtime, kept for the session: block tags by name, foods seen, how items are got. */
@@ -215,7 +216,7 @@ export class Agent {
   /** No shelter tried before then: the last one could not be dug here. */
   private shelterRetryAt = 0;
   /** When the sky was last looked at for nightfall during a step of its own. */
-  private nightCheckedAt = 0;
+  private nightCheckedAt = Number.NEGATIVE_INFINITY;
   /** Calls of any tier in a row that found the model server away (reset by any answer): sets how long the next wait is. */
   private modelFailures = 0;
   /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
@@ -269,7 +270,7 @@ export class Agent {
         // A runtime restarting under a poll fails the read: the next poll tries again (review B5).
         try {
           for (const message of await this.options.runtime.readMessages()) {
-            this.lastHeard.set(message.username.toLowerCase(), Date.now());
+            this.lastHeard.set(message.username.toLowerCase(), monotonicNow());
             this.inbox.push(message);
             this.wakeChat?.();
           }
@@ -316,7 +317,7 @@ export class Agent {
    * (a "stop" still stops: only its line is dropped).
    */
   async handle(message: PlayerMessage, heard?: Heard): Promise<void> {
-    const heardAt = Date.now();
+    const heardAt = monotonicNow();
     this.lastHeard.set(message.username.toLowerCase(), heardAt);
     const { persona, log } = this.options;
     const line = this.remember(message.username, message.message);
@@ -404,7 +405,7 @@ export class Agent {
         }
         const delay = this.modelFailed(error);
         const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
-        if (superseded || Date.now() - heardAt >= CHAT_RETRY_MS) {
+        if (superseded || monotonicNow() - heardAt >= CHAT_RETRY_MS) {
           log(`chat tier unavailable, "${message.message}" dropped (${superseded ? "its speaker said something since" : "no answer in time"}): ${error.message}`);
           return null;
         }
@@ -493,10 +494,10 @@ export class Agent {
    * stays on the stack and resumes in the morning). Looked at every {@link NIGHT_CHECK_MS}.
    */
   private async stopOwnStepAtNightfall(): Promise<void> {
-    if (!this.options.persona.settings.shelterAtNight || Date.now() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
+    if (!this.options.persona.settings.shelterAtNight || monotonicNow() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
     const top = this.stack.at(-1);
-    if (top?.step == null || top.objective.requester !== null || Date.now() < this.shelterRetryAt) return;
-    this.nightCheckedAt = Date.now();
+    if (top?.step == null || top.objective.requester !== null || monotonicNow() < this.shelterRetryAt) return;
+    this.nightCheckedAt = monotonicNow();
     if (!(await this.outInTheNight())) return;
     this.options.log("night fell: setting the step aside to dig in");
     top.step.abort();
@@ -516,7 +517,7 @@ export class Agent {
    */
   private async shelterIfNight(work: Work | undefined): Promise<boolean> {
     const { persona, runtime, log } = this.options;
-    if (!persona.settings.shelterAtNight || Date.now() < this.shelterRetryAt) return false;
+    if (!persona.settings.shelterAtNight || monotonicNow() < this.shelterRetryAt) return false;
     if (work !== undefined && work.objective.requester !== null) return false;
     if (!(await this.outInTheNight())) return false;
     const controller = new AbortController();
@@ -525,7 +526,7 @@ export class Agent {
     const label = "shelter for the night";
     log(`night: ${label}`);
     this.journalState(label);
-    const started = Date.now();
+    const started = monotonicNow();
     let result: SkillResult;
     try {
       result = await shelterForNight({
@@ -540,11 +541,11 @@ export class Agent {
     } finally {
       this.sheltering = null;
     }
-    if (result.status === "failed") this.shelterRetryAt = Date.now() + SHELTER_RETRY_MS;
+    if (result.status === "failed") this.shelterRetryAt = monotonicNow() + SHELTER_RETRY_MS;
     const outcome = result.status === "stopped" ? "interrupted" : result.status;
     const detail = result.status === "stopped" ? "left for an order, or stopped" : result.detail;
     log(`  -> ${label}: ${outcome}: ${detail}`);
-    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: Date.now() - started, activity: null });
+    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: elapsedSince(started), activity: null });
     this.journalState(null);
     if (result.status === "done") {
       this.lately.push(`${label}: ${detail}`);
@@ -556,7 +557,7 @@ export class Agent {
   /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */
   private async pickOwnObjective(): Promise<boolean> {
     const { persona, mind, runtime, log } = this.options;
-    if (persona.goal === undefined || Date.now() < this.restUntil) return false;
+    if (persona.goal === undefined || monotonicNow() < this.restUntil) return false;
     if (!(await this.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
     const hour = lastOfPlay(this.times);
@@ -570,7 +571,7 @@ export class Agent {
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
     this.modelFailures = 0;
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
-    if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
+    if (this.stack.length > 0 || monotonicNow() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}${purpose === null ? " (no kind of work named for it)" : ` (for ${purpose})`}`);
     this.stack.push(newWork({ text, requester: null, purpose }));
     this.options.journal?.({ kind: "objective", event: "own", text, requester: null, opportunities, time, purpose, drawn, chances: chances.slice(0, TOP_CHANCES) });
@@ -641,7 +642,7 @@ export class Agent {
     const controller = new AbortController();
     work.step = controller;
     this.journalState(label);
-    const started = Date.now();
+    const started = monotonicNow();
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
     // travelling; a skill's phases (the house's site preparation) change the activity from then on.
     const actions: ActionTime[] = [];
@@ -652,7 +653,7 @@ export class Agent {
     const gain = watchGain(decision.step, snapshot, controller, { runtime: this.options.runtime, log: this.options.log, ...(this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }) });
     this.body.onAction = (tool, input, ms) => {
       gain.alive();
-      if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
+      if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: monotonicNow() });
     };
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
@@ -691,7 +692,7 @@ export class Agent {
       ...(requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
       phase: (activity) => {
         gain.alive();
-        phases.push({ activity, at: Date.now() });
+        phases.push({ activity, at: monotonicNow() });
       },
       heading: gain.heading,
       alive: gain.alive,
@@ -711,15 +712,16 @@ export class Agent {
    */
   private async recordStep(work: Work, decision: StepDecision, run: StepRun, snapshot: BotSnapshot): Promise<StepRecord | null> {
     const { label, result, started, stalled } = run;
-    const ended = Date.now();
-    const ms = ended - started;
+    const ended = monotonicNow();
+    const endedAt = new Date().toISOString();
+    const ms = Math.round(ended - started);
     const { activity, spans, carried, position, room } = await this.activityOf(decision.step, run.actions, snapshot, started, ended, run.phases);
     // A house or a farm is what the objective turned out to be for, whatever its label said (the end decides).
     const endPurpose = ENDS.get(decision.step.skill);
     if (endPurpose !== undefined) work.purpose = endPurpose;
     const { purpose } = work;
-    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
-    if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
+    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: endedAt, minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
+    if (monotonicNow() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
     // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
     let record: StepRecord = stalled !== null && result.status !== "done"
       ? { step: label, outcome: "failed", detail: stalled }
@@ -753,7 +755,7 @@ export class Agent {
 
   /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
   private rememberFailedStep(objective: Objective, step: string, key: string, detail: string, carried: string | null, position: Position | null): void {
-    const now = Date.now();
+    const now = monotonicNow();
     const before = this.failedSteps.find((failure) => failure.key === key)?.failures ?? [];
     const kept = this.failedSteps.filter((failure) => failure.key !== key);
     kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now], carried, position });
@@ -766,7 +768,7 @@ export class Agent {
    */
   private earlierFailures(snapshot: BotSnapshot): EarlierFailure[] {
     const carried = carriedOf(snapshot);
-    const now = Date.now();
+    const now = monotonicNow();
     return this.failedSteps
       .filter((failure) => now - failure.at <= FAILED_STEP_MINUTES * 60_000)
       .reverse()
@@ -804,12 +806,12 @@ export class Agent {
   private async waitForGoalBudget(): Promise<boolean> {
     const interval = 60_000 / this.options.persona.settings.goalCallsPerMinute;
     const orderOnTop = () => (this.stack.at(-1)?.objective.requester ?? null) !== null;
-    while (Date.now() < this.nextGoalCall) {
+    while (monotonicNow() < this.nextGoalCall) {
       if (this.runSignal.aborted || orderOnTop()) return false;
-      await this.idle(Math.min(this.nextGoalCall - Date.now(), this.options.pollMs ?? DEFAULT_POLL_MS));
+      await this.idle(Math.min(this.nextGoalCall - monotonicNow(), this.options.pollMs ?? DEFAULT_POLL_MS));
     }
     if (orderOnTop()) return false;
-    this.nextGoalCall = Date.now() + interval;
+    this.nextGoalCall = monotonicNow() + interval;
     return true;
   }
 
@@ -1024,7 +1026,7 @@ export class Agent {
    * terraforming: only the last hour is kept), at start and then every {@link ROTATE_EVERY_MS}.
    */
   private async rotateActivityNotes(): Promise<void> {
-    this.rotatedAt = Date.now();
+    this.rotatedAt = monotonicNow();
     try {
       const rows = await this.options.runtime.queryBotData(activityNotesQuery(this.options.persona.username));
       const stale = staleActivityNotes(rows, RECENT_MINUTES);
@@ -1059,10 +1061,10 @@ export class Agent {
     if (!this.stack.includes(work) || fact === work.lastFact) return;
     work.lastFact = fact;
     this.options.log(`  now: ${fact}`);
-    const asked = Date.now() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
+    const asked = monotonicNow() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
     this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
     if (!asked) return;
-    work.spokenAt = Date.now();
+    work.spokenAt = monotonicNow();
     void this.narrate(work.objective.text, "progress", fact, work.whisperTo, () => this.stack.includes(work));
   }
 
@@ -1119,7 +1121,7 @@ export class Agent {
   private stopAndRest(speaker?: string): void {
     if (speaker === undefined) this.stopAll();
     else this.stopWorkOf(speaker);
-    this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
+    this.restUntil = monotonicNow() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 
   /**
@@ -1141,7 +1143,7 @@ export class Agent {
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
-  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null): void {
+  private speak(text: string, since = monotonicNow(), to?: readonly string[], whisperTo: string | null = null): void {
     if (text.trim() === "") return;
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);

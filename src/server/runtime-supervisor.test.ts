@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { blockThread } from "../test-support/block-thread.js";
 import { RUNTIME_RESTART_WINDOW_MS } from "./runtime-liveness.js";
+import { INCIDENT_HISTORY_MS } from "../diagnostics/incident-recorder.js";
 import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervisor.js";
 
 const executable = process.execPath;
@@ -22,6 +24,7 @@ async function supervised(
   launch?: (directory: string) => { executable: string; args: string[] },
   deadlines?: McpSupervisorOptions["deadlines"],
   restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
+  incidentHistoryMs?: number,
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
@@ -35,6 +38,7 @@ async function supervised(
       incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
       deadlines,
       restartWindowMs,
+      incidentHistoryMs,
     },
     Object.getOwnPropertyDescriptors(child),
   ) as McpSupervisorOptions;
@@ -59,27 +63,87 @@ async function whenHealthy(url: string): Promise<void> {
   while (!(await fetch(`${url}/health`)).ok) await delay(20);
 }
 
+/**
+ * Waits for the supervisor's `failed` state and returns its `/health` answer. A 503 alone is not enough: it also covers
+ * `failing`, where the failure and its incident are not saved yet. The wait is bounded by the test's own timeout.
+ */
+async function whenFailed(url: string, pollMs = 100) {
+  while (true) {
+    const response = await fetch(`${url}/health`);
+    const status = await response.json();
+    if (status.runtime?.state === "failed") return { httpStatus: response.status, status };
+    await delay(pollMs);
+  }
+}
+
+/**
+ * The diagnostics once the runtime has reported an active scope and a heartbeat: it sends them on its own timers (the
+ * heartbeat every 250 ms), so a fixed wait can read them too early. Bounded by the test's own timeout.
+ */
+async function whenReported(url: string) {
+  while (true) {
+    const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
+    if (diagnostics.heartbeat && diagnostics.activity?.active.length) return diagnostics;
+    await delay(50);
+  }
+}
+
+/** Heartbeats the supervisor read in its first moments after its own pause were sent before the runtime paused: stale. */
+const STALE_HEARTBEAT_WINDOW_MS = 250;
+
+/**
+ * The runtime's diagnostics once it has sent a heartbeat that the supervisor received after `staleBefore` (a
+ * `performance.now()` reading: the supervisor runs in the test's process), or once the supervisor has declared it
+ * `failed` (it then ignores the runtime's messages for good, so no heartbeat would come). A heartbeat sent before the
+ * runtime's pause is drained at the supervisor's resume and must not count as the runtime being back; a fixed wait
+ * reads too early or accepts it. Bounded by the test's own timeout.
+ */
+async function whenHeartbeatReceivedAfter(url: string, staleBefore: number) {
+  while (true) {
+    const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
+    const receivedAt = performance.now() - diagnostics.heartbeatAgeMs;
+    if (diagnostics.state === "failed" || (diagnostics.heartbeat && receivedAt > staleBefore)) return diagnostics;
+    await delay(50);
+  }
+}
+
+/** The supervisor pauses itself for `SUPERVISOR_PAUSE_MS`, starting `SUPERVISOR_PAUSE_DELAY_MS` after the runtime's `/pause` was accepted (the runtime's own pause starts 100 ms after it). */
+const SUPERVISOR_PAUSE_MS = 2_500;
+const SUPERVISOR_PAUSE_DELAY_MS = 100;
+/** The liveness deadline of the two pause tests below. */
+const PAUSE_TEST_UNRESPONSIVE_MS = 1_500;
+
+/**
+ * The runtime pauses `pauseMs` from its `/pause` and the supervisor itself 2.5 s from 100 ms later, so the supervisor
+ * resumes `pauseMs` - 2.6 s before the runtime does. Returns the diagnostics once the runtime is back or failed. Both
+ * pauses are on the monotonic clock (`blockThread`): a wall-clock pause is stretched ~2 s by WSL's clock steps and made
+ * this test fail once in ~70 runs (2026-10-30).
+ */
+async function pauseBothLoopsUntilRuntimeBack(url: string) {
+  assert.equal(await (await fetch(`${url}/pause`)).text(), "accepted");
+  await new Promise<void>((resolve) =>
+    setTimeout(() => {
+      blockThread(SUPERVISOR_PAUSE_MS);
+      resolve();
+    }, SUPERVISOR_PAUSE_DELAY_MS),
+  );
+  return whenHeartbeatReceivedAfter(url, performance.now() + STALE_HEARTBEAT_WINDOW_MS);
+}
+
 test(
   "a shared scheduling pause gets a fresh liveness window when the supervisor resumes",
   { timeout: 15_000 },
   async (t) => {
-    // The child pauses 3 s, the supervisor 2.5 s: past its 1.5 s deadline, so it sees its own blind gap.
-    const { url } = await supervised(t, "observer-stall", wedgedWith("--pause-ms=3000"), { startupMs: 10_000, unresponsiveMs: 1_500 });
+    // The child pauses 3 s, the supervisor 2.5 s: past its 1.5 s deadline, so it sees its own blind gap. The child
+    // resumes half a second after it, inside the fresh 1.5 s window. The supervisor cannot diagnose a child-only hang
+    // during its own blind gap.
+    const { url } = await supervised(t, "observer-stall", wedgedWith("--pause-ms=3000"), { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS });
     await whenHealthy(url);
-    await delay(350);
-    assert.equal(await (await fetch(`${url}/pause`)).text(), "accepted");
-    // Pause both loops, with the child resuming half a second later. The
-    // supervisor cannot diagnose a child-only hang during its own blind gap.
-    await new Promise<void>((resolve) =>
-      setTimeout(() => {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500);
-        resolve();
-      }, 100),
-    );
-    await delay(1000);
 
+    const diagnostics = await pauseBothLoopsUntilRuntimeBack(url);
+
+    assert.equal(diagnostics.state, "ready", "The supervisor must not blame the child for its own blind gap.");
     assert.equal((await fetch(`${url}/health`)).status, 200);
-    const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
     assert.ok(
       diagnostics.heartbeatAgeMs < 1000,
       "Fresh child heartbeats must resume after the supervisor can observe them.",
@@ -88,22 +152,53 @@ test(
 );
 
 test(
-  "retains active request and restored phase after the client and entry event are gone",
-  { timeout: 40_000 },
+  "a runtime still paused when the fresh liveness window after the supervisor's blind gap ends is declared hung",
+  { timeout: 15_000 },
   async (t) => {
-    const { url } = await supervised(t, "attribution", undefined, fastDeadlines);
+    // The child pauses 5 s: 2.4 s after the supervisor resumes, past the fresh 1.5 s window.
+    const { url } = await supervised(t, "observer-stall-hang", wedgedWith("--pause-ms=5000"), { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS });
+    await whenHealthy(url);
+
+    const pausedAt = performance.now();
+    const diagnostics = await pauseBothLoopsUntilRuntimeBack(url);
+    const failedSeenAfterMs = performance.now() - pausedAt;
+
+    assert.equal(diagnostics.state, "failed");
+    const { runtime } = await (await fetch(`${url}/health`)).json();
+    assert.equal(runtime.failure.code, "RUNTIME_UNRESPONSIVE");
+    // Timed here, not read from the message ("absent for N ms" counts from the last heartbeat the supervisor holds, and
+    // one drained at its resume is as late as the resume itself): the failure may come no sooner than the supervisor's
+    // own pause plus the fresh window after it, whichever heartbeat it holds.
+    const freshWindowEndsMs = SUPERVISOR_PAUSE_DELAY_MS + SUPERVISOR_PAUSE_MS + PAUSE_TEST_UNRESPONSIVE_MS;
+    assert.ok(failedSeenAfterMs >= freshWindowEndsMs, `Declared after the fresh window (${freshWindowEndsMs} ms after the pause), not at the first tick: failed seen after ${Math.round(failedSeenAfterMs)} ms.`);
+  },
+);
+
+/** The attribution test's incident ring age, short so the rows age out in seconds; the child waits it too (`--history-ms`). */
+const SHORT_HISTORY_MS = 3_000;
+
+test(
+  "retains active request and restored phase after the client and entry event are gone",
+  { timeout: 15_000 },
+  async (t) => {
+    const { url } = await supervised(
+      t,
+      "attribution",
+      wedgedWith(`--history-ms=${SHORT_HISTORY_MS}`),
+      fastDeadlines,
+      0,
+      SHORT_HISTORY_MS,
+    );
     await whenHealthy(url);
     assert.equal(await (await fetch(`${url}/background`)).text(), "accepted");
-    await delay(350);
-    const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
+    const diagnostics = await whenReported(url);
     assert.equal(diagnostics.activity.active[0].owner.requestId, 812);
     assert.ok(diagnostics.heartbeat.memory.rss > 0);
 
-    // Outlast the liveness window so the supervisor declares the failure itself.
-    await delay(21_500);
+    // The runtime wedges on its own timer, after the ring's age; the supervisor then declares the failure itself.
+    const { httpStatus, status } = await whenFailed(url);
 
-    assert.equal((await fetch(`${url}/health`)).status, 503);
-    const status = await (await fetch(`${url}/health`)).json();
+    assert.equal(httpStatus, 503);
     const reference = status.runtime.failure.incident;
     assert.equal(status.runtime.failure.actionId, "background-action-812");
     assert.equal(status.runtime.failure.activity.active[0].owner.requestId, 812);
@@ -113,6 +208,7 @@ test(
       .split("\n")
       .map((line) => JSON.parse(line));
     assert.equal(records[0].requestId, 812);
+    assert.equal(records[0].history.durationMs, SHORT_HISTORY_MS, "The option reaches the supervisor's ring.");
     assert.ok(!records.some((row) => row.kind === "execution"), "The original transitions have aged out.");
     const failure = records.find((row) => row.kind === "runtime_failure");
     assert.equal(failure.activity.active.length, 1);
@@ -149,6 +245,12 @@ for (const fault of ["hang", "microtask", "sse-hang", "crash"] as const) {
     assert.match(status.runtime.failure.message, /runtime has been stopped and requires a restart/);
     assert.equal(status.runtime.failure.incident.artifact.kind, "written");
     const incident = await readFile(status.runtime.failure.incident.artifact.path, "utf8");
+    assert.equal(
+      JSON.parse(incident.split("\n")[0]).history.durationMs,
+      INCIDENT_HISTORY_MS,
+      "Without the option the ring keeps production's age.",
+    );
+    assert.equal(INCIDENT_HISTORY_MS, 20_000);
     assert.match(incident, /runtime_failure/);
     assert.match(incident, /"tool":"(?:hang|microtask|sse-hang|crash)"/);
     if (fault !== "crash") assert.match(incident, /fault_injection/);
@@ -187,12 +289,8 @@ test("a runtime launch failure stays observable and can be closed", { timeout: 5
     args: [],
   }));
 
-  let body: string;
-  do {
-    await delay(20);
-    body = await (await fetch(`${url}/health`)).text();
-  } while (!body.includes('"state":"failed"'));
-  assert.match(body, /RUNTIME_EXITED/);
+  const { status } = await whenFailed(url, 20);
+  assert.match(JSON.stringify(status), /RUNTIME_EXITED/);
 
   await Promise.all([supervisor.close(), supervisor.close()]);
 });
@@ -211,12 +309,8 @@ test("a runtime silent before ready for longer than the heartbeat deadline is no
 
 test("a runtime silent past the startup deadline before ready is killed as unresponsive", { timeout: 15_000 }, async (t) => {
   const { url } = await supervised(t, "stuck-start", slowStart(8_000), { startupMs: 2_000, unresponsiveMs: 1_000 });
-  let body: string;
-  do {
-    await delay(100);
-    body = await (await fetch(`${url}/health`)).text();
-  } while (!body.includes('"state":"failed"'));
-  assert.match(body, /RUNTIME_UNRESPONSIVE/);
+  const { status } = await whenFailed(url);
+  assert.match(JSON.stringify(status), /RUNTIME_UNRESPONSIVE/);
 });
 
 const mcpCall = (url: string, id: number, tool: string) =>

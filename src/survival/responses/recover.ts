@@ -1,6 +1,7 @@
 import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import type { Bot } from "mineflayer";
 import { eatFood } from "../../actions/eat-food/eat-food.js";
+import { monotonicNow } from "../../utils/index.js";
 import { REGENERATION_HUNGER } from "../../world/food.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
@@ -65,7 +66,7 @@ export async function recoverUnderCover(
     scope: scope.scope,
     unit: "milliseconds",
     limit: options.maximumMs,
-    measure: Date.now,
+    measure: monotonicNow,
     exhaustion: "Retain observed enclosure and return exhausted recovery with current health and hunger.",
   });
   const held = (stop: "exhausted" | "unavailable" | "eating_failed", reason: string): CoveredRecovery => {

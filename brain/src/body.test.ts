@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, INSTANT_TYPING, toChatLines } from "./body.ts";
-import { FakeRuntime, until } from "./testing.ts";
+import { Body, INSTANT_TYPING, REFLEX_WAIT_MS, toChatLines } from "./body.ts";
+import { FakeRuntime, steppedClocks, until } from "./testing.ts";
 
 test("chat lines are single-line, never commands, and fit the 256-character limit", () => {
   assert.deepEqual(toChatLines("  /op me\nplease §cnow "), ["op me please cnow"]);
@@ -35,7 +35,7 @@ test("a long reply is sent as two lines in order, and a whisper goes to its play
   const body = new Body(runtime, () => undefined, INSTANT_TYPING);
   await body.say(`${"A".repeat(200)}. ${"B".repeat(100)}.`);
   assert.deepEqual(runtime.said, [`${"A".repeat(200)}.`, `${"B".repeat(100)}.`]);
-  await body.say("psst", Date.now(), "Tom");
+  await body.say("psst", performance.now(), "Tom");
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input.to), [undefined, undefined, "Tom"]);
 });
 
@@ -87,13 +87,13 @@ test("speech runs beside the work in progress: it neither cancels it nor waits f
 test("a reply waits as long as typing it would take, thinking time included, and lines keep their order", async () => {
   const runtime = new FakeRuntime();
   const body = new Body(runtime, () => undefined, { msPerChar: 10, maxMs: 200 });
-  const started = Date.now();
+  const started = performance.now();
   const first = body.say("0123456789", started - 60);
   const second = body.say("hi");
   await Promise.all([first, second]);
   assert.deepEqual(runtime.said, ["0123456789", "hi"]);
   // The first line types 100 ms minus the 60 ms already spent thinking; "hi" was typed meanwhile.
-  const elapsed = Date.now() - started;
+  const elapsed = performance.now() - started;
   assert.ok(elapsed >= 35 && elapsed < 400, `took ${elapsed} ms`);
 });
 
@@ -120,4 +120,50 @@ test("every foreground action is reported once it ends, with how long it ran, fa
   await body.act("craft_item", { items: [] }, "test");
   assert.deepEqual(seen.map(([tool, input]) => [tool, input]), [["collect_block", { block_name: "stone", count: 1 }], ["craft_item", { items: [] }]]);
   assert.ok(seen.every(([, , ms]) => ms >= 0));
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock; the typing pace and the reflex wait are durations.
+test("a reply's typing wait counts monotonic time: a wall clock step back of 60 s does not stretch it", async (t) => {
+  const runtime = new FakeRuntime();
+  const clocks = steppedClocks(t);
+  const body = new Body(runtime, () => undefined, { msPerChar: 10, maxMs: 200 });
+  const saying = body.say("0123456789");
+  clocks.wall(-60_000);
+  const outcome = await Promise.race([saying.then(() => "said"), new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 1_500))]);
+  assert.equal(outcome, "said");
+  assert.deepEqual(runtime.said, ["0123456789"]);
+});
+
+test("a survival reflex holding the body is waited for REFLEX_WAIT_MS of monotonic time, however the wall clock steps", async (t) => {
+  const runtime = new FakeRuntime();
+  const clocks = steppedClocks(t);
+  const refusal = { state: "refused", code: "ACTION_BUSY", error: "body owner: hostile_reflex", activeActionId: null, unretrievedActionId: null } as const;
+  let tries = 0;
+  runtime.submit = async () => {
+    tries += 1;
+    if (tries === 2) {
+      clocks.monotonic(REFLEX_WAIT_MS + 1_000);
+      clocks.wall(-REFLEX_WAIT_MS * 3);
+    }
+    return refusal;
+  };
+  const acting = new Body(runtime, () => undefined).act("eat_food", { food_name: "bread" }, "test");
+  const outcome = await Promise.race([acting, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+  assert.notEqual(outcome, "hung", "30 s of monotonic time passed: the wait is over");
+  assert.equal((outcome as { status: string }).status, "refused");
+});
+
+test("the time an action ran, told to onAction, is monotonic: a wall clock step back of 60 s in it does not make it negative", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 200;
+  const clocks = steppedClocks(t);
+  const body = new Body(runtime, () => undefined);
+  const told: number[] = [];
+  body.onAction = (_tool, _input, ms) => told.push(ms);
+  const acting = body.act("collect_block", { block_name: "oak_log" }, "test");
+  await until(() => runtime.submitted.length === 1);
+  clocks.wall(-60_000);
+  await acting;
+  assert.equal(told.length, 1);
+  assert.ok(told[0]! >= 0 && told[0]! < 10_000, `ms ${told[0]}`);
 });

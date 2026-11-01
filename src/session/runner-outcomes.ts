@@ -1,5 +1,6 @@
 // What the action runner reports: the texts of a refused, stalled or limited request, and the output shapes around them.
 import type { ActionOutput, ActionResult, RuntimeFailure } from "../actions/index.js";
+import { elapsedSince } from "../utils/index.js";
 import type { ReflexLimitKind } from "./abort.js";
 
 // ── Reported outcomes ────────────────────────────────────────────────────────
@@ -36,8 +37,8 @@ export function measured<Name extends string, Result extends ActionResult>(
   result: Result | RuntimeFailure,
   interruptions: readonly string[] = [],
 ): ActionOutput<Name, Result> {
-  // The wall clock can step back (WSL resyncing its clock, live 2026-10-07): a negative duration failed the output
-  // schema and every view_status call with it.
-  const output: ActionOutput<Name, Result> = { action, durationMs: Math.max(0, Date.now() - startedAtMs), result };
+  // `startedAtMs` is a `monotonicNow()` reading: the wall clock steps back under WSL (live 2026-10-07) and a negative
+  // duration failed the output schema.
+  const output: ActionOutput<Name, Result> = { action, durationMs: elapsedSince(startedAtMs), result };
   return interruptions.length > 0 ? { ...output, interruptions: [...interruptions] } : output;
 }

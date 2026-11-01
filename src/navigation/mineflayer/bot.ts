@@ -1,5 +1,6 @@
 import { saveWaterLanding } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
+import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { SupportedPositionController } from "../execution/supported-position-controller.js";
 import { holdWaterPosition, landOnStanceFloor } from "../steering/hold-water-position.js";
@@ -730,7 +731,7 @@ export class MineflayerBot implements NavigationBot {
     markIssued();
     // Read before the hold so the dig aims where the route left the head.
     const yaw = this.bot.entity.yaw;
-    const digStartedAt = Date.now();
+    const digStartedAt = monotonicNow();
     const inWater = this.bot.entity.isInWater;
     const releaseStance = this.bot.holdWaterStance(
       signal,
@@ -796,7 +797,7 @@ export class MineflayerBot implements NavigationBot {
         airborne,
         inWater,
         toolType: operation.toolType,
-        elapsedMs: Date.now() - digStartedAt,
+        elapsedMs: elapsedSince(digStartedAt),
       });
     }
     return null;

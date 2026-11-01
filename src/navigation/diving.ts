@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
+import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
 import { timeoutSignal } from "../utils/wall-timers.js";
 import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../world/world-age.js";
@@ -100,7 +101,7 @@ export class Diving {
     const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
       ...(options.stopSignal ? [options.stopSignal] : [])]) };
-    const started = Date.now();
+    const started = monotonicNow();
     let previousStop = "";
     let repeatedStops = 0;
     const tick = () => {
@@ -122,7 +123,7 @@ export class Diving {
       for (;;) {
         options.signal?.throwIfAborted();
         if (options.stopSignal?.aborted) return { status: "stopped" as const,
-          reason: String(options.stopSignal.reason), elapsedMs: Date.now() - started };
+          reason: String(options.stopSignal.reason), elapsedMs: elapsedSince(started) };
         const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
@@ -133,7 +134,7 @@ export class Diving {
           ...(air !== null && options.movements.allowSwimming ? { dive: { origin, airTicks: air } } : {}),
         };
         const result = await navigate({ ...options, movements,
-          timeoutMs: options.timeoutMs === undefined ? undefined : Math.max(0, options.timeoutMs - (Date.now() - started)),
+          timeoutMs: options.timeoutMs === undefined ? undefined : Math.max(0, options.timeoutMs - elapsedSince(started)),
           stopSignal: AbortSignal.any([session.stop.signal, ...(options.stopSignal ? [options.stopSignal] : [])]),
         });
         const continuingDive = session.stop.signal.aborted;
@@ -142,18 +143,18 @@ export class Diving {
         if ((!continuingDive && !returnToProcess) || session.cancelled.signal.aborted || options.signal?.aborted ||
           (options.stopSignal?.aborted && !returnToProcess)) return this.#finished(session, result);
         const surface = swimAscent(this.#read, this.bot.entity.position.floored())?.surface;
-        if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: Date.now() - started };
+        if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: elapsedSince(started) };
         const progress = `${this.bot.entity.position.floored()}:${session.completedWork}`;
         repeatedStops = progress === previousStop ? repeatedStops + 1 : 0;
         previousStop = progress;
-        if (repeatedStops >= 2) return { status: "stopped" as const, reason: "Dive cannot make progress within one breath", elapsedMs: Date.now() - started };
+        if (repeatedStops >= 2) return { status: "stopped" as const, reason: "Dive cannot make progress within one breath", elapsedMs: elapsedSince(started) };
         session.returning = true;
         this.report("breathing");
         // A process's quantity signal ends its route, but still owes a safe
         // handoff. Action cancellation and defensive takeover always win.
         const returnStop = returnToProcess ? session.cancelled.signal : options.stopSignal;
         const unbreathed = await this.#breatheAtSurface(session, options, navigate, surface, lifetime, returnStop);
-        if (unbreathed) return { ...unbreathed, elapsedMs: Date.now() - started };
+        if (unbreathed) return { ...unbreathed, elapsedMs: elapsedSince(started) };
         session.returning = false;
         session.stop = new AbortController();
         this.report("resumed");
@@ -164,7 +165,7 @@ export class Diving {
     } catch (error) {
       options.signal?.throwIfAborted();
       if (session.cancelled.signal.aborted) return { status: "stopped" as const,
-        reason: String(session.cancelled.signal.reason), elapsedMs: Date.now() - started };
+        reason: String(session.cancelled.signal.reason), elapsedMs: elapsedSince(started) };
       throw error;
     } finally {
       this.bot.off("physicsTick", tick);

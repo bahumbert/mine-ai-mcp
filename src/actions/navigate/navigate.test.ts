@@ -59,6 +59,14 @@ function dependencies(
 
 const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
 
+/** Dependencies whose movement policy prices every break with the diamond pickaxe, so losing it ends a dig route. */
+function toolLossDeps(bot: Bot, run: NavigateDependencies["navigate"]): NavigateDependencies {
+  return { navigate: run, createMovements: (() => createMovementPolicy({
+    priceBreak: () => ({ decision: { kind: "allowed" },
+      tool: { itemType: bot.registry.itemsByName.diamond_pickaxe!.id, expectedTicks: 1 } }),
+  })) as never };
+}
+
 test("dig navigation safely settles partial when its best pickaxe capability drops", async () => {
   const { bot, inventory } = flatGroundBot(64, { slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "stone_pickaxe" } } });
   inventory.slots[36]!.durabilityUsed = 1560;
@@ -70,14 +78,61 @@ test("dig navigation safely settles partial when its best pickaxe capability dro
     assert.equal(stopSignal?.aborted, true);
     return { status: "stopped", reason: String(stopSignal?.reason), elapsedMs: 1 };
   };
-  const deps: NavigateDependencies = { navigate: run, createMovements: (() => createMovementPolicy({
-    priceBreak: () => ({ decision: { kind: "allowed" },
-      tool: { itemType: bot.registry.itemsByName.diamond_pickaxe!.id, expectedTicks: 1 } }),
-  })) as never };
-  const action = createNavigateAction(bot, fakeNavigation, deps);
+  const action = createNavigateAction(bot, fakeNavigation, toolLossDeps(bot, run));
   const output = await new ActionRunner().run(action, { x: 10, y: 64, z: 0, dig: true });
   assert.equal(output.result.status, "partial");
   assert.match("error" in output.result ? output.result.error : "", /TOOL_TIER_LOST.*stone pickaxe remains/);
+});
+
+/** The leg's navigation evidence after an engine that takes `legMs` of the installed clock, steps the wall clock by `wallStepMs` mid-leg, then throws. */
+async function faultAcrossWallStep(legMs: number, wallStepMs: number) {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const { bot } = flatGroundBot(64, { clock });
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    await clock.sleep(legMs / 2);
+    clock.stepWallClock(wallStepMs);
+    await clock.sleep(legMs / 2);
+    throw new Error("engine fault");
+  }));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 10, y: 64, z: 0 }), legMs + 1_000);
+  // `server/mcp.ts:124` parses the output; the runner never does, so a negative elapsedMs shows only here.
+  assert.doesNotThrow(() => action.outputSchema.parse(output));
+  assert.equal(output.result.status, "failed");
+  assert.match("error" in output.result ? output.result.error : "", /engine fault/);
+  return "navigation" in output.result ? output.result.navigation.elapsedMs : null;
+}
+
+test("an engine fault after a 0.8 s wall step back in a 200 ms leg fails with the fault, not a schema error", async () => {
+  assert.equal(await faultAcrossWallStep(200, -800), 200);
+});
+
+test("an engine fault in a 3 s leg reports 3000 across a 1.2 s wall step forward", async () => {
+  assert.equal(await faultAcrossWallStep(3_000, 1_200), 3_000);
+});
+
+test("a tool lost in a 3 s leg reports elapsedMs 3000 across a 0.8 s wall step back, and the output parses", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(5_000);
+  const { bot, inventory } = flatGroundBot(64, { clock, slots: { 36: { name: "diamond_pickaxe" }, 9: { name: "stone_pickaxe" } } });
+  inventory.slots[36]!.durabilityUsed = 1560;
+  const run: NavigateDependencies["navigate"] = async ({ stopSignal, onToolSelected }) => {
+    onToolSelected?.(bot.registry.itemsByName.diamond_pickaxe!.id);
+    await clock.sleep(1_500);
+    clock.stepWallClock(-800);
+    await clock.sleep(1_500);
+    inventory.tossStack(inventory.slots[36]!);
+    await Promise.resolve();
+    return { status: "stopped", reason: String(stopSignal?.reason), elapsedMs: 1 };
+  };
+  const action = createNavigateAction(bot, fakeNavigation, toolLossDeps(bot, run));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 10, y: 64, z: 0, dig: true }), 5_000);
+  assert.doesNotThrow(() => action.outputSchema.parse(output));
+  assert.equal(output.result.status, "partial");
+  assert.equal("navigation" in output.result ? output.result.navigation.elapsedMs : null, 3_000);
 });
 
 test("a midwater arrival records current completion without claiming grounded footing", async () => {

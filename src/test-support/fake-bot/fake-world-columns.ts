@@ -155,7 +155,7 @@ function buildColumn(Chunk: ChunkClass, content: ColumnContent, chunkX: number, 
 
 /** Building the class costs about a millisecond and a harness is made per test, so it is kept per version. */
 const chunkClasses = new Map<string, ChunkClass>();
-function chunkClassOf(registry: Bot["registry"]): ChunkClass {
+export function chunkClassOf(registry: Bot["registry"]): ChunkClass {
   const version = String(registry.version.minecraftVersion);
   let Chunk = chunkClasses.get(version);
   if (Chunk === undefined) {

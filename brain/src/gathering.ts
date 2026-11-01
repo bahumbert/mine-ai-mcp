@@ -5,6 +5,7 @@ import { boatsOfWood } from "./boats.ts";
 import type { ActOutcome, Body } from "./body.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
+import { stackSizeOf } from "./newest-registry.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
@@ -538,12 +539,12 @@ function chooseInput(recipes: readonly SmeltingRecipe[], inventory: Stacks): str
 }
 
 /**
- * The fuel for smelting `count` items, never the input itself: a fuel carried or being fetched anyway (`coming`) that
- * covers the job (the one burning the fewest items: coal before planks), else planks of the wood it carries, else oak
- * planks; with how many it burns.
+ * The fuel for smelting `count` items, never the input itself nor an item one slot holds alone (a full bucket, a boat:
+ * kept for their use): a fuel carried or being fetched anyway (`coming`) that covers the job (the one burning the fewest
+ * items: coal before planks), else planks of the wood it carries, else oak planks; with how many it burns.
  */
 function chooseFuel(count: number, input: string, inventory: Stacks, coming: readonly ItemCount[], fuels: Readonly<Record<string, number>>): { fuel: string; fuelCount: number; fuelWorth: number } {
-  const worth = (name: string) => (name === input ? 0 : fuels[name] ?? 0);
+  const worth = (name: string) => (name === input || stackSizeOf(name) === 1 ? 0 : fuels[name] ?? 0);
   const available = (name: string) => carried(inventory, name) + (coming.find((entry) => entry.item === name)?.count ?? 0);
   const covering = [...new Set([...inventory.map((stack) => stack.name), ...coming.map((entry) => entry.item)])]
     .filter((name) => worth(name) > 0 && available(name) * worth(name) >= count)

@@ -131,7 +131,7 @@ export class ServerPool {
     reason ??= this.#startReason(spec, spreadOver);
     const id = `s${this.#nextId++}`;
     this.#started += 1;
-    this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) starting: ${reason}`);
+    this.log(`server ${id} (${spec.kind}, key ${spec.key}) starting: ${reason}`);
     const death = new AbortController();
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
@@ -154,7 +154,7 @@ export class ServerPool {
       await server.stop();
       throw error;
     }
-    this.log(`server ${id} (${spec.kind}, key ${spec.key.slice(0, 60)}) ready on port ${server.gamePort}`);
+    this.log(`server ${id} (${spec.kind}, key ${spec.key}) ready on port ${server.gamePort}`);
     return server;
   }
 
@@ -173,7 +173,7 @@ export class ServerPool {
 
   readings(): ServerReading[] {
     return [...this.#entries.values()].map(entry => ({
-      id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry),
+      id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry), lanes: entry.running,
       msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb,
     }));
   }

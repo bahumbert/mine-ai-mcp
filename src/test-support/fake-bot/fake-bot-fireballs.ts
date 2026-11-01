@@ -4,9 +4,12 @@
  * zero, then at its 2nd tick and at every 10th one from the 10th its velocity and its position (`entity_move_look` with the delta
  * since the last one told in 1/4096 of a block, `sync_entity_position` with the absolute position when the delta passes 8 blocks).
  * The ball's true position is the server's (`setServerPosition` at launch and each tick), so a hit is judged on it while the client holds
- * the last position it was told. A hit in reach (`use_entity`, mouse 1) sets it flying along the way the attacker looks; the client hears the new velocity and a move
- * packet of zero in that tick, nothing about an owner. A hit out of reach changes nothing. At the bot it hurts her (`damage_event`
+ * the last position it was told. A hit in reach (`use_entity`, mouse 1) sets it flying along the way the attacker looks; the client hears the new velocity and a position
+ * packet in that tick (a move of zero or the old flight's catch-up, below), nothing about an owner. A hit out of reach changes nothing. At the bot it hurts her (`damage_event`
  * of type `unattributed_fireball`, the ball as cause and direct source) and blows up (`explosion`, the ball destroyed).
+ * The position packet of a deflection is the ball's move since the last position the client was told (`tellMoveSinceLastTold`): a zero when there is none
+ * (3 of 3 runs of `deflect-fireball`, 2026-10-24, the hit right after the launch) and else the old flight's catch-up, `entity_move_look -856 0` (0.21 blocks
+ * back) in 2 of 24 runs, 2026-10-30 (the check accepts both: `assertMoveWithDeflection`; the fake's catch-up is the whole untold flight, at most 10 ticks).
  * Not modelled: the ball's yaw and pitch (they lerp toward its heading), blocks (a ball flies on until removed or until it meets
  * the bot), a ball with an owner (its hit is `fireball`), a hit on a ball that is not a `fireball`, the sound and particles.
  */
@@ -89,14 +92,19 @@ function createBallTelling(bot: FakeBot, parts: FireballParts) {
     parts.hear("rel_entity_move", { entityId: ball.entity.id, dX: 0, dY: 0, dZ: 0, onGround: false });
     bot.emit("entityMoved", ball.entity);
   };
-  return { tellVelocity, tellPosition, tellStill };
+  /** The position packet of a deflection: the ball's move since the last position the client was told, a move of zero when there is none (to the 1/4096 the packet counts in). */
+  const tellMoveSinceLastTold = (ball: Ball) => {
+    const delta = ball.position.minus(ball.entity.position);
+    return Math.round(delta.x * POSITION_UNIT) === 0 && Math.round(delta.y * POSITION_UNIT) === 0 && Math.round(delta.z * POSITION_UNIT) === 0 ? tellStill(ball) : tellPosition(ball);
+  };
+  return { tellVelocity, tellPosition, tellStill, tellMoveSinceLastTold };
 }
 
 /** The fireballs of the server: flight, what the client is told, the hit by the bot and the hit on her. */
 export function attachFakeFireballs(bot: FakeBot, parts: FireballParts): FakeFireballs {
   const balls = new Map<number, Ball>();
 
-  const { tellVelocity, tellPosition, tellStill } = createBallTelling(bot, parts);
+  const { tellVelocity, tellPosition, tellStill, tellMoveSinceLastTold } = createBallTelling(bot, parts);
 
   const touchesBot = (ball: Ball) => {
     const feet = bot.entity.position;
@@ -150,7 +158,7 @@ export function attachFakeFireballs(bot: FakeBot, parts: FireballParts): FakeFir
       ball.velocity = look.scaled(FIREBALL_DEFLECTED_SPEED);
       ball.power = FIREBALL_DEFLECTED_POWER;
       tellVelocity(ball);
-      tellStill(ball);
+      tellMoveSinceLastTold(ball);
       return "deflected";
     },
   };

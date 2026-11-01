@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,10 +9,14 @@ import type { RunResult } from "mine-labs";
 import { ClientsAhead } from "./client-ahead.ts";
 import { loadScenarioServerConfig } from "./config.ts";
 import { daemonListens, exchange } from "./daemon-client.ts";
-import { startDaemon, type Daemon } from "./daemon.ts";
+import { createDaemonMirror, startDaemon, type Daemon, type DaemonMirror } from "./daemon.ts";
 import { FakeFactory } from "./fake-servers.ts";
+import { modulesHash } from "./mirror-modules.ts";
+import { rootSlug } from "./source-root.ts";
 import type { DaemonMessage } from "./protocol.ts";
 import { ScriptedClients } from "./scripted-clients.ts";
+import { BUILD_KEY, TemplateBuildRig } from "./template-build-rig.ts";
+import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
 
 const ONE_FILE = fileURLToPath(new URL("../contract/scenarios/air-supply-under-water.yaml", import.meta.url));
@@ -28,7 +33,7 @@ const probeAnswers = (factory: FakeFactory): void => {
 
 async function withDaemon(
   run: (context: { daemon: Daemon; socketPath: string; factory: FakeFactory; dir: string; logs: string[] }) => Promise<void>,
-  overrides: { env?: Record<string, string>; runTrial?: TrialRunner } = {},
+  overrides: { env?: Record<string, string>; runTrial?: TrialRunner; mirror?: DaemonMirror; templateBuilds?: TemplateBuilds } = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "daemon-"));
   const socketPath = join(dir, "d.sock");
@@ -38,7 +43,7 @@ async function withDaemon(
   const config = loadScenarioServerConfig({ MINE_AI_SCENARIO_SAMPLE_EVERY_MS: "20", MINE_AI_SCENARIO_SOCKET_PATH: socketPath, ...overrides.env });
   const daemon = await startDaemon({
     socketPath, config, stateDir: join(dir, "state"), portBlock: { first: 25_400, last: 25_559 }, log: line => logs.push(line),
-    factory, runTrial: overrides.runTrial ?? passing,
+    factory, runTrial: overrides.runTrial ?? passing, mirror: overrides.mirror, templateBuilds: overrides.templateBuilds,
     machine: { read: async () => ({ cpuBusy: 0.1, memAvailableMb: 20_000, threads: 24 }) }, residentMbOf: async () => 900,
     runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
   });
@@ -202,5 +207,207 @@ test("a daemon given clients ahead boots one for the scenario it runs and kills 
     await daemon.stop();
     await clients.stopAll();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/** A mirror that records what the daemon asks of it, in order. */
+function recordingMirror(calls: string[]): DaemonMirror {
+  return {
+    acquire: async () => ({ kind: "snapshot", root: "/repo", dir: "/snapshots/g1", generation: 1, syncMs: 5, startedAt: "2026-10-31T10:00:00.000Z", release: () => { calls.push("release"); } }),
+    prune: async () => { calls.push("prune"); },
+    settled: async () => { calls.push("settled"); },
+  };
+}
+
+test("the daemon prunes the mirror at its start and, once the installs settled, again before it stops", async () => {
+  const calls: string[] = [];
+  await withDaemon(async ({ daemon }) => {
+    for (let waited = 0; !calls.includes("prune") && waited < 2_000; waited += 20) await new Promise(done => setTimeout(done, 20));
+    assert.deepEqual(calls, ["prune"], "pruned once at the start");
+    await daemon.stop();
+    assert.deepEqual(calls, ["prune", "settled", "prune"], "the install settles, then the last prune");
+  }, { mirror: recordingMirror(calls) });
+});
+
+test("a submit goes through the daemon's mirror: its snapshot's line is sent and its hold is given back when the batch ends", async () => {
+  const calls: string[] = [];
+  await withDaemon(async ({ socketPath }) => {
+    const messages = await submitAndCollect(socketPath, [ONE_FILE]);
+    assert.ok(messages.some(message => message.type === "info" && message.text.startsWith("clients start from snapshot g1 of /repo (synced in 5 ms")));
+    assert.equal(messages.at(-1)?.type, "done");
+    assert.ok(calls.includes("release"), "the hold was given back");
+  }, { mirror: recordingMirror(calls) });
+});
+
+test("the daemon's own mirror runs on the real node_modules trees and their prune, under a directory named by its socket", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "daemon-mirror-"));
+  try {
+    const root = join(dir, "root");
+    mkdirSync(join(root, "tests", "minecraft"), { recursive: true });
+    writeFileSync(join(root, "bun.lock"), "lock");
+    writeFileSync(join(root, "package.json"), "{}");
+    writeFileSync(join(root, "tests", "minecraft", "client-host.ts"), "export {};");
+    const mirrorDir = join(dir, "mirror");
+    const readyTree = join(mirrorDir, "modules", modulesHash(root), "node_modules");
+    mkdirSync(join(readyTree, "mine-labs"), { recursive: true });
+    const staleTree = join(mirrorDir, "modules", "0".repeat(64));
+    mkdirSync(staleTree, { recursive: true });
+    const eightDaysAgo = (Date.now() - 8 * 86_400_000) / 1000;
+    writeFileSync(join(staleTree, ".last-used"), "");
+    utimesSync(join(staleTree, ".last-used"), eightDaysAgo, eightDaysAgo);
+    const socketPath = join(dir, "d.sock");
+    const mirror = createDaemonMirror({
+      config: loadScenarioServerConfig({ MINE_AI_SCENARIO_MIRROR_DIR: mirrorDir }), socketPath, log: () => {}, ports: { mounts: () => `drvfs ${dir} 9p rw 0 0\n` },
+    });
+    const snapshot = await mirror.acquire(join(root, "tests", "minecraft"));
+    assert.equal(snapshot.kind, "snapshot", snapshot.kind === "in-place" ? snapshot.reason : "");
+    if (snapshot.kind !== "snapshot") return;
+    assert.ok(snapshot.dir.startsWith(join(mirrorDir, rootSlug(socketPath))), `the snapshot lives under the daemon's slug: ${snapshot.dir}`);
+    assert.equal(realpathSync(join(snapshot.dir, "node_modules")), realpathSync(readyTree), "linked to the tree modulesFor found ready");
+    snapshot.release();
+    await mirror.settled();
+    await mirror.prune();
+    assert.equal(existsSync(staleTree), false, "pruneModules deleted the old unlinked tree");
+    assert.equal(existsSync(readyTree), true, "and kept the tree a snapshot links");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the daemon's mirror passes the submitter's notify on: a slow sync reaches it as a syncing line", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "daemon-mirror-slow-"));
+  try {
+    const root = join(dir, "root");
+    mkdirSync(join(root, "tests", "minecraft"), { recursive: true });
+    writeFileSync(join(root, "bun.lock"), "lock");
+    writeFileSync(join(root, "package.json"), "{}");
+    const mirrorDir = join(dir, "mirror");
+    mkdirSync(join(mirrorDir, "modules", modulesHash(root), "node_modules", "mine-labs"), { recursive: true });
+    const mirror = createDaemonMirror({
+      config: loadScenarioServerConfig({ MINE_AI_SCENARIO_MIRROR_DIR: mirrorDir }), socketPath: join(dir, "d.sock"), log: () => {}, slowSyncNoticeMs: 20,
+      ports: { mounts: () => `drvfs ${dir} 9p rw 0 0\n`, run: () => new Promise(resolve => setTimeout(() => resolve({ code: 0, stderrTail: "" }), 150)) },
+    });
+    const notices: string[] = [];
+    const snapshot = await mirror.acquire(join(root, "tests", "minecraft"), undefined, line => notices.push(line));
+    assert.equal(snapshot.kind, "snapshot", snapshot.kind === "in-place" ? snapshot.reason : "");
+    assert.deepEqual(notices, [`syncing ${root} to the client mirror ...`]);
+    if (snapshot.kind === "snapshot") snapshot.release();
+    await mirror.settled();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+const pause = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let waited = 0; !condition(); waited += 10) {
+    if (waited > 5_000) throw new Error(`timed out waiting for ${what}`);
+    await pause(10);
+  }
+}
+
+test("the daemon builds a missing template at the first idle sample, never beside a running trial, and holds a submission made during the build", async () => {
+  const builds = new TemplateBuildRig();
+  builds.status.length = 0; // no flat server has written its server.properties yet
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let started = 0;
+  const gated: TrialRunner = async input => {
+    await input.onPrepared();
+    input.deferReset(async () => {});
+    started += 1;
+    await gate;
+    return { scenario: "x", outcome: "pass", elapsedMs: 1, goal: { state: "passed", detail: "ok" }, goalText: "" } satisfies RunResult;
+  };
+  try {
+    await withDaemon(async ({ socketPath }) => {
+      const first = submitAndCollect(socketPath, [ONE_FILE]);
+      await until(() => started === 1, "the first trial");
+      builds.status.push({ version: "1.21.4", key: BUILD_KEY, boxes: [], present: false }); // the first server of the key wrote it
+      await pause(150);
+      assert.equal(builds.calls.length, 0, "a trial runs, so nothing is built");
+      release();
+      await first;
+      await until(() => builds.calls.length === 1, "the build");
+      const second = submitAndCollect(socketPath, [ONE_FILE]);
+      await pause(200);
+      assert.equal(started, 1, "the second submission's trial waits for the build");
+      builds.calls[0]!.finish({ ok: true, dir: join(builds.storeDir, BUILD_KEY) });
+      const messages = await second;
+      assert.equal(started, 2);
+      const waits = messages.flatMap(message => (message.type === "wait" ? [message.text] : []));
+      assert.match(waits[0] ?? "", /waits: world template build of 1\.21\.4 is running/u, "the submitter is told what it waits for");
+      assert.equal(messages.find(message => message.type === "result")?.type, "result");
+    }, { runTrial: gated, templateBuilds: builds.builds, env: { MINE_AI_SCENARIO_WAIT_REPORT_MS: "50" } });
+  } finally {
+    builds.dispose();
+  }
+});
+
+test("the daemon does not stop for idleness while a build runs", async () => {
+  const builds = new TemplateBuildRig();
+  try {
+    await withDaemon(async ({ socketPath }) => {
+      await until(() => builds.calls.length === 1, "the build");
+      await pause(500); // five times DAEMON_IDLE_MS
+      assert.equal(await daemonListens(socketPath), true);
+      builds.calls[0]!.finish({ ok: true, dir: join(builds.storeDir, BUILD_KEY) });
+    }, { templateBuilds: builds.builds, env: { MINE_AI_SCENARIO_DAEMON_IDLE_MS: "100" } });
+  } finally {
+    builds.dispose();
+  }
+});
+
+test("the daemon's stop ends a running build before it closes the socket", async () => {
+  const builds = new TemplateBuildRig();
+  try {
+    await withDaemon(async ({ daemon }) => {
+      await until(() => builds.calls.length === 1, "the build");
+      await builds.calls[0]!.startServer();
+      const stopping = daemon.stop();
+      await builds.servers[0]!.whenStopped();
+      builds.calls[0]!.finish({ ok: false, reason: "build server did not stop: killed", bound: false });
+      await stopping;
+      assert.equal(builds.servers[0]!.stopped, true);
+      assert.deepEqual(builds.pidFile, []);
+    }, { templateBuilds: builds.builds });
+  } finally {
+    builds.dispose();
+  }
+});
+
+test("a stop request during a build stops the build at once instead of waiting for it (the bound is 180 s), and the daemon then stops", async () => {
+  const builds = new TemplateBuildRig();
+  try {
+    await withDaemon(async ({ daemon, socketPath }) => {
+      await until(() => builds.calls.length === 1, "the build");
+      await builds.calls[0]!.startServer();
+      const session = await exchange(socketPath, { type: "stop" }, () => {});
+      await session.closed;
+      await builds.servers[0]!.whenStopped(); // the request itself stopped the build server
+      builds.calls[0]!.finish({ ok: false, reason: "build server did not stop: killed", bound: false });
+      await daemon.stopped;
+      assert.equal(builds.calls.length, 1, "no other build");
+    }, { templateBuilds: builds.builds });
+  } finally {
+    builds.dispose();
+  }
+});
+
+test("a daemon asked to stop starts no build, even one whose key is being computed when the stop request comes", async () => {
+  const builds = new TemplateBuildRig();
+  let open!: () => void;
+  builds.statusGate = new Promise<void>(resolve => { open = resolve; });
+  try {
+    await withDaemon(async ({ daemon, socketPath }) => {
+      const session = await exchange(socketPath, { type: "stop" }, () => {});
+      await session.closed;
+      open();
+      await daemon.stopped;
+      assert.equal(builds.calls.length, 0);
+    }, { templateBuilds: builds.builds });
+  } finally {
+    builds.dispose();
   }
 });

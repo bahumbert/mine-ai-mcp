@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BodyAbort } from "../../session/abort.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { type SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
@@ -154,6 +154,35 @@ test("an execution exception of a reflex with retryAfterFailureMs is retried aft
   assert.equal(driver.answered.snapshot()[0]?.temporal?.premise, "retry_after_failure");
 });
 
+/** Attempts of a reflex with a 2 s retry delay, driven as production builds it (no `now`) on a mocked clock whose wall clock steps after the first failure. */
+async function attemptsAfterWallStep(wallStepMs: number, advanceAfterStepMs: number) {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the wall clock and the monotonic one read unrelated values (epoch vs uptime): a delay on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const { bot } = createFakeBot({ clock });
+  await using driver = new ReflexDriver(bot, new ActionRunner({ clock }));
+  const { attempts, definition } = throwingEscape(2_000);
+  driver.register(definition);
+  await clock.advance(100); // the first attempt fails and is answered at ~50 ms
+  assert.equal(attempts.count, 1);
+  clock.stepWallClock(wallStepMs);
+  await clock.advance(advanceAfterStepMs);
+  return attempts.count;
+}
+
+// The first attempt fails ~50 ms in; the helper passes 100 ms before the wall clock steps.
+const RETRY_DELAY_ROWS: ReadonlyArray<readonly [wallStepMs: number, advanceAfterStepMs: number, attempts: number, why: string]> = [
+  [-800, 1_800, 1, "1.9 s in: still answered"],
+  [-800, 2_200, 2, "2.3 s in: retried, the 0.8 s do not stretch the delay to 2.8 s"],
+  [1_200, 1_000, 1, "1.1 s in: the wall clock alone would call it over"],
+  [1_200, 2_200, 2, "2.3 s in: retried"],
+];
+for (const [wallStepMs, advanceAfterStepMs, attempts, why] of RETRY_DELAY_ROWS)
+  test(`a 2 s retry delay counts monotonic time: wall step ${wallStepMs} ms, ${advanceAfterStepMs} ms later it has made ${attempts} attempt(s) (${why})`, async () => {
+    assert.equal(await attemptsAfterWallStep(wallStepMs, advanceAfterStepMs), attempts);
+  });
+
 test("a death during the retry delay lets the reflex claim again at once after respawn", async () => {
   const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => 0 });
@@ -190,7 +219,7 @@ test("a definition's own temporal wins over the retry delay", async () => {
     ...definition,
     act: async () => "failed",
     failure: () => ({ kind: "failed", why: "No way out." }),
-    temporal: () => ({ premise: "own_premise", expiresAt: 5_000, why: "own" }),
+    temporal: () => ({ premise: "own_premise", durationMs: 5_000, why: "own" }),
   });
   bot.emit("physicsTick");
   await settled();

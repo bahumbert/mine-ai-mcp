@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Inbox } from "./inbox.ts";
+import { steppedClocks } from "./testing.ts";
 import type { PlayerMessage } from "./runtime-client.ts";
 
 const line = (username: string, message: string, extra: Partial<PlayerMessage> = {}): PlayerMessage => ({ username, channel: "chat", message, addressed: false, ...extra });
@@ -74,4 +75,14 @@ test("it says how long until the next message is ready", () => {
   assert.equal(inbox.readyIn(), 1_100);
   clock.now += 2_000;
   assert.equal(inbox.readyIn(), 0);
+});
+
+test("the burst window runs on the monotonic clock: a wall clock step between two lines does not split them", (t) => {
+  const clocks = steppedClocks(t);
+  const inbox = new Inbox(1_500);
+  inbox.push(line("Tom", "Ayla"));
+  clocks.wall(60_000);
+  inbox.push(line("Tom", "build me a house", { addressed: true }));
+  clocks.monotonic(2_000);
+  assert.equal(inbox.next()?.lines, 2);
 });

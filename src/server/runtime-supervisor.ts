@@ -3,7 +3,12 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, request as httpRequest, type ClientRequest, type ServerResponse } from "node:http";
 import { z } from "zod";
 import { writeIncidentArtifact, type IncidentReference, type IncidentRetention } from "../bot-data/incident-log.js";
-import { IncidentRecorder, type SourceIdentity } from "../diagnostics/incident-recorder.js";
+import {
+  INCIDENT_HISTORY_BYTES,
+  INCIDENT_HISTORY_MS,
+  IncidentRecorder,
+  type SourceIdentity,
+} from "../diagnostics/incident-recorder.js";
 import type { ProcessFault } from "./process-faults.js";
 import {
   RUNTIME_HEARTBEAT_MS,
@@ -65,7 +70,15 @@ export interface McpSupervisorOptions {
   };
   /** One restart of a killed runtime per this window (default {@link RUNTIME_RESTART_WINDOW_MS}); 0 never restarts. For tests. */
   readonly restartWindowMs?: number;
+  /** How far back the supervisor's incident ring keeps rows (default {@link INCIDENT_HISTORY_MS}); a test shortens it to see rows age out. */
+  readonly incidentHistoryMs?: number;
 }
+
+/** The supervisor's incident ring budget: the age from the options, else production's. */
+const incidentHistoryBudget = (options: Pick<McpSupervisorOptions, "incidentHistoryMs">) => ({
+  durationMs: options.incidentHistoryMs ?? INCIDENT_HISTORY_MS,
+  bytes: INCIDENT_HISTORY_BYTES,
+});
 
 type HeartbeatMessage = Extract<z.infer<typeof runtimeMessageSchema>, { kind: "heartbeat" }>;
 /** What the supervisor changes while it runs; the steps below the supervisor take it explicitly. */
@@ -85,14 +98,9 @@ interface SupervisorState {
   heartbeat: HeartbeatMessage | null;
 }
 
-/** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
-export async function startMcpSupervisor(options: McpSupervisorOptions) {
-  // Docker binds all container interfaces; Compose restricts the published port to host loopback.
-  if (!["127.0.0.1", "localhost", "::1", "0.0.0.0"].includes(options.host)) throw new Error("MCP must bind to loopback or 0.0.0.0 for container port forwarding.");
-  const startedAt = performance.now();
-  let closing: Promise<void> | null = null;
-  const pending = new Set<PendingRequest>();
-  const recorder = new IncidentRecorder(
+/** The supervisor's own incident recorder: artifacts go to the options' directory, history age from {@link incidentHistoryBudget}. */
+const supervisorIncidentRecorder = (options: McpSupervisorOptions) =>
+  new IncidentRecorder(
     { instanceId: options.instanceId, source: options.source },
     (capture) =>
       writeIncidentArtifact(
@@ -104,7 +112,17 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
         options.incidents.retention,
       ),
     () => {},
+    incidentHistoryBudget(options),
   );
+
+/** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
+export async function startMcpSupervisor(options: McpSupervisorOptions) {
+  // Docker binds all container interfaces; Compose restricts the published port to host loopback.
+  if (!["127.0.0.1", "localhost", "::1", "0.0.0.0"].includes(options.host)) throw new Error("MCP must bind to loopback or 0.0.0.0 for container port forwarding.");
+  const startedAt = performance.now();
+  let closing: Promise<void> | null = null;
+  const pending = new Set<PendingRequest>();
+  const recorder = supervisorIncidentRecorder(options);
   const sup: SupervisorState = {
     options,
     recorder,

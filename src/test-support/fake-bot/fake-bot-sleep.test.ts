@@ -65,7 +65,7 @@ test("a weather set on the server ramps the rain level a hundredth a tick, and t
   const updates: number[] = [];
   bot.on("weatherUpdate", () => void updates.push(bot.rainState));
   server.setWeather("rain");
-  await clock.advance(1_000 + DELIVERY_MS);
+  await clock.advance(1_000);
   assert.equal(bot.isRaining, true);
   assert.ok(Math.abs(bot.rainState - 0.2) < 0.015, `after 20 ticks ${bot.rainState}`);
   assert.equal(bot.thunderState, 0);
@@ -73,6 +73,18 @@ test("a weather set on the server ramps the rain level a hundredth a tick, and t
   assert.equal(bot.rainState, 1);
   // A hundred rain steps, and the flag flip past 0.2 sends both levels again (contract rain-and-thunder-state: 100 steps in 102 updates).
   assert.equal(updates.length, 102);
+});
+
+test("a server that answers lagMs late sends the weather of a tick in that tick: the lag is in its answers to the client's acts, not in the ramp it runs on its own (plan 2026-10-30-contract-batch-timing T7i)", async () => {
+  // `ServerLevel.advanceWeatherCycle` broadcasts a level as it moves (vanilla source); the time packets, the air and a fireball's updates are not lagged either.
+  const { bot, clock, server } = createFakeBot({ lagMs: 450 });
+  const updates: number[] = [];
+  bot.on("weatherUpdate", () => void updates.push(bot.rainState));
+  server.setWeather("rain");
+  await clock.advance(100 + DELIVERY_MS);
+  assert.ok(updates.length >= 2, `${updates.length} updates in 150 ms of a 450 ms lag: the ramp runs a hundredth a tick from the tick that set it`);
+  await clock.advance(1_000);
+  assert.ok(Math.abs(bot.rainState - 0.22) < 0.03, `after 1.15 s ${bot.rainState}: 0.2 a second, lag or not`);
 });
 
 test("thunder raises the thunder level the same way, and clear lowers both: the rain flag drops when the level is back at 0.2 (4 s), the levels follow to 0", async () => {

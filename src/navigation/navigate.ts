@@ -23,6 +23,7 @@ import {
   type NavigationCalculationFailureResult,
 } from "./orchestration/process-events.js";
 import type { SearchLimits } from "./search/search-result.js";
+import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { timeoutSignal } from "../utils/wall-timers.js";
 
 /** Baritone's inline search budgets: enough to find a useful first segment without holding movement up indefinitely. */
@@ -126,7 +127,7 @@ function isRouteFailure(failure: NavigationFailure): boolean {
 /** Plan, execute, and settle one route through the package-local navigator. */
 export async function runNavigation(navigator: Navigator, options: NavigateOptions): Promise<NavigationResult> {
   options.signal?.throwIfAborted();
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   // Every reason this route may stop, composed into the one signal the engine
   // takes. Whichever source aborts first supplies the reason the outcome
   // reports; nothing below this line installs a listener of its own.
@@ -166,7 +167,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     throw new Error(`${outcome.kind === "completed" ? "Navigation cancelled." : outcomeReason(outcome)} ${pending}`);
   }
   options.signal?.throwIfAborted();
-  const elapsedMs = Date.now() - startedAt;
+  const elapsedMs = elapsedSince(startedAt);
   const escapeRelaxed = outcome.evidence.escapeRelaxed?.length ? { escapeRelaxed: outcome.evidence.escapeRelaxed } : {};
   if (outcome.kind === "completed") return { status: "completed", elapsedMs, ...escapeRelaxed };
   const failedBreak = failedBreakOf(outcome);

@@ -22,8 +22,9 @@ export function attachFakeSwing(parts: { server: FakeServer; inventory: FakeInve
   let ticksSinceSwing = STANDING_SWING_TICKS;
   let heldType = parts.inventory.heldItem?.type;
   onServerTick(parts.server, () => void (ticksSinceSwing += 1));
+  // The server sees the new item when it reads the client's packet, as it reads a hit: a late server starts the count over a lag after the change, in order with the hits (contract check `attack-cooldown-damage` at 450 ms lag: 3.7 for a hit that cost 1.89 at 2 server ticks).
   parts.inventory.onHeldItemChanged((held) => {
-    if (held?.type !== heldType) ticksSinceSwing = 0;
+    if (held?.type !== heldType) parts.server.answer(() => void (ticksSinceSwing = 0));
     heldType = held?.type;
   });
   return { ticksSince: () => ticksSinceSwing, startOver: () => void (ticksSinceSwing = 0) };

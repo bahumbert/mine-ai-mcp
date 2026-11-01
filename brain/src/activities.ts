@@ -60,7 +60,7 @@ export interface ActionTime {
   readonly tool: ForegroundTool;
   readonly input: Readonly<Record<string, unknown>>;
   readonly ms: number;
-  /** When it ended (epoch ms): which phase of the step its time belongs to. */
+  /** When it ended (a `monotonicNow()` reading): which phase of the step its time belongs to. */
   readonly ended?: number;
 }
 
@@ -166,7 +166,7 @@ export interface ActivitySpan {
   readonly ms: number;
 }
 
-/** From this time on (epoch ms), a step's work is this activity: a skill's phase (the house's site preparation). */
+/** From this time on (a `monotonicNow()` reading), a step's work is this activity: a skill's phase (the house's site preparation). */
 export interface ActivityPhase {
   readonly activity: Activity;
   readonly at: number;
@@ -182,7 +182,7 @@ const ALL_OF_IT = new Set<Step["skill"]>(["go_to", "go_to_player", "explore", "f
  */
 export function activityTimes(step: Step, actions: readonly ActionTime[], facts: ActivityFacts, started: number, ended: number, phases: readonly ActivityPhase[] = []): ActivitySpan[] {
   const main = activityOf(step, actions, facts);
-  const total = Math.max(0, ended - started);
+  const total = Math.round(Math.max(0, ended - started));
   if (ALL_OF_IT.has(step.skill)) return main === null || total === 0 ? [] : [{ activity: main, ms: total }];
   const parts = [{ activity: main, from: started, ms: 0 }, ...[...phases].sort((a, b) => a.at - b.at).map((phase) => ({ activity: phase.activity as Activity | null, from: phase.at, ms: 0 }))];
   parts.forEach((part, index) => {
@@ -201,5 +201,5 @@ export function activityTimes(step: Step, actions: readonly ActionTime[], facts:
   if (travelling > 0) totals.set("travelling", travelling);
   for (const part of parts) if (part.activity !== null && part.ms > 0) totals.set(part.activity, (totals.get(part.activity) ?? 0) + part.ms);
   if (totals.size === 0 && main !== null) totals.set(main, 0);
-  return [...totals].map(([activity, ms]) => ({ activity, ms })).sort((a, b) => b.ms - a.ms);
+  return [...totals].map(([activity, ms]) => ({ activity, ms: Math.round(ms) })).sort((a, b) => b.ms - a.ms);
 }

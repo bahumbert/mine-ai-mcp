@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadScenarioServerConfig, portBlockOf } from "./config.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { loadScenarioServerConfig, portBlockOf, SCENARIO_SERVER_ENV_NAMES } from "./config.ts";
 
 test("the defaults are the plan's constants", () => {
   const config = loadScenarioServerConfig({});
@@ -71,4 +73,62 @@ test("the clients booted ahead: the booted size measured by T7h-b, one wave per 
 
 test("a failure limit that is not a whole number is refused, naming its variable", () => {
   assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_CLIENT_BOOT_FAILURE_LIMIT: "1.5" }), /MINE_AI_SCENARIO_CLIENT_BOOT_FAILURE_LIMIT/u);
+});
+
+test("the scenario mirror: on, its sync bound from X3 (3 x 7 912 ms), its install bound from X2 (3 x 1 288 ms), and a directory on ext4", () => {
+  const config = loadScenarioServerConfig({});
+  assert.equal(config.mirror, 1);
+  assert.equal(config.mirrorSyncBoundMs, 23_736);
+  assert.equal(config.modulesInstallBoundMs, 3_864);
+  assert.equal(config.mirrorDir, join(homedir(), ".cache/mine-ai/scenario-mirror"));
+});
+
+test("MINE_AI_SCENARIO_MIRROR=0 turns the mirror off, the bounds and the directory take overrides, and 2 or 0.5 is refused naming the variable", () => {
+  const config = loadScenarioServerConfig({
+    MINE_AI_SCENARIO_MIRROR: "0", MINE_AI_SCENARIO_MIRROR_SYNC_BOUND_MS: "5000", MINE_AI_SCENARIO_MODULES_INSTALL_BOUND_MS: "7000", MINE_AI_SCENARIO_MIRROR_DIR: "/tmp/m",
+  });
+  assert.equal(config.mirror, 0);
+  assert.equal(config.mirrorSyncBoundMs, 5_000);
+  assert.equal(config.modulesInstallBoundMs, 7_000);
+  assert.equal(config.mirrorDir, "/tmp/m");
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_MIRROR: "2" }), /MINE_AI_SCENARIO_MIRROR=2/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_MIRROR: "0.5" }), /MINE_AI_SCENARIO_MIRROR=0\.5/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_MODULES_INSTALL_BOUND_MS: "0" }), /MINE_AI_SCENARIO_MODULES_INSTALL_BOUND_MS/u);
+});
+
+test("the template world: on, 28 lanes (Q4), the build bound from P0 (3 x 59.9 s), the copy bound from P0b (3 x 17 377 ms), a directory on ext4", () => {
+  const config = loadScenarioServerConfig({});
+  assert.equal(config.worldTemplate, 1);
+  assert.equal(config.templateLanes, 28);
+  assert.equal(config.templateBuildBoundMs, 180_000);
+  assert.equal(config.templateCopyBoundMs, 52_131);
+  assert.equal(config.templateDir, join(homedir(), ".cache/mine-ai/world-templates"));
+});
+
+test("MINE_AI_SCENARIO_WORLD_TEMPLATE=0 turns the template off, the lanes, bounds and directory take overrides, and a switch of 2 or 0.5, lanes of 0 or 2.5 are refused naming the variable", () => {
+  const config = loadScenarioServerConfig({
+    MINE_AI_SCENARIO_WORLD_TEMPLATE: "0", MINE_AI_SCENARIO_TEMPLATE_LANES: "4", MINE_AI_SCENARIO_TEMPLATE_BUILD_BOUND_MS: "9000",
+    MINE_AI_SCENARIO_TEMPLATE_COPY_BOUND_MS: "8000", MINE_AI_SCENARIO_TEMPLATE_DIR: "/tmp/t",
+  });
+  assert.equal(config.worldTemplate, 0);
+  assert.equal(config.templateLanes, 4);
+  assert.equal(config.templateBuildBoundMs, 9_000);
+  assert.equal(config.templateCopyBoundMs, 8_000);
+  assert.equal(config.templateDir, "/tmp/t");
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_WORLD_TEMPLATE: "2" }), /MINE_AI_SCENARIO_WORLD_TEMPLATE=2/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_WORLD_TEMPLATE: "0.5" }), /MINE_AI_SCENARIO_WORLD_TEMPLATE=0\.5/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_TEMPLATE_LANES: "0" }), /MINE_AI_SCENARIO_TEMPLATE_LANES/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_TEMPLATE_LANES: "2.5" }), /MINE_AI_SCENARIO_TEMPLATE_LANES=2\.5/u);
+});
+
+test("the daemon's template variables are its own: a submitter does not forward them to the clients", () => {
+  for (const name of ["WORLD_TEMPLATE", "TEMPLATE_LANES", "TEMPLATE_BUILD_BOUND_MS", "TEMPLATE_COPY_BOUND_MS", "TEMPLATE_DIR"]) {
+    assert.ok(SCENARIO_SERVER_ENV_NAMES.has(`MINE_AI_SCENARIO_${name}`), name);
+  }
+});
+
+test("the daemon's mirror variables are its own: a submitter does not forward them to the clients", () => {
+  for (const name of ["MINE_AI_SCENARIO_MIRROR", "MINE_AI_SCENARIO_MIRROR_SYNC_BOUND_MS", "MINE_AI_SCENARIO_MODULES_INSTALL_BOUND_MS", "MINE_AI_SCENARIO_MIRROR_DIR"]) {
+    assert.ok(SCENARIO_SERVER_ENV_NAMES.has(name), name);
+  }
 });

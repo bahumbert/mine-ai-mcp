@@ -48,8 +48,9 @@ export interface ContractSubject {
   /** The shooter `shooterId` (a mob on the client) hits the bot with a `projectile` ("arrow" or "small_fireball") that flew in from its side; resolves once the client heard the hurt. */
   shootBot(projectile: ProjectileName, shooterId: number): Promise<void>;
   /**
-   * Resolves true once the world age the client holds moved by `ticks` or more since this call, false at `wallMs` (the
-   * wall bound; a server behind by seconds ends here, never on ticks alone). The age comes one packet per 20 ticks
+   * Resolves true once the world age the client holds moved by `ticks` or more since this call, false when the age has not
+   * moved for `wallMs` (a stall bound, not a total: a server behind its schedule that keeps ticking is waited for, one that
+   * stops is not). The age comes one packet per 20 ticks
    * (`mineflayer/lib/plugins/time.js`), so the age at the call may be up to 19 ticks stale: `ticks` observed prove at
    * least `ticks - 19` server ticks after the call, and 40 prove at least 21 (the runtime's accepted rule, facts
    * `runtime-pitfalls.md` "The server's answer"). That holds for a client that reads its packets as they come: on a
@@ -174,6 +175,31 @@ export interface Settled<T> {
   readonly atMs: number;
 }
 
+/**
+ * How long a wait has gone without progress: the larger of the clock's reading and the waits it asked for, so a bound still
+ * fires when the clock stops with the server (a wait of 25 ms lasts at least 25 ms, so on a clock that runs the two agree).
+ */
+export interface StallWatch {
+  /** Progress was seen: the stall starts again from zero. */
+  moved(): void;
+  /** The wait asked for `ms` more. */
+  waited(ms: number): void;
+  stalledMs(): number;
+}
+
+export function stallWatch(clock: Pick<ContractSubject, "now">): StallWatch {
+  let sinceMs = clock.now();
+  let waitedMs = 0;
+  return {
+    moved: () => {
+      sinceMs = clock.now();
+      waitedMs = 0;
+    },
+    waited: (ms) => void (waitedMs += ms),
+    stalledMs: () => Math.max(clock.now() - sinceMs, waitedMs),
+  };
+}
+
 /** Let time pass until `promise` settles or `maxMs` is over; the reading is taken when it settled, not when seen. */
 export async function settleWithin<T>(subject: ContractSubject, promise: Promise<T>, maxMs: number): Promise<Settled<T> | null> {
   let settled: Settled<T> | null = null;
@@ -181,28 +207,42 @@ export async function settleWithin<T>(subject: ContractSubject, promise: Promise
     (value) => void (settled = { value, atMs: subject.now() }),
     (error: Error) => void (settled = { error, atMs: subject.now() }),
   );
-  const startedAt = subject.now();
-  while (settled === null && subject.now() - startedAt < maxMs) await subject.wait(SETTLE_STEP_MS);
+  const stall = stallWatch(subject);
+  while (settled === null && stall.stalledMs() < maxMs) {
+    await subject.wait(SETTLE_STEP_MS);
+    stall.waited(SETTLE_STEP_MS);
+  }
   return settled;
 }
 
 /** Let time pass until `condition` holds or `maxMs` is over; whether it held. */
 export function holdsWithin(subject: ContractSubject, condition: () => boolean, maxMs: number): Promise<boolean> {
-  return holdsOnClock(subject, condition, maxMs);
+  return holdsWhileMoving(subject, condition, () => null, maxMs);
 }
 
-/** `holdsWithin` on any clock: a subject under construction has the two clock members before it has the rest. */
-async function holdsOnClock(clock: Pick<ContractSubject, "now" | "wait">, condition: () => boolean, maxMs: number): Promise<boolean> {
-  const startedAt = clock.now();
+/**
+ * Let time pass until `condition` holds; whether it held. `maxMs` is a stall bound: the wait ends false only when `movement()` has
+ * not changed (compared as values) for `maxMs`, so work that keeps progressing (a server at 8 ticks a second, a ramp of 100 ticks)
+ * is never cut by a total wall time. Any clock with `now` and `wait` serves: a subject under construction has them before the rest.
+ */
+export async function holdsWhileMoving(clock: Pick<ContractSubject, "now" | "wait">, condition: () => boolean, movement: () => unknown, maxMs: number): Promise<boolean> {
+  const stall = stallWatch(clock);
+  let seen = movement();
   while (!condition()) {
-    if (clock.now() - startedAt >= maxMs) return false;
+    const now = movement();
+    if (!Object.is(now, seen)) {
+      seen = now;
+      stall.moved();
+    }
+    if (stall.stalledMs() >= maxMs) return false;
     await clock.wait(SETTLE_STEP_MS);
+    stall.waited(SETTLE_STEP_MS);
   }
   return true;
 }
 
-/** `ContractSubject.serverTicks` for a subject made of `bot`, `now` and `wait`: both kinds of subject share it. */
-function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait">, ticks: number, wallMs: number): Promise<boolean> {
+/** `ContractSubject.serverTicks` for a subject made of `bot`, `now` and `wait`: both kinds of subject share it. `stallMs` is the longest the world age may stand still. */
+function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait">, ticks: number, stallMs: number): Promise<boolean> {
   // `bot.time.age` is null until the first time packet; the first age heard is then the start.
   let startAge: number | null = subject.bot.time.age;
   const moved = () => {
@@ -211,7 +251,7 @@ function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait"
     startAge ??= age;
     return age - startAge;
   };
-  return holdsOnClock(subject, () => moved() >= ticks, wallMs);
+  return holdsWhileMoving(subject, () => moved() >= ticks, () => subject.bot.time.age, stallMs);
 }
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
@@ -219,6 +259,16 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
   const { bot, clock, combat, entities, server, world } = harness;
   const wait = (ms: number) => clock.advance(ms);
   const now = () => clock.now();
+  /** `run` is the server's answer; the clock runs until it has (a server answering late or stalled), as the real subject waits for the client to hear it (`spawnedNear`, `heardWithin`, `commandUntil`), within the same wall bound. Resolves with what `run` returned. */
+  const afterAnswer = async <T>(run: () => T, what: string): Promise<T> => {
+    let answered: { readonly value: T } | undefined;
+    server.answer(() => void (answered = { value: run() }));
+    const startedMs = now();
+    do await clock.advance(50);
+    while (answered === undefined && now() - startedMs < SERVER_EDIT_WALL_MS);
+    if (answered === undefined) throw new Error(`${what}: the fake server had not answered after ${SERVER_EDIT_WALL_MS} ms`);
+    return answered.value;
+  };
   return {
     bot,
     world: (local) => new Vec3(...arena.world(local)),
@@ -232,55 +282,34 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       await clock.advance(50);
     },
     async setBlock(cell, block) {
-      server.answer(() => world.setCell(cell, block));
-      await clock.advance(50);
+      await afterAnswer(() => world.setCell(cell, block), "setBlock");
     },
     seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
     async setWeather(weather) {
       server.answer(() => server.setWeather(weather));
       await clock.advance(50);
     },
-    async summonItem(stack, position, pickupDelayTicks) {
-      let summoned: Entity | undefined;
-      server.answer(() => void (summoned = entities.spawn({ name: "item", position, item: stack, pickupDelayTicks })));
-      await clock.advance(50);
-      return summoned!;
-    },
+    summonItem: (stack, position, pickupDelayTicks) =>
+      afterAnswer(() => entities.spawn({ name: "item", position, item: stack, pickupDelayTicks }), "summonItem"),
     async hurtBot(amount, sourceId) {
-      server.answer(() => combat.hurtBot(amount, sourceId));
-      await clock.advance(50);
+      await afterAnswer(() => combat.hurtBot(amount, sourceId), "hurtBot");
     },
     async kill(entityId) {
-      server.answer(() => combat.kill(entityId));
-      await clock.advance(50);
+      await afterAnswer(() => combat.kill(entityId), "kill");
     },
     async explode(position) {
-      server.answer(() => combat.explode(position));
-      await clock.advance(50);
+      await afterAnswer(() => combat.explode(position), "explode");
     },
-    async summonMob(name, position) {
-      let summoned: Entity | undefined;
-      server.answer(() => void (summoned = entities.spawn({ name, position })));
-      await clock.advance(50);
-      return summoned!;
-    },
+    summonMob: (name, position) => afterAnswer(() => entities.spawn({ name, position }), "summonMob"),
     async removeMob(mob) {
-      server.answer(() => entities.remove(mob.id));
-      await clock.advance(50);
+      await afterAnswer(() => entities.remove(mob.id), "removeMob");
     },
     async shootBot(projectile, shooterId) {
-      server.answer(() => combat.shootBot(projectile, shooterId, SHOT_COST[projectile]));
-      await clock.advance(50);
+      await afterAnswer(() => combat.shootBot(projectile, shooterId, SHOT_COST[projectile]), "shootBot");
     },
-    async launchFireball(position, motion) {
-      let launched: Entity | undefined;
-      server.answer(() => void (launched = combat.launchFireball(position, motion)));
-      await clock.advance(50);
-      return launched!;
-    },
+    launchFireball: (position, motion) => afterAnswer(() => combat.launchFireball(position, motion), "launchFireball"),
     async clearFireballs() {
-      server.answer(() => Object.values(bot.entities).filter(({ name }) => name === "fireball").forEach(({ id }) => entities.remove(id)));
-      await clock.advance(50);
+      await afterAnswer(() => Object.values(bot.entities).filter(({ name }) => name === "fireball").forEach(({ id }) => entities.remove(id)), "clearFireballs");
     },
   };
 }

@@ -155,9 +155,11 @@ export function attachFakeHeldUse(bot: FakeBot, parts: HeldUseParts): void {
       stopUsing();
     });
   });
-  // The server ends a use of the main hand when the hand's item changes.
+  // The server ends a use of the main hand when the hand's item changes (`LivingEntity.updatingUsingItem`, vanilla source), which it learns when it reads the client's packet, as for a hit: a late server ends it a lag after the change, in order with the use and the release (contract check `attack-cooldown-damage` swing, `fake-bot-swing.ts`: 3.7 at the client's change against 1.89 read).
   parts.inventory.onHeldItemChanged((held) => {
-    if (using !== null && !using.offHand && held?.type !== using.item.type) stopUsing();
+    parts.server.answer(() => {
+      if (using !== null && !using.offHand && held?.type !== using.item.type) stopUsing();
+    });
   });
 
   bot.unequip = (destination) => unequip(bot, destination);

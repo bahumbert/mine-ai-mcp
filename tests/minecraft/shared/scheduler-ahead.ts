@@ -56,7 +56,7 @@ export function bootClientsForQueuedTrials(start: AheadPass, order: readonly Que
   const considered = new Map<Submission, number>();
   for (const queued of order) {
     const { aheadClient: client, submission } = queued;
-    if (!client || pass.isTiming(submission, queued.entry) || queued.heldBy === "hold") continue;
+    if (!client || pass.isTiming(submission, queued.entry) || queued.heldBy === "hold" || queued.heldBy === "template-build") continue;
     // Past a `--lanes N` cap only the next wave of N can start soon: the rest would idle at their booted size.
     const seen = (considered.get(submission) ?? 0) + 1;
     considered.set(submission, seen);
