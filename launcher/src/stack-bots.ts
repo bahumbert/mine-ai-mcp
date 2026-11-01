@@ -64,8 +64,9 @@ function setStatus(state: StackState, bot: RunningBot, status: BotStatus): void 
   writeOtherAgents(state);
 }
 
-function forgetBot(state: StackState, id: string): void {
-  state.bots.delete(id);
+/** Drops `bot` from the stack; a newer bot with the same id (started after this one was stopped) stays. */
+function forgetBot(state: StackState, bot: RunningBot): void {
+  if (state.bots.get(bot.id) === bot) state.bots.delete(bot.id);
   writeOtherAgents(state);
 }
 
@@ -126,22 +127,25 @@ function reportEndOf(state: StackState, bot: RunningBot, what: "host" | "brain",
   });
 }
 
-/** Starts the host, waits for its `/health`, then starts the brain. Returns the failure line, or null. */
+/**
+ * Starts the host, waits for its `/health`, then starts the brain. Returns the failure line, or null. The bot may be
+ * stopped at any await (while it waits in the queue, for a port, for the health): it is looked at again after each, before
+ * anything is spawned and before the outcome is classified, so a stopped bot leaves no host or brain behind.
+ */
 async function launchBot(state: StackState, bot: RunningBot, persona: PersonaEntry): Promise<string | null> {
   const { deps, manifest } = state;
+  const stopped = `${bot.username} was stopped while it was starting.`;
+  const stillStarting = (): boolean => !isStopRequested(state) && state.bots.get(bot.id) === bot && bot.status === "starting";
+  if (!stillStarting()) return stopped;
   bot.hostPort = await deps.freePort(state.settings.hostBasePort, usedPorts(state));
-  if (isStopRequested(state)) return `${bot.username} was stopped while it was starting.`;
+  if (!stillStarting()) return stopped;
   const host = state.children.spawn(`host-${bot.id}`, deps.bunPath, hostArguments(state, bot), { env: {}, cwd: deps.appRoot, logFile: logFile(state, `host-${bot.id}`) });
   const outcome = await waitUntilReady(state, () => hostIsHealthy(state, bot.hostPort), host.exited, manifest.waits.hostHealthMs);
-  if (outcome !== "ready") {
+  if (outcome !== "ready" || !stillStarting()) {
     await state.children.stop(`host-${bot.id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
-    if (outcome === "stopped") return `${bot.username} was stopped while it was starting.`;
+    if (!stillStarting()) return stopped;
     const reason = outcome === "exited" ? `ended before it was ready (${describeExit(await host.exited)})` : `did not answer within ${manifest.waits.hostHealthMs / 1_000} s`;
     return `The host of ${bot.username} ${reason}. See ${logFile(state, `host-${bot.id}`)}.`;
-  }
-  if (isStopRequested(state)) {
-    await state.children.stop(`host-${bot.id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
-    return `${bot.username} was stopped while it was starting.`;
   }
   writeOtherAgents(state);
   const brain = state.children.spawn(`brain-${bot.id}`, deps.bunPath, brainArguments(state, bot, persona), { env: brainEnvironment(state), cwd: deps.appRoot, logFile: logFile(state, `brain-${bot.id}`) });
@@ -187,8 +191,11 @@ export async function startBot(state: StackState, name: string): Promise<BotOutc
     failure = `${persona.username} could not start: ${(error as Error).message}`;
   }
   if (failure === null) return { ok: true, message: `${persona.username} is running (host port ${bot.hostPort}).` };
-  forgetBot(state, id);
-  await state.children.stop(`host-${id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
+  // Only this start's own bot is cleaned up: after a stop the id may belong to a newer start, and a bot being stopped is forgotten by `stopBot`.
+  if (state.bots.get(id) === bot) {
+    if (bot.status === "starting") forgetBot(state, bot);
+    await state.children.stop(`host-${id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
+  }
   return { ok: false, reason: "failed", message: failure };
 }
 
@@ -209,6 +216,6 @@ export async function stopBot(state: StackState, name: string): Promise<BotOutco
   setStatus(state, bot, "stopping");
   await state.children.stop(`brain-${id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
   await state.children.stop(`host-${id}`, { timeoutMs: BOT_STOP_TIMEOUT_MS });
-  forgetBot(state, id);
+  forgetBot(state, bot);
   return { ok: true, message: `${bot.username} stopped.` };
 }
