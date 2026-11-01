@@ -43,6 +43,7 @@ import { boatShiftWithinOneTick } from "./checks/boat-shift-within-one-tick.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
+import { farPlayerPosition } from "./checks/far-player-position.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { lavaOverPassable } from "./checks/lava-over-passable.ts";
@@ -169,6 +170,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   placeBlockWithOptions,
   lavaOverHole,
   lavaOverPassable,
+  farPlayerPosition,
 ];
 
 /** The check of that name; throws listing the known names. */

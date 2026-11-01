@@ -27,6 +27,8 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/bow-draw-and-release.yaml", /exclusive/u],
   // A contract check that sets the server's tick rate while it runs.
   ["contract/scenarios/world-age-at-slow-tick.yaml", /exclusive/u],
+  // A contract check that joins a second player: the template's tick command puts every other player in spectator.
+  ["contract/scenarios/far-player-position.yaml", /exclusive/u],
   // The arena and its scratch copy pin more than the 256 chunks Minecraft force-loads.
   ["scenarios/collect/obsidian-by-exploring.yaml", /chunks/u],
   ["scenarios/pathfinder/at-sea-land-behind-kelp.yaml", /chunks/u],

@@ -10,6 +10,7 @@ import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { type FakeChat, attachFakeChat } from "./fake-bot-chat.js";
+import { type FakeOtherPlayers, attachFakeOtherPlayers } from "./fake-bot-other-players.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
@@ -103,6 +104,8 @@ export interface FakeHarness {
   readonly combat: FakeCombat;
   /** Lines the bot hears: a player's chat, a system line (Mineflayer's chat patterns run on them). */
   readonly chat: FakeChat;
+  /** Other players: listed to the bot when they join, tracked to it (an entity with a position) by the server's range and their game mode. */
+  readonly otherPlayers: FakeOtherPlayers;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -229,8 +232,9 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeSleep(bot, { server, world });
   attachFakePlugins(bot, client, username);
   const chat = attachFakeChat(bot);
+  const otherPlayers = attachFakeOtherPlayers(bot, { server, entities: serverEntities });
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat, chat };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat, chat, otherPlayers };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

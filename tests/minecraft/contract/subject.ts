@@ -8,9 +8,23 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { FakeCell, FakeHarness, ShotProjectile, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
+import { joinOnFake, joinOnServer } from "./other-player.ts";
 
 /** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
 export type LocalPoint = readonly [number, number, number];
+
+/** The game modes a second player is put in. */
+export type OtherPlayerMode = "survival" | "spectator";
+
+/** A second player on the server: another client the bot hears of, not one a check acts through. */
+export interface OtherPlayer {
+  /** The server moves the player to `position` (a world position); the bot hears of it over the next ticks. */
+  moveTo(position: Vec3): Promise<void>;
+  /** The server puts the player in a game mode (`/gamemode`). */
+  setGameMode(mode: OtherPlayerMode): Promise<void>;
+  /** The player logs out. */
+  leave(): Promise<void>;
+}
 
 /** Mineflayer keeps the ridden entity on the bot too; its typings leave it out. */
 export type ContractBot = Bot & { vehicle?: Entity | null };
@@ -71,6 +85,8 @@ export interface ContractSubject {
   serverGameTime(): Promise<number>;
   /** The server sends a time packet now, as it does at each `/time set`: the command with the day time the client holds, harmless server-wide (the same value). Resolves once the command is sent; the packet comes with the next ticks. */
   resendTime(): Promise<void>;
+  /** A second player named `name` joins the server, standing where the server puts it; the check calls `leave` at its end. */
+  joinPlayer(name: string): Promise<OtherPlayer>;
 }
 
 /** The projectiles a mob shoots at the bot that the checks name. */
@@ -238,6 +254,7 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => server.resendTime());
       await clock.advance(50);
     },
+    joinPlayer: (name) => joinOnFake(harness, name),
     async setBlock(cell, block) {
       server.answer(() => world.setCell(cell, block));
       await clock.advance(50);
@@ -333,6 +350,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
     serverGameTime: gameTimeQueries.ask,
+    joinPlayer: (name) => joinOnServer(bot, name),
     // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
     async resendTime() {
       // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.

@@ -1,0 +1,34 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-far-player-position
+tags:
+  - contract
+  - exclusive
+description: "Whether the bot has a position for a second player 40 to 170 blocks off (8 distances, the cut-off at 128), in survival and in spectator: the
+  second client joins from the check. Contract check tests/minecraft/contract/checks/far-player-position.ts, also run on the fake bot
+  (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: far-player-position
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+tick: []
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor
