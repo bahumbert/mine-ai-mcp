@@ -3,3 +3,4 @@ export * from "./geometry.js";
 export * from "./signals.js";
 export * from "./craft-plan.js";
 export * from "./wall-timers.js";
+export * from "./monotonic-clock.js";

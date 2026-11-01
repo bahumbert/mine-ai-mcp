@@ -41,14 +41,17 @@ export interface SampleReport {
   readonly held: Readonly<Record<string, number>>;
   /** What this sample did to the target, when it did something. */
   readonly event: AdmissionEvent | null;
+  /** Each server's tick time P95 in ms (null: no `tick query` answer yet), named by id so a slow trial is read beside its own server. */
+  readonly serverTicks: readonly { readonly id: string; readonly msptP95: number | null }[];
 }
 
 const percent = (share: number | null): string => (share === null ? "-" : `${Math.round(share * 100)}%`);
 
-/** The sample line: today's text first, then the key=value fields a batch is read from. */
-export function sampleLine(report: SampleReport, msptP95: readonly (number | null)[]): string {
+/** The sample line: counts and each server's tick P95 by id first, then the key=value fields a batch is read from (parsers read after ` | `). */
+export function sampleLine(report: SampleReport): string {
   const held = Object.entries(report.held).map(([bound, count]) => `${bound}:${count}`).join(",");
-  const today = `sample: ${report.running} running, ${report.queued} queued, cpu ${percent(report.cpuBusy)}, ${report.servers} servers, p95 ms ${msptP95.map(value => value ?? "-").join("/")}`;
+  const p95 = report.serverTicks.map(({ id, msptP95 }) => `${id}=${msptP95 ?? "-"}`).join("/");
+  const counts = `sample: ${report.running} running, ${report.queued} queued, cpu ${percent(report.cpuBusy)}, ${report.servers} servers, p95 ms ${p95}`;
   const fields = `cpu=${percent(report.cpuBusy)} own=${percent(report.ownCpu)} load1=${report.load1 === null ? "-" : report.load1.toFixed(2)} mem=${report.memAvailableMb} ledger=${report.ledgerMb} target=${report.target} running=${report.running} queued=${report.queued} servers=${report.servers} starts=${report.starts} held=${held || "none"}`;
-  return `${today} | ${fields}${report.event ? ` target change: ${report.event}` : ""}`;
+  return `${counts} | ${fields}${report.event ? ` target change: ${report.event}` : ""}`;
 }

@@ -5,9 +5,11 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld, movementStep, routePlan } from "../../test-support/navigation.js";
 import type { EffectHandle } from "../bot.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { OpenedPassages } from "./opened-passages.js";
 import { RouteExecutor } from "./route-executor.js";
@@ -71,7 +73,7 @@ async function startBreak(bot: FakeNavigationBot, step: PlannedStep) {
   world.load(BREAK_AT, { stateId: 2 });
   const ledger = new DeadlineLedger();
   const controller = new AbortController();
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   const execution = new RouteExecutor({
     context: { runId: "run", world, bot, ledger, signal: controller.signal },
     passages: new OpenedPassages(world, bot.observe().dimension),
@@ -140,12 +142,28 @@ test("a bot that cannot tell its dig time keeps the planned deadline", async () 
 test("a cancel during the long dig ends the step at once and leaves no expectation behind", async () => {
   const bot = new TimedDiggingBot(FLOATING_ANDESITE_MS);
   const run = await startBreak(bot, breakStep(12));
-  const before = Date.now();
+  const before = monotonicNow();
   run.abort();
   assert.equal((await run.execution).kind, "cancelled");
-  assert.ok(Date.now() - before < 1_000, "the 28 s deadline does not hold the cancel");
+  assert.ok(monotonicNow() - before < 1_000, "the 28 s deadline does not hold the cancel");
   assert.equal(bot.cancelled, true);
   assert.equal(run.ledger.activeCount, 0);
+});
+
+test("the confirmation deadline counts monotonic time: a 1.2 s wall step forward does not expire a 5 s deadline at 4 s", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const bot = new TimedDiggingBot(600);
+  const run = await startBreak(bot, breakStep(12));
+  await clock.advance(4_000);
+  clock.stepWallClock(1_200);
+  for (const tick of bot.ticks) tick();
+  await nextTurn();
+  assert.equal(run.ledger.activeCount, 1, "the physics tick's clock reading is monotonic: 4 s in, 1 s to go");
+  await clock.advance(1_000);
+  const result = await run.execution;
+  assert.equal(result.kind, "failed");
+  assert.match(JSON.stringify(result), /Server confirmation deadline elapsed/);
 });
 
 test("a block that never changes expires at the longer deadline, with the step failing on the confirmation", async () => {

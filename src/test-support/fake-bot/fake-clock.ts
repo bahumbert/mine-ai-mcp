@@ -38,6 +38,12 @@ export interface FakeClock extends StallClock {
   onSlice(stage: SliceStage, step: (sliceMs: number) => void): () => void;
   /** Timers (`after`, `every`, `sleep`) still waiting: a wait that is over leaves none. */
   pendingTimers(): number;
+  /**
+   * `mocked` and installed only: move `Date.now()` by `deltaMs` and nothing else (not `performance.now`, `now()` or a
+   * timer's due time), as WSL steps its wall clock under a running process. Steps add up; disposing undoes them.
+   * `new Date()` is not moved (it reads the mock's own time): code under test reads `Date.now()` for a wall step.
+   */
+  stepWallClock(deltaMs: number): void;
   /** `mocked` only: take over the global timers and `performance.now` until disposed (`using`). */
   install(): Disposable;
 }
@@ -100,10 +106,28 @@ function installGlobals(now: () => number): () => void {
   };
 }
 
+/**
+ * What `install()` checks first: a manual clock has nothing to install, and a mocked clock whose test has ended must not
+ * install. Bun fails a test at its limit but lets its body run on, so a body that was slow before `install()` installs
+ * after its own teardown and nothing would ever restore the globals for it.
+ */
+function installRefusal(mode: FakeClockOptions["mode"]): () => void {
+  let testEnded = false;
+  if (mode === "mocked") after(() => void (testEnded = true));
+  return () => {
+    if (mode !== "mocked") throw new Error("a manual fake clock does not install: create it with mode mocked");
+    if (testEnded) throw new Error("this fake clock was made by a test that has ended (Bun lets a body run on past its time limit), so it is not installed: create the clock in the test that installs it, and keep the setup that can be slow before that test or at module level");
+  };
+}
+
 export function createFakeClock(options: FakeClockOptions): FakeClock {
   const startMs = options.startMs ?? 0;
   let elapsed = 0;
   let ownsGlobals = false;
+  const refuseInstall = installRefusal(options.mode);
+  /** Set while a wall step is in force: gives the mock `Date.now` back. */
+  let undoWallSteps: (() => void) | null = null;
+  let wallOffsetMs = 0;
   const timers = new Set<ClockTimer>();
   const stages: Record<SliceStage, Set<(sliceMs: number) => void>> = { server: new Set(), physics: new Set() };
   const now = () => startMs + elapsed;
@@ -138,8 +162,21 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
       return () => void stages[stage].delete(step);
     },
     pendingTimers: () => timers.size,
+    stepWallClock(deltaMs) {
+      if (options.mode !== "mocked") throw new Error("a manual fake clock has no Date to step: create it with mode mocked");
+      if (!ownsGlobals) throw new Error("this fake clock is not installed: install it (`using installed = clock.install()`) before stepping its wall clock");
+      if (undoWallSteps === null) {
+        const mockDate = Date;
+        const ownNow = mockDate.now;
+        mockDate.now = () => ownNow.call(mockDate) + wallOffsetMs;
+        undoWallSteps = () => {
+          mockDate.now = ownNow;
+        };
+      }
+      wallOffsetMs += deltaMs;
+    },
     install() {
-      if (options.mode !== "mocked") throw new Error("a manual fake clock does not install: create it with mode mocked");
+      refuseInstall();
       const by = installerOfThisCall();
       if (installed !== null) throw new Error(`a fake clock is already installed by ${installed.by}: dispose it (\`using installed = clock.install()\`) before installing another`);
       const restoreGlobals = installGlobals(now);
@@ -148,6 +185,9 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
         by,
         restore() {
           if (installed !== handle) return;
+          undoWallSteps?.();
+          undoWallSteps = null;
+          wallOffsetMs = 0;
           restoreGlobals();
           ownsGlobals = false;
           installed = null;

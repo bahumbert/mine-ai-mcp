@@ -7,6 +7,7 @@ import { closeSqlDatabase } from "../bot-data/sql-bot-data.js";
 import { persistentBotData } from "../test-support/bot-data.js";
 import { createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
+import { ChatCommandRing } from "./chat-commands.js";
 import { observePlayerEvents } from "./player-events.js";
 
 /** A bot at (12.5, 64, -3.25); `added(event)` counts the listeners on `event` beyond the idle bot's own. */
@@ -259,4 +260,59 @@ test("a chat message after the store closed does not throw", (t) => {
 
   assert.doesNotThrow(() => bot.emit("chat", "Alex", "after the shutdown", null, {} as never, null));
   assert.deepEqual(stderr, ["[player-events] SqlBotData is closed.\n"]);
+});
+
+/** A bot observed with command lines on (`commands`), or off; `events()` is what `read_recent_events` would give. */
+function commandBot(t: TestContext, commands: boolean) {
+  const { bot } = playerBot();
+  const data = SqlBotData.create({
+    storage: { kind: "temporary" },
+    identity: { worldId: "player-events-commands-test", scope: { kind: "bot", botId: bot.username } },
+  });
+  const ring = new ChatCommandRing();
+  const stopObserving = observePlayerEvents(bot, data, () => undefined, commands ? { prefix: "!", ring } : undefined);
+  t.after(() => {
+    stopObserving();
+    data.close();
+  });
+  return {
+    bot,
+    data,
+    ring,
+    events: () => readRecentEvents(data, bot.username, 50).events.map(({ summary }) => summary),
+    ringed: () => ring.after(undefined).commands.map(({ username, channel, message }) => `${channel}:${username}:${message}`),
+  };
+}
+
+test("an incoming command line goes to the ring and is not recorded, so no brain reads it; the bot's own line is", (t) => {
+  const { bot, data, events, ringed } = commandBot(t, true);
+
+  bot.emit("chat", "Tom", "!bots", null, {} as never, null);
+  bot.emit("whisper", "Tom", "!bot stop ayla", null, {} as never, null);
+  bot.emit("chat", "Tom", "  !BOT stop x", null, {} as never, null);
+  bot.emit("chat", "Ayla", "!bot", null, {} as never, null);
+  bot.emit("chat", "MineAI", "!bots", null, {} as never, null);
+
+  assert.deepEqual(ringed(), ["chat:Tom:!bots", "whisper:Tom:!bot stop ayla", "chat:Tom:  !BOT stop x", "chat:Ayla:!bot"]);
+  assert.deepEqual(events(), ["MineAI: !bots"]);
+  assert.deepEqual(readNotificationSummary(data, bot.username), { unreadCount: 0 });
+});
+
+test("a line that only holds or resembles a command is ordinary chat", (t) => {
+  const { bot, events, ringed } = commandBot(t, true);
+
+  bot.emit("chat", "Tom", "hello !bots", null, {} as never, null);
+  bot.emit("chat", "Tom", "!botany", null, {} as never, null);
+
+  assert.deepEqual(ringed(), []);
+  assert.deepEqual(events(), ["Tom: hello !bots", "Tom: !botany"]);
+});
+
+test("without command lines on, !bots is recorded as it always was", (t) => {
+  const { bot, events, ringed } = commandBot(t, false);
+
+  bot.emit("chat", "Tom", "!bots", null, {} as never, null);
+
+  assert.deepEqual(events(), ["Tom: !bots"]);
+  assert.deepEqual(ringed(), []);
 });

@@ -9,6 +9,7 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
+import { type FakeChatOptions, attachFakeChat } from "./fake-bot-chat.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
@@ -81,6 +82,8 @@ export interface FakeBotOptions {
   readonly lagMs?: number;
   /** The server's age, time of day, packet phase and tick rate. */
   readonly server?: Omit<FakeServerOptions, "lagMs">;
+  /** How the server answers a whisper (`fake-bot-chat.ts`). */
+  readonly chat?: FakeChatOptions;
   /** Move the body by Mineflayer's own physics engine each tick (gravity, water, jumping); off by default. */
   readonly simulatePhysics?: boolean;
   /** Methods a test replaces (a scripted `tossStack` failure). */
@@ -211,7 +214,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
   const serverEntities = attachFakeEntities(bot, { server, inventory, entities });
-  attachFakeVehicle(bot, { server });
+  attachFakeVehicle(bot, { server, seatPositionLeadTicks: options.server?.seatPositionLeadTicks ?? 0 });
   const swing = attachFakeSwing({ server, inventory });
   attachFakeBoatDamage(bot, { server, entities: serverEntities, inventory, swing });
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
@@ -224,6 +227,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { server });
   attachFakeSleep(bot, { server, world });
+  attachFakeChat(bot, { server, options: options.chat });
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
   return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat };

@@ -10,16 +10,52 @@ import assert from "node:assert/strict";
 import type { Bot } from "mineflayer";
 import type { ContractCheck } from "../checks.ts";
 import { answerArrives, serverQuiet } from "../server-answer.ts";
+import type { ContractSubject } from "../subject.ts";
 import { countWrites } from "./bed-scene.ts";
 import { finishWithin, holdInHand, useFlagsOf } from "./combat-scene.ts";
+import { type TimedMark, latenessRecorded, latenessSaid, markTimed, readingWindow } from "./late-reading-window.ts";
+import { type Mark, markNow, tickOf } from "./server-tick-marks.ts";
 
-const EATING_MS = { min: 1_400, max: 2_100 } as const;
+/**
+ * The bite is the game's 32 ticks (the 1.6 s of Minecraft's food usage, `mineflayer/lib/plugins/inventory.js:12-15` says 1.61 s; 1558-1576 ms
+ * measured at 20 a second): judged by the server's ticks, since a server below 20 a second holds them in more wall time and Mineflayer's
+ * `consume` gives up at 2500 ms (`inventory.js:15`, 12.8 ticks a second and below).
+ */
+const EATING_TICKS = 32;
+const MINEFLAYER_CONSUME_TIMEOUT = /Promise timed out/u;
 
 const USING_HAND = 1;
 const APPLE_EFFECTS = ["regeneration", "absorption"];
 
 const countOf = (bot: Bot, name: string) => bot.inventory.count(bot.registry.itemsByName[name]!.id, null);
 const effectNames = (bot: Bot) => Object.values(bot.entity.effects).map((effect) => bot.registry.effects[effect.id]?.name?.toLowerCase());
+
+/**
+ * Eat the held food and read the server's tick at the use and at the end of the bite (the `consume` promise resolving, or, when Mineflayer gave
+ * up at 2500 ms on a slow server, the effects the server sends with the end), whatever the wall time between them; any other rejection fails.
+ */
+async function eatMarked(subject: ContractSubject, what: string): Promise<{ readonly started: Mark; readonly ended: TimedMark }> {
+  const { bot } = subject;
+  let ended: TimedMark | null = null;
+  const onEffect = (entity: unknown) => {
+    if (entity === bot.entity) ended ??= markTimed(subject);
+  };
+  bot.on("entityEffect", onEffect);
+  try {
+    const started = markNow(subject);
+    const eating = bot.consume().then(
+      () => void (ended ??= markTimed(subject)),
+      (error: Error) => {
+        if (!MINEFLAYER_CONSUME_TIMEOUT.test(error.message)) throw error;
+      },
+    );
+    await finishWithin(subject, eating, what);
+    await answerArrives(subject, () => ended !== null, `${what}: the end of the bite`);
+    return { started, ended: ended! };
+  } finally {
+    bot.off("entityEffect", onEffect);
+  }
+}
 
 export const consumeFood: ContractCheck = {
   name: "consume-food",
@@ -29,9 +65,16 @@ export const consumeFood: ContractCheck = {
     const { bot } = subject;
     assert.equal(bot.food, 20, "the bot starts hungry");
     await holdInHand(subject, "golden_apple");
-    const startedAt = subject.now();
-    const tookMs = (await finishWithin(subject, bot.consume(), "consume")) - startedAt;
-    assert.ok(tookMs >= EATING_MS.min && tookMs <= EATING_MS.max, `eating took ${tookMs} ms, not ${EATING_MS.min} to ${EATING_MS.max}`);
+    const { started, ended } = await eatMarked(subject, "consume");
+    const startTick = await tickOf(subject, started);
+    const endTick = await tickOf(subject, ended);
+    const tookTicks = endTick - startTick;
+    const roundTripMs = await ended.roundTripMs;
+    const window = readingWindow(EATING_TICKS, roundTripMs);
+    assert.ok(
+      tookTicks >= window.min && tookTicks <= window.max,
+      `eating took ${tookTicks} server ticks (tick ${startTick} to ${endTick}), not ${window.min} to ${window.max} (${latenessSaid("end", roundTripMs, window.lateTicks)})`,
+    );
     // The stack, the bit and the effects come after the resolution; the assertions below say which one never did.
     await answerArrives(subject, () => countOf(bot, "golden_apple") === 1 && (useFlagsOf(bot) & USING_HAND) === 0 && APPLE_EFFECTS.every((effect) => effectNames(bot).includes(effect)), "the eaten apple, the bite over and the effects");
     assert.equal(countOf(bot, "golden_apple"), 1, "an eaten apple stays in the stack");
@@ -63,7 +106,8 @@ export const consumeFood: ContractCheck = {
     await finishWithin(subject, interrupted, "the released bite");
     assert.notEqual(await interrupted, "ate", "a bite released halfway was eaten");
     assert.equal(countOf(bot, "golden_apple"), 1, "a released bite spent the apple");
-    await finishWithin(subject, bot.consume(), "the next consume");
+    await eatMarked(subject, "the next consume");
     await answerArrives(subject, () => countOf(bot, "golden_apple") === 0, "the next consume did not eat it");
+    return latenessRecorded(EATING_TICKS, tookTicks, roundTripMs);
   },
 };

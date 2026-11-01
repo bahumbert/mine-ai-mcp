@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { ANSWER_WALL_MS, answerArrives } from "../server-answer.ts";
+import { ANSWER_WALL_MS, answerArrives, answerArrivesWhileMoving } from "../server-answer.ts";
 import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { type Mark, READING_TICKS, markNow, tickOf } from "./server-tick-marks.ts";
 import { BED_FIXTURE, BED_HEAD, bedOccupied, sleepMetadataOf, trySleep, untilBedOccupied } from "./bed-scene.ts";
@@ -18,8 +18,8 @@ const SLEEPING_POSE = 2;
 const SKIP_AFTER_SLEEP_TICKS = 100;
 /** The read at the wake is the skip's tick or later: late by the client's lag and a round trip (the old 3 s of slack, read in server ticks). */
 const SKIP_LATE_TICKS = 60;
-/** The wall bound of the sleep: 100 ticks and the round trips with a server at 10 ticks a second. Over the 10 s of `ANSWER_WALL_MS` on purpose: a wait for 100 ticks is no single answer. */
-const SKIP_WALL_MS = 12_000;
+/** The wait for the wake gives up this many ticks after the sleep: the latest wake `assertSkippedAfterTicks` accepts, and two time packets (20 ticks each) for the age read stale at both ends. */
+const WAKE_GIVE_UP_TICKS = SKIP_AFTER_SLEEP_TICKS + READING_TICKS + SKIP_LATE_TICKS + 2 * 20;
 const DAWN_TICK = 24_000;
 const DAWN_SLACK_TICKS = 20;
 
@@ -27,6 +27,7 @@ export const bedSleepAndWake: ContractCheck = {
   name: "bed-sleep-and-wake",
   // Our runtime would walk to or sleep in the bed.
   withoutRuntime: true,
+  exclusive: "the night skip waits for every player of the world to sleep 100 ticks, so another lane's sleeper or awake player changes when she wakes (173 ticks read against a bound of 162 on a shared server), and a lane trial's `time set` rewinds the night",
   fixture: { ...BED_FIXTURE, timeOfDay: NIGHT_TICK, daylightCycle: true },
   async run(subject) {
     const { bot } = subject;
@@ -62,7 +63,11 @@ export const bedSleepAndWake: ContractCheck = {
       const sleepBegan = markNow(subject);
       const second = await trySleep(subject);
       assert.equal(second.slept, true, `the second sleep: ${String(second.error)}`);
-      assert.ok(await holdsWithin(subject, () => events.length === 4, SKIP_WALL_MS), `no wake for the sleep left alone: ${events.join(",")}`);
+      // The 100 ticks of the sleep take 12.5 s at 8 ticks a second: the wait ends when the world age stands still, not at a total wall time,
+      // and when the world age has run past the latest wake (the age moves on a server that ticks whether or not a wake comes).
+      const ageAtSleep = bot.time.age;
+      await answerArrivesWhileMoving(subject, () => events.length === 4 || bot.time.age - ageAtSleep > WAKE_GIVE_UP_TICKS, () => bot.time.age, "no wake for the sleep left alone");
+      assert.equal(events.length, 4, `no wake for the sleep left alone within ${WAKE_GIVE_UP_TICKS} server ticks: ${events.join(",")}`);
       await assertSkippedAfterTicks(subject, sleepBegan, markNow(subject));
       assert.ok(await holdsWithin(subject, () => bot.time.timeOfDay < 12_541, ANSWER_WALL_MS), `the night was not skipped: ${bot.time.timeOfDay}`);
       // The skip sets the time to the next dawn; the packet the client reads is that dawn a tick or two on (24001 was heard).

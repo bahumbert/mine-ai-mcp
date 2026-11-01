@@ -57,6 +57,7 @@ import { ESCAPE_RELAXED_RULES, RelaxedRulesUsed, isShutInByEscapableRefusals, re
 import type { FailedEdges } from "./failed-edges.js";
 import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movements/policy.js";
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { IncrementalSearch } from "../search/search.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
@@ -323,7 +324,7 @@ export class NavigationRun {
     // Only a committed route owns an execution dependency worth stopping.
     // Every selected step checks its concrete preconditions again before it
     // moves, so an old search result cannot execute stale world assumptions.
-    const classification = this.context.ledger.classify(change, this.#routeDependencies, Date.now());
+    const classification = this.context.ledger.classify(change, this.#routeDependencies, monotonicNow());
     this.#counters[CHANGE_COUNTER[classification]] += 1;
     this.#events.emit({ kind: "world_change", classification, change });
     this.#arrivalRepeat.worldChanged(change);
@@ -999,7 +1000,7 @@ export class NavigationRun {
       token,
       operation: { kind: "break", position: cell, expectedStateId: dig.stateId, toolType: dig.toolType, brings: [] },
       targets: [{ position: cell, before: stateMatcher(dig.stateId), after: airMatcher }],
-      deadlineMs: Date.now() + Math.max(PIN_RELEASE_DEADLINE_MS, dig.expectedTicks * 100),
+      deadlineMs: monotonicNow() + Math.max(PIN_RELEASE_DEADLINE_MS, dig.expectedTicks * 100),
     });
     if (signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
     if (result.kind !== "confirmed")

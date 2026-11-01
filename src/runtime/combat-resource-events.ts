@@ -4,13 +4,16 @@ import { PREPARE_DRAGON_PERCH } from "../actions/prepare-dragon-perch/contract.j
 import { DESTROY_END_CRYSTAL } from "../actions/destroy-end-crystal/contract.js";
 import { COLLECT_MOB_DROP } from "../actions/hunt-mob/contract.js";
 import type { ActionRunner } from "../session/action-runner.js";
+import { monotonicNow } from "../utils/monotonic-clock.js";
 import { isItemEntity } from "../world/item-pickup.js";
+import { isArrowItem } from "../world/item-tags.js";
 import { onCombatResourceReceipt } from "./combat-resource-receipts.js";
 
 const COMBAT_ACTIONS = new Set<string>([COLLECT_MOB_DROP, DESTROY_END_CRYSTAL, ATTACK_DRAGON_PERCH, PREPARE_DRAGON_PERCH]);
 type PendingShot = { readonly scope: string; readonly arrows: number; readonly at: number };
-function count(bot: Bot, name: string): number {
-  return bot.inventory.items().filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0);
+/** Every arrow the bot carries, of any kind in the game's `arrows` tag. */
+function carriedArrows(bot: Bot): number {
+  return bot.inventory.items().filter((item) => isArrowItem(item.name, bot.version)).reduce((sum, item) => sum + item.count, 0);
 }
 
 /** One connection observer correlates owned effects with native receipts. */
@@ -24,7 +27,7 @@ export function observeCombatResourceEvents(bot: Bot, runner: ActionRunner): () 
   const armDurability = () => {
     damageScope = runner.combatResourceScope();
     if (!damageScope) return;
-    damageReceiptAt = Date.now(); damageReceipt++; durabilitySeen.clear();
+    damageReceiptAt = monotonicNow(); damageReceipt++; durabilitySeen.clear();
   };
   const combatActive = () => {
     const ownership = runner.ownership();
@@ -35,19 +38,19 @@ export function observeCombatResourceEvents(bot: Bot, runner: ActionRunner): () 
   const receipt = onCombatResourceReceipt(bot, (event) => {
     const scope = runner.combatResourceScope();
     if (!scope || !combatActive()) return;
-    if (event.kind === "arrow_release_command") pendingShot = { scope, arrows: count(bot, "arrow"), at: Date.now() };
+    if (event.kind === "arrow_release_command") pendingShot = { scope, arrows: carriedArrows(bot), at: monotonicNow() };
     else runner.recordScopedCombatResource(scope, { kind: event.kind });
   });
   const updateSlot = (slot: number, oldItem: Bot["heldItem"], newItem: Bot["heldItem"]) => {
-    const nextArrows = count(bot, "arrow");
+    const nextArrows = carriedArrows(bot);
     const currentScope = runner.combatResourceScope();
-    if (pendingShot && (pendingShot.scope !== currentScope || Date.now() - pendingShot.at > 1_500)) pendingShot = null;
+    if (pendingShot && (pendingShot.scope !== currentScope || monotonicNow() - pendingShot.at > 1_500)) pendingShot = null;
     if (pendingShot && nextArrows < pendingShot.arrows) {
       runner.recordScopedCombatResource(pendingShot.scope, { kind: "arrow_fired" });
       pendingShot = null;
       armDurability();
     }
-    if (!combatActive() || damageScope !== currentScope || Date.now() - damageReceiptAt > 500 || !oldItem || !newItem ||
+    if (!combatActive() || damageScope !== currentScope || monotonicNow() - damageReceiptAt > 500 || !oldItem || !newItem ||
       oldItem.name !== newItem.name || !Number.isInteger(oldItem.durabilityUsed) || !Number.isInteger(newItem.durabilityUsed) ||
       newItem.durabilityUsed <= oldItem.durabilityUsed) return;
     const receiptKey = `${damageReceipt}:${slot}:${newItem.name}`;
@@ -69,7 +72,7 @@ export function observeCombatResourceEvents(bot: Bot, runner: ActionRunner): () 
     try {
       const stack = isItemEntity(collected) ? collected.getDroppedItem() : null;
       const amountCollected = collected.name === "arrow" || collected.name === "spectral_arrow" ? 1
-        : stack?.name === "arrow" ? stack.count : 0;
+        : stack && isArrowItem(stack.name, bot.version) ? stack.count : 0;
       for (let amount = 0; amount < amountCollected; amount++)
         runner.recordCombatResource({ kind: "arrow_recovered" });
     } catch { /* A despawned entity is not recovery evidence. */ }

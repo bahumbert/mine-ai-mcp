@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { recoverUnderCover, type CoveredRecovery } from "./recover.js";
@@ -50,7 +51,7 @@ function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
     options,
     itemUse: new CombatItemUse(bot, (ticks) => holdShelterGuard(build, ticks)),
     enclosed: enclosedInPlace(bot, options.blockNames),
-    constructionDeadline: Date.now() + options.maximumMs,
+    constructionDeadline: monotonicNow() + options.maximumMs,
     dug: 0,
     walled: 0,
     capped: false,

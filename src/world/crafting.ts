@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
@@ -10,7 +9,8 @@ export type CraftExecution =
   | { readonly kind: "failed"; readonly completedSteps: number; readonly cause: unknown };
 
 type ItemLoader = (registry: Bot["registry"]) => typeof Item;
-const loadItem = createRequire(import.meta.url)("prismarine-item") as ItemLoader;
+// A literal `require`, not `createRequire(import.meta.url)`: the setup's bundle follows it (a createRequire resolves at run time from a folder with no node_modules).
+const loadItem = require("prismarine-item") as ItemLoader;
 
 /** Native craft stores each application's output before starting the next one. */
 function requireApplicationRoom(bot: Bot, recipe: CraftApplication["recipe"]): void {

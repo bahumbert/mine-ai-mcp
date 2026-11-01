@@ -2,6 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-bed-sleep-and-wake
 tags:
   - contract
+  - exclusive
 description: "A night bed in a world whose time runs: the sleep is accepted, the player is seated with her pose and sleeping position in the metadata and the bed shown occupied; wake frees her at once with the night on; a sleep left alone is ended by the server skipping the night to the dawn. Contract check tests/minecraft/contract/checks/bed-sleep-and-wake.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun
@@ -12,6 +13,7 @@ client:
     - --without-runtime
 params:
   check: bed-sleep-and-wake
+reset: []
 setup:
   - fill -6 -61 -6 6 -61 6 stone
   - fill -6 -60 -6 6 -55 6 air

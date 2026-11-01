@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import type { ActionStatus, BotRuntime, ForegroundState, ForegroundTool } from "./runtime-client.ts";
 
 /** How long one MCP wait may block; also the reaction time to stop, speech, and re-plan checks. */
@@ -74,31 +75,31 @@ export class Body {
 
   act(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions = {}): Promise<ActOutcome> {
     return this.exclusive(async () => {
-      const started = Date.now();
+      const started = monotonicNow();
       try {
         return await this.run(tool, input, rationale, options);
       } finally {
-        this.onAction?.(tool, input, Date.now() - started);
+        this.onAction?.(tool, input, elapsedSince(started));
       }
     });
   }
 
   /**
    * Says an answer as one chat line, or two when it is long (`toChatLines`), each after as long as typing it would take
-   * counted from `since` (when the message it answers was heard); with `to`, as a whisper to that player. Empty text
-   * says nothing. Resolves once the runtime settled the last line.
+   * counted from `since` (a `monotonicNow()` reading of when the message it answers was heard); with `to`, as a whisper
+   * to that player. Empty text says nothing. Resolves once the runtime settled the last line.
    */
-  say(text: string, since = Date.now(), to?: string): Promise<void> {
+  say(text: string, since = monotonicNow(), to?: string): Promise<void> {
     const messages = toChatLines(text, to === undefined ? MAX_CHAT_LENGTH : MAX_WHISPER_LENGTH);
     if (messages.length === 0) return Promise.resolve();
     const line = this.speech.then(async () => {
       let from = since;
       for (const message of messages) {
-        const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (Date.now() - from);
+        const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (monotonicNow() - from);
         if (wait > 0) await sleep(wait);
         const outcome = await this.runtime.say(message, to);
         if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
-        from = Date.now();
+        from = monotonicNow();
       }
     });
     this.speech = line.catch(() => undefined);
@@ -124,24 +125,24 @@ export class Body {
         if (stop || (options.interruptWhen !== undefined && await options.interruptWhen())) {
           cancelled = true;
           preempted = !stop;
-          cancelledAt = lastCancel = performance.now();
+          cancelledAt = lastCancel = monotonicNow();
           await this.runtime.cancel(state.actionId, stop ? "Stopped by the agent." : "Re-planning.");
         }
       } else {
-        const waited = performance.now() - cancelledAt;
+        const waited = monotonicNow() - cancelledAt;
         if (waited >= this.pace.giveUpMs) {
           this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
           return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
         }
-        if (performance.now() - lastCancel >= this.pace.recancelMs) {
-          lastCancel = performance.now();
+        if (monotonicNow() - lastCancel >= this.pace.recancelMs) {
+          lastCancel = monotonicNow();
           await this.runtime.cancel(state.actionId, "Stopped by the agent.");
         }
       }
       const slice = await this.waitSlice(state.actionId, cancelled ? cancelledAt + this.pace.giveUpMs : null, options.signal);
       if (slice === WOKEN) continue;
       if (slice === GAVE_UP) {
-        const waited = performance.now() - cancelledAt;
+        const waited = monotonicNow() - cancelledAt;
         this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
         return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
       }
@@ -159,7 +160,7 @@ export class Body {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
     const stopped = new Promise<typeof GAVE_UP | typeof WOKEN>((resolve) => {
-      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - performance.now()) + WAIT_SLICE_MS);
+      if (deadline !== null) timer = setTimeout(() => resolve(GAVE_UP), Math.max(0, deadline - monotonicNow()) + WAIT_SLICE_MS);
       else if (signal !== undefined) {
         onAbort = () => resolve(WOKEN);
         signal.addEventListener("abort", onAbort, { once: true });
@@ -181,7 +182,7 @@ export class Body {
    *   `body owner: hostile_reflex`): the reflex is protecting the bot, so wait for it, up to {@link REFLEX_WAIT_MS}.
    */
   private async submit(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, signal: AbortSignal | undefined): Promise<ForegroundState> {
-    const deadline = Date.now() + REFLEX_WAIT_MS;
+    const deadline = monotonicNow() + REFLEX_WAIT_MS;
     let settledBlocker = false;
     for (;;) {
       const state = await this.runtime.submit(tool, input, rationale, WAIT_SLICE_MS);
@@ -193,21 +194,21 @@ export class Body {
         settledBlocker = true;
         continue;
       }
-      if (state.code !== "ACTION_BUSY" || blocking !== null || Date.now() >= deadline || signal?.aborted) return state;
+      if (state.code !== "ACTION_BUSY" || blocking !== null || monotonicNow() >= deadline || signal?.aborted) return state;
       await sleep(WAIT_SLICE_MS, undefined, { signal }).catch(() => undefined);
     }
   }
 
   private async settle(actionId: string, reason: string): Promise<void> {
     await this.runtime.cancel(actionId, reason);
-    const started = Date.now();
+    const started = monotonicNow();
     let lastCancel = started;
     let state = await this.runtime.wait(actionId, WAIT_SLICE_MS);
     while (state.state === "pending") {
       // The same bound as in run: an action that will not stop must not hold the next one for ever.
-      if (Date.now() - started >= this.pace.giveUpMs) return;
-      if (Date.now() - lastCancel >= this.pace.recancelMs) {
-        lastCancel = Date.now();
+      if (monotonicNow() - started >= this.pace.giveUpMs) return;
+      if (monotonicNow() - lastCancel >= this.pace.recancelMs) {
+        lastCancel = monotonicNow();
         await this.runtime.cancel(actionId, reason);
       }
       state = await this.runtime.wait(actionId, WAIT_SLICE_MS);

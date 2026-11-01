@@ -9,6 +9,7 @@ import type { Placement } from "./placement.ts";
 import { ServerPool } from "./pool.ts";
 import { sampleOnce } from "./sampler.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
+import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import { Scheduler, type SubmissionEvent, type SubmissionHandle, type SubmissionSpec } from "./scheduler.ts";
 import type { TrialRunInput } from "./trial.ts";
 
@@ -47,7 +48,7 @@ export class SchedulerRig {
   /** The clients booted ahead, present when the rig was given a `ScriptedClients`. */
   readonly ahead: ClientsAhead | null;
 
-  constructor(env: Record<string, string> = {}, options: { readonly clients?: ScriptedClients } = {}) {
+  constructor(env: Record<string, string> = {}, options: { readonly clients?: ScriptedClients; readonly templateBuilds?: TemplateBuilds } = {}) {
     this.config = loadScenarioServerConfig({ ...TEST_CONFIG_ENV, ...env });
     this.pool = new ServerPool(this.factory, this.config, message => this.logs.push(message));
     this.ahead = options.clients ? new ClientsAhead({ config: this.config, log: message => this.logs.push(message), spawn: options.clients.spawn, now: () => this.clock }) : null;
@@ -55,7 +56,7 @@ export class SchedulerRig {
       pool: this.pool, config: this.config, now: () => this.clock, log: message => this.logs.push(message),
       runTrial: input => this.#runTrial(input),
       runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
-      clientsAhead: this.ahead ?? undefined,
+      clientsAhead: this.ahead ?? undefined, templateBuilds: options.templateBuilds,
     });
   }
 

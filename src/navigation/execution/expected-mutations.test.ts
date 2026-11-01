@@ -2,6 +2,7 @@ import { ExpectedMutationLedger } from "./mutations.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { flatWorld } from "../../test-support/navigation.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { blockKey, type BlockObservation, type BlockPosition } from "../world/world.js";
 
 const TOKEN = { runId: "r", planId: "p", stepId: "s", attempt: 1 };
@@ -23,7 +24,7 @@ test("expected mutation matching is distinct from route invalidation", async () 
     before: reads("solid", 2),
     after: reads("air", 0),
     operation: "break",
-    deadlineMs: Date.now() + 1000,
+    deadlineMs: monotonicNow() + 1000,
   });
   expectation.markIssued();
   world.load(position, { stateId: 0 });
@@ -32,7 +33,7 @@ test("expected mutation matching is distinct from route invalidation", async () 
   const classification = ledger.classify(
     { position, before, after, worldRevision: world.revision },
     new Set([blockKey(position)]),
-    Date.now(),
+    monotonicNow(),
   );
   assert.equal(classification, "expected");
   assert.equal((await expectation.result).kind, "confirmed");
@@ -50,20 +51,20 @@ test("a placement is contradicted neither by a no-op update nor by its own dupli
       before: reads("air", 0),
       after: reads("placed", 10),
       operation: "place",
-      deadlineMs: Date.now() + 1_000,
+      deadlineMs: monotonicNow() + 1_000,
     });
 
   // A cell that did not change cannot contradict work that has not landed yet.
   const pending = placement();
   assert.equal(
-    ledger.classify({ position, before, after: before, worldRevision: world.revision }, new Set(), Date.now()),
+    ledger.classify({ position, before, after: before, worldRevision: world.revision }, new Set(), monotonicNow()),
     "irrelevant",
   );
   assert.equal(ledger.activeCount, 1);
   world.load(position, { stateId: 10 });
   const placed = world.blockAt(position.x, position.y, position.z);
   assert.equal(
-    ledger.classify({ position, before, after: placed, worldRevision: world.revision }, new Set(), Date.now()),
+    ledger.classify({ position, before, after: placed, worldRevision: world.revision }, new Set(), monotonicNow()),
     "expected",
   );
   assert.equal((await pending.result).kind, "confirmed");
@@ -74,11 +75,11 @@ test("a placement is contradicted neither by a no-op update nor by its own dupli
   repeated.markIssued();
   const dependencies = new Set([blockKey(position)]);
   assert.equal(
-    ledger.classify({ position, before, after: placed, worldRevision: 2 }, dependencies, Date.now()),
+    ledger.classify({ position, before, after: placed, worldRevision: 2 }, dependencies, monotonicNow()),
     "expected",
   );
   assert.equal(
-    ledger.classify({ position, before: placed, after: placed, worldRevision: 3 }, dependencies, Date.now()),
+    ledger.classify({ position, before: placed, after: placed, worldRevision: 3 }, dependencies, monotonicNow()),
     "expected",
   );
 });
@@ -97,7 +98,7 @@ test("a break that brings a column down owns every change in that column", async
     after: reads("air", 0),
     operation: "break",
     owned: [head, above],
-    deadlineMs: Date.now() + 5_000,
+    deadlineMs: monotonicNow() + 5_000,
   });
   expectation.markIssued();
   const dependencies = new Set([blockKey(head), blockKey(above)]);
@@ -113,12 +114,12 @@ test("a break that brings a column down owns every change in that column", async
   };
 
   // The break itself, then the column turning to entities, landing, and being broken again.
-  assert.equal(ledger.classify(change(head, 0), dependencies, Date.now()), "expected");
+  assert.equal(ledger.classify(change(head, 0), dependencies, monotonicNow()), "expected");
   assert.equal((await expectation.result).kind, "confirmed");
-  assert.equal(ledger.classify(change(above, 0), dependencies, Date.now()), "expected");
-  assert.equal(ledger.classify(change(head, 2), dependencies, Date.now()), "expected");
-  assert.equal(ledger.classify(change(head, 0), dependencies, Date.now()), "expected");
+  assert.equal(ledger.classify(change(above, 0), dependencies, monotonicNow()), "expected");
+  assert.equal(ledger.classify(change(head, 2), dependencies, monotonicNow()), "expected");
+  assert.equal(ledger.classify(change(head, 0), dependencies, monotonicNow()), "expected");
   // A cell outside the column is still the world's.
   const outside = { x: 2, y: 64, z: 0 };
-  assert.equal(ledger.classify(change(outside, 2), new Set([blockKey(outside)]), Date.now()), "invalidating");
+  assert.equal(ledger.classify(change(outside, 2), new Set([blockKey(outside)]), monotonicNow()), "invalidating");
 });

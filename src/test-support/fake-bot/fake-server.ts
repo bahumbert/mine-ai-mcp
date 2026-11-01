@@ -39,6 +39,13 @@ export interface FakeServerOptions {
   readonly weather?: Weather;
   /** False: no time packet has come yet, so the client has no age (`time.js` starts all null) until the first one. Default true. */
   readonly timePacketYet?: boolean;
+  /**
+   * Server ticks between the `position` packet that puts a rider at her seat and the passenger list that seats her (2 is the value of the
+   * one red of a loaded server, 3 physics steps and 0.23 blocks of fall, contract check `boat-broken-by-attack`, plan 2026-10-30-contract-batch-timing T5;
+   * not measured on a server on time, where the gap may be shorter; the position coming first is from the source, `physics.js:448`, `entities.js:817`). 0 (default): the
+   * seat is set with the list and no position is sent, which the older tests of a mount rely on.
+   */
+  readonly seatPositionLeadTicks?: number;
 }
 
 export interface ReceivedPacket {
@@ -241,11 +248,15 @@ function createRiders(): Pick<FakeServer, "riderOf" | "ridersOf" | "seatRider" |
   };
 }
 
-/** The `game_state_change` packets of the weather: `send` queues one as a server answer, `onWeatherPacket` hears them. */
-function createWeatherChannel(answer: (run: () => void) => void) {
+/**
+ * The `game_state_change` packets of the weather: `send` tells the listeners in the tick that changed a level, `onWeatherPacket` hears them. The game sends them from the tick (`ServerLevel.advanceWeatherCycle`
+ * broadcasts the level change as it moves, vanilla source; contract check `rain-and-thunder-state`, 2026-10-23 on a server on time: 100 steps in 102 updates), not as an answer to a packet of the client, so `lagMs` does not delay
+ * them: as the time packets, the air and a fireball's updates (T7f, T7i). Unmeasured under a lag.
+ */
+function createWeatherChannel() {
   const listeners = new Set<(packet: WeatherPacket) => void>();
   return {
-    send: (packet: WeatherPacket) => answer(() => void [...listeners].forEach((listener) => listener(packet))),
+    send: (packet: WeatherPacket) => void [...listeners].forEach((listener) => listener(packet)),
     onWeatherPacket(listener: (packet: WeatherPacket) => void) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
@@ -348,7 +359,7 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
   let pending: PendingAnswer[] = [];
 
   const answer = (run: () => void) => void pending.push({ dueMs: clock.now() + lagMs, run });
-  const weatherChannel = createWeatherChannel(answer);
+  const weatherChannel = createWeatherChannel();
   // The weather advances a level step each server tick.
   ticks.api.onTick(() => weather.tick().forEach(weatherChannel.send));
   const answerDue = () => void (pending = runDueAnswers(pending, clock.now()));

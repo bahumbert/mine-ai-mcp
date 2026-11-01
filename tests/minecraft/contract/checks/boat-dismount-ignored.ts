@@ -9,7 +9,7 @@ export const boatDismountIgnored: ContractCheck = {
   withoutRuntime: true,
   async run(subject) {
     const { bot } = subject;
-    const boat = await mountBoat(subject);
+    const { boat } = await mountBoat(subject);
     bot.dismount();
     const heard = await listenWhileSeated(subject, boat);
     assert.equal(await subject.seatedOnServer(boat), true, "the server let her off on dismount()");

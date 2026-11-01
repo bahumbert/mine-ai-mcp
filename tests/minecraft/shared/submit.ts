@@ -27,7 +27,7 @@ async function runOnDaemon(args: SubmitArgs): Promise<number> {
   await ensureDaemon({ socketPath, port: args.port, daemonFile: resolve(HERE, "daemon.ts"), repoRoot: REPO_ROOT });
   let exitCode = 1;
   const session = await exchange(socketPath, {
-    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: forwardedEnv(process.env),
+    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: forwardedEnv(process.env, process.cwd()),
   }, message => {
     print(message);
     if (message.type === "done") exitCode = message.failed > 0 || message.cancelled > 0 ? 1 : 0;

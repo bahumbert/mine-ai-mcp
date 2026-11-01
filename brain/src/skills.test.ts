@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import minecraftData from "minecraft-data";
+import { fuelsOf } from "#src/world/smelting.ts";
 import { describeStep, skillUsage, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
@@ -8,7 +10,7 @@ import { DEFAULT_STYLE, STYLES } from "./building/styles.ts";
 import { neededItems } from "./inventory-room.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
-import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "./testing.ts";
+import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL, steppedClocks } from "./testing.ts";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, ...extra };
@@ -542,6 +544,38 @@ test("carried coal burns before planks, and carried red sand is smelted before a
   assert.equal(result.status, "done");
   assert.deepEqual(runtime.submitted.map((call) => call.tool), ["smelt_item"]);
   assert.deepEqual(smeltCalls(runtime), [{ item_name: "red_sand", count: 8, fuel_item_name: "coal", temporary_workstation: true }]);
+});
+
+/** The fuel table the brain gets from the runtime: `view_smelting_recipes`' `fuels` (`fuelsOf`), as `runtime-client.ts` reads it. */
+const RUNTIME_FUELS_1_21_4: Readonly<Record<string, number>> = Object.fromEntries(fuelsOf(Object.keys(minecraftData("1.21.4").itemsByName), "1.21.4").map(({ item, itemsSmelted }) => [item, itemsSmelted]));
+
+test("a carried lava bucket is kept and coal burns, from the runtime's real fuel list", async () => {
+  const runtime = smeltRuntime([{ name: "sand", count: 8 }, { name: "lava_bucket", count: 1 }, { name: "coal", count: 1 }, { name: "furnace", count: 1 }]);
+  runtime.fuels = RUNTIME_FUELS_1_21_4;
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 8 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 8, fuel_item_name: "coal", temporary_workstation: true }]);
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "lava_bucket")?.count ?? 0, 1);
+});
+
+test("with only a lava bucket to burn, planks are made from the carried log", async () => {
+  const runtime = smeltRuntime([{ name: "sand", count: 3 }, { name: "lava_bucket", count: 1 }, { name: "oak_log", count: 1 }, { name: "crafting_table", count: 1 }, { name: "furnace", count: 1 }]);
+  runtime.fuels = RUNTIME_FUELS_1_21_4;
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 3, fuel_item_name: "oak_planks", temporary_workstation: true }]);
+  const carried = (item: string) => runtime.snapshot.inventory.find((stack) => stack.name === item)?.count ?? 0;
+  assert.equal(carried("lava_bucket"), 1);
+  assert.equal(carried("glass"), 3);
+});
+
+test("a carried boat is kept and planks burn, though the runtime lists boats as fuel", async () => {
+  const runtime = smeltRuntime([{ name: "sand", count: 3 }, { name: "oak_boat", count: 2 }, { name: "oak_planks", count: 2 }, { name: "furnace", count: 1 }]);
+  runtime.fuels = RUNTIME_FUELS_1_21_4;
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 3, fuel_item_name: "oak_planks", temporary_workstation: true }]);
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "oak_boat")?.count ?? 0, 2);
 });
 
 test("planks asked for and burnt as fuel are made again", async () => {
@@ -1581,7 +1615,7 @@ test("a follow asked for by a player ends after ten minutes without a word from 
   // Spec 2026-10-04-activity-time-travel-terraforming: following never ended by itself (live: Vex followed Tester until
   // an order came).
   const runtime = new FakeRuntime();
-  const quiet = await runStep({ skill: "follow_player", player: "Tom", distance: 3 }, contextFor(runtime, { heardFrom: () => Date.now() - 11 * 60_000 }));
+  const quiet = await runStep({ skill: "follow_player", player: "Tom", distance: 3 }, contextFor(runtime, { heardFrom: () => performance.now() - 11 * 60_000 }));
   assert.equal(quiet.status, "done");
   assert.match(quiet.status === "done" ? quiet.detail : "", /Tom; they said nothing for 10 minutes/u);
   assert.equal(stepSchema.safeParse({ skill: "follow_player", player: "Tom", minutes: 16 }).success, false);
@@ -2380,4 +2414,20 @@ test("in the Nether, logs seen in the overworld are named as the overworld's, no
   runtime.seen = { dark_oak_log: { dimension: "the_nether", x: 700, z: 8 } };
   const here = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
   assert.match(here.status === "failed" ? here.detail : "", /you saw some 700 blocks east, around 700 64 8: go_to there yourself/u);
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T7: a follow's own minutes are a duration (the player's silence window is covered
+// through the agent in agent.test.ts, where `lastHeard` feeds `heardFrom`).
+test("a follow of its own minutes ends after them in monotonic time, whatever the wall clock does", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 1, y: 64, z: 0 } }] };
+  const clocks = steppedClocks(t);
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const following = runStep({ skill: "follow_player", player: "Tom", distance: 3, minutes: 2 }, contextFor(runtime, { signal: controller.signal }));
+  clocks.wall(-90_000);
+  clocks.monotonic(2 * 60_000 + 500);
+  const result = await Promise.race([following, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+  assert.notEqual(result, "hung");
+  assert.match((result as { detail: string }).detail, /followed Tom for 2 minutes/u);
 });

@@ -1,0 +1,11 @@
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    HardwareInformation.qwMemorySize    REG_QWORD    0x20000000
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0002
+    HardwareInformation.qwMemorySize    REG_QWORD    0x5ff000000
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0004
+    HardwareInformation.qwMemorySize    REG_QWORD    0x20000000
+
+Fin de la recherche : 3 correspondance(s) trouvee(s).

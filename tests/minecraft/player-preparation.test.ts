@@ -86,3 +86,38 @@ test("a Nether start settles only once the client is in the Nether, at its posit
   observation.close();
   assert.deepEqual(listenerCounts(bot), idle);
 });
+
+test("a preparation still waiting says which update it never saw and the last event it heard for each", async () => {
+  const { bot } = scenarioBot("Fighter", {});
+  const scenario = {
+    world: { dimension: "overworld" },
+    players: [{ name: "Fighter", pos: [0.5, -59, 0.5], health: 20, inventory: [{ item: "iron_sword", count: 1 }] }],
+  } as unknown as ScenarioDefinition;
+  const observation = observeScenarioPlayerPreparation(bot, scenario);
+  const waiting = observation.wait();
+  waiting.catch(() => undefined);
+
+  const untouched = observation.describePending();
+  assert.match(untouched, /inventory update: never seen/u);
+  assert.match(untouched, /position update: never seen/u);
+  assert.match(untouched, /health update: never seen/u);
+  observation.close();
+});
+
+test("a preparation whose updates all arrived names the state that still differs, items by their registry names", async () => {
+  const { bot } = scenarioBot("Fighter", { rotten_flesh: 2 });
+  const scenario = {
+    world: { dimension: "overworld" },
+    players: [{ name: "Fighter", pos: [40.5, -59, 0.5], inventory: [] }],
+  } as unknown as ScenarioDefinition;
+  const observation = observeScenarioPlayerPreparation(bot, scenario);
+  observation.wait().catch(() => undefined);
+  bot.emit("forcedMove"); // The teleport arrived, but the body stands at x 0, not 40.5.
+
+  const described = observation.describePending();
+  assert.match(described, /position update: seen, last forcedMove/u);
+  assert.match(described, /differs: position is \(0\.00, -59\.00, 0\.00\), expected \(40\.50, -59\.00, 0\.50\)/u);
+  assert.match(described, /differs: inventory holds 2 rotten_flesh, expected nothing/u, "the extra stack is named, not numbered");
+  assert.doesNotMatch(described, /inventory update/u, "an update the scenario does not declare is not listed");
+  observation.close();
+});

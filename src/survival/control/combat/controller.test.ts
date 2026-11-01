@@ -31,6 +31,7 @@ import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
 import { FightMovement } from "../../responses/fight/movement.js";
 import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facing.js";
+import { monotonicNow } from "../../../utils/index.js";
 
 const goalTestWorld = new GoalTestWorld();
 const fixtureClocks = new Set<() => void>();
@@ -1260,7 +1261,7 @@ test("a settled retreat guards an incoming blaze projectile and releases the shi
     fixture.bot,
     navigationFixture(),
     new AbortController().signal,
-    Date.now() + 15_000,
+    monotonicNow() + 15_000,
     DEFAULT_COMBAT_POLICY,
   );
   assert.ok(fixture.clock.tick >= 8, "wait for the observed projectile to clear");
@@ -1288,7 +1289,7 @@ for (const loss of ["health", "shield", "blast clearance"] as const) {
       fixture.bot,
       navigationFixture(),
       new AbortController().signal,
-      Date.now() + 15_000,
+      monotonicNow() + 15_000,
       DEFAULT_COMBAT_POLICY,
       () => loss === "blast clearance" && fixture.clock.tick >= 3,
     );

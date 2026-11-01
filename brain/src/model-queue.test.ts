@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
 import { ModelQueue, startStaggered, type QueueSnapshot } from "./model-queue.ts";
+import { steppedClocks } from "./testing.ts";
 
 const REPLY: ChatReply = { text: "{}", promptTokens: null, contextTokens: null };
 
@@ -394,4 +395,17 @@ test("with 20 calls on 3 slots, never more than 3 run at once and all 20 finish"
   assert.equal(most, 3);
   assert.equal(queue.inFlight(), 0);
   assert.equal(queue.waiting(), 0);
+});
+
+test("agents start a gap apart in monotonic time: a wall clock step back of 5 s does not stretch the gap", async (t) => {
+  const clocks = steppedClocks(t);
+  const slept: number[] = [];
+  await startStaggered(["a", "b"], (id) => {
+    if (id === "a") {
+      clocks.monotonic(400);
+      clocks.wall(-5_000);
+    }
+  }, { gapMs: 1_000, whenFree: null, signal, sleep: async (ms) => void slept.push(ms) });
+  assert.equal(slept.length, 1);
+  assert.ok(slept[0]! > 590 && slept[0]! <= 600, `slept ${slept[0]}`);
 });

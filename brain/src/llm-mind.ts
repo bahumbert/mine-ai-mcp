@@ -5,6 +5,7 @@ import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -338,10 +339,10 @@ class SendBack extends Error {}
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
-  const started = Date.now();
+  const started = monotonicNow();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
+  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;

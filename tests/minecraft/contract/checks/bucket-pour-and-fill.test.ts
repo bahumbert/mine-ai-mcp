@@ -101,7 +101,7 @@ test("a server that sends no ticks fails on the wall bound, not on ticks alone",
   await afterServerTicks(subject, 1, "before the stop");
   harness.server.stop();
   const startedAt = subject.now();
-  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /stays dry: the world age did not move 40 ticks within 10000 ms: the server is stalled/);
+  await assert.rejects(awaitFlowDried(subject, TAKEN_CELL), /stays dry: the world age stood still for 10000 ms before it moved 40 ticks: the server is stalled/);
   assert.ok(subject.now() - startedAt <= ANSWER_WALL_MS + 100, `waited ${subject.now() - startedAt} ms`);
 });
 

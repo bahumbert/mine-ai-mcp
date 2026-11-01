@@ -13,6 +13,7 @@ const NOT_SAFE = "block.minecraft.bed.not_safe";
 export const bedRefusedMonsterNear: ContractCheck = {
   name: "bed-refused-monster-near",
   withoutRuntime: true,
+  exclusive: "it asserts the server's answer to a bed use in a running night, and a sleeper in another lane sends every player `players_sleeping` instead of the not-safe message (4 heard in a red run on a shared server)",
   fixture: { ...BED_FIXTURE, timeOfDay: 14_000, daylightCycle: true, entities: [{ name: "zombie", position: [4.5, -60, 3.5] }] },
   async run(subject) {
     const { bot } = subject;

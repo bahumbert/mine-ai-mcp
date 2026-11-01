@@ -540,3 +540,32 @@ dropTest("a ground drop waits for the body to land, and one in water or seated i
   const swum = await run(dropItem(swimming.bot, parseDropItemRequest({ items: [{ item_name: "cobblestone" }] }), {}, deps({ groundedWaitMs: 30 }), createDiscardedItems()));
   assert.equal(JSON.stringify(swum).includes("DROP_GROUND_UNAVAILABLE"), false, "a swimmer tosses into the water and swims on");
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: the pickup check waits out PICKUP_WAIT_MS counted from the toss, on monotonic time.
+for (const row of [
+  { name: "a wall step back of 0.8 s during the walk does not stretch it", wallStepMs: -800 },
+  { name: "a wall step forward of 1.2 s during the walk does not cut it short", wallStepMs: 1_200 },
+]) {
+  dropTest(`a ground toss waits its 2 s pickup check from the toss, walk included: ${row.name}`, async ({ clock, run }) => {
+    // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+    clock.stepWallClock(5_000);
+    const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4 }] }, clock);
+    let walkedAt = Number.NaN;
+    const result = await run(
+      dropItem(bot, parseDropItemRequest({ items: [{ item_name: "oak_log" }] }), {}, deps({
+        pickupWaitMs: 2_000,
+        navigate: async () => {
+          await clock.sleep(1_000);
+          bot.entity.position = bot.entity.position.offset(0, 0, 5);
+          clock.stepWallClock(row.wallStepMs);
+          walkedAt = clock.now();
+          return { status: "completed", elapsedMs: 1_000 } as never;
+        },
+      }), createDiscardedItems()),
+    );
+    assert.equal(result.status, "succeeded");
+    assert.ok(Number.isFinite(walkedAt), "the walk ran");
+    // The walk used 1 s of the 2 s: the check waits the other second (one 50 ms slice of slack).
+    assert.ok(clock.now() - walkedAt <= 1_050 && clock.now() - walkedAt >= 950, `the check waited ${clock.now() - walkedAt} ms after the walk`);
+  });
+}

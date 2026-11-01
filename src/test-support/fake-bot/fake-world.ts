@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { blockClass, type MineflayerBlock } from "../../navigation/mineflayer/world.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { cellKey } from "../../utils/index.js";
 import {
   type CellState,
@@ -12,6 +13,7 @@ import {
   type ListedColumn,
   VOID,
   assertWithinRange,
+  chunkClassOf,
   chunkIndexOf,
   createChunkedCells,
   createFakeColumns,
@@ -118,9 +120,17 @@ function stateIdOf(registry: Bot["registry"], Block: ReturnType<typeof blockClas
   return Block.fromProperties(registered.id, properties, 0).stateId;
 }
 
+/** Mineflayer's own registry (`loader.js`): minecraft-data plus Prismarine's indexes. */
+function registryOf(version: string): Bot["registry"] {
+  return (require("prismarine-registry") as (version: string) => Bot["registry"])(version);
+}
+
+// Read the default version's data when the module loads: bun's 5 s test limit counts a test's body, not the imports
+// before it, and this read (0.45-0.53 s unloaded) is 8 s in a first test at load average 28 (quiet-machine plan Q7).
+chunkClassOf(registryOf(DEFAULT_MINECRAFT_VERSION));
+
 export function createFakeWorld(version: string, options: FakeWorldOptions = {}): FakeWorld {
-  // Mineflayer's own registry (`loader.js`): minecraft-data plus Prismarine's indexes.
-  const registry = (require("prismarine-registry") as (version: string) => Bot["registry"])(version);
+  const registry = registryOf(version);
   const Block = blockClass({ registry } as Parameters<typeof blockClass>[0]);
   const groundY = options.groundY ?? null;
   const stone = registry.blocksByName.stone!.defaultState!;

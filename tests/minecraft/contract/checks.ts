@@ -23,6 +23,7 @@ import { explosionKnockback } from "./checks/explosion-knockback.ts";
 import { shieldRaised } from "./checks/shield-raised.ts";
 import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
+import { whisperEcho } from "./checks/whisper-echo.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
@@ -95,8 +96,11 @@ export interface ContractFixture {
 export interface ContractCheck {
   readonly name: string;
   readonly fixture: ContractFixture;
-  /** Throws (`node:assert`) with the disagreement; resolves when the subject answered as the game does. */
-  run(subject: ContractSubject): Promise<void>;
+  /**
+   * Throws (`node:assert`) with the disagreement; resolves when the subject answered as the game does. A check may resolve with a note of what it
+   * measured (`late-reading-window.ts` `latenessRecorded`): the driver adds it to the trial's completion detail.
+   */
+  run(subject: ContractSubject): Promise<string | void>;
   /** Run on the bare bot, with no runtime of ours to act on it (`client-host.ts --without-runtime`). */
   readonly withoutRuntime?: boolean;
   /**
@@ -167,6 +171,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   placeBlockWithOptions,
   lavaOverHole,
   lavaOverPassable,
+  whisperEcho,
 ];
 
 /** The check of that name; throws listing the known names. */

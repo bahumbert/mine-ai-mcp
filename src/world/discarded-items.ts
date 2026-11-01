@@ -1,3 +1,5 @@
+import { monotonicNow } from "../utils/monotonic-clock.js";
+
 /** Tracks deliberate discards shared by collection and hunting. */
 
 /** A dropped item's own lifetime; past this the entity is gone and its id may be reused. */
@@ -12,7 +14,7 @@ export interface DiscardedItems {
 
 /**
  * `buriedIds` lists the stacks lying in the bot's sealed pits, ignored for as long as the pit is remembered: the
- * wall-clock memory is shorter than an item's life (6000 server ticks, Oskar 16:18: taken at +305 s).
+ * claim's memory is shorter than an item's life (6000 server ticks, Oskar 16:18: taken at +305 s).
  */
 export function createDiscardedItems(
   memoryMs: number = DISCARD_MEMORY_MS,
@@ -25,11 +27,11 @@ export function createDiscardedItems(
   };
 
   return {
-    remember(entityIds, now = Date.now()) {
+    remember(entityIds, now = monotonicNow()) {
       prune(now);
       for (const id of entityIds) expiries.set(id, now + memoryMs);
     },
-    ignored(now = Date.now()) {
+    ignored(now = monotonicNow()) {
       prune(now);
       return new Set([...expiries.keys(), ...buriedIds()]);
     },

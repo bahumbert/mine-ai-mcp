@@ -415,3 +415,60 @@ test("the fruitless-kill message of an unknown chance does not state one", () =>
   assert.doesNotMatch(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8), /chance/);
   assert.match(huntMobOutcomes.dropNotGiven("sheep", "cooked_mutton", 8, 0.025), /2\.5 % per kill/);
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: the observation window is a deadline (monotonic) kept across a reflex; the
+// checkpoint keeps epoch times. One wait cannot tell the clocks apart (its timer is set once): the reflex re-enters it.
+for (const row of [
+  { name: "a 0.8 s wall step back", wallStepMs: -800 },
+  { name: "a 1.2 s wall step forward", wallStepMs: 1_200 },
+]) test(`a 3 s quarry observation resumed after a reflex ends after 3 s of monotonic time across ${row.name}`, async () => {
+  const inventory = { count: 0 };
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const bot = huntBot([], inventory, 20, { clock });
+  const action = createCollectMobDropAction(bot, fakeNavigation, fakeCombat, createDiscardedItems(), dependencies(bot, inventory, []), new Budgets());
+  const runner = new ActionRunner();
+  let finished = false;
+  const pending = runner
+    .run({ ...action, execution: { kind: "resumable_task" } }, { mob_name: "sheep", drop_name: "white_wool", count: 1, observe_for_ms: 3_000 })
+    .then((output) => { finished = true; return output; });
+  await clock.advance(1_000);
+  const claim = runner.claim("hunger_reflex", "Eating while awaiting quarry", async () => {
+    await clock.sleep(500);
+    clock.stepWallClock(row.wallStepMs);
+    return { value: null, continuation: { kind: "resume" as const } };
+  });
+  assert.equal(claim.kind, "claimed");
+  await clock.advance(1_900);
+  assert.equal(finished, false, "2.9 s in: still observing");
+  await clock.advance(300);
+  assert.equal(finished, true, "3.2 s in: over");
+  const output = await pending;
+  assert.ok("hunt" in output.result && output.result.termination === "observation_exhausted");
+});
+
+test("the quarry observation's checkpoint reports epoch times of day", async () => {
+  const inventory = { count: 0 };
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(5_000);
+  const bot = huntBot([], inventory, 20, { clock });
+  const action = createCollectMobDropAction(bot, fakeNavigation, fakeCombat, createDiscardedItems(), dependencies(bot, inventory, []), new Budgets());
+  let checkpoint: (() => { checkpoint: Record<string, unknown> }) | undefined;
+  const lifetime = new AbortController();
+  const run = action.begin(
+    parseHuntMobRequest({ mob_name: "sheep", drop_name: "white_wool", count: 1, observe_for_ms: 3_000 }),
+    lifetime.signal,
+    (read) => { checkpoint = read as typeof checkpoint; },
+  );
+  const cancel = new AbortController();
+  const pending = run({ signal: cancel.signal }).catch(() => undefined);
+  await clock.advance(1_000);
+  assert.equal(checkpoint?.().checkpoint.observationStartedAt, Date.now() - 1_000);
+  assert.equal(checkpoint?.().checkpoint.observationUntil, Date.now() + 2_000);
+  cancel.abort(new Error("test over"));
+  await pending;
+  lifetime.abort();
+});

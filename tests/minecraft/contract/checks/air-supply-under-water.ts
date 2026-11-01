@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
 import { ANSWER_WALL_MS, answerArrives, serverQuiet } from "../server-answer.ts";
 import { holdsWithin } from "../subject.ts";
-import { markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
+import { markNow, restTicksSince, roundTripTicks, tickOf } from "./server-tick-marks.ts";
 
 /** The top pool cell, empty at the start (the eye in air), then water, then air again. */
 const HEAD_CELL = [0, -59, 0] as const;
@@ -72,6 +72,8 @@ export const airSupplyUnderWater: ContractCheck = {
       return typeof value === "number" ? value : undefined;
     };
     const readings: Reading[] = [];
+    // A window from an act (read with it) to the air it caused (read when heard) holds a round trip more: the read of the packet when it is heard (`roundTripTicks`). The packet itself comes in the tick that made it, with no lag of its own (the fake's air was lagged like an answer to the client until plan 2026-10-30-contract-batch-timing T7f, hence two round trips in T7e).
+    const slack = LAG_SLACK_TICKS + (await roundTripTicks(subject));
     const startedAtMs = subject.now();
     let wateredAt = "no water placed yet";
     const onBreath = () => void readings.push({ air: airHeard()!, atMs: subject.now(), age: bot.time.age });
@@ -93,7 +95,7 @@ export const airSupplyUnderWater: ContractCheck = {
       assert.ok(stepsOf(dive).every((step) => step === -AIR_LOST_PER_TICK), `dive steps ${stepsOf(dive).join(", ")}: each -${AIR_LOST_PER_TICK}, one packet a server tick`);
       const lost = dive[0]!.air - dive.at(-1)!.air;
       const diveTicks = (await tickOf(subject, diveEnded)) - (await tickOf(subject, waterPlaced));
-      assert.ok(Math.abs(lost - diveTicks) <= LAG_SLACK_TICKS, `${lost} air lost in ${diveTicks} server ticks, read right before the water and after the dive: one air a tick, within ${LAG_SLACK_TICKS}`);
+      assert.ok(Math.abs(lost - diveTicks) <= slack, `${lost} air lost in ${diveTicks} server ticks, read right before the water and after the dive: one air a tick, within ${slack}`);
 
       const airPlaced = markNow(subject);
       await subject.setBlock(subject.world(HEAD_CELL), "air");
@@ -104,7 +106,7 @@ export const airSupplyUnderWater: ContractCheck = {
       assert.ok(steps.every((step) => step > 0 && step <= AIR_GAINED_PER_TICK), `refill steps ${steps.join(", ")}: each 1 to ${AIR_GAINED_PER_TICK}`);
       assert.ok(steps.slice(0, -1).every((step) => step === AIR_GAINED_PER_TICK), `refill steps ${steps.join(", ")}: all ${AIR_GAINED_PER_TICK} but the last, which stops at full`);
       const refillTicks = (await tickOf(subject, refillHeard)) - (await tickOf(subject, airPlaced));
-      assert.ok(Math.abs(steps.length - refillTicks) <= LAG_SLACK_TICKS, `refilled in ${steps.length} air packets in ${refillTicks} server ticks, read right before the air and when the refill was heard: one packet a tick, within ${LAG_SLACK_TICKS}`);
+      assert.ok(Math.abs(steps.length - refillTicks) <= slack, `refilled in ${steps.length} air packets in ${refillTicks} server ticks, read right before the air and when the refill was heard: one packet a tick, within ${slack}`);
       const refilled = readings.length;
       await serverQuiet(subject, "a full meter after the refill");
       assert.equal(readings.length, refilled, "a full meter sends no more air");

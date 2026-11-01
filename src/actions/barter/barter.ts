@@ -6,8 +6,9 @@ import { armSignal, waitForSignal } from "../../utils/signals.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { DROPPED_ITEM_OBSERVATION_EVENTS, droppedItemName, pickupObservedItem } from "../../world/item-pickup.js";
+import { watchEntityRemoval } from "../../world/entity-removal.js";
 import { observeMobAge } from "../../world/mob-age.js";
-import { defineAction, type RequestExecution } from "../action.js";
+import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import {
   BARTER,
   BARTER_DESCRIPTION,
@@ -20,6 +21,8 @@ import {
 // The existing item/slot acknowledgement budget also bounds an offer the server
 // did not acknowledge. Admiration itself waits for equipment, not elapsed time.
 const ACKNOWLEDGEMENT_MS = 1_500;
+/** The one item a piglin barters for: Java code (`PiglinAi`), no data file says it. */
+const BARTER_CURRENCY = "gold_ingot";
 type Exchange = {
   phase: "offered" | "accepted";
   goldBefore: number;
@@ -33,6 +36,56 @@ function piglin(bot: Bot, id: number) {
   if (!entity?.isValid || entity.name !== "piglin") throw new Error(`Piglin #${id} is not loaded and valid.`);
   if (observeMobAge(bot, entity) !== "adult") throw new Error(`Piglin #${id} is not observed to be an adult.`);
   return entity;
+}
+
+/** Waits for the piglin to hold the offered ingot: "accepted", "gone" (it left the world), or null (bound reached). */
+async function waitForOfferAnswer(
+  bot: Bot,
+  piglinId: number,
+  exchange: Exchange,
+  observeGold: () => void,
+  context: ActionContext,
+): Promise<"accepted" | "gone" | null> {
+  using removal = watchEntityRemoval(bot, piglinId);
+  // `return await`: `using` disposes the watch at return, so the wait must settle first.
+  return await waitForSignal(
+    () => {
+      const recipient = removal.removed() ? undefined : bot.entities[piglinId];
+      observeGold();
+      return !recipient?.isValid
+        ? "gone"
+        : exchange.spent && recipient.equipment[1]?.name === BARTER_CURRENCY
+          ? "accepted"
+          : null;
+    },
+    [bot, bot.inventory],
+    ["entityEquip", "entityGone", "updateSlot"],
+    { timeoutMs: ACKNOWLEDGEMENT_MS, context },
+  );
+}
+
+/**
+ * Waits for the piglin to release its ingot: "completed", "gone" (it left the world), or null (cancelled). A held
+ * ingot is the observed exchange lifecycle. There is no timeout that pretends a barter completed; cancellation and
+ * target loss end the wait.
+ */
+async function waitForExchangeEnd(bot: Bot, piglinId: number, context: ActionContext): Promise<"completed" | "gone" | null> {
+  using removal = watchEntityRemoval(bot, piglinId);
+  const completed = armSignal(
+    bot,
+    ["entityEquip", "entityGone"],
+    () => {
+      const recipient = removal.removed() ? undefined : bot.entities[piglinId];
+      return !recipient?.isValid ? "gone" : recipient.equipment[1]?.name !== BARTER_CURRENCY ? "completed" : null;
+    },
+    { context },
+  );
+  try {
+    const outcome = await completed.promise;
+    return outcome.kind === "signalled" ? outcome.value : null;
+  } finally {
+    completed.cancel();
+  }
 }
 
 /** One admitted request retains its inventory target and every reserved gold offer. */
@@ -198,44 +251,15 @@ export function beginBarter(
         observeGold();
         const current = exchange;
         if (current.phase === "offered") {
-          const accepted = await waitForSignal(
-            () => {
-              const recipient = bot.entities[request.piglin_id];
-              observeGold();
-              return !recipient?.isValid
-                ? "gone"
-                : current.spent && recipient.equipment[1]?.name === "gold_ingot"
-                  ? "accepted"
-                  : null;
-            },
-            [bot, bot.inventory],
-            ["entityEquip", "entityGone", "updateSlot"],
-            { timeoutMs: ACKNOWLEDGEMENT_MS, context },
-          );
+          const accepted = await waitForOfferAnswer(bot, request.piglin_id, current, observeGold, context);
           context.signal?.throwIfAborted();
           if (accepted !== "accepted")
             return result("Gold offer acceptance was not observed; the reserved offer will not be repeated.");
           current.phase = "accepted";
         }
-        // A held ingot is the observed exchange lifecycle. There is no timeout
-        // that pretends a barter completed; cancellation and target loss end the wait.
-        const completed = armSignal(
-          bot,
-          ["entityEquip", "entityGone"],
-          () => {
-            const recipient = bot.entities[request.piglin_id];
-            return !recipient?.isValid ? "gone" : recipient.equipment[1]?.name !== "gold_ingot" ? "completed" : null;
-          },
-          { context },
-        );
-        try {
-          const outcome = await completed.promise;
-          context.signal?.throwIfAborted();
-          if (outcome.kind !== "signalled" || outcome.value === "gone")
-            return result("The selected piglin disappeared before exchange completion was observed.");
-        } finally {
-          completed.cancel();
-        }
+        const ended = await waitForExchangeEnd(bot, request.piglin_id, context);
+        context.signal?.throwIfAborted();
+        if (ended !== "completed") return result("The selected piglin disappeared before exchange completion was observed.");
         observeOutput();
         await collect();
         if (satisfied()) return result();

@@ -85,14 +85,14 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
     level = Math.round(ticks / TICKS_PER_BUBBLE);
     bot.emit("breath");
   };
-  const send = (ticks: number) => parts.server.answer(() => hear(ticks));
   let held = false;
+  // The packet of a tick is heard in that tick, whatever the server's answer lag: the game sends the metadata of the tick that changed it (`ServerEntity.sendChanges` after `LivingEntity.baseTick`, vanilla source; contract check `air-supply-under-water`, 3 runs of 2026-10-23 on a server on time: a packet a tick, spans within 3 ms). Not measured under a lag: it follows the time packets and the fireballs' updates, which the fake does not delay either (`lagMs` delays the answers to the client's acts).
   onServerTick(parts.server, () => {
     if (held) return;
     const next = eyeInWater(bot) ? Math.max(0, air - AIR_LOST_PER_TICK) : Math.min(FULL_AIR, air + AIR_GAINED_PER_TICK);
     if (next === air) return;
     air = next;
-    send(air);
+    hear(air);
   });
   // Mineflayer's `oxygenLevel` is a plain property the packet writes; this one is too, with the level also kept here
   // so a test replacing the property (`waterFixture`) leaves the packet's write alone.
@@ -108,7 +108,7 @@ export function attachFakeBreath(bot: FakeBot, parts: FakeBreathParts): FakeBrea
     hold(ticks) {
       held = true;
       air = ticks;
-      send(air);
+      parts.server.answer(() => hear(ticks));
     },
     release() {
       held = false;

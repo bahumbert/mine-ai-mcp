@@ -50,3 +50,14 @@ test("the number of servers started is counted for the sample line", async () =>
   await readyShared(pool, { key: "k2" });
   assert.equal(pool.startedCount, 2);
 });
+
+test("a server's start and ready lines carry its whole key, so a setting at its end (a tick rate) can be read in the log", async () => {
+  const lines: string[] = [];
+  const pool = new ServerPool(new FakeFactory(), config, message => lines.push(message));
+  const key = `own:{"version":"1.21.4","type":"flat","seed":null,"structures":false,"generatorSettings":"x"}|{"tickRate":8}`;
+  const own = pool.startServer(spec({ kind: "single", key, heapMb: 2_048, setup: [] }), 0);
+  await own.ready;
+  assert.ok(key.length > 60);
+  assert.ok(lines.some(line => line.includes(`(single, key ${key}) starting: `)), lines.join("\n"));
+  assert.ok(lines.some(line => line.includes(`(single, key ${key}) ready on port `)), lines.join("\n"));
+});

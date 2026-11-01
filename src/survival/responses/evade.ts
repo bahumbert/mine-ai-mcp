@@ -5,6 +5,7 @@ import type { ResponseContext } from "../control/combat/context.js";
 import { encounterBaseline, type EvadeResponseResult } from "../control/combat/response-result.js";
 import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { observeExposedAvoidanceContact } from "../perception/combat/threats.js";
+import { monotonicNow } from "../../utils/index.js";
 import { permittedCombatItems } from "../policy/combat/permissions.js";
 import { creeperEscape } from "../policy/combat/tactics.js";
 import type { HostileDirective } from "../policy/combat/response.js";
@@ -32,7 +33,7 @@ export async function evade(
     scope: `cell:${bot.entity.position.floored()}`,
     unit: "milliseconds",
     limit: context.policy.evade_timeout_ms,
-    measure: Date.now,
+    measure: monotonicNow,
     exhaustion:
       "Return observed separation or an exhausted escape; route changes and projectile guards cannot renew it.",
   });
@@ -174,7 +175,7 @@ export async function evade(
         bot,
         navigation,
         signal,
-        Date.now() + budget.remaining,
+        monotonicNow() + budget.remaining,
         context.policy,
         escapeRequired,
       );

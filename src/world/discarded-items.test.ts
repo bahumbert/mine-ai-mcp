@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { createDiscardedItems, DISCARD_MEMORY_MS } from "./discarded-items.js";
 import { findNewItemEntity } from "./item-pickup.js";
 
@@ -66,7 +67,7 @@ test("findNewItemEntity skips ids the bot discarded on purpose", () => {
   );
 });
 
-test("ignored adds the ids the buried provider lists, past the wall-clock memory too", () => {
+test("ignored adds the ids the buried provider lists, past the claim's memory too", () => {
   let buried = [3, 4];
   const discarded = createDiscardedItems(1_000, () => buried);
   discarded.remember([7], 0);
@@ -75,3 +76,21 @@ test("ignored adds the ids the buried provider lists, past the wall-clock memory
   buried = [];
   assert.deepEqual([...discarded.ignored(5_000)], [], "a pit forgotten releases its ids");
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: a claim's lifetime is a duration, so the default reading is monotonic.
+for (const row of [
+  { name: "a wall step forward of 1.2 s does not end it early", advanceMs: 500, wallStepMs: 1_200, held: true },
+  { name: "a wall step back of 0.8 s does not stretch it", advanceMs: 1_100, wallStepMs: -800, held: false },
+]) {
+  test(`a discard claim of 1 s counts monotonic time on the default clock: ${row.name}`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+    clock.stepWallClock(5_000);
+    const discarded = createDiscardedItems(1_000);
+    discarded.remember([7]);
+    await clock.advance(row.advanceMs);
+    clock.stepWallClock(row.wallStepMs);
+    assert.equal(discarded.ignored().has(7), row.held);
+  });
+}

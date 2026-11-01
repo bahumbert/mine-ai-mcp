@@ -26,8 +26,13 @@ test("the patched mine-labs exports what the scenario server runs a trial with",
   }
 });
 
-/** A server that is never started: only its generated `server.properties` is read. */
-async function serverProperties(extra: { enableCommandBlocks?: boolean; maxHeap?: string; pauseWhenEmptySeconds?: number }): Promise<string[]> {
+type ServerOptions = { enableCommandBlocks?: boolean; maxHeap?: string; pauseWhenEmptySeconds?: number; properties?: Readonly<Record<string, string>> };
+
+/** A server that never runs: `body` gets it and its folder, and `server.properties` is read through `read`. */
+async function withUnstartedServer<T>(
+  extra: ServerOptions,
+  body: (server: InstanceType<typeof mineLabs.MinecraftServer>, read: () => Promise<string[]>, file: string) => Promise<T>,
+): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-"));
   try {
     const server = new mineLabs.MinecraftServer(
@@ -39,18 +44,22 @@ async function serverProperties(extra: { enableCommandBlocks?: boolean; maxHeap?
       () => {},
       { gamePort: 0, rconPort: 0, release() {} },
     );
-    await (server as unknown as { writeConfig(): Promise<void> }).writeConfig();
-    return (await readFile(join(root, "server.properties"), "utf8")).split("\n");
+    const file = join(root, "server.properties");
+    return await body(server, async () => (await readFile(file, "utf8")).split("\n"), file);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }
 
-test("a server created without the new options writes no command block line and keeps the 2G heap", async () => {
-  const properties = await serverProperties({});
-  assert.equal(properties.some((line) => line.startsWith("enable-command-block")), false);
-  assert.ok(properties.includes("max-players=10"));
-  assert.equal(properties.some((line) => line.startsWith("pause-when-empty-seconds")), false, "without the option the game's own default stands");
+/** A server that is never started: only its generated `server.properties` is read. */
+async function serverProperties(extra: ServerOptions): Promise<string[]> {
+  return withUnstartedServer(extra, async (server, read) => {
+    await (server as unknown as { writeConfig(): Promise<void> }).writeConfig();
+    return read();
+  });
+}
+
+test("a server created without the new options keeps the 2G heap", () => {
   assert.deepEqual(mineLabs.serverJavaArgs({ maxHeap: undefined }, "server.jar"), ["-Xms512M", "-Xmx2G", "-jar", "server.jar", "nogui"]);
 });
 
@@ -64,6 +73,120 @@ test("a server asked never to pause when empty writes pause-when-empty-seconds=0
   const properties = await serverProperties({ pauseWhenEmptySeconds: 0 });
   assert.ok(properties.includes("pause-when-empty-seconds=0"));
   assert.ok((await serverProperties({ pauseWhenEmptySeconds: 30 })).includes("pause-when-empty-seconds=30"));
+});
+
+// The text the unpatched package writes for this config (typed from its writeConfig, mine-labs@aba1cdf, 2026-10-31).
+const UNPATCHED_SERVER_PROPERTIES = [
+  "server-ip=127.0.0.1",
+  "server-port=0",
+  "online-mode=false",
+  "spawn-protection=0",
+  "enable-rcon=true",
+  "rcon.port=0",
+  "rcon.password=test",
+  "level-name=world",
+  "level-type=minecraft\\:flat",
+  'generator-settings={"biome"\\:"minecraft\\:plains","lakes"\\:false,"features"\\:false,"layers"\\:[{"block"\\:"minecraft\\:bedrock","height"\\:1},{"block"\\:"minecraft\\:dirt","height"\\:2},{"block"\\:"minecraft\\:grass_block","height"\\:1}],"structure_overrides"\\:[]}',
+  "generate-structures=false",
+  "spawn-monsters=true",
+  "spawn-animals=false",
+  "view-distance=8",
+  "simulation-distance=8",
+  "max-players=10",
+].join("\n");
+
+/** The unpatched text with `replaced` lines (by key) swapped in place and `appended` lines after the last one. */
+function unpatchedWith(replaced: Record<string, string>, appended: string[]): string[] {
+  const lines = UNPATCHED_SERVER_PROPERTIES.split("\n").map((line) => {
+    const key = line.slice(0, line.indexOf("="));
+    return key in replaced ? `${key}=${replaced[key]}` : line;
+  });
+  return [...lines, ...appended];
+}
+
+test("properties replace a held key in place once and append the others in order", async () => {
+  const cases: { name: string; options: ServerOptions; expected: string[] }[] = [
+    {
+      name: "a fixed key replaced, a new key appended",
+      options: { properties: { "view-distance": "4", "sync-chunk-writes": "false" } },
+      expected: unpatchedWith({ "view-distance": "4" }, ["sync-chunk-writes=false"]),
+    },
+    {
+      name: "new keys keep the order they were given",
+      options: { properties: { "sync-chunk-writes": "false", "max-tick-time": "-1" } },
+      expected: unpatchedWith({}, ["sync-chunk-writes=false", "max-tick-time=-1"]),
+    },
+    {
+      name: "a line the server's own options wrote is replaced, not repeated",
+      options: { enableCommandBlocks: true, pauseWhenEmptySeconds: 30, properties: { "enable-command-block": "false", "pause-when-empty-seconds": "0" } },
+      expected: unpatchedWith({}, ["pause-when-empty-seconds=0", "enable-command-block=false"]),
+    },
+    {
+      name: "a value keeps its = and colons, an even run of backslashes may end it, a key matches whole and not by prefix",
+      options: { properties: { "level-name": "a=b\\:c\\\\", view: "1" } },
+      expected: unpatchedWith({ "level-name": "a=b\\:c\\\\" }, ["view=1"]),
+    },
+  ];
+  for (const { name, options, expected } of cases) {
+    assert.deepEqual(await serverProperties(options), expected, name);
+  }
+});
+
+test("a property key the game would cut or a value that would write or swallow a line is refused with its name", async () => {
+  const refused: { properties: Record<string, string>; message: string }[] = [
+    { properties: { "": "1" }, message: 'server property key ""' },
+    { properties: { "a=b": "1" }, message: 'server property key "a=b"' },
+    { properties: { "a b": "1" }, message: 'server property key "a b"' },
+    { properties: { "a:b": "1" }, message: 'server property key "a:b"' },
+    { properties: { "#a": "1" }, message: 'server property key "#a"' },
+    { properties: { "a\nb": "1" }, message: 'server property key "a\\nb"' },
+    { properties: { a: "1\nenable-rcon=false" }, message: 'server property value of "a"' },
+    { properties: { a: "1\r" }, message: 'server property value of "a"' },
+    { properties: { "level-name": "x\\" }, message: 'server property value of "level-name"' },
+    { properties: { "level-name": "x\\\\\\" }, message: 'server property value of "level-name"' },
+  ];
+  for (const { properties, message } of refused) {
+    await assert.rejects(serverProperties({ properties }), (error: Error) => error.message.startsWith(message), JSON.stringify(properties));
+  }
+});
+
+test("create refuses a bad property before it reserves ports or fetches a jar", async () => {
+  const root = join(tmpdir(), "mine-labs-patch-create-never-used");
+  await assert.rejects(
+    mineLabs.MinecraftServer.create({ version: "1.21.4", root, log: () => {}, properties: { "a b": "1" } }),
+    (error: Error) => error.message.startsWith('server property key "a b"'),
+  );
+});
+
+test("no properties: the same server.properties as unpatched", async () => {
+  assert.equal((await serverProperties({})).join("\n"), UNPATCHED_SERVER_PROPERTIES);
+  assert.equal((await serverProperties({ properties: undefined })).join("\n"), UNPATCHED_SERVER_PROPERTIES);
+  assert.equal((await serverProperties({ properties: {} })).join("\n"), UNPATCHED_SERVER_PROPERTIES);
+});
+
+test("a second start() writes the properties again", async () => {
+  // start() checks its signal only before the first await: aborting right after the call lets it write the config and spawn,
+  // then waitReady throws the AbortError. JAVA_HOME names a folder with no java, so the spawn finds no process to run.
+  const previous = process.env.JAVA_HOME;
+  process.env.JAVA_HOME = join(tmpdir(), "mine-labs-patch-no-java");
+  const startAborted = async (server: { start(signal: AbortSignal): Promise<void> }): Promise<void> => {
+    const controller = new AbortController();
+    const started = server.start(controller.signal);
+    controller.abort();
+    await assert.rejects(started, { name: "AbortError" });
+  };
+  try {
+    await withUnstartedServer({ properties: { "sync-chunk-writes": "false" } }, async (server, read, file) => {
+      await startAborted(server);
+      assert.equal((await read()).at(-1), "sync-chunk-writes=false");
+      await rm(file);
+      await startAborted(server);
+      assert.equal((await read()).at(-1), "sync-chunk-writes=false", "the restart path writes the file again");
+    });
+  } finally {
+    if (previous === undefined) delete process.env.JAVA_HOME;
+    else process.env.JAVA_HOME = previous;
+  }
 });
 
 const LANE_BOX ={ minX: -512, minY: -64, minZ: 1024 - 256, maxX: 1535, maxY: 319, maxZ: 1024 + 255 };
@@ -114,6 +237,8 @@ test("a lane's compiled scenario kills inside its box and never sets the server-
   assert.equal(commands.some((command) => command.startsWith(BLOCK_LIMIT)), false);
   assert.equal(compiled.teardown[0], mineLabs.boxedClearEntities(LANE_BOX));
   assert.equal(compiled.teardown.includes(mineLabs.CLEAR_ENTITIES), false);
+  // A kill drops each mob's loot after it chose its targets; the drops are saved with the unpinned chunks and load back under the next player.
+  assert.equal(compiled.teardown[1], mineLabs.boxedClearEntities(LANE_BOX), "a second clear takes the loot the first one dropped");
   assert.ok(compiled.setup.includes("gamerule commandBlockOutput false"));
   assert.ok(compiled.snapshot?.save.some((command) => command.startsWith("clone ")));
 });

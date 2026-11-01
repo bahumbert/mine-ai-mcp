@@ -19,7 +19,7 @@ export function runOnFake(
   server: FakeServerOptions = {},
   change: (subject: ContractSubject, harness: FakeHarness) => ContractSubject = (subject) => subject,
   stalls: readonly ServerStall[] = [],
-): Promise<void> {
+): Promise<string | void> {
   const frame = arenaFrame(ZERO_ARENA);
   const harness = fakeHarnessFor(check.fixture, frame, server);
   const installed = harness.clock.install();

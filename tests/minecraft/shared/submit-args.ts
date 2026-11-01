@@ -69,8 +69,15 @@ export function formatMessage(message: DaemonMessage): string[] {
   }
 }
 
-/** The variables a submitter hands to the clients: its MINE_AI_* ones, not the daemon's own settings or a lane's offset. */
-export function forwardedEnv(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] =>
-    entry[0].startsWith("MINE_AI_") && !SCENARIO_SERVER_ENV_NAMES.has(entry[0]) && entry[0] !== "MINE_AI_ARENA" && entry[1] !== undefined));
+/** The one forwarded variable that names a file the client writes: relative, it would mean a file in whatever directory the client starts in (a snapshot, since the mirror), not where the submitter typed it. */
+const PATH_VARIABLES: ReadonlySet<string> = new Set(["MINE_AI_DIG_TRACE"]);
+
+/**
+ * The variables a submitter hands to the clients: its MINE_AI_* ones, not the daemon's own settings or a lane's offset.
+ * With `cwd` (the directory `submit` ran in), a relative path variable is made absolute against it.
+ */
+export function forwardedEnv(env: Readonly<Record<string, string | undefined>>, cwd?: string): Record<string, string> {
+  const forwarded = Object.entries(env).filter((entry): entry is [string, string] =>
+    entry[0].startsWith("MINE_AI_") && !SCENARIO_SERVER_ENV_NAMES.has(entry[0]) && entry[0] !== "MINE_AI_ARENA" && entry[1] !== undefined);
+  return Object.fromEntries(forwarded.map(([name, value]) => [name, cwd !== undefined && PATH_VARIABLES.has(name) ? resolve(cwd, value) : value]));
 }

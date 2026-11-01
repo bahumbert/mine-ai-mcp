@@ -6,17 +6,24 @@ import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
-import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "./testing.ts";
+import { OtherAgents } from "./other-agents.ts";
+import { CHAT_RETRY_MS } from "./model-wait.ts";
+import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 
 function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
 }
 
+/** The other agents of a test: the fixed names only, none of them the agent's own (no file, so no re-read). */
+function others(...names: string[]): OtherAgents {
+  return new OtherAgents("", names, null);
+}
+
 /** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */
 function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: others("Vex"), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -442,6 +449,20 @@ test("other agents are not heard, and the chat tier may decide a message is not 
   assert.match(chat.requests[1]?.[1]?.content ?? "", /Alex: "anyone want to trade"/u);
 });
 
+test("a name added to the live list of other agents after construction is not answered (a bot started from chat while this one runs)", async (t) => {
+  const runtime = new FakeRuntime();
+  const names: string[] = ["Vex"];
+  const { agent, chat } = agentFor(t, runtime, {}, { otherAgents: { names: () => names } });
+  chat.reply({ say: "Hello Brea.", route: "talk", request: "" });
+  await agent.handle(say("Brea", "Ayla come here"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 1, "before the list names her, Brea is a player");
+  names.push("Brea");
+  await agent.handle(say("Brea", "Ayla come here again"));
+  assert.equal(chat.requests.length, 1, "no model call for a name the provider now lists");
+  assert.deepEqual(runtime.said, ["Hello Brea."]);
+});
+
 test("under an order, what it starts doing and why is given to the chat tier, which says it; its own goals stay silent", async (t) => {
   const runtime = new FakeRuntime();
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "gather dirt", settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
@@ -486,7 +507,7 @@ test("the journal gets what it takes on, its stack, each step with its input and
   const runtime = new FakeRuntime();
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -547,7 +568,7 @@ test("each finished step counts towards its activity, for the next goal call", a
 function journaledAgent(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -807,10 +828,8 @@ test("a step that failed once is shown to the work tier (its own objective only)
 });
 
 test("a step that failed twice is refused every time, for any objective, until the 30 minutes are over", async (t) => {
-  let offset = 0;
-  const now = Date.now.bind(Date);
-  t.mock.method(Date, "now", () => now() + offset);
-  const { order } = craftOrders(t);
+  const clocks = steppedClocks(t);
+  const { order, runtime } = craftOrders(t);
   await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
   // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
   const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
@@ -818,10 +837,13 @@ test("a step that failed twice is refused every time, for any objective, until t
   assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago \(refused now\)/u);
   assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
   assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
-  offset = 31 * 60_000;
+  clocks.wall(-800);
+  clocks.monotonic(31 * 60_000);
+  const crafted = runtime.submitted.filter((call) => call.tool === "craft_item").length;
   const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
   assert.doesNotMatch(later[0] ?? "", /failed lately/u);
   assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
+  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, crafted + 1, "the step ran again, it was not refused");
 });
 
 test("a step refused three times ends the objective as failed; the count restarts when the step is allowed and runs", async (t) => {
@@ -906,19 +928,13 @@ test("a 60 s wall clock step does not stop a step that keeps gaining", async (t)
   runtime.durations.collect_mob_drop = 300;
   const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
   const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
-  const realNow = Date.now;
-  const stepAt = realNow() + 100;
-  Date.now = () => realNow() + (realNow() >= stepAt ? 60_000 : 0);
-  t.after(() => {
-    Date.now = realNow;
-    clearInterval(gains);
-  });
+  const clocks = steppedClocks(t);
+  setTimeout(() => clocks.wall(60_000), 100);
+  t.after(() => clearInterval(gains));
   chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
   action.reply(HUNT, { done: "got the ink" });
   await agent.handle(say("Steve", "get me 8 ink sacs"));
-  // Waited on the monotonic clock: `until` reads the stepped one.
-  const deadline = performance.now() + 5_000;
-  while (runtime.said.length < 2 && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  await until(() => runtime.said.length >= 2, 5_000);
   assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms: a clock step is not 60 s without a gain");
 });
 
@@ -1072,11 +1088,11 @@ test("a give done and sent again identically goes back once, and the order ends 
 
 test("a line naming nobody, right after its speaker named another character, carries that as a fact for the others only (live 2026-10-11: 'thanks, no rush' answered by Ayla and Vex)", async (t) => {
   const asked: (string | undefined)[] = [];
-  const seen = async (character: string, others: string[]) => {
+  const seen = async (character: string, otherNames: string[]) => {
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: (input: Parameters<typeof tiers.mind.chat>[0], signal: AbortSignal) => { asked.push(input.talkedTo === undefined ? undefined : `${input.talkedTo.name}@${input.talkedTo.secondsAgo}`); return tiers.mind.chat(input, signal); } } as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others, log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others(...otherNames), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
@@ -1193,18 +1209,16 @@ test("a line naming nobody within 60 s of its speaker naming another character i
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: async (input: { message: { message: string } }) => input.message.message === "thanks" ? { to, say: "You're welcome!", route: "talk" as const, request: "" } : { to: ["Vex"], say: "", route: "ignore" as const, request: "" } } as unknown as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: others("Vex"), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
-    const now = Date.now.bind(Date);
-    let offset = 0;
-    const clock = t.mock.method(Date, "now", () => now() + offset);
+    const clocks = steppedClocks(t);
     await agent.handle(say("Tester", "Vex, mine some stone", false));
     runtime.said.length = 0;
-    offset = afterMs;
+    clocks.monotonic(afterMs);
     await agent.handle(say("Tester", "thanks", false));
-    clock.mock.restore();
+    clocks.restore();
     return runtime.said.length;
   };
   assert.equal(await outcome(["Tester"], 20_000), 0, "the model read it as for the speaker only: ignored");
@@ -1444,4 +1458,56 @@ test("two bad replies in a row still end the order with \"could not work out wha
   await until(() => runtime.said.length === 2);
   assert.match(chat.requests[1]?.[1]?.content ?? "", /could not work out what to do next/u);
   assert.equal(agent.activity, "idle");
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock (back ~2 s every ~30 s); a duration is read on the
+// monotonic clock, a time of day (the chat history) stays on the wall clock.
+test("a chat line is asked again for CHAT_RETRY_MS of monotonic time, whatever the wall clock does", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const clocks = steppedClocks(t);
+  const { agent, chat } = agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
+  chat.unavailable(1_000);
+  const handling = agent.handle(say("Steve", "hello Ayla"));
+  await until(() => logs.some((line) => line.startsWith("model unavailable")));
+  // 119 s have passed while the wall clock jumped 5 minutes ahead: the line is still waited for.
+  clocks.monotonic(CHAT_RETRY_MS - 1_000);
+  clocks.wall(300_000);
+  await sleep(100);
+  assert.deepEqual(logs.filter((line) => line.includes("dropped")), [], "a wall clock step ahead does not end the wait early");
+  // 120.5 s have passed while the wall clock went back 5 minutes and 0.8 s: the wait is over.
+  clocks.monotonic(1_500);
+  clocks.wall(-300_800);
+  await until(() => logs.some((line) => line.includes("no answer in time")));
+  await handling;
+});
+
+test("a step's journal ms is its monotonic time: a wall clock step back of 60 s in the step does not make it negative", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 300;
+  const clocks = steppedClocks(t);
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Done." });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await agent.handle(say("Steve", "get me 2 dirt"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  clocks.wall(-60_000);
+  clocks.monotonic(2_000);
+  await until(() => events.some((event) => event.kind === "step"));
+  const step = events.find((event) => event.kind === "step");
+  assert.ok(step?.kind === "step" && step.ms >= 2_000 && step.ms < 10_000, `ms ${step?.kind === "step" ? step.ms : "no step"}`);
+});
+
+test("a follow ordered by a player counts their silence in monotonic time: a wall clock step of 11 minutes does not end it", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [steveAt(1)] };
+  const clocks = steppedClocks(t);
+  const { agent, events, chat, action } = journaledAgent(t, runtime);
+  chat.reply({ say: "Coming.", route: "act", request: "follow me" }, { say: "Done." });
+  action.reply({ step: { skill: "follow_player", player: "Steve", distance: 3 } }, { done: "followed" });
+  await agent.handle(say("Steve", "Ayla, follow me"));
+  await until(() => events.some((event) => event.kind === "state" && event.step !== null));
+  clocks.wall(11 * 60_000);
+  await sleep(1_000);
+  assert.deepEqual(events.filter((event) => event.kind === "step"), [], "still following after a poll (750 ms): the silence is 1 s of real time");
 });

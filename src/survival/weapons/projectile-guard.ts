@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { SupportedPositionHold } from "../../navigation/index.js";
+import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import type { CombatPolicy } from "../policy/combat/contract.js";
@@ -31,6 +32,7 @@ export async function guardRetreatProjectiles(
   bot: Bot,
   navigation: NavigationRuntime,
   signal: AbortSignal,
+  /** A `monotonicNow()` reading. */
   deadline: number,
   policy: Readonly<CombatPolicy>,
   escapeRequired: () => boolean = () => false,
@@ -52,7 +54,7 @@ export async function guardRetreatProjectiles(
   try {
     await face();
     return await itemUse.guardUntil<RetreatGuardResult>(() => {
-      if (signal.aborted || escapeRequired() || bot.health <= 0 || Date.now() >= deadline) return { kind: "finished" };
+      if (signal.aborted || escapeRequired() || bot.health <= 0 || monotonicNow() >= deadline) return { kind: "finished" };
       // Unlike an accelerating escape, this guard is stationary. Give the
       // existing reflex policy its body back when holding can no longer work.
       const reason = retreatGuardLimit(bot, policy);

@@ -1,6 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
-import { createRequire } from "node:module";
 import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { isChatCommandLine, type ChatCommandRing } from "./chat-commands.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -8,7 +8,8 @@ type ChatMessageLoader = (registry: unknown) => { fromNotch(message: unknown): {
 
 // prismarine-chat is the CommonJS loader Mineflayer itself renders chat with;
 // its typings declare a default export the module does not actually make.
-const loadChatMessage = createRequire(import.meta.url)("prismarine-chat") as ChatMessageLoader;
+// A literal `require`: the setup's bundle follows it (see `src/world/crafting.ts`).
+const loadChatMessage = require("prismarine-chat") as ChatMessageLoader;
 
 /**
  * The server names what killed the player in the combat-death packet, which
@@ -27,17 +28,25 @@ export function deathMessage(bot: Bot, message: unknown): string | null {
 type CancelForegroundAction = (reason: string) => unknown;
 type GuardedWrite = ReturnType<typeof guardObservedWrite>;
 
-/** Persist queryable player events for the lifetime of one connected runtime. */
+/**
+ * Persist queryable player events for the lifetime of one connected runtime. With `commands`, an incoming chat or
+ * whisper line that is a command line goes to its ring instead and is never recorded, so no brain reads it as chat.
+ */
 export function observePlayerEvents(
   bot: Bot,
   data: SqlBotData,
   cancelForegroundAction: CancelForegroundAction,
+  commands?: { readonly prefix: string; readonly ring: ChatCommandRing },
 ): () => void {
   const guarded = guardObservedWrite("player-events");
   const observeMessage =
     (channel: "chat" | "whisper"): PlayerMessageListener =>
     (username, message) => {
       const direction = username.toLowerCase() === bot.username.toLowerCase() ? "outgoing" : "incoming";
+      if (direction === "incoming" && commands && isChatCommandLine(message, commands.prefix)) {
+        commands.ring.push({ username, channel, message });
+        return;
+      }
       guarded(() =>
         recordEvent(data, bot.username, {
           type: "player_message",

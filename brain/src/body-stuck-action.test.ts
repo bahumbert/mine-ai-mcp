@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body } from "./body.ts";
-import { FakeRuntime } from "./testing.ts";
+import { FakeRuntime, steppedClocks } from "./testing.ts";
 
 /** A runtime whose action is still `pending` however often it is cancelled (the live 2026-10-11 Vex collect_block). */
 class StuckRuntime extends FakeRuntime {
@@ -75,22 +75,27 @@ test("a wait that never answers does not hold the step: the abort still cancels 
 });
 
 // Review V3: a wall clock stepped back after the cancel stretched the give-up by the step (here 60 s).
-test("a wall clock stepped back after a cancel does not hold the step past its give-up", async () => {
+test("a wall clock stepped back after a cancel does not hold the step past its give-up", async (t) => {
   const runtime = new StuckRuntime();
+  const clocks = steppedClocks(t);
   const body = new Body(runtime, () => undefined, undefined, { recancelMs: 40, giveUpMs: 200 });
   const controller = new AbortController();
-  const realNow = Date.now;
   const act = body.act("collect_block", { block_name: "stone", count: 10 }, "test", { signal: controller.signal });
   setTimeout(() => controller.abort(), 20);
-  setTimeout(() => {
+  setTimeout(() => clocks.wall(-60_000), 60);
+  const outcome = await Promise.race([act, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+  assert.notEqual(outcome, "hung");
+  assert.equal((outcome as { status: string }).status, "failed");
+});
 
-    Date.now = () => realNow() - 60_000;
-  }, 60);
-  try {
-    const outcome = await Promise.race([act, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
-    assert.notEqual(outcome, "hung");
-    assert.equal((outcome as { status: string }).status, "failed");
-  } finally {
-    Date.now = realNow;
-  }
+// Plan 2026-10-27-p1-monotonic-clock T7: the give-up of a blocker that will not stop is a duration too (settle).
+test("a wall clock stepped back while a blocker is settled does not hold the new action past its give-up", async (t) => {
+  const runtime = new BusyRuntime();
+  const clocks = steppedClocks(t);
+  const body = new Body(runtime, () => undefined, undefined, { recancelMs: 40, giveUpMs: 200 });
+  const act = body.act("collect_block", { block_name: "stone", count: 10 }, "test");
+  setTimeout(() => clocks.wall(-60_000), 60);
+  const outcome = await Promise.race([act, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
+  assert.notEqual(outcome, "hung");
+  assert.equal((outcome as { status: string }).status, "refused");
 });
