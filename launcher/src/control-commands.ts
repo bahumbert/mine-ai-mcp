@@ -65,6 +65,12 @@ export async function runStopCommand(context: CliContext, deps: ControlCommandDe
   if (launcher === null) {
     const report = await deps.cleanupStale(context.root);
     report.killed.forEach((record) => context.out(`Ended ${record.name} (pid ${record.pid}), left running by an earlier Mine AI.`));
+    const silent = [...new Set(report.launcherStillRunning.map((record) => record.parentPid))];
+    if (silent.length > 0) {
+      const left = report.launcherStillRunning.map((record) => `${record.name} (pid ${record.pid})`).join(", ");
+      context.out(`Mine AI's launcher (pid ${silent.join(", ")}) is still running but not answering, so it was left alone: ${left}. Wait a minute and run stop again; if it stays silent, end that process (pid ${silent.join(", ")}) in Task Manager, then run stop once more to end what it left.`);
+      return 1;
+    }
     context.out(NOT_RUNNING);
     return 0;
   }

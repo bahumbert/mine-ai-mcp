@@ -82,6 +82,7 @@ function describeLeftovers(report: StaleReport): string[] {
   return [
     ...report.killed.map((record) => `Ended ${record.name} (pid ${record.pid}), left running by an earlier Mine AI that did not close properly.`),
     ...report.failed.map(({ record, error }) => `Could not end ${record.name} (pid ${record.pid}): ${error}. End ${record.image}.exe in Task Manager.`),
+    ...report.launcherStillRunning.map((record) => `Left ${record.name} (pid ${record.pid}) alone: the Mine AI launcher that started it (pid ${record.parentPid}) is still running (it may only be slow to answer), so this start can clash with it for the world and the ports. To keep only one, close this window and run \`mine-ai stop\`.`),
   ];
 }
 

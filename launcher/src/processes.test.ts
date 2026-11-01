@@ -316,6 +316,67 @@ test("cleanupStale leaves a llama-server whose parent pid is now another live pr
   assert.deepEqual(killed, []);
 });
 
+// B2 of review 2026-11-01: a launcher that is slow to answer `/status` is judged gone, but it still runs, so its
+// children are not stale. Pattern: a process taken as gone from one late answer.
+test("cleanupStale leaves the children of a launcher that still runs, and keeps their records", async () => {
+  const { root, killed, list, killPid } = staleSetup(
+    [{ pid: 100, image: "java", name: "server", parentPid: 50 }, { pid: 101, image: "ollama", name: "ollama", parentPid: 50 }],
+    [
+      { pid: 50, parentPid: 4, image: "bun.exe" },
+      { pid: 100, parentPid: 50, image: "java.exe" },
+      { pid: 101, parentPid: 50, image: "ollama.exe" },
+      { pid: 200, parentPid: 101, image: "llama-server.exe" },
+    ],
+  );
+  const report = await cleanupStale(root, list, killPid);
+  assert.deepEqual(killed, []);
+  assert.deepEqual(report.launcherStillRunning.map((record) => record.name), ["server", "ollama"]);
+  assert.deepEqual((readPidFile(root) as { name: string }[]).map((record) => record.name), ["server", "ollama"], "the live launcher's children stay recorded");
+});
+
+test("cleanupStale ends the children of a launcher that is gone, and leaves those of one that still runs in the same pass", async () => {
+  const { root, killed, list, killPid } = staleSetup(
+    [{ pid: 100, image: "java", name: "server", parentPid: 50 }, { pid: 110, image: "java", name: "old-server", parentPid: 60 }],
+    [{ pid: 50, parentPid: 4, image: "bun.exe" }, { pid: 100, parentPid: 50, image: "java.exe" }, { pid: 110, parentPid: 60, image: "java.exe" }],
+  );
+  const report = await cleanupStale(root, list, killPid);
+  assert.deepEqual(killed, [110]);
+  assert.deepEqual(report.launcherStillRunning.map((record) => record.name), ["server"]);
+  assert.deepEqual((readPidFile(root) as { name: string }[]).map((record) => record.name), ["server"]);
+});
+
+// Review of task B2: a pid that a launcher once had is reused after a crash or a reboot; only a process running the
+// launcher's own image (this process's, whatever its name) counts as the launcher.
+test("cleanupStale ends the child of a dead launcher whose pid another program now uses", async () => {
+  const { root, killed, list, killPid } = staleSetup(
+    [{ pid: 100, image: "java", name: "server", parentPid: 50 }],
+    [{ pid: 50, parentPid: 4, image: "chrome.exe" }, { pid: 100, parentPid: 50, image: "java.exe" }],
+  );
+  const report = await cleanupStale(root, list, killPid);
+  assert.deepEqual(killed, [100]);
+  assert.deepEqual(report.launcherStillRunning, []);
+});
+
+test("cleanupStale forgets a record whose child ended, even when its launcher still runs", async () => {
+  const { root, killed, list, killPid } = staleSetup(
+    [{ pid: 100, image: "java", name: "server", parentPid: 50 }, { pid: 101, image: "ollama", name: "ollama", parentPid: 50 }],
+    [{ pid: 50, parentPid: 4, image: "bun.exe" }, { pid: 101, parentPid: 50, image: "ollama.exe" }],
+  );
+  const report = await cleanupStale(root, list, killPid);
+  assert.deepEqual(killed, []);
+  assert.deepEqual(report.launcherStillRunning.map((record) => record.name), ["ollama"]);
+  assert.deepEqual((readPidFile(root) as { name: string }[]).map((record) => record.name), ["ollama"]);
+});
+
+test("cleanupStale leaves a llama-server whose ollama is gone while its launcher still runs", async () => {
+  const { root, killed, list, killPid } = staleSetup(
+    [{ pid: 100, image: "ollama", name: "ollama", parentPid: 50 }],
+    [{ pid: 50, parentPid: 4, image: "bun.exe" }, { pid: 200, parentPid: 100, image: "llama-server.exe" }],
+  );
+  await cleanupStale(root, list, killPid);
+  assert.deepEqual(killed, []);
+});
+
 test("cleanupStale empties the pid file so a second pass finds nothing", async () => {
   const { root, killed, list, killPid } = staleSetup([{ pid: 10, image: "bun", name: "host" }], [{ pid: 10, parentPid: 1, image: "bun.exe" }]);
   await cleanupStale(root, list, killPid);

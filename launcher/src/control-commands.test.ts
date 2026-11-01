@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { UsageError, type CliContext } from "./cli-context.ts";
 import { runBotCommand, runStatusCommand, runStopCommand, type ControlCommandDeps } from "./control-commands.ts";
 import { startControlServer, type LauncherLock } from "./control.ts";
 import { loadManifest } from "./manifest.ts";
+import { cleanupStale } from "./processes.ts";
 import type { BotOutcome } from "./stack.ts";
 import { RecordingHandlers } from "./cli-test-support.ts";
 
@@ -30,7 +34,7 @@ function setup(find: () => LauncherLock | null) {
   const cleaned: string[] = [];
   const deps: ControlCommandDeps = {
     findRunningLauncher: async () => find(),
-    cleanupStale: async (root) => (cleaned.push(root), { killed: [], failed: [] }),
+    cleanupStale: async (root) => (cleaned.push(root), { killed: [], failed: [], launcherStillRunning: [] }),
     fetch,
     now: () => time,
     sleep: async (ms) => void (time += ms),
@@ -43,6 +47,36 @@ test("stop with nothing running says so, exits 0 and ends the leftovers of a cra
   assert.equal(await runStopCommand(t.context, t.deps), 0);
   assert.match(t.out.join("\n"), /not running/u);
   assert.deepEqual(t.cleaned, ["C:/MineAI"]);
+});
+
+test("stop never ends the children of a launcher that runs but did not answer in time, and says so", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-live-launcher-"));
+  mkdirSync(join(root, "run"), { recursive: true });
+  writeFileSync(join(root, "run", "children.json"), JSON.stringify([{ pid: 100, parentPid: 50, image: "java", name: "server" }]));
+  const killed: number[] = [];
+  const t = setup(() => null);
+  const running = [{ pid: 50, parentPid: 4, image: "bun.exe" }, { pid: 100, parentPid: 50, image: "java.exe" }];
+  t.deps.cleanupStale = (staleRoot) => cleanupStale(staleRoot, async () => running, (pid) => void killed.push(pid));
+  assert.equal(await runStopCommand({ ...t.context, root }, t.deps), 1);
+  assert.deepEqual(killed, []);
+  const text = t.out.join("\n");
+  assert.match(text, /pid 50/u);
+  assert.match(text, /not answering/u);
+  assert.match(text, /left alone: server \(pid 100\)/u, "names what was left alone");
+  assert.match(text, /Task Manager/u);
+  assert.doesNotMatch(text, /not running/u);
+});
+
+test("stop ends the children of a launcher that is gone", async () => {
+  const root = mkdtempSync(join(tmpdir(), "stop-gone-launcher-"));
+  mkdirSync(join(root, "run"), { recursive: true });
+  writeFileSync(join(root, "run", "children.json"), JSON.stringify([{ pid: 100, parentPid: 50, image: "java", name: "server" }]));
+  const killed: number[] = [];
+  const t = setup(() => null);
+  t.deps.cleanupStale = (staleRoot) => cleanupStale(staleRoot, async () => [{ pid: 100, parentPid: 50, image: "java.exe" }], (pid) => void killed.push(pid));
+  assert.equal(await runStopCommand({ ...t.context, root }, t.deps), 0);
+  assert.deepEqual(killed, [100]);
+  assert.match(t.out.join("\n"), /Ended server/u);
 });
 
 test("stop asks the launcher to stop and waits until it is gone", () =>

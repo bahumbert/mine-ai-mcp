@@ -265,12 +265,29 @@ export function runnersLeftBy(ollamaPid: number, processes: readonly ProcessInfo
 export interface StaleReport {
   readonly killed: readonly ChildRecord[];
   readonly failed: readonly { readonly record: ChildRecord; readonly error: string }[];
+  /** Records left alone because the launcher that started them still runs (it may only be slow to answer `/status`). */
+  readonly launcherStillRunning: readonly ChildRecord[];
 }
 
-/** True when `record`'s pid runs now with the recorded image, started by the recorded launcher, and is neither this process nor its parent. */
+/** True when `record`'s pid runs now with the recorded image, started by the recorded launcher. */
+function childRunsAsRecorded(record: ChildRecord, processes: readonly ProcessInfo[]): boolean {
+  return processes.some((entry) => entry.pid === record.pid && entry.parentPid === record.parentPid && normalizeImageName(entry.image) === record.image);
+}
+
+/** True when `childRunsAsRecorded` and `record` is neither this process nor its parent. */
 function isStillOurs(record: ChildRecord, processes: readonly ProcessInfo[]): boolean {
   if (record.pid === process.pid || record.pid === process.ppid) return false;
-  return processes.some((entry) => entry.pid === record.pid && entry.parentPid === record.parentPid && normalizeImageName(entry.image) === record.image);
+  return childRunsAsRecorded(record, processes);
+}
+
+/**
+ * True when the recorded launcher's pid runs now with this process's own image (`mine-ai` starts the launcher from the
+ * program it runs in): a launcher that is slow to answer `/status` still counts, and so does a suspended one. A pid
+ * another program took after a crash or a reboot does not.
+ */
+function launcherStillRuns(record: ChildRecord, processes: readonly ProcessInfo[]): boolean {
+  const launcherImage = normalizeImageName(process.execPath);
+  return processes.some((entry) => entry.pid === record.parentPid && normalizeImageName(entry.image) === launcherImage);
 }
 
 function tryKill(kill: KillPid, record: ChildRecord, report: { killed: ChildRecord[]; failed: { record: ChildRecord; error: string }[] }): boolean {
@@ -288,13 +305,17 @@ function tryKill(kill: KillPid, record: ChildRecord, report: { killed: ChildReco
  * Kills what an earlier launcher left running (it crashed past its job object, or was started without one): each pid in
  * `children.json` whose image and starting launcher (`parentPid`) still match the recorded ones, then the `llama-server`
  * runners left by a recorded Ollama. A pid now used by another program is left, the player's own `ollama.exe` included,
- * and so is this process and its parent. Empties the file; no file, nothing to do.
+ * and so is this process and its parent. The children of a launcher that still runs are left too, and stay recorded
+ * while they run: the lock and `/status` can call a slow or suspended launcher gone, the process list cannot. Empties
+ * the file of the rest; no file, nothing to do.
  */
 export async function cleanupStale(root: string, list: ProcessLister = listProcesses, kill: KillPid = killProcess): Promise<StaleReport> {
-  const records = readRecords(root);
-  const report: { killed: ChildRecord[]; failed: { record: ChildRecord; error: string }[] } = { killed: [], failed: [] };
-  if (records === null) return report;
+  const recorded = readRecords(root);
+  const report: { killed: ChildRecord[]; failed: { record: ChildRecord; error: string }[]; launcherStillRunning: ChildRecord[] } = { killed: [], failed: [], launcherStillRunning: [] };
+  if (recorded === null) return report;
   const processes = await list();
+  const records = recorded.filter((record) => !launcherStillRuns(record, processes));
+  report.launcherStillRunning.push(...recorded.filter((record) => launcherStillRuns(record, processes) && childRunsAsRecorded(record, processes)));
   const endedParents = new Set<number>();
   for (const record of records) {
     if (isStillOurs(record, processes) && tryKill(kill, record, report)) endedParents.add(record.pid);
@@ -304,6 +325,6 @@ export async function cleanupStale(root: string, list: ProcessLister = listProce
       tryKill(kill, { pid: runner.pid, parentPid: runner.parentPid, image: OLLAMA_RUNNER_IMAGE, name: `${OLLAMA_RUNNER_IMAGE} of ${record.name}` }, report);
     }
   }
-  writeRecords(root, []);
+  writeRecords(root, report.launcherStillRunning);
   return report;
 }

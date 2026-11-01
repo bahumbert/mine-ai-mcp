@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import test from "node:test";
 import { otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
 
@@ -35,8 +36,11 @@ test("an agent's own username and a repeated name are dropped, whatever their ca
   assert.deepEqual(otherAgentsFor("Ayla", ["Ayla", "Brea"], ["Ayla", "ayla", "brea", "Cato", "Cato"]), ["Brea", "Cato"]);
 });
 
-test("brain-mem.ts, which loads main.ts by import, still runs the brain, whose --help documents --other-agents-file", () => {
-  const run = spawnSync(process.execPath, [".agent/scripts/ops/brain-mem.ts", "brain/src/main.ts", "--help"], { encoding: "utf8", env: { ...process.env, BRAIN_MEM_LOG: "/dev/null" }, timeout: 30_000 });
+// CI checks out the public repository, which has no .agent: the script is run wherever it is present.
+const BRAIN_MEM = ".agent/scripts/ops/brain-mem.ts";
+
+test("brain-mem.ts, which loads main.ts by import, still runs the brain, whose --help documents --other-agents-file", { skip: existsSync(BRAIN_MEM) ? false : ".agent is not in this checkout (the public repository has none)" }, () => {
+  const run = spawnSync(process.execPath, [BRAIN_MEM, "brain/src/main.ts", "--help"], { encoding: "utf8", env: { ...process.env, BRAIN_MEM_LOG: "/dev/null" }, timeout: 30_000 });
   assert.match(run.stdout, /Usage: bun brain\/src\/main\.ts/);
   assert.match(run.stdout, /--other-agents-file\n/u);
 });

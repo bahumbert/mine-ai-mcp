@@ -40,7 +40,7 @@ function launch(change: Parameters<typeof stackFixture>[0] = (settings) => setti
     lock: { isPidAlive: (pid) => pid === process.pid || pid === 7777, fetch, now: fixture.clock.now, ownPid: process.pid },
     cleanupStale: async () => {
       result.order.push("cleanupStale");
-      return { killed: [], failed: [] };
+      return { killed: [], failed: [], launcherStillRunning: [] };
     },
     guardChildren: () => result.warning,
     createChildren: () => fixture.children,
@@ -190,6 +190,18 @@ test("a job object that cannot be made gives one warning line and the start goes
     },
     undefined,
     (launched) => void (launched.warning = "CreateJobObjectW failed (Win32 error 5)"),
+  ));
+
+test("children left alone because their launcher still runs are named, and the start goes on", () =>
+  withBoot(
+    async ({ run, stop }) => {
+      await stop();
+      assert.match(run.out.join("\n"), /Left server \(pid 100\) alone: .*launcher that started it \(pid 50\) is still running/u);
+    },
+    undefined,
+    (launched) => {
+      launched.deps.cleanupStale = async () => ({ killed: [], failed: [], launcherStillRunning: [{ pid: 100, parentPid: 50, image: "java", name: "server" }] });
+    },
   ));
 
 test("a newer release is announced once, a missing answer says nothing", () =>
