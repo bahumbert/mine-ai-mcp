@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Body } from "../body.ts";
 import type { SkillContext } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import type { ItemCount } from "./types.ts";
-import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, runHandoff, type AwaitOptions } from "./handoff.ts";
+import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, PICK_BACK_RADIUS, runHandoff, type AwaitOptions } from "./handoff.ts";
 
 function contextFor(runtime: FakeRuntime): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal };
@@ -213,8 +214,14 @@ test("a toss the partner did not take is picked back up and the hand-off ends no
   const ended = handoffOutcome(result);
   assert.equal(ended.outcome, "not_taken");
   assert.equal(ended.detail, "Theo did not take 4 oak_log");
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }]);
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: PICK_BACK_RADIUS }]);
   assert.deepEqual(taken, [], "nothing taken, nothing credited");
+});
+
+test("the pick-back radius is within the tool's limit and is the one the Mine Labs guard scenario picks back with", () => {
+  assert.ok(PICK_BACK_RADIUS >= 8 && PICK_BACK_RADIUS <= 32, `pick_up_items takes a radius of at most 32, got ${PICK_BACK_RADIUS}`);
+  const guard = readFileSync(new URL("../../../tests/minecraft/scenarios/barter/toss-guard-full-reach.yaml", import.meta.url), "utf8");
+  assert.match(guard, new RegExp(`pick_up_radius: ${PICK_BACK_RADIUS}\\b`), "toss-guard-full-reach.yaml keeps the radius of PICK_BACK_RADIUS");
 });
 
 test("a partial take credits what was taken and picks the rest back up", async () => {
@@ -239,7 +246,7 @@ test("a hand-off with a second entry still gives it after a first that was taken
   const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "bread", count: 5 }, { item: "oak_log", count: 2 }] }, (credit) => taken.push(credit)));
   assert.equal(ended.outcome, "not_taken");
   assert.deepEqual(taken, [{ item: "bread", count: 5 }]);
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }], "only the untaken item is picked up");
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: PICK_BACK_RADIUS }], "only the untaken item is picked up");
 });
 
 test("a toss lying at the feet is not 'taken' even when someone else took it: only the recipient's count counts", async () => {
@@ -308,7 +315,7 @@ test("the pick-back searches around where the toss was made, not around the give
   onGround(runtime, "oak_log", 4);
   runtime.dropOutcomes.push({ ...tossed("oak_log", 4, 0), droppedAt: { x: 12.5, y: 70, z: -3.5 } });
   await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "oak_log", count: 4 }] });
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", x: 12.5, y: 70, z: -3.5, radius: 8 }]);
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", x: 12.5, y: 70, z: -3.5, radius: PICK_BACK_RADIUS }]);
 });
 
 test("a toss result naming no spot credits nothing: a search around the giver could miss the items and read them as taken", async () => {
@@ -401,7 +408,7 @@ test("an unsettled toss with nothing back is credited in full and never given a 
   assert.match(handoffOutcome(result).detail, /4 oak_log not confirmed taken/u);
   assert.deepEqual(taken, [{ item: "oak_log", count: 4 }]);
   assert.equal(dropCalls(runtime), 1);
-  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: 8 }], "what is on the ground is picked back first");
+  assert.deepEqual(picksUp(runtime), [{ item: "oak_log", ...TOSS_SPOT, radius: PICK_BACK_RADIUS }], "what is on the ground is picked back first");
 });
 
 test("an unsettled toss that all came back ends not_taken and credits nothing", async () => {

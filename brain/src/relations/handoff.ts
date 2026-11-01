@@ -9,8 +9,12 @@ import { type ItemCount, MINUTE_MS } from "./types.ts";
 /** How far around itself a collect looks for the partner's items. */
 export const COLLECT_RADIUS = 6;
 /**
- * How far around the spot it tossed from a giver looks for the items the partner left: the partner within reach plus a
- * level toss's ~4.3 block slide. Centred on the giver itself, 6 missed them (Mine Labs hand-over-walks-off: it walks off).
+ * How far (3-D, from the toss spot, as `pick_up_items` filters) around the spot it tossed from a giver looks for the items
+ * the partner left. Centred on the giver itself, 6 missed them (Mine Labs hand-over-walks-off: it walks off). Measured
+ * 2026-11-01 (Mine Labs barter/toss-rest-distance*.yaml, 5 runs each, receiver with a full inventory): flat grass
+ * 0.74-0.99 (up to 1.57 from the 2-block reach), a 2-block stair slope 0.51-0.71, still water 3.16-3.49 (tossed from inside the pool: the giver wades in), ice 3.96-4.40
+ * (4.95-5.53 tossed from the full 2-block reach); the largest, 5.53, plus 2 is under 8, so 8 stays. Flowing water carries a
+ * toss with no bound: not measured, and the radius cannot cover it.
  */
 export const PICK_BACK_RADIUS = 8;
 /** How often a wait for the partner's payment looks at whether it came. */

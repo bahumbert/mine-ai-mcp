@@ -1,0 +1,26 @@
+template: ../../templates/toss-rest-distance.yaml
+
+name: barter-toss-guard-full-reach
+tags: [regression]
+description: >-
+  Guard for the pick-back radius (plan 2026-11-01-trading-tickets-2-6 C1): the receiver stands at the giver's full
+  toss reach (2 blocks) with a full inventory, so the toss is not taken; picking it back up with the brain's radius
+  (PICK_BACK_RADIUS, relations/handoff.ts) must return the log to the giver.
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 1 }
+  - name: Receiver
+    pos: [2.5, -60, 0.5]
+    inventory:
+      - { item: stone, count: 2240 }
+      - { item: oak_log, count: 64 }
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 1, surface: flat, mode: guard, pick_up_radius: 8 }
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Giver, item: oak_log, count: 1 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

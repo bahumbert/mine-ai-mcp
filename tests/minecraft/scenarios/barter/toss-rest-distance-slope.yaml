@@ -1,0 +1,24 @@
+template: ../../templates/toss-rest-distance.yaml
+
+name: barter-toss-rest-slope
+tags: [reliability]
+description: >-
+  Measurement for the brain's pick-back radius (PICK_BACK_RADIUS, relations/handoff.ts): the giver tosses one oak log
+  to a receiver on the top stair, 1 block away (within reach, so the giver does not walk), whose inventory is full, from a platform above a 2-block stair slope. The log rests where it rests; the result line
+  TOSS_REST gives its 3-D distance from the toss spot, the metric pick_up_items filters by.
+geometry:
+  - { fill: { block: stone, from: [-1, -60, -1], to: [0, -59, 1] } }
+  - { fill: { block: "oak_stairs[facing=west]", from: [1, -59, -1], to: [1, -59, 1] } }
+  - { fill: { block: "oak_stairs[facing=west]", from: [2, -60, -1], to: [2, -60, 1] } }
+players:
+  - name: Giver
+    pos: [0.5, -58, 0.5]
+    inventory:
+      - { item: oak_log, count: 1 }
+  - name: Receiver
+    pos: [1.5, -58.5, 0.5]
+    inventory:
+      # 35 full stacks of stone and a full stack of logs fill all 36 slots: nothing is ever taken.
+      - { item: stone, count: 2240 }
+      - { item: oak_log, count: 64 }
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 1, surface: slope, mode: measure }

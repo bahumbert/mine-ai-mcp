@@ -165,6 +165,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
   "hand-over.ts": "drop_item to a player and pick_up_items within a radius: the cells it asks for are the server's answer",
   "idle-then-breathe.ts": "no action, reads the air",
+  "toss-rest-distance.ts": "drop_item to a player and pick_up_items around the spot the toss reported: the cells it asks for are the server's answer",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
 };
 
