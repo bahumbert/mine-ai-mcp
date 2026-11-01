@@ -103,6 +103,12 @@ const
   PARAM_UNSET = '(not given)';
   // Setup's own exit codes are 0-8; a silent setup whose steps failed returns this one.
   SILENT_FAILURE_EXIT_CODE = 100;
+  // `mine-ai stop` ends 1 when the launcher is still starting, does not answer or did not finish stopping (control-commands.ts);
+  // RunLauncherAndWait gives LAUNCHER_NOT_STARTED when bun.exe or the launcher is missing or cannot start: that is no refusal to stop.
+  STOP_REFUSED_EXIT_CODE = 1;
+  LAUNCHER_NOT_STARTED = -1;
+  // What the player does by hand when a removal asked for at uninstall did not happen: {app} is gone by then, so no "run this step again".
+  OLLAMA_REMOVE_BY_HAND = 'Remove Ollama yourself: Windows Settings > Apps > Installed apps > Ollama > Uninstall.';
   // Setup stores the data folder under this name (GetPreviousData/SetPreviousData); the uninstaller reads it back from the
   // uninstall key of this script's AppId (the test in iss-launcher-calls.test.ts keeps the two in step) as the value
   // "Inno Setup CodeFile: DataDir".
@@ -136,6 +142,8 @@ var
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
   UninstallDataDir: String;
+  // What the uninstaller tells the player once, after its removals.
+  UninstallNotes: String;
 
 // ---------- folders: the app, the data and the Ollama folder are the player's to choose ----------
 
@@ -384,6 +392,20 @@ begin
     Result := PROGRESS_STEPS;
 end;
 
+// Keeps the last 600 characters of what the launcher said (LastLogTail), for an error text.
+procedure KeepLauncherLine(const Text: String);
+begin
+  LastLogTail := LastLogTail + Text + #13#10;
+  if Length(LastLogTail) > 600 then
+    LastLogTail := Copy(LastLogTail, Length(LastLogTail) - 599, 600);
+end;
+
+// Why a launcher run did not start: Windows refused bun.exe.
+function BunNotStartedText(const App: String; ErrorCode: Integer): String;
+begin
+  Result := 'Windows could not start ' + App + '\bun.exe (error ' + IntToStr(ErrorCode) + ').';
+end;
+
 // Moves the bar and label on a `PROGRESS <0..1> <label>` line; keeps the last lines of anything else for an error text.
 procedure OnLauncherLine(const Line: String; const Error, FirstLine: Boolean);
 var
@@ -403,9 +425,7 @@ begin
     ActiveStatus.Caption := Trim(Copy(Rest, Space + 1, Length(Rest)));
     Exit;
   end;
-  LastLogTail := LastLogTail + Text + #13#10;
-  if Length(LastLogTail) > 600 then
-    LastLogTail := Copy(LastLogTail, Length(LastLogTail) - 599, 600);
+  KeepLauncherLine(Text);
 end;
 
 // Runs the launcher hidden and waits (Setup keeps answering its window meanwhile). WithJson adds `--json <file>` and
@@ -429,7 +449,7 @@ begin
     Params := Params + ' --json ' + Quoted(JsonFile);
   if not ExecAndLogOutput(App + '\bun.exe', Params, App, SW_HIDE, ewWaitUntilTerminated, ResultCode, @OnLauncherLine) then
   begin
-    LastLogTail := 'Windows could not start ' + App + '\bun.exe (error ' + IntToStr(ResultCode) + ').';
+    LastLogTail := BunNotStartedText(App, ResultCode);
     Result := 1;
     Exit;
   end;
@@ -457,15 +477,55 @@ begin
     Result := ExpandConstant('{app}\{#SourceLauncherScript}');
 end;
 
-// A launcher run whose output nobody reads: stopping the stack before an update or an uninstall.
-procedure RunLauncherAndWait(const Args: String);
+// The callback of a launcher run outside the wizard's steps (PrepareToInstall and the uninstaller have no progress bar): logs each
+// line and keeps the last ones for the message. It touches no wizard control: OnLauncherLine writes ActiveGauge and ActiveStatus,
+// which are nil here. Probe (Inno Setup 6.7.3, 2026-11-01): ExecAndLogOutput works in the uninstaller the same way.
+procedure OnLauncherLogLine(const Line: String; const Error, FirstLine: Boolean);
+var
+  Text: String;
+begin
+  Text := Trim(Line);
+  if Text = '' then
+    Exit;
+  Log('launcher: ' + Text);
+  KeepLauncherLine(Text);
+end;
+
+// A launcher run outside the wizard's steps: stopping the stack before an update or an uninstall, and the uninstaller's removals.
+// Returns the exit code (LAUNCHER_NOT_STARTED when the launcher is not there or Windows cannot start it) and, in Lines, the last
+// lines it said (or why it did not start). Every caller logs both with LogLauncherResult.
+function RunLauncherAndWait(const Args: String; var Lines: String): Integer;
 var
   ResultCode: Integer;
-  Script: String;
+  App, Script: String;
 begin
+  Lines := '';
+  App := ExpandConstant('{app}');
   Script := InstalledLauncherScript();
-  if Script <> '' then
-    Exec(ExpandConstant('{app}\bun.exe'), Quoted(Script) + ' ' + Args, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if Script = '' then
+  begin
+    Lines := 'The launcher is not in ' + App + '.';
+    Result := LAUNCHER_NOT_STARTED;
+    Exit;
+  end;
+  LastLogTail := '';
+  if not ExecAndLogOutput(App + '\bun.exe', Quoted(Script) + ' ' + Args, App, SW_HIDE, ewWaitUntilTerminated, ResultCode, @OnLauncherLogLine) then
+  begin
+    Lines := BunNotStartedText(App, ResultCode);
+    Result := LAUNCHER_NOT_STARTED;
+    Exit;
+  end;
+  Lines := Trim(LastLogTail);
+  Result := ResultCode;
+end;
+
+// The setup or uninstall log line of a RunLauncherAndWait: what was asked, the exit code and, when the launcher did not start, why
+// (the lines it said are already logged one by one by OnLauncherLogLine).
+procedure LogLauncherResult(const What: String; Code: Integer; const Lines: String);
+begin
+  Log('Launcher ' + What + ': exit code ' + IntToStr(Code));
+  if Code = LAUNCHER_NOT_STARTED then
+    Log('Launcher ' + What + ': ' + Lines);
 end;
 
 // ---------- the StepResult JSON the launcher writes: {"ok":true,"detail":...} or {"ok":false,"error":...,"hint":...} ----------
@@ -1517,8 +1577,13 @@ begin
   end;
 end;
 
-// An update stops the running stack first, so no file of the old version is in use. Silent: wrong parameters stop here.
+// An update stops the running stack first, so no file of the old version is in use. Silent: wrong parameters stop here. A launcher
+// that is running but will not stop cancels the update here, before any file is copied: the message is the launcher's own words
+// (which program to end). Any other result of the stop goes on: a launcher that cannot start is what the copy repairs.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+  Lines: String;
 begin
   Result := '';
   if WizardSilent then
@@ -1528,8 +1593,13 @@ begin
   if (Result = '') and (InstalledLauncherScript() <> '') then
   begin
     Log('Stopping a running Mine AI before the copy');
-    RunLauncherAndWait('stop');
+    Code := RunLauncherAndWait('stop', Lines);
+    LogLauncherResult('stop', Code, Lines);
     Log('Stopping a running Mine AI before the copy: done');
+    if Code = STOP_REFUSED_EXIT_CODE then
+      Result := 'Mine AI is running and did not stop, so the update was cancelled before any file was copied.' + #13#10#13#10 + Lines;
+    if Result <> '' then
+      Log('Update cancelled: ' + Result);
   end;
 end;
 
@@ -1625,17 +1695,112 @@ begin
   end;
 end;
 
+// What the player is told about a removal that did not happen or not as asked: in the uninstall log at once, in one box at the end.
+procedure NoteUninstall(const Text: String);
+begin
+  Log('Uninstall: ' + Text);
+  if UninstallNotes <> '' then
+    UninstallNotes := UninstallNotes + #13#10#13#10;
+  UninstallNotes := UninstallNotes + Text;
+end;
+
+procedure ShowUninstallNotes();
+begin
+  if (UninstallNotes <> '') and (not UninstallSilent) then
+    SuppressibleMsgBox(UninstallNotes, mbInformation, MB_OK, IDOK);
+end;
+
+// "Model X removed." and "Ollama removed." say nothing the player did not ask for. Every other detail ("kept", "already removed", "was
+// not pulled by Mine AI") is shown. A launcher wording that stops matching only shows one line more.
+function IsPlainRemoval(const Detail: String): Boolean;
+begin
+  Result := (Length(Detail) >= 9) and (Pos(' already ', Detail) = 0) and (Copy(Detail, Length(Detail) - 8, 9) = ' removed.');
+end;
+
+// How to remove the model by hand. Our own Ollama keeps it alone in <data folder>\models (see InitializeUninstall): the folder is
+// named, and goes with the data folder when the player chose to delete it. Any other Ollama's models folder (OLLAMA_MODELS or
+// <home>\.ollama\models, as model.ts reads it) holds the player's other models too, so no folder is named there: Ollama's own command.
+function ModelRemoveByHand(): String;
+var
+  Store: String;
+begin
+  if InstallStateHas('"ollama":"installed"') and InstallStateHas('"ollamaModels":') then
+  begin
+    Store := UninstallDataDir + '\models';
+    if DeleteDataOnUninstall then
+      Result := 'The AI model is in ' + Store + ', which goes with your data folder.'
+    else
+      Result := 'Delete the AI model yourself: its files are in ' + Store + '.';
+  end
+  else
+    Result := 'Delete the AI model yourself: run "ollama list" to see its name, then "ollama rm <name>". Do not delete Ollama''s models folder: it holds your other models too.';
+end;
+
+// Runs a removal step the player asked for, with its result in a file: a success says its detail unless it is a plain removal, a
+// failure says the error and what to do by hand. The step's hint is not used: it says "run this step again" and {app} goes next.
+procedure RemoveStepOnUninstall(const Args, Subject, ByHand: String);
+var
+  JsonFile, Json, Lines, Detail, Failure: String;
+  Raw: AnsiString;
+  Code: Integer;
+begin
+  JsonFile := ExpandConstant('{tmp}\mine-ai-removal.json');
+  DeleteFile(JsonFile);
+  Json := '';
+  Code := RunLauncherAndWait(Args + ' --json ' + Quoted(JsonFile), Lines);
+  LogLauncherResult(Args, Code, Lines);
+  if LoadStringFromFile(JsonFile, Raw) then
+    Json := UTF8Decode(Raw);
+  if StepSucceeded(Code, Json) then
+  begin
+    Detail := JsonString(Json, 'detail');
+    if (Detail <> '') and (not IsPlainRemoval(Detail)) then
+      NoteUninstall(Subject + ': ' + Detail)
+    else
+      Log('Uninstall: ' + Subject + ': ' + Detail);
+    Exit;
+  end;
+  Failure := JsonString(Json, 'error');
+  if Failure = '' then
+    Failure := Lines;
+  if Failure = '' then
+    Failure := 'the launcher ended with code ' + IntToStr(Code) + ' and said nothing';
+  NoteUninstall(Subject + ' was not removed: ' + Failure + #13#10 + ByHand);
+end;
+
+// The launcher is running and will not stop: what to end, then what to remove by hand (the removals asked for are named, not run).
+function StopRefusedNote(): String;
+begin
+  Result := 'Mine AI did not stop, so some of its files may be left. End bun.exe and java.exe in Task Manager, then delete the folder ' + ExpandConstant('{app}') + ' and the rest by hand.';
+  if RemoveModelOnUninstall then
+    Result := Result + #13#10 + ModelRemoveByHand();
+  if RemoveOllamaOnUninstall then
+    Result := Result + #13#10 + OLLAMA_REMOVE_BY_HAND;
+end;
+
 // Done here, not in [UninstallRun]: that section's Check functions run when the installer runs, before these answers exist.
-// Order: stop the stack, the model through our Ollama, then Ollama; the launcher itself refuses what is not ours.
+// Order: stop the stack, the model through our Ollama, then Ollama; the launcher itself refuses what is not ours. A launcher that
+// is running and will not stop skips both removals (a running Ollama or model server would make them fail or hurt) and the player
+// is told what to end and what to remove by hand.
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
+  Lines: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    RunLauncherAndWait('stop');
-    if RemoveModelOnUninstall then
-      RunLauncherAndWait('install model-remove');
-    if RemoveOllamaOnUninstall then
-      RunLauncherAndWait('install ollama-remove');
+    Code := RunLauncherAndWait('stop', Lines);
+    LogLauncherResult('stop', Code, Lines);
+    if Code = STOP_REFUSED_EXIT_CODE then
+      NoteUninstall(StopRefusedNote())
+    else
+    begin
+      if RemoveModelOnUninstall then
+        RemoveStepOnUninstall('install model-remove', 'The AI model', ModelRemoveByHand());
+      if RemoveOllamaOnUninstall then
+        RemoveStepOnUninstall('install ollama-remove', 'Ollama', OLLAMA_REMOVE_BY_HAND);
+    end;
+    ShowUninstallNotes();
   end;
   if CurUninstallStep = usPostUninstall then
   begin

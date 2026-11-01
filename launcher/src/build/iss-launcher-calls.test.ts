@@ -244,7 +244,7 @@ test("the model page says the model is installed when install gpu says so, and k
 test("PrepareToInstall logs the stop of a running Mine AI before the copy, and its end", () => {
   const prepare = functionBody("PrepareToInstall");
   const start = prepare.indexOf("Stopping a running Mine AI before the copy");
-  const stop = prepare.indexOf("RunLauncherAndWait('stop')");
+  const stop = prepare.indexOf("RunLauncherAndWait('stop'");
   const end = prepare.indexOf("Stopping a running Mine AI before the copy: done");
   assert.ok(start >= 0 && stop > start && end > stop, "the log lines do not surround the stop");
   assert.match(prepare, /InstalledLauncherScript\(\) <> ''/u);
@@ -287,4 +287,81 @@ test("the doc names Inno's own /DIR= beside the table, not in it: the script nev
   const prose = doc.split(/\r?\n/u).filter((line) => !line.startsWith("|")).join("\n");
   assert.match(prose, /`\/DIR=`/u);
   assert.doesNotMatch(doc, /^\| `\/DIR=/mu);
+});
+
+// S9 of review 2026-11-01-pre-alpha-0.1.0: the uninstaller threw away what `stop`, `install model-remove` and `install ollama-remove`
+// said, and an update went on over a launcher that had not stopped. Probe (Inno Setup 6.7.3, 2026-11-01, uninstaller run with
+// /VERYSILENT /LOG): ExecAndLogOutput works in the uninstaller; stdout and stderr lines reach a log-only callback, the exit code
+// comes back, and an exe that is missing gives False with code 2.
+test("every RunLauncherAndWait caller logs the result code and the launcher's words through LogLauncherResult", () => {
+  const callers = [...codeFunctions()].filter(([name, body]) => name !== "RunLauncherAndWait" && body.includes("RunLauncherAndWait(")).map(([name]) => name);
+  assert.deepEqual(callers.sort(), ["CurUninstallStepChanged", "PrepareToInstall", "RemoveStepOnUninstall"]);
+  for (const caller of callers) assert.match(functionBody(caller), /Code := RunLauncherAndWait\([^\n]*, Lines\);\s+LogLauncherResult\(/u, caller);
+  assert.match(iss, /^function RunLauncherAndWait\(const Args: String; var Lines: String\): Integer;/mu);
+  const logged = functionBody("LogLauncherResult");
+  assert.match(logged, /Log\([^\n]*IntToStr\(Code\)/u);
+  assert.match(logged, /Lines/u);
+});
+
+test("no launcher run outside the wizard's steps touches a wizard control or reads PROGRESS lines: only RunLauncher uses OnLauncherLine, every other ExecAndLogOutput uses the log-only callback", () => {
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("@OnLauncherLine")).map(([name]) => name), ["RunLauncher"]);
+  assert.deepEqual([...codeFunctions()].filter(([name, body]) => name !== "RunLauncher" && body.includes("ExecAndLogOutput(")).map(([name]) => name), ["RunLauncherAndWait"]);
+  assert.match(functionBody("RunLauncherAndWait"), /@OnLauncherLogLine\)/u);
+  assert.doesNotMatch(code, /\bExec\(/u, "a plain Exec throws the launcher's words away");
+  const logOnly = functionBody("OnLauncherLogLine");
+  assert.match(logOnly, /Log\(/u);
+  assert.match(logOnly, /KeepLauncherLine\(/u);
+  assert.match(functionBody("KeepLauncherLine"), /Length\(\w+\) > 600/u);
+  assert.doesNotMatch(logOnly, /ActiveGauge|ActiveStatus|PROGRESS/u);
+});
+
+test("an update stops over a launcher that refuses to stop: PrepareToInstall returns the stop's words, which cancels the update before any file is copied", () => {
+  const prepare = functionBody("PrepareToInstall");
+  assert.match(prepare, /if Code = STOP_REFUSED_EXIT_CODE then\s+Result := [^\n]*cancelled before any file was copied[^\n]*\+ Lines;/u);
+  assert.match(iss, /^\s+STOP_REFUSED_EXIT_CODE = 1;/mu);
+  // The launcher's `stop` ends 1 for "still starting", "not answering" and "did not finish stopping"; a launcher that cannot start at all
+  // (bun.exe or the script missing) must not block the update that would repair it. Known gap, for the master: `runCli` also ends 1 for
+  // a `stop` that throws, and Bun ends 1 for a bundle that fails to load, so a corrupt bundle looks like a refusal; a separate exit code
+  // for the refusal paths of `runStopCommand` (control-commands.ts, not this task's file) would close it.
+  assert.match(iss, /^\s+LAUNCHER_NOT_STARTED = -1;/mu);
+  assert.match(functionBody("RunLauncherAndWait"), /Result := LAUNCHER_NOT_STARTED;/u);
+});
+
+test("the uninstaller skips both removals when the launcher refuses to stop and says what to end and remove by hand; otherwise it runs each removal the player asked for", () => {
+  const step = functionBody("CurUninstallStepChanged");
+  assert.match(step, /Code := RunLauncherAndWait\('stop', Lines\);\s+LogLauncherResult\('stop', Code, Lines\);\s+if Code = STOP_REFUSED_EXIT_CODE then\s+NoteUninstall\(StopRefusedNote\(\)\)/u);
+  const refused = functionBody("StopRefusedNote");
+  assert.match(refused, /bun\.exe and java\.exe in Task Manager, then delete the folder ' \+ ExpandConstant\('\{app\}'\) \+ ' and the rest by hand/u);
+  assert.match(refused, /if RemoveModelOnUninstall then\s+Result := Result \+ #13#10 \+ ModelRemoveByHand\(\);\s+if RemoveOllamaOnUninstall then\s+Result := Result \+ #13#10 \+ OLLAMA_REMOVE_BY_HAND;/u);
+  const afterElse = step.slice(step.search(/\n\s+else\n/u));
+  assert.match(afterElse, /if RemoveModelOnUninstall then\s+RemoveStepOnUninstall\('install model-remove'/u);
+  assert.match(afterElse, /if RemoveOllamaOnUninstall then\s+RemoveStepOnUninstall\('install ollama-remove'/u);
+  assert.match(step, /ShowUninstallNotes\(\)/u);
+});
+
+test("a removal the player asked for logs its result, shows the detail unless it is a plain removal and the error otherwise, and never the hint that says to run the step again", () => {
+  const removal = functionBody("RemoveStepOnUninstall");
+  assert.match(removal, /--json/u);
+  assert.match(removal, /UTF8Decode\(Raw\)/u);
+  assert.match(removal, /JsonString\(Json, 'detail'\)/u);
+  assert.match(removal, /JsonString\(Json, 'error'\)/u);
+  assert.doesNotMatch(removal, /'hint'/u, "the launcher's hint says to run the step again; {app} is gone by then");
+  assert.match(removal, /IsPlainRemoval\(/u);
+  assert.match(removal, /ByHand/u);
+  assert.match(functionBody("IsPlainRemoval"), /' removed\.'/u);
+  // Hand removal the player can follow once {app} is gone: Ollama through Windows Settings, the model through the folder the model step names.
+  const step = functionBody("CurUninstallStepChanged");
+  assert.match(code, /Windows Settings > Apps/u);
+  assert.match(step, /RemoveStepOnUninstall\('install ollama-remove', 'Ollama', OLLAMA_REMOVE_BY_HAND\)/u);
+  assert.match(step, /RemoveStepOnUninstall\('install model-remove', 'The AI model', ModelRemoveByHand\(\)\)/u);
+  // The folder is named only for Mine AI's own store (it holds the model alone); another Ollama's store holds the player's other models,
+  // so there the text gives Ollama's command and never a folder to delete.
+  const byHand = functionBody("ModelRemoveByHand");
+  assert.match(byHand, /UninstallDataDir \+ '\\models'/u);
+  assert.match(byHand, /if DeleteDataOnUninstall then\s+Result := [^\n]*goes with your data folder/u);
+  assert.match(byHand, /ollama rm <name>/u);
+  assert.doesNotMatch(byHand, /USERPROFILE|\.ollama\\models/u);
+  // Shown once, together, and only when the player can answer.
+  assert.match(functionBody("ShowUninstallNotes"), /\(UninstallNotes <> ''\) and \(not UninstallSilent\)/u);
+  assert.match(functionBody("NoteUninstall"), /Log\(/u);
 });

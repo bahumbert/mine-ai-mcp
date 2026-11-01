@@ -135,6 +135,11 @@ Use **Apps > Installed apps > Mine AI**. The uninstaller asks, one question each
 It then stops the bots and removes what you chose. The data folder is deleted only when it holds `mine-ai-data.txt`;
 otherwise it is kept (run the uninstaller with `/LOG="C:\path\uninstall.log"` to see why). An Ollama or a model you had before is never touched.
 
+If the model or Ollama could not be removed (or was kept on purpose), the uninstaller says so once, with how to remove it by
+hand, and writes the same lines to the uninstall log. If Mine AI is running and does not stop, the uninstaller removes neither:
+end `bun.exe` and `java.exe` in Task Manager, then delete the Mine AI folder yourself. An update does the same check and is
+cancelled before copying anything; end those programs and run the installer again.
+
 ## Silent install (scripts, Windows Sandbox)
 
 Run the installer with `/SILENT` (progress window only) or `/VERYSILENT` (no window), always with `/SUPPRESSMSGBOXES`
