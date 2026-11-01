@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { OtherAgents } from "./other-agents.ts";
+import { steppedClocks } from "./testing.ts";
 
 /** A clock, a file and a log the test moves by hand: `file` null is a missing file. `write` is a temp-file + rename (new inode), as the launcher does. */
 function fakeWorld(file: string | null) {
@@ -83,6 +84,19 @@ test("invalid JSON or a wrong shape keeps the previous names and logs once for t
   write(["Cato"], 8);
   world.now += 1_000;
   assert.deepEqual(others.names(), ["Vex", "Cato"], "a good file after a bad one is read");
+});
+
+test("by default the throttle reads the monotonic clock: a wall clock step back does not freeze the re-read", (t) => {
+  const { deps, write } = fakeWorld(null);
+  const { now: _injected, ...withoutClock } = deps;
+  write(["Brea"], 5);
+  const clocks = steppedClocks(t);
+  const others = new OtherAgents("Ayla", [], "f.json", withoutClock);
+  assert.deepEqual(others.names(), ["Brea"]);
+  write(["Brea", "Cato"], 6);
+  clocks.wall(-5_000);
+  clocks.monotonic(1_000);
+  assert.deepEqual(others.names(), ["Brea", "Cato"], "a second of real time passed, whatever the wall clock says");
 });
 
 test("a missing file keeps the last good names, logs once, and is read when it appears", () => {

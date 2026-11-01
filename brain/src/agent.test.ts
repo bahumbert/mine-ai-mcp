@@ -6,6 +6,7 @@ import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
+import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
@@ -14,10 +15,15 @@ function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
 }
 
+/** The other agents of a test: the fixed names only, none of them the agent's own (no file, so no re-read). */
+function others(...names: string[]): OtherAgents {
+  return new OtherAgents("", names, null);
+}
+
 /** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */
 function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: others("Vex"), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -501,7 +507,7 @@ test("the journal gets what it takes on, its stack, each step with its input and
   const runtime = new FakeRuntime();
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
+  const agent = new Agent({ persona: testPersona(), runtime, mind: tiers.mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event) });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -562,7 +568,7 @@ test("each finished step counts towards its activity, for the next goal call", a
 function journaledAgent(t: { after(fn: () => Promise<void>): void }, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
   const events: BrainEvent[] = [];
   const tiers = scriptedMind();
-  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: [], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
+  const agent = new Agent({ persona: testPersona(persona), runtime, mind: tiers.mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, journal: (event) => events.push(event), ...options });
   const controller = new AbortController();
   const running = agent.run(controller.signal);
   t.after(async () => {
@@ -1082,11 +1088,11 @@ test("a give done and sent again identically goes back once, and the order ends 
 
 test("a line naming nobody, right after its speaker named another character, carries that as a fact for the others only (live 2026-10-11: 'thanks, no rush' answered by Ayla and Vex)", async (t) => {
   const asked: (string | undefined)[] = [];
-  const seen = async (character: string, others: string[]) => {
+  const seen = async (character: string, otherNames: string[]) => {
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: (input: Parameters<typeof tiers.mind.chat>[0], signal: AbortSignal) => { asked.push(input.talkedTo === undefined ? undefined : `${input.talkedTo.name}@${input.talkedTo.secondsAgo}`); return tiers.mind.chat(input, signal); } } as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others, log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: character, displayName: character }), runtime, mind, otherAgents: others(...otherNames), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });
@@ -1203,7 +1209,7 @@ test("a line naming nobody within 60 s of its speaker naming another character i
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: async (input: { message: { message: string } }) => input.message.message === "thanks" ? { to, say: "You're welcome!", route: "talk" as const, request: "" } : { to: ["Vex"], say: "", route: "ignore" as const, request: "" } } as unknown as typeof tiers.mind;
-    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: ["Vex"], log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+    const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: others("Vex"), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
     t.after(async () => { controller.abort(); await running; });

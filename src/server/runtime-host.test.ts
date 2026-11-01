@@ -39,7 +39,7 @@ async function configuration(t: TestContext) {
 }
 
 function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
-  const { bot } = createFakeBot({
+  const { bot, clock } = createFakeBot({
     slots,
     // No chunk column is loaded: the frontier observes none.
     loadedColumns: [],
@@ -51,7 +51,23 @@ function connectedBot(t: TestContext, slots: FakeBotOptions["slots"] = {}) {
     });
     return bot;
   });
-  return bot;
+  return { bot, clock };
+}
+
+/** A route answering over a real socket gets this much real time (the fake server's own echo comes in the first clock step). */
+const ROUTE_ANSWER_REAL_MS = 5_000;
+
+/** The HTTP exchange runs on real sockets and the server's echo on the fake clock: move the clock 100 ms, give the sockets a real turn, until the answer is in. */
+async function answeredWhileClockMoves<T>(clock: { advance(ms: number): Promise<void> }, pending: Promise<T>): Promise<T> {
+  let settled = false;
+  void pending.then(() => void (settled = true), () => void (settled = true));
+  const deadline = performance.now() + ROUTE_ANSWER_REAL_MS;
+  while (!settled && performance.now() < deadline) {
+    await clock.advance(100);
+    await delay(5);
+  }
+  assert.ok(settled, `the route did not answer within ${ROUTE_ANSWER_REAL_MS} ms of real time`);
+  return pending;
 }
 
 function failures(error: unknown): unknown[] {
@@ -60,7 +76,7 @@ function failures(error: unknown): unknown[] {
 
 test("a plugin startup failure still quits the newly created bot", async (t) => {
   const options = await configuration(t);
-  const bot = connectedBot(t);
+  const { bot } = connectedBot(t);
   const pluginFailure = new Error("Plugin loading failed");
   // Force the real plugin-loading boundary to fail before any spawn waiter exists.
   bot.loadPlugin = () => {
@@ -74,7 +90,7 @@ test("a plugin startup failure still quits the newly created bot", async (t) => 
 
 test("failed HTTP binding releases the runtime and bot and retains combined cleanup failures", async (t) => {
   const options = await configuration(t);
-  const bot = connectedBot(t);
+  const { bot } = connectedBot(t);
   await using occupied = createServer();
   await once(occupied.listen(0, "127.0.0.1"), "listening");
   const address = occupied.address();
@@ -115,7 +131,7 @@ test(
   { timeout: 10_000 },
   async (t) => {
     const options = await configuration(t);
-    const bot = connectedBot(t);
+    const { bot } = connectedBot(t);
     const signals = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
     await using host = await startRuntimeHost(source, options);
     assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], signals);
@@ -190,7 +206,7 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
 
 test("a host with --chat-command-prefix serves the command lines it heard and whispers through send_message; one without has no such routes", async (t) => {
   const withPrefix = { ...(await configuration(t)), chatCommandPrefix: "!" };
-  const bot = connectedBot(t);
+  const { bot, clock } = connectedBot(t);
   await using host = await startRuntimeHost(source, withPrefix);
   const address = host.server.address();
   assert.ok(address && typeof address === "object");
@@ -210,21 +226,16 @@ test("a host with --chat-command-prefix serves the command lines it heard and wh
   assert.equal(whisper.status, 502);
   assert.match((await whisper.json()).error, /PLAYER_NOT_ONLINE/u);
 
-  // Tom is online and the server echoes the whisper (the line `send_message` waits for, as in its own tests).
-  const whispered: [string, string][] = [];
+  // Tom is online: the fake bot's own whisper answers as the 1.21.4 server does (`fake-bot-chat.ts`, contract check
+  // `whisper-echo`), a server tick after the command, so the clock is moved on until the route answers.
   bot.players.Tom = { username: "Tom" } as never;
-  bot.whisper = (to, message) => {
-    whispered.push([to, message]);
-    const echo = { translate: "commands.message.display.outgoing", with: [{ toString: () => to }, { toString: () => message }] };
-    bot.emit("message", echo as never, "chat");
-  };
-  const delivered = await fetch(`${url}/chat-commands/whisper`, {
+  const delivered = fetch(`${url}/chat-commands/whisper`, {
     method: "POST",
     headers: { ...control, "content-type": "application/json" },
     body: JSON.stringify({ to: "tom", message: "Brea is playing." }),
   });
-  assert.deepEqual([delivered.status, await delivered.json()], [200, { ok: true }]);
-  assert.deepEqual(whispered, [["Tom", "Brea is playing."]]);
+  const answer = await answeredWhileClockMoves(clock, delivered);
+  assert.deepEqual([answer.status, await answer.json()], [200, { ok: true }]);
 });
 
 test("a host without --chat-command-prefix answers 404 on the command routes", async (t) => {

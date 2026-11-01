@@ -2,6 +2,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { otherAgentsFor } from "./brain-args.ts";
+import { monotonicNow } from "./monotonic-clock.ts";
 
 /** The launcher rewrites the file at each bot start or stop; a brain looks again at most this often. */
 const OTHER_AGENTS_CHECK_MS = 1_000;
@@ -19,7 +20,7 @@ export interface OtherAgentsDeps {
 const REAL_DEPS: OtherAgentsDeps = {
   stat: (path) => statSync(path),
   read: (path) => readFileSync(path, "utf8"),
-  now: Date.now,
+  now: monotonicNow,
   log: (line) => console.log(`${new Date().toISOString()} [other-agents] ${line}`),
 };
 

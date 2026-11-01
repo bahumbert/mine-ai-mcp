@@ -25,6 +25,7 @@ import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type Unfini
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
+import { WhoWasNamed } from "./who-was-named.ts";
 
 /** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
 const BODY_RESTARTED = "[BODY_RESTARTED]";
@@ -70,10 +71,11 @@ export interface AgentOptions {
   readonly mind: Mind;
   /**
    * Usernames of the other agents. Never answered in Phase 1, so two bots cannot talk each other into an endless
-   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5. A provider (`OtherAgents`, fed by the
-   * launcher's file) is asked on every line: a bot started from game chat joins the list while this one runs.
+   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5. `OtherAgents` (fixed names, and the
+   * launcher's file when there is one) is asked on every line: a bot started from game chat joins the list while this
+   * one runs.
    */
-  readonly otherAgents: readonly string[] | { names(): readonly string[] };
+  readonly otherAgents: { names(): readonly string[] };
   readonly log: (line: string) => void;
   /** The block names a till failed on, shared by the agents of one process (each agent has its own when none is given). */
   readonly soil?: TillFacts;
@@ -163,8 +165,8 @@ export class Agent {
   /** What it hears, before the chat tier reads it: quick lines of one player are one message. */
   private readonly inbox: Inbox;
   private readonly history: ChatLine[] = [];
-  /** Per speaker (lower case), the latest character (this one or another agent) a line of theirs named, and when. */
-  private readonly lastNamed = new Map<string, { readonly name: string; readonly at: number }>();
+  /** Whom each player's lines named last: a line naming nobody is read as following the one that did. */
+  private readonly whoWasNamed: WhoWasNamed;
   private readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
   private readonly farms: KnownFarm[] = [];
@@ -227,6 +229,7 @@ export class Agent {
     this.soil = options.soil ?? new TillFacts();
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
+    this.whoWasNamed = new WhoWasNamed(options.persona.username, () => options.otherAgents.names());
   }
 
   get activity(): string {
@@ -322,7 +325,7 @@ export class Agent {
     this.lastHeard.set(message.username.toLowerCase(), heardAt);
     const { persona, log } = this.options;
     const line = this.remember(message.username, message.message);
-    const talkedTo = this.noteNamed(message, heardAt);
+    const talkedTo = this.whoWasNamed.note(message, heardAt);
     if (!this.listensTo(message.username)) return;
     const decision = await this.decideChat(message, heard, heardAt, talkedTo);
     if (decision === null) return;
@@ -421,16 +424,9 @@ export class Agent {
    */
   private listensTo(username: string): boolean {
     const { persona } = this.options;
-    const otherAgents = this.otherAgentNames();
     const speaker = username.toLowerCase();
-    if (otherAgents.some((name) => name.toLowerCase() === speaker)) return false;
+    if (this.options.otherAgents.names().some((name) => name.toLowerCase() === speaker)) return false;
     return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
-  }
-
-  /** The other agents' usernames now: the fixed list, or what the live provider says at this moment. */
-  private otherAgentNames(): readonly string[] {
-    const { otherAgents } = this.options;
-    return "names" in otherAgents ? otherAgents.names() : otherAgents;
   }
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
@@ -1132,25 +1128,6 @@ export class Agent {
     this.restUntil = monotonicNow() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 
-  /**
-   * Remembers which character (this one or another agent) the line names; for a line naming none, who its speaker named
-   * last when that was within {@link TALKED_TO_MS} (live 2026-10-11: "thanks, no rush" after a line to Vex was answered by
-   * Ayla too). Names as words only, never what the line says.
-   */
-  private noteNamed(message: PlayerMessage, at: number): { name: string; secondsAgo: number } | undefined {
-    const speaker = message.username.toLowerCase();
-    const otherAgents = this.otherAgentNames();
-    const characters = [this.options.persona.username, ...otherAgents];
-    const named = characters.filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
-    if (otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
-    if (named.length > 0) {
-      this.lastNamed.set(speaker, { name: named[0]!, at });
-      return undefined;
-    }
-    const last = this.lastNamed.get(speaker);
-    return last !== undefined && last.name.toLowerCase() !== this.options.persona.username.toLowerCase() && at - last.at <= TALKED_TO_MS ? { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } : undefined;
-  }
-
   /** `since`: when the message being answered was heard (thinking time counts as typing time). */
   private speak(text: string, since = monotonicNow(), to?: readonly string[], whisperTo: string | null = null): void {
     if (text.trim() === "") return;
@@ -1171,9 +1148,6 @@ export class Agent {
     if (index !== -1) this.history[index] = { ...line, to };
   }
 }
-
-/** How long after a line naming a character a line naming nobody is still shown as following it. */
-const TALKED_TO_MS = 60_000;
 
 /** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
 function minutesAgo(iso: string): string {

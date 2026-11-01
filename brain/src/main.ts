@@ -163,7 +163,7 @@ async function main(): Promise<void> {
         persona,
         runtime: runtimes[index]!,
         mind: minds[index]!,
-        otherAgents: otherAgentsFile === undefined ? fixedOthers : new OtherAgents(persona.username, fixedOthers, otherAgentsFile, { log }),
+        otherAgents: new OtherAgents(persona.username, fixedOthers, otherAgentsFile ?? null, { log }),
         knownNames,
         soil,
         log,
