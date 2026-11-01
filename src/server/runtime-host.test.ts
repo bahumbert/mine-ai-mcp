@@ -187,3 +187,53 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);
 });
+
+test("a host with --chat-command-prefix serves the command lines it heard and whispers through send_message; one without has no such routes", async (t) => {
+  const withPrefix = { ...(await configuration(t)), chatCommandPrefix: "!" };
+  const bot = connectedBot(t);
+  await using host = await startRuntimeHost(source, withPrefix);
+  const address = host.server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const control = { "x-mine-ai-control": "1" };
+
+  bot.emit("chat", "Tom", "!bots", null, {} as never, null);
+  const heard = await (await fetch(`${url}/chat-commands?after=0`, { headers: control })).json();
+  assert.deepEqual(heard.commands.map(({ username, channel, message }: Record<string, string>) => [username, channel, message]), [["Tom", "chat", "!bots"]]);
+
+  // Nobody named Tom is online: send_message's own refusal comes back as the route's error, so the whisper went through it.
+  const whisper = await fetch(`${url}/chat-commands/whisper`, {
+    method: "POST",
+    headers: { ...control, "content-type": "application/json" },
+    body: JSON.stringify({ to: "Tom", message: "hi" }),
+  });
+  assert.equal(whisper.status, 502);
+  assert.match((await whisper.json()).error, /PLAYER_NOT_ONLINE/u);
+
+  // Tom is online and the server echoes the whisper (the line `send_message` waits for, as in its own tests).
+  const whispered: [string, string][] = [];
+  bot.players.Tom = { username: "Tom" } as never;
+  bot.whisper = (to, message) => {
+    whispered.push([to, message]);
+    const echo = { translate: "commands.message.display.outgoing", with: [{ toString: () => to }, { toString: () => message }] };
+    bot.emit("message", echo as never, "chat");
+  };
+  const delivered = await fetch(`${url}/chat-commands/whisper`, {
+    method: "POST",
+    headers: { ...control, "content-type": "application/json" },
+    body: JSON.stringify({ to: "tom", message: "Brea is playing." }),
+  });
+  assert.deepEqual([delivered.status, await delivered.json()], [200, { ok: true }]);
+  assert.deepEqual(whispered, [["Tom", "Brea is playing."]]);
+});
+
+test("a host without --chat-command-prefix answers 404 on the command routes", async (t) => {
+  const options = await configuration(t);
+  connectedBot(t);
+  await using host = await startRuntimeHost(source, options);
+  const address = host.server.address();
+  assert.ok(address && typeof address === "object");
+
+  const answer = await fetch(`http://127.0.0.1:${address.port}/chat-commands`, { headers: { "x-mine-ai-control": "1" } });
+  assert.equal(answer.status, 404);
+});

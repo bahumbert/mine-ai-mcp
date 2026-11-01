@@ -63,6 +63,7 @@ import { currentVehicle, recoverPhysics, watchVehicle } from "../actions/navigat
 import { watchServerSeat } from "../actions/navigate/server-seat-watch.js";
 import { observeReflexActivity } from "./reflex-activity.js";
 import { observeBotStatus } from "./bot-status.js";
+import { ChatCommandRing } from "./chat-commands.js";
 import { observePlayerEvents } from "./player-events.js";
 import { snapshotTools } from "../world/tool-tiers.js";
 
@@ -71,6 +72,8 @@ export interface MinecraftRuntimeOptions {
   readonly highlighter?: BlockHighlighter;
   readonly debugExecuteJavaScript?: boolean;
   readonly onDisconnect?: (reason: string) => void;
+  /** Set: incoming lines that are command lines for the launcher (`!bots`) go to `chatCommands`, not the event log. */
+  readonly chatCommandPrefix?: string | null;
   /** A replacement receives the same perception, footing and budgets as every reflex. */
   readonly createCombatController?: typeof createCombatController;
   /** The pinned-bot watch (ten minutes in one place by default); a scenario shortens the window to see it within seconds. */
@@ -118,6 +121,8 @@ export interface MinecraftRuntime extends AsyncDisposable {
   flushIncidents(): Promise<void>;
   /** Observe navigation without acquiring its physical controls. */
   readonly navigation: Pick<NavigationRuntime, "onEvent">;
+  /** The command lines kept out of the event log; null when the host has no chat command prefix. */
+  readonly chatCommands: ChatCommandRing | null;
   notificationSummary(): NotificationSummary;
   recordActionRequest(request: ActionRequestInput): number;
   recordActionResponse(response: ActionResponseInput): void;
@@ -148,7 +153,18 @@ export interface ActionCall {
   readonly durationMs: number | null;
 }
 
+/** The observers and controllers the runtime built that its own methods read, handed over together. */
+interface RuntimeParts {
+  readonly incidents: ReturnType<typeof observeIncidents>;
+  readonly policy: import("../survival/state/survival-policy.js").SurvivalPolicyState;
+  readonly connectionLost: (reason: string) => void;
+  readonly combat: CombatController;
+  readonly survival: SurvivalObserver;
+  readonly chatCommands: ChatCommandRing | null;
+}
+
 class AttachedMinecraftRuntime implements MinecraftRuntime {
+  readonly chatCommands: ChatCommandRing | null;
   readonly asyncActions: AsyncActions;
   readonly actions: ReturnType<typeof createActions>;
   readonly run: RuntimeRun;
@@ -173,12 +189,10 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
     actions: ReturnType<typeof createActions>,
     navigation: NavigationRuntime,
     resources: AsyncDisposableStack,
-    private readonly incidents: ReturnType<typeof observeIncidents>,
-    private readonly policy: import("../survival/state/survival-policy.js").SurvivalPolicyState,
-    private readonly connectionLost: (reason: string) => void,
-    private readonly combat: CombatController,
-    private readonly survival: SurvivalObserver,
+    private readonly parts: RuntimeParts,
   ) {
+    const { incidents, policy, survival } = parts;
+    this.chatCommands = parts.chatCommands;
     this.#bot = bot;
     this.#botData = botData;
     this.#botDataScope = botDataScope;
@@ -219,11 +233,11 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
 
   captureIncident(): ReturnType<ReturnType<typeof observeIncidents>["capture"]> {
     if (this.#closePromise) return Promise.resolve({ kind: "failed", error: "The Minecraft runtime is closed." });
-    return this.incidents.capture();
+    return this.parts.incidents.capture();
   }
 
   flushIncidents(): Promise<void> {
-    return this.incidents.recorder.flush();
+    return this.parts.incidents.recorder.flush();
   }
 
   notificationSummary(): NotificationSummary {
@@ -270,13 +284,13 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
     return {
       ...this.#runner.status(),
       foreground: this.asyncActions.status(),
-      survival: this.survival.snapshot(),
-      combat: this.combat.activeEngagement()
-        ? { targetId: this.combat.activeEngagement()!.targetId, execution: this.combat.execution() }
+      survival: this.parts.survival.snapshot(),
+      combat: this.parts.combat.activeEngagement()
+        ? { targetId: this.parts.combat.activeEngagement()!.targetId, execution: this.parts.combat.execution() }
         : null,
-      survivalPolicy: this.policy.snapshot(),
+      survivalPolicy: this.parts.policy.snapshot(),
       frontier: this.#frontier.status(),
-      incidents: this.incidents.status(),
+      incidents: this.parts.incidents.status(),
       botData: {
         persistence: this.#botData.location.kind,
         scope: this.#botDataScope,
@@ -292,7 +306,7 @@ class AttachedMinecraftRuntime implements MinecraftRuntime {
   }
 
   disconnect(reason: string): void {
-    this.connectionLost(reason);
+    this.parts.connectionLost(reason);
   }
 
   [Symbol.asyncDispose](): Promise<void> {
@@ -370,6 +384,25 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
   resources.defer(watchVehicle(bot));
   resources.defer(watchServerSeat(bot).stop);
   return { runner, routes };
+}
+
+/** Starts the observers that write what happens to the bot into its event log; the returned function stops them all. */
+function observeBotEvents(
+  bot: Bot,
+  botData: SqlBotData,
+  runner: ActionRunner,
+  navigation: NavigationRuntime,
+  commandLines: { readonly prefix: string; readonly ring: ChatCommandRing } | null,
+): () => void {
+  const stops = [
+    observePlayerEvents(bot, botData, (reason) => runner.cancelActive(reason, { kind: "death" }), commandLines ?? undefined),
+    observeEquipmentEvents(bot, botData),
+    observeNavigationEvents(navigation, bot.username, botData),
+    observeBotStatus(bot, botData),
+  ];
+  return () => {
+    for (const stop of stops.toReversed()) stop();
+  };
 }
 
 /** Own every long-lived facility attached to one connected Minecraft bot. */
@@ -489,10 +522,9 @@ export async function createMinecraftRuntime(
   resources.defer(() => {
     bot.off("end", ended);
   });
-  resources.defer(observePlayerEvents(bot, botData, (reason) => runner.cancelActive(reason, { kind: "death" })));
-  resources.defer(observeEquipmentEvents(bot, botData));
-  resources.defer(observeNavigationEvents(navigation, bot.username, botData));
-  resources.defer(observeBotStatus(bot, botData));
+  const commandLines = options.chatCommandPrefix ? { prefix: options.chatCommandPrefix, ring: new ChatCommandRing() } : null;
+  const chatCommands = commandLines?.ring ?? null;
+  resources.defer(observeBotEvents(bot, botData, runner, navigation, commandLines));
   let bodyDimension = bot.game.dimension;
   const retireWorld = () => {
     if (bodyDimension === bot.game.dimension) return;
@@ -551,10 +583,6 @@ export async function createMinecraftRuntime(
     actions,
     navigation,
     resources.move(),
-    incidents,
-    combat.policy,
-    connectionLost,
-    combat,
-    survival,
+    { incidents, policy: combat.policy, connectionLost, combat, survival, chatCommands },
   );
 }

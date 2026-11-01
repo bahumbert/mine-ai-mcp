@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import test, { type TestContext } from "node:test";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -497,4 +498,20 @@ test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RES
     body: JSON.stringify({ jsonrpc: "2.0", id: 97, method: "tools/list" }),
   });
   assert.match(await afterwards.text(), /RUNTIME_RESTART_FAILED/, "later calls get the restart failure, not a hang");
+});
+
+test("the chat command routes answer 403 to a request whose Host is not local, even with the control header", { timeout: 15_000 }, async (t) => {
+  const { url } = await supervised(t, "chat-commands-host");
+  const status = (path: string, method: string, host: string) =>
+    new Promise<number>((resolve, reject) => {
+      const request = httpRequest(`${url}${path}`, { method, headers: { host, "x-mine-ai-control": "1" } }, (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      request.on("error", reject);
+      request.end();
+    });
+
+  assert.equal(await status("/chat-commands", "GET", "evil.example"), 403);
+  assert.equal(await status("/chat-commands/whisper", "POST", "evil.example:25575"), 403);
 });

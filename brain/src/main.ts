@@ -1,18 +1,25 @@
-import { parseArgs } from "node:util";
 import { dirname, join } from "node:path";
 import { Agent } from "./agent.ts";
+import { otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
+import { OtherAgents } from "./other-agents.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
+  --other-agent      Username of an AI agent run by another brain process (repeat for more): this brain's agents never
+                     answer it, so two bots in separate brains cannot reply to each other forever.
+  --other-agents-file
+                     A JSON file { "usernames": string[] } the launcher keeps up to date with the bots playing (and its
+                     chat listener): read again when it changes, so a bot started later is ignored at once. Without it
+                     only --agent and --other-agent names are ignored.
   --known-names      Comma list of people the agents are talked to who are not players here (e.g. Opus): a message opening
                      a sentence with one of these names and a comma or colon is read as spoken to them.
   --<tier>-model     Model id for that tier, for every agent (overrides personas and environment).
@@ -110,19 +117,7 @@ async function openBrainLog(url: string): Promise<BrainLog | null> {
 }
 
 async function main(): Promise<void> {
-  const { values } = parseArgs({
-    options: {
-      agent: { type: "string", multiple: true },
-      "chat-model": { type: "string" },
-      "action-model": { type: "string" },
-      "planner-model": { type: "string" },
-      "known-names": { type: "string" },
-      "model-slots": { type: "string" },
-      "start-gap": { type: "string" },
-      "start-when-free": { type: "boolean" },
-      help: { type: "boolean" },
-    },
-  });
+  const { values } = parseBrainArgs();
   if (values.help || values.agent === undefined) {
     console.log(USAGE);
     return;
@@ -131,6 +126,7 @@ async function main(): Promise<void> {
   const personas = await Promise.all(specs.map((spec) => loadPersona(spec.personaPath)));
   const knownNames = (values["known-names"] ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
   const usernames = personas.map((persona) => persona.username);
+  const otherAgentsFile = values["other-agents-file"];
   const brainLogs = await Promise.all(specs.map((spec) => openBrainLog(spec.url)));
   const slots = positiveInteger(values["model-slots"] ?? env("MODEL_SLOTS"));
   const gapMs = startGapMs(values["start-gap"]);
@@ -162,11 +158,12 @@ async function main(): Promise<void> {
     personas.map((persona, index) => ({ persona, index })),
     ({ persona, index }, afterMs) => {
       const log = (line: string) => console.log(`${new Date().toISOString()} [${persona.id}] ${line}`);
+      const fixedOthers = otherAgentsFor(persona.username, usernames, values["other-agent"] ?? []);
       const agent = new Agent({
         persona,
         runtime: runtimes[index]!,
         mind: minds[index]!,
-        otherAgents: usernames.filter((name) => name !== persona.username),
+        otherAgents: otherAgentsFile === undefined ? fixedOthers : new OtherAgents(persona.username, fixedOthers, otherAgentsFile, { log }),
         knownNames,
         soil,
         log,

@@ -2,6 +2,7 @@
 import { createMinecraftMcpHttpApplication } from "./http.js";
 import { attachHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import mineflayer, { type Bot } from "mineflayer";
+import type { Express } from "express";
 import { once } from "node:events";
 import { createServer, type Server as HttpServer } from "node:http";
 import { BOT_PHYSICS_OPTIONS, assertBotPluginsLoaded, loadBotPlugins } from "../bot-capabilities.js";
@@ -15,11 +16,15 @@ import { snapshotInventory } from "../bot-data/bot-status.js";
 import type { SourceIdentity } from "../diagnostics/incident-recorder.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecraft-runtime.js";
 import type { HostOptions } from "./config.js";
+import { sendMessage } from "../actions/send-message/send-message.js";
+import { handleChatCommandRoute } from "./chat-commands-route.js";
 import { registerIncidentCaptureRoute } from "./incident-route.js";
 import { createMinecraftMcpServer } from "./mcp.js";
 import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+/** `send_message` itself gives up on the echo after 5 s; this bounds a call that never settles at all. */
+const CHAT_COMMAND_WHISPER_TIMEOUT_MS = 10_000;
 
 /**
  * A kick reason is a text component, an object since 1.20.3: logged whole (live 2026-10-07 on a real server, the
@@ -45,6 +50,55 @@ type LoginPacketCapture = { readonly kind: "waiting" } | { readonly kind: "recei
 type ConnectionSettlement =
   | { readonly kind: "ready"; readonly connection: SpawnedActionHost }
   | { readonly kind: "failed"; readonly error: Error };
+
+/** What `/health` publishes: the connection, the bot's body and inventory, the runtime's status and the observer's overlay. */
+function healthSnapshot(
+  bot: Bot,
+  runtime: MinecraftRuntime,
+  configuration: HostOptions,
+  state: { readonly connected: boolean; readonly watching: boolean },
+) {
+  const position = bot.entity?.position;
+  const feet = position?.floored();
+  return {
+    connected: state.connected,
+    username: bot.username,
+    // Reported so a caller can prove an action took no damage, which is
+    // the invariant hardest to check from an action's own result.
+    health: bot.health ?? null,
+    food: bot.food ?? null,
+    gamemode: bot.game?.gameMode ?? bot.players?.[bot.username]?.gamemode ?? null,
+    position: position ? { x: position.x, y: position.y, z: position.z } : null,
+    standingOn: feet ? bot.blockAt(feet.offset(0, -1, 0))?.name || null : null,
+    // The client is sent only another player's six equipment slots, so
+    // an observer can draw a real inventory only from the host that owns
+    // the connection.
+    inventory: snapshotInventory(bot),
+    ...runtime.status(),
+    recentCalls: runtime.recentCalls(),
+    debug: {
+      executeJavaScript: configuration.debugExecuteJavaScript,
+      suspendConnectionTimeouts: configuration.debugExecuteJavaScript,
+    },
+    overlay: {
+      watching: state.watching,
+    },
+  };
+}
+
+/** Mounts the launcher's chat command routes; a whisper goes out through `send_message`, whose echo is the proof. */
+function mountChatCommandRoutes(app: Express, runtime: MinecraftRuntime, bot: Bot): void {
+  app.use((request, response, next) => {
+    const answered = handleChatCommandRoute(request, response, {
+      ring: runtime.chatCommands,
+      whisper: async (to, message) => {
+        const result = await sendMessage(bot, { to, message }, { signal: AbortSignal.timeout(CHAT_COMMAND_WHISPER_TIMEOUT_MS) });
+        return result.status === "succeeded" ? { ok: true } : { ok: false, error: result.error };
+      },
+    });
+    if (!answered) next();
+  });
+}
 
 async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
   using resources = new DisposableStack();
@@ -196,6 +250,7 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
       highlighter,
       botData: botDataOptions,
       debugExecuteJavaScript: configuration.debugExecuteJavaScript,
+      chatCommandPrefix: configuration.chatCommandPrefix,
       onDisconnect: (reason) => connectionEnded(new Error(reason)),
       incidents: {
         retention: configuration.incidentRetention,
@@ -221,34 +276,7 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
     createMinecraftMcpHttpApplication({
       host: configuration.listenHost,
       createServer: () => createMinecraftMcpServer(activeRuntime, bot.username).server,
-      health: () => {
-        const position = bot.entity?.position;
-        const feet = position?.floored();
-        return {
-          connected,
-          username: bot.username,
-          // Reported so a caller can prove an action took no damage, which is
-          // the invariant hardest to check from an action's own result.
-          health: bot.health ?? null,
-          food: bot.food ?? null,
-          gamemode: bot.game?.gameMode ?? bot.players?.[bot.username]?.gamemode ?? null,
-          position: position ? { x: position.x, y: position.y, z: position.z } : null,
-          standingOn: feet ? bot.blockAt(feet.offset(0, -1, 0))?.name || null : null,
-          // The client is sent only another player's six equipment slots, so
-          // an observer can draw a real inventory only from the host that owns
-          // the connection.
-          inventory: snapshotInventory(bot),
-          ...activeRuntime.status(),
-          recentCalls: activeRuntime.recentCalls(),
-          debug: {
-            executeJavaScript: configuration.debugExecuteJavaScript,
-            suspendConnectionTimeouts: configuration.debugExecuteJavaScript,
-          },
-          overlay: {
-            watching: highlighter.listening(),
-          },
-        };
-      },
+      health: () => healthSnapshot(bot, activeRuntime, configuration, { connected, watching: highlighter.listening() }),
       clientIdleTimeoutMs: configuration.debugExecuteJavaScript ? DEBUG_CONNECTION_TIMEOUT_MS : undefined,
       log: (message) => process.stdout.write(`[mine-ai-mcp] ${message}\n`),
     }),
@@ -256,6 +284,7 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
   );
   httpServer.on("request", application.app);
   registerIncidentCaptureRoute(application.app, activeRuntime);
+  mountChatCommandRoutes(application.app, activeRuntime, bot);
   // The highlighter answers its own feed; anything it does not own falls
   // through to the MCP routes untouched.
   application.app.use((request, response, next) => {

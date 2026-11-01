@@ -29,6 +29,11 @@ export interface HostOptions {
   readonly debugExecuteJavaScript: boolean;
   /** Channel list of a NeoForge server (`--neoforge-components <file>`); null joins as a vanilla client. */
   readonly neoforgeComponents: string | null;
+  /**
+   * `--chat-command-prefix <text>`: chat and whisper lines that are command lines for the launcher (`!bots`) are kept
+   * out of the event log and served at `/chat-commands`; null (the default) leaves every line recorded as today.
+   */
+  readonly chatCommandPrefix: string | null;
   readonly botData: {
     readonly storage: BotDataStorage;
     readonly scope: BotDataScopeKind;
@@ -52,6 +57,7 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
       "connect-timeout-ms": { type: "string", default: "45000" },
       "debug-execute-javascript": { type: "boolean", default: false },
       "neoforge-components": { type: "string" },
+      "chat-command-prefix": { type: "string" },
       "data-root": { type: "string", default: DEFAULT_DATA_ROOT },
       "bot-data-persistence": { type: "string", default: "persistent" },
       "bot-data-scope": { type: "string", default: "bot" },
@@ -81,6 +87,7 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
     debugExecuteJavaScript: values["debug-execute-javascript"],
     neoforgeComponents:
       values["neoforge-components"] === undefined ? null : path.resolve(values["neoforge-components"]),
+    chatCommandPrefix: chatCommandPrefix(values["chat-command-prefix"]),
     botData: {
       storage:
         botDataPersistence === "temporary"
@@ -89,6 +96,15 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
       scope: choiceArgument("--bot-data-scope", values["bot-data-scope"], BOT_DATA_SCOPE_KINDS),
     },
   };
+}
+
+/** A `/` prefix would reach the server as a command, whitespace could not start a word, and a long one is no prefix. */
+function chatCommandPrefix(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  if (!/^[^\s/]\S{0,2}$/u.test(raw)) {
+    throw new Error('--chat-command-prefix must be 1 to 3 characters, with no whitespace, not starting with "/".');
+  }
+  return raw;
 }
 
 function positiveInteger(name: string, raw: string): number {

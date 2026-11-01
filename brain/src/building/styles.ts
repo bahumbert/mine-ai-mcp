@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { ROLES, type BlockRole, type Palette, type Variants } from "./blueprint.ts";
 import { ROOFS } from "./house.ts";
@@ -19,8 +19,23 @@ export const styleSchema = z.strictObject({
 
 export type Style = z.infer<typeof styleSchema> & { readonly palette: Palette; readonly variants?: Variants };
 
+const STYLES_FOLDER = "building-styles";
+
+/**
+ * The first `building-styles/` folder at or above the folder of `from`. The source (`brain/src/building/`) and the
+ * setup's bundle (`brain/src/main.js`: a bundled module's `import.meta.url` is its entry file's) both reach `brain/`.
+ */
+export function findStylesDirectory(from: URL, levels = 4): URL {
+  let folder = new URL(".", from);
+  for (let level = 0; level < levels; level++) {
+    if (existsSync(new URL(`${STYLES_FOLDER}/`, folder))) return new URL(`${STYLES_FOLDER}/`, folder);
+    folder = new URL("../", folder);
+  }
+  throw new Error(`[STYLE_INVALID] no ${STYLES_FOLDER}/ folder at or within ${levels - 1} levels above ${from.href}`);
+}
+
 /** Where the style files live; one JSON file per style, named after its id. */
-export const STYLES_DIRECTORY = new URL("../../building-styles/", import.meta.url);
+export const STYLES_DIRECTORY = findStylesDirectory(new URL(import.meta.url));
 
 export function loadStyles(directory: URL = STYLES_DIRECTORY): ReadonlyMap<string, Style> {
   const styles = new Map<string, Style>();

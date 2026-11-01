@@ -643,3 +643,17 @@ test("recent calls keep the newest first and stay bounded", async (t) => {
     ["navigate_11", "navigate_10", "navigate_9", "navigate_8", "navigate_7", "navigate_6", "navigate_5", "navigate_4"],
   );
 });
+
+test("with a chat command prefix the runtime keeps command lines in its ring and out of read_recent_events", async (t) => {
+  const botData = { storage: { kind: "temporary" }, identity: { worldId: "chat-commands", scope: { kind: "bot", botId: "RuntimeBot" } } } as const;
+  const harness = runtimeHarness();
+  const runtime = await createMinecraftRuntime(harness.bot, { createCombatController: () => combatController, botData, chatCommandPrefix: "!" });
+  t.after(() => runtime.close());
+  harness.bot.emit("chat", "Tom", "!bots", null, {} as never, null);
+  harness.bot.emit("chat", "Tom", "hello", null, {} as never, null);
+
+  assert.deepEqual(runtime.chatCommands?.after(undefined).commands.map(({ message }) => message), ["!bots"]);
+  const read = runtime.actions.find((action) => action.name === "read_recent_events")!;
+  const history = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
+  assert.deepEqual(history.events.map(({ summary }) => summary), ["Tom: hello"]);
+});

@@ -27,6 +27,7 @@ const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; rea
   { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: "./scenarios/src" },
   { dir: "tests/", typecheck: "typecheck:tests", tests: "./tests" },
   { dir: "brain/", typecheck: "typecheck:brain", tests: "./brain" },
+  { dir: "launcher/", typecheck: "typecheck:launcher", tests: "./launcher" },
   { dir: "monitor/", typecheck: "typecheck:monitor", tests: "./monitor" },
   { dir: "scripts/", typecheck: "typecheck:scripts", tests: "./scripts" },
 ];

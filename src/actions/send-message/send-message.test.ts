@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ActionRunner } from "../../session/action-runner.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import {
   createSendMessageAction,
   isChatTextAccepted,
@@ -72,26 +72,36 @@ test("releases its echo listener when the caller cancels", async () => {
   assert.equal(bot.listenerCount("chat"), 0);
 });
 
-/** What the server tells a whisperer: `commands.message.display.outgoing` with the target and the text. */
-function whisperEcho(target: string, text: string) {
-  return { translate: "commands.message.display.outgoing", with: [{ toString: () => target }, { toString: () => text }] };
-}
-
-/** The server's line reaching the client: Mineflayer's `message` event, whose payload is all the action reads. */
-function emitMessage(bot: Bot, line: ReturnType<typeof whisperEcho>) {
-  bot.emit("message", line as never, "chat");
-}
-
-function whisperBot(players: string[], echo: (bot: Bot, to: string, message: string) => void = (bot, to, message) => emitMessage(bot, whisperEcho(to, message))) {
-  const { bot } = createFakeBot({ username: "MineAI", players: Object.fromEntries(players.map((name) => [name, { username: name }])) });
+/**
+ * A bot whose whispers the shared fake answers as the 1.21.4 server does (`fake-bot-chat.ts`, contract check
+ * `whisper-echo`): an echo one server tick later. The wait for it is a wall-clock timer, so the caller installs `clock`.
+ * `onWhisper` replaces what happens when the bot whispers, given the fake's own `send` (a refusal, another text's echo).
+ */
+function whisperBot(
+  players: string[],
+  options: {
+    chat?: FakeBotOptions["chat"];
+    onWhisper?: (send: (to: string, message: string) => void, to: string, message: string) => void;
+  } = {},
+) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({
+    username: "MineAI",
+    clock,
+    chat: options.chat,
+    players: Object.fromEntries(players.map((name) => [name, { username: name }])),
+  });
   const whispered: [string, string][] = [];
   const publicLines: string[] = [];
-  bot.chat = (message) => publicLines.push(message);
+  bot.chat = (message) => {
+    publicLines.push(message);
+  };
+  const sendWhisper = bot.whisper.bind(bot);
   bot.whisper = (to, message) => {
     whispered.push([to, message]);
-    echo(bot, to, message);
+    (options.onWhisper ?? ((send, target, text) => send(target, text)))(sendWhisper, to, message);
   };
-  return { bot, whispered, publicLines };
+  return { bot, clock, whispered, publicLines };
 }
 
 test("accepts a whisper target that is a username, and keeps the whisper short enough for one command", () => {
@@ -103,9 +113,23 @@ test("accepts a whisper target that is a username, and keeps the whisper short e
   assert.doesNotThrow(() => parseSendMessageRequest({ message: "x".repeat(240) }));
 });
 
-test("a whisper goes to the named player online, not to public chat, and succeeds on the server's own echo", async () => {
-  const { bot, whispered, publicLines } = whisperBot(["Alex", "Bob"]);
-  const output = await new ActionRunner().run(createSendMessageAction(bot), { message: "On my way", to: "alex" });
+test("two whispers sent back to back are both confirmed", async () => {
+  const { bot, clock, whispered } = whisperBot(["Alex"]);
+  using _installed = clock.install();
+  const action = createSendMessageAction(bot);
+  const runner = new ActionRunner();
+  const both = Promise.all([runner.run(action, { message: "line 1", to: "Alex" }), runner.run(action, { message: "line 2", to: "Alex" })]);
+  const outputs = await clock.settle(both, 1_000);
+  assert.deepEqual(outputs.map(({ result }) => result.status), ["succeeded", "succeeded"]);
+  assert.deepEqual(whispered, [["Alex", "line 1"], ["Alex", "line 2"]]);
+  assert.equal(bot.listenerCount("message"), 0);
+});
+
+// Red before the fix: the fake echoes as `contract whisper-echo` measured (`translate` = the registry's English format, not the key).
+test("a whisper is confirmed by the echo as 1.21.4 sends it: it goes to the named player online, not to public chat", async () => {
+  const { bot, clock, whispered, publicLines } = whisperBot(["Alex", "Bob"]);
+  using _installed = clock.install();
+  const output = await clock.settle(new ActionRunner().run(createSendMessageAction(bot), { message: "On my way", to: "alex" }), 1_000);
   assert.deepEqual(whispered, [["Alex", "On my way"]]);
   assert.deepEqual(publicLines, []);
   assert.deepEqual(output.result, { status: "succeeded", message: "On my way", to: "Alex" });
@@ -116,6 +140,7 @@ test("a whisper goes to the named player online, not to public chat, and succeed
 test("a whisper to nobody online (or to the bot itself) is refused before anything is sent", async () => {
   const { bot, whispered } = whisperBot(["Alex"]);
   for (const to of ["Zed", "MineAI"]) {
+    // Refused before any wait, so no timer is armed and the manual wait needs no installed clock.
     const output = await new ActionRunner().run(createSendMessageAction(bot), { message: "hello", to });
     assert.equal(output.result.status, "failed");
     assert.match("error" in output.result ? output.result.error : "", /^\[PLAYER_NOT_ONLINE\]/);
@@ -125,24 +150,43 @@ test("a whisper to nobody online (or to the bot itself) is refused before anythi
 });
 
 test("a whisper is confirmed only by the echo of its own text; a refusal from mineflayer is reported", async () => {
-  const noisy = whisperBot(["Alex"], (bot, to, message) => {
-    emitMessage(bot, whisperEcho(to, "something else"));
-    emitMessage(bot, whisperEcho(to, message));
+  {
+    // Another text's echo arrives and confirms nothing: the same whisper to a muted-for-this-text server times out.
+    const other = whisperBot(["Alex"], { onWhisper: (send, to) => send(to, "something else") });
+    using _installed = other.clock.install();
+    const output = await other.clock.settle(new ActionRunner().run(createSendMessageAction(other.bot), { message: "hello", to: "Alex" }), 6_000);
+    assert.match("error" in output.result ? output.result.error : "", /^\[MESSAGE_NOT_OBSERVED\]/);
+  }
+  const failing = whisperBot(["Alex"], {
+    onWhisper: () => {
+      throw new Error("chat disabled");
+    },
   });
-  assert.equal((await new ActionRunner().run(createSendMessageAction(noisy.bot), { message: "hello", to: "Alex" })).result.status, "succeeded");
-
-  const failing = whisperBot(["Alex"], () => {
-    throw new Error("chat disabled");
-  });
-  const output = await new ActionRunner().run(createSendMessageAction(failing.bot), { message: "hello", to: "Alex" });
+  using _installed = failing.clock.install();
+  const output = await failing.clock.settle(new ActionRunner().run(createSendMessageAction(failing.bot), { message: "hello", to: "Alex" }), 1_000);
   assert.match("error" in output.result ? output.result.error : "", /MESSAGE_SEND_FAILED.*chat disabled/);
   assert.equal(failing.bot.listenerCount("message"), 0);
 });
 
+test("a whisper the server never echoes (muted) fails as not observed after 5 s", async () => {
+  const { bot, clock } = whisperBot(["Alex"], { chat: { echoWhispers: false } });
+  using _installed = clock.install();
+  const pending = new ActionRunner().run(createSendMessageAction(bot), { message: "hello", to: "Alex" });
+  let settled = false;
+  void pending.then(() => (settled = true));
+  await clock.advance(4_900);
+  assert.equal(settled, false, "still waiting before the 5 s bound");
+  const output = await clock.settle(pending, 200);
+  assert.match("error" in output.result ? output.result.error : "", /^\[MESSAGE_NOT_OBSERVED\]/);
+  assert.equal(bot.listenerCount("message"), 0);
+});
+
 test("a cancelled whisper releases its echo listener", async () => {
-  const { bot } = whisperBot(["Alex"], () => {});
+  const { bot, clock } = whisperBot(["Alex"], { chat: { echoWhispers: false } });
+  using _installed = clock.install();
   const controller = new AbortController();
   const pending = new ActionRunner().run(createSendMessageAction(bot), { message: "hello", to: "Alex" }, controller.signal);
+  await clock.advance(1_000);
   controller.abort(new Error("stop waiting"));
   assert.equal((await pending).result.status, "cancelled");
   assert.equal(bot.listenerCount("message"), 0);

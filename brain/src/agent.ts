@@ -70,9 +70,10 @@ export interface AgentOptions {
   readonly mind: Mind;
   /**
    * Usernames of the other agents. Never answered in Phase 1, so two bots cannot talk each other into an endless
-   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5.
+   * loop; real bot-to-bot conversation (with explicit start/end) is Phase 5. A provider (`OtherAgents`, fed by the
+   * launcher's file) is asked on every line: a bot started from game chat joins the list while this one runs.
    */
-  readonly otherAgents: readonly string[];
+  readonly otherAgents: readonly string[] | { names(): readonly string[] };
   readonly log: (line: string) => void;
   /** The block names a till failed on, shared by the agents of one process (each agent has its own when none is given). */
   readonly soil?: TillFacts;
@@ -419,10 +420,17 @@ export class Agent {
    * Other agents are never answered (see {@link AgentOptions.otherAgents}).
    */
   private listensTo(username: string): boolean {
-    const { persona, otherAgents } = this.options;
+    const { persona } = this.options;
+    const otherAgents = this.otherAgentNames();
     const speaker = username.toLowerCase();
     if (otherAgents.some((name) => name.toLowerCase() === speaker)) return false;
     return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
+  }
+
+  /** The other agents' usernames now: the fixed list, or what the live provider says at this moment. */
+  private otherAgentNames(): readonly string[] {
+    const { otherAgents } = this.options;
+    return "names" in otherAgents ? otherAgents.names() : otherAgents;
   }
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
@@ -1131,9 +1139,10 @@ export class Agent {
    */
   private noteNamed(message: PlayerMessage, at: number): { name: string; secondsAgo: number } | undefined {
     const speaker = message.username.toLowerCase();
-    const characters = [this.options.persona.username, ...this.options.otherAgents];
+    const otherAgents = this.otherAgentNames();
+    const characters = [this.options.persona.username, ...otherAgents];
     const named = characters.filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
-    if (this.options.otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
+    if (otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
     if (named.length > 0) {
       this.lastNamed.set(speaker, { name: named[0]!, at });
       return undefined;

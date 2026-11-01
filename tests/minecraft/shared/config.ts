@@ -25,7 +25,7 @@ export interface ScenarioServerConfig {
   readonly clientMemMb: number;
   /**
    * Resident memory of a scenario client booted and waiting for `init`, before it logs in: 111-122 MB in 10 boots measured 2026-10-25 on WSL
-   * (`.agent/scripts/client-boot-measure.ts`, the contract driver without and `single-action.ts` with the runtime; 125 covers them all). A client
+   * (`.agent/scripts/scenario/client-boot-measure.ts`, the contract driver without and `single-action.ts` with the runtime; 125 covers them all). A client
    * spawned ahead reserves this from its spawn; its trial reserves only `clientMemMb - clientBootedMemMb` (what logging in adds). The logged-in
    * size is still T1's peak (`clientMemMb`): its size right after the login, and so the true difference, is to measure on a running trial (`ps`).
    */

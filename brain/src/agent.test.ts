@@ -443,6 +443,20 @@ test("other agents are not heard, and the chat tier may decide a message is not 
   assert.match(chat.requests[1]?.[1]?.content ?? "", /Alex: "anyone want to trade"/u);
 });
 
+test("a name added to the live list of other agents after construction is not answered (a bot started from chat while this one runs)", async (t) => {
+  const runtime = new FakeRuntime();
+  const names: string[] = ["Vex"];
+  const { agent, chat } = agentFor(t, runtime, {}, { otherAgents: { names: () => names } });
+  chat.reply({ say: "Hello Brea.", route: "talk", request: "" });
+  await agent.handle(say("Brea", "Ayla come here"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 1, "before the list names her, Brea is a player");
+  names.push("Brea");
+  await agent.handle(say("Brea", "Ayla come here again"));
+  assert.equal(chat.requests.length, 1, "no model call for a name the provider now lists");
+  assert.deepEqual(runtime.said, ["Hello Brea."]);
+});
+
 test("under an order, what it starts doing and why is given to the chat tier, which says it; its own goals stay silent", async (t) => {
   const runtime = new FakeRuntime();
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "gather dirt", settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
