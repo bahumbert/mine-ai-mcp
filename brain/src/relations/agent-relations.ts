@@ -10,7 +10,7 @@ import type { BotRuntime, BotSnapshot, HurtBy } from "../runtime-client.ts";
 import type { SkillContext } from "../skills.ts";
 import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
-import { resendRefusedTrade } from "./chat-trade.ts";
+import { resendRefusedTrade, type CheckedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
@@ -135,9 +135,9 @@ export class AgentRelations {
     return this.trades.openWith(speaker)?.id ?? board?.offerFrom(speaker, persona.username)?.id ?? board?.offerFrom(persona.username, speaker)?.id ?? null;
   }
 
-  /** A reply that carries a trade: the trade is checked, and sent back once when the checks refuse it. */
-  checkedTrade(first: ChatDecision, input: ChatInput, o: { readonly speaker: string; readonly snapshot: BotSnapshot; readonly signal: AbortSignal }): Promise<ChatDecision> {
-    return resendRefusedTrade({ mind: this.deps.mind, input, first, trades: this.trades, log: this.deps.log, ...o });
+  /** A reply that carries a trade: the trade is checked on the world as it is now, and sent back once when the checks refuse it; the snapshot of the last check comes with it. */
+  checkedTrade(first: ChatDecision, input: ChatInput, o: { readonly speaker: string; readonly snapshot: BotSnapshot; readonly signal: AbortSignal }): Promise<CheckedTrade> {
+    return resendRefusedTrade({ mind: this.deps.mind, input, first, trades: this.trades, log: this.deps.log, fresh: () => this.deps.runtime.status(), ...o });
   }
 
   /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. `seen` is what the answered line was read against. */
@@ -263,6 +263,11 @@ export class AgentRelations {
       })
       .finally(() => { this.looking = false; });
     return "ticked";
+  }
+
+  /** How many relations ticks counted gains (ran with a baseline): the agent's own-work window moves by it. */
+  countedTicks(): number {
+    return this.trades.countedTicks();
   }
 
   /** Runs one hand-off and tells the controller how it ended. */

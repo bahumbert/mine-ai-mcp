@@ -576,7 +576,7 @@ test("a trade the checks refuse is dropped and the decision says so, whether the
     const { chat, mind } = scriptedMind();
     chat.reply(second);
     const h = relationsWithClock({ mind });
-    const out = await h.relations.checkedTrade(first, input, { speaker: "Bruno", snapshot, signal: new AbortController().signal });
+    const { decision: out } = await h.relations.checkedTrade(first, input, { speaker: "Bruno", snapshot, signal: new AbortController().signal });
     assert.deepEqual([out.trade, out.tradeDropped, out.route], [undefined, true, "act"]);
   }
 });

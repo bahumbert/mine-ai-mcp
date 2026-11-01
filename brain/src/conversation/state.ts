@@ -1,5 +1,5 @@
 import type { Persona } from "../persona.ts";
-import type { BotSnapshot, Position } from "../runtime-client.ts";
+import type { BotSnapshot, PlayerMessage, Position } from "../runtime-client.ts";
 
 export type ConversationKind = "chance" | "social";
 export type PlannedLength = "short" | "medium" | "long";
@@ -78,6 +78,16 @@ export function lineSaid(c: Conversation, now: number): void {
 
 export function manhattan(a: Position, b: Position): number {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z);
+}
+
+/**
+ * How far a line came from: the server's distance when the line carries one (Localized Chat), else where the look puts
+ * its speaker (Manhattan, as talk range is measured); undefined when the speaker is not in the look.
+ */
+export function lineDistance(message: Pick<PlayerMessage, "username" | "distance">, look: Pick<BotSnapshot, "position" | "players"> | null): number | undefined {
+  if (message.distance !== undefined) return message.distance;
+  const at = look?.players.find((player) => same(player.username, message.username))?.position;
+  return look === null || at === undefined || at === null ? undefined : manhattan(look.position, at);
 }
 
 /** Notes who is out of range; members out for `outOfRangeSeconds` are dropped from the record and returned. */

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { personaSchema } from "../persona.ts";
-import { addMembers, capReached, checkRange, ending, isMember, lineSaid, manhattan, openConversation, type Limits } from "./state.ts";
+import { addMembers, capReached, checkRange, ending, isMember, lineDistance, lineSaid, manhattan, openConversation, type Limits } from "./state.ts";
 
 const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
 const limits: Limits = { ...personaSchema.parse(base).settings.conversation, talkRange: 64 };
@@ -95,4 +95,22 @@ test("a conversation opened by whisper ignores range (a whisper carries any dist
   assert.equal(ending(c, "Ayla", limits, t0 + 60_000), "silence");
   c.lines = 24;
   assert.equal(capReached(c, limits, t0), true);
+});
+
+const shout = { username: "Lena", channel: "chat", message: "anyone?", addressed: false } as const;
+const lookAt = (position: { x: number; y: number; z: number } | null) => ({ position: here, players: [{ username: "Lena", position }] });
+
+test("lineDistance: a server distance wins over the positions", () => {
+  assert.equal(lineDistance({ ...shout, distance: 7 }, lookAt({ x: 100, y: 0, z: 0 })), 7);
+});
+
+test("lineDistance: a shout with no distance is as far as the look puts the speaker (Manhattan)", () => {
+  assert.equal(lineDistance(shout, lookAt({ x: 100, y: 1, z: 20 })), 121);
+  assert.equal(lineDistance({ ...shout, username: "LENA" }, lookAt({ x: 5, y: 0, z: 0 })), 5, "the speaker is matched without regard to case");
+});
+
+test("lineDistance: a speaker out of tab range, offline, without a position, or with no look has no distance", () => {
+  assert.equal(lineDistance(shout, { position: here, players: [] }), undefined);
+  assert.equal(lineDistance(shout, lookAt(null)), undefined);
+  assert.equal(lineDistance(shout, null), undefined);
 });

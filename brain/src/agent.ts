@@ -9,7 +9,7 @@ import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
-import type { Conversation } from "./conversation/state.ts";
+import { lineDistance, type Conversation } from "./conversation/state.ts";
 import { pickPartner, socialise, type SocialiseDeps } from "./conversation/socialise.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { namesWord, type LocalizedChat } from "./llm-mind.ts";
@@ -24,6 +24,7 @@ import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
 import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.ts";
+import { OwnWork } from "./relations/own-work.ts";
 import { agreedDetail, heardNeeds, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
@@ -259,13 +260,8 @@ export class Agent {
   private readonly talks: ConversationController | null;
   /** Its relations and trades (spec 2026-10-19-relations-trading-design); null when `settings.relations.enabled` is false. */
   private readonly relations: AgentRelations | null;
-  /** The items the running step is out to get: what it gains is its own work, never a partner's payment. */
-  private stepYields: ReadonlySet<string> = new Set();
-  /** The yields of every step started since a relations tick last ran (B1): a step that ends between two looks still explains its gains. */
-  private yieldsSinceTick: ReadonlySet<string> = new Set();
-  /** A step or hand-off is running, or ran since a relations tick last ran: its gains are the bot's own (except what an open trade is owed). */
-  private ownWork = false;
-  private ownWorkSinceTick = false;
+  /** What the steps and hand-offs explain in the bag: their yields and own-work flag, for the relations tick and one more (relations/own-work.ts). */
+  private readonly own = new OwnWork();
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
@@ -371,12 +367,11 @@ export class Agent {
           unreadable = true;
         }
         this.lookAtConversations();
-        const answer = this.relations?.look(new Set([...this.stepYields, ...this.yieldsSinceTick]), new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal, this.ownWork || this.ownWorkSinceTick);
-        // A tick saw the gains of the steps that ended (and an idle controller counts none): their yields are not needed again.
-        if (answer === "ticked" || answer === "idle") {
-          this.yieldsSinceTick = new Set();
-          this.ownWorkSinceTick = false;
-        }
+        this.own.advance(this.relations?.countedTicks() ?? 0);
+        const answer = this.relations?.look(this.own.yields(), new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal, this.own.active());
+        // An idle controller counts no gain; a tick that counted one moved the window (advance above), so a tick that failed does not use it up.
+        if (answer === "idle") this.own.idle();
+        else if (answer === "ticked") this.own.handedOver();
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -437,7 +432,8 @@ export class Agent {
     const named = this.namedIn(message);
     const chat = await this.decideHeard(message, heard, heardAt, talkedTo, named);
     if (chat === null) return;
-    const { decision, snapshot, conversation, seenOfferId } = chat;
+    // `snapshot` is the chat call's start (the payment baseline of a trade it makes); `checked` is the world after the model call.
+    const { decision, snapshot, checked, conversation, seenOfferId } = chat;
     const seen = { heardAt, ...(seenOfferId !== undefined && { seenOfferId }) };
     // What they said of my requests counts even if the reply below is dropped: it was said.
     await this.relations?.answered(decision, message.username);
@@ -489,7 +485,7 @@ export class Agent {
     // The speaker is the requester: their authority is the order's.
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work), ...(decision.place !== undefined && { place: decision.place }) };
     // No trade errand across the map: a bot out of reach is told to come (relations block); players are obeyed at any distance.
-    if ((routed === "act" || routed === "later") && asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
+    if ((routed === "act" || routed === "later") && asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, checked ?? snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
       log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
       return;
     }
@@ -575,19 +571,16 @@ export class Agent {
   private everyoneLineClaim(message: PlayerMessage, snapshot: BotSnapshot): (() => boolean) | undefined {
     const { everyone, persona } = this.options;
     if (everyone === undefined || message.channel !== "chat") return undefined;
-    const at = snapshot.players.find((player) => player.username.toLowerCase() === message.username.toLowerCase())?.position;
-    if (message.distance === undefined && at !== undefined && at !== null) {
-      everyone.heard(message.username, message.message, persona.username, Math.hypot(at.x - snapshot.position.x, at.y - snapshot.position.y, at.z - snapshot.position.z));
-    }
+    const distance = lineDistance(message, snapshot);
+    if (message.distance === undefined && distance !== undefined) everyone.heard(message.username, message.message, persona.username, distance);
     return () => everyone.claim(message.username, message.message, persona.username);
   }
 
   /** Whether a player's line came from within talk range: its distance, else where the last look put them. */
   private withinTalkRange(message: PlayerMessage): boolean {
     const range = this.options.localizedChat?.range ?? this.options.persona.settings.conversation.stayingDistance;
-    if (message.distance !== undefined) return message.distance <= range;
-    const at = this.lastLook?.players.find((player) => player.username.toLowerCase() === message.username.toLowerCase())?.position;
-    return at !== undefined && at !== null && this.lastLook !== null && Math.abs(at.x - this.lastLook.position.x) + Math.abs(at.y - this.lastLook.position.y) + Math.abs(at.z - this.lastLook.position.z) <= range;
+    const distance = lineDistance(message, this.lastLook);
+    return distance !== undefined && distance <= range;
   }
 
   /** The characters and players a line holds as words (not its speaker), as spelled in the game. */
@@ -646,11 +639,11 @@ export class Agent {
 
   /**
    * The chat tier's decision about `message` (a trade in it checked), with the snapshot and conversation it was made
-   * in, or null when there is none to act on. A model server that does not answer is waited for and asked again while
+   * in (`checked`: the world its trade was last checked on, read after the model call), or null when there is none to act on. A model server that does not answer is waited for and asked again while
    * the line is under {@link CHAT_RETRY_MS} old and its speaker has said nothing since (a stale reply is dropped unspoken
    * anyway); any other failure drops the line, as it always did.
    */
-  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; conversation: ConversationFacts | undefined; seenOfferId?: string } | null> {
+  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; checked?: BotSnapshot; conversation: ConversationFacts | undefined; seenOfferId?: string } | null> {
     const { persona, mind, log } = this.options;
     for (;;) {
       try {
@@ -658,11 +651,15 @@ export class Agent {
         this.onlineNames = snapshot.players.map((player) => player.username);
         const conversation = this.talks?.facts();
         const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
-        const input: ChatInput = { persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+        // A shout with no server distance is as far as the speaker stands in this snapshot: the model is told how far it came (a whisper carries any distance, so it is not).
+        const distance = lineDistance(message, snapshot);
+        const heardMessage = message.channel === "chat" && message.distance === undefined && distance !== undefined ? { ...message, distance } : message;
+        const input: ChatInput = { persona, message: heardMessage, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
         let decision = await mind.chat(input, this.runSignal);
-        if (this.relations !== null && decision.trade !== undefined) decision = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal });
+        let checked: BotSnapshot | undefined;
+        if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal }));
         this.modelFailures = 0;
-        return { decision, snapshot, conversation, ...(input.relations?.seenOfferId !== undefined && { seenOfferId: input.relations.seenOfferId }) };
+        return { decision, snapshot, ...(checked !== undefined && { checked }), conversation, ...(input.relations?.seenOfferId !== undefined && { seenOfferId: input.relations.seenOfferId }) };
       } catch (error) {
         if (this.runSignal.aborted) return null;
         if (!(error instanceof ModelUnavailable)) {
@@ -742,7 +739,7 @@ export class Agent {
     const { runtime, persona } = this.options;
     const controller = new AbortController();
     work.step = controller;
-    this.ownWork = true;
+    this.own.startOwnWork();
     this.journalState(describeHandoff(h));
     let end = { outcome: "dropped", detail: "" };
     try {
@@ -750,7 +747,7 @@ export class Agent {
     } finally {
       work.step = null;
       this.journalState(null);
-      this.endOwnWork();
+      this.own.endOwnWork();
     }
     if (end.outcome !== "dropped") this.finish(work, end.outcome === "done" ? "done" : "failed", end.detail);
     // A wait that a give or a collect set aside stays below it and resumes; any other dropped hand-off leaves the stack.
@@ -760,22 +757,13 @@ export class Agent {
   /** The step runs: its controller stops it, and the items it is out to get are its own work, never a partner's payment. */
   private startStep(work: Work, controller: AbortController, step: Step): void {
     work.step = controller;
-    this.ownWork = true;
-    this.stepYields = itemsYieldedBy(step);
+    this.own.startStep(itemsYieldedBy(step));
   }
 
-  /** The step's yields wait for a tick that sees the inventory after the step (a look during the step clears the set, so they are added here, not at the start). */
+  /** The step's yields wait for the ticks that see the inventory after the step (and one more). */
   private endStep(work: Work): void {
     work.step = null;
-    this.yieldsSinceTick = new Set([...this.yieldsSinceTick, ...this.stepYields]);
-    this.stepYields = new Set();
-    this.endOwnWork();
-  }
-
-  /** The running step or hand-off is over: the next relations tick still counts its gains as own. */
-  private endOwnWork(): void {
-    this.ownWork = false;
-    this.ownWorkSinceTick = true;
+    this.own.endStep();
   }
 
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
