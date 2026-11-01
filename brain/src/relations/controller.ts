@@ -68,6 +68,9 @@ export class TradeController implements BoardPeer {
   /** The collect fallback and what each agreed trade's bag held at agreement (items that arrived unseen are credited from the inventory). */
   private readonly collects = new CollectFallback();
   private readonly nobodyGave = new Set<string>();
+  /** Agreed trades (oldest agreement first) that had no inventory to claim against when they were agreed: started by the next tick, from its bag. */
+  private readonly startAtNextTick = new Set<string>();
+  private ticksCounted = 0;
   private readonly running = new Set<Promise<void>>();
   private chain: Promise<unknown> = Promise.resolve();
 
@@ -109,10 +112,18 @@ export class TradeController implements BoardPeer {
     });
   }
 
-  /** A trade just agreed: earlier gives and payments are claimed, then my side is given at once if covered, or handed to the agent if due. */
+  /**
+   * A trade just agreed: earlier gives and payments are claimed, then my side is given at once if covered, or handed to the agent if due.
+   * With no inventory to claim against (a board accept after a tick that failed) the start waits for the next tick.
+   */
   private async startAgreed(agreed: Trade, partner: string, now: number, carried?: BotSnapshot["inventory"]): Promise<void> {
+    if (carried === undefined && this.previous === null) {
+      this.startAtNextTick.add(agreed.id);
+      return;
+    }
     const current = await this.claimEarlier(agreed, now, carried);
-    const seen = this.previous?.inventory ?? carried;
+    // The bag the claim used; a deferred start runs inside a tick, which has already replaced `previous` by the new bag.
+    const seen = carried ?? this.previous?.inventory;
     if (seen !== undefined) this.collects.arrivals.start(current, seen);
     if (await this.giveIfCovered(current, partner)) return;
     if (this.isGiveDue(current, now, null)) this.takeGive(current);
@@ -256,8 +267,30 @@ export class TradeController implements BoardPeer {
     for (const e of claimed) this.creditGiven(trade, e.item, e.count);
     if (trade.state === "proposed" && claimed.length > 0) this.fromLedger.set(trade.id, claimed);
     const { trade: next, used } = creditTrade(trade, trade.state === "agreed" ? this.earlier.claimGains(trade, carried, now) : [], now);
-    if (used.length > 0) await this.recordStep(next, "received");
+    if (used.length > 0) await this.recordStep(next, "received").catch((error: unknown) => {
+      // The write failed: the payment is kept for the retry (while the book shows no credit), not lost with the claim.
+      if (this.find(trade.id)?.received.length === trade.received.length) this.earlier.gained(used, new Map([[trade.partner.toLowerCase(), 0]]), now);
+      throw error;
+    });
     return next;
+  }
+
+  /** The board accepts that waited for a baseline are started from this tick's bag, oldest agreement first; one that fails keeps its place and drops the baseline, so the retry reads a fresh bag. */
+  private async startDeferred(previous: Seen | null, snapshot: BotSnapshot, now: number): Promise<void> {
+    for (const id of [...this.startAtNextTick]) {
+      const trade = this.find(id);
+      if (trade === undefined || (trade.state !== "agreed" && trade.state !== "they_gave")) {
+        this.startAtNextTick.delete(id);
+        continue;
+      }
+      try {
+        await this.startAgreed(trade, trade.partner, now, previous?.inventory ?? snapshot.inventory);
+      } catch (error) {
+        this.forgetSeen();
+        throw error;
+      }
+      this.startAtNextTick.delete(id);
+    }
   }
 
   /** A hand-off's give was partly or fully taken: what the partner took counts toward my side, so a retake gives only what is left. */
@@ -351,8 +384,11 @@ export class TradeController implements BoardPeer {
       this.previous = { inventory: snapshot.inventory, partners: this.partners };
       this.position = snapshot.position;
       this.near.note(snapshot, this.deps.settings.handoffDistance, now);
-      if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now, ownWork);
-      else this.collects.arrivals.rebase(this.deps.book.trades(), snapshot.inventory);
+      await this.startDeferred(previous, snapshot, now);
+      if (previous !== null) {
+        await this.creditGains(snapshot, previous, ownStepYields, now, ownWork);
+        this.ticksCounted += 1; // after the gains were counted: a tick that threw before counted none
+      } else this.collects.arrivals.rebase(this.deps.book.trades(), snapshot.inventory);
       await this.agreePaidProposals(snapshot.inventory, now);
       await this.creditArrived(snapshot.inventory, ownStepYields, now);
       await this.settleOpen(now);
@@ -373,6 +409,9 @@ export class TradeController implements BoardPeer {
 
   /** No baseline: the next tick counts no gain. The agent's look calls it whenever no tick started on the yields it dropped. */
   forgetSeen(): void { this.previous = null; }
+
+  /** How many ticks ran with a baseline (counting gains); a tick after `forgetSeen` does not raise it. */
+  countedTicks(): number { return this.ticksCounted; }
 
   /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */
   handoffEnded(tradeId: string, outcome: Exclude<HandoffEnd["outcome"], "dropped">, detail: string): Promise<void> {

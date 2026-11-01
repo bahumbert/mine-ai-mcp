@@ -8,7 +8,7 @@ import { RelationBook } from "./book.ts";
 import { TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
 import { newRelation, withTrade } from "./record.ts";
-import { proposeTrade, sameDealTerms } from "./trade.ts";
+import { cancelTrade, proposeTrade, sameDealTerms } from "./trade.ts";
 import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from "./types.ts";
 
 const MIN = 60_000;
@@ -1705,4 +1705,91 @@ test("T3: a partner who paid part before my give is still waited for, for the re
   await h.c.tick(withIron(s, 3), new Set(), signal);
   assert.equal(h.awaits.length, 1);
   assert.equal(h.c.awaits(id), true, "2 of 5 are still owed");
+});
+
+// B1 (plan 2026-11-01-trading-tickets-2-6): a board accept with no baseline is claimed at the next tick.
+const boardProposal = async (h: Harness, partner = "Theo", first: "me" | "them" = "them"): Promise<Trade> => {
+  const proposal = proposeTrade({ self: "Ayla", partner, give: bread(5), get: ingots(5), first, now: h.state.now });
+  await h.book.update(partner, (r) => withTrade(r, proposal));
+  return proposal;
+};
+
+/** The re-review's proof: a payment kept for Theo, a tick that failed (no baseline), then the board accept. */
+async function boardAcceptAfterFailedTick(h: Harness): Promise<Trade> {
+  await baseline(h);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 15_000;
+  h.c.forgetSeen();
+  const proposal = await boardProposal(h);
+  await h.c.offerAccepted(proposal.id, "Theo");
+  return proposal;
+}
+
+test("B1: a board accept with no baseline waits for the next tick, which credits the kept payment and hands my give over", async () => {
+  const h = harness();
+  await boardAcceptAfterFailedTick(h);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(theirTrade(h).received, [], "nothing to claim against yet");
+  assert.deepEqual(h.handoffs, []);
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5));
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.deepEqual(kinds(h), ["give"], "my give is handed over from the new end state");
+  for (let i = 0; i < 3; i += 1) { h.state.now += 2_000; await h.c.tick(withIron(snapshot(), 5), new Set(), signal); }
+  assert.deepEqual(theirTrade(h).received, ingots(5), "credited once, not again by the ticks after");
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).state, "done");
+});
+
+test("B1: a trade cancelled before the tick is not started", async () => {
+  const h = harness();
+  const proposal = await boardAcceptAfterFailedTick(h);
+  await h.book.update("Theo", (r) => withTrade(r, cancelTrade(theirTrade(h), h.state.now, "changed my mind")));
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.equal(h.book.get("Theo")!.trades.find((t) => t.id === proposal.id)!.state, "cancelled");
+  assert.deepEqual(h.handoffs, []);
+  assert.deepEqual(theirTrade(h).received, []);
+});
+
+test("B1: two board accepts before one tick are both started, the oldest agreement first", async () => {
+  const h = harness();
+  const theo = await boardProposal(h, "Theo", "me");
+  h.state.now += 1_000;
+  const bruno = await boardProposal(h, "Bruno", "me");
+  await h.c.offerAccepted(theo.id, "Theo");
+  h.state.now += 1_000;
+  await h.c.offerAccepted(bruno.id, "Bruno");
+  assert.equal(h.handoffs.length, 0, "no baseline: both wait for the tick");
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.deepEqual(h.handoffs.map((x) => (x.kind === "give" ? x.partner : "")), ["Theo", "Bruno"]);
+});
+
+test("B1: a deferred start that throws keeps the accept: the next tick credits the payment", async () => {
+  const h = harness();
+  await boardAcceptAfterFailedTick(h);
+  const update = h.book.update.bind(h.book);
+  let failures = 1;
+  h.book.update = async (...args: Parameters<typeof update>) => {
+    if (failures > 0) { failures -= 1; throw new Error("book write failed"); }
+    return update(...args);
+  };
+  await assert.rejects(h.c.tick(withIron(snapshot(), 5), new Set(), signal), /book write failed/u);
+  assert.deepEqual(theirTrade(h).received, [], "the failed write credited nothing");
+  h.state.now += 1_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  assert.deepEqual(theirTrade(h).received, ingots(5), "the retry runs against a fresh bag and finds the kept payment");
+  assert.deepEqual(kinds(h), ["give"]);
+});
+
+test("B1: countedTicks is not raised by the tick after forgetSeen, raised by the one after", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot());
+  assert.equal(h.c.countedTicks(), 0);
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.equal(h.c.countedTicks(), 1, "the decision's snapshot was the baseline");
+  h.c.forgetSeen();
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.equal(h.c.countedTicks(), 1, "a tick with no baseline counts nothing");
+  await h.c.tick(snapshot(), new Set(), signal);
+  assert.equal(h.c.countedTicks(), 2);
 });
