@@ -114,7 +114,7 @@ async function runCommand(command: string, args: string[], context: CliContext, 
   }
 }
 
-/** Runs one command line; the exit code is 0 for success, 1 for a failure, 2 for arguments it does not take. */
+/** Runs one command line; the exit code is 0 for success, 1 for a failure, 2 for arguments it does not take, 3 for a `stop` the launcher refused (`STOP_REFUSED_EXIT_CODE`). */
 export async function runCli(argv: readonly string[], context: CliContext, overrides: Partial<CliDeps> = {}): Promise<number> {
   const [command = "", ...args] = argv;
   // Before any routing: no command may start a program when the player only asked how to use it.

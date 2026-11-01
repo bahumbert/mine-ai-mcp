@@ -11,6 +11,12 @@ const POLL_MS = 500;
 const PORT_WAIT_MS = 10_000;
 const SHORT_REQUEST_TIMEOUT_MS = 5_000;
 const NOT_RUNNING = "Mine AI is not running.";
+/**
+ * `stop` ends with this when a launcher is alive but will not stop (still starting, silent, or not finished in time). The installer
+ * (`STOP_REFUSED_EXIT_CODE` in mine-ai.iss) cancels an update or skips the uninstaller's removals only on this code: exit 1 is also
+ * what `runCli` gives a `stop` that throws and what Bun gives a bundle that fails to load, and those must not block a repairing update.
+ */
+export const STOP_REFUSED_EXIT_CODE = 3;
 
 export interface ControlCommandDeps {
   findRunningLauncher(): Promise<LauncherLock | null>;
@@ -61,7 +67,7 @@ export async function runStopCommand(context: CliContext, deps: ControlCommandDe
   const launcher = await findLauncherWithPort(deps);
   if (launcher === STARTING) {
     context.out(STILL_STARTING);
-    return 1;
+    return STOP_REFUSED_EXIT_CODE;
   }
   if (launcher === null) {
     const report = await deps.cleanupStale(context.root);
@@ -70,7 +76,7 @@ export async function runStopCommand(context: CliContext, deps: ControlCommandDe
     if (silent.length > 0) {
       const left = report.launcherStillRunning.map((record) => `${record.name} (pid ${record.pid})`).join(", ");
       context.out(`Mine AI's launcher (pid ${silent.join(", ")}) is still running but not answering, so it was left alone: ${left}. Wait a minute and run stop again; if it stays silent, end that process (pid ${silent.join(", ")}) in Task Manager, then run stop once more to end what it left.`);
-      return 1;
+      return STOP_REFUSED_EXIT_CODE;
     }
     context.out(NOT_RUNNING);
     return 0;
@@ -85,7 +91,7 @@ export async function runStopCommand(context: CliContext, deps: ControlCommandDe
     await deps.sleep(POLL_MS);
   }
   context.out(`Mine AI did not finish stopping within ${STOP_WAIT_MS / 1_000} s. End the bun.exe and java.exe of Mine AI in Task Manager (ollama.exe and llama-server.exe too, unless you run Ollama yourself), then try again.`);
-  return 1;
+  return STOP_REFUSED_EXIT_CODE;
 }
 
 /** One screen: phase, model, where to join, each bot. Exit 1 when Mine AI is not running. */

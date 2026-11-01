@@ -7,6 +7,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { cliContext, okInstallSteps } from "./cli-test-support.ts";
 import { CONFIGURE_FLAGS } from "./configure-command.ts";
+import { STOP_REFUSED_EXIT_CODE } from "./control-commands.ts";
 import type { DoctorDeps } from "./doctor.ts";
 import { INSTALL_STEP_NAMES } from "./install-command.ts";
 import { appRoot } from "./paths.ts";
@@ -121,14 +122,19 @@ test("install warns once when the job object cannot be made, and goes on", async
   assert.equal(t.out.filter((line) => line.includes("CreateJobObjectW")).length, 1);
 });
 
-test("an unexpected error is printed as one line and exits 1", async () => {
-  const t = setup();
-  const failing = () => {
-    throw new Error("disk on fire");
-  };
-  assert.equal(await runCli(["status"], t.context, { controlDeps: failing }), 1);
-  assert.deepEqual(t.out, ["disk on fire"]);
-});
+// `stop` is in the loop: a throw there exits 1, never the refusal code, so the installer's update goes on.
+for (const command of ["status", "stop"]) {
+  test(`an unexpected error in \`${command}\` is printed as one line and exits 1, never the stop refusal code`, async () => {
+    const t = setup();
+    const failing = () => {
+      throw new Error("disk on fire");
+    };
+    const code = await runCli([command], t.context, { controlDeps: failing });
+    assert.equal(code, 1);
+    assert.notEqual(code, STOP_REFUSED_EXIT_CODE);
+    assert.deepEqual(t.out, ["disk on fire"]);
+  });
+}
 
 // ---------- the installer calls the CLI exactly like this (packaging/windows/mine-ai.iss) ----------
 

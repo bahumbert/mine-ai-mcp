@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { UsageError, type CliContext } from "./cli-context.ts";
-import { runBotCommand, runStatusCommand, runStopCommand, type ControlCommandDeps } from "./control-commands.ts";
+import { runBotCommand, runStatusCommand, runStopCommand, STOP_REFUSED_EXIT_CODE, type ControlCommandDeps } from "./control-commands.ts";
 import { startControlServer, type LauncherLock } from "./control.ts";
 import { loadManifest } from "./manifest.ts";
 import { cleanupStale } from "./processes.ts";
@@ -57,7 +57,7 @@ test("stop never ends the children of a launcher that runs but did not answer in
   const t = setup(() => null);
   const running = [{ pid: 50, parentPid: 4, image: "bun.exe" }, { pid: 100, parentPid: 50, image: "java.exe" }];
   t.deps.cleanupStale = (staleRoot) => cleanupStale(staleRoot, async () => running, (pid) => void killed.push(pid));
-  assert.equal(await runStopCommand({ ...t.context, root }, t.deps), 1);
+  assert.equal(await runStopCommand({ ...t.context, root }, t.deps), STOP_REFUSED_EXIT_CODE);
   assert.deepEqual(killed, []);
   const text = t.out.join("\n");
   assert.match(text, /pid 50/u);
@@ -91,10 +91,10 @@ test("stop asks the launcher to stop and waits until it is gone", () =>
     assert.match(t.out.join("\n"), /stopped/u);
   }));
 
-test("stop that the launcher never finishes ends with exit 1 and what to do", () =>
+test("stop that the launcher never finishes ends with the refusal exit code and what to do", () =>
   withLauncher(26_510, async ({ launcher }) => {
     const t = setup(() => launcher);
-    assert.equal(await runStopCommand(t.context, t.deps), 1);
+    assert.equal(await runStopCommand(t.context, t.deps), STOP_REFUSED_EXIT_CODE);
     assert.match(t.out.join("\n"), /Task Manager/u);
   }));
 
@@ -147,9 +147,14 @@ for (const [label, run, pattern] of [
 test("a launcher that has not published its control port yet is waited for, then reported as starting", () =>
   withLauncher(26_560, async ({ launcher }) => {
     const waiting = setup(() => ({ pid: 1, controlPort: null, startedAt: 0 }));
-    for (const run of [() => runStopCommand(waiting.context, waiting.deps), () => runStatusCommand(waiting.context, waiting.deps), () => runBotCommand(["start", "ayla"], waiting.context, waiting.deps)]) {
+    const runs: [() => Promise<number>, number][] = [
+      [() => runStopCommand(waiting.context, waiting.deps), STOP_REFUSED_EXIT_CODE],
+      [() => runStatusCommand(waiting.context, waiting.deps), 1],
+      [() => runBotCommand(["start", "ayla"], waiting.context, waiting.deps), 1],
+    ];
+    for (const [run, exitCode] of runs) {
       waiting.out.length = 0;
-      assert.equal(await run(), 1);
+      assert.equal(await run(), exitCode);
       assert.match(waiting.out.join("\n"), /still starting/u);
     }
     let calls = 0;

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { CliContext } from "../cli-context.ts";
 import { runConfigureCommand } from "../configure-command.ts";
+import { STOP_REFUSED_EXIT_CODE } from "../control-commands.ts";
 import { INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "../install-command.ts";
 import { loadManifest } from "../manifest.ts";
 
@@ -318,11 +319,10 @@ test("no launcher run outside the wizard's steps touches a wizard control or rea
 test("an update stops over a launcher that refuses to stop: PrepareToInstall returns the stop's words, which cancels the update before any file is copied", () => {
   const prepare = functionBody("PrepareToInstall");
   assert.match(prepare, /if Code = STOP_REFUSED_EXIT_CODE then\s+Result := [^\n]*cancelled before any file was copied[^\n]*\+ Lines;/u);
-  assert.match(iss, /^\s+STOP_REFUSED_EXIT_CODE = 1;/mu);
-  // The launcher's `stop` ends 1 for "still starting", "not answering" and "did not finish stopping"; a launcher that cannot start at all
-  // (bun.exe or the script missing) must not block the update that would repair it. Known gap, for the master: `runCli` also ends 1 for
-  // a `stop` that throws, and Bun ends 1 for a bundle that fails to load, so a corrupt bundle looks like a refusal; a separate exit code
-  // for the refusal paths of `runStopCommand` (control-commands.ts, not this task's file) would close it.
+  assert.equal(Number(/^\s+STOP_REFUSED_EXIT_CODE = (\d+);/mu.exec(iss)?.[1]), STOP_REFUSED_EXIT_CODE, "the .iss constant is the launcher's");
+  // The launcher's `stop` ends with its own code for "still starting", "not answering" and "did not finish stopping" only; a `stop` that
+  // throws (exit 1 from runCli), a bundle that fails to load (Bun ends 1) and a launcher that cannot start at all (bun.exe or the script
+  // missing) must not block the update that would repair them.
   assert.match(iss, /^\s+LAUNCHER_NOT_STARTED = -1;/mu);
   assert.match(functionBody("RunLauncherAndWait"), /Result := LAUNCHER_NOT_STARTED;/u);
 });

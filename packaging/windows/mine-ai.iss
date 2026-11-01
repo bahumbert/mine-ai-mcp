@@ -103,9 +103,10 @@ const
   PARAM_UNSET = '(not given)';
   // Setup's own exit codes are 0-8; a silent setup whose steps failed returns this one.
   SILENT_FAILURE_EXIT_CODE = 100;
-  // `mine-ai stop` ends 1 when the launcher is still starting, does not answer or did not finish stopping (control-commands.ts);
-  // RunLauncherAndWait gives LAUNCHER_NOT_STARTED when bun.exe or the launcher is missing or cannot start: that is no refusal to stop.
-  STOP_REFUSED_EXIT_CODE = 1;
+  // `mine-ai stop` ends 3 when the launcher is still starting, does not answer or did not finish stopping (control-commands.ts, kept equal by
+  // iss-launcher-calls.test.ts); any other non-zero code (a stop that throws, a bundle Bun cannot load: 1) is a stop that failed, not a refusal.
+  // RunLauncherAndWait gives LAUNCHER_NOT_STARTED when bun.exe or the launcher is missing or cannot start: that is no refusal to stop either.
+  STOP_REFUSED_EXIT_CODE = 3;
   LAUNCHER_NOT_STARTED = -1;
   // What the player does by hand when a removal asked for at uninstall did not happen: {app} is gone by then, so no "run this step again".
   OLLAMA_REMOVE_BY_HAND = 'Remove Ollama yourself: Windows Settings > Apps > Installed apps > Ollama > Uninstall.';
