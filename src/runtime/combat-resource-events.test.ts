@@ -7,9 +7,10 @@ import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { recordCombatResourceReceipt } from "./combat-resource-receipts.js";
 
 /** A bow in hand and three arrows carried; `arm` changes the slots before the observer starts. */
-function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: FakeClock) {
+function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: FakeClock, version?: string) {
   const harness = createFakeBot({
     ...(clock && { clock }),
+    ...(version && { version }),
     slots: { 36: { name: "bow" }, 10: { name: "arrow", count: 3 } },
     entities: { 9: { name: "item", position: new Vec3(0, 64, 0) }, 10: { name: "arrow", position: new Vec3(0, 64, 0) } },
   });
@@ -84,6 +85,51 @@ test("native block, status, pickup and durability facts are attributed only duri
     f.idle();
     f.client.emit("entity_status", { entityId: f.bot.entity.id, entityStatus: 29 });
     assert.equal(f.observed.length, 6, "idle facts do not bleed into the next request");
+  } finally { f.stop(); }
+});
+
+/** The carried arrows replaced by `kind` x3 in slot 11 (the game's `arrows` tag: arrow, spectral_arrow, tipped_arrow). */
+const carryOnly = (kind: string) => ({ bot, inventory }: FakeHarness) => {
+  inventory.updateSlot(10, null as never);
+  inventory.updateSlot(11, itemOf(bot.registry, kind, 3));
+};
+
+test("a shot of a spectral arrow, the only arrow carried, is an arrow_fired", () => {
+  const f = fixture(carryOnly("spectral_arrow"));
+  try {
+    recordCombatResourceReceipt(f.bot, { kind: "arrow_release_command" });
+    f.inventory.updateSlot(11, itemOf(f.bot.registry, "spectral_arrow", 2));
+    assert.deepEqual(f.observed, [{ kind: "arrow_fired" }]);
+  } finally { f.stop(); }
+});
+
+test("arrows of two kinds carried count as one total: either stack losing one after a release is one arrow_fired", () => {
+  for (const [slot, kind] of [[10, "arrow"], [11, "spectral_arrow"]] as const) {
+    const f = fixture(({ bot, inventory }) => inventory.updateSlot(11, itemOf(bot.registry, "spectral_arrow", 3)));
+    try {
+      recordCombatResourceReceipt(f.bot, { kind: "arrow_release_command" });
+      f.inventory.updateSlot(slot, itemOf(f.bot.registry, kind, 2));
+      assert.deepEqual(f.observed, [{ kind: "arrow_fired" }], `${kind} stack in slot ${slot}`);
+    } finally { f.stop(); }
+  }
+});
+
+test("a picked-up stack of two tipped arrows records one arrow_recovered per item", () => {
+  const f = fixture(({ bot }) => { bot.entities[9]!.getDroppedItem = () => itemOf(bot.registry, "tipped_arrow", 2); });
+  try {
+    f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[9]!);
+    assert.deepEqual(f.observed, [{ kind: "arrow_recovered" }, { kind: "arrow_recovered" }]);
+  } finally { f.stop(); }
+});
+
+// Known gap (spec 2026-11-01 C1, open choice 5): no item tags are shipped for 1.20.x, so the `arrows` tag is unknown there
+// and a shot is not counted. Remove this test when those versions' tags ship.
+test("known gap: on 1.20.4 no item tags are shipped, so a shot arrow records no arrow_fired", () => {
+  const f = fixture(undefined, undefined, "1.20.4");
+  try {
+    recordCombatResourceReceipt(f.bot, { kind: "arrow_release_command" });
+    f.inventory.updateSlot(10, f.arrows(2));
+    assert.deepEqual(f.observed, []);
   } finally { f.stop(); }
 });
 
