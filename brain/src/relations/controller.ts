@@ -14,7 +14,7 @@ import { relationsBlock } from "./prompts.ts";
 import { forgetOldSaid, withSaid, withTrade } from "./record.ts";
 import { newScoredRows, withScoreEvent } from "./score.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
-import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, flipped, inventoryGains, isOpen, markGave, newestTrade, owedItems, ownGains, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
 import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A hand-off dropped by a shelter or a stop is taken again after this long. */
@@ -283,12 +283,12 @@ export class TradeController implements BoardPeer {
 
   /**
    * How long my give for the trade may still run before the pay-back clock ends the trade: from the agreement while
-   * nothing was given back to me, from when the give was taken once they paid (`settleTrade`); 0 for a trade that is not open.
+   * nothing was given, from my give once I paid first, from when the give was taken once they paid (`settleTrade`); 0 for a trade that is not open.
    */
   payBackLeftMs(tradeId: string): number {
     const trade = this.find(tradeId);
     if (trade === undefined || !isOpen(trade)) return 0;
-    const since = trade.state === "they_gave" ? this.giveTakenAt.get(tradeId) ?? trade.receivedAt ?? trade.agreedAt ?? trade.createdAt : trade.agreedAt ?? trade.createdAt;
+    const since = trade.state === "they_gave" ? this.giveTakenAt.get(tradeId) ?? trade.receivedAt ?? trade.agreedAt ?? trade.createdAt : trade.state === "i_gave" ? trade.gaveAt ?? trade.createdAt : trade.agreedAt ?? trade.createdAt;
     return Math.max(0, this.deps.settings.payBackMinutes * MINUTE_MS - (this.deps.now() - since));
   }
 
@@ -305,16 +305,19 @@ export class TradeController implements BoardPeer {
   /** A hand-off found nothing left to give: the agent ended it, so it is no longer pending (no retake clock). */
   handoffSkipped(tradeId: string): void { this.pending.delete(tradeId); }
 
-  /** Whether their payment is still to come for a trade: it is agreed and nothing came yet (the wait for their side ends otherwise). */
+  /** Whether their payment is still to come for a trade: it is agreed and nothing came yet, or I gave first and some is still owed (the wait for their side ends otherwise). */
   awaits(tradeId: string): boolean {
     const trade = this.find(tradeId);
-    return trade !== undefined && trade.state === "agreed" && trade.received.length === 0 && owedItems(trade).length > 0;
+    return trade !== undefined && (trade.state === "i_gave" || (trade.state === "agreed" && trade.received.length === 0)) && owedItems(trade).length > 0;
   }
 
   /** A wait for their side ended: dropped (a stop, a shelter) it is taken again after a while; any other end is final. */
   awaitEnded(tradeId: string, outcome: HandoffEnd["outcome"]): void {
     this.awaiting.delete(tradeId);
-    if (outcome !== "dropped") return;
+    if (outcome !== "dropped") {
+      this.collects.collectEnded(tradeId); // a wait that ended reads the bag once, as a collect does: what reached it unseen is credited
+      return;
+    }
     this.awaited.delete(tradeId);
     this.droppedAt.set(awaitKey(tradeId), this.deps.now());
   }
@@ -340,7 +343,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** The agent's poll tick: credits gains, runs the deadlines, takes due hand-offs. Never waits on a model. */
-  tick(snapshot: BotSnapshot, ownStepYields: ReadonlySet<string>, signal: AbortSignal): Promise<void> {
+  tick(snapshot: BotSnapshot, ownStepYields: ReadonlySet<string>, signal: AbortSignal, ownWork = false): Promise<void> {
     return this.exclusive(async () => {
       const now = this.deps.now();
       const previous = this.previous;
@@ -348,7 +351,7 @@ export class TradeController implements BoardPeer {
       this.previous = { inventory: snapshot.inventory, partners: this.partners };
       this.position = snapshot.position;
       this.near.note(snapshot, this.deps.settings.handoffDistance, now);
-      if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now);
+      if (previous !== null) await this.creditGains(snapshot, previous, ownStepYields, now, ownWork);
       else this.collects.arrivals.rebase(this.deps.book.trades(), snapshot.inventory);
       await this.agreePaidProposals(snapshot.inventory, now);
       await this.creditArrived(snapshot.inventory, ownStepYields, now);
@@ -490,7 +493,7 @@ export class TradeController implements BoardPeer {
     this.collects.forget(trade.id);
   }
 
-  private async creditGains(snapshot: BotSnapshot, previous: Seen, ownStepYields: ReadonlySet<string>, now: number): Promise<void> {
+  private async creditGains(snapshot: BotSnapshot, previous: Seen, ownStepYields: ReadonlySet<string>, now: number, ownWork: boolean): Promise<void> {
     const gains = inventoryGains(previous.inventory, snapshot.inventory);
     if (gains.length === 0) return;
     const trades = this.deps.book.trades();
@@ -498,7 +501,7 @@ export class TradeController implements BoardPeer {
     const collecting = trades.filter((t) => this.pending.get(t.id) === "collect");
     const partners = new Map(this.partners);
     for (const t of collecting) partners.set(t.partner, snapshot.position);
-    const mined = new Set([...ownStepYields].filter((item) => !collecting.some((t) => t.get.some((g) => g.item === item))));
+    const mined = ownGains(gains, ownStepYields, ownWork, trades, collecting);
     const credited = attributeGains({ gains, trades, partners, previous: previous.partners, self: snapshot.position, ownStepYields: mined, handoffDistance: this.deps.settings.handoffDistance, recentlyNear: this.near.recently(now) });
     for (const [id, items] of credited) {
       const trade = trades.find((t) => t.id === id);
@@ -549,9 +552,10 @@ export class TradeController implements BoardPeer {
     }
   }
 
-  /** They are to pay first and nothing came: wait near them, once (a dropped wait after a while). */
+  /** They are to pay first, or I paid first, and nothing came: wait near them, once (a dropped wait after a while). */
   private isAwaitDue(t: Trade, now: number): boolean {
-    if (t.state !== "agreed" || t.first !== "them" || owedItems(t).length === 0 || this.awaited.has(t.id)) return false;
+    const owedFirst = (t.state === "agreed" && t.first === "them") || (t.state === "i_gave" && t.first === "me");
+    if (!owedFirst || owedItems(t).length === 0 || this.awaited.has(t.id)) return false;
     const dropped = this.droppedAt.get(awaitKey(t.id));
     return dropped === undefined || now - dropped >= RETAKE_AFTER_MS;
   }

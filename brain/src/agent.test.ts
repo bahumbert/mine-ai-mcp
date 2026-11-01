@@ -1808,8 +1808,10 @@ test("a trade line routed act takes no order", async (t) => {
   chat.reply(TRADE_AND_ORDER);
   await agent.handle(say("Theo", "Ayla, give me 5 bread, I pay 5 iron_ingot right after"));
   await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
-  await until(() => agent.activity === "idle");
-  assert.deepEqual(takenObjectives(events), ["own: hand over 5 bread to Theo (trade)"]);
+  // I paid first: the agent now waits for their side, which ends when Theo pays.
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
+  await until(() => agent.activity === "idle", 4_000);
+  assert.deepEqual(takenObjectives(events), ["own: hand over 5 bread to Theo (trade)", "own: wait for Theo to give their side (trade)"], "the give, then the wait for Theo");
 });
 
 test("a later route with a trade takes no order", async (t) => {
@@ -2226,6 +2228,8 @@ test("a trading objective runs the routine: no work-tier call, a trade step in t
   // The hand-off sets the routine aside; it resumes with the talk still on and follows until the talk ends.
   await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
   await sleep(100);
+  // I paid first: the hand-off is followed by a wait for their side, which ends when Theo pays.
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }], inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
   (agent as unknown as { talks: ConversationController }).talks.end("out_of_range");
   await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && event.text.startsWith("trade Theo") && event.outcome === "done"), 6_000);
   const rows = events.filter((event) => event.kind === "step" && event.objective.startsWith("trade Theo"));
@@ -2693,7 +2697,7 @@ async function stepEndingBetweenLooks(t: TestContext, agent: Agent, runtime: Fak
   const inside = agent as unknown as { relations: AgentRelations; startStep(work: object, controller: AbortController, step: Step): void; endStep(work: object): void };
   const answers: string[] = [];
   const look = inside.relations.look.bind(inside.relations);
-  inside.relations.look = (yields, onStack, signal) => { const answer = look(yields, onStack, signal); answers.push(answer); return answer; };
+  inside.relations.look = (...args) => { const answer = look(...args); answers.push(answer); return answer; };
   const real = Date.now.bind(Date);
   let offset = 0;
   t.mock.method(Date, "now", () => real() + offset);
@@ -3183,4 +3187,31 @@ test("an order to trade from an agent 50 blocks away is still refused: the agree
   await sleep(50);
   assert.deepEqual(takenObjectives(events), []);
   assert.ok(logs.some((line) => line.includes("Vex is too far away to trade with")), logs.join("\n"));
+});
+
+test("T4: a by-product of a step the step was not out to get is not kept as a talking player's early payment", async (t) => {
+  const runtime = tradingRuntime();
+  const lines: string[] = [];
+  const { agent } = agentFor(t, runtime, {}, { log: (line) => lines.push(line) });
+  (agent as unknown as { relations: AgentRelations }).relations.trades.heardLine("Theo", Date.now(), 2);
+  await stepEndingBetweenLooks(t, agent, runtime, { skill: "get_items", items: [{ item: "iron_ingot", count: 3 }] }, [{ name: "cobblestone", count: 8 }]);
+  assert.ok(!lines.some((line) => line.includes("picked up while a player talked")), lines.join("\n"));
+});
+
+test("T4: while a hand-off runs, and on the first look after it, the bot's gains are its own", async (t) => {
+  const runtime = tradingRuntime();
+  const { agent } = agentFor(t, runtime);
+  const inside = agent as unknown as { relations: AgentRelations; handoffStep(work: object, h: unknown): Promise<void> };
+  const seen: (boolean | undefined)[] = [];
+  const look = inside.relations.look.bind(inside.relations);
+  inside.relations.look = (yields, onStack, signal, ownWork) => { seen.push(ownWork); return look(yields, onStack, signal, ownWork); };
+  let release = (): void => undefined;
+  inside.relations.runHandoff = () => new Promise((resolve) => { release = () => resolve({ outcome: "done", detail: "gave" }); });
+  const work = { step: null, objective: {} };
+  const running = inside.handoffStep(work, { kind: "give", tradeId: "x", partner: "Theo", items: [] });
+  await until(() => seen.includes(true), 4_000);
+  release();
+  await running;
+  const after = (agent as unknown as { ownWorkSinceTick: boolean }).ownWorkSinceTick;
+  assert.equal(after, true, "the first look after the hand-off still counts its gains as own");
 });

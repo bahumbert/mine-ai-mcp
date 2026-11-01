@@ -263,6 +263,9 @@ export class Agent {
   private stepYields: ReadonlySet<string> = new Set();
   /** The yields of every step started since a relations tick last ran (B1): a step that ends between two looks still explains its gains. */
   private yieldsSinceTick: ReadonlySet<string> = new Set();
+  /** A step or hand-off is running, or ran since a relations tick last ran: its gains are the bot's own (except what an open trade is owed). */
+  private ownWork = false;
+  private ownWorkSinceTick = false;
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
@@ -368,9 +371,12 @@ export class Agent {
           unreadable = true;
         }
         this.lookAtConversations();
-        const answer = this.relations?.look(new Set([...this.stepYields, ...this.yieldsSinceTick]), new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal);
+        const answer = this.relations?.look(new Set([...this.stepYields, ...this.yieldsSinceTick]), new Set(this.stack.flatMap((work) => work.objective.handoff === undefined ? [] : [handoffKey(work.objective.handoff)])), signal, this.ownWork || this.ownWorkSinceTick);
         // A tick saw the gains of the steps that ended (and an idle controller counts none): their yields are not needed again.
-        if (answer === "ticked" || answer === "idle") this.yieldsSinceTick = new Set();
+        if (answer === "ticked" || answer === "idle") {
+          this.yieldsSinceTick = new Set();
+          this.ownWorkSinceTick = false;
+        }
         await this.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
@@ -736,6 +742,7 @@ export class Agent {
     const { runtime, persona } = this.options;
     const controller = new AbortController();
     work.step = controller;
+    this.ownWork = true;
     this.journalState(describeHandoff(h));
     let end = { outcome: "dropped", detail: "" };
     try {
@@ -743,6 +750,7 @@ export class Agent {
     } finally {
       work.step = null;
       this.journalState(null);
+      this.endOwnWork();
     }
     if (end.outcome !== "dropped") this.finish(work, end.outcome === "done" ? "done" : "failed", end.detail);
     // A wait that a give or a collect set aside stays below it and resumes; any other dropped hand-off leaves the stack.
@@ -752,6 +760,7 @@ export class Agent {
   /** The step runs: its controller stops it, and the items it is out to get are its own work, never a partner's payment. */
   private startStep(work: Work, controller: AbortController, step: Step): void {
     work.step = controller;
+    this.ownWork = true;
     this.stepYields = itemsYieldedBy(step);
   }
 
@@ -760,6 +769,13 @@ export class Agent {
     work.step = null;
     this.yieldsSinceTick = new Set([...this.yieldsSinceTick, ...this.stepYields]);
     this.stepYields = new Set();
+    this.endOwnWork();
+  }
+
+  /** The running step or hand-off is over: the next relations tick still counts its gains as own. */
+  private endOwnWork(): void {
+    this.ownWork = false;
+    this.ownWorkSinceTick = true;
   }
 
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */

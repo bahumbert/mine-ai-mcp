@@ -543,3 +543,29 @@ test("a give does not take the count another agreed trade owes: it fetches the d
   assert.equal(gone.outcome, "items_gone");
   assert.equal(drops(noRecipe).length, 0);
 });
+
+/** Partners positions by poll: the clock moves the partner as the game does. */
+function partnerWalks(runtime: FakeRuntime, at: (poll: number) => number, paidAfter: number) {
+  const w = waiting(runtime, paidAfter);
+  const clock: Clock = { now: w.options.clock.now, sleep: async (ms, signal) => { await w.options.clock.sleep(ms, signal); runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Theo", position: { x: at(w.state.polls), y: 64, z: 0 } }] }; } };
+  return { w, run: () => awaitTheirSide(contextFor(runtime), "Theo", { ...w.options, clock }) };
+}
+
+test("T3: a partner who walks off mid-wait is walked to again, once for each new spot", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const { w, run } = partnerWalks(runtime, (poll) => (poll < 3 ? 2 : poll < 8 ? 40 : 90), 15);
+  assert.equal((await run()).status, "done");
+  assert.equal(navigates(runtime), 2, "one walk to (40), one to (90); none while they stand still");
+  assert.equal(w.now(), 15_000);
+});
+
+test("T3: a status read that fails mid-wait does not end the wait", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const status = runtime.status.bind(runtime);
+  let reads = 0;
+  runtime.status = () => (++reads === 2 ? Promise.reject(new Error("runtime restarting")) : status());
+  const w = waiting(runtime, 5);
+  assert.deepEqual(await w.run(), { status: "done", detail: "they gave" });
+});

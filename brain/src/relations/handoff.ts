@@ -15,6 +15,8 @@ export const COLLECT_RADIUS = 6;
 export const PICK_BACK_RADIUS = 8;
 /** How often a wait for the partner's payment looks at whether it came. */
 const AWAIT_POLL_MS = 1_000;
+/** A waiting partner who stands this far (Manhattan) from the spot of my last walk to them has moved: the wait walks to them again. */
+const REWALK_MOVED = 3;
 export type Handoff =
   | { readonly kind: "give"; readonly tradeId: string; readonly partner: string; readonly items: readonly ItemCount[] }
   | { readonly kind: "collect"; readonly tradeId: string; readonly items: readonly ItemCount[] }
@@ -174,29 +176,38 @@ export interface AwaitOptions {
   readonly clock: Clock;
   /** The wait ends failed after this long on the clock, whatever else happens. */
   readonly maxMs: number;
-  /** Farther than this from the partner, the wait first walks up to them. */
+  /** Farther than this from the partner at a look, the wait walks up to them. */
   readonly openingDistance: number;
 }
 
 /**
- * Waits near a partner who is to pay first: one walk up to them when they are not near (a failed walk is no end: the
- * partner may come to hand over), then a look every second until the payment is credited or the bound on the clock.
+ * Waits near a partner who owes their side (they pay first, or I paid first): a look every second until the payment is
+ * credited or the bound on the clock. Whenever the partner stands farther than the opening distance at a look, and
+ * somewhere new, the wait walks up to them again (a failed walk is no end: the partner may come to hand over).
  */
 export async function awaitTheirSide(context: SkillContext, partner: string, o: AwaitOptions): Promise<SkillResult> {
   const stopped: SkillResult = { status: "stopped" };
   const deadline = o.clock.now() + o.maxMs;
-  if (o.stillAwaiting()) {
-    const snapshot = await context.runtime.status();
-    const there = findPlayer(snapshot, partner)?.position ?? null;
-    const away = there === null ? Infinity : manhattan(snapshot.position, there);
-    if (away > o.openingDistance) await runStep({ skill: "go_to_player", player: partner }, context);
-  }
+  let walkedTo: Position | null | undefined;
   while (o.stillAwaiting()) {
     if (context.signal.aborted) return stopped;
-    if (o.clock.now() >= deadline) return { status: "failed", detail: `${partner} did not give within ${o.maxMs / MINUTE_MS} min` };
-    await o.clock.sleep(AWAIT_POLL_MS, context.signal);
+    if (o.clock.now() >= deadline) return { status: "failed", detail: `${partner} did not give within ${Number.isInteger(o.maxMs / MINUTE_MS) ? `${o.maxMs / MINUTE_MS} min` : `${Math.round(o.maxMs / 1000)} s`}` };
+    walkedTo = await walkIfFarOrMoved(context, partner, o.openingDistance, walkedTo);
+    if (!context.signal.aborted) await o.clock.sleep(AWAIT_POLL_MS, context.signal);
   }
   return context.signal.aborted ? stopped : { status: "done", detail: "they gave" };
+}
+
+/** Walks to the partner when they are farther than `openingDistance` and stand somewhere other than the spot of the last walk (`undefined`: no walk yet). Returns the spot walked to. */
+async function walkIfFarOrMoved(context: SkillContext, partner: string, openingDistance: number, walkedTo: Position | null | undefined): Promise<Position | null | undefined> {
+  const snapshot = await context.runtime.status().catch(() => null); // a runtime restarting under a poll: no walk this time, the wait goes on
+  if (snapshot === null) return walkedTo;
+  const there = findPlayer(snapshot, partner)?.position ?? null;
+  if (there !== null && manhattan(snapshot.position, there) <= openingDistance) return walkedTo;
+  const sameSpot = walkedTo !== undefined && (there === null ? walkedTo === null : walkedTo !== null && manhattan(walkedTo, there) < REWALK_MOVED);
+  if (sameSpot) return walkedTo;
+  await runStep({ skill: "go_to_player", player: partner }, context);
+  return there;
 }
 
 /** Runs one hand-off: a hand-over for each entry of my side (`credit` hears what the partner took), or `pick_up_items` around me for each entry of theirs. */

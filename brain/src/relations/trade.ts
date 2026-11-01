@@ -233,3 +233,16 @@ export function attributeGains(o: {
   }
   return credited;
 }
+
+/**
+ * The items of this tick's gains that are the bot's own work, never a partner's payment: what its running step is out to
+ * get, except what a collect picks up for a trade; and, while any step or hand-off ran (`ownWork`), every gain except the
+ * items a trade is owed (proposed, open, or broken by them and still payable late), which stay creditable to that trade's partner.
+ */
+export function ownGains(gains: readonly ItemCount[], ownStepYields: ReadonlySet<string>, ownWork: boolean, trades: readonly Trade[], collecting: readonly Trade[]): Set<string> {
+  const own = new Set([...ownStepYields].filter((item) => !collecting.some((t) => t.get.some((g) => g.item === item))));
+  if (!ownWork) return own;
+  const owed = new Set(trades.filter((t) => t.state === "proposed" || awaitsPayment(t)).flatMap((t) => owedItems(t).map((o) => o.item)));
+  for (const { item } of gains) if (!owed.has(item)) own.add(item);
+  return own;
+}

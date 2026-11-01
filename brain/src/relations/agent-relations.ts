@@ -236,9 +236,10 @@ export class AgentRelations {
 
   /**
    * The agent's poll: while a trade is open, its tick runs in the background (never held up by, nor holding up, a step).
+   * `ownWork`: a step or hand-off ran since the last tick, so every gain is the bot's own unless an open trade is owed it.
    * "ticked": a tick started with the yields; "idle": nothing is open, so no gain is counted; "busy_wait": a tick runs or the watch throttle skipped it, so the yields must wait for the next look.
    */
-  look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal): LookAnswer {
+  look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal, ownWork = false): LookAnswer {
     const now = this.now();
     if (!signal.aborted) this.expireOpenRequests();
     if (signal.aborted || !this.trades.busy()) {
@@ -253,7 +254,7 @@ export class AgentRelations {
       const snapshot = await this.deps.runtime.status();
       this.trades.reconcileHandoffs(onStack);
       ticking = true;
-      await this.trades.tick(snapshot, ownStepYields, signal);
+      await this.trades.tick(snapshot, ownStepYields, signal, ownWork);
     })()
       .catch((error: unknown) => {
         // A tick that started has set its own baseline from the snapshot it read; only a failure before it leaves the old one.
@@ -300,7 +301,7 @@ export class AgentRelations {
     let end: HandoffEnd;
     try {
       end = handoffOutcome(await awaitTheirSide(context, partner, {
-        stillAwaiting: () => this.trades.awaits(tradeId), clock, maxMs: persona.settings.relations.startMinutes * 60_000, openingDistance: persona.settings.conversation.openingDistance,
+        stillAwaiting: () => this.trades.awaits(tradeId), clock, maxMs: Math.min(persona.settings.relations.startMinutes * 60_000, this.trades.payBackLeftMs(tradeId)), openingDistance: persona.settings.conversation.openingDistance,
       }));
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
