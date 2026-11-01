@@ -1722,12 +1722,15 @@ test("work resumes after a trade hand-off", async (t) => {
   chat.reply(ACCEPT);
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
   await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  await until(() => events.some((event) => event.kind === "trade" && event.event === "gave"), 4_000);
+  const trade = savedRelations(runtime)[0]?.trades[0];
+  assert.deepEqual([trade?.state, trade?.first], ["i_gave", "me"]);
+  // I paid first: the agent waits for their side, which ends when Theo pays; then the earlier objective resumes.
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
   await until(() => action.requests.length === 2, 4_000);
   assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log/u, "the earlier objective's next step is asked for");
   assert.equal(runtime.cancelled.length, 1, "its running step was set aside for the give");
-  assert.deepEqual(events.filter((event) => event.kind === "trade").map((event) => event.event), ["agreed", "gave"]);
-  const trade = savedRelations(runtime)[0]?.trades[0];
-  assert.deepEqual([trade?.state, trade?.first], ["i_gave", "me"]);
+  assert.deepEqual(events.filter((event) => event.kind === "trade").map((event) => event.event).slice(0, 2), ["agreed", "gave"]);
   await until(() => agent.activity === "idle");
 });
 
