@@ -3,6 +3,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
+import { monotonicNow } from "./clocks.ts";
 import { fetchErrorText } from "./fetch-error.ts";
 import { CONTROL_HEADER, findRunningLauncher, realLockDeps, type LauncherLock } from "./control.ts";
 import { appEntry } from "./paths.ts";
@@ -184,7 +185,7 @@ export function realConsoleDeps(root: string, appRoot: string): ConsoleDeps {
     findRunningLauncher: () => findRunningLauncher(root, realLockDeps),
     startLauncher: () => startBackgroundLauncher(process.execPath, appRoot),
     fetch,
-    now: Date.now,
+    now: monotonicNow,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     write: (line) => console.log(line),
     color: Boolean(process.stdout.isTTY) && !process.env.NO_COLOR,

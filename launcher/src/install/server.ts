@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Manifest } from "../manifest.ts";
 import { downloadFailureHint, downloadVerified } from "./download.ts";
-import { stepFailure, type InstallContext, type StepResult } from "./step.ts";
+import { failure, stepFailure, type InstallContext, type StepResult } from "./step.ts";
 
 const EULA_URL = "https://aka.ms/MinecraftEULA";
 const GIB = 1024 ** 3;
@@ -48,12 +48,12 @@ export interface ServerDeps {
 export async function server(ctx: InstallContext, acceptEula: boolean, deps: ServerDeps = {}): Promise<StepResult> {
   const { server: serverSettings } = ctx.settings;
   if (serverSettings.kind !== "local") {
-    return { ok: false, error: `The settings choose a ${serverSettings.kind} server, not a local one.`, hint: "Run `mine-ai configure --server-local` first, then this step again." };
+    return failure(`The settings choose a ${serverSettings.kind} server, not a local one.`, "Run `mine-ai configure --server-local` first, then this step again.");
   }
   const dir = join(ctx.root, "server");
   const eulaPath = join(dir, "eula.txt");
   if (!acceptEula && !(await isEulaAccepted(eulaPath))) {
-    return { ok: false, error: "EULA not accepted.", hint: `Read the Minecraft EULA (${EULA_URL}) and run this step with --accept-eula; the installer asks for it on its server page.` };
+    return failure("EULA not accepted.", `Read the Minecraft EULA (${EULA_URL}) and run this step with --accept-eula; the installer asks for it on its server page.`);
   }
   await mkdir(dir, { recursive: true });
   try {

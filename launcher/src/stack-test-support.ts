@@ -197,6 +197,7 @@ export function stackFixture(change: (settings: Settings) => Settings = (setting
   const deps: StackDeps = {
     fetch: network.fetch,
     now: clock.now,
+    wallNow: clock.now,
     sleep: clock.sleep,
     probeServer: async () => fixture.probe,
     ollamaExe: () => "C:/Ollama/ollama.exe",

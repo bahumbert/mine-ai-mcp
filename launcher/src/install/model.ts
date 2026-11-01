@@ -8,7 +8,7 @@ import { idleWatch, type IdleWatch } from "./idle-watch.ts";
 import { ServeUnavailableError, listModelNames, ollamaServeEnv, realServeDeps, withLatestTag, withOurOllamaServe, type OurServe, type ServeDeps } from "./ollama-serve.ts";
 import { ollamaExeFor } from "./ollama.ts";
 import { loadInstallState, saveInstallState } from "./state.ts";
-import type { InstallContext, StepResult } from "./step.ts";
+import { failure, type InstallContext, type StepFailure, type StepResult } from "./step.ts";
 
 const RESUME_HINT = "Try again: a pull resumes where it stopped. If the same error comes back, it says what to fix.";
 const NO_OLLAMA_HINT = "Install Ollama first (the Ollama step of the installer), then try again.";
@@ -16,8 +16,6 @@ const NO_OLLAMA_HINT = "Install Ollama first (the Ollama step of the installer),
 export interface ModelDeps extends ServeDeps {
   ollamaExe(): string | null;
 }
-
-type Failure = Extract<StepResult, { ok: false }>;
 
 /**
  * Whether the manifest's model has its manifest file in the models folder our serve would use: `OLLAMA_MODELS` of
@@ -108,7 +106,7 @@ async function pullModel(ctx: InstallContext, serve: OurServe, tag: string, deps
 }
 
 /** Reads the pull's lines into `progress`; a failure when Ollama reports an error line, else null. */
-async function readPull(ctx: InstallContext, body: ReadableStream<Uint8Array>, tag: string, progress: PullProgress, idle: IdleWatch): Promise<Failure | null> {
+async function readPull(ctx: InstallContext, body: ReadableStream<Uint8Array>, tag: string, progress: PullProgress, idle: IdleWatch): Promise<StepFailure | null> {
   for await (const line of ndjsonLines(body, idle.signal)) {
     const message = parsePullLine(line);
     if (message.error) return failure(`Ollama could not pull ${tag}: ${message.error}`, RESUME_HINT);
@@ -197,10 +195,6 @@ async function deleteModel(ctx: InstallContext, serve: OurServe, tag: string, de
 function forgetModel(ctx: InstallContext, detail: string): StepResult {
   saveInstallState(ctx.root, { ...loadInstallState(ctx.root), modelPulledByUs: false });
   return { ok: true, detail };
-}
-
-function failure(error: string, hint: string): Failure {
-  return { ok: false, error, hint };
 }
 
 function realModelDeps(root: string): ModelDeps {

@@ -1,5 +1,6 @@
 // `mine-ai stop | status | bot start|stop <id>`: the command-line side of the launcher's control endpoint.
 import { UsageError, type CliContext } from "./cli-context.ts";
+import { monotonicNow } from "./clocks.ts";
 import { CONTROL_HEADER, findRunningLauncher, realLockDeps, type LauncherLock } from "./control.ts";
 import { cleanupStale, type StaleReport } from "./processes.ts";
 import type { StackStatus } from "./stack.ts";
@@ -24,7 +25,7 @@ export function realControlCommandDeps(root: string): ControlCommandDeps {
     findRunningLauncher: () => findRunningLauncher(root, realLockDeps),
     cleanupStale: (staleRoot) => cleanupStale(staleRoot),
     fetch,
-    now: Date.now,
+    now: monotonicNow,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
 }

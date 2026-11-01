@@ -1,7 +1,7 @@
 /** Install step `endpointTest`: one chat completion on the remote endpoint, with the parameters the brain sends. */
 import { z } from "zod";
 import { fetchErrorText } from "../fetch-error.ts";
-import { stepFailure, type InstallContext, type StepResult } from "./step.ts";
+import { failure, stepFailure, type InstallContext, type StepResult } from "./step.ts";
 
 /** Plan: a slow provider has 30 s to answer one short completion. */
 const ENDPOINT_TEST_TIMEOUT_MS = 30_000;
@@ -53,25 +53,25 @@ function refusedStatus(status: number, text: string, baseUrl: string, model: str
   const { message } = body;
   const param = body.param ?? (status === 400 ? parameterNamedIn(message, sentKeys) : undefined);
   if (status === 401 || status === 403) {
-    return { ok: false, error: `API key refused by ${baseUrl} (HTTP ${status}): ${message}`, hint: "Check the key: copy it again from the provider, with no space around it." };
+    return failure(`API key refused by ${baseUrl} (HTTP ${status}): ${message}`, "Check the key: copy it again from the provider, with no space around it.");
   }
   if (status === 404) {
-    return { ok: false, error: `Model not found: ${model} at ${baseUrl} (HTTP 404): ${message}`, hint: "Check the model name, and that the URL is the API's base, such as https://api.example.com/v1." };
+    return failure(`Model not found: ${model} at ${baseUrl} (HTTP 404): ${message}`, "Check the model name, and that the URL is the API's base, such as https://api.example.com/v1.");
   }
   if (status === 400 && param !== undefined) {
-    return { ok: false, error: `The endpoint does not accept the parameter ${param} (HTTP 400): ${message}`, hint: "The bots send this parameter on every call: pick a provider or a model that accepts it." };
+    return failure(`The endpoint does not accept the parameter ${param} (HTTP 400): ${message}`, "The bots send this parameter on every call: pick a provider or a model that accepts it.");
   }
   if (status === 429) {
-    return { ok: false, error: `The endpoint is rate-limiting or out of quota (HTTP 429): ${message}`, hint: "Check the provider's quota and billing, then test again." };
+    return failure(`The endpoint is rate-limiting or out of quota (HTTP 429): ${message}`, "Check the provider's quota and billing, then test again.");
   }
-  return { ok: false, error: `The endpoint answered HTTP ${status}: ${message}`, hint: "Check the URL, the model name and the key, then test again." };
+  return failure(`The endpoint answered HTTP ${status}: ${message}`, "Check the URL, the model name and the key, then test again.");
 }
 
 /** Sends one completion to the remote endpoint of the settings; ok only when it answers with a completion. */
 export async function endpointTest(ctx: InstallContext, deps: EndpointDeps = {}): Promise<StepResult> {
   const { llm } = ctx.settings;
   if (llm.kind !== "remote") {
-    return { ok: false, error: "The settings do not use a remote endpoint.", hint: "Run `mine-ai configure --llm-remote <url> <key> <model>` first, then test again." };
+    return failure("The settings do not use a remote endpoint.", "Run `mine-ai configure --llm-remote <url> <key> <model>` first, then test again.");
   }
   const baseUrl = llm.baseUrl.replace(/\/+$/u, "");
   const timeoutMs = deps.timeoutMs ?? ENDPOINT_TEST_TIMEOUT_MS;

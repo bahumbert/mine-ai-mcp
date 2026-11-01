@@ -16,7 +16,10 @@ import { tellrawLine, toWhisperLines } from "./reply.ts";
 /** What the sources take from outside, so a test starts no process, opens no socket and waits no real time. */
 export interface ChatCommandDeps {
   fetch: typeof fetch;
+  /** The monotonic clock: cooldowns, poll ages and answer deadlines. */
   now(): number;
+  /** The epoch time, only to compare with the host's ISO `at` stamp. */
+  wallNow(): number;
   sleep(ms: number): Promise<void>;
   say(line: string): void;
   spawnListener(): ListenerProcess;
@@ -24,8 +27,8 @@ export interface ChatCommandDeps {
 
 /** The real dependencies of a running stack: its own fetch, clock and console, and the listener child. */
 export function chatCommandDeps(state: StackState): ChatCommandDeps {
-  const { fetch, now, sleep, say } = state.deps;
-  return { fetch, now, sleep, say, spawnListener: () => spawnListenerProcess(state) };
+  const { fetch, now, wallNow, sleep, say } = state.deps;
+  return { fetch, now, wallNow, sleep, say, spawnListener: () => spawnListenerProcess(state) };
 }
 
 /** A host that does not answer in this time is silent for this round only; its own loop tries again, the others never wait for it. */
@@ -207,7 +210,7 @@ class ChatCommandSources {
   /** A line older than `maxAgeMs` when it arrives is dropped (no replay after a stall); public chat is taken from the reader only. */
   private acceptFromHost(poller: HostPoller, command: HostReply["commands"][number]): void {
     const heardAt = Date.parse(command.at);
-    if (!(this.deps.now() - heardAt <= this.state.manifest.commands.maxAgeMs)) return;
+    if (!(this.deps.wallNow() - heardAt <= this.state.manifest.commands.maxAgeMs)) return;
     if (command.channel === "chat") {
       if (this.reader() !== poller) return;
       if (this.alreadyRunPublicLine(command.username, command.message, heardAt)) return;
@@ -221,7 +224,7 @@ class ChatCommandSources {
    */
   private alreadyRunPublicLine(username: string, message: string, heardAt: number): boolean {
     const maxAgeMs = this.state.manifest.commands.maxAgeMs;
-    this.publicLinesRun = this.publicLinesRun.filter((entry) => this.deps.now() - entry.heardAt <= maxAgeMs);
+    this.publicLinesRun = this.publicLinesRun.filter((entry) => this.deps.wallNow() - entry.heardAt <= maxAgeMs);
     const key = `${username.toLowerCase()}\n${message}`;
     if (this.publicLinesRun.some((entry) => entry.key === key && Math.abs(entry.heardAt - heardAt) <= SAME_LINE_WINDOW_MS)) return true;
     this.publicLinesRun.push({ key, heardAt });

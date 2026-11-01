@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { monotonicNow } from "../clocks.ts";
 import "../../../src/actions/use-container/window-answer.ts";
 import "../../../src/navigation/mineflayer/cell-resync.ts";
 import "../../../src/runtime/player-events.ts";
@@ -34,8 +35,8 @@ const freezeWatch = startFreezeWatch({ dir: freezeDirectory, botName: "probe", s
 // The freeze worker records a stall once the main thread answers again. A worker that starts after a freeze has ended sees no
 // stall, so the main thread freezes again (at most FREEZE_ATTEMPTS times, ~1 s each) until a record exists.
 for (let attempt = 0; attempt < FREEZE_ATTEMPTS && freezeWatch.lastRecord() === null; attempt++) {
-  const frozenUntil = Date.now() + FREEZE_MS;
-  while (Date.now() < frozenUntil);
+  const frozenUntil = monotonicNow() + FREEZE_MS;
+  while (monotonicNow() < frozenUntil);
   await new Promise((resolve) => setTimeout(resolve, WORKER_SETTLE_MS));
 }
 

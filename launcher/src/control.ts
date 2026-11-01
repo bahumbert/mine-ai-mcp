@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { wallNow } from "./clocks.ts";
 import { freePort } from "./ports.ts";
 import type { BotOutcome, StackStatus } from "./stack.ts";
 
@@ -28,6 +29,7 @@ export type LauncherLock = z.infer<typeof lockSchema>;
 export interface LockDeps {
   isPidAlive(pid: number): boolean;
   fetch: typeof fetch;
+  /** The epoch time (`wallNow`): compared with a `startedAt` another launcher process wrote, so it cannot be a monotonic reading. */
   now(): number;
 }
 
@@ -43,7 +45,7 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export const realLockDeps: LockDeps = { isPidAlive: isProcessAlive, fetch, now: Date.now };
+export const realLockDeps: LockDeps = { isPidAlive: isProcessAlive, fetch, now: wallNow };
 
 function readLock(root: string): LauncherLock | null {
   try {

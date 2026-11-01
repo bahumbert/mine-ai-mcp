@@ -3,11 +3,12 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
+import { monotonicNow } from "../clocks.ts";
 import { downloadFailureHint, downloadVerified } from "./download.ts";
 import { assessGpu, parseOllamaCompute, remoteVerdictText, type ComputeDevice, type GpuFacts, type GpuStepResult } from "./gpu.ts";
 import { listModelNames, logTail, realServeDeps, ServeUnavailableError, withLatestTag, withOurOllamaServe, type OurServe, type ServeDeps } from "./ollama-serve.ts";
 import { loadInstallState, saveInstallState, type InstallState } from "./state.ts";
-import type { InstallContext, StepResult } from "./step.ts";
+import { failure, type InstallContext, type StepFailure, type StepResult } from "./step.ts";
 
 const SETUP_FLAGS = ["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"];
 const SETUP_FILE = "OllamaSetup.exe";
@@ -29,7 +30,7 @@ export interface OllamaDeps extends ServeDeps {
 }
 
 /** `ollama` ends ok with the stage 2 report (it may say remote), or with the step failure. */
-export type OllamaStepResult = GpuStepResult | Extract<StepResult, { ok: false }>;
+export type OllamaStepResult = GpuStepResult | StepFailure;
 
 /**
  * Where ollama.exe is: the path our install recorded (a folder the player chose) when it is still there, then the
@@ -95,7 +96,7 @@ function isOurOllama(state: InstallState, exe: string): boolean {
   return state.ollama === "installed" && (state.ollamaPath === undefined || state.ollamaPath === exe);
 }
 
-type EnsuredOllama = { ok: true; exe: string; existed: boolean } | Extract<StepResult, { ok: false }>;
+type EnsuredOllama = { ok: true; exe: string; existed: boolean } | StepFailure;
 
 async function ensureOllama(ctx: InstallContext, deps: OllamaDeps, dir: string | undefined): Promise<EnsuredOllama> {
   const existing = deps.ollamaExe();
@@ -169,7 +170,7 @@ async function discoverCompute(ctx: InstallContext, exe: string, deps: OllamaDep
   }
 }
 
-function portBusy(port: number): Extract<StepResult, { ok: false }> {
+function portBusy(port: number): StepFailure {
   return failure(
     `Something already answers on port ${port}, so Mine AI cannot read the GPU report of its own Ollama.`,
     "Close Mine AI if it is running. If an earlier install was interrupted, end ollama.exe in Task Manager. Then try again.",
@@ -179,8 +180,8 @@ function portBusy(port: number): Extract<StepResult, { ok: false }> {
 /** The devices in our serve's log once they stop arriving; `null` when the serve was not ours (no log to read). */
 async function readComputeDevices(serve: OurServe, timeoutMs: number, deps: ServeDeps): Promise<ComputeDevice[] | null> {
   if (serve.reused) return null;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + timeoutMs;
+  while (monotonicNow() < deadline) {
     if (parseOllamaCompute(serve.output()).length > 0) {
       await deps.sleep(COMPUTE_SETTLE_MS);
       return parseOllamaCompute(serve.output());
@@ -233,10 +234,6 @@ async function reasonToKeepOllama(ctx: InstallContext, exe: string, modelPulledB
     if (!(error instanceof ServeUnavailableError)) throw error;
     return `its models could not be checked (${error.message}) and its uninstaller may delete them.`;
   }
-}
-
-function failure(error: string, hint: string): Extract<StepResult, { ok: false }> {
-  return { ok: false, error, hint };
 }
 
 /** Runs a program without a console window; a program that cannot start gives a null code and the reason as output. */

@@ -12,11 +12,17 @@ import { startChatCommands } from "./sources.ts";
 const START_TIME = 1_800_000_000_000;
 const HOST_PORT_BASE = 25_575;
 
-/** Time that moves only when a test says so; a sleeping loop wakes when its time has come. */
+/**
+ * Time that moves only when a test says so; a sleeping loop wakes when its time has come. `now` is the monotonic clock
+ * (durations); `wallNow` is the wall clock (epoch times of the host's lines) and equals it until a test steps it with
+ * `wallSkew`, as WSL does.
+ */
 class ManualClock {
   time = START_TIME;
+  wallSkew = 0;
   private readonly sleeping: { at: number; wake(): void }[] = [];
   readonly now = (): number => this.time;
+  readonly wallNow = (): number => this.time + this.wallSkew;
   readonly sleep = (ms: number): Promise<void> => new Promise((resolve) => this.sleeping.push({ at: this.time + ms, wake: resolve }));
 
   async advance(ms: number): Promise<void> {
@@ -61,7 +67,7 @@ class FakeHost {
 
   constructor(private readonly clock: ManualClock) {}
 
-  hear(username: string, channel: "chat" | "whisper", message: string, at = this.clock.time): void {
+  hear(username: string, channel: "chat" | "whisper", message: string, at = this.clock.wallNow()): void {
     this.seq += 1;
     this.lines.push({ seq: this.seq, username, channel, message, at: new Date(at).toISOString() });
   }
@@ -163,6 +169,7 @@ async function harness(options: Options = {}) {
   const commands = startChatCommands(state, {
     fetch: fetchHost,
     now: clock.now,
+    wallNow: clock.wallNow,
     sleep: clock.sleep,
     say: (line) => void fixture.said.push(line),
     spawnListener: () => {
@@ -329,6 +336,28 @@ test("a line 61 s old at receipt is dropped, one 59 s old runs", async () => {
   h.host(0).hear("Tom", "whisper", "!bots", h.clock.time - 59_000);
   await h.clock.advance(POLL_MS);
   assert.equal(h.commandSays().length, 1);
+});
+
+test("a line the wall clock has aged past maxAgeMs is dropped even when little monotonic time has passed", async () => {
+  const h = await harness({ bots: ["ayla"] });
+  h.host(0).hear("Tom", "whisper", "!bots");
+  h.clock.wallSkew += h.fixture.manifest.commands.maxAgeMs + 1_000;
+  await h.clock.advance(POLL_MS);
+  assert.equal(h.commandSays().length, 0);
+});
+
+test("the memory of public lines run is pruned by the wall clock: a twin line just inside the window runs again once its original aged out", async () => {
+  const h = await harness({ bots: ["ayla"], cooldownMs: 0 });
+  const { maxAgeMs } = h.fixture.manifest.commands;
+  const heardAt = h.clock.wallNow();
+  h.host(0).hear("Tom", "chat", "!bots", heardAt);
+  await h.clock.advance(POLL_MS);
+  assert.equal(h.commandSays().length, 1);
+  // The next poll reads the wall clock at heardAt + maxAgeMs + 500: the first line is out of its window, the twin (1 s later) is not.
+  h.clock.wallSkew = heardAt + maxAgeMs + 500 - (h.clock.time + POLL_MS);
+  h.host(0).hear("Tom", "chat", "!bots", heardAt + 1_000);
+  await h.clock.advance(POLL_MS);
+  assert.equal(h.commandSays().length, 2);
 });
 
 test("a local console line gets one tellraw on the server's stdin", async () => {

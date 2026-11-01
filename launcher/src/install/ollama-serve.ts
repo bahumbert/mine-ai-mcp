@@ -1,5 +1,6 @@
 // Runs the launcher's own `ollama serve` (manifest port and env) for the length of one install step.
 import { spawn } from "node:child_process";
+import { monotonicNow } from "../clocks.ts";
 import type { Manifest } from "../manifest.ts";
 import { loadInstallState, type InstallState } from "./state.ts";
 
@@ -77,8 +78,8 @@ export function withLatestTag(tag: string): string {
 
 async function waitUntilAnswering(baseUrl: string, serve: ServeProcess, log: () => string, timeoutMs: number, deps: ServeDeps): Promise<void> {
   const exitedFirst = serve.exited.then((code) => ({ code }));
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + timeoutMs;
+  while (monotonicNow() < deadline) {
     if (await answersVersion(baseUrl, deps)) return;
     const exit = await Promise.race([exitedFirst, deps.sleep(POLL_INTERVAL_MS).then(() => null)]);
     if (exit) throw new ServeUnavailableError(`ollama serve on ${baseUrl} exited with code ${exit.code} before it answered: ${logTail(log())}`);

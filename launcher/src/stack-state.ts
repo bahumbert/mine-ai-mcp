@@ -2,6 +2,7 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { chatAudience, type ChatAudience } from "./chat/audience.ts";
+import { monotonicNow, wallNow } from "./clocks.ts";
 import { appRoot } from "./paths.ts";
 import { probeServer } from "./install/probe.ts";
 import { ollamaExeFor } from "./install/ollama.ts";
@@ -17,7 +18,10 @@ export type ChildRunner = Pick<Children, "spawn" | "stop" | "stopAll">;
 /** Everything the stack takes from outside, so a test starts no process, opens no socket and waits no real time. */
 export interface StackDeps {
   fetch: typeof fetch;
+  /** The monotonic clock: every duration and deadline (`clocks.ts`). */
   now(): number;
+  /** The epoch time, for comparing with a time another process wrote (a host's ISO `at`); never for a duration. */
+  wallNow(): number;
   sleep(ms: number): Promise<void>;
   probeServer: typeof probeServer;
   ollamaExe(): string | null;
@@ -45,7 +49,8 @@ export interface ChatCommandsHandle {
 export function realStackDeps(say: (line: string) => void, root: string): StackDeps {
   return {
     fetch,
-    now: Date.now,
+    now: monotonicNow,
+    wallNow,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     probeServer,
     ollamaExe: () => ollamaExeFor(root),

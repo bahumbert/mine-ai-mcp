@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeF
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { monotonicNow } from "./clocks.ts";
 import { listProcesses, normalizeImageName, type ProcessInfo, type ProcessLister } from "./process-list.ts";
 
 /** What the launcher needs of a started process; `node:child_process`'s `ChildProcess` fits it, and tests supply their own. */
@@ -212,10 +213,10 @@ export class Children {
   async stop(name: string, options: StopOptions): Promise<StopResult> {
     const child = this.running.get(name);
     if (!child) return "not-running";
-    const deadline = Date.now() + options.timeoutMs;
+    const deadline = monotonicNow() + options.timeoutMs;
     if (options.graceful) {
       const asked = await within(Promise.resolve().then(options.graceful).then(() => true, () => false), options.timeoutMs);
-      const exit = asked === true ? await within(child.exited, deadline - Date.now()) : TIMED_OUT;
+      const exit = asked === true ? await within(child.exited, deadline - monotonicNow()) : TIMED_OUT;
       if (exit !== TIMED_OUT) return { ended: exit };
     }
     try {

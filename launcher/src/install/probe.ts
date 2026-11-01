@@ -2,6 +2,7 @@
 import minecraftData from "minecraft-data";
 import { connect, type Socket } from "node:net";
 import { z } from "zod";
+import { monotonicNow } from "../clocks.ts";
 
 export interface ProbeResult {
   readonly up: boolean;
@@ -79,7 +80,7 @@ class PacketConnection {
   private readonly timer: ReturnType<typeof setTimeout>;
 
   private constructor(private readonly socket: Socket, deadlineAt: number) {
-    this.timer = setTimeout(() => this.fail(new Deadline()), Math.max(deadlineAt - Date.now(), 0));
+    this.timer = setTimeout(() => this.fail(new Deadline()), Math.max(deadlineAt - monotonicNow(), 0));
     socket.on("data", (chunk: Buffer) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.wake();
@@ -215,7 +216,7 @@ function describeFailure(error: unknown, address: string, timeoutMs: number): st
  */
 export async function probeServer(host: string, port: number, version: string, timeoutMs: number): Promise<ProbeResult> {
   const address = `${host}:${port}`;
-  const deadlineAt = Date.now() + timeoutMs;
+  const deadlineAt = monotonicNow() + timeoutMs;
   try {
     const wanted = expectedProtocol(version);
     const status = (await pingStatus(host, port, wanted ?? 0, deadlineAt)).version;

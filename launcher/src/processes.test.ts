@@ -178,6 +178,26 @@ test("stop kills a child that ignores the graceful step once timeoutMs has passe
   assert.ok(Date.now() - started >= 50, "waited for the timeout first");
 });
 
+test("the wait for a child to save is not cut short when the wall clock jumps forward mid-wait", async () => {
+  const { children, calls, root } = newChildren();
+  children.spawn("server", "java", [], { env: {}, cwd: root, logFile: join(root, "logs", "s.log"), stdin: "pipe" });
+  const realNow = Date.now;
+  try {
+    const result = await children.stop("server", {
+      graceful: async () => {
+        // The `stop` line is sent; the wall clock then steps 60 s ahead (NTP, WSL) while the server saves for 100 ms.
+        Date.now = () => realNow() + 60_000;
+        setTimeout(() => calls[0]!.process.exit(0), 100);
+      },
+      timeoutMs: 1000,
+    });
+    assert.deepEqual(result, { ended: { code: 0, signal: null } });
+    assert.equal(calls[0]!.process.killed, false);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("stop kills a child whose graceful step throws, and with no graceful step kills at once", async () => {
   const { children, calls, root } = newChildren();
   const options = { env: {}, cwd: root, logFile: join(root, "logs", "s.log") };
