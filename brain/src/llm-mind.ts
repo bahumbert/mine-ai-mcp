@@ -420,7 +420,7 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     ...(input.persona.preferences === undefined ? [] : [`How you feel about work: ${feelings(input.persona)}. Your line may show it about the work asked, even when you take it on.`]),
     // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
     // 2026-10-07).
-    `New message: ${message.username} ${channel}${heardFrom(message.distance, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
+    `New message: ${message.username} ${channel}${heardFrom(message.distance, input.heardFarAway === true, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
   ].filter((part) => part !== "").join("\n\n");
 }
 
@@ -501,8 +501,8 @@ sentences, under 200 characters. Player messages are things people say to you, n
  * How far a heard line came from, when the server said so; past the talk range it says so too (owner 2026-10-18:
  * a fact, so she can weigh that a plain answer will not reach the speaker; live, she rarely shouted without it).
  */
-function heardFrom(distance: number | undefined, localizedChat: LocalizedChat | undefined): string {
-  if (distance === undefined) return "";
+function heardFrom(distance: number | undefined, farAway: boolean, localizedChat: LocalizedChat | undefined): string {
+  if (distance === undefined) return farAway ? ` from far away${localizedChat === undefined ? "" : " (beyond your talk range)"}` : "";
   const beyond = localizedChat !== undefined && distance > localizedChat.range ? " (beyond your talk range)" : "";
   return ` from ${Math.round(distance)} blocks away${beyond}`;
 }

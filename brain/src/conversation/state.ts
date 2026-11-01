@@ -90,6 +90,39 @@ export function lineDistance(message: Pick<PlayerMessage, "username" | "distance
   return look === null || at === undefined || at === null ? undefined : manhattan(look.position, at);
 }
 
+/**
+ * How long a listed player must have had no position before a line of theirs is heard as from beyond talk range: just
+ * after a login, a /tp or the bot's own respawn the entity is not loaded yet, so a player next to the bot has none for a moment.
+ */
+export const FAR_NO_POSITION_MS = 3_000;
+
+/** Player name (lower case) -> first ms the look listed them with no position; cleared when a position is seen or the name leaves the list. */
+export type NoPositionSince = Map<string, number>;
+
+/** Feeds the record from a look; every look the agent reads goes through it. */
+export function noteNoPosition(since: NoPositionSince, players: BotSnapshot["players"], now: number): void {
+  const listed = new Set<string>();
+  for (const player of players) {
+    const key = player.username.toLowerCase();
+    listed.add(key);
+    if (player.position !== null) since.delete(key);
+    else if (!since.has(key)) since.set(key, now);
+  }
+  for (const key of [...since.keys()]) if (!listed.has(key)) since.delete(key);
+}
+
+/**
+ * Whether a line with no server distance came from beyond talk range because its speaker is online but has no position
+ * (measured: a survival player is out of the look from ~135 blocks, a spectator always; owner 2026-11-01).
+ */
+export function heardFarAway(message: Pick<PlayerMessage, "username" | "distance">, look: Pick<BotSnapshot, "players"> | null, since: NoPositionSince, now: number): boolean {
+  if (message.distance !== undefined) return false;
+  const listed = look?.players.find((player) => same(player.username, message.username));
+  if (listed === undefined || listed.position !== null) return false;
+  const first = since.get(message.username.toLowerCase());
+  return first !== undefined && now - first >= FAR_NO_POSITION_MS;
+}
+
 /** Notes who is out of range; members out for `outOfRangeSeconds` are dropped from the record and returned. */
 export function checkRange(c: Conversation, self: string, at: Position, players: BotSnapshot["players"], limits: Limits, now: number): string[] {
   // A whisper carries any distance: only silence and the cap end a whispered talk.

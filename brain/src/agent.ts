@@ -9,7 +9,7 @@ import type { HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
-import { lineDistance, type Conversation } from "./conversation/state.ts";
+import { heardFarAway, lineDistance, noteNoPosition, type Conversation, type NoPositionSince } from "./conversation/state.ts";
 import { pickPartner, socialise, type SocialiseDeps } from "./conversation/socialise.ts";
 import { Inbox, type Heard } from "./inbox.ts";
 import { namesWord, type LocalizedChat } from "./llm-mind.ts";
@@ -264,6 +264,8 @@ export class Agent {
   private readonly own = new OwnWork();
   /** Who was online at the last look, as spelled in the game: the names a line may hold. */
   private onlineNames: readonly string[] = [];
+  /** Who the looks list with no position, since when: a line from one of them for 3 s is heard as from beyond talk range. */
+  private readonly noPositionSince: NoPositionSince = new Map();
   /** The last look at the world by the conversation check: where players stood when a line carries no distance. */
   private lastLook: BotSnapshot | null = null;
   /** What an own objective could not get and who refused to trade it, for ten minutes (relations/trading.ts). */
@@ -649,12 +651,14 @@ export class Agent {
       try {
         const snapshot = await this.options.runtime.status();
         this.onlineNames = snapshot.players.map((player) => player.username);
+        noteNoPosition(this.noPositionSince, snapshot.players, Date.now());
         const conversation = this.talks?.facts();
         const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
         // A shout with no server distance is as far as the speaker stands in this snapshot: the model is told how far it came (a whisper carries any distance, so it is not).
         const distance = lineDistance(message, snapshot);
         const heardMessage = message.channel === "chat" && message.distance === undefined && distance !== undefined ? { ...message, distance } : message;
-        const input: ChatInput = { persona, message: heardMessage, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+        const farAway = message.channel === "chat" && heardFarAway(message, snapshot, this.noPositionSince, Date.now());
+        const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
         let decision = await mind.chat(input, this.runSignal);
         let checked: BotSnapshot | undefined;
         if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal }));
@@ -694,6 +698,7 @@ export class Agent {
       const snapshot = await this.options.runtime.status();
       this.talksUnreadable = false;
       this.onlineNames = snapshot.players.map((player) => player.username);
+      noteNoPosition(this.noPositionSince, snapshot.players, Date.now());
       this.lastLook = snapshot;
       await talks.tick(snapshot, this.runSignal);
       // An order, a night shelter or a socialising objective on its way (it opens its own conversation) is busy enough.

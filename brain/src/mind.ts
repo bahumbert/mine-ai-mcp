@@ -66,6 +66,8 @@ export interface ChatInput {
   /** Recent chat around the agent, oldest first, including its own lines. */
   readonly history: readonly ChatLine[];
   readonly snapshot: BotSnapshot;
+  /** The speaker is online with no position (beyond view distance) and the line carries no distance: heard from beyond talk range. */
+  readonly heardFarAway?: boolean;
   /** What the agent is doing now, e.g. `idle` or `follow StarOr1 at 3 blocks`. */
   readonly activity: string;
   /** Places the agent knows, oldest first. */

@@ -3361,3 +3361,33 @@ test("A3: a whisper keeps its text as it was: it carries any distance, so none i
   await agent.handle({ username: "Lena", channel: "whisper", message: "psst", addressed: true });
   assert.doesNotMatch(chat.requests[0]?.at(-1)?.content ?? "", /blocks away/u);
 });
+
+/** Steve is listed (tab list) without a position, as a player beyond the view distance is; the model's request for each line he sends. */
+function farShouts(t: TestContext, lines: { at: number; line: ReturnType<typeof say> | { username: string; channel: "whisper"; message: string; addressed: boolean } }[]) {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: null }] };
+  const { agent, chat } = agentFor(t, runtime);
+  chat.reply({ say: "Hi.", route: "talk", request: "" }, { say: "Hi again.", route: "talk", request: "" });
+  return { agent, chat, run: async () => {
+    for (const { at, line } of lines) {
+      t.mock.timers.setTime(1_000_000 + at);
+      await agent.handle(line);
+    }
+    return chat.requests.map((request) => request.at(-1)?.content ?? "");
+  } };
+}
+
+test("a shout from a player listed with no position for 3 s is heard as from far away; the first sight of the gap is not", async (t) => {
+  const { run } = farShouts(t, [{ at: 0, line: say("Steve", "Ayla, hello") }, { at: 3_000, line: say("Steve", "Ayla, hello?") }]);
+  const [first, second] = await run();
+  assert.doesNotMatch(first ?? "", /from far away/u, "listed with no position for under 3 s: a fresh login or teleport");
+  assert.match(second ?? "", /Steve says in chat, naming you from far away: /u);
+});
+
+test("a whisper from a player listed with no position is not heard as from far away", async (t) => {
+  const whisper = { username: "Steve", channel: "whisper" as const, message: "Ayla, psst", addressed: true };
+  const { run } = farShouts(t, [{ at: 0, line: say("Steve", "Ayla, hello") }, { at: 3_000, line: whisper }]);
+  const [, second] = await run();
+  assert.doesNotMatch(second ?? "", /from far away/u);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { personaSchema } from "../persona.ts";
-import { addMembers, capReached, checkRange, ending, isMember, lineDistance, lineSaid, manhattan, openConversation, type Limits } from "./state.ts";
+import { addMembers, capReached, checkRange, ending, FAR_NO_POSITION_MS, heardFarAway, isMember, lineDistance, lineSaid, manhattan, noteNoPosition, openConversation, type Limits, type NoPositionSince } from "./state.ts";
 
 const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
 const limits: Limits = { ...personaSchema.parse(base).settings.conversation, talkRange: 64 };
@@ -113,4 +113,52 @@ test("lineDistance: a speaker out of tab range, offline, without a position, or 
   assert.equal(lineDistance(shout, { position: here, players: [] }), undefined);
   assert.equal(lineDistance(shout, lookAt(null)), undefined);
   assert.equal(lineDistance(shout, null), undefined);
+});
+
+const listed = (...players: { username: string; position: { x: number; y: number; z: number } | null }[]) => ({ position: here, players });
+
+test("heardFarAway: a speaker listed with no position for 3 s is far; for less (a fresh login or /tp) is not", () => {
+  const since: NoPositionSince = new Map();
+  const look = listed({ username: "Lena", position: null });
+  noteNoPosition(since, look.players, t0);
+  assert.equal(heardFarAway(shout, look, since, t0), false);
+  assert.equal(heardFarAway(shout, look, since, t0 + FAR_NO_POSITION_MS - 1), false);
+  assert.equal(heardFarAway(shout, look, since, t0 + FAR_NO_POSITION_MS), true);
+});
+
+test("heardFarAway: a position seen in between starts the timer again", () => {
+  const since: NoPositionSince = new Map();
+  noteNoPosition(since, [{ username: "Lena", position: null }], t0);
+  noteNoPosition(since, [{ username: "Lena", position: { x: 5, y: 0, z: 0 } }], t0 + 2_000);
+  const gone = listed({ username: "Lena", position: null });
+  noteNoPosition(since, gone.players, t0 + 2_500);
+  assert.equal(heardFarAway(shout, gone, since, t0 + 5_000), false, "2.5 s since the position was lost");
+  assert.equal(heardFarAway(shout, gone, since, t0 + 5_500), true);
+});
+
+test("heardFarAway: a name that left the list and came back starts the timer again", () => {
+  const since: NoPositionSince = new Map();
+  const back = listed({ username: "Lena", position: null });
+  noteNoPosition(since, back.players, t0);
+  noteNoPosition(since, [], t0 + 1_000);
+  noteNoPosition(since, back.players, t0 + 2_500);
+  assert.equal(heardFarAway(shout, back, since, t0 + 3_000), false, "listed again 0.5 s ago");
+  assert.equal(heardFarAway(shout, back, since, t0 + 5_500), true);
+});
+
+test("heardFarAway: the name is matched without regard to case", () => {
+  const since: NoPositionSince = new Map();
+  const look = listed({ username: "Lena", position: null });
+  noteNoPosition(since, look.players, t0);
+  assert.equal(heardFarAway({ ...shout, username: "LENA" }, look, since, t0 + 3_000), true);
+});
+
+test("heardFarAway: not listed, a position known, a server distance or no look is not far", () => {
+  const since: NoPositionSince = new Map([["lena", t0]]);
+  const later = t0 + 10_000;
+  assert.equal(heardFarAway(shout, listed(), since, later), false, "not listed");
+  assert.equal(heardFarAway(shout, listed({ username: "Lena", position: { x: 100, y: 0, z: 0 } }), since, later), false, "position known");
+  assert.equal(heardFarAway({ ...shout, distance: 150 }, listed({ username: "Lena", position: null }), since, later), false, "the server's number wins");
+  assert.equal(heardFarAway(shout, null, since, later), false, "no look");
+  assert.equal(heardFarAway(shout, listed({ username: "Lena", position: null }), new Map(), later), false, "never seen with no position");
 });

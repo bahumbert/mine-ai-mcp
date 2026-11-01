@@ -1269,6 +1269,22 @@ test("a heard line from farther than her talk carries says so, a fact for her to
   assert.doesNotMatch(local.chat.requests[1]?.at(-1)?.content ?? "", /beyond/u);
 });
 
+test("a line heard from a speaker with no position says from far away, with the range words only under Localized Chat", async () => {
+  const far = async (range: { range: number } | undefined, patch: Record<string, unknown>) => {
+    const local = scriptedMind();
+    local.chat.reply({ say: "Hi", route: "talk", request: "" });
+    const mind = new LlmMind({ chat: local.chat, action: local.action, planner: local.planner }, undefined, range);
+    const input = chatInput("Ayla, can you hear me?");
+    await mind.chat({ ...input, ...patch, message: { ...input.message, ...(patch.message as object | undefined) } } as typeof input, signal);
+    return local.chat.requests[0]?.at(-1)?.content ?? "";
+  };
+  assert.match(await far({ range: 64 }, { heardFarAway: true }), /says in chat, naming you from far away \(beyond your talk range\): /u);
+  assert.match(await far(undefined, { heardFarAway: true }), /naming you from far away: /u);
+  assert.doesNotMatch(await far(undefined, { heardFarAway: true }), /range/u);
+  assert.match(await far({ range: 64 }, { heardFarAway: true, message: { distance: 150 } }), /from 150 blocks away \(beyond your talk range\)/u, "a number wins over far away");
+  assert.doesNotMatch(await far({ range: 64 }, {}), /from far away/u);
+});
+
 test("a persona with preferences gets the feelings line before the new message", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const { mind, chat } = scriptedMind();
