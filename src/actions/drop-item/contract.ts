@@ -5,7 +5,7 @@ import { registryNameSchema } from "../registry-name.js";
 
 export const DROP_ITEM = "drop_item" as const;
 export const DROP_ITEM_DESCRIPTION =
-  "Drop carried items on the ground, or hand them to a nearby player by walking to them first and tossing at their feet. " +
+  "Drop carried items on the ground, or hand them to a nearby player by walking to them first and tossing at their feet once they stand still (a player who keeps moving fails the hand-over with nothing tossed). " +
   "Each named item is tossed stack by stack, the most worn tool first, and verified gone from the inventory; a toss on the ground needs the bot standing on it or in water, else it is refused with nothing dropped. Worn armour and the off-hand are never " +
   "dropped, and the held item only with allow_equipped. With in_a_hole, dig a dry two-block-deep hole beside the bot " +
   "(excavating a wall opening underground when needed), verify the items landed below pickup height, then plug the hole " +
@@ -176,6 +176,8 @@ export const dropItemOutcomes = {
   playerUnreachable: (name: string, reason: string) =>
     `[DROP_PLAYER_UNREACHABLE] Pathfinder could not reach ${name}: ${reason}.`,
   playerLeft: (name: string) => `[DROP_PLAYER_LEFT] ${name} stopped being observed before the items were tossed.`,
+  recipientMoving: (name: string, seconds: number) =>
+    `[DROP_RECIPIENT_MOVING] ${name} did not stand still within 2 blocks for ${seconds} s; nothing was tossed. Hand over again once they stop.`,
   groundUnavailable: (): string =>
     "[DROP_GROUND_UNAVAILABLE] The bot is neither standing on the ground nor in water, so it cannot walk off after a toss at its feet and would pick the items straight back up. Nothing was dropped. Get onto solid ground first (navigate), or drop in_a_hole once it can stand beside a pit.",
   incomplete: (failed: number, total: number, reasons: readonly string[] = []) =>

@@ -1,0 +1,34 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-recipient-never-still
+tags: [regression]
+description: >-
+  Plan 2026-11-01-hand-over-hold: the recipient walks 70 blocks away without stopping (about 15 s), longer than the giver's 10 s wait. The giver must fail
+  with [DROP_RECIPIENT_MOVING] having tossed nothing, still hold all three logs, and the recipient must hold none.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [0.5, -60, 4.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3, giver_expects: moving, receiver_walk: { legs: [{ x: 0, y: -60, z: 70 }], then: end } }
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: hasItem, who: Giver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

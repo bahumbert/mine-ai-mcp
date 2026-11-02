@@ -11,6 +11,7 @@ import { dropItemOutcomes, type DropRecipient, type HoleClosure } from "./contra
 import { pluggedCellCount, sealDisposalHole } from "./disposal-hole.js";
 import type { DropItemDependencies } from "./drop-item.js";
 import { tossAimHeight } from "./hand-over.js";
+import { awaitStillRecipient, RECIPIENT_STILL_EPSILON, RECIPIENT_STILL_TICKS, RECIPIENT_WAIT_MS } from "./recipient-still.js";
 
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
 const HANDOVER_RANGE = 2;
@@ -42,35 +43,90 @@ function feetCellCentre(bot: Bot): { x: number; z: number } {
   return cellCentre(bot.entity.position.floored());
 }
 
-/** Walk to the named player and face them, so a toss lands at their feet rather than ours. */
+/** Walk up to the recipient with a route that ends at `deadline`; a route that stops short of them is unreachable. */
+async function walkUpToPlayer(
+  bot: Bot,
+  name: string,
+  entity: Entity,
+  deadline: AbortSignal,
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<void> {
+  const route = await dependencies
+    .navigate({
+      movements: dependencies.createMovements(bot),
+      goal: nearEntityGoal({ id: entity.id }, HANDOVER_RANGE),
+      signal: context.signal ? AbortSignal.any([context.signal, deadline]) : deadline,
+    })
+    .catch((cause: unknown) => {
+      // A chase the deadline cut is a recipient who kept moving; a cancel stays what the caller aborted with.
+      if (deadline.aborted && !context.signal?.aborted) throw new DropItemActionError(recipientMovingOutcome(name, dependencies));
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      throw new DropItemActionError(dropItemOutcomes.playerUnreachable(name, reason), { cause });
+    });
+
+  // The goal tracks a live entity, so a player who walks off invalidates it.
+  const arrived = bot.players[name]?.entity;
+  if (!arrived) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
+  // A route that completed with the recipient stepping away just then is a recipient on the move: the wait finds them away.
+  if (route.status !== "completed" && bot.entity.position.distanceTo(arrived.position) > HANDOVER_RANGE) {
+    throw new DropItemActionError(dropItemOutcomes.playerUnreachable(name, describeNavigation(route)));
+  }
+}
+
+function recipientMovingOutcome(name: string, dependencies: DropItemDependencies): string {
+  return dropItemOutcomes.recipientMoving(name, Math.round((dependencies.recipientWaitMs ?? RECIPIENT_WAIT_MS) / 1000));
+}
+
+/** Walk up to the recipient and wait until they stand still within reach: the walks and the waits share one wall-clock bound. */
+async function reachStillRecipient(
+  bot: Bot,
+  name: string,
+  dependencies: DropItemDependencies,
+  context: ActionContext,
+): Promise<void> {
+  const waitMs = dependencies.recipientWaitMs ?? RECIPIENT_WAIT_MS;
+  const startedAt = performance.now();
+  const timeLeft = () => waitMs - (performance.now() - startedAt);
+  const awaitStill = dependencies.awaitStillRecipient ?? awaitStillRecipient;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new DOMException("The operation timed out.", "TimeoutError")), waitMs);
+  try {
+    for (;;) {
+      const entity = bot.players[name]?.entity;
+      if (!entity) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
+      if (timeLeft() <= 0) throw new DropItemActionError(recipientMovingOutcome(name, dependencies));
+      if (bot.entity.position.distanceTo(entity.position) > HANDOVER_RANGE) {
+        await walkUpToPlayer(bot, name, entity, deadline.signal, dependencies, context);
+      }
+      const outcome = await awaitStill(bot, name, {
+        range: HANDOVER_RANGE,
+        stillTicks: RECIPIENT_STILL_TICKS,
+        epsilon: RECIPIENT_STILL_EPSILON,
+        maxWallMs: timeLeft(),
+        signal: context.signal,
+      });
+      if (outcome === "still") return;
+      if (outcome === "left") throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
+      if (outcome === "timeout") throw new DropItemActionError(recipientMovingOutcome(name, dependencies));
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Walk to the named player, wait until they stand still within reach and face them, so a toss lands at their feet rather
+ * than ours, and is there to be picked up when its delay ends.
+ */
 export async function approachPlayer(
   bot: Bot,
   name: string,
   dependencies: DropItemDependencies,
   context: ActionContext,
 ): Promise<DropRecipient> {
-  const entity: Entity | undefined = bot.players[name]?.entity;
-  if (!entity) throw new DropItemActionError(dropItemOutcomes.playerNotFound(name));
-
-  if (bot.entity.position.distanceTo(entity.position) > HANDOVER_RANGE) {
-    const route = await dependencies
-      .navigate({
-        movements: dependencies.createMovements(bot),
-        goal: nearEntityGoal({ id: entity.id }, HANDOVER_RANGE),
-        signal: context.signal,
-      })
-      .catch((cause: unknown) => {
-        const reason = cause instanceof Error ? cause.message : String(cause);
-        throw new DropItemActionError(dropItemOutcomes.playerUnreachable(name, reason), { cause });
-      });
-
-    // The goal tracks a live entity, so a player who walks off invalidates it.
-    const arrived = bot.players[name]?.entity;
-    if (!arrived) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));
-    if (bot.entity.position.distanceTo(arrived.position) > HANDOVER_RANGE) {
-      throw new DropItemActionError(dropItemOutcomes.playerUnreachable(name, describeNavigation(route)));
-    }
-  }
+  if (!bot.players[name]?.entity) throw new DropItemActionError(dropItemOutcomes.playerNotFound(name));
+  await reachStillRecipient(bot, name, dependencies, context);
 
   const target = bot.players[name]?.entity;
   if (!target) throw new DropItemActionError(dropItemOutcomes.playerLeft(name));

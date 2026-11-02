@@ -1,0 +1,35 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-moving-recipient
+tags: [regression]
+description: >-
+  Plan 2026-11-01-hand-over-hold: the recipient walks for about 3 s, out to 4 blocks and back, before it stands. The
+  giver must not toss at a walking recipient: it follows, waits until they stand still within 2 blocks, tosses, and the
+  recipient ends up holding all three logs.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [0.5, -60, 4.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3, receiver_walk: { legs: [{ x: 0, y: -60, z: 6 }, { x: 0, y: -60, z: 2 }], then: stand } }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

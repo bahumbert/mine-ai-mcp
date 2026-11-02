@@ -39,6 +39,7 @@ import {
 } from "./disposal-hole.js";
 import { approachPlayer, canWalkOffAfterToss, closeDisposalHole, DropItemActionError, walkAwayFromToss, walkToStance } from "./drop-walks.js";
 import { handOverAndRecount, handOverLine, recountAfterToss, rememberDiscards } from "./hand-over.js";
+import { awaitStillRecipient } from "./recipient-still.js";
 import { planPlugKeep, PLUG_CELLS, type PlugKeep } from "./plug-reserve.js";
 import { tossItem, type ItemToss } from "./toss-item.js";
 
@@ -70,6 +71,10 @@ export interface DropItemDependencies {
   readonly groundedWaitMs?: number;
   /** The wall-clock bound of a hand-over's wait, for a server whose world age does not move far enough. */
   readonly handoverWallMs?: number;
+  /** The wall-clock bound of walking up to a recipient and waiting for them to stand still. */
+  readonly recipientWaitMs?: number;
+  /** The wait for a still recipient; tests of a fixture without world ticks answer it. */
+  readonly awaitStillRecipient?: typeof awaitStillRecipient;
 }
 
 function productionDependencies(navigation: NavigationRuntime): DropItemDependencies {

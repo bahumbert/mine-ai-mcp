@@ -876,6 +876,12 @@ them. Each entry accepts `item_name` and an optional `count`; omitting the count
 drops all carried stacks of that item; a count smaller than the copies of a tool gives up the most worn copy first. Worn armor and the off-hand are excluded,
 and the held item requires `allow_equipped`. A toss on the ground (no hole, no player) is refused with `[DROP_GROUND_UNAVAILABLE]` while the bot is in the air: it could not walk off and would pick the items up again. Results report the observed inventory
 decrease. Collection and hunting ignore the resulting item entities as targets.
+With `to_player`, the bot walks up to the player and tosses only once they have stood still within 2 blocks for
+10 ticks of world age (a tossed item can be taken only after its pickup delay, so a walking player is elsewhere by then);
+a player who walks beyond 2 blocks is walked up to again. The walks and the wait share 10 s of wall clock: a player who
+does not stand still in that time fails the call with `[DROP_RECIPIENT_MOVING]`, nothing tossed, and the next call can
+hand over again once they stop. The other codes of a hand-over are `[DROP_PLAYER_NOT_FOUND]`, `[DROP_PLAYER_UNREACHABLE]`
+and `[DROP_PLAYER_LEFT]`.
 Set `in_a_hole: true` to create a dry, enclosed disposal pit below pickup height
 beside the bot. Underground, this can excavate an opening into a tunnel wall
 before digging the pit. Existing suitable pits can be reused. The bot stays on

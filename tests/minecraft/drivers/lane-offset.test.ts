@@ -163,7 +163,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "arrow-reservation.ts": "runs single-action.ts; the scenario's action input holds no x or z",
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
-  "hand-over.ts": "drop_item to a player and pick_up_items within a radius: the cells it asks for are the server's answer",
+  "hand-over-walks-off.ts": "BLIND: its receiver walks off only once view_status shows the toss on the ground, which the stand-in never shows; the walk_to cell is read by the lane run of the scenario",
   "idle-then-breathe.ts": "no action, reads the air",
   "toss-rest-distance.ts": "drop_item to a player and pick_up_items around the spot the toss reported: the cells it asks for are the server's answer",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",

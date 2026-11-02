@@ -162,6 +162,8 @@ function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependenci
     settleMs: 50,
     pickupWaitMs: 150,
     handoverWallMs: 100,
+    // This fixture's bot has no world ticks to count stillness on; the recipient stands still here.
+    awaitStillRecipient: async () => "still",
     ...overrides,
   };
 }

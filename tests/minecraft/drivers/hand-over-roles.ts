@@ -1,5 +1,7 @@
 import { z } from "zod";
-import type { ScenarioContext } from "../scenario.ts";
+import type { ClientCompletion } from "mine-labs/client";
+import type { ArenaFrame } from "../arena/frame.ts";
+import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
 
 /** The two roles of a hand-over scenario, as places in its `players` list (a lane renames the players, so a name written in the YAML would not match). */
 export const handOverRolesSchema = {
@@ -21,4 +23,17 @@ export function handOverRolesOf(context: ScenarioContext, places: { readonly giv
   const receiver = players[places.receiver]?.name;
   if (giver === undefined || receiver === undefined) throw new Error(`params name players ${places.giver} and ${places.receiver}, but the scenario declares ${players.length}`);
   return { giver, receiver, isGiver: context.username === giver };
+}
+
+/** The `run` of a hand-over driver: the params of its scenario, then the giver's part or the other player's. */
+export function handOverRun<Params extends { readonly giver: number; readonly receiver: number }>(
+  paramsIn: (arena: ArenaFrame) => { parse(input: unknown): Params },
+  give: (context: ScenarioContext, params: Params, roles: HandOverRoles) => Promise<ClientCompletion>,
+  other: (context: ScenarioContext, params: Params) => Promise<ClientCompletion>,
+): ScenarioRun {
+  return async (context) => {
+    const params = paramsIn(context.arena).parse(context.scenario.params);
+    const roles = handOverRolesOf(context, params);
+    return roles.isGiver ? give(context, params, roles) : other(context, params);
+  };
 }
