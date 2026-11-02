@@ -2476,3 +2476,101 @@ test("drop_item of a counted owed item drops only the spare ones", async () => {
   await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "crafting_table", count: 3 }] }), contextFor(runtime, { owed: () => owedToAyla }));
   assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "crafting_table", count: 2 }]]);
 });
+
+/** One trade of Ayla's owing `count` dirt: the kind a craft with a full bag would drop first. */
+const owedDirt = (count: number) => [{ item: "dirt", count, partner: "Ayla", tradeId: "t1" }];
+const roomRig = (inventory: BotSnapshot["inventory"]) => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.snapshot = { ...runtime.snapshot, inventory };
+  runtime.failNext.craft_item = { error: NO_ROOM_CRAFT };
+  return runtime;
+};
+const stickStep = { skill: "craft_item", item: "stick", count: 4 } as const;
+
+test("making room never drops a kind with no spare to an open trade: the next kind goes and the craft is done", async () => {
+  const runtime = roomRig([{ name: "wooden_pickaxe", count: 1 }, { name: "oak_planks", count: 8 }, { name: "dirt", count: 64 }, { name: "gravel", count: 16 }]);
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "gravel", dropped: 16 }] });
+  const result = await runStep(stickStep, { ...contextFor(runtime), needed: needsOnlyTools, owed: () => owedDirt(64) });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "drop_item").map((call) => call.input.items), [[{ item_name: "gravel", count: 16 }]]);
+});
+
+test("making room drops a partly owed kind down to its spare, 64 carried with 2 owed lose 62", async () => {
+  const runtime = roomRig([{ name: "wooden_pickaxe", count: 1 }, { name: "oak_planks", count: 8 }, { name: "dirt", count: 64 }, { name: "gravel", count: 16 }]);
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 62 }] });
+  const result = await runStep(stickStep, { ...contextFor(runtime), needed: needsOnlyTools, owed: () => owedDirt(2) });
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "drop_item").map((call) => call.input.items), [[{ item_name: "dirt", count: 62 }]]);
+});
+
+test("a full bag where every kind is owed: the craft fails with no drop, and a give to the partner is the next action that works", async () => {
+  const runtime = roomRig([{ name: "wooden_pickaxe", count: 1 }, { name: "oak_planks", count: 8 }, { name: "dirt", count: 4 }]);
+  runtime.walkOnNavigate = true;
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Ayla", position: { x: 3, y: 64, z: 0 } }] };
+  const context = { ...contextFor(runtime), needed: needsOnlyTools, owed: () => owedDirt(4) };
+  const crafted = await runStep(stickStep, context);
+  assert.equal(crafted.status, "failed");
+  assert.match(crafted.status === "failed" ? crafted.detail : "", /needs inventory room/u);
+  assert.equal(runtime.submitted.some((call) => call.tool === "drop_item"), false, "nothing owed is dropped");
+  const given = await runStep(stepSchema.parse({ skill: "give_item", player: "Ayla", item: "dirt", count: 4 }), context);
+  assert.equal(given.status, "done", "the owed item goes to the one it is owed to");
+});
+
+const owedBread = (count: number) => [{ item: "bread", count, partner: "Ayla", tradeId: "t1" }];
+
+test("eat is refused with the fact when the named food has no spare, and eats when one is spare", async () => {
+  const none = new FakeRuntime();
+  none.snapshot = { ...none.snapshot, inventory: [{ name: "bread", count: 4 }] };
+  const refused = await runStep({ skill: "eat", food: "bread" }, contextFor(none, { owed: () => owedBread(4) }));
+  assert.deepEqual(refused, { status: "failed", detail: "you owe 4 bread to Ayla (trade); you carry no bread beyond it" });
+  assert.equal(none.submitted.some((call) => call.tool === "eat_food"), false);
+
+  const spare = new FakeRuntime();
+  spare.snapshot = { ...spare.snapshot, inventory: [{ name: "bread", count: 5 }] };
+  assert.equal((await runStep({ skill: "eat", food: "bread" }, contextFor(spare, { owed: () => owedBread(4) }))).status, "done");
+  assert.equal(spare.submitted.some((call) => call.tool === "eat_food"), true);
+
+  const other = new FakeRuntime();
+  other.snapshot = { ...other.snapshot, inventory: [{ name: "apple", count: 1 }] };
+  assert.equal((await runStep({ skill: "eat", food: "apple" }, contextFor(other, { owed: () => owedBread(4) }))).status, "done", "an unowed food is eaten as ever");
+});
+
+const owedSlabs = (count: number) => [{ item: "spruce_slab", count, partner: "Ayla", tradeId: "t1" }];
+
+test("a build whose bill blocks are owed to a trade fails with the owed count and builds nothing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", owed: () => owedSlabs(7) }));
+  assert.deepEqual(result, { status: "failed", detail: "missing 7 spruce_slab for a small medieval house (the rest is carried; 7 spruce_slab you carry are owed: 7 spruce_slab to Ayla (trade)): fetch exactly the missing items with get_items, then build again" });
+  assert.equal(runtime.submitted.some((call) => call.tool === "build_structure"), false);
+  const free = new FakeRuntime();
+  free.snapshot = { ...free.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [...SMALL_MEDIEVAL, { name: "spruce_slab", count: 7 }] };
+  assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(free, { style: "medieval", owed: () => owedSlabs(7) }))).status, "done", "7 more carried than the bill: the owed ones stay and the house is built");
+});
+
+test("improving a house with its blocks owed fails with the owed count", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 10 }] };
+  const owed = [{ item: "oak_planks", count: 10, partner: "Ayla", tradeId: "t1" }];
+  const result = await runStep({ skill: "improve_house", roles: ["wall"] }, contextFor(runtime, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE, owed: () => owed }));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /^missing \d+ oak_planks to improve your small medieval house \(the rest is carried; 10 oak_planks you carry are owed: 10 oak_planks to Ayla \(trade\)\): fetch exactly/u);
+  assert.equal(runtime.submitted.length, 0);
+});
+
+test("a levelling fill leaves the cobblestone a trade owes: with all of it owed the hole is filled with dirt", async () => {
+  const levelled = async (owed: readonly { item: string; count: number; partner: string; tradeId: string }[], inventory = [{ name: "cobblestone", count: 5 }, { name: "dirt", count: 1 }]) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory };
+    runtime.world.set("2,64,2", "gold_block");
+    runtime.world.set("6,64,5", "gold_block");
+    for (const y of [63, 62, 61]) runtime.world.set(`5,${y},4`, "air");
+    const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [], owed: () => owed }));
+    assert.equal(result.status, "done", JSON.stringify(result));
+    return builds(runtime).flatMap((call) => call.blocks).map((cell) => cell.block_name);
+  };
+  assert.deepEqual(await levelled([]), ["cobblestone"], "nothing owed: the cobblestone fills, as before");
+  assert.deepEqual(await levelled([{ item: "cobblestone", count: 5, partner: "Ayla", tradeId: "t1" }]), ["dirt"]);
+  assert.deepEqual(await levelled([{ item: "cobblestone", count: 4, partner: "Ayla", tradeId: "t1" }], [{ name: "cobblestone", count: 5 }]), ["cobblestone"], "5 carried, 4 owed: the one spare fills");
+});

@@ -262,3 +262,24 @@ test("isInHole: the column and the depth, not a neighbour column, not the surfac
   assert.equal(isInHole({ x: 0.5, y: 64, z: 0.5 }, spot), false);
   assert.equal(isInHole({ x: 0.5, y: 70, z: 0.5 }, spot), false);
 });
+
+test("the roof skips the kinds an open trade owes whole, and falls back to planks only when those are free", () => {
+  const stacks = [{ name: "sand" }, { name: "dirt" }, { name: "cobblestone" }, { name: "oak_planks" }];
+  assert.equal(roofBlock(stacks, new Set(["dirt"])), "cobblestone");
+  assert.equal(roofBlock(stacks, new Set(["dirt", "cobblestone"])), "oak_planks");
+  assert.equal(roofBlock(stacks, new Set(["dirt", "cobblestone", "oak_planks"])), null);
+  assert.equal(roofBlock([{ name: "spruce_log" }], new Set(["spruce_log"])), null);
+});
+
+test("a night roofs the hole with the next kind when the first is all owed, and with the first when only part of it is", async () => {
+  const roofed = async (owedDirt: number) => {
+    const { runtime, context, dayIn, calls } = rig({ inventory: [{ name: "dirt", count: 4 }, { name: "cobblestone", count: 4 }] });
+    const dug = runtime.succeedEffects.raw_action!;
+    runtime.succeedEffects.raw_action = (input) => { dug(input); if (input.operation === "place") dayIn(20); };
+    const owed = () => [{ item: "dirt", count: owedDirt, partner: "Ayla", tradeId: "t1" }];
+    assert.equal((await shelterForNight({ ...context, owed })).status, "done");
+    return calls("place").map((place) => place.block_name);
+  };
+  assert.deepEqual(await roofed(4), ["cobblestone"], "4 carried, 4 owed: no dirt spare");
+  assert.deepEqual(await roofed(2), ["dirt"], "4 carried, 2 owed: dirt has a spare");
+});

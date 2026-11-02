@@ -3,7 +3,7 @@ import minecraftData from "minecraft-data";
 import { z } from "zod";
 import type { Activity } from "./activities.ts";
 import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./actions.ts";
-import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
+import { describeMaterials, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
@@ -13,7 +13,7 @@ import type { HouseSize } from "./building/house.ts";
 import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
 import type { KnownPlace } from "./mind.ts";
 import { handedOver, recipientSettled, recipientTook, tossSpot } from "./give-result.ts";
-import { carriedOf, owedText, spareFor, type OwedItem } from "./relations/items.ts";
+import { billShortfall, carriedOf, heldCounts, heldKinds, noSpareFact, owedText, spareCounter, spareFor, type OwedItem } from "./relations/items.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
@@ -148,7 +148,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "craft_item": return await craftItem(context, step, why);
       case "get_items": return await getItems(context, step.items);
       // No refusal from the bar here: golden apples and chorus fruit are edible when it is full, so the game answers.
-      case "eat": return await once(context, "eat_food", { food_name: step.food }, why, `ate ${step.food}`);
+      case "eat": return await eat(context, step.food, why);
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
       case "sleep": return await once(context, "sleep", {}, why, "slept");
       case "hunt":
@@ -244,6 +244,13 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
 }
 
+/** Eats the named food, unless an agreed trade owes all of what is carried of it. */
+async function eat(context: SkillContext, food: string, why: string): Promise<SkillResult> {
+  const owed = context.owed?.() ?? [];
+  const fact = owed.length === 0 ? null : noSpareFact(owed, (await context.runtime.status()).inventory, food);
+  return fact === null ? once(context, "eat_food", { food_name: food }, why, `ate ${food}`) : { status: "failed", detail: fact };
+}
+
 /**
  * Crafts one item. A table close by is used where it stands; else the runtime sets a carried one down. With no room for
  * the result or the table, room is made from what the work does not need and the craft runs again; with no table
@@ -279,7 +286,8 @@ async function makeRoom(context: SkillContext, inputs: ReadonlySet<string>): Pro
     const before = await context.runtime.status();
     // The kind junkStacks lists first (most stacks: a lone bucket or pair of shears is never first), and a count drops
     // the kind's stacks in inventory order: the first stack's count frees exactly the first stack.
-    const [kind] = junkStacks(before, new Set([...context.needed(before), ...inputs]));
+    // A kind an open trade owes all of is never junk; a partly owed one is dropped down to its spare (spareDrop).
+    const [kind] = junkStacks(before, new Set([...context.needed(before), ...inputs, ...heldKinds(context.owed?.() ?? [], before.inventory)]));
     if (kind === undefined) return false;
     const dropped = await dropItems(context, { skill: "drop_item", items: [{ item: kind.name, count: kind.stacks[0]! }] }, "Make room in the inventory for what I am crafting.");
     if (dropped.status !== "done") return false;
@@ -496,10 +504,10 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
         : `the nearest site clear of them has its door ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
       return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) ${describeOverlaps(context, blocked)}; ${where}` };
     }
-    const missing = shortfall(plan.bill, snapshot.inventory);
+    const { missing, owedNote } = billShortfall(plan.bill, snapshot.inventory, context.owed?.() ?? []);
     // Only what is missing, named as the step that fetches it: get_items adds to what she carries, so asking for the
     // whole bill fetched it twice and filled her inventory (live 2026-10-02).
-    if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (the rest is carried): fetch exactly the missing items with get_items, then build again` };
+    if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): fetch exactly the missing items with get_items, then build again` };
   }
   if (at !== null) {
     const stand = builderStand(plan.site);
@@ -608,8 +616,8 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const kind = `${house.size} ${style.id} house`;
   const what = `your ${kind}`;
   const snapshot = await context.runtime.status();
-  const missing = shortfall(bill, snapshot.inventory);
-  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} to improve ${what} (the rest is carried): fetch exactly the missing items with get_items, then improve again` };
+  const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
+  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): fetch exactly the missing items with get_items, then improve again` };
   const { x, y, z } = house.door;
   context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
   const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
@@ -822,9 +830,8 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
     return { ...area, kinds: Object.fromEntries(Object.entries(area.kinds).map(([name, kind]) => [name, { ...kind, tags: tagged[name]?.tags ?? [] }])) };
   };
   const inventory = (await context.runtime.status()).inventory;
-  // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone).
-  const spareIn = (stacks: typeof inventory) => (item: string) =>
-    stacks.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0) - (reserved.find((entry) => entry.item === item)?.count ?? 0);
+  // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone), nor what an open trade owes.
+  const spareIn = spareCounter(reserved, heldCounts(context.owed?.() ?? [], inventory));
   const spare = spareIn(inventory);
   // Dirt is the fill: quick to dig with a shovel and everywhere. Cobblestone only when enough of it is spare already;
   // fetching it means mining stone (live 2026-10-02: a 42-block fill sent her mining for half an hour).

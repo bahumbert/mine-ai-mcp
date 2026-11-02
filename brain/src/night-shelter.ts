@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ActOutcome, Body } from "./body.ts";
 import { areaKey, type BlockArea, type BotRuntime, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { heldKinds, type OwedItem } from "./relations/items.ts";
 import type { SkillResult } from "./skills.ts";
 
 /**
@@ -116,8 +117,9 @@ export async function underCover(runtime: BotRuntime, at: Position): Promise<boo
   return coverOver(await runtime.blocksIn({ x, y: head + 1, z }, { x, y: head + COVER_HEIGHT, z }), at);
 }
 
-/** The carried block she roofs the hole with, null when she carries none. */
-export function roofBlock(inventory: readonly { readonly name: string }[]): string | null {
+/** The carried block she roofs the hole with, null when she carries none; a kind in `held` (no spare: an open trade owes all of it) is never the roof. */
+export function roofBlock(carried: readonly { readonly name: string }[], held: ReadonlySet<string> = new Set()): string | null {
+  const inventory = carried.filter((stack) => !held.has(stack.name));
   for (const block of ROOF_BLOCKS) if (inventory.some((stack) => stack.name === block)) return block;
   return inventory.find((stack) => stack.name.endsWith("_planks") || stack.name.endsWith("_log"))?.name ?? null;
 }
@@ -129,6 +131,8 @@ export interface ShelterContext {
   readonly areas: readonly ProtectedArea[];
   /** True once the night is over (or there is no night where she is). */
   readonly dayCame: () => Promise<boolean>;
+  /** My side of the agreed trades not yet given: their items are not the roof (the caller passes `SkillContext.owed`). */
+  readonly owed?: () => readonly OwedItem[];
   /** The waits' lengths; a test seam, the constants by default. */
   readonly timings?: Partial<ShelterTimings>;
 }
@@ -198,7 +202,8 @@ const leaveHint = (spot: ShelterSpot) => `go_to a spot on the surface nearby (${
 
 /** Places the carried block against the support, only when she stands on the floor of the full-depth hole. */
 async function roofHole(context: ShelterContext, act: ShelterAct, spot: ShelterSpot, landed: boolean): Promise<Roof> {
-  const block = landed ? roofBlock((await context.runtime.status()).inventory) : null;
+  const { inventory } = landed ? await context.runtime.status() : { inventory: [] };
+  const block = roofBlock(inventory, heldKinds(context.owed?.() ?? [], inventory));
   if (block === null) return { block: null, placed: false };
   const { support, face } = spot;
   const placed = await act("raw_action", { operation: "place", block_name: block, x: support.x, y: support.y, z: support.z, face });
